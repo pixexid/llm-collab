@@ -1,0 +1,43 @@
+# Runtime config (created by scripts/init.py)
+collab.config.json
+agents.json
+projects.json
+
+# Per-agent runtime state (inbox pointers, memory, identity)
+agents/*/inbox.json
+agents/*/memory.md
+agents/*/identity.md
+
+# Live workspace data
+Chats/
+Tasks/active/
+Tasks/backlog/
+Tasks/done/
+State/
+Index/index.md
+Logs/
+
+# Keep directory structure
+!Chats/.gitkeep
+!Tasks/active/.gitkeep
+!Tasks/backlog/.gitkeep
+!Tasks/done/.gitkeep
+!State/inbox/read/.gitkeep
+!State/inbox/notified/.gitkeep
+!Index/.gitkeep
+!Logs/watchers/.gitkeep
+!agents/.gitkeep
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Node (PM2)
+node_modules/
+
+# OS
+.DS_Store
+*.swp
