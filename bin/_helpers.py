@@ -190,10 +190,52 @@ def resolve_project_repo_path(project_id: str, repo_key: str = "app") -> Path | 
     return (ROOT / path).resolve()
 
 
+def _resolve_command_path(command: str) -> str:
+    if "/" in command:
+        return command
+
+    direct = shutil.which(command)
+    if direct:
+        return direct
+
+    candidates = [
+        Path("/opt/homebrew/bin") / command,
+        Path("/usr/local/bin") / command,
+        Path.home() / ".local" / "bin" / command,
+    ]
+
+    local_node_root = Path.home() / ".local"
+    if local_node_root.exists():
+        candidates.extend(sorted(local_node_root.glob(f"node-v*/bin/{command}")))
+
+    nvm_root = Path.home() / ".nvm" / "versions" / "node"
+    if nvm_root.exists():
+        candidates.extend(sorted(nvm_root.glob(f"*/bin/{command}")))
+
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate)
+
+    return command
+
+
+def _build_command_env(command_path: str) -> dict[str, str]:
+    env = os.environ.copy()
+    existing = [entry for entry in env.get("PATH", "").split(os.pathsep) if entry]
+    preferred = [str(Path(command_path).resolve().parent), "/opt/homebrew/bin", "/usr/local/bin"]
+    deduped = []
+    for entry in [*preferred, *existing]:
+        if entry and entry not in deduped:
+            deduped.append(entry)
+    env["PATH"] = os.pathsep.join(deduped)
+    return env
+
+
 def run_project_preflight(
     project_id: str | None,
     *,
     cwd: Path | None = None,
+    extra_args: list[str] | None = None,
 ) -> dict:
     if not project_id:
         return {"ran": False, "reason": "task/message has no project_id"}
@@ -207,7 +249,17 @@ def run_project_preflight(
         return {"ran": False, "reason": f"project {project_id} preflight_command must be list[str]"}
 
     run_cwd = (cwd or resolve_project_repo_path(project_id, "app") or ROOT).resolve()
-    result = subprocess.run(command, cwd=run_cwd, text=True, capture_output=True, check=False)
+    full_command = [*command, *(extra_args or [])]
+    command_path = _resolve_command_path(full_command[0])
+    executed_command = [command_path, *full_command[1:]]
+    result = subprocess.run(
+        executed_command,
+        cwd=run_cwd,
+        text=True,
+        capture_output=True,
+        check=False,
+        env=_build_command_env(command_path),
+    )
     stdout = result.stdout.strip()
     stderr = result.stderr.strip()
 
@@ -221,7 +273,7 @@ def run_project_preflight(
     return {
         "ran": True,
         "ok": result.returncode == 0,
-        "command": command,
+        "command": executed_command,
         "cwd": str(run_cwd),
         "returncode": result.returncode,
         "stdout": stdout,

@@ -186,6 +186,8 @@ python3 bin/task_board.py --project docs-site
 
 Full reference: [docs/schema-reference.md](docs/schema-reference.md)
 
+Note: when `claim_task.py` transitions a task to `in_progress` or `review`, it runs project preflight with browser checks skipped (`--browser-check skip`). Browser checks stay lane-gated for runtime/UI changes.
+
 Legacy migration aliases:
 - `msg.py` -> `deliver.py`
 - `watcher_ctl.py` -> `pm2_watchers.py`

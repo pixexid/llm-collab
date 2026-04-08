@@ -14,6 +14,12 @@ One owner, one scope, one verification plan.
 6. move task to `in_progress`
 7. then begin implementation
 
+## Preflight gate split
+
+- task-claim preflight (`claim_task.py` to `in_progress` or `review`) is a tooling/env gate, not a browser gate
+- `claim_task.py` appends `--browser-check skip` when it runs project preflight
+- browser validation should run later only for runtime/UI-impact lanes
+
 ## Required task fields
 
 - `task_id`
@@ -52,4 +58,3 @@ When multiple workers are involved, state activation order explicitly:
 - who should act now
 - who should wait
 - what condition triggers next activation
-

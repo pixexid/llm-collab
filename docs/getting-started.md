@@ -216,6 +216,9 @@ The LLM runs the bootstrap command and immediately sees its identity and unread 
 
 ## Troubleshooting
 
+**Task claim triggered browser checks unexpectedly**
+`claim_task.py` now forces preflight `--browser-check skip` for `in_progress`/`review` transitions. Browser checks should run in preview/review gates for runtime/UI changes only.
+
 **"collab.config.json not found"**
 Run `python scripts/init.py` from the workspace root.
 
@@ -230,3 +233,6 @@ Install PM2: `npm install -g pm2`. Check logs: `python bin/pm2_watchers.py logs 
 
 **Identity file missing**
 Re-run `python scripts/init.py` — it will skip existing config and only generate missing agent files.
+
+**Codex app shell cannot find pnpm**
+Set a project local environment in Codex app so PATH includes your Node bin directory (for example `/opt/homebrew/bin` or `~/.local/node-v*/bin`).
