@@ -194,6 +194,15 @@ Legacy migration aliases:
 
 For `human_relay` recipients, `deliver.py` prints a first-time onboarding relay prompt (docs + memory update instructions) only once, then switches to short “check inbox” relay prompts after awareness is recorded in local runtime state.
 
+### Activation-gated relay policy
+
+Use relay prompts only when a worker should start immediately.
+
+- Do not request relay for queued/not-ready workers.
+- If multiple workers are queued, provide only the relay for the worker that should act now.
+- For sequential lanes, wait for the trigger condition before requesting the next relay.
+- For parallel-safe lanes, explicitly say: `activate <worker-a> + <worker-b> now in parallel`.
+
 ## What this is NOT
 
 - Not a real-time chat system (async file-based)
