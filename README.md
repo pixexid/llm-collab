@@ -60,14 +60,14 @@ llm-collab/
 ### 1. Clone the template
 
 ```bash
-git clone https://github.com/your-org/llm-collab ~/Projects/_collab
+git clone https://github.com/pixexid/llm-collab ~/Projects/_collab
 cd ~/Projects/_collab
 ```
 
 ### 2. Initialize your workspace
 
 ```bash
-python scripts/init.py
+python3 scripts/init.py
 ```
 
 The init script will ask you to:
@@ -83,7 +83,7 @@ It then generates `collab.config.json`, `agents.json`, `projects.json`, and `age
 At the start of every LLM session, run:
 
 ```bash
-python bin/session_bootstrap.py --agent <your_agent_id>
+python3 bin/session_bootstrap.py --agent <your_agent_id>
 ```
 
 This outputs your `identity.md` first (so you know who you are), then shows your unread inbox.
@@ -92,31 +92,32 @@ This outputs your `identity.md` first (so you know who you are), then shows your
 
 ```bash
 # For Claude Code
-python bin/init_agent_memory.py --agent claude --target claude-code --write
+python3 bin/init_agent_memory.py --agent claude --target claude-code --write
 
 # For Codex
-python bin/init_agent_memory.py --agent codex --target codex
+python3 bin/init_agent_memory.py --agent codex --target codex
 
 # Universal (copy/paste into any LLM)
-python bin/init_agent_memory.py --agent orchestrator --target generic
+python3 bin/init_agent_memory.py --agent orchestrator --target generic
 ```
 
 ### 5. Create a chat and start messaging
 
 ```bash
-# Create a chat thread
-python bin/new_chat.py --title "Implement checkout flow" --project my-app
+# Create a project-scoped chat thread
+python3 bin/new_chat.py --title "Implement checkout flow" --project my-app
 
 # Send a message
-python bin/deliver.py \
+python3 bin/deliver.py \
   --chat last \
   --from orchestrator \
   --to worker \
+  --project my-app \
   --title "Implement the checkout API endpoint" \
   --body-file brief.md
 
 # Read inbox
-python bin/inbox.py --me worker
+python3 bin/inbox.py --me worker --project my-app
 ```
 
 ## Core concepts
@@ -146,7 +147,7 @@ When you have two accounts of the same LLM (e.g. two Codex accounts), configure 
 You are Worker (worker). Read only messages addressed to 'worker'.
 
 Bootstrap your session by running:
-  python /path/to/_collab/bin/session_bootstrap.py --agent worker
+  python3 /path/to/_collab/bin/session_bootstrap.py --agent worker
 
 Then read your inbox and execute your latest task.
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -160,9 +161,9 @@ Messages live in `Chats/` (permanent record). Agent inboxes (`agents/{id}/inbox.
 
 Every message and task carries a `project_id`. A single workspace can coordinate work across multiple repos:
 
-```
-python bin/inbox.py --me orchestrator --project my-app
-python bin/task_board.py --project docs-site
+```bash
+python3 bin/inbox.py --me orchestrator --project my-app
+python3 bin/task_board.py --project docs-site
 ```
 
 ## Command reference
