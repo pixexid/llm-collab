@@ -15,6 +15,8 @@ Every message and task carries a `project_id` that identifies which project the 
 
 The workspace itself is project-agnostic — it coordinates work, not a specific codebase.
 
+Project-specific policy should live under `projects/{project_id}/` and override the universal defaults in `docs/workflows/`.
+
 ---
 
 ## Registering projects

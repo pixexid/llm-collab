@@ -3,7 +3,7 @@
 This document is the migration contract for moving from the Amiga-embedded `.ai-collaboration` workspace to a standalone `llm-collab` workspace.
 
 The migration has two goals:
-1. Preserve all existing chat history and task state
+1. Preserve operational continuity (agent inbox state, memory, worktree context)
 2. Switch all new writes to the universal workspace format (schema v2)
 
 ---
@@ -88,7 +88,7 @@ python scripts/migrate_from_amiga.py \
   --workspace ~/Projects/_collab
 ```
 
-> **Note**: `migrate_from_amiga.py` is included below. It does NOT move Chats/ or Tasks/ — those stay in the Amiga workspace as historical archive. Only inbox state is migrated.
+> **Note**: `scripts/migrate_from_amiga.py` ships in this repo. It does NOT move Chats/ or Tasks/ — those stay in the Amiga workspace as historical archive. Only inbox state is migrated.
 
 ### Manual migration (if preferred)
 
@@ -235,70 +235,18 @@ echo "# ARCHIVED — migrated to ~/Projects/_collab on $(date +%Y-%m-%d)" > \
 
 ## Migration script
 
-Save as `scripts/migrate_from_amiga.py`:
+The migration utility is shipped at:
 
-```python
-#!/usr/bin/env python3
-"""Migrate inbox state from Amiga workspace to llm-collab format."""
+- `scripts/migrate_from_amiga.py`
 
-import argparse
-import json
-from pathlib import Path
-from datetime import datetime, timezone
+It migrates `State/inbox/read/*.json` into `agents/{id}/inbox.json`, preserving existing unread pointers in the target workspace and merging read pointers deduplicated.
 
+Run:
 
-def utc_iso():
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
-
-
-def main():
-    p = argparse.ArgumentParser()
-    p.add_argument("--source", required=True, help="Path to Amiga .ai-collaboration dir")
-    p.add_argument("--workspace", required=True, help="Path to new llm-collab workspace")
-    args = p.parse_args()
-
-    source = Path(args.source)
-    workspace = Path(args.workspace)
-
-    read_dir = source / "State" / "inbox" / "read"
-    if not read_dir.exists():
-        print("[skip] No Amiga inbox state found.")
-        return
-
-    for state_file in sorted(read_dir.glob("*.json")):
-        agent_id = state_file.stem
-        amiga_state = json.loads(state_file.read_text())
-
-        # Amiga format: array of absolute paths
-        read_paths = amiga_state if isinstance(amiga_state, list) else amiga_state.get("messages", [])
-
-        # Convert to relative paths (best effort)
-        relative_paths = []
-        for p in read_paths:
-            try:
-                rel = str(Path(p).relative_to(source))
-                relative_paths.append(rel)
-            except ValueError:
-                relative_paths.append(p)  # keep absolute if can't relativize
-
-        out_path = workspace / "agents" / agent_id / "inbox.json"
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-
-        new_state = {
-            "agent": agent_id,
-            "updated_utc": utc_iso(),
-            "unread": [],
-            "read": relative_paths,
-        }
-
-        out_path.write_text(json.dumps(new_state, indent=2))
-        print(f"  [migrated] {agent_id}: {len(relative_paths)} read messages → {out_path.relative_to(workspace)}")
-
-    print("\nDone. Verify with: python bin/inbox.py --me <agent_id> --all")
-
-
-if __name__ == "__main__":
-    main()
+```bash
+python scripts/migrate_from_amiga.py \
+  --source ~/Projects/amiga_house_cleaning_company_docs/.ai-collaboration \
+  --workspace ~/Projects/_collab
 ```
 
 ---

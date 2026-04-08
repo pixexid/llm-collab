@@ -178,6 +178,8 @@ python bin/task_board.py --project docs-site
 | `claim_task.py --task TASK-xxx --owner <id> --status in_progress` | Claim/update a task |
 | `task_board.py` | List all tasks |
 | `reindex.py` | Regenerate `Index/index.md` |
+| `check_github_task_mirrors.py --project <id>` | Detect GitHub issue/task mirror drift |
+| `report_github_project_task_sync.py --project <id>` | Generate GitHub Project/task alignment report |
 | `pm2_watchers.py start --all` | Start background inbox watchers |
 | `worktree_ctl.py create --task TASK-xxx --agent <id> --repo ../my-app` | Create isolated git worktree |
 | `init_agent_memory.py --agent <id> --target generic` | Generate LLM memory snippet |
@@ -196,6 +198,16 @@ Full reference: [docs/schema-reference.md](docs/schema-reference.md)
 - Python 3.9+
 - Git (for worktree features)
 - PM2 (optional, for background watchers): `npm install -g pm2`
+
+## Local Safety Guards
+
+This repo ships a local pre-commit hook at `.githooks/pre-commit` that blocks commits of runtime workspace state and common sensitive file patterns.
+
+Enable it locally:
+
+```bash
+git config core.hooksPath .githooks
+```
 
 ## License
 

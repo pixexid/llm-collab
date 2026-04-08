@@ -14,6 +14,8 @@ Usage:
   python bin/inbox.py --me orchestrator --mark-all-read
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import sys

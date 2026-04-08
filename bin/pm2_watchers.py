@@ -13,6 +13,8 @@ Usage:
   python bin/pm2_watchers.py logs --agent orchestrator --lines 50
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import shutil

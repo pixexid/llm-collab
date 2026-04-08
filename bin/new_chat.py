@@ -18,6 +18,7 @@ from _helpers import (
     ROOT,
     chat_id,
     date_prefix,
+    ensure_project,
     slugify,
     utc_iso,
     write_file,
@@ -34,6 +35,7 @@ def parse_args():
 
 def main():
     args = parse_args()
+    ensure_project(args.project, allow_none=True)
 
     cid = chat_id()
     slug = slugify(args.title)

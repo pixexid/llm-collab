@@ -18,6 +18,7 @@ from _helpers import (
     TASK_PRIORITIES,
     TASK_STATUSES,
     agent_ids,
+    ensure_project,
     date_prefix,
     dump_frontmatter,
     slugify,
@@ -54,6 +55,7 @@ def main():
     if args.owner != "unassigned" and args.owner not in known:
         print(f"[error] --owner agent {args.owner!r} not in agents.json", file=sys.stderr)
         sys.exit(1)
+    ensure_project(args.project, allow_none=True)
 
     tid = task_id()
     repo_targets = [r.strip() for r in args.repo_targets.split(",") if r.strip()]

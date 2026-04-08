@@ -1,7 +1,7 @@
 # Runtime config (created by scripts/init.py)
-collab.config.json
-agents.json
-projects.json
+/collab.config.json
+/agents.json
+/projects.json
 
 # Per-agent runtime state (inbox pointers, memory, identity)
 agents/*/inbox.json
@@ -9,24 +9,28 @@ agents/*/memory.md
 agents/*/identity.md
 
 # Live workspace data
-Chats/
-Tasks/active/
-Tasks/backlog/
-Tasks/done/
-State/
-Index/index.md
-Logs/
+/Chats/
+/Tasks/active/
+/Tasks/backlog/
+/Tasks/done/
+/State/
+/Index/*.md
+/Logs/
+/projects/*
+/examples/*
 
 # Keep directory structure
-!Chats/.gitkeep
-!Tasks/active/.gitkeep
-!Tasks/backlog/.gitkeep
-!Tasks/done/.gitkeep
-!State/inbox/read/.gitkeep
-!State/inbox/notified/.gitkeep
-!Index/.gitkeep
-!Logs/watchers/.gitkeep
-!agents/.gitkeep
+!/Chats/.gitkeep
+!/Tasks/active/.gitkeep
+!/Tasks/backlog/.gitkeep
+!/Tasks/done/.gitkeep
+!/State/inbox/read/.gitkeep
+!/State/inbox/notified/.gitkeep
+!/Index/.gitkeep
+!/Logs/watchers/.gitkeep
+!/agents/.gitkeep
+!/projects/.gitkeep
+!/examples/.gitkeep
 
 # Python
 __pycache__/
@@ -37,6 +41,23 @@ venv/
 
 # Node (PM2)
 node_modules/
+
+# Local/sensitive files
+.env
+.env.*
+!.env.example
+!.env.sample
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+*.p8
+*.asc
+*credentials*.json
+*secrets*.json
+*token*.txt
 
 # OS
 .DS_Store

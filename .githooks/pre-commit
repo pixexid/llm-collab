@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+staged="$(git diff --cached --name-only --diff-filter=ACMR)"
+if [[ -z "${staged}" ]]; then
+  exit 0
+fi
+
+blocked_regex='^(collab\.config\.json|agents\.json|projects\.json|Chats/|Tasks/(active|backlog|done)/|State/|Logs/|Index/|agents/[^/]+/(inbox\.json|memory\.md|identity\.md)|projects/|examples/|\.env($|[.])|.*\.(pem|key|p12|pfx|crt|cer|p8|asc)$|.*credentials.*\.json$|.*secrets.*\.json$|.*token.*\.txt$)'
+allow_regex='^(projects/\.gitkeep|examples/\.gitkeep|Index/\.gitkeep|\.env\.example|\.env\.sample)$'
+
+blocked=()
+while IFS= read -r path; do
+  [[ -z "${path}" ]] && continue
+  if [[ "${path}" =~ ${allow_regex} ]]; then
+    continue
+  fi
+  if [[ "${path}" =~ ${blocked_regex} ]]; then
+    blocked+=("${path}")
+  fi
+done <<< "${staged}"
+
+if (( ${#blocked[@]} > 0 )); then
+  printf '\n[pre-commit] Blocked sensitive/internal files:\n' >&2
+  for f in "${blocked[@]}"; do
+    printf '  - %s\n' "${f}" >&2
+  done
+  printf '\nUnstage/remove them, or adjust local policy intentionally.\n' >&2
+  exit 1
+fi
+
+exit 0

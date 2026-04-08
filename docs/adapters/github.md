@@ -22,7 +22,6 @@ In `projects.json`:
 ## Requirements
 
 - `gh` CLI installed and authenticated: `gh auth login`
-- Python `requests` package (for API calls): `pip install requests`
 
 ---
 
@@ -47,6 +46,9 @@ python bin/check_github_task_mirrors.py --project my-app
 # Report sync state between local tasks and GitHub project board
 python bin/report_github_project_task_sync.py --project my-app
 ```
+
+By default, both scripts include legacy unscoped tasks (`project_id` missing) for migration compatibility.
+Use `--strict-project` to require exact `project_id` match only.
 
 ---
 

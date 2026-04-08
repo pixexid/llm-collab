@@ -74,6 +74,12 @@ Init generates:
 - `agents/{id}/memory.md` for each LLM agent
 - `agents/{id}/inbox.json` for each LLM agent
 
+Project-specific overrides can live under:
+
+- `projects/{project_id}/roles-and-routing.md`
+- `projects/{project_id}/runbooks/`
+- `projects/{project_id}/memory-templates/`
+
 ## Step 3: Generate memory snippets
 
 Make each LLM agent aware of the workspace by generating a memory snippet.

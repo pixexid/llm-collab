@@ -25,6 +25,7 @@ from _helpers import (
     CHATS_DIR,
     add_to_inbox,
     agent_ids,
+    ensure_project,
     find_chat_by_partial,
     get_agent,
     is_human_relay,
@@ -98,6 +99,7 @@ def main():
             print(f"[error] {label} agent {aid!r} not found in agents.json", file=sys.stderr)
             print(f"       Known agents: {', '.join(known)}", file=sys.stderr)
             sys.exit(1)
+    ensure_project(args.project, allow_none=True)
 
     # Resolve chat
     chat_dir = find_chat_by_partial(args.chat)

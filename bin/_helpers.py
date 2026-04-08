@@ -141,6 +141,27 @@ def project_ids() -> list[str]:
     return [p["id"] for p in load_projects()]
 
 
+def ensure_project(project_id: str | None, *, allow_none: bool = True) -> None:
+    if project_id is None:
+        if allow_none:
+            return
+        print("[error] project_id is required but missing", file=sys.stderr)
+        sys.exit(1)
+    if get_project(project_id) is None:
+        known = project_ids()
+        if known:
+            print(
+                f"[error] Unknown project_id: {project_id!r}. Known: {', '.join(known)}",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"[error] Unknown project_id: {project_id!r}. No projects configured in projects.json.",
+                file=sys.stderr,
+            )
+        sys.exit(1)
+
+
 # ---------------------------------------------------------------------------
 # Per-agent paths
 # ---------------------------------------------------------------------------

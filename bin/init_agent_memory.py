@@ -13,6 +13,8 @@ Usage:
   python bin/init_agent_memory.py --agent claude --target claude-md --project-path /path/to/project
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import sys
