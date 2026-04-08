@@ -38,5 +38,25 @@ After merge:
 
 1. fast-forward local `main`
 2. run targeted post-merge smoke only when the merge is browser-relevant
-3. clean stale review branches/worktrees
+3. clean stale branches/worktrees
 4. mark local task done
+
+## Branch/worktree cleanup contract
+
+Post-merge cleanup is required, not optional.
+
+- remove merged `codex/review/*` branches (local and remote)
+- remove stale worker branches that were tied to completed lanes (for example `codex/cdx2/*`, `codex/claude/*`)
+- remove stale worktrees for those branches
+- keep only active worktrees and one intentional root parking branch (or `main`)
+
+Safe cleanup order:
+
+1. fetch/prune refs (`git fetch --all --prune`)
+2. verify each candidate worktree is disposable (`git status --short --untracked-files=all`)
+3. remove stale worktrees first (`git worktree remove [--force] <path>`)
+4. prune stale worktree metadata (`git worktree prune`)
+5. delete stale local branches (`git branch -d` or `-D` when explicitly safe)
+6. delete stale remote branches (`git push origin --delete <branch...>`)
+
+Do not keep merged branch clutter; clean branch lists are required for reliable lane selection.
