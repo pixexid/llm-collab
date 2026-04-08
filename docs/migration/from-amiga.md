@@ -1,6 +1,6 @@
 # Migration: Amiga → llm-collab
 
-This document is the migration contract for moving from the Amiga-embedded `.ai-collaboration` workspace to a standalone `llm-collab` workspace.
+This document is the migration contract for moving from the Amiga-embedded `.ai-collaboration` workspace to the standalone `llm-collab` workspace.
 
 The migration has two goals:
 1. Preserve operational continuity (agent inbox state, memory, worktree context)
@@ -39,7 +39,7 @@ The migration has two goals:
 ```bash
 git clone https://github.com/your-org/llm-collab ~/Projects/_collab
 cd ~/Projects/_collab
-python scripts/init.py
+python3 scripts/init.py
 ```
 
 When defining agents, mirror the Amiga roster:
@@ -83,12 +83,17 @@ The Amiga inbox state format (`State/inbox/read/{agent}.json`) stores **read** m
 Run the migration script:
 
 ```bash
-python scripts/migrate_from_amiga.py \
+python3 scripts/migrate_from_amiga.py \
   --source ~/Projects/amiga_house_cleaning_company_docs/.ai-collaboration \
-  --workspace ~/Projects/_collab
+  --workspace ~/Projects/_collab \
+  --project-id amiga \
+  --migrate-chats \
+  --migrate-tasks \
+  --migrate-worktrees \
+  --backfill-project-id
 ```
 
-> **Note**: `scripts/migrate_from_amiga.py` ships in this repo. It does NOT move Chats/ or Tasks/ — those stay in the Amiga workspace as historical archive. Only inbox state is migrated.
+`scripts/migrate_from_amiga.py` now migrates inbox read-state plus optional chat/task/worktree continuity and project scoping backfill.
 
 ### Manual migration (if preferred)
 
@@ -163,8 +168,8 @@ When working on the Amiga project, the collaboration workspace lives at:
 Replace with the universal snippet:
 
 ```bash
-python bin/init_agent_memory.py --agent claude --target claude-code --write
-python bin/init_agent_memory.py --agent codex --target codex
+python3 bin/init_agent_memory.py --agent claude --target claude-code --write
+python3 bin/init_agent_memory.py --agent codex --target codex
 ```
 
 Update CLAUDE.md to point to the new workspace bootstrap:
@@ -173,10 +178,10 @@ Update CLAUDE.md to point to the new workspace bootstrap:
 <Project_Collaboration>
 Your collaboration workspace: /Users/pixexid/Projects/_collab
 
-Bootstrap: python /Users/pixexid/Projects/_collab/bin/session_bootstrap.py --agent claude
+Bootstrap: python3 /Users/pixexid/Projects/_collab/bin/session_bootstrap.py --agent claude
 
 If the user says "check your inbox":
-  python /Users/pixexid/Projects/_collab/bin/inbox.py --me claude --limit 5
+  python3 /Users/pixexid/Projects/_collab/bin/inbox.py --me claude --project amiga --limit 5
 </Project_Collaboration>
 ```
 
@@ -186,15 +191,15 @@ If the user says "check your inbox":
 
 ```bash
 # Verify new workspace is operational
-python bin/session_bootstrap.py --agent codex
-python bin/task_board.py
-python bin/inbox.py --me codex
+python3 bin/session_bootstrap.py --agent codex
+python3 bin/task_board.py --project amiga
+python3 bin/inbox.py --me codex --project amiga
 
 # Create a test message end-to-end
-python bin/new_chat.py --title "Migration smoke test" --project amiga
-echo "Test message" | python bin/deliver.py \
+python3 bin/new_chat.py --title "Migration smoke test" --project amiga
+echo "Test message" | python3 bin/deliver.py \
   --chat last --from codex --to claude --title "Migration test"
-python bin/inbox.py --me claude
+python3 bin/inbox.py --me claude --project amiga
 ```
 
 ---
@@ -208,8 +213,8 @@ pm2 stop all
 
 # Start new workspace watchers
 cd ~/Projects/_collab
-python bin/pm2_watchers.py start --all
-python bin/pm2_watchers.py status --all
+python3 bin/pm2_watchers.py start --all
+python3 bin/pm2_watchers.py status --all
 ```
 
 Old PM2 apps are named `amiga-collab-{agent}`. New apps are named `{workspace_name}-{agent}`. They can coexist during cutover.
@@ -244,9 +249,14 @@ It migrates `State/inbox/read/*.json` into `agents/{id}/inbox.json`, preserving 
 Run:
 
 ```bash
-python scripts/migrate_from_amiga.py \
+python3 scripts/migrate_from_amiga.py \
   --source ~/Projects/amiga_house_cleaning_company_docs/.ai-collaboration \
-  --workspace ~/Projects/_collab
+  --workspace ~/Projects/_collab \
+  --project-id amiga \
+  --migrate-chats \
+  --migrate-tasks \
+  --migrate-worktrees \
+  --backfill-project-id
 ```
 
 ---
@@ -255,7 +265,7 @@ python scripts/migrate_from_amiga.py \
 
 To roll back to the Amiga workspace:
 
-1. Stop new workspace watchers: `python bin/pm2_watchers.py stop --all`
+1. Stop new workspace watchers: `python3 bin/pm2_watchers.py stop --all`
 2. Restart old watchers: `cd {amiga}/.ai-collaboration && pm2 start pm2/ecosystem.config.cjs`
 3. Restore CLAUDE.md to original Amiga bootstrap config
 

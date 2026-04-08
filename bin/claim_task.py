@@ -24,11 +24,10 @@ from _helpers import (
     dump_frontmatter,
     find_task_by_id,
     parse_frontmatter,
+    run_project_preflight,
     target_task_path,
-    task_folder_for_status,
     utc_iso,
     write_file,
-    TASKS_DIR,
 )
 
 
@@ -39,6 +38,11 @@ def parse_args():
     p.add_argument("--status", required=True, choices=TASK_STATUSES)
     p.add_argument("--note", default=None, help="Activity log entry (optional)")
     p.add_argument("--branch", default=None, help="Git branch associated with this task")
+    p.add_argument(
+        "--skip-preflight",
+        action="store_true",
+        help="Skip project preflight gate for this status transition.",
+    )
     return p.parse_args()
 
 
@@ -59,6 +63,35 @@ def main():
     fm, body = parse_frontmatter(content)
 
     old_status = fm.get("status", "open")
+    project_id = fm.get("project_id")
+    preflight_summary = None
+
+    if args.status in ("in_progress", "review") and not args.skip_preflight:
+        preflight = run_project_preflight(project_id)
+        if preflight.get("ran"):
+            preflight_summary = {
+                "ran": True,
+                "ok": bool(preflight.get("ok")),
+                "cwd": preflight.get("cwd"),
+                "command": preflight.get("command"),
+                "returncode": preflight.get("returncode"),
+            }
+        if preflight.get("ran") and not preflight.get("ok"):
+            print(
+                json.dumps(
+                    {
+                        "error": "project preflight failed; refusing claim_task transition",
+                        "task_id": fm.get("task_id", args.task),
+                        "target_status": args.status,
+                        "project_id": project_id,
+                        "preflight": preflight,
+                    },
+                    indent=2,
+                ),
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
     fm["status"] = args.status
     fm["owner"] = args.owner
     if args.branch:
@@ -92,6 +125,8 @@ def main():
         "path": str(new_path.relative_to(ROOT)),
         "moved": task_file != new_path,
     }
+    if preflight_summary is not None:
+        result["preflight"] = preflight_summary
     print(json.dumps(result, indent=2))
 
 

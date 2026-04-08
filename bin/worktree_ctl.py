@@ -26,6 +26,7 @@ from _helpers import (
     dump_frontmatter,
     find_task_by_id,
     parse_frontmatter,
+    run_project_preflight,
     slugify,
     utc_iso,
     write_file,
@@ -159,6 +160,7 @@ def command_create(args: argparse.Namespace) -> None:
     fm, _ = parse_frontmatter(task_path.read_text())
     title = str(fm.get("title") or args.task)
     task_id = str(fm.get("task_id") or args.task)
+    project_id = fm.get("project_id")
     task_slug = slugify(title, max_len=32)
     short_task = task_id.lower().replace("task-", "t-")
 
@@ -171,6 +173,22 @@ def command_create(args: argparse.Namespace) -> None:
         raise SystemExit(
             "[error] Base repo is dirty. Commit/stash first or pass --allow-dirty-base to bypass."
         )
+
+    if not args.skip_preflight:
+        preflight = run_project_preflight(project_id, cwd=repo_root)
+        if preflight.get("ran") and not preflight.get("ok"):
+            raise SystemExit(
+                json.dumps(
+                    {
+                        "error": "project preflight failed; refusing worktree creation",
+                        "task_id": task_id,
+                        "project_id": project_id,
+                        "repo_root": str(repo_root),
+                        "preflight": preflight,
+                    },
+                    indent=2,
+                )
+            )
 
     branch = args.branch or make_branch_name(args.agent, f"{short_task}-{task_slug}")
     worktree_root = Path(args.worktree_root) if args.worktree_root else (repo_root.parent / f"{repo_root.name}-worktrees")
@@ -370,6 +388,7 @@ def build_parser() -> argparse.ArgumentParser:
     create.add_argument("--worktree-root", default=None, help="Override worktree root directory")
     create.add_argument("--branch", default=None, help="Override branch name")
     create.add_argument("--allow-dirty-base", action="store_true", help="Allow create from dirty base repo")
+    create.add_argument("--skip-preflight", action="store_true", help="Skip project preflight gate before create")
     create.add_argument(
         "--require-checkpoint-commit",
         action="store_true",
@@ -415,4 +434,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

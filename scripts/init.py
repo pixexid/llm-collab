@@ -75,12 +75,6 @@ def build_identity_md(agent: dict, workspace_name: str, all_agent_ids: list[str]
             f"> **IMPORTANT**: {identity_note}",
             "",
         ]
-    elif base_model:
-        lines += [
-            f"> You are **{display}**. You are NOT `{base_model}`.",
-            f"> Do not read or respond to messages addressed to `{base_model}`.",
-            "",
-        ]
 
     lines += [
         f"## Role",
@@ -189,8 +183,8 @@ def collect_agents() -> list[dict]:
             if base_model:
                 activation["base_model"] = base_model
             identity_note = prompt(
-                f"  Identity note shown in handoff prompt (e.g. 'You are NOT codex')",
-                default=f"You are {display}. Do not read messages addressed to other agents.",
+                f"  Identity note shown in handoff prompt (identity-only form)",
+                default=f"You are {display} ({aid}). Read only messages addressed to '{aid}'.",
             )
             activation["identity_note"] = identity_note
         elif atype == "human":

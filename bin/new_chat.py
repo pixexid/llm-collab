@@ -29,13 +29,13 @@ def parse_args():
     p = argparse.ArgumentParser(description="Create a new chat thread.")
     p.add_argument("--title", required=True, help="Chat title")
     p.add_argument("--prefix", default="", help="Optional prefix (e.g. 'research', 'workstream')")
-    p.add_argument("--project", default=None, help="project_id this chat belongs to")
+    p.add_argument("--project", required=True, help="project_id this chat belongs to")
     return p.parse_args()
 
 
 def main():
     args = parse_args()
-    ensure_project(args.project, allow_none=True)
+    ensure_project(args.project, allow_none=False)
 
     cid = chat_id()
     slug = slugify(args.title)

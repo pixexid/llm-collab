@@ -25,10 +25,14 @@ from _helpers import (
     CHATS_DIR,
     add_to_inbox,
     agent_ids,
+    build_handoff_prompt,
     ensure_project,
+    has_collab_awareness,
+    set_collab_awareness,
     find_chat_by_partial,
     get_agent,
     is_human_relay,
+    python_cmd,
     load_chat_meta,
     print_handoff_prompt,
     shortid,
@@ -48,10 +52,15 @@ def parse_args():
     p.add_argument("--title", required=True, help="Short semantic message title")
     p.add_argument("--priority", default="normal", choices=["low", "normal", "high", "urgent"])
     p.add_argument("--tags", default="", help="Comma-separated tags (default: empty)")
-    p.add_argument("--project", default=None, help="project_id this message relates to")
+    p.add_argument("--project", required=True, help="project_id this message relates to")
     p.add_argument("--related-task", default=None, help="TASK-id cross-reference")
     p.add_argument("--repo-targets", default="", help="Comma-separated repo IDs in scope")
     p.add_argument("--path-targets", default="", help="Comma-separated file/dir paths in scope")
+    p.add_argument(
+        "--skip-awareness-instruction",
+        action="store_true",
+        help="Skip first-time awareness tracking/onboarding behavior for this delivery.",
+    )
     p.add_argument(
         "--body-file",
         default="-",
@@ -99,7 +108,7 @@ def main():
             print(f"[error] {label} agent {aid!r} not found in agents.json", file=sys.stderr)
             print(f"       Known agents: {', '.join(known)}", file=sys.stderr)
             sys.exit(1)
-    ensure_project(args.project, allow_none=True)
+    ensure_project(args.project, allow_none=False)
 
     # Resolve chat
     chat_dir = find_chat_by_partial(args.chat)
@@ -110,8 +119,36 @@ def main():
 
     meta = load_chat_meta(chat_dir)
     chat_id = meta.get("chat_id", chat_dir.name)
+    chat_project_id = meta.get("project_id")
+    if not chat_project_id:
+        print(
+            f"[error] Chat {chat_id} has no project_id in meta.json. "
+            "Project scoping is required for messages.",
+            file=sys.stderr,
+        )
+        print(
+            "       Create a new chat with --project, or fix chat meta project_id before sending.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if chat_project_id != args.project:
+        print(
+            f"[error] Project mismatch for chat {chat_id}: "
+            f"chat project_id={chat_project_id!r}, --project={args.project!r}",
+            file=sys.stderr,
+        )
+        print(
+            "       Send with the chat's project_id or use a chat for the intended project.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     body = read_body(args.body_file)
+    recipient_agent = get_agent(args.recipient)
+    recipient_type = recipient_agent.get("activation", {}).get("type")
+    should_consider_onboarding = recipient_type != "human" and not args.skip_awareness_instruction
+    first_time_awareness = should_consider_onboarding and not has_collab_awareness(args.recipient)
+
     content = build_message(args, body, chat_id)
     slug = slugify(args.title, max_len=40)
     timestamp = ts()
@@ -128,19 +165,47 @@ def main():
 
     # Update recipient inbox pointer
     add_to_inbox(args.recipient, to_path)
+    if first_time_awareness:
+        set_collab_awareness(args.recipient, to_path)
 
     result = {
         "chat_id": chat_id,
         "chat_dir": str(chat_dir.relative_to(ROOT)),
         "to_file": str(to_path.relative_to(ROOT)),
         "from_file": str(from_path.relative_to(ROOT)),
+        "recipient_first_time_awareness": bool(first_time_awareness),
+        "relay_required": args.recipient != "operator",
     }
     print(json.dumps(result, indent=2))
 
-    # Handoff prompt for human-relay agents
-    recipient_agent = get_agent(args.recipient)
+    # Relay prompt for the human operator (always printed).
     if is_human_relay(recipient_agent):
-        print_handoff_prompt(recipient_agent)
+        print_handoff_prompt(
+            recipient_agent,
+            sender_id=args.sender,
+            first_time=bool(first_time_awareness),
+        )
+    else:
+        recipient_display = recipient_agent.get("display_name", args.recipient)
+        border = "━" * 60
+        print(f"\n{border}")
+        print("📨 RELAY REQUIRED FOR OPERATOR:")
+        print(border)
+        print()
+        print(
+            f"Please send this to {recipient_display} ({args.recipient}) "
+            f"for chat {chat_id} (project: {args.project}):"
+        )
+        print()
+        print(
+            build_handoff_prompt(
+                recipient_agent,
+                sender_id=args.sender,
+                first_time=bool(first_time_awareness),
+            )
+        )
+        print()
+        print(border)
 
 
 if __name__ == "__main__":

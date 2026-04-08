@@ -143,8 +143,7 @@ When you have two accounts of the same LLM (e.g. two Codex accounts), configure 
    Share this prompt with the operator to activate them:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-You are Worker. You are NOT Orchestrator.
-Do not read messages addressed to 'orchestrator'.
+You are Worker (worker). Read only messages addressed to 'worker'.
 
 Bootstrap your session by running:
   python /path/to/_collab/bin/session_bootstrap.py --agent worker
@@ -185,6 +184,8 @@ python bin/task_board.py --project docs-site
 | `init_agent_memory.py --agent <id> --target generic` | Generate LLM memory snippet |
 
 Full reference: [docs/schema-reference.md](docs/schema-reference.md)
+
+For `human_relay` recipients, `deliver.py` prints a first-time onboarding relay prompt (docs + memory update instructions) only once, then switches to short “check inbox” relay prompts after awareness is recorded in local runtime state.
 
 ## What this is NOT
 

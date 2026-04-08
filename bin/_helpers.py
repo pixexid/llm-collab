@@ -8,6 +8,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
 import uuid
 from datetime import datetime, timezone
@@ -37,6 +39,7 @@ CHATS_DIR = ROOT / "Chats"
 TASKS_DIR = ROOT / "Tasks"
 STATE_DIR = ROOT / "State" / "inbox"
 INDEX_DIR = ROOT / "Index"
+AWARENESS_FILE = ROOT / "State" / "awareness.json"
 
 TASK_FOLDERS = ("active", "backlog", "done")
 TASK_STATUSES = ("open", "in_progress", "blocked", "review", "done")
@@ -66,6 +69,15 @@ def load_config() -> dict:
 
 def config_get(key: str, default: Any = None) -> Any:
     return load_config().get(key, default)
+
+
+def python_cmd() -> str:
+    """Best-effort python launcher command for human-facing snippets."""
+    if shutil.which("python3"):
+        return "python3"
+    if shutil.which("python"):
+        return "python"
+    return "python3"
 
 
 # ---------------------------------------------------------------------------
@@ -162,6 +174,62 @@ def ensure_project(project_id: str | None, *, allow_none: bool = True) -> None:
         sys.exit(1)
 
 
+def resolve_project_repo_path(project_id: str, repo_key: str = "app") -> Path | None:
+    project = get_project(project_id)
+    if not project:
+        return None
+    repos = project.get("repos")
+    if not isinstance(repos, dict):
+        return None
+    raw = repos.get(repo_key)
+    if not raw:
+        return None
+    path = Path(str(raw))
+    if path.is_absolute():
+        return path.resolve()
+    return (ROOT / path).resolve()
+
+
+def run_project_preflight(
+    project_id: str | None,
+    *,
+    cwd: Path | None = None,
+) -> dict:
+    if not project_id:
+        return {"ran": False, "reason": "task/message has no project_id"}
+    project = get_project(project_id)
+    if not project:
+        return {"ran": False, "reason": f"unknown project_id: {project_id}"}
+    command = project.get("preflight_command")
+    if not command:
+        return {"ran": False, "reason": f"project {project_id} has no preflight_command"}
+    if not isinstance(command, list) or not all(isinstance(token, str) for token in command):
+        return {"ran": False, "reason": f"project {project_id} preflight_command must be list[str]"}
+
+    run_cwd = (cwd or resolve_project_repo_path(project_id, "app") or ROOT).resolve()
+    result = subprocess.run(command, cwd=run_cwd, text=True, capture_output=True, check=False)
+    stdout = result.stdout.strip()
+    stderr = result.stderr.strip()
+
+    parsed_json = None
+    if stdout:
+        try:
+            parsed_json = json.loads(stdout)
+        except json.JSONDecodeError:
+            parsed_json = None
+
+    return {
+        "ran": True,
+        "ok": result.returncode == 0,
+        "command": command,
+        "cwd": str(run_cwd),
+        "returncode": result.returncode,
+        "stdout": stdout,
+        "stderr": stderr,
+        "json": parsed_json,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Per-agent paths
 # ---------------------------------------------------------------------------
@@ -229,6 +297,53 @@ def get_unread_messages(agent_id: str) -> list[dict]:
             fm, body = parse_frontmatter(abs_path.read_text())
             messages.append({"path": rel_path, "frontmatter": fm, "body": body})
     return messages
+
+
+# ---------------------------------------------------------------------------
+# Recipient awareness state (local-only, runtime)
+# ---------------------------------------------------------------------------
+
+def load_awareness_state() -> dict:
+    if not AWARENESS_FILE.exists():
+        return {"version": 1, "agents": {}}
+    try:
+        payload = json.loads(AWARENESS_FILE.read_text())
+    except json.JSONDecodeError:
+        return {"version": 1, "agents": {}}
+    if not isinstance(payload, dict):
+        return {"version": 1, "agents": {}}
+    agents = payload.get("agents")
+    if not isinstance(agents, dict):
+        payload["agents"] = {}
+    return payload
+
+
+def save_awareness_state(payload: dict) -> None:
+    AWARENESS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    write_file(AWARENESS_FILE, json.dumps(payload, indent=2))
+
+
+def has_collab_awareness(agent_id: str) -> bool:
+    state = load_awareness_state()
+    agents = state.get("agents", {})
+    if agent_id in agents:
+        entry = agents.get(agent_id, {})
+        return bool(isinstance(entry, dict) and entry.get("aware", False))
+    return False
+
+
+def set_collab_awareness(agent_id: str, message_path: str | Path) -> None:
+    state = load_awareness_state()
+    agents = state.get("agents", {})
+    rel = str(Path(message_path).relative_to(ROOT)) if Path(message_path).is_absolute() else str(message_path)
+    agents[agent_id] = {
+        "aware": True,
+        "updated_utc": utc_iso(),
+        "source": "onboarding_message",
+        "message_path": rel,
+    }
+    state["agents"] = agents
+    save_awareness_state(state)
 
 
 # ---------------------------------------------------------------------------
@@ -428,30 +543,68 @@ def target_task_path(title: str, tid: str, status: str) -> Path:
 # Handoff prompt generator
 # ---------------------------------------------------------------------------
 
-def build_handoff_prompt(agent: dict) -> str:
+def build_handoff_prompt(
+    agent: dict,
+    *,
+    sender_id: str | None = None,
+    first_time: bool = False,
+) -> str:
     activation = agent.get("activation", {})
-    identity_note = activation.get("identity_note", f"You are {agent.get('display_name', agent['id'])}.")
-    bootstrap_cmd = f"python {ROOT}/bin/session_bootstrap.py --agent {agent['id']}"
-    lines = [
-        f"You are {agent.get('display_name', agent['id'])}.",
-        "",
-        identity_note,
-        "",
-        "Bootstrap your session by running:",
-        f"  {bootstrap_cmd}",
-        "",
-        "Then read your inbox and execute your latest task.",
-    ]
+    agent_id = str(agent["id"])
+    display_name = str(agent.get("display_name", agent_id))
+
+    identity_note = activation.get(
+        "identity_note",
+        f"You are {display_name} ({agent_id}). Read only messages addressed to '{agent_id}'.",
+    )
+    py = python_cmd()
+    bootstrap_cmd = f"{py} {ROOT}/bin/session_bootstrap.py --agent {agent['id']}"
+    memory_path = f"{ROOT}/agents/{agent_id}/memory.md"
+    if first_time:
+        lines = [
+            identity_note,
+            "",
+            "First-time setup required before task work:",
+            f"1) Read docs: {ROOT}/README.md",
+            f"2) Read docs: {ROOT}/docs/getting-started.md",
+            f"3) Read docs: {ROOT}/docs/identity-system.md",
+            f"4) Read docs: {ROOT}/docs/workflows/README.md",
+            "5) Update memory files now:",
+            "   - Your main/global memory file for this model account.",
+            "   - The repo/project memory file used when working on this project.",
+            f"   - Local collab memory file: {memory_path}",
+            "",
+            "Memory updates must include:",
+            f"- Bootstrap: {bootstrap_cmd}",
+            f"- Inbox: {py} {ROOT}/bin/inbox.py --me {agent_id}",
+            f"- Deliver: {py} {ROOT}/bin/deliver.py --chat last --from {agent_id} --to <agent> --title \"...\"",
+            "- Rule: always bootstrap and check inbox at session start.",
+            "",
+            "Then bootstrap now and execute your latest inbox message.",
+            f"  {bootstrap_cmd}",
+        ]
+    else:
+        lines = [
+            identity_note,
+            "",
+            "Please check your inbox now and execute the latest task.",
+            f"  {bootstrap_cmd}",
+        ]
     return "\n".join(lines)
 
 
-def print_handoff_prompt(agent: dict) -> None:
+def print_handoff_prompt(
+    agent: dict,
+    *,
+    sender_id: str | None = None,
+    first_time: bool = False,
+) -> None:
     border = "━" * 60
     print(f"\n{border}")
     print(f"⚠  {agent.get('display_name', agent['id'])} requires human relay.")
     print(f"   Share this prompt with the operator to activate them:")
     print(border)
     print()
-    print(build_handoff_prompt(agent))
+    print(build_handoff_prompt(agent, sender_id=sender_id, first_time=first_time))
     print()
     print(border)

@@ -56,7 +56,7 @@ For each LLM agent, choose an activation type:
 **For multi-account same-model setups** (e.g. two Codex accounts):
 - Name them distinctly: `codex` and `codex2`
 - Set `codex2` as `human_relay` with `base_model: codex`
-- Add a clear `identity_note`: `"You are Codex2. You are NOT codex."`
+- Add a clear `identity_note`: `"You are Codex2 (codex2). Read only messages addressed to 'codex2'."`
 
 ### Projects
 
@@ -152,6 +152,8 @@ python bin/deliver.py \
   --title "Auth implementation task"
 ```
 
+For `human_relay` recipients, `deliver.py` prints a one-time onboarding relay prompt (read docs + update memory file) the first time they receive work. Later relays are short “check inbox” prompts once awareness is tracked locally.
+
 ## Daily workflow
 
 ### For an orchestrator agent
@@ -202,8 +204,7 @@ python bin/deliver.py --chat last --from worker --to orchestrator \
 The human operator receives the handoff prompt automatically when a message is sent to this agent. They paste it into a new LLM session:
 
 ```
-You are Worker. You are NOT Orchestrator.
-Do not read messages addressed to 'orchestrator'.
+You are Worker (worker). Read only messages addressed to 'worker'.
 
 Bootstrap your session by running:
   python /path/to/_collab/bin/session_bootstrap.py --agent worker

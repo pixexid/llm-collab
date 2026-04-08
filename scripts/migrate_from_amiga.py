@@ -1,22 +1,25 @@
 #!/usr/bin/env python3
 """
-Migrate inbox read-state from Amiga .ai-collaboration to llm-collab.
+Migrate Amiga .ai-collaboration state into llm-collab.
 
 Source format:
-  State/inbox/read/{agent}.json
-  - either list[str] of message paths
-  - or {"messages": list[str]}
+  - State/inbox/read/{agent}.json
+  - Chats/*
+  - Tasks/{active,backlog,done}/*.md
+  - State/worktrees.json
 
 Target format:
-  agents/{agent}/inbox.json
-  - preserves any existing unread pointers
-  - merges read pointers (deduplicated)
+  - agents/{agent}/inbox.json
+  - Chats/*
+  - Tasks/{active,backlog,done}/*.md (with project_id backfilled)
+  - State/worktrees.json
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -34,6 +37,60 @@ def load_old_read_paths(path: Path) -> list[str]:
         if isinstance(messages, list):
             return [str(p) for p in messages]
     return []
+
+
+def parse_frontmatter(text: str) -> tuple[dict, str]:
+    if not text.startswith("---\n"):
+        return {}, text
+    end = text.find("\n---", 4)
+    if end == -1:
+        return {}, text
+    fm_text = text[4:end].strip()
+    body = text[end + 4 :].lstrip("\n")
+    fm: dict[str, str | int | bool | None | list] = {}
+    for line in fm_text.splitlines():
+        if ":" not in line:
+            continue
+        key, _, value = line.partition(":")
+        key = key.strip()
+        value = value.strip()
+        if value == "" or value.lower() == "null":
+            fm[key] = None
+        elif value.lower() == "true":
+            fm[key] = True
+        elif value.lower() == "false":
+            fm[key] = False
+        elif value.startswith("[") and value.endswith("]"):
+            inner = value[1:-1].strip()
+            if not inner:
+                fm[key] = []
+            else:
+                fm[key] = [v.strip().strip('"').strip("'") for v in inner.split(",")]
+        else:
+            try:
+                fm[key] = int(value)
+            except ValueError:
+                fm[key] = value
+    return fm, body
+
+
+def dump_frontmatter(fm: dict, body: str) -> str:
+    lines = ["---"]
+    for key, value in fm.items():
+        if value is None:
+            lines.append(f"{key}: null")
+        elif isinstance(value, bool):
+            lines.append(f"{key}: {'true' if value else 'false'}")
+        elif isinstance(value, list):
+            if not value:
+                lines.append(f"{key}: []")
+            else:
+                joined = ", ".join(str(v) for v in value)
+                lines.append(f"{key}: [{joined}]")
+        else:
+            lines.append(f"{key}: {value}")
+    lines.append("---")
+    return "\n".join(lines) + "\n\n" + body
 
 
 def relativize_message_path(raw_path: str, source_root: Path) -> str:
@@ -62,10 +119,172 @@ def load_target_inbox(path: Path, agent_id: str) -> dict:
     }
 
 
+def copy_chat_dirs(source: Path, workspace: Path) -> tuple[int, int]:
+    source_chats = source / "Chats"
+    target_chats = workspace / "Chats"
+    if not source_chats.exists():
+        return 0, 0
+    copied = 0
+    skipped = 0
+    for chat_dir in sorted(source_chats.iterdir()):
+        if not chat_dir.is_dir():
+            continue
+        dst = target_chats / chat_dir.name
+        if dst.exists():
+            skipped += 1
+            continue
+        shutil.copytree(chat_dir, dst)
+        copied += 1
+    return copied, skipped
+
+
+def copy_task_files(source: Path, workspace: Path) -> tuple[int, int]:
+    copied = 0
+    skipped = 0
+    for folder in ("active", "backlog", "done"):
+        src_dir = source / "Tasks" / folder
+        dst_dir = workspace / "Tasks" / folder
+        if not src_dir.exists():
+            continue
+        dst_dir.mkdir(parents=True, exist_ok=True)
+        for src_file in sorted(src_dir.glob("*.md")):
+            dst_file = dst_dir / src_file.name
+            if dst_file.exists():
+                skipped += 1
+                continue
+            shutil.copy2(src_file, dst_file)
+            copied += 1
+    return copied, skipped
+
+
+def backfill_chat_project_id(workspace: Path, project_id: str) -> int:
+    patched = 0
+    chats_dir = workspace / "Chats"
+    if not chats_dir.exists():
+        return patched
+    for chat_dir in chats_dir.iterdir():
+        if not chat_dir.is_dir():
+            continue
+        meta_path = chat_dir / "meta.json"
+        if not meta_path.exists():
+            continue
+        payload = json.loads(meta_path.read_text())
+        if payload.get("project_id"):
+            continue
+        payload["project_id"] = project_id
+        meta_path.write_text(json.dumps(payload, indent=2) + "\n")
+        patched += 1
+    return patched
+
+
+def backfill_task_project_id(workspace: Path, project_id: str) -> int:
+    patched = 0
+    for folder in ("active", "backlog", "done"):
+        task_dir = workspace / "Tasks" / folder
+        if not task_dir.exists():
+            continue
+        for task_file in task_dir.glob("*.md"):
+            fm, body = parse_frontmatter(task_file.read_text())
+            if not fm:
+                continue
+            if fm.get("project_id"):
+                continue
+            fm["project_id"] = project_id
+            task_file.write_text(dump_frontmatter(fm, body))
+            patched += 1
+    return patched
+
+
+def expected_task_folder(status: str | None) -> str:
+    if status == "done":
+        return "done"
+    if status in ("open", "in_progress", "blocked", "review"):
+        return "active"
+    return "backlog"
+
+
+def normalize_task_folders(workspace: Path) -> tuple[int, int]:
+    moved = 0
+    skipped_collisions = 0
+    tasks_root = workspace / "Tasks"
+    for folder in ("active", "backlog", "done"):
+        task_dir = tasks_root / folder
+        if not task_dir.exists():
+            continue
+        for task_file in list(task_dir.glob("*.md")):
+            fm, _ = parse_frontmatter(task_file.read_text())
+            if not fm:
+                continue
+            status = str(fm.get("status") or "open")
+            target_folder = expected_task_folder(status)
+            if target_folder == folder:
+                continue
+            target_path = tasks_root / target_folder / task_file.name
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            if target_path.exists():
+                skipped_collisions += 1
+                continue
+            task_file.rename(target_path)
+            moved += 1
+    return moved, skipped_collisions
+
+
+def merge_worktrees(source: Path, workspace: Path) -> tuple[int, int]:
+    source_path = source / "State" / "worktrees.json"
+    target_path = workspace / "State" / "worktrees.json"
+    if not source_path.exists():
+        return 0, 0
+
+    source_payload = json.loads(source_path.read_text())
+    source_entries = source_payload if isinstance(source_payload, list) else source_payload.get("worktrees", [])
+    if not isinstance(source_entries, list):
+        source_entries = []
+
+    if target_path.exists():
+        target_payload = json.loads(target_path.read_text())
+        target_entries = target_payload if isinstance(target_payload, list) else target_payload.get("worktrees", [])
+        if not isinstance(target_entries, list):
+            target_entries = []
+    else:
+        target_entries = []
+
+    key = lambda entry: (
+        str(entry.get("task_id", "")),
+        str(entry.get("agent", "")),
+        str(entry.get("worktree_path", "")),
+        str(entry.get("branch", "")),
+    )
+    seen = {key(entry) for entry in target_entries if isinstance(entry, dict)}
+    appended = 0
+    for entry in source_entries:
+        if not isinstance(entry, dict):
+            continue
+        k = key(entry)
+        if k in seen:
+            continue
+        target_entries.append(entry)
+        seen.add(k)
+        appended += 1
+
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    target_path.write_text(json.dumps(target_entries, indent=2) + "\n")
+    return len(target_entries), appended
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Migrate Amiga inbox read-state into llm-collab format.")
+    parser = argparse.ArgumentParser(description="Migrate Amiga collaboration state into llm-collab format.")
     parser.add_argument("--source", required=True, help="Path to Amiga .ai-collaboration directory")
     parser.add_argument("--workspace", required=True, help="Path to llm-collab workspace root")
+    parser.add_argument("--project-id", default="amiga", help="Project ID used to backfill migrated tasks/chats")
+    parser.add_argument("--migrate-chats", action="store_true", help="Copy chat folders into workspace Chats/")
+    parser.add_argument("--migrate-tasks", action="store_true", help="Copy task markdown files into workspace Tasks/")
+    parser.add_argument("--migrate-worktrees", action="store_true", help="Merge State/worktrees.json entries")
+    parser.add_argument("--backfill-project-id", action="store_true", help="Backfill missing project_id on migrated chats/tasks")
+    parser.add_argument(
+        "--normalize-task-folders",
+        action="store_true",
+        help="Move migrated task files into folder that matches frontmatter status.",
+    )
     args = parser.parse_args()
 
     source = Path(args.source).resolve()
@@ -80,7 +299,7 @@ def main() -> None:
     if not agents_dir.exists():
         raise SystemExit(f"[error] Target agents directory missing: {agents_dir}")
 
-    migrated = 0
+    inbox_migrated = 0
     for state_file in sorted(read_dir.glob("*.json")):
         agent_id = state_file.stem
         source_paths = load_old_read_paths(state_file)
@@ -100,12 +319,61 @@ def main() -> None:
             "read": merged_read,
         }
         target_path.write_text(json.dumps(new_payload, indent=2) + "\n")
-        migrated += 1
-        print(f"[migrated] {agent_id}: +{len(migrated_paths)} read pointers -> {target_path}")
+        inbox_migrated += 1
+        print(f"[migrated:inbox] {agent_id}: +{len(migrated_paths)} read pointers -> {target_path}")
 
-    print(f"\nDone. Migrated {migrated} agent inbox file(s).")
+    chats_copied = chats_skipped = 0
+    tasks_copied = tasks_skipped = 0
+    worktrees_total = worktrees_appended = 0
+    chats_backfilled = 0
+    tasks_backfilled = 0
+    task_folders_moved = 0
+    task_folders_collision = 0
+
+    if args.migrate_chats:
+        chats_copied, chats_skipped = copy_chat_dirs(source, workspace)
+        print(f"[migrated:chats] copied={chats_copied} skipped_existing={chats_skipped}")
+
+    if args.migrate_tasks:
+        tasks_copied, tasks_skipped = copy_task_files(source, workspace)
+        print(f"[migrated:tasks] copied={tasks_copied} skipped_existing={tasks_skipped}")
+
+    if args.migrate_worktrees:
+        worktrees_total, worktrees_appended = merge_worktrees(source, workspace)
+        print(f"[migrated:worktrees] appended={worktrees_appended} total={worktrees_total}")
+
+    if args.backfill_project_id:
+        chats_backfilled = backfill_chat_project_id(workspace, args.project_id)
+        tasks_backfilled = backfill_task_project_id(workspace, args.project_id)
+        print(
+            f"[migrated:project_scope] project_id={args.project_id} "
+            f"chats_patched={chats_backfilled} tasks_patched={tasks_backfilled}"
+        )
+
+    if args.normalize_task_folders:
+        task_folders_moved, task_folders_collision = normalize_task_folders(workspace)
+        print(
+            f"[migrated:task_folders] moved={task_folders_moved} "
+            f"skipped_collisions={task_folders_collision}"
+        )
+
+    summary = {
+        "inbox_migrated_agents": inbox_migrated,
+        "chats_copied": chats_copied,
+        "chats_skipped_existing": chats_skipped,
+        "tasks_copied": tasks_copied,
+        "tasks_skipped_existing": tasks_skipped,
+        "worktrees_appended": worktrees_appended,
+        "worktrees_total": worktrees_total,
+        "project_id": args.project_id if args.backfill_project_id else None,
+        "chats_project_backfilled": chats_backfilled,
+        "tasks_project_backfilled": tasks_backfilled,
+        "task_folders_moved": task_folders_moved,
+        "task_folders_collision": task_folders_collision,
+    }
+    print("\nMigration summary:")
+    print(json.dumps(summary, indent=2))
 
 
 if __name__ == "__main__":
     main()
-
