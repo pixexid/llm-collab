@@ -58,3 +58,20 @@ When multiple workers are involved, state activation order explicitly:
 - who should act now
 - who should wait
 - what condition triggers next activation
+
+## Relay enforcement (hard rule)
+
+Do not request operator relay for workers that are not ready to start.
+
+- Send relay only for workers in `in_progress` state that should execute now.
+- For queued workers, update task ownership/status and keep instructions in task/chat, but do not request activation relay yet.
+- When a queued worker becomes ready, send a single activation message and then request relay.
+
+Required operator instruction format:
+
+- single activation: `activate <worker> now`
+- parallel activation: `activate <worker-a> + <worker-b> now in parallel`
+- queue-only instruction: `do not activate yet; waiting on <condition>`
+
+Never dump multiple relay prompts without explicit activation order.
+If order is sequential, provide only the first relay and wait until the trigger condition is met before requesting the next.
