@@ -17,7 +17,7 @@ Prevent overlapping edits by isolating worker implementation in per-task worktre
 3. run required verification in that worktree
 4. hand off for orchestrator review
 5. mark integrated after acceptance
-6. retire/remove worktree after integration
+6. retire/remove worktree and branch after integration
 
 ## Required metadata
 
@@ -38,4 +38,5 @@ Track on each worktree entry:
 - refuse removal of dirty worktree unless explicitly forced
 - refuse retirement before integration unless explicitly forced
 - workers do not push or open PRs
-
+- after merge, remove retired worker worktrees before deleting their local branches
+- after local cleanup, prune stale worktree metadata
