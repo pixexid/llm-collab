@@ -19,7 +19,9 @@ No lane is PR-ready until local validation and required metadata are complete.
 
 ## Review-branch gate
 
-Before PR creation, run project-required verification on the review branch, then run targeted smoke checks for changed flows.
+Before PR creation, run project-required verification on the review branch.
+Run browser/smoke checks only when the lane touches browser-relevant behavior.
+Use the project's primary browser path first, and run fallback browser tooling only if the primary path fails.
 
 ## PR requirements
 
@@ -35,7 +37,6 @@ Include:
 After merge:
 
 1. fast-forward local `main`
-2. run targeted post-merge smoke
+2. run targeted post-merge smoke only when the merge is browser-relevant
 3. clean stale review branches/worktrees
 4. mark local task done
-
