@@ -198,6 +198,6 @@ python bin/deliver.py \
 
 ## Notes
 
-- `project_id` is optional on messages and tasks. A workspace can mix project-scoped and non-scoped communication.
-- If you only have one project, you can leave `project_id` null on everything and the system works fine.
-- Chat threads are not project-scoped at the thread level (one thread can have messages about multiple projects). Project filtering is done per-message via the frontmatter field.
+- `new_chat.py` and `deliver.py` require `--project`, and each chat has a single `project_id` in `meta.json`.
+- Task files should also carry `project_id`; legacy unscoped tasks are still read for migration/back-compat.
+- For single-project setups, pass that project ID consistently instead of leaving fields null.

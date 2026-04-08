@@ -90,10 +90,11 @@ python3 scripts/migrate_from_amiga.py \
   --migrate-chats \
   --migrate-tasks \
   --migrate-worktrees \
+  --migrate-memory \
   --backfill-project-id
 ```
 
-`scripts/migrate_from_amiga.py` now migrates inbox read-state plus optional chat/task/worktree continuity and project scoping backfill.
+`scripts/migrate_from_amiga.py` now migrates inbox read-state plus optional chat/task/worktree/memory continuity and project scoping backfill (chat meta, message files, and task files).
 
 ### Manual migration (if preferred)
 
@@ -202,6 +203,10 @@ echo "Test message" | python3 bin/deliver.py \
 python3 bin/inbox.py --me claude --project amiga
 ```
 
+Legacy command compatibility in `llm-collab`:
+- `python3 bin/msg.py ...` still works as a wrapper around `deliver.py`
+- `python3 bin/watcher_ctl.py ...` still works as a wrapper around `pm2_watchers.py`
+
 ---
 
 ## Step 7: Switch PM2 watchers
@@ -256,6 +261,7 @@ python3 scripts/migrate_from_amiga.py \
   --migrate-chats \
   --migrate-tasks \
   --migrate-worktrees \
+  --migrate-memory \
   --backfill-project-id
 ```
 

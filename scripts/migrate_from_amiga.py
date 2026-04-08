@@ -138,6 +138,32 @@ def copy_chat_dirs(source: Path, workspace: Path) -> tuple[int, int]:
     return copied, skipped
 
 
+def copy_memory_files(source: Path, workspace: Path, overwrite: bool = False) -> tuple[int, int, int]:
+    memory_dir = source / "Memory"
+    agents_dir = workspace / "agents"
+    if not memory_dir.exists() or not agents_dir.exists():
+        return 0, 0, 0
+
+    copied = 0
+    skipped = 0
+    missing_agent = 0
+
+    for memory_file in sorted(memory_dir.glob("*.memory.md")):
+        agent_name = memory_file.name.split(".memory.md")[0].strip().lower()
+        target_dir = agents_dir / agent_name
+        if not target_dir.exists():
+            missing_agent += 1
+            continue
+        target_file = target_dir / "memory.md"
+        if target_file.exists() and not overwrite:
+            skipped += 1
+            continue
+        target_file.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(memory_file, target_file)
+        copied += 1
+    return copied, skipped, missing_agent
+
+
 def copy_task_files(source: Path, workspace: Path) -> tuple[int, int]:
     copied = 0
     skipped = 0
@@ -174,6 +200,26 @@ def backfill_chat_project_id(workspace: Path, project_id: str) -> int:
         payload["project_id"] = project_id
         meta_path.write_text(json.dumps(payload, indent=2) + "\n")
         patched += 1
+    return patched
+
+
+def backfill_message_project_id(workspace: Path, project_id: str) -> int:
+    patched = 0
+    chats_dir = workspace / "Chats"
+    if not chats_dir.exists():
+        return patched
+    for chat_dir in chats_dir.iterdir():
+        if not chat_dir.is_dir():
+            continue
+        for message_file in chat_dir.glob("*.md"):
+            fm, body = parse_frontmatter(message_file.read_text())
+            if not fm:
+                continue
+            if fm.get("project_id"):
+                continue
+            fm["project_id"] = project_id
+            message_file.write_text(dump_frontmatter(fm, body))
+            patched += 1
     return patched
 
 
@@ -279,6 +325,8 @@ def main() -> None:
     parser.add_argument("--migrate-chats", action="store_true", help="Copy chat folders into workspace Chats/")
     parser.add_argument("--migrate-tasks", action="store_true", help="Copy task markdown files into workspace Tasks/")
     parser.add_argument("--migrate-worktrees", action="store_true", help="Merge State/worktrees.json entries")
+    parser.add_argument("--migrate-memory", action="store_true", help="Copy Memory/*.memory.md into agents/*/memory.md")
+    parser.add_argument("--overwrite-memory", action="store_true", help="Allow migrated memory files to overwrite existing target memory.md")
     parser.add_argument("--backfill-project-id", action="store_true", help="Backfill missing project_id on migrated chats/tasks")
     parser.add_argument(
         "--normalize-task-folders",
@@ -325,7 +373,9 @@ def main() -> None:
     chats_copied = chats_skipped = 0
     tasks_copied = tasks_skipped = 0
     worktrees_total = worktrees_appended = 0
+    memory_copied = memory_skipped = memory_missing_agent = 0
     chats_backfilled = 0
+    messages_backfilled = 0
     tasks_backfilled = 0
     task_folders_moved = 0
     task_folders_collision = 0
@@ -342,12 +392,24 @@ def main() -> None:
         worktrees_total, worktrees_appended = merge_worktrees(source, workspace)
         print(f"[migrated:worktrees] appended={worktrees_appended} total={worktrees_total}")
 
+    if args.migrate_memory:
+        memory_copied, memory_skipped, memory_missing_agent = copy_memory_files(
+            source,
+            workspace,
+            overwrite=args.overwrite_memory,
+        )
+        print(
+            f"[migrated:memory] copied={memory_copied} "
+            f"skipped_existing={memory_skipped} missing_agent={memory_missing_agent}"
+        )
+
     if args.backfill_project_id:
         chats_backfilled = backfill_chat_project_id(workspace, args.project_id)
+        messages_backfilled = backfill_message_project_id(workspace, args.project_id)
         tasks_backfilled = backfill_task_project_id(workspace, args.project_id)
         print(
             f"[migrated:project_scope] project_id={args.project_id} "
-            f"chats_patched={chats_backfilled} tasks_patched={tasks_backfilled}"
+            f"chats_patched={chats_backfilled} messages_patched={messages_backfilled} tasks_patched={tasks_backfilled}"
         )
 
     if args.normalize_task_folders:
@@ -365,8 +427,12 @@ def main() -> None:
         "tasks_skipped_existing": tasks_skipped,
         "worktrees_appended": worktrees_appended,
         "worktrees_total": worktrees_total,
+        "memory_copied": memory_copied,
+        "memory_skipped_existing": memory_skipped,
+        "memory_missing_agent": memory_missing_agent,
         "project_id": args.project_id if args.backfill_project_id else None,
         "chats_project_backfilled": chats_backfilled,
+        "messages_project_backfilled": messages_backfilled,
         "tasks_project_backfilled": tasks_backfilled,
         "task_folders_moved": task_folders_moved,
         "task_folders_collision": task_folders_collision,

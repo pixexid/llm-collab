@@ -185,6 +185,10 @@ python bin/task_board.py --project docs-site
 
 Full reference: [docs/schema-reference.md](docs/schema-reference.md)
 
+Legacy migration aliases:
+- `msg.py` -> `deliver.py`
+- `watcher_ctl.py` -> `pm2_watchers.py`
+
 For `human_relay` recipients, `deliver.py` prints a first-time onboarding relay prompt (docs + memory update instructions) only once, then switches to short “check inbox” relay prompts after awareness is recorded in local runtime state.
 
 ## What this is NOT

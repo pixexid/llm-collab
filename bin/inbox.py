@@ -8,7 +8,7 @@ message content from Chats/. Marks messages as read unless --peek.
 Usage:
   python bin/inbox.py --me orchestrator
   python bin/inbox.py --me orchestrator --limit 10
-  python bin/inbox.py --me orchestrator --project amiga
+  python bin/inbox.py --me orchestrator --project my-app
   python bin/inbox.py --me orchestrator --all
   python bin/inbox.py --me orchestrator --peek
   python bin/inbox.py --me orchestrator --mark-all-read
