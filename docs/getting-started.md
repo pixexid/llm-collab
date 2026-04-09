@@ -184,11 +184,8 @@ python bin/session_bootstrap.py --agent worker
 # Read inbox (full content)
 python bin/inbox.py --me worker
 
-# Claim task
+# Claim task after the orchestrator provisions the lane
 python bin/claim_task.py --task TASK-xxx --owner worker --status in_progress
-
-# Create isolated worktree (optional)
-python bin/worktree_ctl.py create --task TASK-xxx --agent worker --repo ../my-app
 
 # ... do the work ...
 
@@ -218,6 +215,9 @@ The LLM runs the bootstrap command and immediately sees its identity and unread 
 
 **Task claim triggered browser checks unexpectedly**
 `claim_task.py` now forces preflight `--browser-check skip` for `in_progress`/`review` transitions. Browser checks should run in preview/review gates for runtime/UI changes only.
+
+**Worker says the branch/worktree does not exist**
+For isolated implementation lanes, branch/worktree provisioning is orchestrator-owned. The worker should treat a missing lane as a blocker and report it immediately instead of inventing local lane state unless the task explicitly says self-provision is allowed.
 
 **"collab.config.json not found"**
 Run `python scripts/init.py` from the workspace root.
