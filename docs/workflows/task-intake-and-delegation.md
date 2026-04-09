@@ -51,7 +51,15 @@ When isolated worktrees are used, include:
 - branch
 - base ref and base SHA
 - allowed workspace
-- checkpoint commit expectation
+- explicit checkpoint-commit requirement for worker-owned implementation lanes
+- required handoff evidence for acceptance:
+  - checkpoint commit SHA
+  - assigned branch confirmation
+  - `git status --short --untracked-files=all`
+  - disposition of any remaining tracked or untracked files
+
+For worker-owned isolated lanes, those values must be provisioned and verified by the orchestrator before relay.
+Do not phrase a planned branch/worktree as already assigned.
 
 For worker-owned isolated lanes, those values must be provisioned and verified by the orchestrator before relay.
 Do not phrase a planned branch/worktree as already assigned.
