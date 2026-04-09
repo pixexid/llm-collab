@@ -9,10 +9,12 @@ One owner, one scope, one verification plan.
 1. pass startup/preflight
 2. create or identify the chat
 3. create/update the task
-4. assign one owner
-5. send one clear delegation message
-6. move task to `in_progress`
-7. then begin implementation
+4. provision branch/worktree first when the lane is isolated-worker implementation
+5. assign one owner
+6. send one clear delegation message
+7. move task to `in_progress`
+8. then request activation relay
+9. then begin implementation
 
 ## Preflight gate split
 
@@ -49,7 +51,15 @@ When isolated worktrees are used, include:
 - branch
 - base ref and base SHA
 - allowed workspace
-- checkpoint commit expectation
+- explicit checkpoint-commit requirement for worker-owned implementation lanes
+- required handoff evidence for acceptance:
+  - checkpoint commit SHA
+  - assigned branch confirmation
+  - `git status --short --untracked-files=all`
+  - disposition of any remaining tracked or untracked files
+
+For worker-owned isolated lanes, those values must be provisioned and verified by the orchestrator before relay.
+Do not phrase a planned branch/worktree as already assigned.
 
 ## Activation rule
 
@@ -64,6 +74,7 @@ When multiple workers are involved, state activation order explicitly:
 Do not request operator relay for workers that are not ready to start.
 
 - Send relay only for workers in `in_progress` state that should execute now.
+- A worker is not ready to start until its required branch/worktree already exists when isolated mode is expected.
 - For queued workers, update task ownership/status and keep instructions in task/chat, but do not request activation relay yet.
 - When a queued worker becomes ready, send a single activation message and then request relay.
 

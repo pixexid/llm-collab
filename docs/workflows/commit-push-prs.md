@@ -22,6 +22,7 @@ No lane is PR-ready until local validation and required metadata are complete.
 Before PR creation, run project-required verification on the review branch.
 Run browser/smoke checks only when the lane touches browser-relevant behavior.
 Use the project's primary browser path first, and run fallback browser tooling only if the primary path fails.
+Do not create the review branch from a worker lane until the worker handoff acceptance gate has already passed, including branch verification, checkpoint-commit verification, and `git status --short --untracked-files=all`.
 
 ## PR requirements
 
