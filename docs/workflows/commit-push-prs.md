@@ -46,17 +46,34 @@ After merge:
 Post-merge cleanup is required, not optional.
 
 - remove merged `codex/review/*` branches (local and remote)
-- remove stale worker branches that were tied to completed lanes (for example `codex/cdx2/*`, `codex/claude/*`)
-- remove stale worktrees for those branches
+- remove stale worker branches only when their lane is verified complete
+- remove stale worktrees only when their lane is verified complete
 - keep only active worktrees and one intentional root parking branch (or `main`)
+
+Do not treat `merged` as sufficient evidence that a worker branch/worktree is disposable.
+
+Worker branches/worktrees are deletion candidates only when all of the following are true:
+
+1. the related PR is merged or the related issue is closed
+2. the related local task mirror is `done`, not `open`, `in_progress`, `blocked`, or `review`
+3. the branch is not the active branch of any existing worktree
+4. the worktree is clean enough to discard (`git status --short --untracked-files=all`)
+5. the branch tip is merged into `main` or patch-equivalent to a merged commit on `main`
+6. no active chat/task/brief still points to that branch/worktree as the implementation lane
+
+If any one of those checks fails, defer cleanup.
 
 Safe cleanup order:
 
 1. fetch/prune refs (`git fetch --all --prune`)
-2. verify each candidate worktree is disposable (`git status --short --untracked-files=all`)
-3. remove stale worktrees first (`git worktree remove [--force] <path>`)
-4. prune stale worktree metadata (`git worktree prune`)
-5. delete stale local branches (`git branch -d` or `-D` when explicitly safe)
-6. delete stale remote branches (`git push origin --delete <branch...>`)
+2. split cleanup candidates into:
+   - safe now: merged review branches and worker lanes whose task is `done`
+   - defer: any branch/worktree still referenced by an active task/chat or still carrying non-disposable files
+3. verify each candidate worktree is disposable (`git status --short --untracked-files=all`)
+4. verify each candidate branch is merged or patch-equivalent to `main`
+5. remove stale worktrees first (`git worktree remove [--force] <path>`)
+6. prune stale worktree metadata (`git worktree prune`)
+7. delete stale local branches (`git branch -d` or `-D` when explicitly safe)
+8. delete stale remote branches (`git push origin --delete <branch...>`)
 
 Do not keep merged branch clutter; clean branch lists are required for reliable lane selection.
