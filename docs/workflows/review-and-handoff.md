@@ -39,7 +39,11 @@ For worker-owned isolated-worktree implementation lanes, handoff replies must al
    - record the disposition of any remaining files in task/chat notes
 6. if the worktree is still dirty, orchestrator blocks acceptance unless the worker adds the missing checkpoint commit, explains why specific files must remain dirty, or the orchestrator records an explicit waiver with the reason
 7. orchestrator either blocks, reassigns, or accepts
-8. accepted tasks move to `Tasks/done`
+8. if the project maintains a canonical queue artifact, orchestrator updates queue state/order before selecting the next lane
+9. accepted tasks move to `Tasks/done`
+
+When the last queued lane moves to `done`, archive the final queue snapshot and keep the canonical
+queue path in an explicit empty state instead of deleting it.
 
 ## Thread-boundary handoff rule
 

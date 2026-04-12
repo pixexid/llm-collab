@@ -8,13 +8,26 @@ One owner, one scope, one verification plan.
 
 1. pass startup/preflight
 2. create or identify the chat
-3. create/update the task
-4. provision branch/worktree first when the lane is isolated-worker implementation
-5. assign one owner
-6. send one clear delegation message
-7. move task to `in_progress`
-8. then request activation relay
-9. then begin implementation
+3. read the project queue artifact when the project maintains one
+4. create/update the task
+5. update the queue when owner/order/dependency/activation state changes
+6. provision branch/worktree first when the lane is isolated-worker implementation
+7. assign one owner
+8. send one clear delegation message
+9. move task to `in_progress`
+10. then request activation relay
+11. then begin implementation
+
+## Canonical ordered queue
+
+If the project defines a canonical queue artifact, treat it as the ordered source of truth for
+remaining issue-sized lanes.
+
+- keep the queue outside chat threads
+- read it during fresh-session recovery before selecting the next lane
+- update it whenever lane order, owner, queue state, dependency state, or task status changes
+- when the queue has a generated Markdown view, regenerate it after JSON edits
+- if `claim_task.py --status in_progress` targets a queued lane that is not `ready`, the transition should fail unless an explicit queue-override flag is used
 
 ## Preflight gate split
 
@@ -57,9 +70,6 @@ When isolated worktrees are used, include:
   - assigned branch confirmation
   - `git status --short --untracked-files=all`
   - disposition of any remaining tracked or untracked files
-
-For worker-owned isolated lanes, those values must be provisioned and verified by the orchestrator before relay.
-Do not phrase a planned branch/worktree as already assigned.
 
 For worker-owned isolated lanes, those values must be provisioned and verified by the orchestrator before relay.
 Do not phrase a planned branch/worktree as already assigned.
