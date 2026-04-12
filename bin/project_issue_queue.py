@@ -304,6 +304,41 @@ def find_lane(payload: dict, task_id: str) -> dict | None:
     return next((lane for lane in payload.get("lanes", []) if lane.get("task_id") == task_id), None)
 
 
+def normalize_lanes(payload: dict) -> None:
+    lanes = sorted(payload.get("lanes", []), key=lambda lane: lane["order"])
+
+    for index, lane in enumerate(lanes, start=1):
+        lane["order"] = index
+
+    active_like = [
+        lane for lane in lanes if lane.get("queue_state") in {"active", "review"}
+    ]
+    ready_lanes = [lane for lane in lanes if lane.get("queue_state") == "ready"]
+
+    if active_like:
+        for lane in ready_lanes:
+            lane["queue_state"] = "queued"
+        payload["lanes"] = lanes
+        return
+
+    canonical_ready: dict | None = None
+    if ready_lanes:
+        canonical_ready = min(ready_lanes, key=lambda lane: lane["order"])
+        for lane in ready_lanes:
+            if lane is not canonical_ready:
+                lane["queue_state"] = "queued"
+
+    if canonical_ready is None:
+        canonical_ready = next(
+            (lane for lane in lanes if lane.get("queue_state") == "queued"),
+            None,
+        )
+        if canonical_ready is not None:
+            canonical_ready["queue_state"] = "ready"
+
+    payload["lanes"] = lanes
+
+
 def archive_complete_queue(project_id: str, payload: dict) -> tuple[Path, Path]:
     stamp = utc_iso().replace(":", "").replace("+00:00", "Z")
     history_dir = queue_history_dir(project_id)
@@ -358,6 +393,7 @@ def mark_lane_transition(project_id: str, task_id: str, *, owner: str, task_stat
                 "history_json": str(archived_json.relative_to(ROOT)),
                 "history_md": str(archived_md.relative_to(ROOT)),
             }
+    normalize_lanes(payload)
     sync_markdown(project_id, payload)
     return {"updated": True, "archived": False}
 
