@@ -1,0 +1,220 @@
+{
+  "schema_version": 1,
+  "artifact_type": "ordered_issue_queue",
+  "project_id": "amiga",
+  "last_updated_utc": "2026-04-12T16:51:07+00:00",
+  "source_issue": 257,
+  "source_task": "TASK-A3AEFF",
+  "notes": [
+    "Canonical ordered remaining Amiga implementation queue.",
+    "Fresh sessions must read this before choosing or activating the next issue-sized lane.",
+    "Update this file whenever lane order, owner, queue state, dependency state, or task status changes."
+  ],
+  "completed_recently": [
+    {
+      "issue": 219,
+      "task_id": "TASK-44A521",
+      "owner": "codex",
+      "status": "done"
+    },
+    {
+      "issue": 220,
+      "task_id": "TASK-390E21",
+      "owner": "claude",
+      "status": "done"
+    },
+    {
+      "issue": 234,
+      "task_id": "TASK-36FEB8",
+      "owner": "gemini",
+      "status": "done"
+    },
+    {
+      "issue": 241,
+      "task_id": "TASK-136AF6",
+      "owner": "cdx2",
+      "status": "done"
+    },
+    {
+      "issue": 232,
+      "task_id": "TASK-B0D14F",
+      "owner": "cdx2",
+      "status": "done"
+    }
+  ],
+  "lanes": [
+    {
+      "order": 1,
+      "issue": 233,
+      "task_id": "TASK-48C9F9",
+      "title": "validate transitions against real drive time not zone buckets",
+      "owner": "cdx2",
+      "task_status": "pending",
+      "queue_state": "ready",
+      "tier": 2,
+      "depends_on": [],
+      "blocked_by": [],
+      "notes": "Current next lane after GH-232."
+    },
+    {
+      "order": 2,
+      "issue": 235,
+      "task_id": "TASK-C44C3E",
+      "title": "soft lunch-break guard 12:00 to 12:30 review_required for solo crew",
+      "owner": "cdx2",
+      "task_status": "pending",
+      "queue_state": "queued",
+      "tier": 2,
+      "depends_on": [],
+      "blocked_by": [],
+      "notes": "Next cdx2 scheduling lane after GH-233."
+    },
+    {
+      "order": 3,
+      "issue": 230,
+      "task_id": "TASK-5283BD",
+      "title": "smart availability picker overhaul multi-date scan route-fit indicators pre-selection",
+      "owner": "cdx2",
+      "task_status": "pending",
+      "queue_state": "queued",
+      "tier": 3,
+      "depends_on": [],
+      "blocked_by": [],
+      "notes": "Availability UX/logic lane after the remaining tier-2 cdx2 slices."
+    },
+    {
+      "order": 4,
+      "issue": 236,
+      "task_id": "TASK-316440",
+      "title": "show duration breakdown and crew size on time window cards",
+      "owner": "claude",
+      "task_status": "pending",
+      "queue_state": "queued",
+      "tier": 3,
+      "depends_on": [],
+      "blocked_by": [],
+      "notes": "Claude-owned follow-up after the earlier operations/tasks work."
+    },
+    {
+      "order": 5,
+      "issue": 239,
+      "task_id": "TASK-C710AD",
+      "title": "time-of-day preference filter morning afternoon any",
+      "owner": "gemini",
+      "task_status": "pending",
+      "queue_state": "queued",
+      "tier": 3,
+      "depends_on": [],
+      "blocked_by": [],
+      "notes": "Gemini-owned customer preference slice."
+    },
+    {
+      "order": 6,
+      "issue": 237,
+      "task_id": "TASK-92C17E",
+      "title": "property-level duration adjustment notes admin field and DB migration",
+      "owner": "cdx2",
+      "task_status": "pending",
+      "queue_state": "queued",
+      "tier": 4,
+      "depends_on": [],
+      "blocked_by": [],
+      "notes": "Later cdx2 duration/settings lane."
+    },
+    {
+      "order": 7,
+      "issue": 231,
+      "task_id": "TASK-9B33E0",
+      "title": "replace Syncfusion with custom dispatch calendar dnd-kit CSS grid",
+      "owner": "claude",
+      "task_status": "pending",
+      "queue_state": "blocked",
+      "tier": 4,
+      "depends_on": [
+        "TASK-37C311"
+      ],
+      "blocked_by": [
+        "TASK-37C311"
+      ],
+      "notes": "Blocked until the referenced Phase 4 lane completes."
+    },
+    {
+      "order": 8,
+      "issue": 221,
+      "task_id": "TASK-1DF3C7",
+      "title": "admin dashboard replace static cards with live operational metrics",
+      "owner": "gemini",
+      "task_status": "pending",
+      "queue_state": "queued",
+      "tier": 4,
+      "depends_on": [],
+      "blocked_by": [],
+      "notes": "Gemini-owned dashboard metrics lane."
+    },
+    {
+      "order": 9,
+      "issue": 226,
+      "task_id": "TASK-B374E9",
+      "title": "payment capture workflow tie task completion to payment capture",
+      "owner": "cdx2",
+      "task_status": "pending",
+      "queue_state": "queued",
+      "tier": 5,
+      "depends_on": [],
+      "blocked_by": [],
+      "notes": "Payments follow-up after the scheduling queue clears."
+    },
+    {
+      "order": 10,
+      "issue": 229,
+      "task_id": "TASK-B5D56C",
+      "title": "wire notification delivery booking confirmation reminders task assignment emails",
+      "owner": "cdx2",
+      "task_status": "pending",
+      "queue_state": "queued",
+      "tier": 5,
+      "depends_on": [],
+      "blocked_by": [],
+      "notes": "Notification delivery lane."
+    },
+    {
+      "order": 11,
+      "issue": 223,
+      "task_id": "TASK-C78AED",
+      "title": "booking confirmation post-booking page confirmation email customer status tracker",
+      "owner": "claude",
+      "task_status": "pending",
+      "queue_state": "queued",
+      "tier": 5,
+      "depends_on": [],
+      "blocked_by": [],
+      "notes": "Claude-owned booking confirmation/customer state lane."
+    },
+    {
+      "order": 12,
+      "issue": 227,
+      "task_id": "TASK-EF110F",
+      "title": "admin booking reschedule UI",
+      "owner": "gemini",
+      "task_status": "pending",
+      "queue_state": "queued",
+      "tier": 5,
+      "depends_on": [],
+      "blocked_by": [],
+      "notes": "Gemini-owned admin reschedule surface."
+    },
+    {
+      "order": 13,
+      "issue": 238,
+      "task_id": "TASK-65615C",
+      "title": "recurring velocity discount minus 15 percent on third and later weekly biweekly visits",
+      "owner": "cdx2",
+      "task_status": "pending",
+      "queue_state": "queued",
+      "tier": 5,
+      "depends_on": [],
+      "blocked_by": [],
+      "notes": "Latest queued cdx2 pricing/recurrence lane in this plan."
+    }
+  ]
+}

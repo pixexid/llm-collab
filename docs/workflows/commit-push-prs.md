@@ -39,8 +39,9 @@ After merge:
 
 1. fast-forward local `main`
 2. run targeted post-merge smoke only when the merge is browser-relevant
-3. clean stale branches/worktrees
-4. mark local task done
+3. update the project queue artifact when lane ordering/state changes
+4. clean stale branches/worktrees
+5. mark local task done
 
 ## Branch/worktree cleanup contract
 

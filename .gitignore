@@ -17,6 +17,11 @@ agents/*/identity.md
 /Index/*.md
 /Logs/
 /projects/*
+!/projects/amiga/
+!/projects/amiga/README.md
+!/projects/amiga/roles-and-routing.md
+!/projects/amiga/issue-queue.json
+!/projects/amiga/issue-queue.md
 /examples/*
 
 # Keep directory structure

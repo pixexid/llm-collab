@@ -18,6 +18,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
+import project_issue_queue as issue_queue
 from _helpers import (
     ROOT,
     agent_ids,
@@ -25,6 +26,7 @@ from _helpers import (
     get_agent,
     get_unread_messages,
     is_human_relay,
+    load_projects,
     utc_iso,
     watcher_enabled_agents,
 )
@@ -53,6 +55,25 @@ def start_watcher(agent_id: str) -> dict:
         return {"status": "error", "stderr": result.stderr.strip()}
     except Exception as e:
         return {"status": "error", "reason": str(e)}
+
+
+def queue_summaries() -> list[dict]:
+    summaries: list[dict] = []
+    for project in load_projects():
+        project_id = project.get("id")
+        if not isinstance(project_id, str) or not issue_queue.queue_exists(project_id):
+            continue
+        payload = issue_queue.load_queue(project_id)
+        ready_lane = issue_queue.next_ready_lane(payload)
+        summaries.append(
+            {
+                "project_id": project_id,
+                "queue_path": str(issue_queue.queue_markdown_path(project_id).relative_to(ROOT)),
+                "queue_empty": not bool(payload.get("lanes")),
+                "ready_lane": ready_lane,
+            }
+        )
+    return summaries
 
 
 def main():
@@ -109,6 +130,24 @@ def main():
         else:
             print(f"[inbox] No unread messages for {args.agent}.\n")
 
+    # ── 2b. Queue summaries ──
+    queue_info = queue_summaries()
+    if not args.json_output and queue_info:
+        print("[queue]")
+        for item in queue_info:
+            if item["queue_empty"]:
+                print(f"  - {item['project_id']}: no remaining queued lanes ({item['queue_path']})")
+                continue
+            ready = item["ready_lane"]
+            if ready:
+                print(
+                    f"  - {item['project_id']}: next ready GH-{ready['issue']} / {ready['task_id']} / {ready['owner']} "
+                    f"({item['queue_path']})"
+                )
+            else:
+                print(f"  - {item['project_id']}: queue has no ready lane ({item['queue_path']})")
+        print("")
+
     # ── 3. Watcher ──
     watcher_result = {"status": "skipped"}
     activation = agent.get("activation", {})
@@ -130,6 +169,7 @@ def main():
             "bootstrapped_utc": utc_iso(),
             "identity_loaded": identity_content is not None,
             "inbox": inbox_summary,
+            "queues": queue_info,
             "watcher": watcher_result,
         }, indent=2))
 

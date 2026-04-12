@@ -17,6 +17,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
+import project_issue_queue as issue_queue
 from _helpers import (
     ROOT,
     TASK_STATUSES,
@@ -43,6 +44,11 @@ def parse_args():
         action="store_true",
         help="Skip project preflight gate for this status transition.",
     )
+    p.add_argument(
+        "--allow-queue-override",
+        action="store_true",
+        help="Allow claiming a queued project lane out of order even if it is not the current ready lane.",
+    )
     return p.parse_args()
 
 
@@ -65,6 +71,35 @@ def main():
     old_status = fm.get("status", "open")
     project_id = fm.get("project_id")
     preflight_summary = None
+    queue_summary = None
+
+    if project_id and args.status == "in_progress" and issue_queue.queue_exists(project_id):
+        payload = issue_queue.load_queue(project_id)
+        lane = issue_queue.find_lane(payload, fm.get("task_id", args.task))
+        if lane is not None:
+            lane_state = lane.get("queue_state")
+            if lane_state not in {"ready", "active"} and not args.allow_queue_override:
+                current_ready = issue_queue.next_ready_lane(payload)
+                print(
+                    json.dumps(
+                        {
+                            "error": "task is not the current ready queue lane; refusing out-of-order claim",
+                            "task_id": fm.get("task_id", args.task),
+                            "target_status": args.status,
+                            "project_id": project_id,
+                            "lane": {
+                                "issue": lane.get("issue"),
+                                "queue_state": lane_state,
+                                "order": lane.get("order"),
+                            },
+                            "ready_lane": current_ready,
+                            "override_flag": "--allow-queue-override",
+                        },
+                        indent=2,
+                    ),
+                    file=sys.stderr,
+                )
+                sys.exit(1)
 
     if args.status in ("in_progress", "review") and not args.skip_preflight:
         preflight = run_project_preflight(project_id, extra_args=["--browser-check", "skip"])
@@ -117,6 +152,14 @@ def main():
 
     write_file(new_path, new_content)
 
+    if project_id and issue_queue.queue_exists(project_id):
+        queue_summary = issue_queue.mark_lane_transition(
+            project_id,
+            tid,
+            owner=args.owner,
+            task_status=args.status,
+        )
+
     result = {
         "task_id": tid,
         "old_status": old_status,
@@ -127,6 +170,8 @@ def main():
     }
     if preflight_summary is not None:
         result["preflight"] = preflight_summary
+    if queue_summary is not None:
+        result["queue"] = queue_summary
     print(json.dumps(result, indent=2))
 
 

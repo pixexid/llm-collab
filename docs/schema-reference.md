@@ -312,6 +312,79 @@ Contains:
 7. Other agents list
 8. Behavioral instructions
 
+---
+
+## projects/{project_id}/issue-queue.json
+
+Optional per-project artifact for canonical ordered issue queues.
+
+Use this when a project needs one durable ordered list of remaining issue-sized lanes that survives
+chat/session turnover.
+
+```json
+{
+  "schema_version": 1,
+  "artifact_type": "ordered_issue_queue",
+  "project_id": "amiga",
+  "last_updated_utc": "2026-04-12T16:47:13+00:00",
+  "source_issue": 257,
+  "source_task": "TASK-A3AEFF",
+  "completed_recently": [
+    { "issue": 232, "task_id": "TASK-B0D14F", "owner": "cdx2", "status": "done" }
+  ],
+  "lanes": [
+    {
+      "order": 1,
+      "issue": 233,
+      "task_id": "TASK-48C9F9",
+      "title": "validate transitions against real drive time not zone buckets",
+      "owner": "cdx2",
+      "task_status": "pending",
+      "queue_state": "ready",
+      "tier": 2,
+      "depends_on": [],
+      "blocked_by": [],
+      "notes": "Current next lane after GH-232."
+    }
+  ]
+}
+```
+
+### Queue fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `schema_version` | int | Queue schema version |
+| `artifact_type` | string | `ordered_issue_queue` |
+| `project_id` | string | Project identifier |
+| `last_updated_utc` | string | ISO 8601 timestamp |
+| `source_issue` | int | Workflow issue tracking this queue contract |
+| `source_task` | string | Local task mirror tracking this queue contract |
+| `completed_recently` | object[] | Optional recently-finished reference lanes |
+| `lanes` | object[] | Ordered remaining issue-sized lanes |
+
+### Lane fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `order` | int | Canonical queue order; contiguous starting at 1 |
+| `issue` | int | GitHub issue number |
+| `task_id` | string | Local task mirror id |
+| `title` | string | Short lane title |
+| `owner` | string | Assigned collaborator |
+| `task_status` | string | Mirror task status (`pending`, `in_progress`, `review`, etc.) |
+| `queue_state` | string | Queue position state such as `ready`, `queued`, or `blocked` |
+| `tier` | int | Optional rollout tier |
+| `depends_on` | string[] | Task-level dependencies |
+| `blocked_by` | string[] | Explicit blocker references |
+| `notes` | string | Short operator/orchestrator note |
+
+### Operational rules
+
+- the canonical queue path should remain stable even when no lanes remain
+- when the final lane completes, archive the last queue snapshot to `projects/{project_id}/history/`
+- keep `projects/{project_id}/issue-queue.json` and `.md` present with `lanes: []` so fresh sessions see an explicit empty queue instead of a missing file
+
 Read first by `session_bootstrap.py` so the LLM immediately knows its identity.
 
 ---
