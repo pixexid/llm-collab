@@ -43,6 +43,10 @@ After merge:
 4. clean stale branches/worktrees
 5. mark local task done
 
+Do not idle the active thread just to wait for asynchronous deploy automation if local post-merge
+work is already complete. Treat deploy as a later checkpoint unless it has actually failed or a new
+production-impacting merge would stack on top of an unresolved deploy state.
+
 ## Branch/worktree cleanup contract
 
 Post-merge cleanup is required, not optional.
