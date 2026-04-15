@@ -190,9 +190,69 @@ def resolve_project_repo_path(project_id: str, repo_key: str = "app") -> Path | 
     return (ROOT / path).resolve()
 
 
-def _resolve_command_path(command: str) -> str:
+def _read_repo_nvmrc(repo_root: Path) -> str | None:
+    nvmrc_path = repo_root / ".nvmrc"
+    if not nvmrc_path.exists():
+        return None
+    raw = nvmrc_path.read_text().strip()
+    if not raw:
+        return None
+    return raw.removeprefix("v")
+
+
+def _resolve_repo_runtime_bin_dir(repo_root: Path) -> Path | None:
+    version = _read_repo_nvmrc(repo_root)
+    if not version:
+        return None
+
+    exact_candidates = [
+        Path.home() / ".nvm" / "versions" / "node" / f"v{version}" / "bin",
+        Path.home() / ".local" / f"node-v{version}" / "bin",
+    ]
+
+    for candidate in exact_candidates:
+        if candidate.exists():
+            return candidate
+
+    version_parts = version.split(".")
+    if len(version_parts) != 3:
+        return None
+
+    major = version_parts[0]
+    nvm_root = Path.home() / ".nvm" / "versions" / "node"
+    if nvm_root.exists():
+        matching = sorted(
+            (
+                path / "bin"
+                for path in nvm_root.iterdir()
+                if path.is_dir() and path.name.startswith(f"v{major}.")
+            ),
+            reverse=True,
+        )
+        for candidate in matching:
+            if candidate.exists():
+                return candidate
+
+    local_node_root = Path.home() / ".local"
+    if local_node_root.exists():
+        matching = sorted(local_node_root.glob(f"node-v{major}.*.*"))
+        for path in reversed(matching):
+            candidate = path / "bin"
+            if candidate.exists():
+                return candidate
+
+    return None
+
+
+def _resolve_command_path(command: str, repo_root: Path | None = None) -> str:
     if "/" in command:
         return command
+
+    runtime_bin_dir = _resolve_repo_runtime_bin_dir(repo_root) if repo_root else None
+    if runtime_bin_dir:
+        candidate = runtime_bin_dir / command
+        if candidate.exists():
+            return str(candidate)
 
     direct = shutil.which(command)
     if direct:
@@ -219,10 +279,16 @@ def _resolve_command_path(command: str) -> str:
     return command
 
 
-def _build_command_env(command_path: str) -> dict[str, str]:
+def _build_command_env(command_path: str, repo_root: Path | None = None) -> dict[str, str]:
     env = os.environ.copy()
     existing = [entry for entry in env.get("PATH", "").split(os.pathsep) if entry]
-    preferred = [str(Path(command_path).resolve().parent), "/opt/homebrew/bin", "/usr/local/bin"]
+    preferred = [str(Path(command_path).resolve().parent)]
+
+    runtime_bin_dir = _resolve_repo_runtime_bin_dir(repo_root) if repo_root else None
+    if runtime_bin_dir:
+        preferred.append(str(runtime_bin_dir))
+
+    preferred.extend(["/opt/homebrew/bin", "/usr/local/bin"])
     deduped = []
     for entry in [*preferred, *existing]:
         if entry and entry not in deduped:
@@ -250,7 +316,7 @@ def run_project_preflight(
 
     run_cwd = (cwd or resolve_project_repo_path(project_id, "app") or ROOT).resolve()
     full_command = [*command, *(extra_args or [])]
-    command_path = _resolve_command_path(full_command[0])
+    command_path = _resolve_command_path(full_command[0], run_cwd)
     executed_command = [command_path, *full_command[1:]]
     result = subprocess.run(
         executed_command,
@@ -258,7 +324,7 @@ def run_project_preflight(
         text=True,
         capture_output=True,
         check=False,
-        env=_build_command_env(command_path),
+        env=_build_command_env(command_path, run_cwd),
     )
     stdout = result.stdout.strip()
     stderr = result.stderr.strip()
