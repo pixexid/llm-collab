@@ -200,6 +200,13 @@ def _read_repo_nvmrc(repo_root: Path) -> str | None:
     return raw.removeprefix("v")
 
 
+def _parse_semver_parts(raw: str) -> tuple[int, int, int] | None:
+    match = re.fullmatch(r"v?(\d+)\.(\d+)\.(\d+)", raw)
+    if not match:
+        return None
+    return tuple(int(part) for part in match.groups())
+
+
 def _resolve_repo_runtime_bin_dir(repo_root: Path) -> Path | None:
     version = _read_repo_nvmrc(repo_root)
     if not version:
@@ -221,25 +228,25 @@ def _resolve_repo_runtime_bin_dir(repo_root: Path) -> Path | None:
     major = version_parts[0]
     nvm_root = Path.home() / ".nvm" / "versions" / "node"
     if nvm_root.exists():
-        matching = sorted(
-            (
-                path / "bin"
-                for path in nvm_root.iterdir()
-                if path.is_dir() and path.name.startswith(f"v{major}.")
-            ),
-            reverse=True,
-        )
-        for candidate in matching:
-            if candidate.exists():
-                return candidate
+        matching = [
+            (parsed, path / "bin")
+            for path in nvm_root.iterdir()
+            if path.is_dir()
+            and path.name.startswith(f"v{major}.")
+            and (parsed := _parse_semver_parts(path.name)) is not None
+        ]
+        if matching:
+            return max(matching, key=lambda entry: entry[0])[1]
 
     local_node_root = Path.home() / ".local"
     if local_node_root.exists():
-        matching = sorted(local_node_root.glob(f"node-v{major}.*.*"))
-        for path in reversed(matching):
-            candidate = path / "bin"
-            if candidate.exists():
-                return candidate
+        matching = [
+            (parsed, path / "bin")
+            for path in local_node_root.glob(f"node-v{major}.*.*")
+            if (parsed := _parse_semver_parts(path.name.removeprefix("node-"))) is not None
+        ]
+        if matching:
+            return max(matching, key=lambda entry: entry[0])[1]
 
     return None
 
