@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -99,6 +100,7 @@ def detect_ui_ux_lane(frontmatter: dict, body: str = "") -> tuple[bool, str, lis
     existing_detection = _normalize_text(frontmatter.get("ui_ux_detection"))
     related_paths = _normalize_list(frontmatter.get("related_paths"))
     title = _normalize_text(frontmatter.get("title")).lower()
+    title_tokens = {token for token in re.split(r"[^a-z0-9]+", title) if token}
     body_lower = body.lower()
     reasons: list[str] = []
 
@@ -110,7 +112,7 @@ def detect_ui_ux_lane(frontmatter: dict, body: str = "") -> tuple[bool, str, lis
     if doc_hits:
         reasons.extend([f"ui doc path: {path}" for path in doc_hits])
 
-    if any(marker in title for marker in UI_TITLE_MARKERS):
+    if any(marker in title_tokens for marker in UI_TITLE_MARKERS):
         reasons.append("title keyword match")
     if "ui/ux" in body_lower or "frontend" in body_lower or "design" in body_lower:
         reasons.append("body keyword match")
