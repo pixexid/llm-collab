@@ -48,6 +48,26 @@ remaining issue-sized lanes.
 - `related_chat`
 - `related_paths`
 
+For UI/UX lanes, also require:
+- `ui_ux_lane: true`
+- `ui_ux_mode: implementation | docs_only`
+- `required_design_docs`
+- `required_design_skills`
+- `impeccable_required: true`
+- `design_doc_update_review_required: true`
+
+Use the contract helper instead of hand-editing guesses:
+
+```bash
+python3 /Users/pixexid/Projects/llm-collab/bin/task_contract.py sync --task TASK-xxxxxx --write
+```
+
+If a lane should be forced on/off instead of auto-detected:
+
+```bash
+python3 /Users/pixexid/Projects/llm-collab/bin/task_contract.py sync --task TASK-xxxxxx --ui-ux-lane true --write
+```
+
 ## Delegation message requirements
 
 - exact goal
@@ -73,6 +93,27 @@ When isolated worktrees are used, include:
 
 For worker-owned isolated lanes, those values must be provisioned and verified by the orchestrator before relay.
 Do not phrase a planned branch/worktree as already assigned.
+
+For UI/UX implementation lanes, the delegation brief must also name:
+- required design docs to read first, including `DESIGN.md`
+- required design/taste skills
+- the mandatory `pnpm ui:impeccable:detect -- <paths>` step
+- the exact browser-validation expectation
+- the requirement to record UI evidence back onto the task contract before moving to `review`
+
+Canonical UI evidence recording command:
+
+```bash
+python3 /Users/pixexid/Projects/llm-collab/bin/task_contract.py record-ui-evidence \
+  --task TASK-xxxxxx \
+  --design-docs-read /Users/pixexid/Projects/amiga/docs/ui_ux/DESIGN.md \
+  --design-skills-used impeccable,design-taste-frontend \
+  --impeccable-detect-result "pass: pnpm ui:impeccable:detect -- src/routes/app/bookings.index.tsx" \
+  --browser-validation-desktop "pass: /app/bookings desktop" \
+  --browser-validation-mobile "pass: 393px no overflow" \
+  --operator-visual-feedback-requested true \
+  --design-doc-update-decision "reviewed; no DESIGN.md diff required"
+```
 
 ## Activation rule
 

@@ -229,6 +229,21 @@ related_paths: [src/auth/, src/middleware/]
 repo_targets: [app]
 depends_on: [TASK-XYZ789]
 branch: collab/worker/t-abc123-implement-auth
+ui_ux_lane: true
+ui_ux_mode: implementation
+ui_ux_detection: auto
+ui_ux_detection_reasons: [src/routes/app/bookings.index.tsx]
+required_design_docs: [/Users/pixexid/Projects/amiga/docs/ui_ux/DESIGN.md]
+required_design_skills: [design-taste-frontend, stitch-design-taste, impeccable]
+impeccable_required: true
+design_doc_update_review_required: true
+design_docs_read: []
+design_skills_used: []
+impeccable_detect_result: null
+browser_validation_desktop: null
+browser_validation_mobile: null
+operator_visual_feedback_requested: false
+design_doc_update_decision: null
 ---
 ```
 
@@ -248,6 +263,21 @@ branch: collab/worker/t-abc123-implement-auth
 | `repo_targets` | string[] | Repos in scope |
 | `depends_on` | string[] | `TASK-{id}` blockers |
 | `branch` | string or null | Git branch for this task |
+| `ui_ux_lane` | bool | Whether the lane is subject to the UI/UX workflow contract |
+| `ui_ux_mode` | string | `implementation`, `docs_only`, or `none` |
+| `ui_ux_detection` | string | `auto`, `manual_true`, or `manual_false` |
+| `ui_ux_detection_reasons` | string[] | Why the lane was auto-flagged |
+| `required_design_docs` | string[] | UI docs the worker must read before starting |
+| `required_design_skills` | string[] | Shared design/taste skills and CLI expected for the lane |
+| `impeccable_required` | bool | Whether `impeccable detect` is mandatory |
+| `design_doc_update_review_required` | bool | Whether the lane must record a DESIGN.md review/update decision |
+| `design_docs_read` | string[] | Design docs the worker explicitly confirms were read |
+| `design_skills_used` | string[] | Skills/CLI actually used during the lane |
+| `impeccable_detect_result` | string or null | Captured `impeccable detect` evidence summary |
+| `browser_validation_desktop` | string or null | Worker-owned desktop browser validation evidence |
+| `browser_validation_mobile` | string or null | Worker-owned mobile browser validation evidence |
+| `operator_visual_feedback_requested` | bool | Whether the operator was explicitly asked for visual review feedback |
+| `design_doc_update_decision` | string or null | Same-session DESIGN.md or linked UI-doc review/update decision |
 
 ### Body
 

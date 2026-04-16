@@ -27,6 +27,7 @@ from _helpers import (
     utc_iso,
     write_file,
 )
+from task_contract import sync_ui_ux_contract
 
 
 def parse_args():
@@ -42,6 +43,12 @@ def parse_args():
     p.add_argument("--path-targets", default="", help="Comma-separated file/dir paths in scope")
     p.add_argument("--related-chat", default=None, help="CHAT-id cross-reference")
     p.add_argument("--depends-on", default="", help="Comma-separated TASK-ids this depends on")
+    p.add_argument(
+        "--ui-ux-lane",
+        default="auto",
+        choices=["auto", "true", "false"],
+        help="Mark or auto-detect whether this is a UI/UX lane.",
+    )
     return p.parse_args()
 
 
@@ -78,6 +85,12 @@ def main():
         "depends_on": depends_on,
         "branch": None,
     }
+    if args.ui_ux_lane == "true":
+        fm["ui_ux_lane"] = True
+        fm["ui_ux_detection"] = "manual_true"
+    elif args.ui_ux_lane == "false":
+        fm["ui_ux_lane"] = False
+        fm["ui_ux_detection"] = "manual_false"
 
     body = f"""# {args.title}
 
@@ -99,6 +112,8 @@ def main():
 
 - {utc_iso()} | {args.created_by} | Task created
 """
+
+    fm, _ = sync_ui_ux_contract(fm, body)
 
     content = dump_frontmatter(fm, body)
     path = target_task_path(args.title, tid, args.status)
