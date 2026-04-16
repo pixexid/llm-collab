@@ -18,6 +18,14 @@ For worker-owned isolated-worktree implementation lanes, handoff replies must al
 - `git status --short --untracked-files=all`
 - disposition of any remaining tracked or untracked files
 
+For UI/UX lanes, handoff replies and the linked task contract must also include:
+- `design_docs_read`
+- `design_skills_used`
+- `impeccable_detect_result`
+- `browser_validation_desktop`
+- `browser_validation_mobile`
+- `operator_visual_feedback_requested`
+- `design_doc_update_decision`
 ## Task status guide
 
 - `open`: created, not started
@@ -42,6 +50,9 @@ For worker-owned isolated-worktree implementation lanes, handoff replies must al
 8. if the project maintains a canonical queue artifact, orchestrator updates queue state/order before selecting the next lane
 9. accepted tasks move to `Tasks/done`
 
+Hard rule for UI/UX lanes:
+- `claim_task.py --status review` should fail if the task contract is missing the required UI evidence
+- PR/review gating should fail again if the same task still does not satisfy the UI contract
 When the last queued lane moves to `done`, archive the final queue snapshot and keep the canonical
 queue path in an explicit empty state instead of deleting it.
 

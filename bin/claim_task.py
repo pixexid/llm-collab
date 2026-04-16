@@ -30,6 +30,7 @@ from _helpers import (
     utc_iso,
     write_file,
 )
+from task_contract import sync_ui_ux_contract, validate_ui_ux_contract
 
 
 def parse_args():
@@ -67,6 +68,7 @@ def main():
 
     content = task_file.read_text()
     fm, body = parse_frontmatter(content)
+    fm, _ = sync_ui_ux_contract(fm, body)
 
     old_status = fm.get("status", "open")
     project_id = fm.get("project_id")
@@ -120,6 +122,42 @@ def main():
                         "target_status": args.status,
                         "project_id": project_id,
                         "preflight": preflight,
+                    },
+                    indent=2,
+                ),
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+    if args.status == "in_progress":
+        errors, summary = validate_ui_ux_contract(fm, body, stage="assignment")
+        if errors:
+            print(
+                json.dumps(
+                    {
+                        "error": "ui/ux task contract is incomplete; refusing in_progress transition",
+                        "task_id": fm.get("task_id", args.task),
+                        "target_status": args.status,
+                        "ui_contract": summary,
+                        "problems": errors,
+                    },
+                    indent=2,
+                ),
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+    if args.status == "review":
+        errors, summary = validate_ui_ux_contract(fm, body, stage="review")
+        if errors:
+            print(
+                json.dumps(
+                    {
+                        "error": "ui/ux review evidence is incomplete; refusing review transition",
+                        "task_id": fm.get("task_id", args.task),
+                        "target_status": args.status,
+                        "ui_contract": summary,
+                        "problems": errors,
                     },
                     indent=2,
                 ),
