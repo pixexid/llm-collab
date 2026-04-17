@@ -10,13 +10,14 @@ One owner, one scope, one verification plan.
 2. create or identify the chat
 3. read the project queue artifact when the project maintains one
 4. create/update the task
-5. update the queue when owner/order/dependency/activation state changes
-6. provision branch/worktree first when the lane is isolated-worker implementation
-7. assign one owner
-8. send one clear delegation message
-9. move task to `in_progress`
-10. then request activation relay
-11. then begin implementation
+5. **send task to claude for spec refinement** (non-trivial tasks — see Refinement Gate below)
+6. update the queue when owner/order/dependency/activation state changes
+7. provision branch/worktree first when the lane is isolated-worker implementation
+8. assign one owner
+9. send one clear delegation message
+10. move task to `in_progress` (gated — requires `refined_by: claude` or `skip_refinement: true`)
+11. then request activation relay
+12. then begin implementation
 
 ## Canonical ordered queue
 
@@ -35,6 +36,32 @@ remaining issue-sized lanes.
 - `claim_task.py` appends `--browser-check skip` when it runs project preflight
 - browser validation should run later only for runtime/UI-impact lanes
 
+## Refinement Gate
+
+Claude is the designated task spec refiner. `claim_task.py` blocks any `open → in_progress` transition unless the task frontmatter contains `refined_by: claude` or `skip_refinement: true`.
+
+**Standard flow (non-trivial tasks):**
+1. Orchestrator creates task with `new_task.py` (status: `open`, `refined_by: null`)
+2. Orchestrator sends refinement request to claude via `deliver.py`, including task ID, file path, research docs, and GH issue
+3. Claude reviews spec, patches task and GH issue, then runs:
+   ```bash
+   python3 /Users/pixexid/Projects/llm-collab/bin/refine_task.py --task TASK-... --note "..."
+   ```
+4. Claude replies in the linked chat confirming refinement is done
+5. Orchestrator confirms `refined_by: claude` in the frontmatter, then proceeds to activation
+
+**Bypass (trivial/hotfix tasks only):**
+```bash
+python3 /Users/pixexid/Projects/llm-collab/bin/new_task.py \
+  --title "..." --created-by codex --project amiga --skip-refinement
+```
+Sets `skip_refinement: true` at creation. Use only for tasks with obvious, single-file scope where a spec review adds no value.
+
+**Verify refinement status:**
+```bash
+grep refined_by /Users/pixexid/Projects/llm-collab/Tasks/active/<task-file>.md
+```
+
 ## Required task fields
 
 - `task_id`
@@ -47,6 +74,9 @@ remaining issue-sized lanes.
 - `project_id`
 - `related_chat`
 - `related_paths`
+- `skip_refinement` (bool — set at creation; `false` by default)
+- `refined_by` (null until claude marks it)
+- `refined_at` (null until claude marks it)
 
 For UI/UX lanes, also require:
 - `ui_ux_lane: true`

@@ -130,6 +130,22 @@ def main():
             sys.exit(1)
 
     if args.status == "in_progress":
+        if not fm.get("skip_refinement", False) and fm.get("refined_by") != "claude":
+            print(
+                json.dumps(
+                    {
+                        "error": "task has not been refined by claude; refusing in_progress transition",
+                        "task_id": fm.get("task_id", args.task),
+                        "target_status": args.status,
+                        "hint": "Send the task to claude for spec review, then run: python bin/refine_task.py --task TASK-...",
+                        "bypass": "For trivial or hotfix tasks, set skip_refinement: true in the task frontmatter at creation time (use --skip-refinement flag in new_task.py).",
+                    },
+                    indent=2,
+                ),
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
         errors, summary = validate_ui_ux_contract(fm, body, stage="assignment")
         if errors:
             print(
