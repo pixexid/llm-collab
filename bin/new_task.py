@@ -49,6 +49,11 @@ def parse_args():
         choices=["auto", "true", "false"],
         help="Mark or auto-detect whether this is a UI/UX lane.",
     )
+    p.add_argument(
+        "--skip-refinement",
+        action="store_true",
+        help="Mark task as not requiring claude refinement before activation (trivial/hotfix tasks only).",
+    )
     return p.parse_args()
 
 
@@ -63,6 +68,14 @@ def main():
         print(f"[error] --owner agent {args.owner!r} not in agents.json", file=sys.stderr)
         sys.exit(1)
     ensure_project(args.project, allow_none=True)
+
+    if args.status == "in_progress" and not args.skip_refinement:
+        print(
+            "[error] Cannot create a task directly in in_progress without --skip-refinement. "
+            "Create in open state, send to claude for refinement, then activate.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     tid = task_id()
     repo_targets = [r.strip() for r in args.repo_targets.split(",") if r.strip()]
@@ -84,6 +97,9 @@ def main():
         "repo_targets": repo_targets,
         "depends_on": depends_on,
         "branch": None,
+        "skip_refinement": args.skip_refinement,
+        "refined_by": None,
+        "refined_at": None,
     }
     if args.ui_ux_lane == "true":
         fm["ui_ux_lane"] = True
