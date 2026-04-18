@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -88,6 +89,11 @@ DDL_BODY_MARKERS = (
     "rls",
     "schema",
 )
+DDL_PATH_MARKERS = (
+    "db/migrations/",
+    "/db/migrations/",
+    "schema.sql",
+)
 
 
 def _normalize_list(value) -> list[str]:
@@ -123,6 +129,14 @@ def _has_any_marker(text: str, markers: tuple[str, ...]) -> bool:
     return any(marker in text for marker in markers)
 
 
+def _has_tokenized_marker(text: str, markers: tuple[str, ...]) -> bool:
+    tokens = re.findall(r"[a-z0-9]+", text.lower())
+    if not tokens:
+        return False
+    joined = " ".join(tokens)
+    return any((marker in joined) if " " in marker else (marker in tokens) for marker in markers)
+
+
 def _task_path(task_id: str) -> Path:
     path = find_task_by_id(task_id)
     if path is None:
@@ -146,7 +160,7 @@ def detect_ui_ux_lane(frontmatter: dict, body: str = "") -> tuple[bool, str, lis
     if doc_hits:
         reasons.extend([f"ui doc path: {path}" for path in doc_hits])
 
-    if any(marker in title for marker in UI_TITLE_MARKERS):
+    if _has_tokenized_marker(title, UI_TITLE_MARKERS):
         reasons.append("title keyword match")
     if "ui/ux" in body_lower or "frontend" in body_lower or "design" in body_lower:
         reasons.append("body keyword match")
@@ -181,7 +195,10 @@ def detect_db_contract(frontmatter: dict, body: str = "") -> tuple[str, str, lis
     if _has_any_marker(body_lower, DB_BODY_MARKERS):
         reasons.append("body db keyword match")
 
-    schema_change_detected = bool(path_hits) or _has_any_marker(body_lower, DDL_BODY_MARKERS)
+    schema_path_hits = [
+        path for path in related_paths if any(marker in path.lower() for marker in DDL_PATH_MARKERS)
+    ]
+    schema_change_detected = bool(schema_path_hits) or _has_any_marker(body_lower, DDL_BODY_MARKERS)
 
     if explicit_impact in DB_IMPACT_VALUES:
         return explicit_impact, "manual", reasons or ["manual override"], schema_change_detected
