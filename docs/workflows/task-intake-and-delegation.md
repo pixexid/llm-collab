@@ -86,6 +86,12 @@ For UI/UX lanes, also require:
 - `impeccable_required: true`
 - `design_doc_update_review_required: true`
 
+For DB lanes, also require:
+- `db_impact: none | local-schema-only | shared-supabase-required`
+- `db_impact_detection`
+- `db_impact_detection_reasons`
+- for `shared-supabase-required`: `db_project_ref` and `db_required_surfaces`
+
 Use the contract helper instead of hand-editing guesses:
 
 ```bash
@@ -97,6 +103,11 @@ If a lane should be forced on/off instead of auto-detected:
 ```bash
 python3 /Users/pixexid/Projects/llm-collab/bin/task_contract.py sync --task TASK-xxxxxx --ui-ux-lane true --write
 ```
+
+DB clarification:
+- if a lane touches the Amiga shared Supabase schema or depends on shared DB state, do not treat a separate “local DB” as the acceptance database
+- the acceptance database is the shared/live Amiga Supabase project
+- workers must use the CLI + `supabase_amiga` MCP workflow instead of guessing from migration files alone
 
 ## Delegation message requirements
 
@@ -131,6 +142,12 @@ For UI/UX implementation lanes, the delegation brief must also name:
 - the exact browser-validation expectation
 - the requirement to record UI evidence back onto the task contract before moving to `review`
 
+For `shared-supabase-required` lanes, the delegation brief must also name:
+- the required `db_impact` classification and shared project ref
+- the requirement to use both Supabase CLI and `supabase_amiga` MCP surfaces
+- the required shared-project apply + schema assertion step
+- the requirement to record DB evidence back onto the task contract before moving to `review`
+
 Canonical UI evidence recording command:
 
 ```bash
@@ -143,6 +160,20 @@ python3 /Users/pixexid/Projects/llm-collab/bin/task_contract.py record-ui-eviden
   --browser-validation-mobile "pass: 393px no overflow" \
   --operator-visual-feedback-requested true \
   --design-doc-update-decision "reviewed; no DESIGN.md diff required"
+```
+
+Canonical DB evidence recording command:
+
+```bash
+python3 /Users/pixexid/Projects/llm-collab/bin/task_contract.py record-db-evidence \
+  --task TASK-xxxxxx \
+  --db-impact shared-supabase-required \
+  --db-project-ref wbqjeasgxakubqcutgjt \
+  --db-migration-files db/migrations/20260417_example.sql \
+  --db-apply-result "pass: supabase db push --linked" \
+  --db-schema-assertion "pass: execute_sql confirmed expected shape" \
+  --db-advisors-result "pass: get_advisors returned no blocking advisors" \
+  --db-runtime-validation "pass: exercised affected route against shared Supabase"
 ```
 
 ## Activation rule

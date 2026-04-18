@@ -26,6 +26,15 @@ For UI/UX lanes, handoff replies and the linked task contract must also include:
 - `browser_validation_mobile`
 - `operator_visual_feedback_requested`
 - `design_doc_update_decision`
+
+For `shared-supabase-required` lanes, handoff replies and the linked task contract must also include:
+- `db_project_ref`
+- `db_migration_files` when schema change is involved
+- `db_apply_result`
+- `db_schema_assertion`
+- `db_advisors_result` for schema-change lanes
+- `db_runtime_validation`
+
 ## Task status guide
 
 - `open`: created, not started
@@ -53,6 +62,11 @@ For UI/UX lanes, handoff replies and the linked task contract must also include:
 Hard rule for UI/UX lanes:
 - `claim_task.py --status review` should fail if the task contract is missing the required UI evidence
 - PR/review gating should fail again if the same task still does not satisfy the UI contract
+
+Hard rule for shared-Supabase lanes:
+- `claim_task.py --status review` should fail if the task contract is missing the required DB evidence
+- migration files in git do not count as acceptance without shared-project apply + assertion
+
 When the last queued lane moves to `done`, archive the final queue snapshot and keep the canonical
 queue path in an explicit empty state instead of deleting it.
 
