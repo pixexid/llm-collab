@@ -30,7 +30,7 @@ from _helpers import (
     utc_iso,
     write_file,
 )
-from task_contract import sync_ui_ux_contract, validate_ui_ux_contract
+from task_contract import sync_task_contract, validate_task_contract
 
 
 def parse_args():
@@ -68,7 +68,7 @@ def main():
 
     content = task_file.read_text()
     fm, body = parse_frontmatter(content)
-    fm, _ = sync_ui_ux_contract(fm, body)
+    fm, _ = sync_task_contract(fm, body)
 
     old_status = fm.get("status", "open")
     project_id = fm.get("project_id")
@@ -146,15 +146,15 @@ def main():
             )
             sys.exit(1)
 
-        errors, summary = validate_ui_ux_contract(fm, body, stage="assignment")
+        errors, summary = validate_task_contract(fm, body, stage="assignment")
         if errors:
             print(
                 json.dumps(
                     {
-                        "error": "ui/ux task contract is incomplete; refusing in_progress transition",
+                        "error": "task contract is incomplete; refusing in_progress transition",
                         "task_id": fm.get("task_id", args.task),
                         "target_status": args.status,
-                        "ui_contract": summary,
+                        "contract": summary,
                         "problems": errors,
                     },
                     indent=2,
@@ -164,15 +164,15 @@ def main():
             sys.exit(1)
 
     if args.status == "review":
-        errors, summary = validate_ui_ux_contract(fm, body, stage="review")
+        errors, summary = validate_task_contract(fm, body, stage="review")
         if errors:
             print(
                 json.dumps(
                     {
-                        "error": "ui/ux review evidence is incomplete; refusing review transition",
+                        "error": "task review evidence is incomplete; refusing review transition",
                         "task_id": fm.get("task_id", args.task),
                         "target_status": args.status,
-                        "ui_contract": summary,
+                        "contract": summary,
                         "problems": errors,
                     },
                     indent=2,

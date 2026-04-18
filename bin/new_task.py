@@ -27,7 +27,7 @@ from _helpers import (
     utc_iso,
     write_file,
 )
-from task_contract import sync_ui_ux_contract
+from task_contract import sync_task_contract
 
 
 def parse_args():
@@ -129,7 +129,7 @@ def main():
 - {utc_iso()} | {args.created_by} | Task created
 """
 
-    fm, _ = sync_ui_ux_contract(fm, body)
+    fm, _ = sync_task_contract(fm, body)
 
     content = dump_frontmatter(fm, body)
     path = target_task_path(args.title, tid, args.status)

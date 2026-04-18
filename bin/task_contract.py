@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-task_contract.py — Project/task contract helpers with Amiga UI/UX enforcement.
+task_contract.py — Project/task contract helpers with Amiga UI/UX and DB enforcement.
 
 Commands:
   python3 bin/task_contract.py sync --task TASK-ABC123 --write
   python3 bin/task_contract.py validate --task TASK-ABC123 --stage review --json
   python3 bin/task_contract.py record-ui-evidence --task TASK-ABC123 --design-docs-read /path/to/DESIGN.md --design-skills-used impeccable,design-taste-frontend --impeccable-detect-result pass --browser-validation-desktop "pass: /app/bookings desktop" --browser-validation-mobile "pass: 393px no overflow" --operator-visual-feedback-requested true --design-doc-update-decision "reviewed; no DESIGN.md diff required"
+  python3 bin/task_contract.py record-db-evidence --task TASK-ABC123 --db-impact shared-supabase-required --db-migration-files db/migrations/20260417_add_staff_unavailability.sql --db-project-ref wbqjeasgxakubqcutgjt --db-apply-result "pass: supabase db push --linked" --db-schema-assertion "pass: execute_sql confirmed table staff_unavailability exists" --db-advisors-result "pass: get_advisors returned no blocking notices" --db-runtime-validation "pass: admin booking review + staff detail against shared Supabase"
 """
 
 from __future__ import annotations
@@ -20,12 +21,14 @@ sys.path.insert(0, str(Path(__file__).parent))
 from _helpers import dump_frontmatter, find_task_by_id, parse_frontmatter, write_file
 
 AMIGA_DESIGN_DOC = "/Users/pixexid/Projects/amiga/docs/ui_ux/DESIGN.md"
+AMIGA_SHARED_SUPABASE_PROJECT_REF = "wbqjeasgxakubqcutgjt"
 DEFAULT_DESIGN_SKILLS = [
     "design-taste-frontend",
     "stitch-design-taste",
     "impeccable",
 ]
 REQUIRED_TASTE_SKILLS = {"design-taste-frontend", "stitch-design-taste", "impeccable"}
+DB_IMPACT_VALUES = {"none", "local-schema-only", "shared-supabase-required"}
 
 RUNTIME_UI_MARKERS = (
     "src/",
@@ -56,6 +59,40 @@ UI_TITLE_MARKERS = (
     "toast",
     "icon",
     "badge",
+)
+DB_PATH_MARKERS = (
+    "db/",
+    "/db/",
+    "schema.sql",
+    "migration",
+    "supabase",
+)
+DB_BODY_MARKERS = (
+    "db impact",
+    "database",
+    "supabase",
+    "migration",
+    "schema",
+    "rls",
+    "policy",
+    "column",
+    "table",
+    "sql",
+)
+DDL_BODY_MARKERS = (
+    "migration",
+    "table",
+    "column",
+    "index",
+    "policy",
+    "function",
+    "rls",
+    "schema",
+)
+DDL_PATH_MARKERS = (
+    "db/migrations/",
+    "/db/migrations/",
+    "schema.sql",
 )
 
 
@@ -88,6 +125,18 @@ def _normalize_text(value) -> str:
     return str(value).strip()
 
 
+def _has_any_marker(text: str, markers: tuple[str, ...]) -> bool:
+    return any(marker in text for marker in markers)
+
+
+def _has_tokenized_marker(text: str, markers: tuple[str, ...]) -> bool:
+    tokens = re.findall(r"[a-z0-9]+", text.lower())
+    if not tokens:
+        return False
+    joined = " ".join(tokens)
+    return any((marker in joined) if " " in marker else (marker in tokens) for marker in markers)
+
+
 def _task_path(task_id: str) -> Path:
     path = find_task_by_id(task_id)
     if path is None:
@@ -100,7 +149,6 @@ def detect_ui_ux_lane(frontmatter: dict, body: str = "") -> tuple[bool, str, lis
     existing_detection = _normalize_text(frontmatter.get("ui_ux_detection"))
     related_paths = _normalize_list(frontmatter.get("related_paths"))
     title = _normalize_text(frontmatter.get("title")).lower()
-    title_tokens = {token for token in re.split(r"[^a-z0-9]+", title) if token}
     body_lower = body.lower()
     reasons: list[str] = []
 
@@ -112,7 +160,7 @@ def detect_ui_ux_lane(frontmatter: dict, body: str = "") -> tuple[bool, str, lis
     if doc_hits:
         reasons.extend([f"ui doc path: {path}" for path in doc_hits])
 
-    if any(marker in title_tokens for marker in UI_TITLE_MARKERS):
+    if _has_tokenized_marker(title, UI_TITLE_MARKERS):
         reasons.append("title keyword match")
     if "ui/ux" in body_lower or "frontend" in body_lower or "design" in body_lower:
         reasons.append("body keyword match")
@@ -129,6 +177,34 @@ def detect_ui_ux_lane(frontmatter: dict, body: str = "") -> tuple[bool, str, lis
     if explicit is False:
         return False, "manual_false", reasons or ["manual override"], "none"
     return auto_ui, "auto", reasons, auto_mode
+
+
+def detect_db_contract(frontmatter: dict, body: str = "") -> tuple[str, str, list[str], bool]:
+    explicit_impact = _normalize_text(frontmatter.get("db_impact"))
+    related_paths = _normalize_list(frontmatter.get("related_paths"))
+    title = _normalize_text(frontmatter.get("title")).lower()
+    body_lower = body.lower()
+    reasons: list[str] = []
+
+    path_hits = [path for path in related_paths if any(marker in path.lower() for marker in DB_PATH_MARKERS)]
+    if path_hits:
+        reasons.extend([f"db path: {path}" for path in path_hits])
+
+    if _has_any_marker(title, DB_BODY_MARKERS):
+        reasons.append("title db keyword match")
+    if _has_any_marker(body_lower, DB_BODY_MARKERS):
+        reasons.append("body db keyword match")
+
+    schema_path_hits = [
+        path for path in related_paths if any(marker in path.lower() for marker in DDL_PATH_MARKERS)
+    ]
+    schema_change_detected = bool(schema_path_hits) or _has_any_marker(body_lower, DDL_BODY_MARKERS)
+
+    if explicit_impact in DB_IMPACT_VALUES:
+        return explicit_impact, "manual", reasons or ["manual override"], schema_change_detected
+
+    auto_impact = "shared-supabase-required" if reasons else "none"
+    return auto_impact, "auto", reasons, schema_change_detected
 
 
 def sync_ui_ux_contract(frontmatter: dict, body: str) -> tuple[dict, list[str]]:
@@ -208,6 +284,57 @@ def sync_ui_ux_contract(frontmatter: dict, body: str) -> tuple[dict, list[str]]:
     return updated, changed
 
 
+def sync_db_contract(frontmatter: dict, body: str) -> tuple[dict, list[str]]:
+    updated = dict(frontmatter)
+    changed: list[str] = []
+
+    db_impact, detection_mode, reasons, schema_change_detected = detect_db_contract(updated, body)
+    if updated.get("db_impact") != db_impact:
+        updated["db_impact"] = db_impact
+        changed.append("db_impact")
+    if updated.get("db_impact_detection") != detection_mode:
+        updated["db_impact_detection"] = detection_mode
+        changed.append("db_impact_detection")
+    if updated.get("db_impact_detection_reasons") != reasons:
+        updated["db_impact_detection_reasons"] = reasons
+        changed.append("db_impact_detection_reasons")
+    if updated.get("db_schema_change_detected") != schema_change_detected:
+        updated["db_schema_change_detected"] = schema_change_detected
+        changed.append("db_schema_change_detected")
+
+    if db_impact == "shared-supabase-required":
+        defaults: dict[str, object] = {
+            "db_project_ref": updated.get("db_project_ref") or AMIGA_SHARED_SUPABASE_PROJECT_REF,
+            "db_required_surfaces": _normalize_list(updated.get("db_required_surfaces"))
+            or [
+                "supabase_amiga.get_project",
+                "supabase_amiga.execute_sql",
+                "supabase_amiga.get_advisors",
+                "supabase CLI",
+            ],
+            "db_migration_files": _normalize_list(updated.get("db_migration_files")),
+            "db_apply_result": updated.get("db_apply_result"),
+            "db_schema_assertion": updated.get("db_schema_assertion"),
+            "db_advisors_result": updated.get("db_advisors_result"),
+            "db_runtime_validation": updated.get("db_runtime_validation"),
+        }
+        for key, default in defaults.items():
+            if key not in updated:
+                updated[key] = default
+                changed.append(key)
+            elif updated.get(key) != default and key in {"db_required_surfaces", "db_migration_files"}:
+                updated[key] = default
+                changed.append(key)
+
+    return updated, changed
+
+
+def sync_task_contract(frontmatter: dict, body: str) -> tuple[dict, list[str]]:
+    synced_ui, ui_changed = sync_ui_ux_contract(frontmatter, body)
+    synced_db, db_changed = sync_db_contract(synced_ui, body)
+    return synced_db, ui_changed + db_changed
+
+
 def validate_ui_ux_contract(frontmatter: dict, body: str, *, stage: str) -> tuple[list[str], dict]:
     errors: list[str] = []
     fm, _ = sync_ui_ux_contract(frontmatter, body)
@@ -282,8 +409,68 @@ def validate_ui_ux_contract(frontmatter: dict, body: str, *, stage: str) -> tupl
     return errors, summary
 
 
+def validate_db_contract(frontmatter: dict, body: str, *, stage: str) -> tuple[list[str], dict]:
+    errors: list[str] = []
+    fm, _ = sync_db_contract(frontmatter, body)
+    db_impact = _normalize_text(fm.get("db_impact"))
+    summary = {
+        "db_impact": db_impact,
+        "db_impact_detection": fm.get("db_impact_detection", "auto"),
+        "db_impact_detection_reasons": _normalize_list(fm.get("db_impact_detection_reasons")),
+        "db_project_ref": _normalize_text(fm.get("db_project_ref")),
+        "db_schema_change_detected": _normalize_bool(fm.get("db_schema_change_detected")) is True,
+    }
+
+    if db_impact not in DB_IMPACT_VALUES:
+        errors.append("Task must classify `db_impact` as none, local-schema-only, or shared-supabase-required.")
+        return errors, summary
+
+    if db_impact != "shared-supabase-required":
+        return errors, summary
+
+    if _normalize_text(fm.get("db_project_ref")) != AMIGA_SHARED_SUPABASE_PROJECT_REF:
+        errors.append(
+            f"Shared Supabase lanes must set `db_project_ref: {AMIGA_SHARED_SUPABASE_PROJECT_REF}`."
+        )
+
+    required_surfaces = set(_normalize_list(fm.get("db_required_surfaces")))
+    required_surface_set = {
+        "supabase CLI",
+        "supabase_amiga.execute_sql",
+        "supabase_amiga.get_advisors",
+    }
+    if not required_surface_set.issubset(required_surfaces):
+        errors.append(
+            "Shared Supabase lanes must require `supabase CLI`, `supabase_amiga.execute_sql`, and `supabase_amiga.get_advisors`."
+        )
+
+    if stage in {"review", "pr"}:
+        if _normalize_bool(fm.get("db_schema_change_detected")) is True and not _normalize_list(
+            fm.get("db_migration_files")
+        ):
+            errors.append("Shared Supabase schema-change lanes must record `db_migration_files`.")
+        if not _normalize_text(fm.get("db_apply_result")):
+            errors.append("Shared Supabase review evidence must include `db_apply_result`.")
+        if not _normalize_text(fm.get("db_schema_assertion")):
+            errors.append("Shared Supabase review evidence must include `db_schema_assertion`.")
+        if not _normalize_text(fm.get("db_runtime_validation")):
+            errors.append("Shared Supabase review evidence must include `db_runtime_validation`.")
+        if _normalize_bool(fm.get("db_schema_change_detected")) is True and not _normalize_text(
+            fm.get("db_advisors_result")
+        ):
+            errors.append("Shared Supabase schema-change lanes must include `db_advisors_result`.")
+
+    return errors, summary
+
+
+def validate_task_contract(frontmatter: dict, body: str, *, stage: str) -> tuple[list[str], dict]:
+    ui_errors, ui_summary = validate_ui_ux_contract(frontmatter, body, stage=stage)
+    db_errors, db_summary = validate_db_contract(frontmatter, body, stage=stage)
+    return ui_errors + db_errors, {"ui_ux": ui_summary, "db": db_summary}
+
+
 def write_synced_task(task_path: Path, frontmatter: dict, body: str) -> dict:
-    synced, changed = sync_ui_ux_contract(frontmatter, body)
+    synced, changed = sync_task_contract(frontmatter, body)
     if changed:
         write_file(task_path, dump_frontmatter(synced, body))
     return {"changed_fields": changed, "frontmatter": synced}
@@ -295,7 +482,7 @@ def command_sync(args: argparse.Namespace) -> None:
     if args.ui_ux_lane != "auto":
         fm["ui_ux_lane"] = args.ui_ux_lane == "true"
         fm["ui_ux_detection"] = "manual_true" if args.ui_ux_lane == "true" else "manual_false"
-    synced, changed = sync_ui_ux_contract(fm, body)
+    synced, changed = sync_task_contract(fm, body)
     if args.write and changed:
         write_file(task_path, dump_frontmatter(synced, body))
     payload = {
@@ -304,6 +491,7 @@ def command_sync(args: argparse.Namespace) -> None:
         "changed_fields": changed,
         "ui_ux_lane": synced.get("ui_ux_lane"),
         "ui_ux_mode": synced.get("ui_ux_mode"),
+        "db_impact": synced.get("db_impact"),
     }
     print(json.dumps(payload, indent=2))
 
@@ -311,7 +499,7 @@ def command_sync(args: argparse.Namespace) -> None:
 def command_validate(args: argparse.Namespace) -> None:
     task_path = _task_path(args.task)
     fm, body = parse_frontmatter(task_path.read_text())
-    errors, summary = validate_ui_ux_contract(fm, body, stage=args.stage)
+    errors, summary = validate_task_contract(fm, body, stage=args.stage)
     payload = {
         "task": args.task,
         "path": str(task_path),
@@ -331,7 +519,7 @@ def command_validate(args: argparse.Namespace) -> None:
 def command_record_ui_evidence(args: argparse.Namespace) -> None:
     task_path = _task_path(args.task)
     fm, body = parse_frontmatter(task_path.read_text())
-    synced, _ = sync_ui_ux_contract(fm, body)
+    synced, _ = sync_task_contract(fm, body)
 
     if args.design_docs_read is not None:
         synced["design_docs_read"] = _normalize_list(args.design_docs_read)
@@ -362,8 +550,43 @@ def command_record_ui_evidence(args: argparse.Namespace) -> None:
     )
 
 
+def command_record_db_evidence(args: argparse.Namespace) -> None:
+    task_path = _task_path(args.task)
+    fm, body = parse_frontmatter(task_path.read_text())
+    synced, _ = sync_task_contract(fm, body)
+
+    if args.db_impact is not None:
+        synced["db_impact"] = args.db_impact
+        synced["db_impact_detection"] = "manual"
+    if args.db_project_ref is not None:
+        synced["db_project_ref"] = args.db_project_ref
+    if args.db_migration_files is not None:
+        synced["db_migration_files"] = _normalize_list(args.db_migration_files)
+    if args.db_apply_result is not None:
+        synced["db_apply_result"] = args.db_apply_result
+    if args.db_schema_assertion is not None:
+        synced["db_schema_assertion"] = args.db_schema_assertion
+    if args.db_advisors_result is not None:
+        synced["db_advisors_result"] = args.db_advisors_result
+    if args.db_runtime_validation is not None:
+        synced["db_runtime_validation"] = args.db_runtime_validation
+
+    write_file(task_path, dump_frontmatter(synced, body))
+    print(
+        json.dumps(
+            {
+                "task": args.task,
+                "path": str(task_path),
+                "db_impact": synced.get("db_impact"),
+                "recorded": True,
+            },
+            indent=2,
+        )
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Task contract helpers with Amiga UI/UX enforcement.")
+    parser = argparse.ArgumentParser(description="Task contract helpers with Amiga UI/UX and DB enforcement.")
     sub = parser.add_subparsers(dest="command", required=True)
 
     sync = sub.add_parser("sync", help="Sync UI/UX defaults onto a task.")
@@ -372,7 +595,7 @@ def build_parser() -> argparse.ArgumentParser:
     sync.add_argument("--write", action="store_true", help="Persist synced changes.")
     sync.set_defaults(func=command_sync)
 
-    validate = sub.add_parser("validate", help="Validate UI/UX task contract/evidence.")
+    validate = sub.add_parser("validate", help="Validate task contract/evidence.")
     validate.add_argument("--task", required=True, help="TASK-id")
     validate.add_argument("--stage", required=True, choices=["assignment", "review", "pr"])
     validate.add_argument("--json", action="store_true", help="Emit JSON result.")
@@ -396,6 +619,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="How DESIGN.md or linked UI docs were reviewed/updated for this lane.",
     )
     evidence.set_defaults(func=command_record_ui_evidence)
+
+    db_evidence = sub.add_parser("record-db-evidence", help="Record DB evidence on a task.")
+    db_evidence.add_argument("--task", required=True, help="TASK-id")
+    db_evidence.add_argument("--db-impact", default=None, choices=sorted(DB_IMPACT_VALUES))
+    db_evidence.add_argument("--db-project-ref", default=None)
+    db_evidence.add_argument("--db-migration-files", default=None, help="Comma-separated migration files.")
+    db_evidence.add_argument("--db-apply-result", default=None)
+    db_evidence.add_argument("--db-schema-assertion", default=None)
+    db_evidence.add_argument("--db-advisors-result", default=None)
+    db_evidence.add_argument("--db-runtime-validation", default=None)
+    db_evidence.set_defaults(func=command_record_db_evidence)
 
     return parser
 
