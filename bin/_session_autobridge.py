@@ -132,10 +132,12 @@ def resolve_effective_action(session: dict, message: dict) -> tuple[str, str]:
         return "manual_noop", "manual_mode"
     if mode == "notify" or wake_strategy == "notify":
         return "notify_only", "notify_mode"
+    if activation_type == "human_relay":
+        return "relay_prompt", "human_relay_fallback"
     if wake_strategy == "runtime_trigger" and runtime_command:
         return "runtime_trigger", "runtime_command_available"
-    if wake_strategy == "relay" or activation_type == "human_relay":
-        return "relay_prompt", "human_relay_fallback"
+    if wake_strategy == "relay":
+        return "relay_prompt", "relay_mode"
     if activation_type == "cli_session":
         return "notify_only", "cli_session_has_no_runtime_hook"
     if activation_type == "api_trigger":

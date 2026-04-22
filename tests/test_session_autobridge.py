@@ -186,6 +186,18 @@ class SessionAutobridgeTest(unittest.TestCase):
             project_id="amiga",
             title="Relay fallback",
         )
+        worker_script = root / "human_relay_worker.py"
+        output_file = root / "human_relay_runtime_result.json"
+        write(
+            worker_script,
+            "\n".join(
+                [
+                    "from pathlib import Path",
+                    "import sys",
+                    "Path(sys.argv[1]).write_text('should-not-run')",
+                ]
+            ),
+        )
 
         self.run_cli(
             root,
@@ -202,12 +214,15 @@ class SessionAutobridgeTest(unittest.TestCase):
             "auto-read",
             "--wake-strategy",
             "runtime_trigger",
+            "--runtime-command",
+            json.dumps([sys.executable, str(worker_script), str(output_file)]),
         )
         dispatch_result = self.run_cli(root, "dispatch", "--session", "SESSION-RELAY")
 
         self.assertEqual(1, len(dispatch_result["actions"]))
         action = dispatch_result["actions"][0]
         self.assertEqual("relay_prompt", action["effective_action"])
+        self.assertFalse(output_file.exists())
         prompt_path = root / action["relay_result"]["prompt_path"]
         self.assertTrue(prompt_path.exists())
         prompt_text = prompt_path.read_text()
