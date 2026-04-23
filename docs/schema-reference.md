@@ -234,11 +234,14 @@ ui_ux_mode: implementation
 ui_ux_detection: auto
 ui_ux_detection_reasons: [src/routes/app/bookings.index.tsx]
 required_design_docs: [/Users/pixexid/Projects/amiga/docs/ui_ux/DESIGN.md]
-required_design_skills: [design-taste-frontend, stitch-design-taste, impeccable]
+required_design_skills: [impeccable]
+impeccable_commands_required: [/impeccable craft, /polish]
 impeccable_required: true
+impeccable_antipatterns_enforced: true
 design_doc_update_review_required: true
 design_docs_read: []
 design_skills_used: []
+impeccable_commands_used: []
 impeccable_detect_result: null
 browser_validation_desktop: null
 browser_validation_mobile: null
@@ -268,11 +271,14 @@ design_doc_update_decision: null
 | `ui_ux_detection` | string | `auto`, `manual_true`, or `manual_false` |
 | `ui_ux_detection_reasons` | string[] | Why the lane was auto-flagged |
 | `required_design_docs` | string[] | UI docs the worker must read before starting |
-| `required_design_skills` | string[] | Shared design/taste skills and CLI expected for the lane |
+| `required_design_skills` | string[] | Design skill family expected for the lane; for Amiga UI/UX lanes this must be `[impeccable]` |
+| `impeccable_commands_required` | string[] | Planned Impeccable steering commands for the lane |
 | `impeccable_required` | bool | Whether `impeccable detect` is mandatory |
+| `impeccable_antipatterns_enforced` | bool | Whether Impeccable curated anti-patterns are treated as a hard guardrail |
 | `design_doc_update_review_required` | bool | Whether the lane must record a DESIGN.md review/update decision |
 | `design_docs_read` | string[] | Design docs the worker explicitly confirms were read |
-| `design_skills_used` | string[] | Skills/CLI actually used during the lane |
+| `design_skills_used` | string[] | Design skills actually used during the lane; for Amiga UI/UX lanes this must be `[impeccable]` |
+| `impeccable_commands_used` | string[] | Impeccable commands actually used during the lane |
 | `impeccable_detect_result` | string or null | Captured `impeccable detect` evidence summary |
 | `browser_validation_desktop` | string or null | Worker-owned desktop browser validation evidence |
 | `browser_validation_mobile` | string or null | Worker-owned mobile browser validation evidence |
