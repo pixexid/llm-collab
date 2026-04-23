@@ -83,7 +83,9 @@ For UI/UX lanes, also require:
 - `ui_ux_mode: implementation | docs_only`
 - `required_design_docs`
 - `required_design_skills`
+- `impeccable_commands_required`
 - `impeccable_required: true`
+- `impeccable_antipatterns_enforced: true`
 - `design_doc_update_review_required: true`
 
 For DB lanes, also require:
@@ -137,7 +139,9 @@ Do not phrase a planned branch/worktree as already assigned.
 
 For UI/UX implementation lanes, the delegation brief must also name:
 - required design docs to read first, including `DESIGN.md`
-- required design/taste skills
+- required Impeccable-family skill usage (`required_design_skills: [impeccable]`)
+- planned Impeccable steering commands for the lane
+- the requirement to enforce Impeccable curated anti-patterns
 - the mandatory `pnpm ui:impeccable:detect -- <paths>` step
 - the exact browser-validation expectation
 - the requirement to record UI evidence back onto the task contract before moving to `review`
@@ -154,7 +158,8 @@ Canonical UI evidence recording command:
 python3 /Users/pixexid/Projects/llm-collab/bin/task_contract.py record-ui-evidence \
   --task TASK-xxxxxx \
   --design-docs-read /Users/pixexid/Projects/amiga/docs/ui_ux/DESIGN.md \
-  --design-skills-used impeccable,design-taste-frontend \
+  --design-skills-used impeccable \
+  --impeccable-commands-used /impeccable\ craft,/polish \
   --impeccable-detect-result "pass: pnpm ui:impeccable:detect -- src/routes/app/bookings.index.tsx" \
   --browser-validation-desktop "pass: /app/bookings desktop" \
   --browser-validation-mobile "pass: 393px no overflow" \

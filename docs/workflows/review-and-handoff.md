@@ -21,6 +21,7 @@ For worker-owned isolated-worktree implementation lanes, handoff replies must al
 For UI/UX lanes, handoff replies and the linked task contract must also include:
 - `design_docs_read`
 - `design_skills_used`
+- `impeccable_commands_used`
 - `impeccable_detect_result`
 - `browser_validation_desktop`
 - `browser_validation_mobile`

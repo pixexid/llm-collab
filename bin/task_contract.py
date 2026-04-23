@@ -5,8 +5,8 @@ task_contract.py — Project/task contract helpers with Amiga UI/UX and DB enfor
 Commands:
   python3 bin/task_contract.py sync --task TASK-ABC123 --write
   python3 bin/task_contract.py validate --task TASK-ABC123 --stage review --json
-  python3 bin/task_contract.py record-ui-evidence --task TASK-ABC123 --design-docs-read /path/to/DESIGN.md --design-skills-used impeccable,design-taste-frontend --impeccable-detect-result pass --browser-validation-desktop "pass: /app/bookings desktop" --browser-validation-mobile "pass: 393px no overflow" --operator-visual-feedback-requested true --design-doc-update-decision "reviewed; no DESIGN.md diff required"
   python3 bin/task_contract.py record-db-evidence --task TASK-ABC123 --db-impact shared-supabase-required --db-migration-files db/migrations/20260417_add_staff_unavailability.sql --db-project-ref wbqjeasgxakubqcutgjt --db-apply-result "pass: supabase db push --linked" --db-schema-assertion "pass: execute_sql confirmed table staff_unavailability exists" --db-advisors-result "pass: get_advisors returned no blocking notices" --db-runtime-validation "pass: admin booking review + staff detail against shared Supabase"
+  python3 bin/task_contract.py record-ui-evidence --task TASK-ABC123 --design-docs-read /path/to/DESIGN.md --design-skills-used impeccable --impeccable-commands-used /impeccable\\ craft,/polish --impeccable-detect-result pass --browser-validation-desktop "pass: /app/bookings desktop" --browser-validation-mobile "pass: 393px no overflow" --operator-visual-feedback-requested true --design-doc-update-decision "reviewed; no DESIGN.md diff required"
 """
 
 from __future__ import annotations
@@ -22,13 +22,52 @@ from _helpers import dump_frontmatter, find_task_by_id, parse_frontmatter, write
 
 AMIGA_DESIGN_DOC = "/Users/pixexid/Projects/amiga/docs/ui_ux/DESIGN.md"
 AMIGA_SHARED_SUPABASE_PROJECT_REF = "wbqjeasgxakubqcutgjt"
-DEFAULT_DESIGN_SKILLS = [
-    "design-taste-frontend",
-    "stitch-design-taste",
-    "impeccable",
-]
-REQUIRED_TASTE_SKILLS = {"design-taste-frontend", "stitch-design-taste", "impeccable"}
 DB_IMPACT_VALUES = {"none", "local-schema-only", "shared-supabase-required"}
+DEFAULT_DESIGN_SKILLS = ["impeccable"]
+IMPECCABLE_SETUP_COMMAND = "/impeccable teach"
+IMPECCABLE_STEERING_COMMANDS = [
+    "/impeccable craft",
+    "/impeccable extract",
+    "/audit",
+    "/critique",
+    "/polish",
+    "/distill",
+    "/clarify",
+    "/optimize",
+    "/harden",
+    "/animate",
+    "/colorize",
+    "/bolder",
+    "/quieter",
+    "/delight",
+    "/adapt",
+    "/typeset",
+    "/layout",
+    "/overdrive",
+]
+IMPECCABLE_ALLOWED_COMMANDS = {IMPECCABLE_SETUP_COMMAND, *IMPECCABLE_STEERING_COMMANDS}
+IMPECCABLE_COMMAND_ALIASES = {
+    "/normalize": "/polish",
+    "normalize": "/polish",
+    "/arrange": "/layout",
+    "arrange": "/layout",
+    "prompts:audit": "/audit",
+    "prompts:critique": "/critique",
+    "prompts:polish": "/polish",
+    "prompts:distill": "/distill",
+    "prompts:clarify": "/clarify",
+    "prompts:optimize": "/optimize",
+    "prompts:harden": "/harden",
+    "prompts:animate": "/animate",
+    "prompts:colorize": "/colorize",
+    "prompts:bolder": "/bolder",
+    "prompts:quieter": "/quieter",
+    "prompts:delight": "/delight",
+    "prompts:adapt": "/adapt",
+    "prompts:typeset": "/typeset",
+    "prompts:layout": "/layout",
+    "prompts:overdrive": "/overdrive",
+}
 
 RUNTIME_UI_MARKERS = (
     "src/",
@@ -137,6 +176,40 @@ def _has_tokenized_marker(text: str, markers: tuple[str, ...]) -> bool:
     return any((marker in joined) if " " in marker else (marker in tokens) for marker in markers)
 
 
+def _normalize_impeccable_command(value: str) -> str:
+    raw = value.strip()
+    if not raw:
+        return ""
+    normalized = raw.replace("\\ ", " ").strip().lower()
+    if normalized.startswith("/prompts:"):
+        normalized = normalized.removeprefix("/prompts:")
+        normalized = f"/{normalized}"
+    elif normalized.startswith("prompts:"):
+        normalized = normalized.removeprefix("prompts:")
+        normalized = f"/{normalized}"
+    elif normalized.startswith("impeccable "):
+        normalized = f"/{normalized}"
+    elif not normalized.startswith("/"):
+        normalized = f"/{normalized}"
+    normalized = IMPECCABLE_COMMAND_ALIASES.get(normalized, normalized)
+    return normalized
+
+
+def _normalize_impeccable_commands(value) -> list[str]:
+    commands = []
+    for item in _normalize_list(value):
+        normalized = _normalize_impeccable_command(item)
+        if normalized:
+            commands.append(normalized)
+    return list(dict.fromkeys(commands))
+
+
+def _default_impeccable_commands(ui_mode: str) -> list[str]:
+    if ui_mode == "docs_only":
+        return ["/critique", "/polish"]
+    return ["/impeccable craft", "/polish"]
+
+
 def _task_path(task_id: str) -> Path:
     path = find_task_by_id(task_id)
     if path is None:
@@ -241,24 +314,31 @@ def sync_ui_ux_contract(frontmatter: dict, body: str) -> tuple[dict, list[str]]:
             changed.append("required_design_docs")
 
         required_skills = _normalize_list(updated.get("required_design_skills"))
-        if not required_skills:
-            required_skills = list(DEFAULT_DESIGN_SKILLS)
-            updated["required_design_skills"] = required_skills
-            changed.append("required_design_skills")
-        elif updated.get("required_design_skills") != required_skills:
-            updated["required_design_skills"] = required_skills
+        if required_skills != list(DEFAULT_DESIGN_SKILLS):
+            updated["required_design_skills"] = list(DEFAULT_DESIGN_SKILLS)
             changed.append("required_design_skills")
 
         if _normalize_bool(updated.get("impeccable_required")) is not True:
             updated["impeccable_required"] = True
             changed.append("impeccable_required")
+        if _normalize_bool(updated.get("impeccable_antipatterns_enforced")) is not True:
+            updated["impeccable_antipatterns_enforced"] = True
+            changed.append("impeccable_antipatterns_enforced")
         if _normalize_bool(updated.get("design_doc_update_review_required")) is not True:
             updated["design_doc_update_review_required"] = True
             changed.append("design_doc_update_review_required")
 
+        required_commands = _normalize_impeccable_commands(updated.get("impeccable_commands_required"))
+        if not required_commands:
+            required_commands = _default_impeccable_commands(updated["ui_ux_mode"])
+        if updated.get("impeccable_commands_required") != required_commands:
+            updated["impeccable_commands_required"] = required_commands
+            changed.append("impeccable_commands_required")
+
         evidence_defaults: dict[str, object] = {
             "design_docs_read": _normalize_list(updated.get("design_docs_read")),
             "design_skills_used": _normalize_list(updated.get("design_skills_used")),
+            "impeccable_commands_used": _normalize_impeccable_commands(updated.get("impeccable_commands_used")),
             "impeccable_detect_result": updated.get("impeccable_detect_result"),
             "browser_validation_desktop": updated.get("browser_validation_desktop"),
             "browser_validation_mobile": updated.get("browser_validation_mobile"),
@@ -352,18 +432,30 @@ def validate_ui_ux_contract(frontmatter: dict, body: str, *, stage: str) -> tupl
 
     required_docs = _normalize_list(fm.get("required_design_docs"))
     required_skills = _normalize_list(fm.get("required_design_skills"))
+    required_commands = _normalize_impeccable_commands(fm.get("impeccable_commands_required"))
     if AMIGA_DESIGN_DOC not in required_docs:
         errors.append("UI/UX lane must require DESIGN.md in `required_design_docs`.")
-    if "impeccable" not in required_skills:
-        errors.append("UI/UX lane must require `impeccable` in `required_design_skills`.")
-    if not REQUIRED_TASTE_SKILLS.intersection(required_skills):
-        errors.append("UI/UX lane must require at least one shared design/taste skill.")
+    if required_skills != list(DEFAULT_DESIGN_SKILLS):
+        errors.append("UI/UX lane must set `required_design_skills: [impeccable]`.")
     if _normalize_bool(fm.get("impeccable_required")) is not True:
         errors.append("UI/UX lane must set `impeccable_required: true`.")
+    if _normalize_bool(fm.get("impeccable_antipatterns_enforced")) is not True:
+        errors.append("UI/UX lane must set `impeccable_antipatterns_enforced: true`.")
     if _normalize_bool(fm.get("design_doc_update_review_required")) is not True:
         errors.append("UI/UX lane must set `design_doc_update_review_required: true`.")
     if _normalize_text(fm.get("ui_ux_mode")) not in {"implementation", "docs_only"}:
         errors.append("UI/UX lane must set `ui_ux_mode` to `implementation` or `docs_only`.")
+    if not required_commands:
+        errors.append("UI/UX lane must record `impeccable_commands_required`.")
+    invalid_required_commands = [
+        command for command in required_commands if command not in IMPECCABLE_ALLOWED_COMMANDS
+    ]
+    if invalid_required_commands:
+        errors.append(
+            "UI/UX lane has invalid `impeccable_commands_required`: " + ", ".join(invalid_required_commands)
+        )
+    if required_commands and not any(command in IMPECCABLE_STEERING_COMMANDS for command in required_commands):
+        errors.append("UI/UX lane must plan at least one Impeccable steering command.")
 
     if stage in {"review", "pr"}:
         design_docs_read = set(_normalize_list(fm.get("design_docs_read")))
@@ -374,11 +466,27 @@ def validate_ui_ux_contract(frontmatter: dict, body: str, *, stage: str) -> tupl
                 + ", ".join(missing_docs)
             )
 
-        design_skills_used = set(_normalize_list(fm.get("design_skills_used")))
-        if "impeccable" not in design_skills_used:
-            errors.append("UI/UX review evidence must record `impeccable` in `design_skills_used`.")
-        if not REQUIRED_TASTE_SKILLS.intersection(design_skills_used):
-            errors.append("UI/UX review evidence must record at least one shared design/taste skill.")
+        design_skills_used = _normalize_list(fm.get("design_skills_used"))
+        if design_skills_used != list(DEFAULT_DESIGN_SKILLS):
+            errors.append("UI/UX review evidence must record `design_skills_used: [impeccable]`.")
+
+        commands_used = _normalize_impeccable_commands(fm.get("impeccable_commands_used"))
+        if not commands_used:
+            errors.append("UI/UX review evidence must include `impeccable_commands_used`.")
+        invalid_used_commands = [command for command in commands_used if command not in IMPECCABLE_ALLOWED_COMMANDS]
+        if invalid_used_commands:
+            errors.append(
+                "UI/UX review evidence has invalid `impeccable_commands_used`: "
+                + ", ".join(invalid_used_commands)
+            )
+        if commands_used and not any(command in IMPECCABLE_STEERING_COMMANDS for command in commands_used):
+            errors.append("UI/UX review evidence must include at least one Impeccable steering command.")
+        missing_required_commands = [command for command in required_commands if command not in commands_used]
+        if missing_required_commands:
+            errors.append(
+                "UI/UX review evidence is missing planned `impeccable_commands_required`: "
+                + ", ".join(missing_required_commands)
+            )
 
         if not _normalize_text(fm.get("impeccable_detect_result")):
             errors.append("UI/UX review evidence must include `impeccable_detect_result`.")
@@ -525,6 +633,8 @@ def command_record_ui_evidence(args: argparse.Namespace) -> None:
         synced["design_docs_read"] = _normalize_list(args.design_docs_read)
     if args.design_skills_used is not None:
         synced["design_skills_used"] = _normalize_list(args.design_skills_used)
+    if args.impeccable_commands_used is not None:
+        synced["impeccable_commands_used"] = _normalize_impeccable_commands(args.impeccable_commands_used)
     if args.impeccable_detect_result is not None:
         synced["impeccable_detect_result"] = args.impeccable_detect_result
     if args.browser_validation_desktop is not None:
@@ -604,7 +714,12 @@ def build_parser() -> argparse.ArgumentParser:
     evidence = sub.add_parser("record-ui-evidence", help="Record UI/UX evidence on a task.")
     evidence.add_argument("--task", required=True, help="TASK-id")
     evidence.add_argument("--design-docs-read", default=None, help="Comma-separated design docs read.")
-    evidence.add_argument("--design-skills-used", default=None, help="Comma-separated skill/CLI list used.")
+    evidence.add_argument("--design-skills-used", default=None, help="Comma-separated design skill list used.")
+    evidence.add_argument(
+        "--impeccable-commands-used",
+        default=None,
+        help="Comma-separated Impeccable commands used (for example: /impeccable craft,/polish).",
+    )
     evidence.add_argument("--impeccable-detect-result", default=None, help="Result or evidence summary.")
     evidence.add_argument("--browser-validation-desktop", default=None, help="Desktop browser validation summary.")
     evidence.add_argument("--browser-validation-mobile", default=None, help="Mobile browser validation summary.")
