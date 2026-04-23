@@ -314,8 +314,7 @@ def sync_ui_ux_contract(frontmatter: dict, body: str) -> tuple[dict, list[str]]:
             changed.append("required_design_docs")
 
         required_skills = _normalize_list(updated.get("required_design_skills"))
-        normalized_required_skills = [skill for skill in required_skills if skill == "impeccable"]
-        if normalized_required_skills != list(DEFAULT_DESIGN_SKILLS):
+        if required_skills != list(DEFAULT_DESIGN_SKILLS):
             updated["required_design_skills"] = list(DEFAULT_DESIGN_SKILLS)
             changed.append("required_design_skills")
 
