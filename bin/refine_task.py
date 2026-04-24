@@ -60,7 +60,7 @@ def validate_implementation_risk_analysis(body):
         if label not in section:
             errors.append(f"missing risk-analysis label: {label}")
             continue
-        label_match = re.search(rf"{re.escape(label)}\s*(?P<value>.*)", section)
+        label_match = re.search(rf"^[^\n]*{re.escape(label)}[ \t]*(?P<value>[^\n]*)$", section, flags=re.MULTILINE)
         value = label_match.group("value").strip() if label_match else ""
         if not value or RISK_PLACEHOLDER in value:
             errors.append(f"unresolved risk-analysis value: {label}")
