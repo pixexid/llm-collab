@@ -81,7 +81,7 @@ def main():
         lane = issue_queue.find_lane(payload, fm.get("task_id", args.task))
         if lane is not None:
             lane_state = lane.get("queue_state")
-            if lane_state not in {"ready", "active"} and not args.allow_queue_override:
+            if lane_state not in {"ready", "active", "review"} and not args.allow_queue_override:
                 current_ready = issue_queue.next_ready_lane(payload)
                 print(
                     json.dumps(
