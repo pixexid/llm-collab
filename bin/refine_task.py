@@ -12,6 +12,7 @@ Usage:
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -26,6 +27,15 @@ from _helpers import (
 )
 
 REFINEMENT_AGENT = "claude"
+RISK_SECTION = "## Implementation Risk Analysis"
+RISK_REQUIRED_LABELS = [
+    "Current file/topology reviewed:",
+    "Scope split decision:",
+    "Estimated diff/risk:",
+    "Verification/browser/sign-off plan:",
+    "Open decisions/blockers:",
+]
+RISK_PLACEHOLDER = "(required before refinement)"
 
 
 def parse_args():
@@ -33,6 +43,28 @@ def parse_args():
     p.add_argument("--task", required=True, help="TASK-id to mark as refined")
     p.add_argument("--note", default=None, help="Optional activity log note describing what was refined")
     return p.parse_args()
+
+
+def validate_implementation_risk_analysis(body):
+    match = re.search(
+        rf"^{re.escape(RISK_SECTION)}\s*(?P<section>.*?)(?=^##\s|\Z)",
+        body,
+        flags=re.MULTILINE | re.DOTALL,
+    )
+    if not match:
+        return [f"missing {RISK_SECTION} section"]
+
+    section = match.group("section")
+    errors = []
+    for label in RISK_REQUIRED_LABELS:
+        if label not in section:
+            errors.append(f"missing risk-analysis label: {label}")
+            continue
+        label_match = re.search(rf"{re.escape(label)}\s*(?P<value>.*)", section)
+        value = label_match.group("value").strip() if label_match else ""
+        if not value or RISK_PLACEHOLDER in value:
+            errors.append(f"unresolved risk-analysis value: {label}")
+    return errors
 
 
 def main():
@@ -56,6 +88,24 @@ def main():
                 indent=2,
             )
         )
+
+    risk_errors = [] if fm.get("skip_refinement", False) else validate_implementation_risk_analysis(body)
+    if risk_errors:
+        print(
+            json.dumps(
+                {
+                    "error": "implementation risk analysis is incomplete; refusing refinement mark",
+                    "task_id": fm.get("task_id", args.task),
+                    "required_section": RISK_SECTION,
+                    "required_labels": RISK_REQUIRED_LABELS,
+                    "errors": risk_errors,
+                    "hint": "Patch the task body with real pre-implementation feasibility analysis before running refine_task.py.",
+                },
+                indent=2,
+            ),
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     already_refined = fm.get("refined_by") == REFINEMENT_AGENT
     if already_refined:
