@@ -198,13 +198,13 @@ python3 bin/inbox.py --me codex --project amiga
 
 # Create a test message end-to-end
 python3 bin/new_chat.py --title "Migration smoke test" --project amiga
-echo "Test message" | python3 bin/deliver.py \
+echo "Test message" | bin/deliver.py \
   --chat last --from codex --to claude --title "Migration test"
 python3 bin/inbox.py --me claude --project amiga
 ```
 
 Legacy command compatibility in `llm-collab`:
-- `python3 bin/msg.py ...` still works as a wrapper around `deliver.py`
+- `python3 bin/msg.py ...` still works as a wrapper around `deliver.py`, but direct `bin/deliver.py ...` is the safer node-exec path
 - `python3 bin/watcher_ctl.py ...` still works as a wrapper around `pm2_watchers.py`
 
 ---

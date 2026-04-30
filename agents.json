@@ -1,0 +1,60 @@
+{
+  "agents": [
+    {
+      "id": "operator",
+      "display_name": "Operator",
+      "role": "human_dispatcher",
+      "activation": { "type": "human", "watcher_enabled": true }
+    },
+    {
+      "id": "amiga-operator-cmo",
+      "display_name": "Amiga Operator CMO",
+      "role": "internal_operator_agent",
+      "activation": {
+        "type": "cli_session",
+        "watcher_enabled": true,
+        "identity_note": "You are amiga-operator-cmo. Read only messages addressed to 'amiga-operator-cmo'."
+      }
+    },
+    {
+      "id": "codex",
+      "display_name": "Codex",
+      "role": "primary_orchestrator",
+      "activation": { "type": "cli_session", "watcher_enabled": true }
+    },
+    {
+      "id": "cdx2",
+      "display_name": "CDX2",
+      "role": "implementation",
+      "activation": {
+        "type": "human_relay",
+        "watcher_enabled": true,
+        "base_model": "codex",
+        "identity_note": "You are CDX2 (cdx2). Read only messages addressed to 'cdx2'."
+      }
+    },
+    {
+      "id": "claude",
+      "display_name": "Claude",
+      "role": "implementation",
+      "activation": { "type": "cli_session", "watcher_enabled": true }
+    },
+    {
+      "id": "gemini",
+      "display_name": "Gemini",
+      "role": "research",
+      "activation": { "type": "cli_session", "watcher_enabled": true }
+    },
+    {
+      "id": "antigravity",
+      "display_name": "Antigravity",
+      "role": "implementation",
+      "activation": {
+        "type": "human_relay",
+        "watcher_enabled": false,
+        "base_model": "claude",
+        "identity_note": "You are Antigravity (antigravity). Read only messages addressed to 'antigravity'."
+      }
+    }
+  ]
+}

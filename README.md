@@ -108,7 +108,7 @@ python3 bin/init_agent_memory.py --agent orchestrator --target generic
 python3 bin/new_chat.py --title "Implement checkout flow" --project my-app
 
 # Send a message
-python3 bin/deliver.py \
+bin/deliver.py \
   --chat last \
   --from orchestrator \
   --to worker \
@@ -172,7 +172,7 @@ python3 bin/task_board.py --project docs-site
 |---------|---------|
 | `session_bootstrap.py --agent <id>` | Initialize session, print identity, show inbox |
 | `inbox.py --me <id>` | List unread messages |
-| `deliver.py --from <id> --to <id> --chat last --title "..."` | Send a message |
+| `bin/deliver.py --from <id> --to <id> --chat last --title "..."` | Send a message |
 | `new_chat.py --title "..." --project <id>` | Create a chat thread |
 | `new_task.py --title "..." --created-by <id>` | Create a task |
 | `claim_task.py --task TASK-xxx --owner <id> --status in_progress` | Claim/update a task |

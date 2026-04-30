@@ -30,6 +30,7 @@ from _helpers import (
     utc_iso,
     write_file,
 )
+from refine_task import RISK_REQUIRED_LABELS, RISK_SECTION, validate_implementation_risk_analysis
 from task_contract import sync_task_contract, validate_task_contract
 
 
@@ -80,7 +81,7 @@ def main():
         lane = issue_queue.find_lane(payload, fm.get("task_id", args.task))
         if lane is not None:
             lane_state = lane.get("queue_state")
-            if lane_state not in {"ready", "active"} and not args.allow_queue_override:
+            if lane_state not in {"ready", "active", "review"} and not args.allow_queue_override:
                 current_ready = issue_queue.next_ready_lane(payload)
                 print(
                     json.dumps(
@@ -139,6 +140,25 @@ def main():
                         "target_status": args.status,
                         "hint": "Send the task to claude for spec review, then run: python bin/refine_task.py --task TASK-...",
                         "bypass": "For trivial or hotfix tasks, set skip_refinement: true in the task frontmatter at creation time (use --skip-refinement flag in new_task.py).",
+                    },
+                    indent=2,
+                ),
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+        risk_errors = [] if fm.get("skip_refinement", False) else validate_implementation_risk_analysis(body)
+        if risk_errors:
+            print(
+                json.dumps(
+                    {
+                        "error": "implementation risk analysis is incomplete; refusing in_progress transition",
+                        "task_id": fm.get("task_id", args.task),
+                        "target_status": args.status,
+                        "required_section": RISK_SECTION,
+                        "required_labels": RISK_REQUIRED_LABELS,
+                        "problems": risk_errors,
+                        "hint": "Patch the task body with real pre-implementation feasibility analysis before activation.",
                     },
                     indent=2,
                 ),

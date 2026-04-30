@@ -285,6 +285,14 @@ design_doc_update_decision: null
 | `operator_visual_feedback_requested` | bool | Whether the operator was explicitly asked for visual review feedback |
 | `design_doc_update_decision` | string or null | Same-session DESIGN.md or linked UI-doc review/update decision |
 
+Non-trivial tasks must also include a completed body section named `## Implementation Risk Analysis` before `refine_task.py` can set `refined_by: claude`. The section is a refinement gate, not optional prose. Required labels:
+
+- `Current file/topology reviewed:`
+- `Scope split decision:`
+- `Estimated diff/risk:`
+- `Verification/browser/sign-off plan:`
+- `Open decisions/blockers:`
+
 ### Body
 
 ```markdown
@@ -302,6 +310,14 @@ Context and motivation.
 ## Verification Plan
 
 - [ ] How to verify it works
+
+## Implementation Risk Analysis
+
+- Current file/topology reviewed: concrete files/directories inspected
+- Scope split decision: one lane, split now, or defer with reason
+- Estimated diff/risk: expected diff size and risky surfaces
+- Verification/browser/sign-off plan: exact evidence and review mechanics
+- Open decisions/blockers: blockers before activation, or none
 
 ## Notes
 

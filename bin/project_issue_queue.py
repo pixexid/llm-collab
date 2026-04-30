@@ -363,6 +363,8 @@ def mark_lane_transition(project_id: str, task_id: str, *, owner: str, task_stat
 
     if task_status == "in_progress":
         lane["queue_state"] = "active"
+    elif task_status == "open":
+        lane["queue_state"] = "queued"
     elif task_status == "blocked":
         lane["queue_state"] = "blocked"
     elif task_status == "review":

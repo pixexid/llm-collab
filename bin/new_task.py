@@ -122,6 +122,14 @@ def main():
 
 - [ ]
 
+## Implementation Risk Analysis
+
+- Current file/topology reviewed: (required before refinement)
+- Scope split decision: (required before refinement)
+- Estimated diff/risk: (required before refinement)
+- Verification/browser/sign-off plan: (required before refinement)
+- Open decisions/blockers: (required before refinement)
+
 ## Notes
 
 ## Activity Log

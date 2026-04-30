@@ -23,15 +23,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from _helpers import (
-    ROOT,
-    agent_ids,
-    config_get,
-    get_agent,
-    is_human_relay,
-    load_agents,
-    watcher_enabled_agents,
-)
+from _helpers import ROOT, agent_ids, config_get, get_agent, watcher_enabled_agents
 
 COMMANDS = ("start", "restart", "ensure", "stop", "delete", "status", "logs")
 
@@ -69,9 +61,6 @@ def ecosystem_path() -> Path:
 
 def start_agent(agent_id: str) -> None:
     agent = get_agent(agent_id)
-    if is_human_relay(agent):
-        print(f"[skip] {agent_id} is human_relay — no watcher needed.")
-        return
     if not agent.get("activation", {}).get("watcher_enabled", False):
         print(f"[skip] {agent_id} has watcher_enabled: false")
         return

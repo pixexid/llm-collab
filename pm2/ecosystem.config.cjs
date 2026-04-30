@@ -29,12 +29,25 @@ const logsDir = path.join(root, "Logs", "watchers");
 const python = process.env.PYTHON || "python3";
 const watchScript = path.join(root, "bin", "watch_inbox.py");
 
+function buildWatcherEnv(agent) {
+  const env = {
+    PYTHONUNBUFFERED: "1",
+  };
+
+  if (agent.id === "codex") {
+    env.LLM_COLLAB_CODEX_UI_REFRESH_METHOD =
+      process.env.LLM_COLLAB_CODEX_UI_REFRESH_METHOD || "cdp";
+    env.LLM_COLLAB_CODEX_CDP_PORT =
+      process.env.LLM_COLLAB_CODEX_CDP_PORT || "9223";
+  }
+
+  return env;
+}
+
 const watcherAgents = agents.filter(
   (a) =>
     a.activation &&
-    a.activation.watcher_enabled === true &&
-    a.activation.type !== "human_relay" &&
-    a.activation.type !== "human"
+    a.activation.watcher_enabled === true
 );
 
 module.exports = {
@@ -60,9 +73,7 @@ module.exports = {
       out_file: path.join(logsDir, `${agent.id}.pm2.out.log`),
       error_file: path.join(logsDir, `${agent.id}.pm2.err.log`),
       merge_logs: false,
-      env: {
-        PYTHONUNBUFFERED: "1",
-      },
+      env: buildWatcherEnv(agent),
     };
   }),
 };

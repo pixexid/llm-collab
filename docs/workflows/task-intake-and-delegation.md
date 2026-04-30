@@ -42,13 +42,31 @@ Claude is the designated task spec refiner. `claim_task.py` blocks any `open →
 
 **Standard flow (non-trivial tasks):**
 1. Orchestrator creates task with `new_task.py` (status: `open`, `refined_by: null`)
-2. Orchestrator sends refinement request to claude via `deliver.py`, including task ID, file path, research docs, and GH issue
-3. Claude reviews spec, patches task and GH issue, then runs:
+2. Orchestrator fills or requests enough context for the task's `## Implementation Risk Analysis` section; this is required for Codex-created tasks too, not only Claude refinement
+3. Orchestrator sends refinement request to claude via `deliver.py`, including task ID, file path, research docs, GH issue, and the required implementation-risk checklist
+4. Claude reviews current files/topology, patches task and GH issue, completes `## Implementation Risk Analysis`, then runs:
    ```bash
    python3 /Users/pixexid/Projects/llm-collab/bin/refine_task.py --task TASK-... --note "..."
    ```
-4. Claude replies in the linked chat confirming refinement is done
-5. Orchestrator confirms `refined_by: claude` in the frontmatter, then proceeds to activation
+5. Claude replies in the linked chat confirming refinement is done
+6. Orchestrator confirms `refined_by: claude` in the frontmatter and checks the risk analysis for unresolved blockers, then proceeds to activation
+
+**Implementation Risk Analysis (hard gate):**
+
+Every non-trivial task must carry a completed `## Implementation Risk Analysis` section before it can be marked refined or activated. `refine_task.py` refuses to set `refined_by: claude`, and `claim_task.py --status in_progress` refuses activation, unless the section exists and these labels have real values:
+
+- `Current file/topology reviewed:` exact files/directories inspected and whether the task plan matches the current repo shape
+- `Scope split decision:` keep as one lane, split now, or explicitly defer a sub-lane; include why
+- `Estimated diff/risk:` expected diff size, risky surfaces, and reviewability concerns
+- `Verification/browser/sign-off plan:` concrete verification, browser, DB, UI, or operator sign-off mechanics
+- `Open decisions/blockers:` decisions that must be resolved before activation, or `none`
+
+This requirement applies in two places:
+
+- Codex/orchestrator task creation must include the section with enough initial assessment that Claude can verify or correct it.
+- Claude refinement must validate and complete the section before marking the task refined.
+
+Do not hide implementation risks in chat only. If a risk changes lane size, acceptance criteria, activation order, worker ownership, or sign-off mechanics, update the task contract before activation.
 
 **Bypass (trivial/hotfix tasks only):**
 ```bash
@@ -77,6 +95,7 @@ grep refined_by /Users/pixexid/Projects/llm-collab/Tasks/active/<task-file>.md
 - `skip_refinement` (bool — set at creation; `false` by default)
 - `refined_by` (null until claude marks it)
 - `refined_at` (null until claude marks it)
+- `## Implementation Risk Analysis` body section with the required labels above for every non-trivial task
 
 For UI/UX lanes, also require:
 - `ui_ux_lane: true`
