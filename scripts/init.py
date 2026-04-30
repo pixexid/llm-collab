@@ -103,7 +103,7 @@ def build_identity_md(agent: dict, workspace_name: str, all_agent_ids: list[str]
         f"python {ROOT}/bin/inbox.py --me {aid}",
         "",
         f"# Send message",
-        f'python {ROOT}/bin/deliver.py --chat last --from {aid} --to <agent> --title "..."',
+        f'{ROOT}/bin/deliver.py --chat last --from {aid} --to <agent> --title "..."',
         "",
         f"# Create task",
         f'python {ROOT}/bin/new_task.py --title "..." --created-by {aid} --project <project_id>',

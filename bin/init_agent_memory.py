@@ -69,7 +69,7 @@ def build_snippet(agent_id: str) -> str:
         "**Quick commands:**",
         f"- Bootstrap session: `python {ROOT}/bin/session_bootstrap.py --agent {agent_id}`",
         f"- Read inbox: `python {ROOT}/bin/inbox.py --me {agent_id}`",
-        f"- Send message: `python {ROOT}/bin/deliver.py --chat last --from {agent_id} --to <agent> --title \"...\"`",
+        f"- Send message: `{ROOT}/bin/deliver.py --chat last --from {agent_id} --to <agent> --title \"...\"`",
         f"- Create task: `python {ROOT}/bin/new_task.py --title \"...\" --created-by {agent_id}`",
         f"- Task board: `python {ROOT}/bin/task_board.py`",
         "",

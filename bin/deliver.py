@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+from __future__ import annotations
+
 """
 deliver.py — Send a message from one agent to another.
 
@@ -9,9 +11,9 @@ If the recipient has activation.type == "human_relay", prints
 a ready-to-paste handoff prompt for the human operator.
 
 Usage:
-  python bin/deliver.py --chat last --from orchestrator --to worker --title "Implement feature X"
-  echo "Body text" | python bin/deliver.py --chat CHAT-abc123 --from orchestrator --to worker --title "..."
-  python bin/deliver.py --chat last --from orchestrator --to worker --title "..." --body-file brief.md
+  bin/deliver.py --chat last --from orchestrator --to worker --title "Implement feature X"
+  echo "Body text" | bin/deliver.py --chat CHAT-abc123 --from orchestrator --to worker --title "..."
+  bin/deliver.py --chat last --from orchestrator --to worker --title "..." --body-file brief.md
 """
 
 import argparse
