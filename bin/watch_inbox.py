@@ -135,6 +135,8 @@ def dispatch_autobridge(agent_id: str, json_output: bool) -> list[str]:
                     },
                     json_output,
                 )
+        if consumed_paths:
+            mark_messages_read(agent_id, sorted(set(consumed_paths)))
 
     return consumed_paths
 
@@ -174,8 +176,6 @@ def main():
                         )
                 if unread and not args.no_autobridge:
                     consumed_paths = sorted(set(dispatch_autobridge(args.me, args.json_output)))
-                    if consumed_paths:
-                        mark_messages_read(args.me, consumed_paths)
                 seen_paths = seen_paths | new_msgs
         except Exception as e:
             ts_str = utc_now_str()

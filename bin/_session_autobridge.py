@@ -498,14 +498,12 @@ def find_dispatchable_target_session(
     chat_id: str | None,
     target_session_id: str | None,
 ) -> dict[str, Any] | None:
-    if not target_session_id:
-        return None
     for session in iter_sessions(agent_id=agent_id):
         if project_id and session.get("project_id") not in {None, project_id}:
             continue
         if chat_id and session.get("chat_id") not in {None, chat_id}:
             continue
-        if str(target_session_id) not in session_target_ids(session):
+        if target_session_id and str(target_session_id) not in session_target_ids(session):
             continue
         dispatchable, _ = session_is_dispatchable(session)
         if dispatchable:

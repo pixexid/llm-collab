@@ -1510,6 +1510,84 @@ class SessionAutobridgeTest(unittest.TestCase):
         self.assertFalse(result_payload["relay_required"])
         self.assertNotIn("RELAY REQUIRED FOR OPERATOR", deliver_result.stdout)
 
+    def test_deliver_suppresses_manual_relay_for_untargeted_dispatchable_session(self):
+        root = self.make_workspace()
+        self.add_agent(
+            root,
+            {
+                "id": "codex",
+                "display_name": "Codex",
+                "activation": {"type": "cli_session", "watcher_enabled": True},
+            },
+        )
+        self.add_agent(
+            root,
+            {
+                "id": "cdx2",
+                "display_name": "CDX2",
+                "activation": {"type": "human_relay", "watcher_enabled": True},
+            },
+        )
+        self.create_chat(
+            root,
+            chat_dir_name="2026-04-25_dispatchable-broadcast__CHAT-DISPATCH2",
+            chat_id="CHAT-DISPATCH2",
+            project_id="amiga",
+        )
+        self.run_cli(
+            root,
+            "register",
+            "--session",
+            "SESSION-CDX2-BROADCAST",
+            "--agent",
+            "cdx2",
+            "--project",
+            "amiga",
+            "--chat",
+            "CHAT-DISPATCH2",
+            "--mode",
+            "auto-read",
+            "--wake-strategy",
+            "runtime_trigger",
+            "--runtime-family",
+            "gemini_cli",
+            "--runtime-session-source",
+            "first_read",
+            "--runtime-command",
+            json.dumps([sys.executable, "-c", "import sys; sys.exit(0)"]),
+        )
+
+        deliver_result = subprocess.run(
+            [
+                sys.executable,
+                str(DELIVER_SCRIPT),
+                "--chat",
+                "CHAT-DISPATCH2",
+                "--from",
+                "codex",
+                "--to",
+                "cdx2",
+                "--project",
+                "amiga",
+                "--title",
+                "Untargeted dispatchable receiver",
+                "--body-file",
+                "-",
+            ],
+            cwd=root,
+            text=True,
+            input="Use the chat-scoped autobridge session.",
+            capture_output=True,
+            check=True,
+        )
+
+        result_payload = json.loads(deliver_result.stdout.strip())
+        self.assertTrue(result_payload["autobridge_ready"])
+        self.assertEqual("SESSION-CDX2-BROADCAST", result_payload["autobridge_session_id"])
+        self.assertFalse(result_payload["relay_required"])
+        self.assertIsNone(result_payload["resolved_target_session_id"])
+        self.assertNotIn("RELAY REQUIRED FOR OPERATOR", deliver_result.stdout)
+
     def test_deliver_uses_thread_pair_for_reverse_reply_routing(self):
         root = self.make_workspace()
         self.add_agent(
@@ -1859,6 +1937,104 @@ class SessionAutobridgeTest(unittest.TestCase):
         self.assertEqual("Watcher autobridge", runtime_payload["message"]["title"])
         session_payload = self.run_cli(root, "show", "--session", "SESSION-WATCHER")
         self.assertIn(message_rel, session_payload["processed_messages"])
+
+    def test_watch_inbox_consumes_unread_in_only_one_overlapping_session(self):
+        root = self.make_workspace()
+        self.add_agent(
+            root,
+            {
+                "id": "gemini",
+                "display_name": "Gemini",
+                "activation": {"type": "cli_session", "watcher_enabled": True},
+            },
+        )
+        message_rel = self.add_message(
+            root,
+            agent_id="gemini",
+            chat_id="CHAT-WATCHOVERLAP",
+            project_id="amiga",
+            title="Watcher overlap",
+            sender_session_id="codex-live-1",
+            sender_agent_id="codex",
+        )
+        worker_script = root / "watcher_runtime_overlap.py"
+        output_a = root / "watcher_runtime_overlap_a.json"
+        output_b = root / "watcher_runtime_overlap_b.json"
+        write(
+            worker_script,
+            "\n".join(
+                [
+                    "import json",
+                    "import sys",
+                    "from pathlib import Path",
+                    "payload = json.load(sys.stdin)",
+                    "Path(sys.argv[1]).write_text(json.dumps(payload, indent=2))",
+                ]
+            ),
+        )
+
+        for session_id, output_file in (
+            ("SESSION-WATCHER-A", output_a),
+            ("SESSION-WATCHER-B", output_b),
+        ):
+            self.run_cli(
+                root,
+                "register",
+                "--session",
+                session_id,
+                "--agent",
+                "gemini",
+                "--project",
+                "amiga",
+                "--chat",
+                "CHAT-WATCHOVERLAP",
+                "--mode",
+                "auto-read",
+                "--wake-strategy",
+                "runtime_trigger",
+                "--runtime-family",
+                "gemini_cli",
+                "--runtime-session-id",
+                session_id.lower(),
+                "--runtime-session-source",
+                "first_read",
+                "--runtime-command",
+                json.dumps([sys.executable, str(worker_script), str(output_file)]),
+            )
+
+        watcher_result = subprocess.run(
+            [
+                sys.executable,
+                str(WATCH_INBOX_SCRIPT),
+                "--me",
+                "gemini",
+                "--max-polls",
+                "1",
+                "--json",
+            ],
+            cwd=root,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        watcher_events = [json.loads(line) for line in watcher_result.stdout.splitlines() if line.strip()]
+
+        consumed = [event for event in watcher_events if event["event"] == "autobridge_consumed"]
+        self.assertEqual(1, len(consumed))
+        self.assertEqual(message_rel, consumed[0]["message_path"])
+        self.assertTrue(output_a.exists() ^ output_b.exists())
+
+        inbox = json.loads((root / "agents" / "gemini" / "inbox.json").read_text())
+        self.assertEqual([], inbox["unread"])
+        self.assertIn(message_rel, inbox["read"])
+
+        session_a = self.run_cli(root, "show", "--session", "SESSION-WATCHER-A")
+        session_b = self.run_cli(root, "show", "--session", "SESSION-WATCHER-B")
+        processed_count = sum(
+            message_rel in session["processed_messages"]
+            for session in (session_a, session_b)
+        )
+        self.assertEqual(1, processed_count)
 
     def test_watch_inbox_keeps_message_unread_when_runtime_trigger_fails(self):
         root = self.make_workspace()
