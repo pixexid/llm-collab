@@ -32,3 +32,54 @@ Typical preflight checks:
 
 If any item fails: stop, fix environment, re-run checks.
 
+## Session-autobridge validation rule
+
+When validating worker wake/resume behavior, do not target the active operator thread.
+
+Use a disposable worker session instead, especially for Codex app tests:
+
+1. bind or refresh a disposable worker session
+2. if testing queue protection, make that disposable session busy first
+3. send the routed message to the disposable target session
+4. inspect watcher/inbox state
+
+Queue-protection acceptance for Codex:
+
+- busy target session: message must stay in `unread` and appear in `queued`
+- idle target session on the next watcher pass: message must drain from `queued` and move to `read`
+
+For Codex manual watcher checks, `watch_inbox.py` should behave the same as the PM2 watcher by default:
+
+- `LLM_COLLAB_CODEX_UI_REFRESH_METHOD=cdp`
+- `LLM_COLLAB_CODEX_CDP_PORT=9223`
+
+## Claude desktop rule
+
+Treat the Claude desktop app as a human-driven UI surface, not a safe programmatic thread-creation target.
+
+Important distinction:
+
+- Claude desktop app visible sidebar threads are backed by app-managed Electron state under:
+  - `~/Library/Application Support/Claude/IndexedDB/...`
+  - `~/Library/Application Support/Claude/Session Storage/...`
+- Claude CLI/project sessions are backed by:
+  - `~/.claude/projects/<project-slug>/<sessionId>.jsonl`
+  - `~/.claude/projects/<project-slug>/sessions-index.json`
+
+These stores are not interchangeable. A CLI-created project session may persist on disk without appearing in the desktop app sidebar.
+
+Operational rule:
+
+- do not claim that `llm-collab` can safely create a brand new Claude desktop app thread
+- do not synthesize desktop-visible Claude threads by writing local app cache/index files
+- use Claude desktop as an operator-facing UI
+- use `Chats/` messages as the transport of record
+
+Safest workflow for Claude desktop today:
+
+1. operator or Claude opens an existing visible desktop thread manually
+2. `llm-collab` delivers the task into `Chats/`
+3. Claude reads/processes from that known thread or from the collab inbox
+4. if a concrete visible thread must be targeted, bind only an already-existing thread/session id
+
+For programmatic runtime targeting, prefer Claude CLI/project sessions over fresh desktop-sidebar thread creation.

@@ -21,9 +21,13 @@ from _session_autobridge import (
     SESSION_MODES,
     SESSION_STATUSES,
     WAKE_STRATEGIES,
+    discover_runtime_session,
     dispatch_session,
+    load_binding,
     load_session,
+    runtime_home_from_source,
     save_session,
+    update_binding_from_session,
 )
 
 
@@ -42,6 +46,10 @@ def parse_args():
     register.add_argument("--lease-owner", default=None, help="Who activated this session")
     register.add_argument("--ttl-seconds", type=int, default=3600, help="Lease TTL in seconds")
     register.add_argument("--allowed-action", dest="allowed_actions", action="append", default=[])
+    register.add_argument("--runtime-family", default=None, help="Runtime family, e.g. codex_app, claude_app, gemini_cli")
+    register.add_argument("--runtime-session-id", default=None, help="Current runtime-native session identifier")
+    register.add_argument("--runtime-session-source", default=None, help="Where the runtime session identifier came from")
+    register.add_argument("--supersedes-session", default=None, help="Older llm-collab session replaced by this registration")
     register.add_argument(
         "--runtime-command",
         default=None,
@@ -50,9 +58,35 @@ def parse_args():
     register.add_argument("--runtime-timeout", type=int, default=30, help="Runtime trigger timeout in seconds")
     register.add_argument("--json", dest="json_output", action="store_true")
 
+    discover = subparsers.add_parser("discover-runtime", help="Discover current runtime session metadata")
+    discover.add_argument("--runtime-family", required=True, choices=("codex_app", "claude_app", "gemini_cli"))
+    discover.add_argument("--project-path", default=None, help="Optional project path hint for runtime discovery")
+    discover.add_argument("--json", dest="json_output", action="store_true")
+
+    publish = subparsers.add_parser("publish-current", help="Discover and publish current runtime session into a session lease")
+    publish.add_argument("--session", required=True, help="Stable llm-collab session identifier")
+    publish.add_argument("--agent", required=True, help="Agent ID the parked session belongs to")
+    publish.add_argument("--runtime-family", required=True, choices=("codex_app", "claude_app", "gemini_cli"))
+    publish.add_argument("--project", default=None, help="Optional project_id filter")
+    publish.add_argument("--chat", default=None, help="Optional chat_id filter")
+    publish.add_argument("--project-path", default=None, help="Optional runtime project path hint")
+    publish.add_argument("--mode", default="notify", choices=SESSION_MODES)
+    publish.add_argument("--status", default="parked", choices=SESSION_STATUSES)
+    publish.add_argument("--wake-strategy", default="none", choices=WAKE_STRATEGIES)
+    publish.add_argument("--lease-owner", default=None, help="Who activated this session")
+    publish.add_argument("--ttl-seconds", type=int, default=3600, help="Lease TTL in seconds")
+    publish.add_argument("--supersedes-session", default=None, help="Older llm-collab session replaced by this registration")
+    publish.add_argument("--json", dest="json_output", action="store_true")
+
     show = subparsers.add_parser("show", help="Show a registered session")
     show.add_argument("--session", required=True)
     show.add_argument("--json", dest="json_output", action="store_true")
+
+    show_binding = subparsers.add_parser("show-binding", help="Show a canonical chat/agent runtime binding")
+    show_binding.add_argument("--project", required=True)
+    show_binding.add_argument("--chat", required=True)
+    show_binding.add_argument("--agent", required=True)
+    show_binding.add_argument("--json", dest="json_output", action="store_true")
 
     dispatch = subparsers.add_parser("dispatch", help="Run one bounded dispatch pass")
     dispatch.add_argument("--session", required=True)
@@ -81,22 +115,37 @@ def register_session(args) -> dict:
         expires_at, tz=now.tzinfo
     ).isoformat(timespec="seconds")
 
-    runtime = None
-    if args.runtime_command:
-        runtime = {
-            "command": json.loads(args.runtime_command),
-            "timeout_seconds": args.runtime_timeout,
-        }
-        if not isinstance(runtime["command"], list) or not all(
-            isinstance(token, str) for token in runtime["command"]
-        ):
-            raise ValueError("--runtime-command must be a JSON array of strings")
-
     existing = {}
     try:
         existing = load_session(args.session)
     except FileNotFoundError:
         existing = {}
+
+    runtime = existing.get("runtime") if isinstance(existing.get("runtime"), dict) else {}
+    runtime = dict(runtime)
+    if args.runtime_family is not None:
+        runtime["family"] = args.runtime_family
+    if args.runtime_session_id is not None:
+        runtime["session_id"] = args.runtime_session_id
+    if args.runtime_session_source is not None:
+        runtime["session_source"] = args.runtime_session_source
+    runtime_home = getattr(args, "runtime_home", None)
+    if runtime_home is None and runtime.get("family") and runtime.get("session_source"):
+        runtime_home = runtime_home_from_source(str(runtime["family"]), runtime.get("session_source"))
+    if runtime_home is not None:
+        runtime["home"] = runtime_home
+    if args.runtime_command:
+        runtime["command"] = json.loads(args.runtime_command)
+        runtime["timeout_seconds"] = args.runtime_timeout
+        if not isinstance(runtime["command"], list) or not all(
+            isinstance(token, str) for token in runtime["command"]
+        ):
+            raise ValueError("--runtime-command must be a JSON array of strings")
+    elif "command" in runtime and "timeout_seconds" not in runtime:
+        runtime["timeout_seconds"] = args.runtime_timeout
+
+    if not runtime:
+        runtime = None
 
     payload = {
         **existing,
@@ -112,15 +161,54 @@ def register_session(args) -> dict:
         "lease_owner": args.lease_owner,
         "lease_expires_utc": lease_expires_utc,
         "runtime": runtime,
+        "supersedes_session_id": args.supersedes_session,
         "created_utc": existing.get("created_utc", utc_iso()),
         "processed_messages": existing.get("processed_messages", []),
     }
     save_session(payload)
+    binding = update_binding_from_session(payload)
+    if binding is not None:
+        payload["binding"] = binding
     return payload
 
 
 def show_session(args) -> dict:
     return load_session(args.session)
+
+
+def show_binding(args) -> dict:
+    return load_binding(args.project, args.chat, args.agent)
+
+
+def discover_runtime(args) -> dict:
+    return discover_runtime_session(args.runtime_family, project_path=args.project_path)
+
+
+def publish_current_session(args) -> dict:
+    class RegisterArgs:
+        pass
+
+    discovered = discover_runtime_session(args.runtime_family, project_path=args.project_path)
+    register_args = RegisterArgs()
+    register_args.session = args.session
+    register_args.agent = args.agent
+    register_args.project = args.project
+    register_args.chat = args.chat
+    register_args.mode = args.mode
+    register_args.status = args.status
+    register_args.wake_strategy = args.wake_strategy
+    register_args.lease_owner = args.lease_owner
+    register_args.ttl_seconds = args.ttl_seconds
+    register_args.allowed_actions = []
+    register_args.runtime_family = discovered["family"]
+    register_args.runtime_session_id = discovered["session_id"]
+    register_args.runtime_session_source = discovered["session_source"]
+    register_args.runtime_home = discovered.get("home")
+    register_args.supersedes_session = args.supersedes_session
+    register_args.runtime_command = None
+    register_args.runtime_timeout = 30
+    payload = register_session(register_args)
+    return {"discovered": discovered, "session": payload}
 
 
 def deactivate_session(args) -> dict:
@@ -136,8 +224,14 @@ def main():
     args = parse_args()
     if args.command == "register":
         result = register_session(args)
+    elif args.command == "discover-runtime":
+        result = discover_runtime(args)
+    elif args.command == "publish-current":
+        result = publish_current_session(args)
     elif args.command == "show":
         result = show_session(args)
+    elif args.command == "show-binding":
+        result = show_binding(args)
     elif args.command == "dispatch":
         result = dispatch_session(args.session)
     else:

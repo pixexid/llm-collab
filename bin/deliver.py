@@ -43,6 +43,13 @@ from _helpers import (
     utc_iso,
     write_file,
     dump_frontmatter,
+    write_chat_note,
+)
+from _session_autobridge import (
+    find_dispatchable_target_session,
+    load_binding,
+    resolve_thread_pair_session_id,
+    update_thread_pair,
 )
 
 
@@ -58,6 +65,10 @@ def parse_args():
     p.add_argument("--related-task", default=None, help="TASK-id cross-reference")
     p.add_argument("--repo-targets", default="", help="Comma-separated repo IDs in scope")
     p.add_argument("--path-targets", default="", help="Comma-separated file/dir paths in scope")
+    p.add_argument("--sender-agent-id", default=None, help="Override sender identity recorded in frontmatter")
+    p.add_argument("--sender-session-id", default=None, help="Runtime session identifier for the sender")
+    p.add_argument("--target-session-id", default=None, help="Explicit runtime session identifier to target")
+    p.add_argument("--supersedes-session-id", default=None, help="Older sender session replaced by this sender session")
     p.add_argument(
         "--skip-awareness-instruction",
         action="store_true",
@@ -88,6 +99,10 @@ def build_message(args, body: str, chat_id: str) -> str:
         "chat_id": chat_id,
         "from": args.sender,
         "to": args.recipient,
+        "sender_agent_id": args.sender_agent_id or args.sender,
+        "sender_session_id": args.sender_session_id,
+        "target_session_id": args.target_session_id,
+        "supersedes_session_id": args.supersedes_session_id,
         "title": args.title,
         "priority": args.priority,
         "tags": tags,
@@ -98,6 +113,17 @@ def build_message(args, body: str, chat_id: str) -> str:
         "sent_utc": utc_iso(),
     }
     return dump_frontmatter(fm, body or "(no body)")
+
+
+def resolve_bound_runtime_session_id(project_id: str, chat_id: str, agent_id: str) -> str | None:
+    try:
+        binding = load_binding(project_id, chat_id, agent_id)
+    except FileNotFoundError:
+        return None
+    runtime_session_id = binding.get("runtime_session_id")
+    if not runtime_session_id:
+        return None
+    return str(runtime_session_id)
 
 
 def main():
@@ -145,6 +171,25 @@ def main():
         )
         sys.exit(1)
 
+    if args.sender_session_id is None:
+        args.sender_session_id = (
+            resolve_thread_pair_session_id(args.project, chat_id, args.sender, args.recipient)
+            or resolve_bound_runtime_session_id(args.project, chat_id, args.sender)
+        )
+
+    if args.target_session_id is None:
+        args.target_session_id = (
+            resolve_thread_pair_session_id(args.project, chat_id, args.recipient, args.sender)
+            or resolve_bound_runtime_session_id(args.project, chat_id, args.recipient)
+        )
+    autobridge_target = find_dispatchable_target_session(
+        agent_id=args.recipient,
+        project_id=args.project,
+        chat_id=chat_id,
+        target_session_id=args.target_session_id,
+    )
+    autobridge_ready = autobridge_target is not None
+
     body = read_body(args.body_file)
     recipient_agent = get_agent(args.recipient)
     recipient_type = recipient_agent.get("activation", {}).get("type")
@@ -170,24 +215,63 @@ def main():
     if first_time_awareness:
         set_collab_awareness(args.recipient, to_path)
 
+    if args.sender_session_id or args.target_session_id:
+        update_thread_pair(
+            args.project,
+            chat_id,
+            args.sender,
+            args.recipient,
+            sender_session_id=args.sender_session_id,
+            target_session_id=args.target_session_id,
+        )
+
+    note_lines = [
+        f"{args.sender} sent `{args.title}` to {args.recipient}.",
+        f"Chat: `{chat_id}`",
+    ]
+    if args.sender_session_id:
+        note_lines.append(f"Sender thread: `{args.sender_session_id}`")
+    if args.target_session_id:
+        note_lines.append(f"Target thread: `{args.target_session_id}`")
+    write_chat_note(
+        chat_dir,
+        title=f"{args.sender} -> {args.recipient}: {args.title}",
+        body="\n".join(note_lines),
+        sender=args.sender,
+        recipient="operator",
+        project_id=args.project,
+        extra_frontmatter={
+            "informational_kind": "autobridge_turn_summary",
+            "summary_event": "sent",
+            "summary_sender": args.sender,
+            "summary_recipient": args.recipient,
+            "sender_session_id": args.sender_session_id,
+            "target_session_id": args.target_session_id,
+            "related_message_path": str(to_path.relative_to(ROOT)),
+        },
+    )
+
     result = {
         "chat_id": chat_id,
         "chat_dir": str(chat_dir.relative_to(ROOT)),
         "to_file": str(to_path.relative_to(ROOT)),
         "from_file": str(from_path.relative_to(ROOT)),
         "recipient_first_time_awareness": bool(first_time_awareness),
-        "relay_required": args.recipient != "operator",
+        "relay_required": args.recipient != "operator" and not autobridge_ready,
+        "resolved_target_session_id": args.target_session_id,
+        "autobridge_ready": autobridge_ready,
+        "autobridge_session_id": autobridge_target.get("session_id") if autobridge_target else None,
     }
     print(json.dumps(result, indent=2))
 
     # Relay prompt for the human operator (always printed).
-    if is_human_relay(recipient_agent):
+    if is_human_relay(recipient_agent) and not autobridge_ready:
         print_handoff_prompt(
             recipient_agent,
             sender_id=args.sender,
             first_time=bool(first_time_awareness),
         )
-    else:
+    elif not autobridge_ready:
         recipient_display = recipient_agent.get("display_name", args.recipient)
         border = "━" * 60
         print(f"\n{border}")

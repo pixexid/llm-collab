@@ -625,6 +625,41 @@ def load_chat_meta(chat_dir: Path) -> dict:
     return {}
 
 
+def write_chat_note(
+    chat_dir: Path,
+    *,
+    title: str,
+    body: str,
+    sender: str = "system",
+    recipient: str = "operator",
+    priority: str = "normal",
+    tags: list[str] | None = None,
+    project_id: str | None = None,
+    extra_frontmatter: dict[str, Any] | None = None,
+) -> Path:
+    meta = load_chat_meta(chat_dir)
+    chat_id = str(meta.get("chat_id", chat_dir.name))
+    resolved_project_id = project_id or meta.get("project_id")
+    fm: dict[str, Any] = {
+        "chat_id": chat_id,
+        "from": sender,
+        "to": recipient,
+        "title": title,
+        "priority": priority,
+        "tags": tags or [],
+        "project_id": resolved_project_id,
+        "sent_utc": utc_iso(),
+        "informational": True,
+    }
+    if extra_frontmatter:
+        fm.update(extra_frontmatter)
+    timestamp = ts()
+    slug = slugify(title, max_len=40)
+    path = chat_dir / f"{timestamp}_note-{sender}_{slug}.md"
+    write_file(path, dump_frontmatter(fm, body.strip() or "(no body)"))
+    return path
+
+
 # ---------------------------------------------------------------------------
 # Task helpers
 # ---------------------------------------------------------------------------
