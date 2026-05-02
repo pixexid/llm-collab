@@ -164,20 +164,19 @@ def main():
                 data = load_agent_inbox(args.me)
                 unread = set(data.get("unread", []))
                 new_msgs = unread - seen_paths
-                if new_msgs:
-                    for path in sorted(new_msgs):
-                        ts_str = utc_now_str()
-                        emit({"ts": ts_str, "event": "new_message", "detail": path, "agent": args.me}, args.json_output)
-                        if args.notify:
-                            send_notification(
-                                f"llm-collab: {args.me}",
-                                f"New message: {Path(path).stem}",
-                            )
-                    if not args.no_autobridge:
-                        consumed_paths = sorted(set(dispatch_autobridge(args.me, args.json_output)))
-                        if consumed_paths:
-                            mark_messages_read(args.me, consumed_paths)
-                    seen_paths = seen_paths | new_msgs
+                for path in sorted(new_msgs):
+                    ts_str = utc_now_str()
+                    emit({"ts": ts_str, "event": "new_message", "detail": path, "agent": args.me}, args.json_output)
+                    if args.notify:
+                        send_notification(
+                            f"llm-collab: {args.me}",
+                            f"New message: {Path(path).stem}",
+                        )
+                if unread and not args.no_autobridge:
+                    consumed_paths = sorted(set(dispatch_autobridge(args.me, args.json_output)))
+                    if consumed_paths:
+                        mark_messages_read(args.me, consumed_paths)
+                seen_paths = seen_paths | new_msgs
         except Exception as e:
             ts_str = utc_now_str()
             emit({"ts": ts_str, "event": "error", "detail": str(e)}, args.json_output)

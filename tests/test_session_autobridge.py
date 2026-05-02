@@ -1940,6 +1940,107 @@ class SessionAutobridgeTest(unittest.TestCase):
         session_payload = self.run_cli(root, "show", "--session", "SESSION-WATCHER-FAIL")
         self.assertEqual([], session_payload["processed_messages"])
 
+    def test_watch_inbox_retries_deferred_message_without_new_message(self):
+        root = self.make_workspace()
+        self.add_agent(
+            root,
+            {
+                "id": "gemini",
+                "display_name": "Gemini",
+                "activation": {"type": "cli_session", "watcher_enabled": True},
+            },
+        )
+        message_rel = self.add_message(
+            root,
+            agent_id="gemini",
+            chat_id="CHAT-WATCHRETRY",
+            project_id="amiga",
+            title="Watcher retry",
+            target_session_id="gemini-runtime-retry",
+        )
+        worker_script = root / "watcher_runtime_retry.py"
+        output_file = root / "watcher_runtime_retry_result.json"
+        marker_file = root / "watcher_runtime_retry_busy"
+        write(
+            worker_script,
+            "\n".join(
+                [
+                    "import json",
+                    "import sys",
+                    "from pathlib import Path",
+                    "payload = json.load(sys.stdin)",
+                    "output_file = Path(sys.argv[1])",
+                    "marker_file = Path(sys.argv[2])",
+                    "if not marker_file.exists():",
+                    "    marker_file.write_text('busy')",
+                    "    sys.exit(7)",
+                    "output_file.write_text(json.dumps(payload, indent=2))",
+                ]
+            ),
+        )
+
+        self.run_cli(
+            root,
+            "register",
+            "--session",
+            "SESSION-WATCHER-RETRY",
+            "--agent",
+            "gemini",
+            "--project",
+            "amiga",
+            "--chat",
+            "CHAT-WATCHRETRY",
+            "--mode",
+            "auto-read",
+            "--wake-strategy",
+            "runtime_trigger",
+            "--runtime-family",
+            "gemini_cli",
+            "--runtime-session-id",
+            "gemini-runtime-retry",
+            "--runtime-session-source",
+            "first_read",
+            "--runtime-command",
+            json.dumps([sys.executable, str(worker_script), str(output_file), str(marker_file)]),
+        )
+
+        watcher_result = subprocess.run(
+            [
+                sys.executable,
+                str(WATCH_INBOX_SCRIPT),
+                "--me",
+                "gemini",
+                "--max-polls",
+                "2",
+                "--poll-seconds",
+                "1",
+                "--json",
+            ],
+            cwd=root,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        watcher_events = [json.loads(line) for line in watcher_result.stdout.splitlines() if line.strip()]
+
+        new_message_events = [event for event in watcher_events if event["event"] == "new_message"]
+        self.assertEqual(1, len(new_message_events))
+        self.assertTrue(
+            any(event["event"] == "autobridge_failed" and event["message_path"] == message_rel for event in watcher_events)
+        )
+        self.assertTrue(
+            any(event["event"] == "autobridge_consumed" and event["message_path"] == message_rel for event in watcher_events)
+        )
+
+        inbox = json.loads((root / "agents" / "gemini" / "inbox.json").read_text())
+        self.assertEqual([], inbox["unread"])
+        self.assertIn(message_rel, inbox["read"])
+
+        runtime_payload = json.loads(output_file.read_text())
+        self.assertEqual("Watcher retry", runtime_payload["message"]["title"])
+        session_payload = self.run_cli(root, "show", "--session", "SESSION-WATCHER-RETRY")
+        self.assertIn(message_rel, session_payload["processed_messages"])
+
 
 if __name__ == "__main__":
     unittest.main()
