@@ -11,6 +11,38 @@ cd <workspace_root>
 python bin/session_bootstrap.py --agent <agent_id>
 ```
 
+## Keep The Tooling Current
+
+`llm-collab` is the shared coordination tool. Before using a persistent checkout
+for inbox, task, queue, watcher, or delivery work, make sure the checkout is on
+the latest `main`.
+
+Safe refresh flow:
+
+```bash
+git fetch origin main
+git status --short --branch --untracked-files=all
+git switch main
+git pull --ff-only origin main
+git status --short --branch --untracked-files=all
+```
+
+If tracked or staged changes block `git switch main`, stop and classify them
+before proceeding:
+
+- merged/superseded feature-branch edits: discard only after confirming they are
+  already on `origin/main`
+- active task edits: keep working in that task branch or commit/stash before
+  switching
+- project-private or generated local files: keep them untracked; do not commit
+  them just to make the checkout clean
+
+Untracked/gitignored files normally persist across branch switches. Git blocks
+the switch instead of silently overwriting untracked files that conflict with
+tracked files on the target branch. This is intentional: project-local secrets,
+runtime state, worker memory templates, and operator/private config should stay
+local in this open-source repo.
+
 ## Read before acting
 
 1. collaboration inbox
