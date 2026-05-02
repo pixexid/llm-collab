@@ -47,6 +47,25 @@ Do not idle the active thread just to wait for asynchronous deploy automation if
 work is already complete. Treat deploy as a later checkpoint unless it has actually failed or a new
 production-impacting merge would stack on top of an unresolved deploy state.
 
+For `llm-collab` itself, refreshing `main` after every merge is mandatory before
+new coordination work starts from a persistent checkout. Workers and new
+sessions must not keep using an old feature branch as the collaboration runtime
+after its changes merge.
+
+Use:
+
+```bash
+git fetch origin main
+git switch main
+git pull --ff-only origin main
+git status --short --branch --untracked-files=all
+```
+
+Do not delete or commit project-private untracked files during this refresh.
+Examples include `.secrets/`, local runtime state, generated worker memory
+templates, and project-local config examples. They should remain local unless a
+separate reviewed task explicitly promotes them into the open-source repo.
+
 ## Branch/worktree cleanup contract
 
 Post-merge cleanup is required, not optional.
