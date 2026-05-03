@@ -6,12 +6,13 @@ Commands:
   python3 bin/task_contract.py sync --task TASK-ABC123 --write
   python3 bin/task_contract.py validate --task TASK-ABC123 --stage review --json
   python3 bin/task_contract.py record-db-evidence --task TASK-ABC123 --db-impact shared-supabase-required --db-migration-files db/migrations/20260417_add_staff_unavailability.sql --db-project-ref wbqjeasgxakubqcutgjt --db-apply-result "pass: supabase db push --linked" --db-schema-assertion "pass: execute_sql confirmed table staff_unavailability exists" --db-advisors-result "pass: get_advisors returned no blocking notices" --db-runtime-validation "pass: admin booking review + staff detail against shared Supabase"
-  python3 bin/task_contract.py record-ui-evidence --task TASK-ABC123 --design-docs-read /path/to/DESIGN.md --design-skills-used impeccable --impeccable-commands-used /impeccable\\ craft,/polish --impeccable-detect-result pass --browser-validation-desktop "pass: /app/bookings desktop" --browser-validation-mobile "pass: 393px no overflow" --operator-visual-feedback-requested true --design-doc-update-decision "reviewed; no DESIGN.md diff required"
+  python3 bin/task_contract.py record-ui-evidence --task TASK-ABC123 --design-docs-read /path/to/DESIGN.md --design-skills-used impeccable --impeccable-commands-used /impeccable\\ craft,/polish --impeccable-detect-result pass --browser-validation-desktop "pass: /app/bookings desktop" --browser-validation-mobile "pass: 393px no overflow" --operator-visual-feedback-requested true --design-doc-update-decision "reviewed; no DESIGN.md diff required" --design-thinking-pass-items '[{"finding":"Filter empty state felt abrupt","disposition":"shipped"}]'
 """
 
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import re
 import sys
@@ -24,6 +25,7 @@ AMIGA_DESIGN_DOC = "/Users/pixexid/Projects/amiga/docs/ui_ux/DESIGN.md"
 AMIGA_SHARED_SUPABASE_PROJECT_REF = "wbqjeasgxakubqcutgjt"
 DB_IMPACT_VALUES = {"none", "local-schema-only", "shared-supabase-required"}
 DEFAULT_DESIGN_SKILLS = ["impeccable"]
+DESIGN_THINKING_DISPOSITIONS = {"shipped", "deferred", "out_of_scope"}
 IMPECCABLE_SETUP_COMMAND = "/impeccable teach"
 IMPECCABLE_STEERING_COMMANDS = [
     "/impeccable craft",
@@ -143,6 +145,39 @@ def _normalize_list(value) -> list[str]:
     if isinstance(value, str):
         return [item.strip() for item in value.split(",") if item.strip()]
     return [str(value).strip()]
+
+
+def _normalize_design_thinking_items(value) -> list[dict[str, str]]:
+    if value in (None, "", "<none>"):
+        return []
+    raw_items = value
+    if isinstance(value, str):
+        try:
+            raw_items = json.loads(value)
+        except json.JSONDecodeError:
+            raw_items = []
+    if not isinstance(raw_items, list):
+        return []
+
+    items: list[dict[str, str]] = []
+    for raw in raw_items:
+        if isinstance(raw, str):
+            try:
+                raw = ast.literal_eval(raw)
+            except (SyntaxError, ValueError):
+                continue
+        if not isinstance(raw, dict):
+            continue
+        finding = _normalize_text(raw.get("finding"))
+        disposition = _normalize_text(raw.get("disposition"))
+        evidence = _normalize_text(raw.get("evidence"))
+        if not finding and not disposition and not evidence:
+            continue
+        item = {"finding": finding, "disposition": disposition}
+        if evidence:
+            item["evidence"] = evidence
+        items.append(item)
+    return items
 
 
 def _normalize_bool(value) -> bool | None:
@@ -345,6 +380,11 @@ def sync_ui_ux_contract(frontmatter: dict, body: str) -> tuple[dict, list[str]]:
             "operator_visual_feedback_requested": _normalize_bool(updated.get("operator_visual_feedback_requested"))
             or False,
             "design_doc_update_decision": updated.get("design_doc_update_decision"),
+            "design_thinking_polish_budget_loc": updated.get("design_thinking_polish_budget_loc"),
+            "design_thinking_polish_seeds": _normalize_list(updated.get("design_thinking_polish_seeds")),
+            "design_thinking_pass_items": _normalize_design_thinking_items(
+                updated.get("design_thinking_pass_items")
+            ),
         }
         for key, default in evidence_defaults.items():
             if key not in updated:
@@ -433,6 +473,7 @@ def validate_ui_ux_contract(frontmatter: dict, body: str, *, stage: str) -> tupl
     required_docs = _normalize_list(fm.get("required_design_docs"))
     required_skills = _normalize_list(fm.get("required_design_skills"))
     required_commands = _normalize_impeccable_commands(fm.get("impeccable_commands_required"))
+    mode = _normalize_text(fm.get("ui_ux_mode"))
     if AMIGA_DESIGN_DOC not in required_docs:
         errors.append("UI/UX lane must require DESIGN.md in `required_design_docs`.")
     if required_skills != list(DEFAULT_DESIGN_SKILLS):
@@ -443,7 +484,7 @@ def validate_ui_ux_contract(frontmatter: dict, body: str, *, stage: str) -> tupl
         errors.append("UI/UX lane must set `impeccable_antipatterns_enforced: true`.")
     if _normalize_bool(fm.get("design_doc_update_review_required")) is not True:
         errors.append("UI/UX lane must set `design_doc_update_review_required: true`.")
-    if _normalize_text(fm.get("ui_ux_mode")) not in {"implementation", "docs_only"}:
+    if mode not in {"implementation", "docs_only"}:
         errors.append("UI/UX lane must set `ui_ux_mode` to `implementation` or `docs_only`.")
     if not required_commands:
         errors.append("UI/UX lane must record `impeccable_commands_required`.")
@@ -456,6 +497,18 @@ def validate_ui_ux_contract(frontmatter: dict, body: str, *, stage: str) -> tupl
         )
     if required_commands and not any(command in IMPECCABLE_STEERING_COMMANDS for command in required_commands):
         errors.append("UI/UX lane must plan at least one Impeccable steering command.")
+
+    if mode == "implementation":
+        budget = fm.get("design_thinking_polish_budget_loc")
+        if isinstance(budget, bool) or not isinstance(budget, int) or budget <= 0:
+            errors.append(
+                "UI/UX implementation lane must set `design_thinking_polish_budget_loc` to a positive integer."
+            )
+        seeds = _normalize_list(fm.get("design_thinking_polish_seeds"))
+        if len(seeds) < 2:
+            errors.append(
+                "UI/UX implementation lane must record at least 2 `design_thinking_polish_seeds`."
+            )
 
     if stage in {"review", "pr"}:
         design_docs_read = set(_normalize_list(fm.get("design_docs_read")))
@@ -491,7 +544,6 @@ def validate_ui_ux_contract(frontmatter: dict, body: str, *, stage: str) -> tupl
         if not _normalize_text(fm.get("impeccable_detect_result")):
             errors.append("UI/UX review evidence must include `impeccable_detect_result`.")
 
-        mode = _normalize_text(fm.get("ui_ux_mode"))
         desktop = _normalize_text(fm.get("browser_validation_desktop"))
         mobile = _normalize_text(fm.get("browser_validation_mobile"))
         if mode == "implementation":
@@ -503,6 +555,19 @@ def validate_ui_ux_contract(frontmatter: dict, body: str, *, stage: str) -> tupl
                 errors.append(
                     "UI/UX implementation review evidence must set `operator_visual_feedback_requested: true`."
                 )
+            pass_items = _normalize_design_thinking_items(fm.get("design_thinking_pass_items"))
+            if len(pass_items) < 3:
+                errors.append(
+                    "UI/UX implementation review evidence must include at least 3 `design_thinking_pass_items`."
+                )
+            for index, item in enumerate(pass_items, start=1):
+                if not _normalize_text(item.get("finding")):
+                    errors.append(f"UI/UX design-thinking pass item {index} is missing `finding`.")
+                disposition = _normalize_text(item.get("disposition"))
+                if disposition not in DESIGN_THINKING_DISPOSITIONS:
+                    errors.append(
+                        f"UI/UX design-thinking pass item {index} has invalid disposition `{disposition}`."
+                    )
         elif mode == "docs_only":
             if desktop != "skipped (docs-only)":
                 errors.append("Docs-only UI/UX lanes must record `browser_validation_desktop: skipped (docs-only)`.")
@@ -645,6 +710,8 @@ def command_record_ui_evidence(args: argparse.Namespace) -> None:
         synced["operator_visual_feedback_requested"] = _normalize_bool(args.operator_visual_feedback_requested)
     if args.design_doc_update_decision is not None:
         synced["design_doc_update_decision"] = args.design_doc_update_decision
+    if args.design_thinking_pass_items is not None:
+        synced["design_thinking_pass_items"] = _normalize_design_thinking_items(args.design_thinking_pass_items)
 
     write_file(task_path, dump_frontmatter(synced, body))
     print(
@@ -732,6 +799,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--design-doc-update-decision",
         default=None,
         help="How DESIGN.md or linked UI docs were reviewed/updated for this lane.",
+    )
+    evidence.add_argument(
+        "--design-thinking-pass-items",
+        default=None,
+        help=(
+            "JSON array of design-thinking pass items, each with finding, disposition "
+            "(shipped|deferred|out_of_scope), and optional evidence."
+        ),
     )
     evidence.set_defaults(func=command_record_ui_evidence)
 

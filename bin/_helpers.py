@@ -553,8 +553,12 @@ def parse_frontmatter(text: str) -> tuple[dict, str]:
         k = k.strip()
         v = v.strip()
         if v.startswith("[") and v.endswith("]"):
-            inner = v[1:-1].strip()
-            fm[k] = [i.strip().strip('"').strip("'") for i in inner.split(",") if i.strip()] if inner else []
+            try:
+                parsed = json.loads(v)
+                fm[k] = parsed if isinstance(parsed, list) else []
+            except json.JSONDecodeError:
+                inner = v[1:-1].strip()
+                fm[k] = [i.strip().strip('"').strip("'") for i in inner.split(",") if i.strip()] if inner else []
         elif v.lower() == "null" or v == "":
             fm[k] = None
         elif v.lower() == "true":
@@ -580,7 +584,7 @@ def dump_frontmatter(fm: dict, body: str) -> str:
             if not v:
                 lines.append(f"{k}: []")
             else:
-                inner = ", ".join(f'"{i}"' if " " in str(i) else str(i) for i in v)
+                inner = ", ".join(json.dumps(i, ensure_ascii=True) for i in v)
                 lines.append(f"{k}: [{inner}]")
         else:
             lines.append(f"{k}: {v}")

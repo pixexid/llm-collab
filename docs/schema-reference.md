@@ -239,6 +239,9 @@ impeccable_commands_required: [/impeccable craft, /polish]
 impeccable_required: true
 impeccable_antipatterns_enforced: true
 design_doc_update_review_required: true
+design_thinking_polish_budget_loc: 80
+design_thinking_polish_seeds: [map rail coupling, empty route row treatment]
+design_thinking_pass_items: []
 design_docs_read: []
 design_skills_used: []
 impeccable_commands_used: []
@@ -276,6 +279,9 @@ design_doc_update_decision: null
 | `impeccable_required` | bool | Whether `impeccable detect` is mandatory |
 | `impeccable_antipatterns_enforced` | bool | Whether Impeccable curated anti-patterns are treated as a hard guardrail |
 | `design_doc_update_review_required` | bool | Whether the lane must record a DESIGN.md review/update decision |
+| `design_thinking_polish_budget_loc` | int or null | UI/UX implementation lanes only: refinement-time D8 polish budget, roughly 10–20% of the implementation LOC estimate |
+| `design_thinking_polish_seeds` | string[] | UI/UX implementation lanes only: at least 2 surface-specific D8 polish vectors seeded during refinement |
+| `design_thinking_pass_items` | object[] | UI/UX implementation lanes only: review/PR evidence for the D8 pass; at least 3 items with `finding`, `disposition`, and optional `evidence` |
 | `design_docs_read` | string[] | Design docs the worker explicitly confirms were read |
 | `design_skills_used` | string[] | Design skills actually used during the lane; for Amiga UI/UX lanes this must be `[impeccable]` |
 | `impeccable_commands_used` | string[] | Impeccable commands actually used during the lane |
@@ -284,6 +290,16 @@ design_doc_update_decision: null
 | `browser_validation_mobile` | string or null | Worker-owned mobile browser validation evidence |
 | `operator_visual_feedback_requested` | bool | Whether the operator was explicitly asked for visual review feedback |
 | `design_doc_update_decision` | string or null | Same-session DESIGN.md or linked UI-doc review/update decision |
+
+`design_thinking_pass_items` entries use:
+
+```yaml
+- finding: "Map marker click feels detached from the opened popover"
+  disposition: shipped
+  evidence: "Added 220ms marker ring expansion before popover"
+```
+
+Allowed dispositions: `shipped`, `deferred`, `out_of_scope`.
 
 Non-trivial tasks must also include a completed body section named `## Implementation Risk Analysis` before `refine_task.py` can set `refined_by: claude`. The section is a refinement gate, not optional prose. Required labels:
 

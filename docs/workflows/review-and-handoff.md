@@ -28,6 +28,16 @@ For UI/UX lanes, handoff replies and the linked task contract must also include:
 - `operator_visual_feedback_requested`
 - `design_doc_update_decision`
 
+For UI/UX implementation lanes, handoff replies must also include a `Design-thinking pass`
+section and the linked task contract must record at least 3 `design_thinking_pass_items`.
+Each item must include:
+
+- `finding`
+- `disposition`: `shipped`, `deferred`, or `out_of_scope`
+- optional `evidence`
+
+Docs-only UI/UX lanes skip D8 pass items unless they also change rendered UI.
+
 For `shared-supabase-required` lanes, handoff replies and the linked task contract must also include:
 - `db_project_ref`
 - `db_migration_files` when schema change is involved
@@ -62,6 +72,7 @@ For `shared-supabase-required` lanes, handoff replies and the linked task contra
 
 Hard rule for UI/UX lanes:
 - `claim_task.py --status review` should fail if the task contract is missing the required UI evidence
+- `claim_task.py --status review` should fail for UI/UX implementation lanes if the D8 design-thinking pass is missing or has fewer than 3 findings
 - PR/review gating should fail again if the same task still does not satisfy the UI contract
 
 Hard rule for shared-Supabase lanes:
