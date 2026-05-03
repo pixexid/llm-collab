@@ -98,6 +98,14 @@ def _normalize_list(value) -> list[str]:
     return [str(value).strip()]
 
 
+def _risk_label_value(section: str, label: str) -> str | None:
+    if label not in section:
+        return None
+    post_label = section.split(label, 1)[1]
+    first_line = post_label.splitlines()[0] if post_label.splitlines() else ""
+    return first_line.strip()
+
+
 def validate_design_thinking_refinement(frontmatter, body):
     if _normalize_bool(frontmatter.get("ui_ux_lane")) is not True:
         return []
@@ -111,9 +119,10 @@ def validate_design_thinking_refinement(frontmatter, body):
     )
     section = match.group("section") if match else ""
     errors = []
-    if DESIGN_THINKING_BUDGET_LABEL not in section:
+    budget_line = _risk_label_value(section, DESIGN_THINKING_BUDGET_LABEL)
+    if budget_line is None:
         errors.append(f"missing risk-analysis label: {DESIGN_THINKING_BUDGET_LABEL}")
-    elif RISK_PLACEHOLDER in section.split(DESIGN_THINKING_BUDGET_LABEL, 1)[1].splitlines()[0]:
+    elif not budget_line or RISK_PLACEHOLDER in budget_line:
         errors.append(f"unresolved risk-analysis value: {DESIGN_THINKING_BUDGET_LABEL}")
 
     budget = frontmatter.get("design_thinking_polish_budget_loc")
@@ -124,8 +133,11 @@ def validate_design_thinking_refinement(frontmatter, body):
     if len(seeds) < 2:
         errors.append("missing at least 2 frontmatter entries: design_thinking_polish_seeds")
 
-    if DESIGN_THINKING_SEEDS_LABEL not in section:
+    seeds_line = _risk_label_value(section, DESIGN_THINKING_SEEDS_LABEL)
+    if seeds_line is None:
         errors.append(f"missing risk-analysis label: {DESIGN_THINKING_SEEDS_LABEL}")
+    elif not seeds_line or RISK_PLACEHOLDER in seeds_line:
+        errors.append(f"unresolved risk-analysis value: {DESIGN_THINKING_SEEDS_LABEL}")
     return errors
 
 
