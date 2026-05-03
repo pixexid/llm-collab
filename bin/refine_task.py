@@ -36,6 +36,8 @@ RISK_REQUIRED_LABELS = [
     "Open decisions/blockers:",
 ]
 RISK_PLACEHOLDER = "(required before refinement)"
+DESIGN_THINKING_BUDGET_LABEL = "Design thinking in details — polish-pass budget:"
+DESIGN_THINKING_SEEDS_LABEL = "Design thinking in details — polish vectors:"
 
 
 def parse_args():
@@ -67,6 +69,66 @@ def validate_implementation_risk_analysis(body):
     return errors
 
 
+def _normalize_bool(value):
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return None
+    raw = str(value).strip().lower()
+    if raw in {"true", "yes", "1"}:
+        return True
+    if raw in {"false", "no", "0"}:
+        return False
+    return None
+
+
+def _normalize_text(value) -> str:
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _normalize_list(value) -> list[str]:
+    if value in (None, "", "<none>"):
+        return []
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if isinstance(value, str):
+        return [item.strip() for item in value.split(",") if item.strip()]
+    return [str(value).strip()]
+
+
+def validate_design_thinking_refinement(frontmatter, body):
+    if _normalize_bool(frontmatter.get("ui_ux_lane")) is not True:
+        return []
+    if _normalize_text(frontmatter.get("ui_ux_mode")) != "implementation":
+        return []
+
+    match = re.search(
+        rf"^{re.escape(RISK_SECTION)}\s*(?P<section>.*?)(?=^##\s|\Z)",
+        body,
+        flags=re.MULTILINE | re.DOTALL,
+    )
+    section = match.group("section") if match else ""
+    errors = []
+    if DESIGN_THINKING_BUDGET_LABEL not in section:
+        errors.append(f"missing risk-analysis label: {DESIGN_THINKING_BUDGET_LABEL}")
+    elif RISK_PLACEHOLDER in section.split(DESIGN_THINKING_BUDGET_LABEL, 1)[1].splitlines()[0]:
+        errors.append(f"unresolved risk-analysis value: {DESIGN_THINKING_BUDGET_LABEL}")
+
+    budget = frontmatter.get("design_thinking_polish_budget_loc")
+    if isinstance(budget, bool) or not isinstance(budget, int) or budget <= 0:
+        errors.append("missing positive integer frontmatter field: design_thinking_polish_budget_loc")
+
+    seeds = _normalize_list(frontmatter.get("design_thinking_polish_seeds"))
+    if len(seeds) < 2:
+        errors.append("missing at least 2 frontmatter entries: design_thinking_polish_seeds")
+
+    if DESIGN_THINKING_SEEDS_LABEL not in section:
+        errors.append(f"missing risk-analysis label: {DESIGN_THINKING_SEEDS_LABEL}")
+    return errors
+
+
 def main():
     args = parse_args()
 
@@ -90,6 +152,7 @@ def main():
         )
 
     risk_errors = [] if fm.get("skip_refinement", False) else validate_implementation_risk_analysis(body)
+    risk_errors.extend([] if fm.get("skip_refinement", False) else validate_design_thinking_refinement(fm, body))
     if risk_errors:
         print(
             json.dumps(

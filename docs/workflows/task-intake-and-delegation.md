@@ -66,6 +66,15 @@ This requirement applies in two places:
 - Codex/orchestrator task creation must include the section with enough initial assessment that Claude can verify or correct it.
 - Claude refinement must validate and complete the section before marking the task refined.
 
+For UI/UX implementation lanes, refinement must also seed D8 design-thinking-in-details work:
+
+- frontmatter `design_thinking_polish_budget_loc`: positive integer, usually ~10–20% of the expected implementation LOC
+- frontmatter `design_thinking_polish_seeds`: at least 2 surface-specific vectors
+- risk-analysis line `Design thinking in details — polish-pass budget:`
+- risk-analysis line `Design thinking in details — polish vectors:`
+
+Docs-only UI/UX lanes do not need D8 pass items unless they also change rendered UI, but they still need an explicit browser-validation skip reason in the review evidence.
+
 Do not hide implementation risks in chat only. If a risk changes lane size, acceptance criteria, activation order, worker ownership, or sign-off mechanics, update the task contract before activation.
 
 **Bypass (trivial/hotfix tasks only):**
@@ -106,6 +115,7 @@ For UI/UX lanes, also require:
 - `impeccable_required: true`
 - `impeccable_antipatterns_enforced: true`
 - `design_doc_update_review_required: true`
+- for `ui_ux_mode: implementation`: `design_thinking_polish_budget_loc` and at least 2 `design_thinking_polish_seeds`
 
 For DB lanes, also require:
 - `db_impact: none | local-schema-only | shared-supabase-required`
@@ -161,8 +171,10 @@ For UI/UX implementation lanes, the delegation brief must also name:
 - required Impeccable-family skill usage (`required_design_skills: [impeccable]`)
 - planned Impeccable steering commands for the lane
 - the requirement to enforce Impeccable curated anti-patterns
+- the D8 design-thinking-in-details budget and seeded polish vectors from the task contract
 - the mandatory `pnpm ui:impeccable:detect -- <paths>` step
 - the exact browser-validation expectation
+- the requirement for a handoff `Design-thinking pass` section with at least 3 findings and dispositions
 - the requirement to record UI evidence back onto the task contract before moving to `review`
 
 For `shared-supabase-required` lanes, the delegation brief must also name:
