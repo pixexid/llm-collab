@@ -7,7 +7,7 @@ if [[ -z "${staged}" ]]; then
 fi
 
 blocked_regex='^(collab\.config\.json|agents\.json|projects\.json|Chats/|Tasks/(active|backlog|done)/|State/|Logs/|Index/|agents/[^/]+/(inbox\.json|memory\.md|identity\.md)|projects/|examples/|\.env($|[.])|.*\.(pem|key|p12|pfx|crt|cer|p8|asc)$|.*credentials.*\.json$|.*secrets.*\.json$|.*token.*\.txt$)'
-allow_regex='^(projects/\.gitkeep|projects/[^/]+/(README\.md|roles-and-routing\.md|issue-queue\.json|issue-queue\.md)$|examples/\.gitkeep|Index/\.gitkeep|\.env\.example|\.env\.sample)$'
+allow_regex='^(projects/\.gitkeep|projects/[^/]+/(README\.md|roles-and-routing\.md|issue-queue\.json|issue-queue\.md|design-queue\.json|design-queue\.md)$|examples/\.gitkeep|Index/\.gitkeep|\.env\.example|\.env\.sample)$'
 
 blocked=()
 while IFS= read -r path; do

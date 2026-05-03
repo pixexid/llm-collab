@@ -1,0 +1,109 @@
+{
+  "schema_version": 1,
+  "artifact_type": "ordered_design_queue",
+  "project_id": "amiga",
+  "last_updated_utc": "2026-05-03T04:05:00+00:00",
+  "source": "docs/ui_ux/DESIGN.md §14-16 planned Phase 6 R3.x surfaces",
+  "notes": [
+    "Canonical ordered /design-only queue for Amiga before Phase 7 /app implementation.",
+    "Use this queue before choosing or activating design sandbox/spec lanes.",
+    "These lanes are design artifacts only: surface specs, sandbox gaps, parity/handoff preparation. Do not implement /app runtime behavior from this queue.",
+    "The older issue-queue.json tracks implementation/business lanes and is currently not a reliable source for /design sequencing."
+  ],
+  "completed_recently": [
+    {
+      "issue": 338,
+      "task_id": "TASK-2370B3",
+      "title": "Phase 6 R2.4 Dispatch Map view in /design",
+      "status": "done"
+    },
+    {
+      "issue": 340,
+      "task_id": "TASK-130A01",
+      "title": "Phase 6 R3 handoff/parity templates and Operations surface specs",
+      "status": "done"
+    },
+    {
+      "issue": 345,
+      "task_id": "TASK-50F143",
+      "title": "Dashboard surface spec for /design",
+      "status": "done",
+      "notes": "Merged in PR #349."
+    },
+    {
+      "issue": 342,
+      "task_id": "TASK-86F310",
+      "title": "Research Mapbox vs OpenFreeMap for Dispatch map provider",
+      "status": "done",
+      "notes": "Research-only; no app-repo artifact required. Recommendation: keep Mapbox for Phase 7."
+    }
+  ],
+  "lanes": [
+    {
+      "order": 1,
+      "phase": "6 R3.1",
+      "issue": 345,
+      "task_id": "TASK-50F143",
+      "title": "Dashboard surface spec for /design",
+      "owner": "claude",
+      "task_status": "done",
+      "queue_state": "done",
+      "lane_type": "design-surface-spec",
+      "repo_scope": "design/surfaces/dashboard.md, docs/ui_ux/DESIGN.md if needed",
+      "depends_on": [],
+      "notes": "Merged in PR #349.",
+      "branch": "claude/gh-345-dashboard-surface-spec",
+      "worktree": "/Users/pixexid/Projects/amiga-worktrees/claude/gh-345-dashboard-surface-spec"
+    },
+    {
+      "order": 2,
+      "phase": "6 R3.2",
+      "issue": 346,
+      "task_id": "TASK-02B76E",
+      "title": "Clients dashboard layout and surface spec for /design",
+      "owner": "claude",
+      "task_status": "in_progress",
+      "queue_state": "active",
+      "lane_type": "design-layout-plus-surface-spec",
+      "repo_scope": "design/src/routes.tsx, design/src/surfaces/clients/ClientsPage.tsx, design/surfaces/clients.md, docs/ui_ux/DESIGN.md",
+      "depends_on": [
+        "TASK-50F143"
+      ],
+      "notes": "Corrected after operator review: design/refine Clients under /design/dashboard/clients first, then write the spec. Keep Client + Property redesign deferred.",
+      "branch": "claude/gh-346-clients-surface-spec",
+      "worktree": "/Users/pixexid/Projects/amiga-worktrees/claude/gh-346-clients-surface-spec"
+    },
+    {
+      "order": 3,
+      "phase": "6 R3.3",
+      "issue": 347,
+      "task_id": "TASK-180EDC",
+      "title": "Staff dashboard layout and surface spec for /design",
+      "owner": "claude",
+      "task_status": "open",
+      "queue_state": "queued",
+      "lane_type": "design-layout-plus-surface-spec",
+      "repo_scope": "design/src/routes.tsx, design/src/surfaces/dashboard/staff or equivalent, design/surfaces/staff.md, docs/ui_ux/DESIGN.md",
+      "depends_on": [
+        "TASK-02B76E"
+      ],
+      "notes": "Design Staff under /design/dashboard/staff first; do not land docs-only gap specs as the main deliverable."
+    },
+    {
+      "order": 4,
+      "phase": "6 R3.4",
+      "issue": 348,
+      "task_id": "TASK-3D1716",
+      "title": "Account dashboard layout and surface spec for /design",
+      "owner": "claude",
+      "task_status": "open",
+      "queue_state": "queued",
+      "lane_type": "design-layout-plus-surface-spec",
+      "repo_scope": "design/src/routes.tsx, design/src/surfaces/dashboard/account or equivalent, design/surfaces/account.md, docs/ui_ux/DESIGN.md",
+      "depends_on": [
+        "TASK-180EDC"
+      ],
+      "notes": "Design Account under /design/dashboard/account first; do not land docs-only gap specs as the main deliverable."
+    }
+  ]
+}
