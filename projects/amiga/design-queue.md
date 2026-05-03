@@ -27,7 +27,7 @@ Research-only outputs stay in the collaboration task record unless the operator 
 
 | Order | Phase | Issue | Task | Owner | Status | Queue | Lane Type | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 1 | 6 R3.2 | GH-346 | TASK-02B76E | claude | in_progress | active | design-layout-plus-surface-spec | Corrected after operator review: design/refine Clients under `/design/dashboard/clients` first, then write the spec. |
+| 2 | 6 R3.2 | GH-346 | TASK-02B76E | claude | in_progress | active | design-layout-plus-surface-spec | Corrected after operator review: design/refine Clients under `/design/dashboard/clients` first, then write the spec. |
 | 3 | 6 R3.3 | GH-347 | TASK-180EDC | claude | open | queued | design-layout-plus-surface-spec | Design Staff under `/design/dashboard/staff` first; no docs-only gap-spec PR as the main deliverable. |
 | 4 | 6 R3.4 | GH-348 | TASK-3D1716 | claude | open | queued | design-layout-plus-surface-spec | Design Account under `/design/dashboard/account` first; no docs-only gap-spec PR as the main deliverable. |
 
