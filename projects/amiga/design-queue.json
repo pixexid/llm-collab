@@ -2,7 +2,7 @@
   "schema_version": 1,
   "artifact_type": "ordered_design_queue",
   "project_id": "amiga",
-  "last_updated_utc": "2026-05-03T04:00:00+00:00",
+  "last_updated_utc": "2026-05-03T04:05:00+00:00",
   "source": "docs/ui_ux/DESIGN.md §14-16 planned Phase 6 R3.x surfaces",
   "notes": [
     "Canonical ordered /design-only queue for Amiga before Phase 7 /app implementation.",
@@ -60,16 +60,16 @@
       "phase": "6 R3.2",
       "issue": 346,
       "task_id": "TASK-02B76E",
-      "title": "Clients surface spec for /design",
+      "title": "Clients dashboard layout and surface spec for /design",
       "owner": "claude",
       "task_status": "in_progress",
       "queue_state": "active",
-      "lane_type": "design-surface-spec",
-      "repo_scope": "design/surfaces/clients.md, docs/ui_ux/DESIGN.md if needed",
+      "lane_type": "design-layout-plus-surface-spec",
+      "repo_scope": "design/src/routes.tsx, design/src/surfaces/clients/ClientsPage.tsx, design/surfaces/clients.md, docs/ui_ux/DESIGN.md",
       "depends_on": [
         "TASK-50F143"
       ],
-      "notes": "Refined by Claude and activated after D8 merge. Create the Clients surface spec from the existing /design/clients sandbox route; keep Client + Property redesign deferred.",
+      "notes": "Corrected after operator review: design/refine Clients under /design/dashboard/clients first, then write the spec. Keep Client + Property redesign deferred.",
       "branch": "claude/gh-346-clients-surface-spec",
       "worktree": "/Users/pixexid/Projects/amiga-worktrees/claude/gh-346-clients-surface-spec"
     },
@@ -78,32 +78,32 @@
       "phase": "6 R3.3",
       "issue": 347,
       "task_id": "TASK-180EDC",
-      "title": "Staff surface spec for /design",
+      "title": "Staff dashboard layout and surface spec for /design",
       "owner": "claude",
       "task_status": "open",
       "queue_state": "queued",
-      "lane_type": "design-surface-spec-or-gap-spec",
-      "repo_scope": "design/surfaces/staff.md, docs/ui_ux/DESIGN.md if needed",
+      "lane_type": "design-layout-plus-surface-spec",
+      "repo_scope": "design/src/routes.tsx, design/src/surfaces/dashboard/staff or equivalent, design/surfaces/staff.md, docs/ui_ux/DESIGN.md",
       "depends_on": [
         "TASK-02B76E"
       ],
-      "notes": "If /design/staff does not exist, write an honest gap spec and block implementation handoff until a rendered sandbox route exists."
+      "notes": "Design Staff under /design/dashboard/staff first; do not land docs-only gap specs as the main deliverable."
     },
     {
       "order": 4,
       "phase": "6 R3.4",
       "issue": 348,
       "task_id": "TASK-3D1716",
-      "title": "Account surface spec for /design",
+      "title": "Account dashboard layout and surface spec for /design",
       "owner": "claude",
       "task_status": "open",
       "queue_state": "queued",
-      "lane_type": "design-surface-spec-or-gap-spec",
-      "repo_scope": "design/surfaces/account.md, docs/ui_ux/DESIGN.md if needed",
+      "lane_type": "design-layout-plus-surface-spec",
+      "repo_scope": "design/src/routes.tsx, design/src/surfaces/dashboard/account or equivalent, design/surfaces/account.md, docs/ui_ux/DESIGN.md",
       "depends_on": [
         "TASK-180EDC"
       ],
-      "notes": "If /design/account does not exist, write an honest gap spec and block implementation handoff until a rendered sandbox route exists."
+      "notes": "Design Account under /design/dashboard/account first; do not land docs-only gap specs as the main deliverable."
     }
   ]
 }
