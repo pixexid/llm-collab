@@ -198,7 +198,7 @@ def validate_queue(project_id: str, payload: dict) -> tuple[list[str], list[str]
     return errors, warnings
 
 
-def render_markdown(payload: dict) -> str:
+def render_markdown(project_id: str, payload: dict) -> str:
     lanes = sorted(payload.get("lanes", []), key=lambda lane: lane["order"])
     completed = payload.get("completed_recently", [])
     last_updated = payload.get("last_updated_utc", "unknown")
@@ -283,7 +283,7 @@ def sync_markdown(project_id: str, payload: dict) -> Path:
     updated = dict(payload)
     updated["last_updated_utc"] = utc_iso()
     save_queue(project_id, updated)
-    markdown = render_markdown(updated)
+    markdown = render_markdown(project_id, updated)
     markdown_path = queue_markdown_path(project_id)
     write_file(markdown_path, markdown)
     return markdown_path
@@ -345,7 +345,7 @@ def archive_complete_queue(project_id: str, payload: dict) -> tuple[Path, Path]:
     history_json = history_dir / f"issue-queue-{stamp}.json"
     history_md = history_dir / f"issue-queue-{stamp}.md"
     write_file(history_json, json.dumps(payload, indent=2) + "\n")
-    write_file(history_md, render_markdown(payload))
+    write_file(history_md, render_markdown(project_id, payload))
     return history_json, history_md
 
 
