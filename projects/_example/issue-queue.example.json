@@ -7,7 +7,7 @@
   "source_task": "TASK-EXAMPLE",
   "notes": [
     "Example ordered remaining implementation queue.",
-    "Copy to projects/<project_id>/issue-queue.json for local project use."
+    "Copy to {project_state_root}/<project_id>/issue-queue.json for local project use."
   ],
   "completed_recently": [],
   "lanes": [

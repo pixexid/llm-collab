@@ -1,8 +1,8 @@
 # Example Project Overrides
 
-Copy this directory to `projects/<project_id>/` in your local workspace when a project needs local routing, queue, runbook, or memory-template overrides.
+Copy this directory to `{project_state_root}/<project_id>/` when a project needs local routing, queue, runbook, or memory-template overrides.
 
-Real project directories are runtime-local and gitignored. Do not commit customer, company, repository, queue, task, worker, or operational state from a real project into this open-source repo.
+Real project directories are runtime-local. Prefer a `project_state_root` outside this Git checkout, such as `~/.local/share/llm-collab/projects`. Do not commit customer, company, repository, queue, task, worker, or operational state from a real project into this open-source repo.
 
 ## Contents
 
@@ -15,7 +15,7 @@ Real project directories are runtime-local and gitignored. Do not commit custome
 To create a real queue for a project:
 
 ```bash
-mkdir -p projects/my-app
-cp projects/_example/issue-queue.example.json projects/my-app/issue-queue.json
+mkdir -p ~/.local/share/llm-collab/projects/my-app
+cp projects/_example/issue-queue.example.json ~/.local/share/llm-collab/projects/my-app/issue-queue.json
 python3 bin/project_issue_queue.py sync-markdown --project my-app
 ```

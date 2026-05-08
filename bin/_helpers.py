@@ -1,6 +1,7 @@
 """
 Shared utilities for llm-collab bin scripts.
-All paths are relative to WORKSPACE_ROOT (the directory containing collab.config.json).
+Workspace paths are relative to WORKSPACE_ROOT. Project runtime state may live
+outside the Git checkout via collab.config.json `project_state_root`.
 """
 
 from __future__ import annotations
@@ -69,6 +70,34 @@ def load_config() -> dict:
 
 def config_get(key: str, default: Any = None) -> Any:
     return load_config().get(key, default)
+
+
+def _expand_config_path(raw: str, *, base: Path = ROOT) -> Path:
+    path = Path(raw).expanduser()
+    if path.is_absolute():
+        return path.resolve()
+    return (base / path).resolve()
+
+
+def project_state_root() -> Path:
+    """Directory that stores local project runtime state outside tracked repo files."""
+    raw = config_get("project_state_root")
+    if raw:
+        return _expand_config_path(str(raw))
+    return ROOT / "projects"
+
+
+def project_state_dir(project_id: str) -> Path:
+    return project_state_root() / project_id
+
+
+def display_path(path: Path) -> str:
+    """Return a stable human-facing path, relative to ROOT when possible."""
+    resolved = path.resolve()
+    try:
+        return str(resolved.relative_to(ROOT))
+    except ValueError:
+        return str(resolved)
 
 
 def python_cmd() -> str:
@@ -187,7 +216,9 @@ def resolve_project_repo_path(project_id: str, repo_key: str = "app") -> Path | 
     path = Path(str(raw))
     if path.is_absolute():
         return path.resolve()
-    return (ROOT / path).resolve()
+    projects_root = config_get("projects_root")
+    base = _expand_config_path(str(projects_root)) if projects_root else ROOT
+    return (base / path).resolve()
 
 
 def _read_repo_nvmrc(repo_root: Path) -> str | None:

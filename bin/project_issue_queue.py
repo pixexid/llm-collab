@@ -18,7 +18,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from _helpers import ROOT, find_task_by_id, get_project, parse_frontmatter, utc_iso, write_file
+from _helpers import display_path, find_task_by_id, get_project, parse_frontmatter, project_state_dir, utc_iso, write_file
 
 QUEUE_STATES = {"ready", "queued", "blocked", "active", "review", "done"}
 QUEUE_FILE_NAME = "issue-queue.json"
@@ -35,7 +35,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def queue_dir(project_id: str) -> Path:
-    return ROOT / "projects" / project_id
+    return project_state_dir(project_id)
 
 
 def queue_json_path(project_id: str) -> Path:
@@ -387,14 +387,14 @@ def mark_lane_transition(project_id: str, task_id: str, *, owner: str, task_stat
             archived_json, archived_md = archive_complete_queue(project_id, dict(payload))
             payload["notes"] = [
                 "No remaining queued lanes.",
-                f"Last complete queue snapshot archived to {archived_json.relative_to(ROOT)} and {archived_md.relative_to(ROOT)}.",
+                f"Last complete queue snapshot archived to {display_path(archived_json)} and {display_path(archived_md)}.",
             ]
             sync_markdown(project_id, payload)
             return {
                 "updated": True,
                 "archived": True,
-                "history_json": str(archived_json.relative_to(ROOT)),
-                "history_md": str(archived_md.relative_to(ROOT)),
+                "history_json": display_path(archived_json),
+                "history_md": display_path(archived_md),
             }
     normalize_lanes(payload)
     sync_markdown(project_id, payload)
@@ -412,7 +412,7 @@ def main() -> int:
     if args.command == "validate":
         errors, warnings = validate_queue(args.project, payload)
         print(f"project: {args.project}")
-        print(f"queue: {queue_json_path(args.project).relative_to(ROOT)}")
+        print(f"queue: {display_path(queue_json_path(args.project))}")
         if warnings:
             print("\nwarnings:")
             for warning in warnings:
@@ -428,6 +428,8 @@ def main() -> int:
             print(
                 f"next ready lane: GH-{ready_lane['issue']} / {ready_lane['task_id']} / {ready_lane['owner']}"
             )
+        elif payload.get("lanes"):
+            print("queue has no ready lane")
         else:
             print("queue empty")
         return 0
@@ -439,11 +441,11 @@ def main() -> int:
         archived_json, archived_md = archive_complete_queue(args.project, payload)
         payload["notes"] = [
             "No remaining queued lanes.",
-            f"Queue archived manually to {archived_json.relative_to(ROOT)} and {archived_md.relative_to(ROOT)}.",
+            f"Queue archived manually to {display_path(archived_json)} and {display_path(archived_md)}.",
         ]
         sync_markdown(args.project, payload)
-        print(f"archived_json: {archived_json.relative_to(ROOT)}")
-        print(f"archived_md: {archived_md.relative_to(ROOT)}")
+        print(f"archived_json: {display_path(archived_json)}")
+        print(f"archived_md: {display_path(archived_md)}")
         return 0
 
     errors, warnings = validate_queue(args.project, payload)
@@ -453,7 +455,7 @@ def main() -> int:
             print(f"- {error}", file=sys.stderr)
         return 1
     markdown_path = sync_markdown(args.project, payload)
-    print(markdown_path.relative_to(ROOT))
+    print(display_path(markdown_path))
     if warnings:
         print("\nwarnings:")
         for warning in warnings:

@@ -15,9 +15,9 @@ Every message and task carries a `project_id` that identifies which project the 
 
 The workspace itself is project-agnostic — it coordinates work, not a specific codebase.
 
-Project-specific policy should live under local `projects/{project_id}/` and override the universal defaults in `docs/workflows/`.
+Project-specific policy should live under `{project_state_root}/{project_id}/` and override the universal defaults in `docs/workflows/`.
 
-The public repository tracks only `projects/_example/`. Real project directories are runtime-local and gitignored by default so queue state, customer context, repository paths, worker routing, memory templates, and operational runbooks do not leak into the open-source repo.
+The public repository tracks only `projects/_example/`. Real project directories are runtime-local and should normally live outside the Git checkout via `project_state_root` in `collab.config.json`, so queue state, customer context, repository paths, worker routing, memory templates, and operational runbooks do not leak into the open-source repo or disappear during merges that delete tracked paths.
 
 ---
 
@@ -32,8 +32,8 @@ Edit `projects.json` (or regenerate with `python scripts/init.py`):
       "id": "my-app",
       "display_name": "My Application",
       "repos": {
-        "app": "../my-app",
-        "api": "../my-app-api"
+        "app": "my-app",
+        "api": "my-app-api"
       },
       "default_branch_base": "main",
       "preflight_command": ["pnpm", "preflight", "--json"],
@@ -47,7 +47,7 @@ Edit `projects.json` (or regenerate with `python scripts/init.py`):
       "id": "docs",
       "display_name": "Docs Site",
       "repos": {
-        "site": "../docs-site"
+        "site": "docs-site"
       },
       "default_branch_base": "main",
       "preflight_command": null,
@@ -59,7 +59,30 @@ Edit `projects.json` (or regenerate with `python scripts/init.py`):
 }
 ```
 
-Repo paths are relative to `projects_root` (from `collab.config.json`).
+Repo paths are relative to `projects_root` (from `collab.config.json`). Project runtime state, such as queues and local runbooks, is separate and resolves from `project_state_root`.
+
+### Project state root
+
+Set `project_state_root` to a directory outside this repository:
+
+```json
+{
+  "projects_root": "/Users/you/Projects",
+  "project_state_root": "/Users/you/.local/share/llm-collab/projects"
+}
+```
+
+Tools that read or write local project state use `{project_state_root}/{project_id}/`.
+For example, `python bin/project_issue_queue.py show --project my-app` reads:
+
+```text
+/Users/you/.local/share/llm-collab/projects/my-app/issue-queue.json
+```
+
+Use the in-repo `projects/_example/` directory only as a template. Do not store
+real project queues, customer notes, routing policy, or memory templates under
+the public checkout unless you intentionally want Git branch switches and pulls
+to manage those files.
 
 ---
 
@@ -128,7 +151,7 @@ When using git worktrees for isolation, reference the project's repo by path:
 python bin/worktree_ctl.py create \
   --task TASK-ABC123 \
   --agent worker \
-  --repo ../my-app
+  --repo my-app
 
 # Using absolute path
 python bin/worktree_ctl.py create \
@@ -146,7 +169,7 @@ The worktree is created at `{repo}-worktrees/{agent}/{task-slug}/` by default.
 ```
 ~/Projects/
 ├── _collab/                    ← this workspace
-│   ├── collab.config.json
+│   ├── collab.config.json     ← project_state_root points outside this tree
 │   ├── projects.json
 │   ├── agents/
 │   ├── Chats/
@@ -164,6 +187,14 @@ The worktree is created at `{repo}-worktrees/{agent}/{task-slug}/` by default.
 │   └── worker/
 │       └── t-aaa-fix-auth/
 └── docs-site/                  ← project repo
+
+~/.local/share/llm-collab/projects/
+└── my-app/
+    ├── issue-queue.json        ← local runtime state
+    ├── issue-queue.md
+    ├── roles-and-routing.md
+    ├── runbooks/
+    └── memory-templates/
 ```
 
 ---

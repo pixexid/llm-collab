@@ -1,7 +1,7 @@
 # Example Issue Queue
 
 > Example generated view for `issue-queue.example.json`.
-> Real generated queue views belong in local `projects/<project_id>/issue-queue.md` and are gitignored.
+> Real generated queue views belong in `{project_state_root}/<project_id>/issue-queue.md`.
 
 | Order | Issue | Task | Owner | Task Status | Queue State | Title |
 |---:|---:|---|---|---|---|---|
