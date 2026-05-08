@@ -199,6 +199,7 @@ def validate_queue(project_id: str, payload: dict) -> tuple[list[str], list[str]
 
 
 def render_markdown(payload: dict) -> str:
+    project_id = payload.get("project_id", "amiga")
     lanes = sorted(payload.get("lanes", []), key=lambda lane: lane["order"])
     completed = payload.get("completed_recently", [])
     last_updated = payload.get("last_updated_utc", "unknown")

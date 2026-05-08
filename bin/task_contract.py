@@ -27,9 +27,18 @@ DB_IMPACT_VALUES = {"none", "local-schema-only", "shared-supabase-required"}
 DEFAULT_DESIGN_SKILLS = ["impeccable"]
 DESIGN_THINKING_DISPOSITIONS = {"shipped", "deferred", "out_of_scope"}
 IMPECCABLE_SETUP_COMMAND = "/impeccable teach"
+IMPECCABLE_SETUP_COMMANDS = [
+    "/impeccable",
+    "/teach",
+    IMPECCABLE_SETUP_COMMAND,
+]
 IMPECCABLE_STEERING_COMMANDS = [
     "/impeccable craft",
     "/impeccable extract",
+    "/shape",
+    "/document",
+    "/extract",
+    "/craft",
     "/audit",
     "/critique",
     "/polish",
@@ -47,8 +56,28 @@ IMPECCABLE_STEERING_COMMANDS = [
     "/layout",
     "/overdrive",
 ]
-IMPECCABLE_ALLOWED_COMMANDS = {IMPECCABLE_SETUP_COMMAND, *IMPECCABLE_STEERING_COMMANDS}
+IMPECCABLE_RUNTIME_COMMANDS = [
+    "/onboard",
+    "/live",
+]
+IMPECCABLE_ALLOWED_COMMANDS = {
+    *IMPECCABLE_SETUP_COMMANDS,
+    *IMPECCABLE_STEERING_COMMANDS,
+    *IMPECCABLE_RUNTIME_COMMANDS,
+}
 IMPECCABLE_COMMAND_ALIASES = {
+    "impeccable": "/impeccable",
+    "/impeccable": "/impeccable",
+    "teach": "/teach",
+    "/teach": "/teach",
+    "shape": "/shape",
+    "/shape": "/shape",
+    "document": "/document",
+    "/document": "/document",
+    "extract": "/extract",
+    "/extract": "/extract",
+    "craft": "/craft",
+    "/craft": "/craft",
     "/normalize": "/polish",
     "normalize": "/polish",
     "/arrange": "/layout",
@@ -69,6 +98,8 @@ IMPECCABLE_COMMAND_ALIASES = {
     "prompts:typeset": "/typeset",
     "prompts:layout": "/layout",
     "prompts:overdrive": "/overdrive",
+    "prompts:onboard": "/onboard",
+    "prompts:live": "/live",
 }
 
 RUNTIME_UI_MARKERS = (
