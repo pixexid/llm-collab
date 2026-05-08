@@ -80,6 +80,8 @@ Project-specific overrides can live under:
 - `projects/{project_id}/runbooks/`
 - `projects/{project_id}/memory-templates/`
 
+Real `projects/{project_id}/` directories are runtime-local and gitignored by default. Use `projects/_example/` as the public template; do not commit customer, company, repository, queue, task, worker, or operational state from a real project into this open-source repo.
+
 ## Step 3: Generate memory snippets
 
 Make each LLM agent aware of the workspace by generating a memory snippet.

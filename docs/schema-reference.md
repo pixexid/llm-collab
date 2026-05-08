@@ -393,26 +393,26 @@ chat/session turnover.
 {
   "schema_version": 1,
   "artifact_type": "ordered_issue_queue",
-  "project_id": "amiga",
-  "last_updated_utc": "2026-04-12T16:47:13+00:00",
-  "source_issue": 257,
-  "source_task": "TASK-A3AEFF",
+  "project_id": "my-app",
+  "last_updated_utc": "2026-01-01T00:00:00+00:00",
+  "source_issue": 1,
+  "source_task": "TASK-EXAMPLE",
   "completed_recently": [
-    { "issue": 232, "task_id": "TASK-B0D14F", "owner": "cdx2", "status": "done" }
+    { "issue": 100, "task_id": "TASK-DONE1", "owner": "worker", "status": "done" }
   ],
   "lanes": [
     {
       "order": 1,
-      "issue": 233,
-      "task_id": "TASK-48C9F9",
-      "title": "validate transitions against real drive time not zone buckets",
-      "owner": "cdx2",
+      "issue": 101,
+      "task_id": "TASK-READY1",
+      "title": "first ready implementation lane",
+      "owner": "worker",
       "task_status": "pending",
       "queue_state": "ready",
-      "tier": 2,
+      "tier": 1,
       "depends_on": [],
       "blocked_by": [],
-      "notes": "Current next lane after GH-232."
+      "notes": "Replace with local project queue details."
     }
   ]
 }

@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "artifact_type": "ordered_issue_queue",
+  "project_id": "my-app",
+  "last_updated_utc": "2026-01-01T00:00:00+00:00",
+  "source_issue": 1,
+  "source_task": "TASK-EXAMPLE",
+  "notes": [
+    "Example ordered remaining implementation queue.",
+    "Copy to projects/<project_id>/issue-queue.json for local project use."
+  ],
+  "completed_recently": [],
+  "lanes": [
+    {
+      "order": 1,
+      "issue": 101,
+      "task_id": "TASK-READY1",
+      "title": "first ready implementation lane",
+      "owner": "worker",
+      "task_status": "pending",
+      "queue_state": "ready",
+      "tier": 1,
+      "depends_on": [],
+      "blocked_by": [],
+      "notes": "Replace with local project queue details."
+    },
+    {
+      "order": 2,
+      "issue": 102,
+      "task_id": "TASK-QUEUE2",
+      "title": "second queued implementation lane",
+      "owner": "worker",
+      "task_status": "pending",
+      "queue_state": "queued",
+      "tier": 2,
+      "depends_on": [],
+      "blocked_by": [],
+      "notes": "Runs after the ready lane."
+    }
+  ]
+}
