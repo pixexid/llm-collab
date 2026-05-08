@@ -47,7 +47,7 @@ local in this open-source repo.
 
 1. collaboration inbox
 2. active task board
-3. project-level instructions (`projects/<project_id>/...` when present)
+3. project-level instructions (`projects/<project_id>/...` when present locally)
 4. repo-specific contributing/agent guidance
 
 ## Required preflight

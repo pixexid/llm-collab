@@ -209,7 +209,7 @@ def render_markdown(payload: dict) -> str:
     lines = [
         "# Amiga Ordered Issue Queue",
         "",
-        "> Generated from `issue-queue.json`. Edit the JSON, then run `python3 bin/project_issue_queue.py sync-markdown --project amiga`.",
+        f"> Generated from `issue-queue.json`. Edit the JSON, then run `python3 bin/project_issue_queue.py sync-markdown --project {project_id}`.",
         "",
         f"- Last updated: `{last_updated}`",
         f"- Source issue: `GH-{source_issue}`",

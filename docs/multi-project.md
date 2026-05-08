@@ -15,7 +15,9 @@ Every message and task carries a `project_id` that identifies which project the 
 
 The workspace itself is project-agnostic — it coordinates work, not a specific codebase.
 
-Project-specific policy should live under `projects/{project_id}/` and override the universal defaults in `docs/workflows/`.
+Project-specific policy should live under local `projects/{project_id}/` and override the universal defaults in `docs/workflows/`.
+
+The public repository tracks only `projects/_example/`. Real project directories are runtime-local and gitignored by default so queue state, customer context, repository paths, worker routing, memory templates, and operational runbooks do not leak into the open-source repo.
 
 ---
 

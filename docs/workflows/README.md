@@ -2,7 +2,9 @@
 
 Universal collaboration workflows that apply across projects.
 
-Use these docs as defaults, then layer project-specific overrides from `projects/{project_id}/`.
+Use these docs as defaults, then layer project-specific overrides from local `projects/{project_id}/`.
+
+Only `projects/_example/` is intended to be tracked in the open-source repo. Real project directories are local runtime state and should stay gitignored.
 
 Recommended read order:
 
