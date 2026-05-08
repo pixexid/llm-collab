@@ -43,11 +43,32 @@ tracked files on the target branch. This is intentional: project-local secrets,
 runtime state, worker memory templates, and operator/private config should stay
 local in this open-source repo.
 
+Real project runtime state should not depend on that Git behavior. Configure
+`project_state_root` in `collab.config.json` to a directory outside the
+`llm-collab` checkout, such as:
+
+```json
+{
+  "project_state_root": "~/.local/share/llm-collab/projects"
+}
+```
+
+Queues, project runbooks, roles/routing files, and memory templates then live at
+`{project_state_root}/{project_id}/`. After any merge or branch switch, verify
+the active queue from that external state root:
+
+```bash
+python bin/project_issue_queue.py show --project <project_id>
+```
+
+Do not copy real `projects/{project_id}` directories back into the public repo
+as tracked files. The in-repo `projects/_example/` directory is only a template.
+
 ## Read before acting
 
 1. collaboration inbox
 2. active task board
-3. project-level instructions (`projects/<project_id>/...` when present locally)
+3. project-level instructions (`{project_state_root}/<project_id>/...` when present locally)
 4. repo-specific contributing/agent guidance
 
 ## Required preflight

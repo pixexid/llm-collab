@@ -230,7 +230,7 @@ def collect_projects() -> list[dict]:
             break
 
         display = prompt("  Display name", default=pid.replace("-", " ").title())
-        repos_raw = prompt_list("  Repo IDs and paths (e.g. app:../my-app  or  app)")
+        repos_raw = prompt_list("  Repo IDs and paths (e.g. app:my-app  or  app)")
 
         repos = {}
         for r in repos_raw:
@@ -238,10 +238,10 @@ def collect_projects() -> list[dict]:
                 rid, _, rpath = r.partition(":")
                 repos[rid.strip()] = rpath.strip()
             else:
-                repos[r] = f"../{r}"
+                repos[r] = r
 
         if not repos:
-            repos = {pid: f"../{pid}"}
+            repos = {pid: pid}
 
         preflight = None
         if yn(f"  Does this project have a preflight/build check command?", default=False):
@@ -303,12 +303,17 @@ def main():
         "Projects root path (directory containing your project repos)",
         default=str(Path.home() / "Projects"),
     )
+    project_state_root = prompt(
+        "Project state root path (local queues/runbooks/memory; outside this git repo)",
+        default=str(Path.home() / ".local" / "share" / "llm-collab" / "projects"),
+    )
     poll_interval = prompt("Inbox poll interval in seconds", default="15")
     notifications = yn("Enable desktop notifications?", default=True)
 
     _local_config = {
         "workspace_name": workspace_name,
         "projects_root": projects_root,
+        "project_state_root": project_state_root,
         "poll_interval_seconds": int(poll_interval),
         "notifications_enabled": notifications,
     }
@@ -317,6 +322,7 @@ def main():
         "workspace_name": workspace_name,
         "schema_version": 2,
         "projects_root": projects_root,
+        "project_state_root": project_state_root,
         "default_tags": [],
         "branch_pattern": "collab/{agent}/{task_slug}",
         "poll_interval_seconds": int(poll_interval),

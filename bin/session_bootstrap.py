@@ -23,6 +23,7 @@ from _helpers import (
     ROOT,
     agent_ids,
     agent_identity_path,
+    display_path,
     get_agent,
     get_unread_messages,
     is_human_relay,
@@ -68,7 +69,7 @@ def queue_summaries() -> list[dict]:
         summaries.append(
             {
                 "project_id": project_id,
-                "queue_path": str(issue_queue.queue_markdown_path(project_id).relative_to(ROOT)),
+                "queue_path": display_path(issue_queue.queue_markdown_path(project_id)),
                 "queue_empty": not bool(payload.get("lanes")),
                 "ready_lane": ready_lane,
             }

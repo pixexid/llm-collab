@@ -30,6 +30,7 @@ llm-collab/
 ├── collab.config.json      workspace settings
 ├── agents.json             agent roster + activation config
 ├── projects.json           project registry (repos, preflight, github)
+├── projects/_example/      public template for local project state
 │
 ├── agents/
 │   ├── {agent_id}/
@@ -53,6 +54,10 @@ llm-collab/
 ├── pm2/                    PM2 ecosystem config
 ├── scripts/                setup utilities
 └── docs/                   documentation
+
+Local project queues, runbooks, routing policy, and memory templates should live
+outside this Git checkout via `project_state_root`, for example
+`~/.local/share/llm-collab/projects/{project_id}/`.
 ```
 
 ## Quickstart
@@ -72,7 +77,8 @@ python3 scripts/init.py
 
 The init script will ask you to:
 - Name your workspace
-- Set your projects root path
+- Set your projects root path for code repositories
+- Set your project state root path for local queues/runbooks/memory
 - Define your agents (identities, roles, activation types)
 - Register your projects (repos, preflight commands, GitHub integration)
 
@@ -181,7 +187,7 @@ python3 bin/task_board.py --project docs-site
 | `check_github_task_mirrors.py --project <id>` | Detect GitHub issue/task mirror drift |
 | `report_github_project_task_sync.py --project <id>` | Generate GitHub Project/task alignment report |
 | `pm2_watchers.py start --all` | Start background inbox watchers |
-| `worktree_ctl.py create --task TASK-xxx --agent <id> --repo ../my-app` | Create isolated git worktree |
+| `worktree_ctl.py create --task TASK-xxx --agent <id> --repo my-app` | Create isolated git worktree |
 | `init_agent_memory.py --agent <id> --target generic` | Generate LLM memory snippet |
 
 Full reference: [docs/schema-reference.md](docs/schema-reference.md)

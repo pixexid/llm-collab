@@ -2,9 +2,9 @@
 
 Universal collaboration workflows that apply across projects.
 
-Use these docs as defaults, then layer project-specific overrides from local `projects/{project_id}/`.
+Use these docs as defaults, then layer project-specific overrides from local `{project_state_root}/{project_id}/`.
 
-Only `projects/_example/` is intended to be tracked in the open-source repo. Real project directories are local runtime state and should stay gitignored.
+Only `projects/_example/` is intended to be tracked in the open-source repo. Real project directories are local runtime state and should normally live outside the Git checkout via `project_state_root` in `collab.config.json`.
 
 Recommended read order:
 

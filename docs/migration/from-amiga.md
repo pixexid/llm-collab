@@ -61,8 +61,8 @@ When defining projects, add at minimum:
   "id": "amiga",
   "display_name": "Amiga House Cleaning",
   "repos": {
-    "app": "../amiga_house_cleaning_company",
-    "docs": "../amiga_house_cleaning_company_docs"
+    "app": "amiga_house_cleaning_company",
+    "docs": "amiga_house_cleaning_company_docs"
   },
   "default_branch_base": "main",
   "preflight_command": ["pnpm", "preflight", "--json"],

@@ -13,6 +13,7 @@ Workspace-level settings. Created by `scripts/init.py`. Gitignored.
   "workspace_name": "my-collab",
   "schema_version": 2,
   "projects_root": "/path/to/your/projects",
+  "project_state_root": "~/.local/share/llm-collab/projects",
   "default_tags": [],
   "branch_pattern": "collab/{agent}/{task_slug}",
   "poll_interval_seconds": 15,
@@ -26,6 +27,7 @@ Workspace-level settings. Created by `scripts/init.py`. Gitignored.
 | `workspace_name` | string | Used as PM2 app prefix and in memory snippets |
 | `schema_version` | int | Must be `2` |
 | `projects_root` | string | Absolute path to directory containing project repos |
+| `project_state_root` | string | Optional path for local project runtime state such as queues, runbooks, roles, and memory templates. Defaults to `<workspace_root>/projects` for backward compatibility. Prefer a path outside the Git checkout. |
 | `default_tags` | string[] | Default tags applied to messages (empty = no tags) |
 | `branch_pattern` | string | Template for git branch names. Variables: `{agent}`, `{task_slug}`, `{orchestrator}` |
 | `poll_interval_seconds` | int | Seconds between inbox polls in background watchers |
@@ -107,8 +109,8 @@ Project registry. Created by `scripts/init.py`. Gitignored.
       "id": "my-app",
       "display_name": "My Application",
       "repos": {
-        "app": "../my-app",
-        "api": "../my-app-api"
+        "app": "my-app",
+        "api": "my-app-api"
       },
       "default_branch_base": "main",
       "preflight_command": ["pnpm", "preflight", "--json"],
@@ -382,7 +384,7 @@ Contains:
 
 ---
 
-## projects/{project_id}/issue-queue.json
+## project_state_root/{project_id}/issue-queue.json
 
 Optional per-project artifact for canonical ordered issue queues.
 
@@ -450,8 +452,9 @@ chat/session turnover.
 ### Operational rules
 
 - the canonical queue path should remain stable even when no lanes remain
-- when the final lane completes, archive the last queue snapshot to `projects/{project_id}/history/`
-- keep `projects/{project_id}/issue-queue.json` and `.md` present with `lanes: []` so fresh sessions see an explicit empty queue instead of a missing file
+- when the final lane completes, archive the last queue snapshot to `{project_state_root}/{project_id}/history/`
+- keep `{project_state_root}/{project_id}/issue-queue.json` and `.md` present with `lanes: []` so fresh sessions see an explicit empty queue instead of a missing file
+- do not keep real project queue files as tracked files in this repo; only `projects/_example/` belongs in the public checkout
 
 Read first by `session_bootstrap.py` so the LLM immediately knows its identity.
 

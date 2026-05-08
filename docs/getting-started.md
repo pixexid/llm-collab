@@ -62,7 +62,7 @@ For each LLM agent, choose an activation type:
 
 Register each code project. Provide:
 - A short ID (e.g. `my-app`)
-- Repo paths (relative to `projects_root`, e.g. `../my-app`)
+- Repo paths (relative to `projects_root`, e.g. `my-app`)
 - Optional preflight command (e.g. `pnpm preflight --json`)
 - Optional GitHub integration
 
@@ -76,11 +76,11 @@ Init generates:
 
 Project-specific overrides can live under:
 
-- `projects/{project_id}/roles-and-routing.md`
-- `projects/{project_id}/runbooks/`
-- `projects/{project_id}/memory-templates/`
+- `{project_state_root}/{project_id}/roles-and-routing.md`
+- `{project_state_root}/{project_id}/runbooks/`
+- `{project_state_root}/{project_id}/memory-templates/`
 
-Real `projects/{project_id}/` directories are runtime-local and gitignored by default. Use `projects/_example/` as the public template; do not commit customer, company, repository, queue, task, worker, or operational state from a real project into this open-source repo.
+Set `project_state_root` in `collab.config.json` to keep real project state outside the Git checkout, for example `~/.local/share/llm-collab/projects`. Use `projects/_example/` as the public template; do not commit customer, company, repository, queue, task, worker, or operational state from a real project into this open-source repo.
 
 ## Step 3: Generate memory snippets
 
@@ -223,6 +223,9 @@ For isolated implementation lanes, branch/worktree provisioning is orchestrator-
 
 **"collab.config.json not found"**
 Run `python scripts/init.py` from the workspace root.
+
+**"Queue file not found" after pulling latest main**
+Check `project_state_root` in `collab.config.json`. Real queues should live at `{project_state_root}/{project_id}/issue-queue.json`, not under the tracked public checkout. If you previously kept `projects/{project_id}` inside the repo, copy it to the configured external state root and rerun `python bin/project_issue_queue.py show --project <project_id>`.
 
 **"Unknown agent: X"**
 Check `agents.json` — the ID must match exactly (case-sensitive).
