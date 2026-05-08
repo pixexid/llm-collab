@@ -216,6 +216,8 @@ def resolve_project_repo_path(project_id: str, repo_key: str = "app") -> Path | 
     path = Path(str(raw))
     if path.is_absolute():
         return path.resolve()
+    if path.parts and path.parts[0] == "..":
+        return (ROOT / path).resolve()
     projects_root = config_get("projects_root")
     base = _expand_config_path(str(projects_root)) if projects_root else ROOT
     return (base / path).resolve()
