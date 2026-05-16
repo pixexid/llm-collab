@@ -14,8 +14,13 @@ autonomous.
 - Keep operator-visible chat notes enabled; autobridge activity must stay
   visible in `Chats/`.
 - Do not target an active operator thread for queue/busy tests.
-- Treat Claude desktop as an existing-thread, human-visible UI. Do not claim
-  safe fresh Claude desktop sidebar thread creation.
+- Treat Claude desktop as a human-visible UI controlled through Computer Use,
+  not as a `session_autobridge.py` runtime target. Fresh Claude desktop threads
+  can be created only by visible app interaction: generate a UUID plus short
+  title, click `New session`, send the first prompt beginning with
+  `[BRIDGE <8-char-uuid-prefix>] <short title>`, then verify the sidebar title
+  and `local_*` URL. Do not claim a PM2 watcher, CLI resume, or filesystem write
+  created a desktop-visible thread.
 
 ## Activate A Session
 

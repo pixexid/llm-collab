@@ -106,9 +106,11 @@ For Codex manual watcher checks, `watch_inbox.py` should behave the same as the 
 - `LLM_COLLAB_CODEX_UI_REFRESH_METHOD=cdp`
 - `LLM_COLLAB_CODEX_CDP_PORT=9223`
 
-## Claude desktop rule
+## Claude Desktop Rule
 
-Treat the Claude desktop app as a human-driven UI surface, not a safe programmatic thread-creation target.
+Treat the Claude desktop app as a human-driven UI surface that Codex may drive
+only through Computer Use. Do not treat Claude desktop as a CLI/project-session
+target.
 
 Important distinction:
 
@@ -123,16 +125,31 @@ These stores are not interchangeable. A CLI-created project session may persist 
 
 Operational rule:
 
-- do not claim that `llm-collab` can safely create a brand new Claude desktop app thread
+- do not claim that `llm-collab`, PM2, or Claude CLI can safely create a brand
+  new Claude desktop app thread
 - do not synthesize desktop-visible Claude threads by writing local app cache/index files
-- use Claude desktop as an operator-facing UI
+- use Claude desktop as an operator-facing UI controlled through Computer Use
 - use `Chats/` messages as the transport of record
+- when any Claude action or response is expected while the operator is away,
+  Codex must plan a Codex-side heartbeat that wakes Codex and inspects Claude
+  desktop through Computer Use
 
-Safest workflow for Claude desktop today:
+Safest task-grade workflow for Claude desktop:
 
-1. operator or Claude opens an existing visible desktop thread manually
-2. `llm-collab` delivers the task into `Chats/`
-3. Claude reads/processes from that known thread or from the collab inbox
-4. if a concrete visible thread must be targeted, bind only an already-existing thread/session id
+1. `llm-collab` delivers the task into `Chats/` with `deliver.py`
+2. Codex uses Computer Use to open/select the Claude desktop thread, or creates a
+   new visible thread by generating a UUID plus short title, clicking
+   `New session`, and sending the first prompt with
+   `[BRIDGE <8-char-uuid-prefix>] <short title>` as the first line
+3. Codex tells Claude either to read the exact `llm-collab` inbox/chat/message
+   or pastes the full bounded context into the visible prompt
+4. Codex creates a heartbeat only while a Claude response is expected
+5. each heartbeat checks Claude desktop through Computer Use; if Claude is
+   running, it waits; if Claude is idle/awaiting input, it reads and records the
+   response
+6. Codex deletes the heartbeat when the response is recorded, blocked, timed
+   out, or no longer needed
 
-For programmatic runtime targeting, prefer Claude CLI/project sessions over fresh desktop-sidebar thread creation.
+For programmatic runtime targeting that does not require visible desktop state,
+use a separate non-desktop adapter. For Claude desktop work, do not use
+`claude -p`, `claude --resume`, or `~/.claude/projects` as the bridge.

@@ -97,15 +97,21 @@ This applies to:
 
 ---
 
-## Claude desktop constraint
+## Claude Desktop Constraint
 
-PM2/watcher automation should not be treated as a safe fresh-thread creator for the Claude desktop app.
+PM2/watcher automation must not be treated as the controller for the Claude
+desktop app. PM2 can watch `llm-collab` inbox files and dispatch shell/runtime
+adapters, but it cannot call Codex Computer Use tools.
 
 Current safe assumption:
 
 - Codex app visible refresh is automatable
-- Claude desktop app page reload is automatable
-- Claude desktop app fresh sidebar thread creation is not proven safe
+- Claude desktop app interaction is automatable only from a live Codex turn using
+  Computer Use
+- Claude desktop fresh sidebar thread creation is safe only when Computer Use
+  generates a UUID plus short title, clicks `New session`, sends the first
+  visible prompt beginning with `[BRIDGE <8-char-uuid-prefix>] <short title>`,
+  and verifies the new sidebar title/local URL
 
 Why:
 
@@ -118,17 +124,26 @@ Why:
 
 Watcher policy for Claude:
 
-- safe: resume or refresh an already-known Claude runtime/session
-- safe: reload the Claude page after a successful bounded turn
-- unsafe by default: claim a watcher created a new app-visible desktop thread
+- safe: record durable work in `llm-collab` and notify that a Claude desktop
+  bridge plan is needed
+- safe: let a Codex heartbeat drive Claude desktop through Computer Use
+- unsafe: claim a PM2 watcher created a new app-visible desktop thread
 - unsafe by default: synthesize sidebar visibility by writing app cache/index files directly
+- unsafe: use `claude -p`, `claude --resume`, or `~/.claude/projects` as proof
+  that the visible desktop thread changed
 
 If an operator needs Claude desktop visibility, the recommended flow is:
 
-1. use an existing visible Claude desktop thread
-2. bind that existing thread/session id into `llm-collab`
-3. let watcher/autobridge resume that known target
-4. keep `Chats/` as the source-of-truth transport log
+1. write the task/message to `Chats/` with `deliver.py`
+2. create a Codex-side bridge plan and heartbeat
+3. have the heartbeat wake Codex, not Claude
+4. Codex uses Computer Use to open/select/create the Claude desktop thread and
+   sends the bounded prompt
+5. while Claude is running, the heartbeat observes only
+6. once Claude is idle/awaiting input, Codex reads the visible response and
+   records it back into the Codex thread and `llm-collab`
+7. delete the heartbeat when the response is recorded, blocked, timed out, or no
+   longer needed
 
 ---
 
