@@ -9,9 +9,11 @@ Only `projects/_example/` is intended to be tracked in the open-source repo. Rea
 Recommended read order:
 
 1. `session-startup.md`
-2. `session-autobridge-runbook.md`
-3. `task-intake-and-delegation.md`
-4. `review-and-handoff.md`
-5. `isolated-worktrees.md`
-6. `commit-push-prs.md`
-7. `github-projects.md`
+2. `claude-code-desktop-computer-use-bridge.md` when Claude desktop app
+   interaction or unattended Claude responses are expected
+3. `session-autobridge-runbook.md`
+4. `task-intake-and-delegation.md`
+5. `review-and-handoff.md`
+6. `isolated-worktrees.md`
+7. `commit-push-prs.md`
+8. `github-projects.md`
