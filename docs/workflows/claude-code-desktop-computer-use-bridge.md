@@ -90,8 +90,11 @@ only for Claude desktop interaction. Do not use Claude Code CLI, `claude -p`,
 `claude --resume`, or `~/.claude/projects` as the bridge.
 
 Peek inboxes first:
-- python3 /Users/pixexid/Projects/llm-collab/bin/inbox.py --me codex --project amiga --peek --limit 5
-- python3 /Users/pixexid/Projects/llm-collab/bin/inbox.py --me claude --project amiga --peek --limit 5
+- Set `<llm-collab-checkout>` to the active llm-collab checkout path.
+- Set `<project-id>` to the collaboration project id for this task.
+- cd <llm-collab-checkout>
+- python3 bin/inbox.py --me codex --project <project-id> --peek --limit 5
+- python3 bin/inbox.py --me claude --project <project-id> --peek --limit 5
 
 Inspect /Applications/Claude.app with Computer Use. If Claude is running, shows
 Stop, is creating a worktree, or is otherwise mid-turn, report the visible status
