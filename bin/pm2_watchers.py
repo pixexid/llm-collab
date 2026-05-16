@@ -16,7 +16,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import json
+import os
 import shutil
 import subprocess
 import sys
@@ -26,6 +26,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from _helpers import ROOT, agent_ids, config_get, get_agent, watcher_enabled_agents
 
 COMMANDS = ("start", "restart", "ensure", "stop", "delete", "status", "logs")
+DEFAULT_PM2_TIMEOUT_SECONDS = 15
 
 
 def parse_args():
@@ -47,12 +48,41 @@ def app_name(agent_id: str) -> str:
     return f"{workspace}-{agent_id}"
 
 
-def pm2_run(args_list: list[str]) -> subprocess.CompletedProcess:
+def pm2_timeout_seconds() -> int:
+    raw_timeout = os.environ.get("LLM_COLLAB_PM2_TIMEOUT_SECONDS")
+    if not raw_timeout:
+        return DEFAULT_PM2_TIMEOUT_SECONDS
+    try:
+        timeout_seconds = int(raw_timeout)
+    except ValueError:
+        print(
+            f"[warn] Invalid LLM_COLLAB_PM2_TIMEOUT_SECONDS={raw_timeout!r}; "
+            f"using {DEFAULT_PM2_TIMEOUT_SECONDS}s",
+            file=sys.stderr,
+        )
+        return DEFAULT_PM2_TIMEOUT_SECONDS
+    return max(1, timeout_seconds)
+
+
+def pm2_run(args_list: list[str], *, capture_output: bool = False) -> subprocess.CompletedProcess:
     pm2 = resolve_pm2()
     if not pm2:
         print("[error] pm2 not found. Install: npm install -g pm2", file=sys.stderr)
         sys.exit(1)
-    return subprocess.run([pm2] + args_list, text=True)
+    timeout_seconds = pm2_timeout_seconds()
+    try:
+        return subprocess.run(
+            [pm2] + args_list,
+            text=True,
+            capture_output=capture_output,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired:
+        print(
+            f"[error] pm2 {' '.join(args_list)} timed out after {timeout_seconds}s",
+            file=sys.stderr,
+        )
+        sys.exit(124)
 
 
 def ecosystem_path() -> Path:
@@ -68,11 +98,7 @@ def start_agent(agent_id: str) -> None:
 
 
 def ensure_agent(agent_id: str) -> None:
-    pm2 = resolve_pm2()
-    if not pm2:
-        print("[error] pm2 not found.", file=sys.stderr)
-        sys.exit(1)
-    result = subprocess.run([pm2, "describe", app_name(agent_id)], capture_output=True, text=True)
+    result = pm2_run(["describe", app_name(agent_id)], capture_output=True)
     if "online" in result.stdout.lower():
         print(f"[watcher] {agent_id} already running.")
     else:
@@ -109,7 +135,7 @@ def main():
         elif args.command == "status":
             pm2_run(["describe", name])
         elif args.command == "logs":
-            pm2_run(["logs", name, "--lines", str(args.lines)])
+            pm2_run(["logs", name, "--lines", str(args.lines), "--nostream"])
 
 
 if __name__ == "__main__":
