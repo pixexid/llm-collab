@@ -105,6 +105,8 @@ those changes before starting the next lane or ending the thread.
 
 For PR-review wait heartbeats, follow `commit-push-prs.md`: when the operator
 has authorized the merge path and the latest head has green checks, clean merge
-state, no unresolved review feedback, and a fresh Codex review artifact with no
-major issues, merge from the current thread and delete the heartbeat before
-post-merge cleanup.
+state, no unresolved current review feedback, and the latest top-level
+`chatgpt-codex-connector` `Codex Review:` comment after the latest operator
+`@codex review` request reports no major issues, merge from the current thread
+and delete the heartbeat before post-merge cleanup. Do not substitute stale
+inline review-thread objects for that latest Codex Review comment.

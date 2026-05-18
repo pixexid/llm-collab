@@ -53,11 +53,16 @@ to it, push the update, and keep the heartbeat active until the rerun checks and
 review state are clean.
 
 When the operator has authorized the merge path for the PR or PR class, the
-heartbeat is allowed to complete the wait by merging once the latest PR head has
-green required checks, clean `mergeStateStatus`, no unresolved review
-threads/comments, and a fresh Codex review artifact after the latest pushed fix
-that reports no major issues. Delete the PR-wait heartbeat immediately after
-the merge, then continue normal post-merge cleanup in the same Codex thread.
+heartbeat is allowed to complete the wait only after it locates the latest
+top-level `chatgpt-codex-connector` comment whose body starts with
+`Codex Review:` and that was created after the latest operator `@codex review`
+request for the current head. Read that full comment body and treat it as the
+current Codex review result; do not infer the current result from stale inline
+review-thread objects alone. Merge only once the latest PR head has green
+required checks, clean `mergeStateStatus`, no unresolved current review
+feedback, and that latest Codex Review comment reports no major issues. Delete
+the PR-wait heartbeat immediately after the merge, then continue normal
+post-merge cleanup in the same Codex thread.
 
 ## Post-merge
 
