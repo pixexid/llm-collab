@@ -102,3 +102,9 @@ Do not use a thread-boundary handoff as a substitute for preserving workflow
 changes. If workflow docs, repo instructions, skills, queue scripts, bridge
 runtime docs, or agent memory changed during the lane, classify and persist
 those changes before starting the next lane or ending the thread.
+
+For PR-review wait heartbeats, follow `commit-push-prs.md`: when the operator
+has authorized the merge path and the latest head has green checks, clean merge
+state, no unresolved review feedback, and a fresh Codex review artifact with no
+major issues, merge from the current thread and delete the heartbeat before
+post-merge cleanup.

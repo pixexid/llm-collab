@@ -52,6 +52,13 @@ external wait state instead of merging. If review feedback lands, fix or respond
 to it, push the update, and keep the heartbeat active until the rerun checks and
 review state are clean.
 
+When the operator has authorized the merge path for the PR or PR class, the
+heartbeat is allowed to complete the wait by merging once the latest PR head has
+green required checks, clean `mergeStateStatus`, no unresolved review
+threads/comments, and a fresh Codex review artifact after the latest pushed fix
+that reports no major issues. Delete the PR-wait heartbeat immediately after
+the merge, then continue normal post-merge cleanup in the same Codex thread.
+
 ## Post-merge
 
 After merge:
