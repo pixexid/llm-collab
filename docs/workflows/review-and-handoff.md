@@ -84,6 +84,12 @@ queue path in an explicit empty state instead of deleting it.
 
 ## Thread-boundary handoff rule
 
+Stay in the active orchestrator thread by default after merge/local cleanup. Do
+not create a self-handoff only because an issue merged, a task moved to `done`,
+or the queue advanced. Continue in-thread unless the operator asks for a fresh
+session/handoff, context safety requires a boundary, or the current agent cannot
+continue safely.
+
 If context must continue in a fresh orchestrator thread, send a self-handoff message before ending context. Include:
 
 - task/issue identifiers
@@ -91,3 +97,14 @@ If context must continue in a fresh orchestrator thread, send a self-handoff mes
 - branch/worktree state
 - files/docs to read first
 - current state and next concrete action
+
+Do not use a thread-boundary handoff as a substitute for preserving workflow
+changes. If workflow docs, repo instructions, skills, queue scripts, bridge
+runtime docs, or agent memory changed during the lane, classify and persist
+those changes before starting the next lane or ending the thread.
+
+For PR-review wait heartbeats, follow `commit-push-prs.md`: when the operator
+has authorized the merge path and the latest head has green checks, clean merge
+state, no unresolved review feedback, and a fresh Codex review artifact with no
+major issues, merge from the current thread and delete the heartbeat before
+post-merge cleanup.
