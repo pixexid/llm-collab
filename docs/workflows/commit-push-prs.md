@@ -33,6 +33,25 @@ Include:
 - risk notes
 - docs-sync confirmation when behavior contracts changed
 
+## PR Review Wait Gate
+
+Do not merge a PR from green CI alone when the project expects Codex/GitHub PR
+review. A merge is allowed only after the orchestrator has inspected:
+
+- GitHub Actions checks on the latest head SHA
+- `mergeStateStatus`
+- top-level PR reviews and review bodies
+- nested review threads and inline comments
+- any requested changes or review replies after follow-up commits
+
+If the PR is waiting only for Codex/GitHub review, keep it open and create or
+update a Codex heartbeat attached to the current thread with a 6-minute cadence.
+Each heartbeat must re-check the PR checks, review state, review
+threads/comments, and merge state. If no review artifact exists yet, report the
+external wait state instead of merging. If review feedback lands, fix or respond
+to it, push the update, and keep the heartbeat active until the rerun checks and
+review state are clean.
+
 ## Post-merge
 
 After merge:
@@ -42,6 +61,25 @@ After merge:
 3. update the project queue artifact when lane ordering/state changes
 4. clean stale branches/worktrees
 5. mark local task done
+
+Stay in the same Codex thread after merge/local cleanup by default. Do not send
+a `codex -> codex` self-handoff or force a fresh `check inbox` thread unless the
+operator explicitly asks for a new session/handoff or context safety requires a
+thread boundary.
+
+Workflow/process edits are first-class deliverables, not disposable local dirt.
+If an orchestrator edits repo instructions, skills, workflow docs, queue
+scripts, agent memory, or bridge/runtime instructions while fixing a process
+failure, it must classify that diff before starting the next lane:
+
+- own PR
+- explicitly bundled into the current task PR
+- intentionally abandoned or kept local with operator approval
+
+Run `git status --short --branch --untracked-files=all` in each touched repo,
+commit/push/open the PR for changes that should persist, and record any
+intentional local remainder. Do not assume future merge cleanup will preserve
+uncommitted workflow edits.
 
 Do not idle the active thread just to wait for asynchronous deploy automation if local post-merge
 work is already complete. Treat deploy as a later checkpoint unless it has actually failed or a new
