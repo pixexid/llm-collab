@@ -72,7 +72,9 @@ policy:
 - GitHub Codex review must not become an infinite wait when no new review
   artifact appears after the review request
 - do not request another GitHub Codex review after a narrow fix that directly
-  addresses a PR comment and does not materially expand the diff
+  addresses a PR comment and does not materially expand the diff; the
+  current-head GitHub Codex artifact requirement is waived only for that narrow
+  review-fix commit
 - if the connector fails, stays silent, or only reacts positively, the
   orchestrator may proceed after inspecting the full PR comment/review state
   and confirming there is no current actionable feedback
@@ -85,11 +87,12 @@ review threads/comments, review-request reactions, and merge state.
 When the operator has authorized the merge path for the PR or PR class, the
 heartbeat may complete the wait after it verifies the latest head has green
 required checks, clean `mergeStateStatus`, local/orchestrator review completed,
-and no unresolved current review feedback. Treat the current GitHub Codex review
-signal as clean when either:
+and no unresolved current review feedback. Treat the GitHub Codex review signal
+as clean when either:
 
-- the latest top-level `chatgpt-codex-connector` review/comment for the current
-  head reports no actionable or major issues, or
+- before any review-fix commit, the latest top-level
+  `chatgpt-codex-connector` review/comment for the reviewed head reports no
+  actionable or major issues, or
 - the connector reacted positively to the latest operator `@codex review`
   request for the current head and no new inline/top-level actionable comments
   were created after that request.
@@ -108,8 +111,10 @@ Read current review bodies and reactions directly. Do not infer the current
 result from stale inline review-thread objects alone, and do not keep a heartbeat
 waiting indefinitely for a comment when the connector signaled clean review via
 reaction. If review feedback lands, fix or respond to it, push the update, rerun
-the internal Codex app review and required local/CI checks, then continue toward
-merge without asking GitHub Codex for another review when the fix is narrow.
+the internal Codex app review and required local/CI checks, treat the resolved
+review thread plus current PR state as the GitHub Codex signal, then continue
+toward merge without asking GitHub Codex for another review when the fix is
+narrow.
 
 Request another GitHub Codex review only when the follow-up materially changes
 the PR, for example:
