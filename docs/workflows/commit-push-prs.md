@@ -35,8 +35,8 @@ Include:
 
 ## PR Review Wait Gate
 
-Do not merge a PR from green CI alone when the project expects Codex/GitHub PR
-review. A merge is allowed only after the orchestrator has inspected:
+Do not merge a PR from green CI alone. A merge is allowed only after the
+orchestrator has inspected:
 
 - GitHub Actions checks on the latest head SHA
 - `mergeStateStatus`
@@ -44,25 +44,49 @@ review. A merge is allowed only after the orchestrator has inspected:
 - nested review threads and inline comments
 - any requested changes or review replies after follow-up commits
 
-If the PR is waiting only for Codex/GitHub review, keep it open and create or
-update a Codex heartbeat attached to the current thread with a 6-minute cadence.
-Each heartbeat must re-check the PR checks, review state, review
-threads/comments, review-request reactions, and merge state.
-
 Do not idle on review while `mergeStateStatus` is dirty. A dirty merge state is
 an active blocker: refresh the branch against the target base, resolve conflicts,
 rerun verification, push, and then request/inspect review again.
 
+### GitHub Codex review policy
+
+Use `local_required_github_codex_opportunistic` as the default queue-runner
+policy:
+
+- the orchestrator's local review and required project gates are mandatory
+- GitHub Codex review/comments are consumed when they appear
+- GitHub Codex review must not become an infinite wait when no new review
+  artifact appears after the review request
+- if the connector fails, stays silent, or only reacts positively, the
+  orchestrator may proceed after inspecting the full PR comment/review state
+  and confirming there is no current actionable feedback
+
+If the PR is waiting only for remote checks or remote review state, keep it open
+and create or update a Codex heartbeat attached to the current thread with a
+6-minute cadence. Each heartbeat must re-check the PR checks, review state,
+review threads/comments, review-request reactions, and merge state.
+
 When the operator has authorized the merge path for the PR or PR class, the
 heartbeat may complete the wait after it verifies the latest head has green
-required checks, clean `mergeStateStatus`, and no unresolved current review
-feedback. Treat the current Codex review signal as clean when either:
+required checks, clean `mergeStateStatus`, local/orchestrator review completed,
+and no unresolved current review feedback. Treat the current GitHub Codex review
+signal as clean when either:
 
 - the latest top-level `chatgpt-codex-connector` review/comment for the current
   head reports no actionable or major issues, or
 - the connector reacted positively to the latest operator `@codex review`
   request for the current head and no new inline/top-level actionable comments
   were created after that request.
+
+If no new GitHub Codex review artifact appears, do not wait forever. After at
+least one heartbeat cycle, proceed when all of these are true:
+
+- local/orchestrator review found no actionable issues
+- required checks are green on the latest head
+- `mergeStateStatus` is clean
+- full PR comments, review bodies, review threads, and inline comments contain
+  no unresolved actionable feedback for the current head
+- the project/operator has authorized auto-merge for this PR or queue class
 
 Read current review bodies and reactions directly. Do not infer the current
 result from stale inline review-thread objects alone, and do not keep a heartbeat
@@ -71,6 +95,38 @@ reaction. If review feedback lands, fix or respond to it, push the update, and
 keep the heartbeat active until rerun checks, merge state, and review signals are
 clean. Delete the PR-wait heartbeat immediately after the merge, then continue
 normal post-merge cleanup in the same Codex thread.
+
+## Autonomous Queue Runner State
+
+For unattended or standing-instruction loops, record the current loop mode in:
+
+```bash
+python3 bin/autonomous_loop.py start --project <project_id> --agent codex --mode next_lane
+```
+
+The state file lives at:
+
+```text
+{project_state_root}/<project_id>/autonomous-loop.json
+```
+
+Use it to distinguish these states:
+
+- `next_lane`: recover inbox/queues/PRs and activate the next safe lane
+- `worker_wait`: a worker is active; check inbox and bridge status without
+  interrupting visible work
+- `acceptance`: worker checkpoint is ready for dirty-worktree/task-contract
+  acceptance
+- `pr_wait`: PR is open; re-check checks/reviews/comments/merge state
+- `fix_loop`: blocker exists but can be fixed by Codex or re-delegation
+- `post_merge`: merge completed; run cleanup and return to queue recovery
+- `queue_empty`: no remaining lane after validation
+
+There should be one queue-runner heartbeat per project loop. Task-specific
+heartbeats are subordinate: create them only for a concrete wait such as Claude
+Desktop, a worker handoff, or a PR, and delete/update them when the main
+queue-runner state moves. Do not leave a stale task heartbeat competing with the
+persistent queue runner.
 ## Post-merge
 
 After merge:

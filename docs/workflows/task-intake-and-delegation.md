@@ -30,6 +30,59 @@ remaining issue-sized lanes.
 - when the queue has a generated Markdown view, regenerate it after JSON edits
 - if `claim_task.py --status in_progress` targets a queued lane that is not `ready`, the transition should fail unless an explicit queue-override flag is used
 
+## Autonomous queue loop
+
+When the operator gives standing instructions to keep processing tasks, the
+orchestrator should run a persistent queue loop instead of treating each PR or
+worker wait as the end of the thread. Record the loop with:
+
+```bash
+python3 bin/autonomous_loop.py start --project <project_id> --agent codex --mode next_lane
+```
+
+Each loop pass must recover all live coordination inputs before deciding the
+next action:
+
+- `session_bootstrap.py --agent codex`
+- `inbox.py --me codex --project <project_id> --limit 5 --peek` or the
+  project-approved unread check
+- canonical issue/design queue validation
+- `project_design_queue.py bridge-status --project <project_id> --json` when a
+  design/Claude Desktop lane may be active
+- active task mirrors and worker checkpoint status
+- active PR checks, merge state, full comments/reviews/threads, and branch
+  freshness
+
+The loop may stop only when one of the recorded stop conditions is true:
+
+- `operator_interrupt`: the operator changes direction or asks to stop
+- `queue_empty`: queue validation confirms no remaining ready/active/review lane
+- `true_external_blocker`: the next step needs unavailable credentials, product
+  direction, destructive approval, or an unreachable required UI
+
+Do not stop on these states:
+
+- a worker reported `blocked`, if Codex can update the task, issue, branch, PR,
+  brief, or verification failure and continue
+- a PR is green but waiting for a GitHub Codex review artifact that may never
+  arrive, after local/orchestrator review and the configured PR heartbeat policy
+  are satisfied
+- a workflow/process diff exists; classify it into its own PR or an explicit
+  bundle before the next lane
+
+`llm-collab` messages are part of the loop, not a side channel. Before sending a
+worker follow-up, update the task/issue if scope changed, write one consolidated
+message, and use the approved worker bridge. For Claude Desktop, use Computer
+Use when available; if Computer Use cannot access the target UI, report the
+reason and ask the operator to wake the target worker instead of falling back to
+hidden relay text.
+
+There should be one active queue-runner heartbeat for a project loop. A
+task-specific heartbeat may exist only as a child wait for Claude, a worker
+handoff, or a PR review/check state. Child heartbeats must name the current
+task/PR and update or delete themselves when the loop mode changes, so stale
+heartbeats cannot collide with the queue runner.
+
 ### Design-first queue precedence
 
 Some projects maintain a separate runtime-local design queue, commonly:
