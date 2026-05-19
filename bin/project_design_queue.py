@@ -822,6 +822,23 @@ def computer_use_timeout_status(project_id: str, task_id: object, *, now: dateti
     }
 
 
+def active_computer_use_timeout_count(entry: dict, *, now: datetime) -> int:
+    last_timeout = parse_utc_datetime(entry.get("last_timeout_utc"))
+    if last_timeout is None:
+        return 0
+    try:
+        timeout_count = max(1, int(entry.get("timeout_count", 1)))
+    except (TypeError, ValueError):
+        timeout_count = 1
+    cooldown_seconds = min(
+        COMPUTER_USE_TIMEOUT_COOLDOWN_SECONDS * (2 ** (timeout_count - 1)),
+        COMPUTER_USE_TIMEOUT_MAX_COOLDOWN_SECONDS,
+    )
+    if last_timeout + timedelta(seconds=cooldown_seconds) <= now:
+        return 0
+    return timeout_count
+
+
 def record_computer_use_timeout(project_id: str, payload: dict, *, reason: str) -> dict:
     context = ready_context(project_id, payload)
     if not context.get("ready"):
@@ -831,12 +848,11 @@ def record_computer_use_timeout(project_id: str, payload: dict, *, reason: str) 
     state = load_bridge_state(project_id)
     timeouts = state.setdefault("computer_use_timeouts", {})
     previous = timeouts.get(task_id, {})
-    try:
-        previous_count = max(0, int(previous.get("timeout_count", 0)))
-    except (TypeError, ValueError):
-        previous_count = 0
+    current = datetime.now(timezone.utc)
+    current_iso = current.isoformat()
+    previous_count = active_computer_use_timeout_count(previous, now=current)
     timeouts[task_id] = {
-        "last_timeout_utc": utc_iso(),
+        "last_timeout_utc": current_iso,
         "timeout_count": previous_count + 1,
         "reason": reason,
         "issue": context.get("issue"),
@@ -845,7 +861,7 @@ def record_computer_use_timeout(project_id: str, payload: dict, *, reason: str) 
         "branch": context.get("branch"),
     }
     state["project_id"] = project_id
-    state["updated_utc"] = utc_iso()
+    state["updated_utc"] = current_iso
     save_bridge_state(project_id, state)
     return {
         "project_id": project_id,

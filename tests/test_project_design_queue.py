@@ -1061,6 +1061,63 @@ class ProjectDesignQueueTest(unittest.TestCase):
         self.assertIn('"timeout_count": 1', stored)
         self.assertIn('"reason": "timeout"', stored)
 
+    def test_record_computer_use_timeout_resets_expired_cooldown_count(self) -> None:
+        payload = {
+            "lanes": [
+                {
+                    "order": 1,
+                    "issue": 223,
+                    "task_id": "TASK-A",
+                    "title": "Booking design",
+                    "owner": "claude",
+                    "queue_state": "ready",
+                    "depends_on": [],
+                }
+            ]
+        }
+        task_body = "\n".join(
+            [
+                "---",
+                "task_id: TASK-A",
+                "branch: codex/claude/task-a",
+                "worktree: /tmp/task-a",
+                "---",
+                "",
+            ]
+        )
+        written: dict[str, str] = {}
+
+        class FakeTaskPath:
+            def __str__(self) -> str:
+                return "/tmp/TASK-A.md"
+
+            def read_text(self) -> str:
+                return task_body
+
+        def fake_write_file(path: object, content: str) -> None:
+            written[str(path)] = content
+
+        expired_timeout = {
+            "last_timeout_utc": "2000-01-01T00:00:00+00:00",
+            "timeout_count": 3,
+            "reason": "old timeout",
+        }
+
+        with patch.object(project_design_queue, "find_task_by_id", return_value=FakeTaskPath()):
+            with patch.object(
+                project_design_queue,
+                "load_bridge_state",
+                return_value={"computer_use_timeouts": {"TASK-A": expired_timeout}},
+            ):
+                with patch.object(project_design_queue, "write_file", side_effect=fake_write_file):
+                    with patch.object(project_design_queue, "computer_use_timeout_status", return_value={"active": True}):
+                        result = project_design_queue.record_computer_use_timeout("amiga", payload, reason="timeout")
+
+        self.assertEqual(result["task_id"], "TASK-A")
+        stored = next(iter(written.values()))
+        self.assertIn('"timeout_count": 1', stored)
+        self.assertIn('"reason": "timeout"', stored)
+
 
 if __name__ == "__main__":
     unittest.main()
