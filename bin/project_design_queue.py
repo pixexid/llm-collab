@@ -1162,7 +1162,7 @@ def mark_lane_transition(project_id: str, task_id: str, *, owner: str, task_stat
                 f"Last complete design queue snapshot archived to {display_path(archived_json)} and {display_path(archived_md)}.",
                 "Rebuild implementation queue from completed design handoffs before activating code lanes.",
             ]
-            sync_markdown(project_id, payload, mirror_issue_queue=False)
+            sync_markdown(project_id, payload)
             return {
                 "updated": True,
                 "archived": True,
@@ -1275,7 +1275,7 @@ def main() -> int:
             "No remaining design lanes.",
             f"Design queue archived manually to {display_path(archived_json)} and {display_path(archived_md)}.",
         ]
-        sync_markdown(args.project, payload, mirror_issue_queue=False)
+        sync_markdown(args.project, payload)
         print(f"archived_json: {display_path(archived_json)}")
         print(f"archived_md: {display_path(archived_md)}")
         return 0

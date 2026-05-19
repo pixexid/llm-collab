@@ -86,6 +86,55 @@ class ProjectDesignQueueTest(unittest.TestCase):
         self.assertEqual(updated["lanes"][0]["queue_state"], "ready")
         self.assertEqual(updated["completed_recently"][-1]["task_id"], "TASK-A")
 
+    def test_mark_lane_done_syncs_empty_issue_mirror_for_final_lane(self) -> None:
+        payload = {
+            "schema_version": 2,
+            "artifact_type": "ordered_design_queue",
+            "project_id": "amiga",
+            "completed_recently": [],
+            "lanes": [
+                {
+                    "order": 1,
+                    "issue": 223,
+                    "task_id": "TASK-A",
+                    "title": "Final design lane",
+                    "owner": "claude",
+                    "task_status": "review",
+                    "queue_state": "review",
+                    "depends_on": [],
+                    "blocked_by": [],
+                }
+            ],
+        }
+        synced: list[dict] = []
+        mirror_flags: list[bool] = []
+
+        def fake_sync_markdown(project_id: str, updated: dict, *, mirror_issue_queue: bool = True) -> Path:
+            synced.append(updated)
+            mirror_flags.append(mirror_issue_queue)
+            return Path("/tmp/design-queue.md")
+
+        with patch.object(project_design_queue, "queue_exists", return_value=True):
+            with patch.object(project_design_queue, "load_queue", return_value=payload):
+                with patch.object(
+                    project_design_queue,
+                    "archive_complete_queue",
+                    return_value=(Path("/tmp/design-queue.json"), Path("/tmp/design-queue.md")),
+                ):
+                    with patch.object(project_design_queue, "sync_markdown", side_effect=fake_sync_markdown):
+                        result = project_design_queue.mark_lane_transition(
+                            "amiga",
+                            "TASK-A",
+                            owner="claude",
+                            task_status="done",
+                        )
+
+        self.assertEqual(result["updated"], True)
+        self.assertEqual(result["archived"], True)
+        self.assertEqual(len(synced), 1)
+        self.assertEqual(synced[0]["lanes"], [])
+        self.assertEqual(mirror_flags, [True])
+
     def test_issue_queue_mirror_uses_active_design_lanes_only(self) -> None:
         design_payload = {
             "completed_recently": [
