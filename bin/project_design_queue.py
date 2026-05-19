@@ -528,12 +528,10 @@ def next_ready_lane(payload: dict) -> dict | None:
 
 def current_bridge_lane(payload: dict) -> dict | None:
     lanes = sorted(payload.get("lanes", []), key=lambda lane: lane.get("order", 0))
-    return next((lane for lane in lanes if lane.get("queue_state") == "ready"), None) or next(
-        (lane for lane in lanes if lane.get("queue_state") == "active"),
-        None,
-    ) or next(
-        (lane for lane in lanes if lane.get("queue_state") == "review"),
-        None,
+    return (
+        next((lane for lane in lanes if lane.get("queue_state") == "active"), None)
+        or next((lane for lane in lanes if lane.get("queue_state") == "review"), None)
+        or next((lane for lane in lanes if lane.get("queue_state") == "ready"), None)
     )
 
 
@@ -808,7 +806,7 @@ def computer_use_timeout_status(project_id: str, task_id: object, *, now: dateti
     )
     cooldown_until = last_timeout + timedelta(seconds=cooldown_seconds)
     seconds_remaining = max(0, int((cooldown_until - current).total_seconds()))
-    next_check_seconds = min(max(seconds_remaining, 5 * 60), 30 * 60) if seconds_remaining > 0 else 0
+    next_check_seconds = min(seconds_remaining, 30 * 60) if seconds_remaining > 0 else 0
     return {
         "active": seconds_remaining > 0,
         "last_timeout_utc": entry.get("last_timeout_utc"),

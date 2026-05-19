@@ -521,6 +521,113 @@ class ProjectDesignQueueTest(unittest.TestCase):
         self.assertEqual(context["task_id"], "TASK-A")
         self.assertTrue(context["bridge_metadata_complete"])
 
+    def test_ready_context_prefers_active_lane_over_ready_lane(self) -> None:
+        payload = {
+            "lanes": [
+                {
+                    "order": 1,
+                    "issue": 223,
+                    "task_id": "TASK-READY",
+                    "title": "Ready design",
+                    "owner": "claude",
+                    "queue_state": "ready",
+                    "depends_on": [],
+                },
+                {
+                    "order": 2,
+                    "issue": 226,
+                    "task_id": "TASK-ACTIVE",
+                    "title": "Active design",
+                    "owner": "claude",
+                    "queue_state": "active",
+                    "depends_on": [],
+                },
+            ]
+        }
+
+        def fake_find_task_by_id(task_id: str) -> object:
+            task_body = "\n".join(
+                [
+                    "---",
+                    f"task_id: {task_id}",
+                    "related_chat: CHAT-TEST",
+                    f"branch: codex/claude/{task_id.lower()}",
+                    f"worktree: /tmp/{task_id.lower()}",
+                    f"bridge_thread_uuid: {task_id.lower()}-1234-1234-1234-123456789abc",
+                    f"bridge_visible_prefix: \"[BRIDGE {task_id}] GH-226 active design\"",
+                    "claude_activation_message_path: /tmp/message.md",
+                    "---",
+                    "",
+                ]
+            )
+
+            class FakeTaskPath:
+                def __str__(self) -> str:
+                    return f"/tmp/{task_id}.md"
+
+                def read_text(self) -> str:
+                    return task_body
+
+            return FakeTaskPath()
+
+        with patch.object(project_design_queue, "find_task_by_id", side_effect=fake_find_task_by_id):
+            context = project_design_queue.ready_context("amiga", payload)
+
+        self.assertTrue(context["ready"])
+        self.assertEqual(context["queue_state"], "active")
+        self.assertEqual(context["task_id"], "TASK-ACTIVE")
+
+    def test_ready_context_prefers_review_lane_over_ready_lane(self) -> None:
+        payload = {
+            "lanes": [
+                {
+                    "order": 1,
+                    "issue": 223,
+                    "task_id": "TASK-READY",
+                    "title": "Ready design",
+                    "owner": "claude",
+                    "queue_state": "ready",
+                    "depends_on": [],
+                },
+                {
+                    "order": 2,
+                    "issue": 226,
+                    "task_id": "TASK-REVIEW",
+                    "title": "Review design",
+                    "owner": "claude",
+                    "queue_state": "review",
+                    "depends_on": [],
+                },
+            ]
+        }
+
+        class FakeTaskPath:
+            def __str__(self) -> str:
+                return "/tmp/TASK-REVIEW.md"
+
+            def read_text(self) -> str:
+                return "\n".join(
+                    [
+                        "---",
+                        "task_id: TASK-REVIEW",
+                        "related_chat: CHAT-TEST",
+                        "branch: codex/claude/task-review",
+                        "worktree: /tmp/task-review",
+                        "bridge_thread_uuid: 12345678-1234-1234-1234-123456789abc",
+                        "bridge_visible_prefix: \"[BRIDGE 12345678] GH-226 review design\"",
+                        "claude_activation_message_path: /tmp/message.md",
+                        "---",
+                        "",
+                    ]
+                )
+
+        with patch.object(project_design_queue, "find_task_by_id", return_value=FakeTaskPath()):
+            context = project_design_queue.ready_context("amiga", payload)
+
+        self.assertTrue(context["ready"])
+        self.assertEqual(context["queue_state"], "review")
+        self.assertEqual(context["task_id"], "TASK-REVIEW")
+
     def test_render_markdown_reports_active_lane_when_no_ready_lane(self) -> None:
         payload = {
             "project_id": "amiga",
@@ -1111,6 +1218,31 @@ class ProjectDesignQueueTest(unittest.TestCase):
         self.assertEqual(blocker["timeout_count"], 2)
         self.assertEqual(blocker["cooldown_seconds"], 3600)
         self.assertEqual(blocker["recommended_next_check_minutes"], 30)
+
+    def test_computer_use_timeout_next_check_does_not_exceed_remaining_cooldown(self) -> None:
+        with patch.object(
+            project_design_queue,
+            "load_bridge_state",
+            return_value={
+                "computer_use_timeouts": {
+                    "TASK-A": {
+                        "last_timeout_utc": "2026-01-01T00:00:00+00:00",
+                        "timeout_count": 1,
+                        "reason": "timeout",
+                    }
+                }
+            },
+        ):
+            blocker = project_design_queue.computer_use_timeout_status(
+                "amiga",
+                "TASK-A",
+                now=datetime.fromisoformat("2026-01-01T00:28:30+00:00"),
+            )
+
+        self.assertTrue(blocker["active"])
+        self.assertEqual(blocker["seconds_remaining"], 90)
+        self.assertEqual(blocker["recommended_next_check_seconds"], 90)
+        self.assertEqual(blocker["recommended_next_check_minutes"], 2)
 
     def test_record_computer_use_timeout_writes_ready_lane_state(self) -> None:
         payload = {
