@@ -116,17 +116,23 @@ changes. If workflow docs, repo instructions, skills, queue scripts, bridge
 runtime docs, or agent memory changed during the lane, classify and persist
 those changes before starting the next lane or ending the thread.
 
-For PR-review wait heartbeats, follow `commit-push-prs.md`: when the operator
-has authorized the merge path and the latest head has green checks, clean merge
-state, and no unresolved current review feedback, merge from the current thread
-when the current Codex review signal is clean. A clean signal can be either the
-latest current-head `chatgpt-codex-connector` review/comment with no actionable
-issues or the connector's positive reaction to the latest `@codex review`
-request with no later actionable comments. Do not wait indefinitely for a
-comment if the connector used a reaction or if no new connector artifact appears
-after the configured heartbeat cycle and local/orchestrator review is clean. Do
-not substitute stale inline review-thread objects for current PR state. Delete
-the heartbeat before post-merge cleanup.
+For PR-review wait heartbeats, follow `commit-push-prs.md`: the repeated review
+loop is the orchestrator's internal Codex app review before commit/PR and after
+any review-fix patch. When the operator has authorized the merge path and the
+latest head has green checks, clean merge state, and no unresolved current
+review feedback, merge from the current thread when the current Codex review
+signal is clean. A clean signal can be either the latest current-head
+`chatgpt-codex-connector` review/comment with no actionable issues or the
+connector's positive reaction to the latest `@codex review` request with no
+later actionable comments. Do not wait indefinitely for a comment if the
+connector used a reaction or if no new connector artifact appears after the
+configured heartbeat cycle and local/orchestrator review is clean.
+
+If GitHub Codex comments on the PR, fix the pointed issue, rerun internal Codex
+app review and required checks, and do not request another GitHub Codex review
+unless the fix materially expands the PR or changes code semantics. Do not
+substitute stale inline review-thread objects for current PR state. Delete the
+heartbeat before post-merge cleanup.
 
 When a persistent queue-runner heartbeat is active, each task-specific wait must
 update `autonomous-loop.json` before it waits and again before it resumes. This
