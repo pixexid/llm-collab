@@ -68,6 +68,18 @@ class ClaudeDesktopBridgeHealthTest(unittest.TestCase):
         ):
             self.assertEqual(claude_desktop_bridge_health.claude_local_agent_count(), 0)
 
+    def test_run_command_reports_missing_binary_without_raising(self) -> None:
+        with patch.object(
+            claude_desktop_bridge_health.subprocess,
+            "run",
+            side_effect=FileNotFoundError("missing-tool"),
+        ):
+            result = claude_desktop_bridge_health.run_command(["missing-tool", "--version"])
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("command not found: missing-tool", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -29,13 +29,20 @@ class CommandResult:
 
 
 def run_command(command: list[str]) -> CommandResult:
-    result = subprocess.run(
-        command,
-        check=False,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
+    try:
+        result = subprocess.run(
+            command,
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except FileNotFoundError as error:
+        return CommandResult(
+            ok=False,
+            stdout="",
+            stderr=f"command not found: {command[0]} ({error})",
+        )
     return CommandResult(
         ok=result.returncode == 0,
         stdout=result.stdout.strip(),
