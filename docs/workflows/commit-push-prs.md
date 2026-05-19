@@ -47,11 +47,30 @@ review. A merge is allowed only after the orchestrator has inspected:
 If the PR is waiting only for Codex/GitHub review, keep it open and create or
 update a Codex heartbeat attached to the current thread with a 6-minute cadence.
 Each heartbeat must re-check the PR checks, review state, review
-threads/comments, and merge state. If no review artifact exists yet, report the
-external wait state instead of merging. If review feedback lands, fix or respond
-to it, push the update, and keep the heartbeat active until the rerun checks and
-review state are clean.
+threads/comments, review-request reactions, and merge state.
 
+Do not idle on review while `mergeStateStatus` is dirty. A dirty merge state is
+an active blocker: refresh the branch against the target base, resolve conflicts,
+rerun verification, push, and then request/inspect review again.
+
+When the operator has authorized the merge path for the PR or PR class, the
+heartbeat may complete the wait after it verifies the latest head has green
+required checks, clean `mergeStateStatus`, and no unresolved current review
+feedback. Treat the current Codex review signal as clean when either:
+
+- the latest top-level `chatgpt-codex-connector` review/comment for the current
+  head reports no actionable or major issues, or
+- the connector reacted positively to the latest operator `@codex review`
+  request for the current head and no new inline/top-level actionable comments
+  were created after that request.
+
+Read current review bodies and reactions directly. Do not infer the current
+result from stale inline review-thread objects alone, and do not keep a heartbeat
+waiting indefinitely for a comment when the connector signaled clean review via
+reaction. If review feedback lands, fix or respond to it, push the update, and
+keep the heartbeat active until rerun checks, merge state, and review signals are
+clean. Delete the PR-wait heartbeat immediately after the merge, then continue
+normal post-merge cleanup in the same Codex thread.
 ## Post-merge
 
 After merge:

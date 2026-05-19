@@ -381,9 +381,14 @@ Codex side:
 
 - Continue the current Codex thread when the operator wants the bridge watcher to
   stay active and report Claude state here.
-- Start a fresh Codex thread after an Amiga issue is merged/cleaned up, or when
-  the normal Amiga self-handoff rule says the next issue-sized lane should begin
-  from inbox recovery.
+- Stay in the current Codex thread after an Amiga issue is merged/cleaned up by
+  default. Start a fresh Codex thread only when the operator explicitly asks for
+  a fresh session/handoff, context safety requires a boundary, or Codex cannot
+  safely continue in the current thread.
+- Before starting a new lane or ending the current thread, preserve any workflow
+  docs, repo instructions, skills, queue scripts, bridge docs, or agent-memory
+  edits by committing/PR'ing them, explicitly bundling them into the next lane,
+  or abandoning them with operator approval.
 
 Claude side:
 
