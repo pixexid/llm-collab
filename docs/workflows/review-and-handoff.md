@@ -54,6 +54,19 @@ For `shared-supabase-required` lanes, handoff replies and the linked task contra
 - `review`: ready for orchestrator review
 - `done`: reviewed and accepted
 
+In an autonomous queue loop, `blocked` is not a default stop state. First decide
+whether the blocker is actionable:
+
+- if Codex can fix the brief, task contract, queue metadata, branch conflict,
+  PR body, review comment, or verification failure, switch the loop to
+  `fix_loop`, make the smallest correction, rerun the relevant gates, and
+  return to the normal lane state
+- if a worker needs a corrected instruction, update the task/issue first, then
+  send one consolidated `llm-collab` message through the approved bridge path
+- stop only for a true external blocker, such as missing credentials, operator
+  product direction, unavailable required UI, or a destructive decision that
+  cannot be inferred safely
+
 ## Handoff flow
 
 1. worker creates the required checkpoint commit when the lane is an isolated-worktree implementation task
@@ -110,6 +123,12 @@ when the current Codex review signal is clean. A clean signal can be either the
 latest current-head `chatgpt-codex-connector` review/comment with no actionable
 issues or the connector's positive reaction to the latest `@codex review`
 request with no later actionable comments. Do not wait indefinitely for a
-comment if the connector used a reaction, and do not substitute stale inline
-review-thread objects for the latest current-head review signal. Delete the
-heartbeat before post-merge cleanup.
+comment if the connector used a reaction or if no new connector artifact appears
+after the configured heartbeat cycle and local/orchestrator review is clean. Do
+not substitute stale inline review-thread objects for current PR state. Delete
+the heartbeat before post-merge cleanup.
+
+When a persistent queue-runner heartbeat is active, each task-specific wait must
+update `autonomous-loop.json` before it waits and again before it resumes. This
+keeps one authoritative loop state instead of several stale heartbeats making
+conflicting decisions.
