@@ -1057,9 +1057,6 @@ def issue_lane_from_design_lane(lane: dict) -> dict:
 
 def sync_issue_queue_mirror(project_id: str, design_payload: dict) -> Path | None:
     active_lanes = active_design_lanes(design_payload)
-    if not active_lanes:
-        return None
-
     existing_issue_payload = load_issue_queue(project_id)
     existing_completed_by_task = {
         str(item.get("task_id")): item

@@ -125,6 +125,60 @@ class ProjectDesignQueueTest(unittest.TestCase):
         self.assertEqual(issue_payload["lanes"][0]["task_id"], "TASK-A")
         self.assertEqual(issue_payload["lanes"][0]["queue_state"], "ready")
 
+    def test_issue_queue_mirror_clears_stale_lanes_when_design_queue_is_empty(self) -> None:
+        design_payload = {
+            "completed_recently": [
+                {"issue": 223, "task_id": "TASK-A", "owner": "claude", "status": "done"}
+            ],
+            "lanes": [
+                {
+                    "order": 1,
+                    "issue": 223,
+                    "task_id": "TASK-A",
+                    "title": "Finished design lane",
+                    "owner": "claude",
+                    "task_status": "done",
+                    "queue_state": "done",
+                    "depends_on": [],
+                    "blocked_by": [],
+                    "notes": "Done.",
+                }
+            ],
+        }
+        existing_issue_payload = {
+            "schema_version": 1,
+            "artifact_type": "ordered_issue_queue",
+            "project_id": "amiga",
+            "completed_recently": [],
+            "lanes": [
+                {
+                    "order": 1,
+                    "issue": 223,
+                    "task_id": "TASK-A",
+                    "title": "Stale lane",
+                    "owner": "claude",
+                    "task_status": "open",
+                    "queue_state": "ready",
+                    "depends_on": [],
+                }
+            ],
+        }
+        captured: dict[str, object] = {}
+
+        def fake_issue_sync(project_id: str, issue_payload: dict) -> Path:
+            captured["project_id"] = project_id
+            captured["payload"] = issue_payload
+            return Path("/tmp/issue-queue.md")
+
+        with patch.object(project_design_queue, "load_issue_queue", return_value=existing_issue_payload):
+            with patch.object(project_design_queue.issue_queue, "sync_markdown", side_effect=fake_issue_sync):
+                path = project_design_queue.sync_issue_queue_mirror("amiga", design_payload)
+
+        self.assertEqual(path, Path("/tmp/issue-queue.md"))
+        issue_payload = captured["payload"]
+        self.assertEqual(issue_payload["lanes"], [])
+        self.assertEqual(issue_payload["completed_recently"][0]["task_id"], "TASK-A")
+
     def test_issue_queue_mirror_preserves_existing_completed_owner(self) -> None:
         design_payload = {
             "completed_recently": [
