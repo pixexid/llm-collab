@@ -137,18 +137,32 @@ Operational rule:
 Safest task-grade workflow for Claude desktop:
 
 1. `llm-collab` delivers the task into `Chats/` with `deliver.py`
+   - for Claude Desktop, `desktop_bridge_required` means Codex must continue to
+     Computer Use; it is not a manual operator relay request
 2. Codex uses Computer Use to open/select the Claude desktop thread, or creates a
    new visible thread by generating a UUID plus short title, clicking
-   `New session`, and sending the first prompt with
-   `[BRIDGE <8-char-uuid-prefix>] <short title>` as the first line
-3. Codex tells Claude either to read the exact `llm-collab` inbox/chat/message
-   or pastes the full bounded context into the visible prompt
-4. Codex creates a heartbeat only while a Claude response is expected
-5. each heartbeat checks Claude desktop through Computer Use; if Claude is
+   `New session`, and sending one one-line wake prompt
+3. Codex sends a visible prompt only after the Claude idle input gate passes:
+   active row not `Running`, empty focused composer, no visible `Stop`, and no
+   visible queued messages with `Remove queued message`
+4. Codex types exactly one short visible wake prompt that points Claude to the
+   exact `llm-collab` inbox/chat/message path. Do not paste full task context,
+   acceptance criteria, or multi-paragraph implementation briefs into Claude
+   Desktop; the durable `Chats/` packet is the source of truth. The prompt must
+   be one line, under roughly 240 characters, and never contain newline-split
+   bridge details. If more detail is needed, update the durable chat packet and
+   wake Claude with the same one-line pointer only after Claude is idle.
+5. Codex creates a heartbeat only while a Claude response is expected
+6. each heartbeat checks Claude desktop through Computer Use; if Claude is
    running, it waits; if Claude is idle/awaiting input, it reads and records the
    response
-6. Codex deletes the heartbeat when the response is recorded, blocked, timed
+7. Codex deletes the heartbeat when the response is recorded, blocked, timed
    out, or no longer needed
+
+Manual operator wake is only a fallback after Computer Use is unavailable,
+blocked by a non-idle Claude state, or fails to send. In that case, report the
+specific blocker and provide the one-line bridge prompt the operator should
+send.
 
 For programmatic runtime targeting that does not require visible desktop state,
 use a separate non-desktop adapter. For Claude desktop work, do not use

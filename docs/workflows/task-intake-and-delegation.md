@@ -30,6 +30,42 @@ remaining issue-sized lanes.
 - when the queue has a generated Markdown view, regenerate it after JSON edits
 - if `claim_task.py --status in_progress` targets a queued lane that is not `ready`, the transition should fail unless an explicit queue-override flag is used
 
+### Design-first queue precedence
+
+Some projects maintain a separate runtime-local design queue, commonly:
+
+```text
+{project_state_root}/<project_id>/design-queue.json
+{project_state_root}/<project_id>/design-queue.md
+```
+
+When that file exists and contains lanes, it takes precedence for UI/UX-adjacent work. Before activating code implementation:
+
+- verify the design queue against live issue state, task mirrors, and the runtime issue-queue mirror with `python3 bin/project_design_queue.py validate --project <project_id> --check-github`
+- use `python3 bin/project_design_queue.py validate --project <project_id> --check-github --json` when a watcher or heartbeat needs machine-readable `ok`, `errors`, `warnings`, and current-lane status
+- remove closed, done, or stale lanes immediately
+- keep only design, shaping, surface-spec, handoff, parity, and template-design work in the design queue
+- mirror the active design lane into the canonical issue queue when project bootstrap only reads `issue-queue.json`
+- keep backend or runtime implementation lanes out of `ready` until their design dependency is done
+- regenerate the generated view with `python3 bin/project_design_queue.py sync-markdown --project <project_id>` after JSON edits
+- rely on `claim_task.py` to advance both `design-queue.json` and the mirrored `issue-queue.json` when a design lane moves to `in_progress`, `review`, or `done`
+
+For design lanes that depend on accepted surface specs or handoffs that may not
+yet be on the default branch, add a machine-readable materialization gate to the
+task frontmatter before activation:
+
+```yaml
+dependency_materialization_gate: true
+required_dependency_artifacts: ["design/surfaces/notifications.md", "design/handoff/notifications-HANDOFF.md"]
+```
+
+When such a lane is `ready`, `active`, or `review`, `project_design_queue.py
+validate` checks the assigned `worktree` for those files. A missing file is an
+activation/base-branch blocker, not a product gap for the worker to rediscover
+or recreate.
+
+If a broad issue mixes design and code, split it into a design task first and create the implementation task only after the design handoff is accepted.
+
 ## Preflight gate split
 
 - task-claim preflight (`claim_task.py` to `in_progress` or `review`) is a tooling/env gate, not a browser gate
