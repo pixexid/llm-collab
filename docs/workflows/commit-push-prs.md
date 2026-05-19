@@ -23,9 +23,12 @@ Before PR creation, run project-required verification on the review branch.
 Run browser/smoke checks only when the lane touches browser-relevant behavior.
 Use the project's primary browser path first, and run fallback browser tooling only if the primary path fails.
 Do not create the review branch from a worker lane until the worker handoff acceptance gate has already passed, including branch verification, checkpoint-commit verification, and `git status --short --untracked-files=all`.
+For Amiga, this means invoking the repo-local `amiga-pre-pr-review` skill before
+commit, push, or PR.
 
-Before committing or opening a PR, run the orchestrator's internal Codex app
-review against the final local diff. Treat this as the primary code-review gate:
+Before committing or opening a PR, the orchestrator must manually review the
+final branch diff against the target branch or merge base. Treat this as the
+primary code-review gate:
 
 - review against the merge base or target branch, not just the last edited file
 - check correctness, regressions, missing verification, contract drift, and
@@ -34,9 +37,14 @@ review against the final local diff. Treat this as the primary code-review gate:
 - rerun the affected verification after fixes
 - only then commit, push, and open the PR
 
-This internal review is the repeated review loop. GitHub Codex PR review is an
-external safety net, not the mechanism that should discover routine issues for
-the first time.
+This manual branch-diff review is the repeated review loop. GitHub Codex PR
+review is an external safety net, not the mechanism that should discover routine
+issues for the first time.
+
+Do not manually comment `@codex review` when opening a PR. If GitHub Codex is
+enabled for the repository, consume the automatic PR review/comment/reaction
+when it appears. If no automatic artifact appears, use the opportunistic policy
+below instead of creating a manual review request.
 
 ## PR requirements
 
@@ -68,9 +76,9 @@ Use `local_required_github_codex_opportunistic` as the default queue-runner
 policy:
 
 - the orchestrator's local review and required project gates are mandatory
-- GitHub Codex review/comments are consumed when they appear
+- automatic GitHub Codex review/comments are consumed when they appear
 - GitHub Codex review must not become an infinite wait when no new review
-  artifact appears after the review request
+  artifact appears after PR creation
 - do not request another GitHub Codex review after a narrow fix that directly
   addresses a PR comment and does not materially expand the diff; the
   current-head GitHub Codex artifact requirement is waived only for that narrow
@@ -82,7 +90,7 @@ policy:
 If the PR is waiting only for remote checks or remote review state, keep it open
 and create or update a Codex heartbeat attached to the current thread with a
 6-minute cadence. Each heartbeat must re-check the PR checks, review state,
-review threads/comments, review-request reactions, and merge state.
+review threads/comments, automatic connector reactions, and merge state.
 
 When the operator has authorized the merge path for the PR or PR class, the
 heartbeat may complete the wait after it verifies the latest head has green
@@ -93,9 +101,8 @@ as clean when either:
 - before any review-fix commit, the latest top-level
   `chatgpt-codex-connector` review/comment for the reviewed head reports no
   actionable or major issues, or
-- the connector reacted positively to the latest operator `@codex review`
-  request for the current head and no new inline/top-level actionable comments
-  were created after that request.
+- the connector reacted positively to the PR or latest reviewed head and no new
+  inline/top-level actionable comments were created after that signal.
 
 If no new GitHub Codex review artifact appears, do not wait forever. After at
 least one heartbeat cycle, proceed when all of these are true:
@@ -111,7 +118,7 @@ Read current review bodies and reactions directly. Do not infer the current
 result from stale inline review-thread objects alone, and do not keep a heartbeat
 waiting indefinitely for a comment when the connector signaled clean review via
 reaction. If review feedback lands, fix or respond to it, push the update, rerun
-the internal Codex app review and required local/CI checks, treat the resolved
+the manual branch-diff review and required local/CI checks, treat the resolved
 review thread plus current PR state as the GitHub Codex signal, then continue
 toward merge without asking GitHub Codex for another review when the fix is
 narrow.
