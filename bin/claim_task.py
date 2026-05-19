@@ -18,6 +18,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 import project_issue_queue as issue_queue
+import project_design_queue as design_queue
 from _helpers import (
     ROOT,
     TASK_STATUSES,
@@ -233,6 +234,18 @@ def main():
             owner=args.owner,
             task_status=args.status,
         )
+    if project_id and design_queue.queue_exists(project_id):
+        design_queue_summary = design_queue.mark_lane_transition(
+            project_id,
+            tid,
+            owner=args.owner,
+            task_status=args.status,
+        )
+        if design_queue_summary is not None:
+            queue_summary = {
+                "issue_queue": queue_summary,
+                "design_queue": design_queue_summary,
+            }
 
     result = {
         "task_id": tid,

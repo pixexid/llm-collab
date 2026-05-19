@@ -7,8 +7,10 @@ deliver.py — Send a message from one agent to another.
 Writes the message to Chats/ (canonical record) and appends
 a pointer to the recipient's agents/{id}/inbox.json.
 
-If the recipient has activation.type == "human_relay", prints
-a ready-to-paste handoff prompt for the human operator.
+If the recipient is a Claude Desktop target, prints a Computer Use bridge
+instruction instead of a human relay prompt. If the recipient has
+activation.type == "human_relay", prints a ready-to-paste handoff prompt for
+the human operator.
 
 Usage:
   bin/deliver.py --chat last --from orchestrator --to worker --title "Implement feature X"
@@ -124,6 +126,19 @@ def resolve_bound_runtime_session_id(project_id: str, chat_id: str, agent_id: st
     if not runtime_session_id:
         return None
     return str(runtime_session_id)
+
+
+def is_claude_desktop_bridge_target(project_id: str, recipient_id: str) -> bool:
+    return project_id == "amiga" and recipient_id == "claude"
+
+
+def build_desktop_bridge_prompt(chat_id: str, recipient_id: str, message_path: Path) -> str:
+    bridge_id = shortid(8)
+    filename = message_path.name
+    prompt = f"[BRIDGE {bridge_id}] Read latest {recipient_id} packet in {chat_id}: {filename}"
+    if len(prompt) <= 240:
+        return prompt
+    return f"[BRIDGE {bridge_id}] Read latest {recipient_id} inbox packet for {chat_id} and respond here."
 
 
 def main():
@@ -251,21 +266,54 @@ def main():
         },
     )
 
+    desktop_bridge_required = (
+        args.recipient != "operator"
+        and not autobridge_ready
+        and is_claude_desktop_bridge_target(args.project, args.recipient)
+    )
+    desktop_bridge_prompt = (
+        build_desktop_bridge_prompt(chat_id, args.recipient, to_path)
+        if desktop_bridge_required
+        else None
+    )
+    operator_relay_required = args.recipient != "operator" and not autobridge_ready and not desktop_bridge_required
+
     result = {
         "chat_id": chat_id,
         "chat_dir": str(chat_dir.relative_to(ROOT)),
         "to_file": str(to_path.relative_to(ROOT)),
         "from_file": str(from_path.relative_to(ROOT)),
         "recipient_first_time_awareness": bool(first_time_awareness),
-        "relay_required": args.recipient != "operator" and not autobridge_ready,
+        "relay_required": operator_relay_required,
+        "operator_relay_required": operator_relay_required,
+        "desktop_bridge_required": desktop_bridge_required,
+        "desktop_bridge_prompt": desktop_bridge_prompt,
         "resolved_target_session_id": args.target_session_id,
         "autobridge_ready": autobridge_ready,
         "autobridge_session_id": autobridge_target.get("session_id") if autobridge_target else None,
     }
     print(json.dumps(result, indent=2))
 
-    # Relay prompt for the human operator (always printed).
-    if is_human_relay(recipient_agent) and not autobridge_ready:
+    if desktop_bridge_required:
+        recipient_display = recipient_agent.get("display_name", args.recipient)
+        border = "━" * 60
+        print(f"\n{border}")
+        print("🖥️  CLAUDE DESKTOP BRIDGE REQUIRED")
+        print(border)
+        print()
+        print(
+            f"Use Computer Use against /Applications/Claude.app to wake "
+            f"{recipient_display} ({args.recipient}) for chat {chat_id}."
+        )
+        print("Do not ask the operator to relay this while Computer Use is available.")
+        print()
+        print("Visible one-line prompt:")
+        print(desktop_bridge_prompt)
+        print()
+        print("If Computer Use is blocked or Claude is not idle, record the blocker and")
+        print("then tell the operator why manual wake is needed.")
+        print(border)
+    elif is_human_relay(recipient_agent) and not autobridge_ready:
         print_handoff_prompt(
             recipient_agent,
             sender_id=args.sender,

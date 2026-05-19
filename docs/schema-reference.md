@@ -270,6 +270,8 @@ design_doc_update_decision: null
 | `related_paths` | string[] | File/directory paths involved |
 | `repo_targets` | string[] | Repos in scope |
 | `depends_on` | string[] | `TASK-{id}` blockers |
+| `dependency_materialization_gate` | bool | For queued design lanes, require accepted dependency artifacts to be present in the assigned worktree before activation/review |
+| `required_dependency_artifacts` | string[] | Repo-relative or absolute artifact paths that `project_design_queue.py validate` checks when the lane is `ready`, `active`, or `review` |
 | `branch` | string or null | Git branch for this task |
 | `ui_ux_lane` | bool | Whether the lane is subject to the UI/UX workflow contract |
 | `ui_ux_mode` | string | `implementation`, `docs_only`, or `none` |
@@ -456,6 +458,117 @@ chat/session turnover.
 - keep `{project_state_root}/{project_id}/issue-queue.json` and `.md` present with `lanes: []` so fresh sessions see an explicit empty queue instead of a missing file
 - do not keep real project queue files as tracked files in this repo; only `projects/_example/` belongs in the public checkout
 
+---
+
+## project_state_root/{project_id}/design-queue.json
+
+Optional per-project artifact for design-first queues that must temporarily take precedence over implementation queues.
+
+Use this when a project needs to clean stale design issues, route design-only lanes to a design owner, and keep implementation blocked until design handoffs are accepted. While active lanes remain, `design-queue.json` should be mirrored into `issue-queue.json` so session bootstrap and task-claim gates cannot advertise stale implementation work.
+
+```json
+{
+  "schema_version": 2,
+  "artifact_type": "ordered_design_queue",
+  "project_id": "my-app",
+  "last_updated_utc": "2026-01-01T00:00:00+00:00",
+  "mode": "design-only-until-empty",
+  "completed_recently": [
+    { "issue": 100, "task_id": "TASK-DONE1", "title": "accepted surface spec", "owner": "designer", "status": "done" }
+  ],
+  "lanes": [
+    {
+      "order": 1,
+      "phase": "design-refresh D1",
+      "issue": 101,
+      "task_id": "TASK-DESIGN1",
+      "title": "customer status tracker design",
+      "owner": "designer",
+      "task_status": "open",
+      "queue_state": "ready",
+      "lane_type": "design-layout-plus-template-spec",
+      "repo_scope": "design/surfaces/customer.md",
+      "depends_on": [],
+      "blocked_by": [],
+      "notes": "Design contract only; implementation follows from accepted handoff."
+    }
+  ]
+}
+```
+
+### Design Queue Rules
+
+- keep only design, shaping, surface-spec, handoff, parity, stale-issue audit, and template-design lanes in the design queue
+- remove closed, completed, non-design, backend-only, and implementation-ready lanes before activation
+- validate with `python3 bin/project_design_queue.py validate --project <project_id> --check-github`
+- use `python3 bin/project_design_queue.py validate --project <project_id> --check-github --json` for heartbeat/workflow automation; it returns `ok`, `errors`, `warnings`, and the current design lane status
+- for lanes depending on accepted-but-not-yet-main design outputs, set `dependency_materialization_gate: true` and `required_dependency_artifacts` in the task mirror; validation fails ready/active/review lanes when the assigned worktree lacks those artifacts
+- regenerate with `python3 bin/project_design_queue.py sync-markdown --project <project_id>`
+- let `claim_task.py` advance both the design queue and the mirrored issue queue when a design lane changes status
+- when the final design lane completes, archive the design queue and rebuild implementation work from accepted design handoffs instead of restoring stale placeholder lanes
+
+---
+
+## project_state_root/{project_id}/claude-desktop-bridge-state.json
+
+Runtime-local state for the Claude desktop Computer Use bridge.
+
+This file is outside the public checkout when `project_state_root` points to a
+local runtime directory. It records recent Computer Use capture/accessibility
+timeouts for the current ready design lane so unattended heartbeats can apply a
+cooldown instead of repeatedly spending long tool timeouts on the same blocked
+desktop state.
+
+```json
+{
+  "project_id": "my-app",
+  "updated_utc": "2026-01-01T00:00:00+00:00",
+  "computer_use_timeouts": {
+    "TASK-DESIGN1": {
+      "last_timeout_utc": "2026-01-01T00:00:00+00:00",
+      "timeout_count": 1,
+      "reason": "Computer Use get_app_state timed out after 120s",
+      "issue": 101,
+      "bridge_thread_uuid": "00000000-0000-0000-0000-000000000000",
+      "worktree": "/path/to/worktree",
+      "branch": "codex/claude/task-design1"
+    }
+  }
+}
+```
+
+### Bridge state fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `project_id` | string | Project identifier |
+| `updated_utc` | string | Last write timestamp |
+| `computer_use_timeouts` | object | Map of task id to the latest idle-time Computer Use timeout blocker |
+| `last_timeout_utc` | string | Timestamp used to calculate the retry cooldown |
+| `timeout_count` | int | Consecutive timeout count for the task; repeated failures increase the retry cooldown |
+| `reason` | string | Short operator-readable blocker reason |
+| `issue` | int | GitHub issue number for the ready lane |
+| `bridge_thread_uuid` | string or null | Claude desktop bridge UUID for audit/binding |
+| `worktree` | string or null | Assigned implementation/design worktree |
+| `branch` | string or null | Assigned branch |
+
+Use `python3 bin/project_design_queue.py record-computer-use-timeout --project
+<project_id> --reason "..."` to update this state. Use `python3
+bin/project_design_queue.py bridge-status --project <project_id> --json` to read
+the current classification. When it reports
+`computer-use-cooldown-no-durable-progress`, keep checking durable evidence but
+do not call Computer Use again until the cooldown expires.
+
+Repeated timeouts use exponential backoff from 30 minutes up to a 2-hour cap.
+This prevents unattended loops from spending a 120-second Computer Use timeout
+on every heartbeat when Claude Desktop accessibility/capture is blocked.
+`bridge-status --json` also reports `recommended_next_check_seconds` and
+`recommended_next_check_minutes` inside `computer_use_blocker`; heartbeat loops
+should use that value as their next wake cadence while no durable progress is
+visible.
+
+---
+
 Read first by `session_bootstrap.py` so the LLM immediately knows its identity.
 
 ---
@@ -517,3 +630,6 @@ Local runtime state used to avoid repeating first-time collaboration onboarding 
 Notes:
 - this file is runtime-only and gitignored (`State/`)
 - `deliver.py` uses it to print first-time onboarding relay prompts for `human_relay` recipients, then avoid repeating those long prompts
+- Claude Desktop recipients are not normal relay recipients when Computer Use is
+  available. For those sends, `deliver.py` reports `desktop_bridge_required`
+  and a one-line bridge prompt instead of asking for operator relay.

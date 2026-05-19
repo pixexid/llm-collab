@@ -192,6 +192,8 @@ The worktree is created at `{repo}-worktrees/{agent}/{task-slug}/` by default.
 └── my-app/
     ├── issue-queue.json        ← local runtime state
     ├── issue-queue.md
+    ├── design-queue.json       ← optional design-first runtime queue
+    ├── design-queue.md
     ├── roles-and-routing.md
     ├── runbooks/
     └── memory-templates/
