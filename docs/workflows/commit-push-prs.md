@@ -174,8 +174,30 @@ After merge:
 1. fast-forward local `main`
 2. run targeted post-merge smoke only when the merge is browser-relevant
 3. update the project queue artifact when lane ordering/state changes
-4. clean stale branches/worktrees
+4. run the executable branch/worktree cleanup gate
 5. mark local task done
+
+The cleanup gate is:
+
+```bash
+python3 bin/post_merge_cleanup.py \
+  --project <project_id> \
+  --apply \
+  --remove-plain-dirs \
+  --discard-disposable-dirty \
+  --fail-on-blockers
+```
+
+Run it from `/Users/pixexid/Projects/llm-collab`. For Amiga this command scans
+the app repo and `/Users/pixexid/Projects/amiga-worktrees`, not only branch refs
+visible from `/Users/pixexid/Projects/amiga`. The queue runner must not clear
+`post_merge`, return to `idle`, or activate the next lane until this command has
+either:
+
+- removed all safe stale worktrees, stale branches, and disposable plain
+  directories; or
+- reported every deferred dirty/active item with a concrete reason in the
+  current thread or task notes.
 
 Stay in the same Codex thread after merge/local cleanup by default. Do not send
 a `codex -> codex` self-handoff or force a fresh `check inbox` thread unless the
@@ -255,3 +277,7 @@ Safe cleanup order:
 8. delete stale remote branches (`git push origin --delete <branch...>`)
 
 Do not keep merged branch clutter; clean branch lists are required for reliable lane selection.
+
+The manual sequence above is the policy model. The executable gate above is the
+required loop mechanism. If the gate reports `ok_to_clear_post_merge: false`,
+the queue runner is still in `post_merge` or `fix_loop`, not `next_lane`.

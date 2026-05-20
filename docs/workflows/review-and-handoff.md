@@ -141,3 +141,23 @@ When a persistent queue-runner heartbeat is active, each task-specific wait must
 update `autonomous-loop.json` before it waits and again before it resumes. This
 keeps one authoritative loop state instead of several stale heartbeats making
 conflicting decisions.
+
+## Post-merge Cleanup Gate
+
+After a merge, the orchestrator must run the executable cleanup gate before the
+queue runner leaves `post_merge`:
+
+```bash
+python3 bin/post_merge_cleanup.py \
+  --project amiga \
+  --apply \
+  --remove-plain-dirs \
+  --discard-disposable-dirty \
+  --fail-on-blockers
+```
+
+This gate is intentionally broader than `git branch --merged`: it inspects the
+project worktree root, registered git worktrees, stale branch refs, done-task
+mirrors, disposable generated dirt, and plain leftover directories. If it
+reports blockers, the active thread must either fix them or record why they are
+intentionally deferred before moving to the next lane.
