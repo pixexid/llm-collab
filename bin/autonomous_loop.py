@@ -191,7 +191,7 @@ def next_action(state: dict[str, Any]) -> str:
     if mode == "fix_loop":
         return "Inspect the blocker, patch or re-delegate the smallest fix, rerun gates, and return to the loop."
     if mode == "post_merge":
-        return "Fast-forward main, run post-merge checks, mark task done, clean branches/worktrees, then continue the queue."
+        return "Fast-forward main, run post-merge checks, mark task done, run bin/post_merge_cleanup.py, then continue only when cleanup is clear or deferred items are recorded."
     if mode == "blocked":
         return "Stop only if the blocker requires external operator input; otherwise convert it into a fix loop."
     if mode == "queue_empty":
