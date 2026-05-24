@@ -23,17 +23,6 @@
       "activation": { "type": "cli_session", "watcher_enabled": true }
     },
     {
-      "id": "cdx2",
-      "display_name": "CDX2",
-      "role": "implementation",
-      "activation": {
-        "type": "human_relay",
-        "watcher_enabled": true,
-        "base_model": "codex",
-        "identity_note": "You are CDX2 (cdx2). Read only messages addressed to 'cdx2'."
-      }
-    },
-    {
       "id": "claude",
       "display_name": "Claude",
       "role": "implementation",
