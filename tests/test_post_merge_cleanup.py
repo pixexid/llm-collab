@@ -155,6 +155,22 @@ class PostMergeCleanupTest(unittest.TestCase):
 
         self.assertFalse(self.worktree_root.exists())
 
+    def test_empty_dirs_inside_registered_worktrees_are_not_reported(self) -> None:
+        branch = "codex/cdx2/task-JKL012-example"
+        path = self.worktree_root / "cdx2" / "task-JKL012-example"
+        self.create_worktree(branch, path)
+        self.write_task("TASK-JKL012", "review", branch)
+        nested_empty_dir = path / "node_modules" / ".cache" / "empty"
+        nested_empty_dir.mkdir(parents=True)
+
+        with patch.object(post_merge_cleanup, "ensure_project", return_value=None):
+            with patch.object(post_merge_cleanup, "TASKS_DIR", self.tasks):
+                summary = post_merge_cleanup.classify(self.args(plain_dirs=True))
+
+        empty_paths = {Path(item["path"]).resolve() for item in summary["remove_empty_dirs"]}
+        self.assertNotIn(nested_empty_dir.resolve(), empty_paths)
+        self.assertTrue(path.exists())
+
 
 if __name__ == "__main__":
     unittest.main()
