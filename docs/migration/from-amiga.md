@@ -49,7 +49,7 @@ When defining agents, mirror the Amiga roster:
 | operator | operator | human | No change |
 | amiga-operator-cmo | amiga-operator-cmo | cli_session | Internal triage bot |
 | codex | codex | cli_session | Primary orchestrator |
-| cdx2 | cdx2 | human_relay | base_model: codex |
+| cdx2 | cdx2 | human_relay | base_model: codex; fresh chat/task/session binding per new task |
 | claude | claude | cli_session | UI/UX implementation |
 | gemini | gemini | cli_session | Research |
 | antigravity | antigravity | human_relay | base_model: claude/codex |

@@ -57,6 +57,9 @@ For each LLM agent, choose an activation type:
 - Name them distinctly: `codex` and `codex2`
 - Set `codex2` as `human_relay` with `base_model: codex`
 - Add a clear `identity_note`: `"You are Codex2 (codex2). Read only messages addressed to 'codex2'."`
+- For task ownership, start each new human-relay task in a fresh chat and
+  runtime session. Reuse the existing session only for the same task's blocker,
+  review-fix, or final handoff loop.
 
 ### Projects
 
