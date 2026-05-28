@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -33,6 +34,19 @@ from _helpers import (
 
 DISPOSABLE_STATUS_PATHS = {
     "public/sitemap.xml",
+}
+
+EMPTY_DIR_PRUNE_NAMES = {
+    ".git",
+    ".local",
+    ".next",
+    ".turbo",
+    ".vite",
+    ".wrangler",
+    "build",
+    "coverage",
+    "dist",
+    "node_modules",
 }
 
 
@@ -227,22 +241,41 @@ def path_inside(path: Path, roots: list[Path]) -> bool:
     resolved = path.resolve()
     for root in roots:
         try:
-            resolved.relative_to(root.resolve())
+            resolved.relative_to(root)
         except ValueError:
             continue
         return True
     return False
 
 
+def path_is_ancestor(path: Path, roots: set[Path]) -> bool:
+    resolved = path.resolve()
+    return any(root != resolved and root.is_relative_to(resolved) for root in roots)
+
+
 def collect_empty_dirs(worktree_root: Path, registered: set[Path], skipped_roots: list[Path]) -> list[Path]:
     if not worktree_root.exists():
         return []
+    registered_resolved = {path.resolve() for path in registered}
+    skipped_resolved = [path.resolve() for path in skipped_roots]
     candidates: list[Path] = []
-    for path in [*worktree_root.rglob("*"), worktree_root]:
-        if not path.is_dir():
-            continue
+    for current, dirnames, _filenames in os.walk(worktree_root, topdown=True):
+        path = Path(current)
         resolved = path.resolve()
-        if resolved in registered or path_inside(path, skipped_roots):
+        if resolved in registered_resolved or path_inside(path, skipped_resolved):
+            dirnames[:] = []
+            continue
+        if path.name in EMPTY_DIR_PRUNE_NAMES:
+            dirnames[:] = []
+            continue
+        dirnames[:] = [
+            dirname
+            for dirname in dirnames
+            if (path / dirname).resolve() not in registered_resolved
+            and not path_inside(path / dirname, skipped_resolved)
+            and (path / dirname).name not in EMPTY_DIR_PRUNE_NAMES
+        ]
+        if path_is_ancestor(path, registered_resolved):
             continue
         try:
             next(path.iterdir())
@@ -427,7 +460,7 @@ def apply_cleanup(summary: dict[str, Any]) -> None:
     worktree_root = Path(str(summary["worktree_root"]))
     registered_paths = {record.path.resolve() for record in parse_worktrees(repo)}
     while True:
-        empty_dirs = collect_empty_dirs(worktree_root, registered_paths, [])
+        empty_dirs = collect_empty_dirs(worktree_root, registered_paths, [Path(str(item["path"])) for item in summary["deferred_worktrees"]])
         if not empty_dirs:
             break
         for path in empty_dirs:
