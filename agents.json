@@ -30,7 +30,7 @@
         "type": "human_relay",
         "watcher_enabled": true,
         "base_model": "codex",
-        "identity_note": "You are cdx2. Read only messages addressed to 'cdx2'."
+        "identity_note": "You are cdx2. Read only messages addressed to 'cdx2'. Each new Amiga task must use a fresh cdx2 chat/task/session binding; continue in an existing cdx2 session only for the same task context, blocker repair, or review-fix loop."
       }
     },
     {

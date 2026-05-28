@@ -36,6 +36,19 @@ DISPOSABLE_STATUS_PATHS = {
     "public/sitemap.xml",
 }
 
+EMPTY_DIR_PRUNE_NAMES = {
+    ".git",
+    ".local",
+    ".next",
+    ".turbo",
+    ".vite",
+    ".wrangler",
+    "build",
+    "coverage",
+    "dist",
+    "node_modules",
+}
+
 
 @dataclass
 class GitResult:
@@ -228,11 +241,16 @@ def path_inside(path: Path, roots: list[Path]) -> bool:
     resolved = path.resolve()
     for root in roots:
         try:
-            resolved.relative_to(root.resolve())
+            resolved.relative_to(root)
         except ValueError:
             continue
         return True
     return False
+
+
+def path_is_ancestor(path: Path, roots: set[Path]) -> bool:
+    resolved = path.resolve()
+    return any(root != resolved and root.is_relative_to(resolved) for root in roots)
 
 
 def collect_empty_dirs(worktree_root: Path, registered: set[Path], skipped_roots: list[Path]) -> list[Path]:
@@ -247,12 +265,18 @@ def collect_empty_dirs(worktree_root: Path, registered: set[Path], skipped_roots
         if resolved in registered_resolved or path_inside(path, skipped_resolved):
             dirnames[:] = []
             continue
+        if path.name in EMPTY_DIR_PRUNE_NAMES:
+            dirnames[:] = []
+            continue
         dirnames[:] = [
             dirname
             for dirname in dirnames
             if (path / dirname).resolve() not in registered_resolved
             and not path_inside(path / dirname, skipped_resolved)
+            and (path / dirname).name not in EMPTY_DIR_PRUNE_NAMES
         ]
+        if path_is_ancestor(path, registered_resolved):
+            continue
         try:
             next(path.iterdir())
         except StopIteration:

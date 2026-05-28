@@ -11,6 +11,9 @@ autonomous.
 - Prefer `notify` or `auto-read` over `auto-reply`.
 - Keep one registered session per active worker/chat unless intentionally
   superseding an old one.
+- For human-relay implementation workers such as Amiga `cdx2`, create a fresh
+  chat, task, and session binding for each new task. Reuse a registered session
+  only for the same task context, blocker repair, or review-fix loop.
 - Keep operator-visible chat notes enabled; autobridge activity must stay
   visible in `Chats/`.
 - Do not target an active operator thread for queue/busy tests.
@@ -105,6 +108,11 @@ python3 bin/deliver.py \
 
 If no dispatchable target exists, the command still writes the chat/inbox
 message and prints the manual relay prompt.
+
+Do not use `--chat last` for a new implementation task unless you have just
+created and verified that the latest chat is the task's dedicated chat. A new
+task must not be carried into a previous worker thread just because the old
+binding can still receive messages.
 
 ## Watch Or Run One Dispatch Pass
 
