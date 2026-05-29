@@ -146,8 +146,12 @@ known non-relaunch renderer refresh route.
 
 ### Bidirectional Codex App Setup
 
-Codex-to-cdx2 and cdx2-to-Codex use the same contract. Each visible Codex app
-account that should receive auto-bridged work needs three runtime facts:
+Codex-to-Codex human-relay accounts use the same contract. Amiga `cdx2` was a
+Codex-backed human-relay spike target but is disabled for new Amiga
+implementation work by default. Treat the `cdx2` references in this RFC as
+legacy examples unless the operator explicitly re-enables that worker for a
+specific task. Each visible Codex app account that should receive auto-bridged
+work needs three runtime facts:
 
 - a published runtime binding for the receiving `agent_id`, `project_id`, and
   `chat_id`
@@ -160,7 +164,7 @@ The sender does not infer these from its own app. It resolves the receiver's
 binding, dispatches the receiver's registered autobridge session, and sets the
 receiver's CDP port for the UI refresh step.
 
-Example cdx2 receiver:
+Legacy example cdx2 receiver:
 
 ```bash
 CODEX_HOME=/Users/pixexid/.codex-app-account2 \
@@ -200,7 +204,9 @@ python3 bin/session_autobridge.py dispatch --session SESSION-CODEX-...
 
 Live proof from this spike:
 
-- Codex -> cdx2 used cdx2 runtime session
+- Codex -> cdx2 used cdx2 runtime session. This is historical proof of the
+  bridge mechanics, not current approval to route new Amiga implementation work
+  to cdx2 by default.
   `019dbb4c-ac68-7f10-8332-77ea314a137f`, app-server
   `ws://100.91.98.28:8765`, CDP `9224`, and rendered
   `CDX2_CDP_REPEAT_REFRESH_OK`.

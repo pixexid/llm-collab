@@ -11,9 +11,13 @@ autonomous.
 - Prefer `notify` or `auto-read` over `auto-reply`.
 - Keep one registered session per active worker/chat unless intentionally
   superseding an old one.
-- For human-relay implementation workers such as Amiga `cdx2`, create a fresh
-  chat, task, and session binding for each new task. Reuse a registered session
-  only for the same task context, blocker repair, or review-fix loop.
+- Amiga `cdx2` is a disabled legacy human-relay worker by default. Do not
+  activate `cdx2` for new Amiga implementation work unless the operator
+  explicitly re-enables it for that specific task.
+- When a human-relay implementation worker is explicitly enabled for a task,
+  create a fresh chat, task, and session binding for that task. Reuse a
+  registered session only for the same task context, blocker repair, or
+  review-fix loop.
 - Keep operator-visible chat notes enabled; autobridge activity must stay
   visible in `Chats/`.
 - Do not target an active operator thread for queue/busy tests.
@@ -100,7 +104,7 @@ Use `deliver.py` as usual. If a binding exists, `deliver.py` resolves
 python3 bin/deliver.py \
   --chat CHAT-xxxx \
   --from codex \
-  --to cdx2 \
+  --to <enabled-human-relay-worker> \
   --project amiga \
   --title "Review watcher retry fix" \
   --body-file /tmp/message.md
