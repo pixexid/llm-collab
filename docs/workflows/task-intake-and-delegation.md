@@ -159,6 +159,33 @@ Claude is the designated task spec refiner. `claim_task.py` blocks any `open →
 5. Claude replies in the linked chat confirming refinement is done
 6. Orchestrator confirms `refined_by: claude` in the frontmatter and checks the risk analysis for unresolved blockers, then proceeds to activation
 
+## Worker-owned follow-up capture
+
+When a worker discovers new implementation scope, parity gaps, design-doc drift,
+DB follow-up, or tooling repairs from direct rendered/code context, the worker
+who found the gap owns the first durable capture. Do not route rich findings
+through a short chat note and ask the orchestrator to reconstruct them later.
+
+For Claude UI/UX and D8 lanes, this is mandatory:
+
+- Claude creates or updates the GitHub issue and local task mirror from its own
+  context, then links both from the active task and handoff.
+- If an existing issue/task already owns the gap, Claude links it and records
+  the disposition instead of creating a duplicate.
+- If Claude lacks a required credential or command capability, Claude writes a
+  complete issue/task draft artifact with title, body, labels, dependencies,
+  evidence, acceptance gates, and queue placement recommendation, then hands
+  that artifact to Codex for mechanical creation only.
+- Codex validates the created/drafted issue/task against the source evidence,
+  queue order, and task-contract gates before activation. Codex may discuss or
+  request corrections from Claude, but should not be the first author of
+  Claude's detailed finding unless Claude is blocked.
+
+Every created follow-up must preserve the original evidence trail: source task,
+source chat, affected route/component/state, D8 finding/disposition, browser or
+DB evidence, operator feedback status, and whether the follow-up blocks later
+route work.
+
 **Implementation Risk Analysis (hard gate):**
 
 Every non-trivial task must carry a completed `## Implementation Risk Analysis` section before it can be marked refined or activated. `refine_task.py` refuses to set `refined_by: claude`, and `claim_task.py --status in_progress` refuses activation, unless the section exists and these labels have real values:
