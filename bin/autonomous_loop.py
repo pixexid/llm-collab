@@ -9,9 +9,16 @@ to wait, fix a blocker, merge a PR, or continue to the next lane.
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent))
+from _python_runtime import require_python
+
+require_python()
+
 import argparse
 import json
-from pathlib import Path
 from typing import Any
 
 from _helpers import display_path, ensure_project, get_agent, project_state_dir, utc_iso, write_file

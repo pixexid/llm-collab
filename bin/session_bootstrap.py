@@ -11,11 +11,17 @@ Usage:
   python bin/session_bootstrap.py --agent orchestrator --no-watcher
 """
 
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent))
+from _python_runtime import require_python
+
+require_python()
+
 import argparse
 import json
 import subprocess
-import sys
-from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 import project_issue_queue as issue_queue

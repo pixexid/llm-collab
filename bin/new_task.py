@@ -7,10 +7,16 @@ Usage:
   python bin/new_task.py --title "Research DB options" --created-by researcher --owner researcher --project my-app --priority high
 """
 
-import argparse
-import json
 import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent))
+from _python_runtime import require_python
+
+require_python()
+
+import argparse
+import json
 
 sys.path.insert(0, str(Path(__file__).parent))
 from _helpers import (

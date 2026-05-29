@@ -11,11 +11,17 @@ Branch naming uses the pattern from collab.config.json:
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent))
+from _python_runtime import require_python
+
+require_python()
+
 import argparse
 import json
 import subprocess
-import sys
-from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).parent))

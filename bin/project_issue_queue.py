@@ -11,11 +11,17 @@ Usage:
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent))
+from _python_runtime import require_python
+
+require_python()
+
 import argparse
 import json
 import re
-import sys
-from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from _helpers import display_path, find_task_by_id, get_project, parse_frontmatter, project_state_dir, utc_iso, write_file

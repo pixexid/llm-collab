@@ -10,11 +10,17 @@ Usage:
   python bin/refine_task.py --task TASK-ABC123 --note "Added numeric spec and regression cases"
 """
 
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent))
+from _python_runtime import require_python
+
+require_python()
+
 import argparse
 import json
 import re
-import sys
-from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from _helpers import (
