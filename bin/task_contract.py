@@ -320,6 +320,7 @@ def detect_ui_ux_lane(frontmatter: dict, body: str = "") -> tuple[bool, str, lis
 
 def detect_db_contract(frontmatter: dict, body: str = "") -> tuple[str, str, list[str], bool]:
     explicit_impact = _normalize_text(frontmatter.get("db_impact"))
+    explicit_schema_change = frontmatter.get("db_schema_change_detected")
     related_paths = _normalize_list(frontmatter.get("related_paths"))
     title = _normalize_text(frontmatter.get("title")).lower()
     body_lower = body.lower()
@@ -338,6 +339,8 @@ def detect_db_contract(frontmatter: dict, body: str = "") -> tuple[str, str, lis
         path for path in related_paths if any(marker in path.lower() for marker in DDL_PATH_MARKERS)
     ]
     schema_change_detected = bool(schema_path_hits) or _has_any_marker(body_lower, DDL_BODY_MARKERS)
+    if isinstance(explicit_schema_change, bool):
+        schema_change_detected = explicit_schema_change
 
     if explicit_impact in DB_IMPACT_VALUES:
         return explicit_impact, "manual", reasons or ["manual override"], schema_change_detected

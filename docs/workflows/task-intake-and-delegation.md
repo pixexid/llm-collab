@@ -238,6 +238,15 @@ DB clarification:
 - if a lane touches the Amiga shared Supabase schema or depends on shared DB state, do not treat a separate “local DB” as the acceptance database
 - the acceptance database is the shared/live Amiga Supabase project
 - workers must use the CLI + `supabase_amiga` MCP workflow instead of guessing from migration files alone
+- Supabase MCP privileges are account-scoped. Preflight the owning worker's own
+  `supabase_amiga.get_project`, safe read-only `execute_sql`, and required
+  `get_advisors` call before handoff for `shared-supabase-required` work.
+- if that worker receives a Supabase access-control error, record it and stop;
+  the remediation is operator/admin Supabase project or org access for that
+  account. Do not silently continue with a service-role key.
+- fallback order for DB proof is privileged `supabase_amiga` MCP, then linked
+  Supabase CLI when local auth or `SUPABASE_DB_PASSWORD` is configured, then
+  explicitly recorded service-role read-only assertions as the last resort.
 
 ## Delegation message requirements
 
@@ -281,6 +290,8 @@ For `shared-supabase-required` lanes, the delegation brief must also name:
 - the requirement to use both Supabase CLI and `supabase_amiga` MCP surfaces
 - the required shared-project apply + schema assertion step
 - the requirement to record DB evidence back onto the task contract before moving to `review`
+- the worker-account MCP preflight and the exact fallback/remediation path for
+  access-control failures
 
 Canonical UI evidence recording command:
 
