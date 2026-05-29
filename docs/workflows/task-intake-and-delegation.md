@@ -2,7 +2,17 @@
 
 ## Goal
 
-One owner, one scope, one verification plan.
+One implementation owner, one scope, one verification plan.
+
+For Amiga work, use at most one Codex-managed internal subagent for a task. Do
+not stack several Codex-managed subagents on the same implementation lane.
+External collaborators do not count against that internal subagent limit.
+Claude is the first-choice UI/UX implementation worker for Claude-owned UI/UX
+lanes, not merely a refinement or review agent. Claude may own the actual UI
+diff, rendered parity repair, D8 pass, review evidence, and handoff for that
+lane.
+The one-writer rule still applies: do not make Claude and a Codex-managed
+internal subagent implementation writers for the same files in the same task.
 
 ## Intake order
 
@@ -13,7 +23,7 @@ One owner, one scope, one verification plan.
 5. **send task to claude for spec refinement** (non-trivial tasks — see Refinement Gate below)
 6. update the queue when owner/order/dependency/activation state changes
 7. provision branch/worktree first when the lane is isolated-worker implementation
-8. assign one owner
+8. assign one implementation owner
 9. send one clear delegation message
 10. move task to `in_progress` (gated — requires `refined_by: claude` or `skip_refinement: true`)
 11. then request activation relay
