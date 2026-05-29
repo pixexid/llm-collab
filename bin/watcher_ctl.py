@@ -7,10 +7,16 @@ Maps legacy commands to `pm2_watchers.py`.
 
 from __future__ import annotations
 
-import argparse
-import subprocess
 import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent))
+from _python_runtime import require_python
+
+require_python()
+
+import argparse
+import subprocess
 
 
 def parse_args() -> argparse.Namespace:

@@ -10,14 +10,20 @@ Usage:
   python bin/watch_inbox.py --me orchestrator --poll-seconds 30 --notify
 """
 
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent))
+from _python_runtime import require_python
+
+require_python()
+
 import argparse
 import json
 import platform
 import subprocess
-import sys
 import time
 from datetime import datetime
-from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from _helpers import (

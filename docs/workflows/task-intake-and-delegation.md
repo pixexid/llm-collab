@@ -135,6 +135,15 @@ If a broad issue mixes design and code, split it into a design task first and cr
 - `claim_task.py` appends `--browser-check skip` when it runs project preflight
 - browser validation should run later only for runtime/UI-impact lanes
 
+## Python Runtime
+
+Use `/Users/pixexid/Projects/llm-collab/bin/llm-collab <script>.py ...` for
+llm-collab task, inbox, queue, and contract commands. The launcher resolves a
+Python 3.10+ interpreter before running the target script, which avoids macOS
+environments where bare `python3` or `#!/usr/bin/env python3` can resolve to the
+system Python 3.9. Direct script entrypoints also fail fast with a clear version
+message if they are run under an incompatible interpreter.
+
 ## Refinement Gate
 
 Claude is the designated task spec refiner. `claim_task.py` blocks any `open → in_progress` transition unless the task frontmatter contains `refined_by: claude` or `skip_refinement: true`.
@@ -145,7 +154,7 @@ Claude is the designated task spec refiner. `claim_task.py` blocks any `open →
 3. Orchestrator sends refinement request to claude via `deliver.py`, including task ID, file path, research docs, GH issue, and the required implementation-risk checklist
 4. Claude reviews current files/topology, patches task and GH issue, completes `## Implementation Risk Analysis`, then runs:
    ```bash
-   python3 /Users/pixexid/Projects/llm-collab/bin/refine_task.py --task TASK-... --note "..."
+   /Users/pixexid/Projects/llm-collab/bin/llm-collab refine_task.py --task TASK-... --note "..."
    ```
 5. Claude replies in the linked chat confirming refinement is done
 6. Orchestrator confirms `refined_by: claude` in the frontmatter and checks the risk analysis for unresolved blockers, then proceeds to activation
@@ -178,7 +187,7 @@ Do not hide implementation risks in chat only. If a risk changes lane size, acce
 
 **Bypass (trivial/hotfix tasks only):**
 ```bash
-python3 /Users/pixexid/Projects/llm-collab/bin/new_task.py \
+/Users/pixexid/Projects/llm-collab/bin/llm-collab new_task.py \
   --title "..." --created-by codex --project amiga --skip-refinement
 ```
 Sets `skip_refinement: true` at creation. Use only for tasks with obvious, single-file scope where a spec review adds no value.
@@ -225,13 +234,13 @@ For DB lanes, also require:
 Use the contract helper instead of hand-editing guesses:
 
 ```bash
-python3 /Users/pixexid/Projects/llm-collab/bin/task_contract.py sync --task TASK-xxxxxx --write
+/Users/pixexid/Projects/llm-collab/bin/llm-collab task_contract.py sync --task TASK-xxxxxx --write
 ```
 
 If a lane should be forced on/off instead of auto-detected:
 
 ```bash
-python3 /Users/pixexid/Projects/llm-collab/bin/task_contract.py sync --task TASK-xxxxxx --ui-ux-lane true --write
+/Users/pixexid/Projects/llm-collab/bin/llm-collab task_contract.py sync --task TASK-xxxxxx --ui-ux-lane true --write
 ```
 
 DB clarification:
@@ -296,7 +305,7 @@ For `shared-supabase-required` lanes, the delegation brief must also name:
 Canonical UI evidence recording command:
 
 ```bash
-python3 /Users/pixexid/Projects/llm-collab/bin/task_contract.py record-ui-evidence \
+/Users/pixexid/Projects/llm-collab/bin/llm-collab task_contract.py record-ui-evidence \
   --task TASK-xxxxxx \
   --design-docs-read /Users/pixexid/Projects/amiga/docs/ui_ux/DESIGN.md \
   --design-skills-used impeccable \
@@ -311,7 +320,7 @@ python3 /Users/pixexid/Projects/llm-collab/bin/task_contract.py record-ui-eviden
 Canonical DB evidence recording command:
 
 ```bash
-python3 /Users/pixexid/Projects/llm-collab/bin/task_contract.py record-db-evidence \
+/Users/pixexid/Projects/llm-collab/bin/llm-collab task_contract.py record-db-evidence \
   --task TASK-xxxxxx \
   --db-impact shared-supabase-required \
   --db-project-ref wbqjeasgxakubqcutgjt \

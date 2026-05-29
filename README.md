@@ -62,6 +62,19 @@ outside this Git checkout via `project_state_root`, for example
 
 ## Quickstart
 
+### Python command runner
+
+Run collaboration commands through the repo launcher:
+
+```bash
+bin/llm-collab session_bootstrap.py --agent codex
+bin/llm-collab inbox.py --me codex --project amiga --limit 5
+```
+
+The launcher selects Python 3.10+ even on macOS machines where bare `python3`
+resolves to the system Python. Direct command entrypoints also fail fast with a
+clear version message if they are run under an older interpreter.
+
 ### 1. Clone the template
 
 ```bash
