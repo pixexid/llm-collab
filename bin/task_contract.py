@@ -321,6 +321,7 @@ def detect_ui_ux_lane(frontmatter: dict, body: str = "") -> tuple[bool, str, lis
 def detect_db_contract(frontmatter: dict, body: str = "") -> tuple[str, str, list[str], bool]:
     explicit_impact = _normalize_text(frontmatter.get("db_impact"))
     explicit_schema_change = frontmatter.get("db_schema_change_detected")
+    schema_change_detection = _normalize_text(frontmatter.get("db_schema_change_detection"))
     related_paths = _normalize_list(frontmatter.get("related_paths"))
     title = _normalize_text(frontmatter.get("title")).lower()
     body_lower = body.lower()
@@ -339,7 +340,7 @@ def detect_db_contract(frontmatter: dict, body: str = "") -> tuple[str, str, lis
         path for path in related_paths if any(marker in path.lower() for marker in DDL_PATH_MARKERS)
     ]
     schema_change_detected = bool(schema_path_hits) or _has_any_marker(body_lower, DDL_BODY_MARKERS)
-    if isinstance(explicit_schema_change, bool):
+    if schema_change_detection in {"manual_true", "manual_false"} and isinstance(explicit_schema_change, bool):
         schema_change_detected = explicit_schema_change
 
     if explicit_impact in DB_IMPACT_VALUES:
@@ -455,6 +456,11 @@ def sync_db_contract(frontmatter: dict, body: str) -> tuple[dict, list[str]]:
     if updated.get("db_schema_change_detected") != schema_change_detected:
         updated["db_schema_change_detected"] = schema_change_detected
         changed.append("db_schema_change_detected")
+    schema_change_detection = _normalize_text(updated.get("db_schema_change_detection"))
+    if schema_change_detection not in {"manual_true", "manual_false"}:
+        if updated.get("db_schema_change_detection") != "auto":
+            updated["db_schema_change_detection"] = "auto"
+            changed.append("db_schema_change_detection")
 
     if db_impact == "shared-supabase-required":
         defaults: dict[str, object] = {
@@ -781,6 +787,10 @@ def command_record_db_evidence(args: argparse.Namespace) -> None:
         synced["db_advisors_result"] = args.db_advisors_result
     if args.db_runtime_validation is not None:
         synced["db_runtime_validation"] = args.db_runtime_validation
+    if args.db_schema_change is not None:
+        schema_change = _normalize_bool(args.db_schema_change)
+        synced["db_schema_change_detected"] = schema_change is True
+        synced["db_schema_change_detection"] = "manual_true" if schema_change is True else "manual_false"
 
     write_file(task_path, dump_frontmatter(synced, body))
     print(
@@ -853,6 +863,7 @@ def build_parser() -> argparse.ArgumentParser:
     db_evidence.add_argument("--db-schema-assertion", default=None)
     db_evidence.add_argument("--db-advisors-result", default=None)
     db_evidence.add_argument("--db-runtime-validation", default=None)
+    db_evidence.add_argument("--db-schema-change", default=None, choices=["true", "false"])
     db_evidence.set_defaults(func=command_record_db_evidence)
 
     return parser
