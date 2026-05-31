@@ -149,6 +149,7 @@ class ProjectDesignQueueTest(unittest.TestCase):
                     "owner": "claude",
                     "task_status": "open",
                     "queue_state": "ready",
+                    "lane_type": "design-spec",
                     "depends_on": ["TASK-DONE"],
                     "blocked_by": [],
                     "notes": "Design first.",
@@ -173,6 +174,7 @@ class ProjectDesignQueueTest(unittest.TestCase):
         self.assertEqual(len(issue_payload["lanes"]), 1)
         self.assertEqual(issue_payload["lanes"][0]["task_id"], "TASK-A")
         self.assertEqual(issue_payload["lanes"][0]["queue_state"], "ready")
+        self.assertEqual(issue_payload["lanes"][0]["lane_type"], "design-spec")
 
     def test_issue_queue_mirror_clears_stale_lanes_when_design_queue_is_empty(self) -> None:
         design_payload = {

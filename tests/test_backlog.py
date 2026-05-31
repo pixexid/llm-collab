@@ -95,6 +95,11 @@ class BacklogTest(unittest.TestCase):
             with self.assertRaisesRegex(_backlog.BacklogUnavailable, "authentication required"):
                 _backlog.load_open_github_issues("pixexid/amiga")
 
+    def test_load_open_github_issues_reports_missing_gh_as_unavailable(self) -> None:
+        with patch("subprocess.run", side_effect=FileNotFoundError("gh")):
+            with self.assertRaisesRegex(_backlog.BacklogUnavailable, "gh issue list unavailable"):
+                _backlog.load_open_github_issues("pixexid/amiga")
+
     @staticmethod
     def issue(number: int, title: str, labels: list[str]) -> dict:
         return {

@@ -82,24 +82,27 @@ def eligible_open_issues(project_id: str) -> list[BacklogIssue]:
 
 
 def load_open_github_issues(repo: str) -> list[dict[str, Any]]:
-    result = subprocess.run(
-        [
-            "gh",
-            "issue",
-            "list",
-            "--repo",
-            repo,
-            "--state",
-            "open",
-            "--limit",
-            "1000",
-            "--json",
-            "number,title,labels,url",
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    try:
+        result = subprocess.run(
+            [
+                "gh",
+                "issue",
+                "list",
+                "--repo",
+                repo,
+                "--state",
+                "open",
+                "--limit",
+                "1000",
+                "--json",
+                "number,title,labels,url",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError as exc:
+        raise BacklogUnavailable(f"gh issue list unavailable for {repo}: {exc}") from exc
     if result.returncode != 0:
         detail = (result.stderr or result.stdout).strip()
         raise BacklogUnavailable(detail or f"gh issue list failed for {repo}")
