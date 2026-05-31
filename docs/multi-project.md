@@ -40,7 +40,11 @@ Edit `projects.json` (or regenerate with `python scripts/init.py`):
       "github": {
         "enabled": true,
         "repo": "owner/my-app",
-        "project_number": 1
+        "project_number": 1,
+        "backlog": {
+          "exclude_labels": ["type:epic", "wontfix", "duplicate", "invalid", "question", "status:deferred"],
+          "require_any_label": []
+        }
       }
     },
     {

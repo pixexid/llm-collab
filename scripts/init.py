@@ -256,6 +256,17 @@ def collect_projects() -> list[dict]:
             pn = prompt("  GitHub Project number (optional)", default="")
             if pn.isdigit():
                 github["project_number"] = int(pn)
+            github["backlog"] = {
+                "exclude_labels": [
+                    "type:epic",
+                    "wontfix",
+                    "duplicate",
+                    "invalid",
+                    "question",
+                    "status:deferred",
+                ],
+                "require_any_label": [],
+            }
 
         projects.append({
             "id": pid,

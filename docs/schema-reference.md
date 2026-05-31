@@ -117,7 +117,11 @@ Project registry. Created by `scripts/init.py`. Gitignored.
       "github": {
         "enabled": true,
         "repo": "owner/my-app",
-        "project_number": 1
+        "project_number": 1,
+        "backlog": {
+          "exclude_labels": ["type:epic", "wontfix", "duplicate", "invalid", "question", "status:deferred"],
+          "require_any_label": []
+        }
       }
     }
   ]
@@ -134,6 +138,10 @@ Project registry. Created by `scripts/init.py`. Gitignored.
 | `github.enabled` | bool | Whether GitHub integration is active |
 | `github.repo` | string | `owner/repo` format |
 | `github.project_number` | int | GitHub Projects board number |
+| `github.backlog.exclude_labels` | string[] | Open issue labels excluded from the executable backlog. Defaults include `type:epic`, terminal labels, and `status:deferred`. |
+| `github.backlog.require_any_label` | string[] | Optional label or wildcard patterns that an open issue must match to be backlog-eligible. Empty means every non-excluded open issue is eligible. |
+
+When GitHub integration is enabled, open GitHub issues are the source of truth for whether project work remains. Runtime queues may order and assign work, but `issue-queue.json` is empty only when the eligible GitHub backlog is empty.
 
 ---
 
