@@ -25,12 +25,12 @@
     {
       "id": "cdx2",
       "display_name": "CDX2",
-      "role": "implementation",
+      "role": "legacy_disabled_implementation",
       "activation": {
         "type": "human_relay",
-        "watcher_enabled": true,
+        "watcher_enabled": false,
         "base_model": "codex",
-        "identity_note": "You are cdx2. Read only messages addressed to 'cdx2'. Each new Amiga task must use a fresh cdx2 chat/task/session binding; continue in an existing cdx2 session only for the same task context, blocker repair, or review-fix loop."
+        "identity_note": "You are cdx2. Read only messages addressed to 'cdx2'. cdx2 is disabled legacy routing for Amiga and must not receive new implementation lanes unless the operator explicitly re-enables cdx2 for one specific task. If re-enabled, use a fresh cdx2 chat/task/session binding and continue an existing cdx2 session only for the same task context, blocker repair, or review-fix loop."
       }
     },
     {
