@@ -417,8 +417,8 @@ def render_markdown(payload: dict) -> str:
     lines = [
         "# Amiga Design Queue",
         "",
-        f"> Source: `design-queue.json`. This queue is for design-first work only: `/design` sandbox, surface specs, handoffs, parity contracts, email/template design, and stale issue splitting.",
-        "> Do not activate `/app` implementation while this queue has active lanes unless the implementation lane explicitly depends on a completed design lane.",
+        f"> Source: `design-queue.json`. This is a legacy design-first queue artifact. New design lanes should live in `issue-queue.json` with a design `lane_type`.",
+        "> Do not treat an empty design queue as proof that project work is done; validate the GitHub-backed issue queue.",
         "",
         f"- Last updated: `{last_updated}`",
         f"- Current mode: `{mode}`",
@@ -443,9 +443,9 @@ def render_markdown(payload: dict) -> str:
             "",
             "## Rule",
             "",
-            "Work this queue until it is empty before opening new code implementation lanes from the older implementation queue. All active lanes are Claude-owned design tasks. Codex owns queue hygiene, workflow gates, and Claude desktop wake/heartbeat handling.",
+            "Legacy design queues are migration artifacts. Keep active design dependencies represented in the canonical issue queue before activating code implementation lanes.",
             "",
-            "The implementation queue mirrors this design queue while this mode is active so `session_bootstrap.py` cannot advertise a stale code-ready lane. When the final design lane is done, rebuild the implementation queue from completed design handoffs instead of restoring old placeholder tasks.",
+            "Use `project_issue_queue.py validate --project <project_id>` for backlog truth. `project_design_queue.py` can still inspect existing design queues and bridge metadata while those projects migrate.",
         ]
     )
 
@@ -1080,11 +1080,11 @@ def sync_issue_queue_mirror(project_id: str, design_payload: dict) -> Path | Non
     issue_payload["project_id"] = project_id
     issue_payload["last_updated_utc"] = utc_iso()
     issue_payload["notes"] = [
-        "Temporary canonical queue mode: design-only-until-empty.",
-        "This issue queue mirrors design-queue.json while active design tasks remain, so fresh Codex sessions and claim_task.py do not activate stale implementation lanes.",
+        "Legacy design-queue migration: active design lanes copied into the canonical issue queue.",
+        "Do not maintain design-queue.json as a second source of truth after migration.",
         "All lanes in this queue are design, shaping, /design sandbox, surface-spec, handoff, parity, stale-issue audit, or template-design work assigned to claude.",
         "Do not add backend or /app implementation lanes here until the relevant design queue item is done and the implementation dependency is explicit.",
-        "When the final design lane completes, rebuild the implementation queue from completed design handoffs instead of restoring the old placeholder ordering.",
+        "When the final design lane completes, validate the GitHub-backed issue queue before treating the backlog as empty.",
     ]
     issue_payload["completed_recently"] = [
         {

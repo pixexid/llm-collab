@@ -194,9 +194,9 @@ The worktree is created at `{repo}-worktrees/{agent}/{task-slug}/` by default.
 
 ~/.local/share/llm-collab/projects/
 └── my-app/
-    ├── issue-queue.json        ← local runtime state
+    ├── issue-queue.json        ← canonical local runtime execution cache
     ├── issue-queue.md
-    ├── design-queue.json       ← optional design-first runtime queue
+    ├── design-queue.json       ← deprecated legacy design queue, migrate to issue-queue lane_type
     ├── design-queue.md
     ├── roles-and-routing.md
     ├── runbooks/

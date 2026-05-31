@@ -96,25 +96,19 @@ handoff, or a PR review/check state. Child heartbeats must name the current
 task/PR and update or delete themselves when the loop mode changes, so stale
 heartbeats cannot collide with the queue runner.
 
-### Design-first queue precedence
+### Design-first lane precedence
 
-Some projects maintain a separate runtime-local design queue, commonly:
+Design-first work uses the canonical runtime queue with a design `lane_type`.
+Do not create a second backlog in `design-queue.json`; a local empty design
+queue is not proof that GitHub-backed work is empty.
 
-```text
-{project_state_root}/<project_id>/design-queue.json
-{project_state_root}/<project_id>/design-queue.md
-```
+Before activating code implementation:
 
-When that file exists and contains lanes, it takes precedence for UI/UX-adjacent work. Before activating code implementation:
-
-- verify the design queue against live issue state, task mirrors, and the runtime issue-queue mirror with `python3 bin/project_design_queue.py validate --project <project_id> --check-github`
-- use `python3 bin/project_design_queue.py validate --project <project_id> --check-github --json` when a watcher or heartbeat needs machine-readable `ok`, `errors`, `warnings`, and current-lane status
-- remove closed, done, or stale lanes immediately
-- keep only design, shaping, surface-spec, handoff, parity, and template-design work in the design queue
-- mirror the active design lane into the canonical issue queue when project bootstrap only reads `issue-queue.json`
-- keep backend or runtime implementation lanes out of `ready` until their design dependency is done
-- regenerate the generated view with `python3 bin/project_design_queue.py sync-markdown --project <project_id>` after JSON edits
-- rely on `claim_task.py` to advance both `design-queue.json` and the mirrored `issue-queue.json` when a design lane moves to `in_progress`, `review`, or `done`
+- run `python3 bin/project_issue_queue.py validate --project <project_id>` and treat DRIFT or unknown GitHub backlog state as a blocker
+- keep only the earliest unblocked design dependency in `ready`; backend or runtime implementation lanes stay `queued` or `blocked` until their design dependency is done
+- use `lane_type` values such as `design`, `design-surface-spec`, `design-handoff`, or `design-template` to filter design views from the single issue queue
+- keep legacy `project_design_queue.py` usage limited to existing design-queue migrations and Claude Desktop bridge metadata until those projects are converted
+- when migrating an existing `design-queue.json`, copy active design lanes into `issue-queue.json`, preserve their `lane_type` and dependencies, validate the single queue, then archive the old design queue
 
 For design lanes that depend on accepted surface specs or handoffs that may not
 yet be on the default branch, add a machine-readable materialization gate to the

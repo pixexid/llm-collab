@@ -463,16 +463,16 @@ chat/session turnover.
 
 - the canonical queue path should remain stable even when no lanes remain
 - when the final lane completes, archive the last queue snapshot to `{project_state_root}/{project_id}/history/`
-- keep `{project_state_root}/{project_id}/issue-queue.json` and `.md` present with `lanes: []` so fresh sessions see an explicit empty queue instead of a missing file
+- keep `{project_state_root}/{project_id}/issue-queue.json` and `.md` present, but treat `lanes: []` as valid only when `project_issue_queue.py validate` confirms the eligible GitHub backlog is also empty
 - do not keep real project queue files as tracked files in this repo; only `projects/_example/` belongs in the public checkout
 
 ---
 
 ## project_state_root/{project_id}/design-queue.json
 
-Optional per-project artifact for design-first queues that must temporarily take precedence over implementation queues.
+Deprecated per-project artifact for older design-first queue workflows.
 
-Use this when a project needs to clean stale design issues, route design-only lanes to a design owner, and keep implementation blocked until design handoffs are accepted. While active lanes remain, `design-queue.json` should be mirrored into `issue-queue.json` so session bootstrap and task-claim gates cannot advertise stale implementation work.
+Do not use `design-queue.json` as a second backlog source. New design-first work should live in the single `issue-queue.json` as lanes whose `lane_type` identifies the design scope. GitHub-backed backlog validation remains the authority for whether work exists; design views and bridge helpers may filter or annotate the single issue queue, but they must not create an independent `lanes: []` state.
 
 ```json
 {
@@ -506,14 +506,11 @@ Use this when a project needs to clean stale design issues, route design-only la
 
 ### Design Queue Rules
 
-- keep only design, shaping, surface-spec, handoff, parity, stale-issue audit, and template-design lanes in the design queue
-- remove closed, completed, non-design, backend-only, and implementation-ready lanes before activation
-- validate with `python3 bin/project_design_queue.py validate --project <project_id> --check-github`
-- use `python3 bin/project_design_queue.py validate --project <project_id> --check-github --json` for heartbeat/workflow automation; it returns `ok`, `errors`, `warnings`, and the current design lane status
+- prefer `issue-queue.json` with `lane_type: design*` for new design, shaping, surface-spec, handoff, parity, stale-issue audit, and template-design lanes
+- validate backlog emptiness with `python3 bin/project_issue_queue.py validate --project <project_id>`; do not trust a design queue's empty state as proof that work is done
+- keep `project_design_queue.py` for legacy design-queue inspection and Claude Desktop bridge metadata while projects migrate to single-queue design lanes
 - for lanes depending on accepted-but-not-yet-main design outputs, set `dependency_materialization_gate: true` and `required_dependency_artifacts` in the task mirror; validation fails ready/active/review lanes when the assigned worktree lacks those artifacts
-- regenerate with `python3 bin/project_design_queue.py sync-markdown --project <project_id>`
-- let `claim_task.py` advance both the design queue and the mirrored issue queue when a design lane changes status
-- when the final design lane completes, archive the design queue and rebuild implementation work from accepted design handoffs instead of restoring stale placeholder lanes
+- when migrating an old design queue, copy active design lanes into `issue-queue.json`, preserve their `lane_type`, then archive the legacy design queue
 
 ---
 
