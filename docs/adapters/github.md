@@ -14,7 +14,11 @@ In `projects.json`:
   "github": {
     "enabled": true,
     "repo": "owner/my-app",
-    "project_number": 1
+    "project_number": 1,
+    "backlog": {
+      "exclude_labels": ["type:epic", "wontfix", "duplicate", "invalid", "question", "status:deferred"],
+      "require_any_label": []
+    }
   }
 }
 ```
@@ -22,6 +26,14 @@ In `projects.json`:
 ## Requirements
 
 - `gh` CLI installed and authenticated: `gh auth login`
+
+---
+
+## Backlog eligibility
+
+For GitHub-backed projects, open GitHub issues are the source of truth for whether work remains. The backlog resolver includes every open issue except labels listed in `github.backlog.exclude_labels`. By default, epics, terminal issue labels, and `status:deferred` are excluded.
+
+`github.backlog.require_any_label` can narrow the backlog with exact labels or wildcard patterns such as `area:*`. Keep it empty unless label hygiene is strong enough that unlabeled issues should not become executable work.
 
 ---
 
