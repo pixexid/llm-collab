@@ -28,6 +28,20 @@ autonomous.
   `[BRIDGE <8-char-uuid-prefix>] <short title>`, then verify the sidebar title
   and `local_*` URL. Do not claim a PM2 watcher, CLI resume, or filesystem write
   created a desktop-visible thread.
+- For Claude-owned collaboration lanes, inspect the visible Claude app before
+  treating inbox or queue state as final. If Claude is visibly asking a related
+  question, waiting for direction, or reporting Read/Agent/tool errors, Codex
+  must answer or unblock it in that same visible thread when safe; do not wait
+  for a final inbox handoff while Claude is blocked in the app.
+- If Claude is stale, idle with no durable progress, or repeatedly erroring,
+  first try to wake or repair the same thread with a durable unblock packet plus
+  one short bridge after the idle gate passes. Restart or reopen Claude only
+  from an attended Codex recovery turn or after explicit operator instruction;
+  unattended heartbeats must notify with the observed blocker instead of
+  interrupting or restarting Claude. Create a new Claude thread only when the
+  current thread is full, unrecoverably corrupted, repeatedly loses tool access,
+  or still cannot continue after attended recovery; include a full continuity
+  packet for the same task.
 
 ## Activate A Session
 
