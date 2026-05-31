@@ -311,13 +311,13 @@ def main():
             f"Use Computer Use against /Applications/Claude.app to wake "
             f"{recipient_display} ({args.recipient}) for chat {chat_id}."
         )
-        print("Do not ask the operator to relay this while Computer Use is available.")
+        print("Do not ask the operator to relay this until Codex has exhausted Computer Use/app-control recovery.")
         print()
         print("Visible one-line prompt:")
         print(desktop_bridge_prompt)
         print()
-        print("If Computer Use is blocked or Claude is not idle, record the blocker and")
-        print("then tell the operator why manual wake is needed.")
+        print("If Computer Use is blocked or Claude is not idle, keep the heartbeat active,")
+        print("retry through Codex/Computer Use when appropriate, and record exact failed attempts.")
         print(border)
     elif is_human_relay(recipient_agent) and not autobridge_ready:
         print_handoff_prompt(

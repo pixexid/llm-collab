@@ -127,10 +127,15 @@ Watcher policy for Claude:
 - safe: record durable work in `llm-collab` and notify that a Claude desktop
   bridge plan is needed
 - safe: let a Codex heartbeat drive Claude desktop through Computer Use
+- safe: if Computer Use cannot inspect or send, keep the Codex heartbeat active,
+  try reasonable app-control recovery paths, and record a blocker for
+  Codex/Computer Use retry or tooling repair
 - unsafe: claim a PM2 watcher created a new app-visible desktop thread
 - unsafe by default: synthesize sidebar visibility by writing app cache/index files directly
 - unsafe: use `claude -p`, `claude --resume`, or `~/.claude/projects` as proof
   that the visible desktop thread changed
+- unsafe: ask the operator to wake Claude or paste the bridge prompt before
+  Codex has exhausted Computer Use/app-control recovery
 
 If an operator needs Claude desktop visibility, the recommended flow is:
 
