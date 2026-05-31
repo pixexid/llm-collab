@@ -24,6 +24,7 @@ from _helpers import (
     TASK_PRIORITIES,
     TASK_STATUSES,
     agent_ids,
+    ensure_agent_enabled,
     ensure_project,
     date_prefix,
     dump_frontmatter,
@@ -73,6 +74,9 @@ def main():
     if args.owner != "unassigned" and args.owner not in known:
         print(f"[error] --owner agent {args.owner!r} not in agents.json", file=sys.stderr)
         sys.exit(1)
+    ensure_agent_enabled(args.created_by, context="task creation")
+    if args.owner != "unassigned":
+        ensure_agent_enabled(args.owner, context="task ownership")
     ensure_project(args.project, allow_none=True)
 
     if args.status == "in_progress" and not args.skip_refinement:

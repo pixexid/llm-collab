@@ -154,6 +154,28 @@ def is_human_relay(agent: dict) -> bool:
     return agent.get("activation", {}).get("type") == "human_relay"
 
 
+def is_agent_disabled(agent: dict) -> bool:
+    activation = agent.get("activation", {})
+    role = str(agent.get("role", ""))
+    return (
+        agent.get("disabled") is True
+        or activation.get("enabled") is False
+        or role.startswith("legacy_disabled")
+    )
+
+
+def ensure_agent_enabled(agent_id: str, *, context: str) -> dict:
+    agent = get_agent(agent_id)
+    if is_agent_disabled(agent):
+        print(
+            f"[error] Agent {agent_id!r} is disabled for {context}. "
+            "Re-enable it explicitly in agents.json before routing work to it.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    return agent
+
+
 # ---------------------------------------------------------------------------
 # Projects
 # ---------------------------------------------------------------------------

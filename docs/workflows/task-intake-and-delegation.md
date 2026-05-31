@@ -7,6 +7,12 @@ One implementation owner, one scope, one verification plan.
 For Amiga work, use at most one Codex-managed internal subagent for a task. Do
 not stack several Codex-managed subagents on the same implementation lane.
 External collaborators do not count against that internal subagent limit.
+Codex is the orchestrator, reviewer, queue owner, and merge/release gate owner.
+Codex-owned implementation should use managed Codex Thread Coordination workers
+by default. Native subagents are focused local support lanes for review, repo
+mapping, docs sync, verification, and recovery. `cdx2` is disabled legacy
+routing for Amiga; use it only when the operator explicitly re-enables cdx2 for
+one specific task.
 Claude is the first-choice UI/UX implementation worker for Claude-owned UI/UX
 lanes, not merely a refinement or review agent. Claude may own the actual UI
 diff, rendered parity repair, D8 pass, review evidence, and handoff for that
@@ -28,6 +34,18 @@ internal subagent implementation writers for the same files in the same task.
 10. move task to `in_progress` (gated — requires `refined_by: claude` or `skip_refinement: true`)
 11. then request activation relay
 12. then begin implementation
+
+For Codex-owned implementation, the implementation owner is a managed Codex
+Thread Coordination worker. Use Thread Coordination when that owner needs a
+durable background Codex thread:
+
+1. create one managed Codex thread for the task/worktree/branch
+2. inspect progress with `read_thread`
+3. send only focused unblocks with `send_message_to_thread`
+4. record progress, blockers, evidence, and handoff state back to the
+   `llm-collab` task/chat
+
+Thread Coordination is an execution surface, not a queue source of truth.
 
 ## Canonical ordered queue
 

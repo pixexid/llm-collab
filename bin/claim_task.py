@@ -29,6 +29,7 @@ from _helpers import (
     TASK_STATUSES,
     agent_ids,
     dump_frontmatter,
+    ensure_agent_enabled,
     find_task_by_id,
     parse_frontmatter,
     run_project_preflight,
@@ -67,6 +68,8 @@ def main():
     if args.owner != "unassigned" and args.owner not in known:
         print(f"[error] Owner {args.owner!r} not in agents.json", file=sys.stderr)
         sys.exit(1)
+    if args.owner != "unassigned":
+        ensure_agent_enabled(args.owner, context="task ownership")
 
     task_file = find_task_by_id(args.task)
     if task_file is None:

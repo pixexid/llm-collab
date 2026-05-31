@@ -51,6 +51,7 @@ from _helpers import (
     utc_iso,
     write_file,
     dump_frontmatter,
+    ensure_agent_enabled,
     write_chat_note,
 )
 from _session_autobridge import (
@@ -157,6 +158,7 @@ def main():
             print(f"[error] {label} agent {aid!r} not found in agents.json", file=sys.stderr)
             print(f"       Known agents: {', '.join(known)}", file=sys.stderr)
             sys.exit(1)
+        ensure_agent_enabled(aid, context=f"{label} message routing")
     ensure_project(args.project, allow_none=False)
 
     # Resolve chat
