@@ -632,4 +632,7 @@ Notes:
 - `deliver.py` uses it to print first-time onboarding relay prompts for `human_relay` recipients, then avoid repeating those long prompts
 - Claude Desktop recipients are not normal relay recipients when Computer Use is
   available. For those sends, `deliver.py` reports `desktop_bridge_required`
-  and a one-line bridge prompt instead of asking for operator relay.
+  and a one-line bridge prompt for Codex to send through Computer Use. The
+  operator wake path is a last resort; if Computer Use is blocked, record a
+  blocker, keep the heartbeat active, and retry through Codex/Computer Use or
+  repair tooling before asking the operator to relay.

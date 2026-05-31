@@ -83,9 +83,12 @@ Do not stop on these states:
 `llm-collab` messages are part of the loop, not a side channel. Before sending a
 worker follow-up, update the task/issue if scope changed, write one consolidated
 message, and use the approved worker bridge. For Claude Desktop, use Computer
-Use when available; if Computer Use cannot access the target UI, report the
-reason and ask the operator to wake the target worker instead of falling back to
-hidden relay text.
+Use. If Computer Use cannot access the target UI, try reasonable app-control
+recovery paths first, report and record the blocker, and keep the heartbeat
+active for Codex/Computer Use retry or tooling repair. Operator wake is a
+last-resort fallback only after those attempts fail or require an operator-only
+permission/tooling decision; do not use routine bridge-prompt relay as the first
+fallback.
 
 There should be one active queue-runner heartbeat for a project loop. A
 task-specific heartbeat may exist only as a child wait for Claude, a worker
