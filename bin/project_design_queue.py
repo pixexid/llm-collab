@@ -350,6 +350,7 @@ def lane_mirror_fields(lane: dict) -> dict:
         "owner": lane.get("owner"),
         "task_status": lane.get("task_status"),
         "queue_state": lane.get("queue_state"),
+        "lane_type": lane.get("lane_type") or "design",
         "depends_on": normalize_depends(lane.get("depends_on")),
     }
 
