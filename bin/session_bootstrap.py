@@ -24,6 +24,7 @@ import json
 import subprocess
 
 sys.path.insert(0, str(Path(__file__).parent))
+import _backlog
 import project_issue_queue as issue_queue
 from _helpers import (
     ROOT,
@@ -72,12 +73,33 @@ def queue_summaries() -> list[dict]:
             continue
         payload = issue_queue.load_queue(project_id)
         ready_lane = issue_queue.next_ready_lane(payload)
+        backlog_status = "not_checked"
+        missing_issues: list[int] = []
+        backlog_error = None
+        try:
+            eligible = _backlog.eligible_open_issues(project_id)
+            queued_issues = {
+                lane.get("issue")
+                for lane in payload.get("lanes", [])
+                if isinstance(lane, dict) and isinstance(lane.get("issue"), int)
+            }
+            missing_issues = [issue.number for issue in eligible if issue.number not in queued_issues]
+            backlog_status = "drift" if missing_issues else "clean"
+        except _backlog.BacklogUnavailable as exc:
+            backlog_status = "unknown"
+            backlog_error = str(exc)
+        except ValueError as exc:
+            backlog_status = "error"
+            backlog_error = str(exc)
         summaries.append(
             {
                 "project_id": project_id,
                 "queue_path": display_path(issue_queue.queue_markdown_path(project_id)),
                 "queue_empty": not bool(payload.get("lanes")),
                 "ready_lane": ready_lane,
+                "backlog_status": backlog_status,
+                "missing_issues": missing_issues,
+                "backlog_error": backlog_error,
             }
         )
     return summaries
@@ -142,8 +164,27 @@ def main():
     if not args.json_output and queue_info:
         print("[queue]")
         for item in queue_info:
+            if item["backlog_status"] == "unknown":
+                print(
+                    f"  - {item['project_id']}: backlog unknown; GitHub unavailable ({item['backlog_error']}) "
+                    f"({item['queue_path']})"
+                )
+                continue
+            if item["backlog_status"] == "error":
+                print(
+                    f"  - {item['project_id']}: backlog error: {item['backlog_error']} "
+                    f"({item['queue_path']})"
+                )
+                continue
+            if item["backlog_status"] == "drift":
+                issues = ", ".join(f"GH-{issue}" for issue in item["missing_issues"])
+                print(
+                    f"  - {item['project_id']}: DRIFT queue missing eligible GitHub issue(s): {issues} "
+                    f"({item['queue_path']})"
+                )
+                continue
             if item["queue_empty"]:
-                print(f"  - {item['project_id']}: no remaining queued lanes ({item['queue_path']})")
+                print(f"  - {item['project_id']}: queue empty confirmed against GitHub ({item['queue_path']})")
                 continue
             ready = item["ready_lane"]
             if ready:

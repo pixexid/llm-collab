@@ -24,6 +24,7 @@ import json
 import re
 
 sys.path.insert(0, str(Path(__file__).parent))
+import _backlog
 from _helpers import display_path, find_task_by_id, get_project, parse_frontmatter, project_state_dir, utc_iso, write_file
 
 QUEUE_STATES = {"ready", "queued", "blocked", "active", "review", "done"}
@@ -37,6 +38,16 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Show, validate, or render a project issue queue.")
     parser.add_argument("command", choices=("show", "validate", "sync-markdown", "archive-complete"))
     parser.add_argument("--project", required=True, help="project_id from projects.json")
+    parser.add_argument(
+        "--require-clean-backlog",
+        action="store_true",
+        help="Require GitHub-backed queue/backlog consistency. This is the default for validate.",
+    )
+    parser.add_argument(
+        "--skip-backlog-check",
+        action="store_true",
+        help="Skip GitHub backlog consistency checks for offline/manual validation.",
+    )
     return parser.parse_args()
 
 
@@ -200,6 +211,35 @@ def validate_queue(project_id: str, payload: dict) -> tuple[list[str], list[str]
         warnings.append(
             f"ready lane order {ready_orders[0]} is not the earliest queue order {min(queue_orders)}"
         )
+
+    return errors, warnings
+
+
+def backlog_consistency_errors(project_id: str, payload: dict) -> tuple[list[str], list[str]]:
+    errors: list[str] = []
+    warnings: list[str] = []
+    try:
+        eligible = _backlog.eligible_open_issues(project_id)
+    except _backlog.BacklogUnavailable as exc:
+        errors.append(f"GitHub backlog state unknown for {project_id}: {exc}")
+        return errors, warnings
+    except ValueError as exc:
+        errors.append(str(exc))
+        return errors, warnings
+
+    queued_issues = {
+        lane.get("issue")
+        for lane in payload.get("lanes", [])
+        if isinstance(lane, dict) and isinstance(lane.get("issue"), int)
+    }
+    missing = [issue for issue in eligible if issue.number not in queued_issues]
+    if missing:
+        formatted = ", ".join(f"GH-{issue.number}" for issue in missing)
+        errors.append(
+            f"queue/backlog drift: eligible open GitHub issue(s) missing from issue-queue.json: {formatted}"
+        )
+    elif not payload.get("lanes"):
+        warnings.append("queue empty confirmed against GitHub backlog")
 
     return errors, warnings
 
@@ -417,6 +457,10 @@ def main() -> int:
 
     if args.command == "validate":
         errors, warnings = validate_queue(args.project, payload)
+        if not args.skip_backlog_check:
+            backlog_errors, backlog_warnings = backlog_consistency_errors(args.project, payload)
+            errors.extend(backlog_errors)
+            warnings.extend(backlog_warnings)
         print(f"project: {args.project}")
         print(f"queue: {display_path(queue_json_path(args.project))}")
         if warnings:
@@ -437,10 +481,17 @@ def main() -> int:
         elif payload.get("lanes"):
             print("queue has no ready lane")
         else:
-            print("queue empty")
+            print("queue empty: confirmed against GitHub backlog")
         return 0
 
     if args.command == "archive-complete":
+        if not args.skip_backlog_check:
+            backlog_errors, _ = backlog_consistency_errors(args.project, payload)
+            if backlog_errors:
+                print("[error] Refusing archive-complete while GitHub backlog is not clean.", file=sys.stderr)
+                for error in backlog_errors:
+                    print(f"- {error}", file=sys.stderr)
+                return 1
         if payload.get("lanes"):
             print("[error] Refusing archive-complete while lanes remain in the queue.", file=sys.stderr)
             return 1
