@@ -149,6 +149,7 @@ class ProjectDesignQueueTest(unittest.TestCase):
                     "owner": "claude",
                     "task_status": "open",
                     "queue_state": "ready",
+                    "lane_type": "design-spec",
                     "depends_on": ["TASK-DONE"],
                     "blocked_by": [],
                     "notes": "Design first.",
@@ -173,6 +174,7 @@ class ProjectDesignQueueTest(unittest.TestCase):
         self.assertEqual(len(issue_payload["lanes"]), 1)
         self.assertEqual(issue_payload["lanes"][0]["task_id"], "TASK-A")
         self.assertEqual(issue_payload["lanes"][0]["queue_state"], "ready")
+        self.assertEqual(issue_payload["lanes"][0]["lane_type"], "design-spec")
 
     def test_issue_queue_mirror_clears_stale_lanes_when_design_queue_is_empty(self) -> None:
         design_payload = {
@@ -318,6 +320,70 @@ class ProjectDesignQueueTest(unittest.TestCase):
 
         self.assertTrue(any("issue queue mirror" in error for error in errors_with_mirror))
         self.assertEqual(errors_without_mirror, [])
+
+    def test_validate_reports_stale_issue_queue_mirror_lane_type(self) -> None:
+        payload = {
+            "artifact_type": "ordered_design_queue",
+            "project_id": "amiga",
+            "lanes": [
+                {
+                    "order": 1,
+                    "issue": 223,
+                    "task_id": "TASK-A",
+                    "owner": "claude",
+                    "task_status": "open",
+                    "queue_state": "ready",
+                    "lane_type": "design-spec",
+                    "depends_on": [],
+                }
+            ],
+        }
+        issue_payload = {
+            "artifact_type": "ordered_issue_queue",
+            "project_id": "amiga",
+            "lanes": [
+                {
+                    "order": 1,
+                    "issue": 223,
+                    "task_id": "TASK-A",
+                    "owner": "claude",
+                    "task_status": "open",
+                    "queue_state": "ready",
+                    "lane_type": "design",
+                    "depends_on": [],
+                }
+            ],
+        }
+        task_body = "\n".join(
+            [
+                "---",
+                "task_id: TASK-A",
+                "owner: claude",
+                "status: open",
+                "depends_on: []",
+                "ui_ux_lane: true",
+                "---",
+                "",
+            ]
+        )
+
+        class FakeTaskPath:
+            def read_text(self) -> str:
+                return task_body
+
+        with patch.object(project_design_queue, "get_project", return_value={"id": "amiga"}):
+            with patch.object(project_design_queue, "find_task_by_id", return_value=FakeTaskPath()):
+                with patch.object(project_design_queue, "load_issue_queue", return_value=issue_payload):
+                    errors, _ = project_design_queue.validate_queue(
+                        "amiga",
+                        payload,
+                        check_github=False,
+                        check_issue_mirror=True,
+                    )
+
+        self.assertTrue(
+            any("issue queue mirror mismatch" in error and "'lane_type': 'design-spec'" in error for error in errors)
+        )
 
     def test_validate_materialized_dependency_artifacts_for_active_lane(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

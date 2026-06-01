@@ -350,6 +350,7 @@ def lane_mirror_fields(lane: dict) -> dict:
         "owner": lane.get("owner"),
         "task_status": lane.get("task_status"),
         "queue_state": lane.get("queue_state"),
+        "lane_type": lane.get("lane_type") or "design",
         "depends_on": normalize_depends(lane.get("depends_on")),
     }
 
@@ -1052,6 +1053,7 @@ def issue_lane_from_design_lane(lane: dict) -> dict:
         "owner": lane["owner"],
         "task_status": lane["task_status"],
         "queue_state": lane["queue_state"],
+        "lane_type": lane.get("lane_type") or "design",
         "tier": lane.get("tier", 5),
         "depends_on": normalize_depends(lane.get("depends_on")),
         "blocked_by": normalize_depends(lane.get("blocked_by")),
