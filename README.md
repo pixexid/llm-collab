@@ -221,6 +221,10 @@ Use relay prompts only when a worker should start immediately.
 - If multiple workers are queued, provide only the relay for the worker that should act now.
 - For sequential lanes, wait for the trigger condition before requesting the next relay.
 - For parallel-safe lanes, explicitly say: `activate <worker-a> + <worker-b> now in parallel`.
+- A queue may have multiple active workers when each worker owns a distinct task, branch, and worktree.
+- Use read-only planning, repo-mapping, review, docs, and release-check workers in parallel with implementation whenever they can unblock later lanes without touching the active writer's code.
+- Before activating parallel implementation writers, record a non-overlap check covering touched files/routes, shared APIs/data/schema, generated artifacts, validation resources, and merge order.
+- If overlap is uncertain, keep one implementation writer and use additional workers only for read-only prep/review.
 
 ## What this is NOT
 

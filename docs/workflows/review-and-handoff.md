@@ -83,6 +83,26 @@ whether the blocker is actionable:
 8. if the project maintains a canonical queue artifact, orchestrator updates queue state/order before selecting the next lane
 9. accepted tasks move to `Tasks/done`
 
+## Parallel queue operation
+
+Do not reduce the collaboration loop to one worker implementing while everyone
+else waits. The orchestrator should keep safe parallel work moving:
+
+- one authoritative writer per implementation lane
+- one branch and isolated worktree per writer
+- read-only planning, repo mapping, review, docs-sync, and release-guard work in
+  parallel with active implementation when it can unblock future lanes
+- multiple implementation writers only after a recorded non-overlap check for
+  routes/surfaces, file sets, shared utilities, API/data/schema ownership,
+  generated artifacts, validation resources, and merge order
+- no parallel implementation when two lanes touch the same route, component
+  family, DB table/migration, API contract, or generated artifact unless the
+  task contracts explicitly split ownership and sequencing
+
+Queue order still matters. If a later lane is safe to implement out of order,
+use the queue override path with the non-overlap evidence. If that evidence is
+missing, run read-only prep instead of parking the worker.
+
 Hard rule for UI/UX lanes:
 - `claim_task.py --status review` should fail if the task contract is missing the required UI evidence
 - `claim_task.py --status review` should fail for UI/UX implementation lanes if the D8 design-thinking pass is missing or has fewer than 3 findings
