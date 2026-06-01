@@ -177,6 +177,18 @@ After merge:
 4. run the executable branch/worktree cleanup gate
 5. mark local task done
 
+For `llm-collab` itself, the shared local checkout is part of the shipped
+workflow. After a PR that changes workflow docs, scripts, gates, skills, agent
+routing, or queue behavior merges, fast-forward the canonical local checkout
+that future sessions read before starting or handing off more work. For Amiga,
+that checkout is `/Users/pixexid/Projects/llm-collab`.
+
+If tracked local dirt blocks the fast-forward, stash or move the tracked dirt
+aside with an explicit note. Do not leave the shared checkout behind
+`origin/main` just because GitHub is up to date. Project-private untracked files
+may remain untracked; do not delete or commit them just to sync tracked workflow
+files.
+
 The cleanup gate is:
 
 ```bash

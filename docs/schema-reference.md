@@ -465,6 +465,25 @@ chat/session turnover.
 | `blocked_by` | string[] | Explicit blocker references |
 | `notes` | string | Short operator/orchestrator note |
 
+### Parallel lane policy
+
+The ordered queue is an activation contract, not a requirement to keep only one
+worker alive. Projects may run multiple active lanes when the orchestrator
+records why the work is parallel-safe.
+
+- Keep one writer per task, branch, and isolated worktree.
+- Use read-only mapper, planner, reviewer, docs-sync, and release-guard workers
+  freely while an implementation writer is active.
+- Activate more than one implementation writer only after recording a
+  non-overlap check in the task activity note or lane notes. The check should
+  cover routes/surfaces, file sets, shared utilities, API/data/schema ownership,
+  generated artifacts, validation resources such as ports/browser profiles, and
+  intended merge order.
+- If a queued lane needs an out-of-order implementation claim, use
+  `claim_task.py --allow-queue-override` only with that non-overlap evidence.
+- If the non-overlap check is unclear, keep the later lane in planning/review
+  prep instead of starting a second writer.
+
 ### Operational rules
 
 - the canonical queue path should remain stable even when no lanes remain
