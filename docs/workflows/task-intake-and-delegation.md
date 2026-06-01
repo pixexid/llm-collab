@@ -26,7 +26,8 @@ internal subagent implementation writers for the same files in the same task.
 2. create or identify the chat
 3. read the project queue artifact when the project maintains one
 4. create/update the task
-5. **send task to claude for spec refinement** (non-trivial tasks — see Refinement Gate below)
+5. run the Claude planning/refinement gate for non-trivial tasks (see
+   Refinement Gate below)
 6. update the queue when owner/order/dependency/activation state changes
 7. provision branch/worktree first when the lane is isolated-worker implementation
 8. assign one implementation owner
@@ -161,17 +162,39 @@ message if they are run under an incompatible interpreter.
 
 ## Refinement Gate
 
-Claude is the designated task spec refiner. `claim_task.py` blocks any `open → in_progress` transition unless the task frontmatter contains `refined_by: claude` or `skip_refinement: true`.
+Claude is the designated planning/refinement collaborator for non-trivial
+tasks. `claim_task.py` blocks any `open → in_progress` transition unless the
+task frontmatter contains `refined_by: claude` or `skip_refinement: true`.
+
+The gate is a machine contract, not a requirement to open a separate refinement
+thread. Prefer the Claude thread that already holds the relevant context:
+
+- use the same Claude thread for the same task, same surface, blocker repair,
+  review-fix loop, or continuation of the same planning chain
+- ask Claude to create or update the task, GitHub issue, acceptance criteria,
+  and risk analysis directly when that thread has the needed context
+- set `refined_by: claude` from any real Claude planning/refinement pass, even
+  when it happened inside the existing context-holding thread
+- open a fresh Claude thread only for a genuinely new context, a full/corrupted
+  thread, a needed cold-read independence check, or a task that cannot safely
+  continue in the old thread
+- keep Codex as the independent acceptance gate: Codex validates queue state,
+  de-duplicates scope, checks blockers/frontmatter, and controls status
+  transitions
 
 **Standard flow (non-trivial tasks):**
 1. Orchestrator creates task with `new_task.py` (status: `open`, `refined_by: null`)
 2. Orchestrator fills or requests enough context for the task's `## Implementation Risk Analysis` section; this is required for Codex-created tasks too, not only Claude refinement
-3. Orchestrator sends refinement request to claude via `deliver.py`, including task ID, file path, research docs, GH issue, and the required implementation-risk checklist
+3. Orchestrator sends or records the planning/refinement request in the
+   context-holding Claude chat when one exists; otherwise create a fresh Claude
+   chat with task ID, file path, research docs, GH issue, and the required
+   implementation-risk checklist
 4. Claude reviews current files/topology, patches task and GH issue, completes `## Implementation Risk Analysis`, then runs:
    ```bash
    /Users/pixexid/Projects/llm-collab/bin/llm-collab refine_task.py --task TASK-... --note "..."
    ```
-5. Claude replies in the linked chat confirming refinement is done
+5. Claude replies in the linked chat confirming refinement is done and calls out
+   any cross-surface context it used
 6. Orchestrator confirms `refined_by: claude` in the frontmatter and checks the risk analysis for unresolved blockers, then proceeds to activation
 
 ## Worker-owned follow-up capture

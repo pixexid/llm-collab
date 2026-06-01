@@ -6,7 +6,7 @@ Commands:
   python3 bin/task_contract.py sync --task TASK-ABC123 --write
   python3 bin/task_contract.py validate --task TASK-ABC123 --stage review --json
   python3 bin/task_contract.py record-db-evidence --task TASK-ABC123 --db-impact shared-supabase-required --db-migration-files db/migrations/20260417_add_staff_unavailability.sql --db-project-ref wbqjeasgxakubqcutgjt --db-apply-result "pass: supabase db push --linked" --db-schema-assertion "pass: execute_sql confirmed table staff_unavailability exists" --db-advisors-result "pass: get_advisors returned no blocking notices" --db-runtime-validation "pass: admin booking review + staff detail against shared Supabase"
-  python3 bin/task_contract.py record-ui-evidence --task TASK-ABC123 --design-docs-read /path/to/DESIGN.md --design-skills-used impeccable --impeccable-commands-used /impeccable\\ craft,/polish --impeccable-detect-result pass --browser-validation-desktop "pass: /app/bookings desktop" --browser-validation-mobile "pass: 393px no overflow" --operator-visual-feedback-requested true --design-doc-update-decision "reviewed; no DESIGN.md diff required" --design-thinking-pass-items '[{"finding":"Filter empty state felt abrupt","disposition":"shipped"}]'
+  python3 bin/task_contract.py record-ui-evidence --task TASK-ABC123 --design-docs-read /path/to/DESIGN.md --design-skills-used impeccable --impeccable-commands-used /impeccable\\ craft,/polish --impeccable-detect-result pass --browser-validation-desktop "pass: /app/bookings desktop" --browser-validation-mobile "pass: 393px no overflow" --operator-visual-feedback-requested true --operator-visual-feedback-disposition "requested; timeout_proceeded after 10 minutes without operator reply" --design-doc-update-decision "reviewed; no DESIGN.md diff required" --design-thinking-pass-items '[{"finding":"Filter empty state felt abrupt","disposition":"shipped"}]'
 """
 
 from __future__ import annotations
@@ -420,6 +420,9 @@ def sync_ui_ux_contract(frontmatter: dict, body: str) -> tuple[dict, list[str]]:
             "browser_validation_mobile": updated.get("browser_validation_mobile"),
             "operator_visual_feedback_requested": _normalize_bool(updated.get("operator_visual_feedback_requested"))
             or False,
+            "operator_visual_feedback_timeout_minutes": updated.get("operator_visual_feedback_timeout_minutes")
+            or 10,
+            "operator_visual_feedback_disposition": updated.get("operator_visual_feedback_disposition"),
             "design_doc_update_decision": updated.get("design_doc_update_decision"),
             "design_thinking_polish_budget_loc": updated.get("design_thinking_polish_budget_loc"),
             "design_thinking_polish_seeds": _normalize_list(updated.get("design_thinking_polish_seeds")),
@@ -599,7 +602,8 @@ def validate_ui_ux_contract(frontmatter: dict, body: str, *, stage: str) -> tupl
                 errors.append("UI/UX implementation review evidence must include `browser_validation_mobile`.")
             if _normalize_bool(fm.get("operator_visual_feedback_requested")) is not True:
                 errors.append(
-                    "UI/UX implementation review evidence must set `operator_visual_feedback_requested: true`."
+                    "UI/UX implementation review evidence must set `operator_visual_feedback_requested: true`; "
+                    "this records that feedback was requested, not that operator approval blocked review."
                 )
             pass_items = _normalize_design_thinking_items(fm.get("design_thinking_pass_items"))
             if len(pass_items) < 3:
@@ -754,6 +758,10 @@ def command_record_ui_evidence(args: argparse.Namespace) -> None:
         synced["browser_validation_mobile"] = args.browser_validation_mobile
     if args.operator_visual_feedback_requested is not None:
         synced["operator_visual_feedback_requested"] = _normalize_bool(args.operator_visual_feedback_requested)
+    if args.operator_visual_feedback_timeout_minutes is not None:
+        synced["operator_visual_feedback_timeout_minutes"] = int(args.operator_visual_feedback_timeout_minutes)
+    if args.operator_visual_feedback_disposition is not None:
+        synced["operator_visual_feedback_disposition"] = args.operator_visual_feedback_disposition
     if args.design_doc_update_decision is not None:
         synced["design_doc_update_decision"] = args.design_doc_update_decision
     if args.design_thinking_pass_items is not None:
@@ -844,6 +852,19 @@ def build_parser() -> argparse.ArgumentParser:
         "--operator-visual-feedback-requested",
         default=None,
         help="true|false: whether the operator was explicitly asked for visual feedback.",
+    )
+    evidence.add_argument(
+        "--operator-visual-feedback-timeout-minutes",
+        default=None,
+        help="Minutes to wait for operator visual feedback before Codex/worker may proceed. Default: 10.",
+    )
+    evidence.add_argument(
+        "--operator-visual-feedback-disposition",
+        default=None,
+        help=(
+            "Result of the visual feedback request, for example: "
+            "responded, timeout_proceeded, or explicitly_not_required."
+        ),
     )
     evidence.add_argument(
         "--design-doc-update-decision",
