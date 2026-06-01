@@ -313,13 +313,19 @@ design_doc_update_decision: null
 
 Allowed dispositions: `shipped`, `deferred`, `out_of_scope`.
 
-Non-trivial tasks must also include a completed body section named `## Implementation Risk Analysis` before `refine_task.py` can set `refined_by: claude`. The section is a refinement gate, not optional prose. Required labels:
+Non-trivial tasks must also include a completed body section named `## Implementation Risk Analysis` before `plan_task.py`/`refine_task.py` can set `refined_by: claude`. The section is a planning/refinement gate, not optional prose. Required labels:
 
 - `Current file/topology reviewed:`
 - `Scope split decision:`
 - `Estimated diff/risk:`
 - `Verification/browser/sign-off plan:`
 - `Open decisions/blockers:`
+
+When Claude both creates and plans a task (`created_by: claude` and
+`refined_by: claude`), activation also requires `accepted_by: codex` and
+`accepted_at` before `claim_task.py --status in_progress` succeeds. That
+acceptance is Codex's independent read of the task/issue, source evidence,
+queue order, blockers, and task contract.
 
 ### Body
 

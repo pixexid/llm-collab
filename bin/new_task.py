@@ -5,6 +5,7 @@ new_task.py — Create a new task file.
 Usage:
   python bin/new_task.py --title "Implement auth flow" --created-by orchestrator --project my-app
   python bin/new_task.py --title "Research DB options" --created-by researcher --owner researcher --project my-app --priority high
+  python bin/new_task.py --title "Plan dashboard parity" --created-by claude --project amiga
 """
 
 import sys
@@ -82,7 +83,7 @@ def main():
     if args.status == "in_progress" and not args.skip_refinement:
         print(
             "[error] Cannot create a task directly in in_progress without --skip-refinement. "
-            "Create in open state, send to claude for refinement, then activate.",
+            "Create in open state, complete the Claude planning/refinement gate, then activate.",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -110,6 +111,9 @@ def main():
         "skip_refinement": args.skip_refinement,
         "refined_by": None,
         "refined_at": None,
+        "planning_mode": None,
+        "accepted_by": None,
+        "accepted_at": None,
     }
     if args.ui_ux_lane == "true":
         fm["ui_ux_lane"] = True

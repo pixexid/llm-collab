@@ -7,6 +7,7 @@ and appends an activity log entry.
 
 Usage:
   python bin/claim_task.py --task TASK-ABC123 --owner orchestrator --status in_progress
+  python bin/claim_task.py --task TASK-ABC123 --owner claude --status in_progress --accepted-by codex
   python bin/claim_task.py --task TASK-ABC123 --owner unassigned --status open --note "Blocked on API spec"
   python bin/claim_task.py --task TASK-ABC123 --owner orchestrator --status done
 """
@@ -40,6 +41,9 @@ from _helpers import (
 from refine_task import RISK_REQUIRED_LABELS, RISK_SECTION, validate_implementation_risk_analysis
 from task_contract import sync_task_contract, validate_task_contract
 
+PLANNING_AGENT = "claude"
+ACCEPTANCE_AGENT = "codex"
+
 
 def parse_args():
     p = argparse.ArgumentParser(description="Claim or update a task.")
@@ -58,7 +62,32 @@ def parse_args():
         action="store_true",
         help="Allow claiming a queued project lane out of order even if it is not the current ready lane.",
     )
+    p.add_argument(
+        "--accepted-by",
+        default=None,
+        help="Agent ID accepting a Claude-authored/Claude-planned task for activation.",
+    )
+    p.add_argument(
+        "--accepted-note",
+        default=None,
+        help="Optional note recorded when accepting a self-authored planning pass.",
+    )
+    p.add_argument(
+        "--allow-self-plan",
+        action="store_true",
+        help="Override the Codex acceptance requirement for a Claude-authored/Claude-planned task. Logged in frontmatter.",
+    )
     return p.parse_args()
+
+
+def requires_codex_acceptance(frontmatter: dict) -> bool:
+    if frontmatter.get("skip_refinement", False):
+        return False
+    return frontmatter.get("created_by") == PLANNING_AGENT and frontmatter.get("refined_by") == PLANNING_AGENT
+
+
+def has_codex_acceptance(frontmatter: dict) -> bool:
+    return frontmatter.get("accepted_by") == ACCEPTANCE_AGENT
 
 
 def main():
@@ -68,8 +97,13 @@ def main():
     if args.owner != "unassigned" and args.owner not in known:
         print(f"[error] Owner {args.owner!r} not in agents.json", file=sys.stderr)
         sys.exit(1)
+    if args.accepted_by is not None and args.accepted_by not in known:
+        print(f"[error] --accepted-by agent {args.accepted_by!r} not in agents.json", file=sys.stderr)
+        sys.exit(1)
     if args.owner != "unassigned":
         ensure_agent_enabled(args.owner, context="task ownership")
+    if args.accepted_by is not None:
+        ensure_agent_enabled(args.accepted_by, context="task planning acceptance")
 
     task_file = find_task_by_id(args.task)
     if task_file is None:
@@ -79,6 +113,26 @@ def main():
     content = task_file.read_text()
     fm, body = parse_frontmatter(content)
     fm, _ = sync_task_contract(fm, body)
+
+    if args.accepted_by is not None:
+        if args.accepted_by != ACCEPTANCE_AGENT:
+            print(
+                json.dumps(
+                    {
+                        "error": "self-authored Claude planning acceptance must be recorded by codex",
+                        "task_id": fm.get("task_id", args.task),
+                        "accepted_by": args.accepted_by,
+                        "required_accepted_by": ACCEPTANCE_AGENT,
+                    },
+                    indent=2,
+                ),
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        fm["accepted_by"] = args.accepted_by
+        fm["accepted_at"] = utc_iso()
+        if args.accepted_note:
+            fm["accepted_note"] = args.accepted_note
 
     old_status = fm.get("status", "open")
     project_id = fm.get("project_id")
@@ -155,6 +209,28 @@ def main():
                 file=sys.stderr,
             )
             sys.exit(1)
+
+        if requires_codex_acceptance(fm) and not has_codex_acceptance(fm):
+            if not args.allow_self_plan:
+                print(
+                    json.dumps(
+                        {
+                            "error": "Claude-authored and Claude-planned task requires Codex acceptance before activation",
+                            "task_id": fm.get("task_id", args.task),
+                            "target_status": args.status,
+                            "created_by": fm.get("created_by"),
+                            "refined_by": fm.get("refined_by"),
+                            "hint": "Review the task/issue against source evidence, then rerun with --accepted-by codex.",
+                            "override_flag": "--allow-self-plan",
+                        },
+                        indent=2,
+                    ),
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            now = utc_iso()
+            fm["self_plan_acceptance_override"] = True
+            fm["self_plan_acceptance_override_at"] = now
 
         risk_errors = [] if fm.get("skip_refinement", False) else validate_implementation_risk_analysis(body)
         if risk_errors:

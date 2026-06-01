@@ -160,11 +160,13 @@ environments where bare `python3` or `#!/usr/bin/env python3` can resolve to the
 system Python 3.9. Direct script entrypoints also fail fast with a clear version
 message if they are run under an incompatible interpreter.
 
-## Refinement Gate
+## Planning And Acceptance Gate
 
 Claude is the designated planning/refinement collaborator for non-trivial
 tasks. `claim_task.py` blocks any `open → in_progress` transition unless the
 task frontmatter contains `refined_by: claude` or `skip_refinement: true`.
+When Claude both creates and plans a task, `claim_task.py` also requires
+`accepted_by: codex` before activation.
 
 The gate is a machine contract, not a requirement to open a separate refinement
 thread. Prefer the Claude thread that already holds the relevant context:
@@ -172,7 +174,8 @@ thread. Prefer the Claude thread that already holds the relevant context:
 - use the same Claude thread for the same task, same surface, blocker repair,
   review-fix loop, or continuation of the same planning chain
 - ask Claude to create or update the task, GitHub issue, acceptance criteria,
-  and risk analysis directly when that thread has the needed context
+  and risk analysis directly when that thread has the needed context; use
+  `new_task.py`, never hand-author a task file
 - set `refined_by: claude` from any real Claude planning/refinement pass, even
   when it happened inside the existing context-holding thread
 - open a fresh Claude thread only for a genuinely new context, a full/corrupted
@@ -189,13 +192,15 @@ thread. Prefer the Claude thread that already holds the relevant context:
    context-holding Claude chat when one exists; otherwise create a fresh Claude
    chat with task ID, file path, research docs, GH issue, and the required
    implementation-risk checklist
-4. Claude reviews current files/topology, patches task and GH issue, completes `## Implementation Risk Analysis`, then runs:
+4. Claude reviews current files/topology, patches or authors the task and GH issue, completes `## Implementation Risk Analysis`, then runs:
    ```bash
-   /Users/pixexid/Projects/llm-collab/bin/llm-collab refine_task.py --task TASK-... --note "..."
+   /Users/pixexid/Projects/llm-collab/bin/llm-collab plan_task.py --task TASK-... --note "..."
    ```
+   `refine_task.py` remains the same validation path and may still be used.
 5. Claude replies in the linked chat confirming refinement is done and calls out
    any cross-surface context it used
-6. Orchestrator confirms `refined_by: claude` in the frontmatter and checks the risk analysis for unresolved blockers, then proceeds to activation
+6. Orchestrator confirms `refined_by: claude` in the frontmatter and checks the risk analysis for unresolved blockers
+7. If `created_by: claude` and `refined_by: claude`, Codex performs an independent acceptance read and activates with `claim_task.py --accepted-by codex`; otherwise Codex proceeds to activation normally
 
 ## Worker-owned follow-up capture
 
@@ -207,7 +212,7 @@ through a short chat note and ask the orchestrator to reconstruct them later.
 For Claude UI/UX and D8 lanes, this is mandatory:
 
 - Claude creates or updates the GitHub issue and local task mirror from its own
-  context, then links both from the active task and handoff.
+  context via `new_task.py`, then links both from the active task and handoff.
 - If an existing issue/task already owns the gap, Claude links it and records
   the disposition instead of creating a duplicate.
 - If Claude lacks a required credential or command capability, Claude writes a
@@ -215,9 +220,11 @@ For Claude UI/UX and D8 lanes, this is mandatory:
   evidence, acceptance gates, and queue placement recommendation, then hands
   that artifact to Codex for mechanical creation only.
 - Codex validates the created/drafted issue/task against the source evidence,
-  queue order, and task-contract gates before activation. Codex may discuss or
-  request corrections from Claude, but should not be the first author of
-  Claude's detailed finding unless Claude is blocked.
+  queue order, and task-contract gates before activation. For Claude-authored
+  and Claude-planned tasks, Codex records `accepted_by: codex` during activation
+  only after that read. Codex may discuss or request corrections from Claude,
+  but should not be the first author of Claude's detailed finding unless Claude
+  is blocked.
 
 Every created follow-up must preserve the original evidence trail: source task,
 source chat, affected route/component/state, D8 finding/disposition, browser or
@@ -226,7 +233,7 @@ route work.
 
 **Implementation Risk Analysis (hard gate):**
 
-Every non-trivial task must carry a completed `## Implementation Risk Analysis` section before it can be marked refined or activated. `refine_task.py` refuses to set `refined_by: claude`, and `claim_task.py --status in_progress` refuses activation, unless the section exists and these labels have real values:
+Every non-trivial task must carry a completed `## Implementation Risk Analysis` section before it can be marked planned/refined or activated. `plan_task.py`/`refine_task.py` refuses to set `refined_by: claude`, and `claim_task.py --status in_progress` refuses activation, unless the section exists and these labels have real values:
 
 - `Current file/topology reviewed:` exact files/directories inspected and whether the task plan matches the current repo shape
 - `Scope split decision:` keep as one lane, split now, or explicitly defer a sub-lane; include why
@@ -237,7 +244,7 @@ Every non-trivial task must carry a completed `## Implementation Risk Analysis` 
 This requirement applies in two places:
 
 - Codex/orchestrator task creation must include the section with enough initial assessment that Claude can verify or correct it.
-- Claude refinement must validate and complete the section before marking the task refined.
+- Claude planning/refinement must validate and complete the section before marking the task refined.
 
 For UI/UX implementation lanes, refinement must also seed D8 design-thinking-in-details work:
 
@@ -257,10 +264,23 @@ Do not hide implementation risks in chat only. If a risk changes lane size, acce
 ```
 Sets `skip_refinement: true` at creation. Use only for tasks with obvious, single-file scope where a spec review adds no value.
 
-**Verify refinement status:**
+**Verify planning/refinement status:**
 ```bash
 grep refined_by /Users/pixexid/Projects/llm-collab/Tasks/active/<task-file>.md
 ```
+
+**Accept a Claude-authored and Claude-planned task for activation:**
+```bash
+/Users/pixexid/Projects/llm-collab/bin/llm-collab claim_task.py \
+  --task TASK-... \
+  --owner claude \
+  --status in_progress \
+  --accepted-by codex \
+  --accepted-note "Reviewed source evidence, queue order, blockers, and task contract"
+```
+
+Use `--allow-self-plan` only for an explicitly approved solo recovery case; the
+override is logged in the task frontmatter.
 
 ## Required task fields
 
@@ -277,6 +297,9 @@ grep refined_by /Users/pixexid/Projects/llm-collab/Tasks/active/<task-file>.md
 - `skip_refinement` (bool — set at creation; `false` by default)
 - `refined_by` (null until claude marks it)
 - `refined_at` (null until claude marks it)
+- `planning_mode` (`authored` when Claude created the task, `refined` when Claude refined another agent's task)
+- `accepted_by` (required as `codex` before activation only when `created_by: claude` and `refined_by: claude`)
+- `accepted_at`
 - `## Implementation Risk Analysis` body section with the required labels above for every non-trivial task
 
 For UI/UX lanes, also require:

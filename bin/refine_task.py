@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-refine_task.py — Mark a task as refined after claude has reviewed and patched the spec.
+refine_task.py — Mark a task as planned/refined after claude has validated the spec.
 
-Sets refined_by and refined_at in the task frontmatter, unblocking the in_progress
-transition in claim_task.py.
+Sets refined_by/refined_at and planning_mode in the task frontmatter, unblocking
+the in_progress transition in claim_task.py when the task is otherwise accepted.
 
 Usage:
   python bin/refine_task.py --task TASK-ABC123
   python bin/refine_task.py --task TASK-ABC123 --note "Added numeric spec and regression cases"
+  python bin/refine_task.py --task TASK-ABC123 --planning-mode authored
 """
 
 import sys
@@ -47,9 +48,15 @@ DESIGN_THINKING_SEEDS_LABEL = "Design thinking in details — polish vectors:"
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Mark a task as refined by claude.")
+    p = argparse.ArgumentParser(description="Mark a task as planned/refined by claude.")
     p.add_argument("--task", required=True, help="TASK-id to mark as refined")
     p.add_argument("--note", default=None, help="Optional activity log note describing what was refined")
+    p.add_argument(
+        "--planning-mode",
+        choices=["authored", "refined"],
+        default=None,
+        help="Whether Claude authored the task plan or refined an existing task.",
+    )
     return p.parse_args()
 
 
@@ -205,8 +212,9 @@ def main():
     now = utc_iso()
     fm["refined_by"] = REFINEMENT_AGENT
     fm["refined_at"] = now
+    fm["planning_mode"] = args.planning_mode or ("authored" if fm.get("created_by") == REFINEMENT_AGENT else "refined")
 
-    note = args.note or "Task spec refined — ready for activation"
+    note = args.note or "Task spec planned/refined — ready for activation"
     activity_line = f"- {now} | {REFINEMENT_AGENT} | {note}"
 
     if "## Activity Log" in body:
@@ -222,6 +230,7 @@ def main():
                 "task_id": fm.get("task_id", args.task),
                 "refined_by": REFINEMENT_AGENT,
                 "refined_at": now,
+                "planning_mode": fm.get("planning_mode"),
                 "path": str(task_file.relative_to(ROOT)),
             },
             indent=2,
