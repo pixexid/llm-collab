@@ -1486,6 +1486,8 @@ class SessionAutobridgeTest(unittest.TestCase):
         self.assertLessEqual(len(result_payload["desktop_bridge_prompt"]), 240)
         self.assertIn("CLAUDE DESKTOP BRIDGE REQUIRED", deliver_result.stdout)
         self.assertIn("Computer Use", deliver_result.stdout)
+        self.assertIn("Do not ask the operator to relay, paste, click, or manually wake Claude.", deliver_result.stdout)
+        self.assertNotIn("until Codex has exhausted Computer Use/app-control recovery", deliver_result.stdout)
         self.assertNotIn("RELAY REQUIRED FOR OPERATOR", deliver_result.stdout)
 
     def test_deliver_suppresses_manual_relay_when_autobridge_target_is_dispatchable(self):

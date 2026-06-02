@@ -313,7 +313,7 @@ def main():
             f"Use Computer Use against /Applications/Claude.app to wake "
             f"{recipient_display} ({args.recipient}) for chat {chat_id}."
         )
-        print("Do not ask the operator to relay this until Codex has exhausted Computer Use/app-control recovery.")
+        print("Do not ask the operator to relay, paste, click, or manually wake Claude.")
         print()
         print("Visible one-line prompt:")
         print(desktop_bridge_prompt)
