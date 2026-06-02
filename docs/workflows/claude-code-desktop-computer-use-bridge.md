@@ -48,8 +48,8 @@ Codex thread.
 When `deliver.py --to claude --project amiga` reports
 `desktop_bridge_required`, Codex should continue to Computer Use in the same
 thread. This is not an operator relay request. Do not print or act on a manual
-operator relay for Claude Desktop until Codex has exhausted Computer
-Use/app-control recovery.
+operator relay for Claude Desktop; Claude Desktop wake/status work must stay in
+the Claude app through Codex-owned Computer Use/app inspection.
 
 Use shell commands for `llm-collab` filesystem checks and message recording.
 Use Computer Use only for Claude desktop interaction.
@@ -74,16 +74,15 @@ titles, URLs, or local session stores. A healthy shell report is not proof that
 the bridge is usable; the bridge is usable only after `get_app_state` succeeds
 through Computer Use and the visible target thread/prompt can be inspected.
 
-Operator wake is a last-resort fallback path. If Computer Use is unavailable,
-cannot inspect Claude, cannot pass the idle input gate, or a send attempt fails,
-Codex must first try reasonable app-control recovery paths: bring Claude to
+Operator wake is not a Claude Desktop bridge path. If Computer Use is
+unavailable, cannot inspect Claude, cannot pass the idle input gate, or a send
+attempt fails, Codex must keep ownership of the Claude app path: bring Claude to
 front by bundle id, use Computer Use app inspection/click/type, run coarse
 Claude bridge health checks, wait/retry via heartbeat when Claude is busy, and
 record any accessibility/capture blocker. Keep the heartbeat active for
-Codex/Computer Use retry, app-permission repair, or automation fix. Escalate to
-the operator only after those attempts fail or when the next unlock action is a
-real permission/tooling decision. Include the exact failed attempts and the same
-one-line bridge prompt. Do not fall back to Claude CLI, Electron store writes,
+Codex/Computer Use retry, app-permission repair, or automation fix. Do not ask
+the operator to relay, paste, click, or manually wake Claude. Do not fall back
+to Claude CLI, Electron store writes,
 or `~/.claude/projects`.
 
 For unattended heartbeats, run this helper before calling Computer Use. If it
@@ -435,7 +434,7 @@ Do not create a Claude desktop thread by writing Electron stores, IndexedDB,
   blocker with `project_design_queue.py record-computer-use-timeout` so later
   heartbeats apply the cooldown classification while still checking durable
   progress. Retry via Codex/Computer Use after cooldown or repair the Computer
-  Use/tooling blocker before escalating to an operator manual wake.
+  Use/tooling blocker; do not escalate to an operator manual wake.
 - If the app-visible thread changes, re-read the app state and confirm the
   project/title before sending anything.
 - If a heartbeat times out, record `timed_out`, delete the heartbeat, and leave
