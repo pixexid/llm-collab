@@ -660,9 +660,9 @@ Local runtime state used to avoid repeating first-time collaboration onboarding 
 Notes:
 - this file is runtime-only and gitignored (`State/`)
 - `deliver.py` uses it to print first-time onboarding relay prompts for `human_relay` recipients, then avoid repeating those long prompts
-- Claude Desktop recipients are not normal relay recipients when Computer Use is
-  available. For those sends, `deliver.py` reports `desktop_bridge_required`
-  and a one-line bridge prompt for Codex to send through Computer Use. The
-  operator wake path is a last resort; if Computer Use is blocked, record a
-  blocker, keep the heartbeat active, and retry through Codex/Computer Use or
-  repair tooling before asking the operator to relay.
+- Claude Desktop recipients are not relay recipients. For those sends,
+  `deliver.py` reports `desktop_bridge_required` and a one-line bridge prompt
+  for Codex to send through the Claude app with Computer Use. If Computer Use is
+  blocked, record the blocker, keep the heartbeat active, and retry through
+  Codex-owned Computer Use/app inspection or repair tooling. Do not ask the
+  operator to relay, paste, click, or manually wake Claude.

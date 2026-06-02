@@ -161,16 +161,15 @@ Safest task-grade workflow for Claude desktop:
 
 After `desktop_bridge_required`, Codex owns the visible Claude Desktop wake
 through Computer Use. If Computer Use is unavailable, blocked by a non-idle
-Claude state, cannot inspect the app, or fails to send, Codex must try
-reasonable app-control recovery paths first: bring Claude to front by bundle id,
-use Computer Use app inspection/click/type, run coarse Claude bridge health
-checks, wait/retry via heartbeat when Claude is busy, and record any
+Claude state, cannot inspect the app, or fails to send, Codex must keep
+ownership of the Claude app path: bring Claude to front by bundle id, use
+Computer Use app inspection/click/type, run coarse Claude bridge health checks,
+wait/retry via heartbeat when Claude is busy, and record any
 accessibility/capture blocker. Keep or create the heartbeat and record
 `observed_state`, `expected_outcome`, `why_not_done`, and
-`next_unlock_action`. Operator manual wake is a last-resort fallback only after
-those Codex/Computer Use attempts fail or require an operator-only
-permission/tooling decision; include the exact failed attempts and the one-line
-bridge prompt.
+`next_unlock_action`. Do not ask the operator to relay, paste, click, or
+manually wake Claude; repair Computer Use/app access or continue monitoring the
+Claude app until Codex can inspect and act safely.
 
 For programmatic runtime targeting that does not require visible desktop state,
 use a separate non-desktop adapter. For Claude desktop work, do not use
