@@ -247,6 +247,36 @@ accepted_by: null
         self.assertEqual(result["duplicate_mirrors"], [])
         self.assertEqual(result["projection"]["lanes"][0]["task_id"], "TASK-BAFE85")
 
+    def test_reconcile_treats_done_only_mirror_as_unmaterialized(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            done_mirror = self.write_task(
+                root,
+                "2026-06-04_gh-795-done__TASK-BAFE85.md",
+                """---
+task_id: TASK-BAFE85
+title: GH-795 Done
+status: done
+owner: unassigned
+project_id: amiga
+depends_on: []
+skip_refinement: false
+refined_by: null
+accepted_by: null
+---
+""",
+            )
+            issue = _backlog.BacklogIssue(number=795, title="Inbox source fidelity", labels=())
+
+            with patch.object(_backlog, "eligible_open_issues", return_value=[issue]):
+                with patch.object(project_issue_queue, "all_task_files", return_value=[done_mirror]):
+                    with patch.object(project_issue_queue, "queue_exists", return_value=False):
+                        result = project_issue_queue.reconcile_queue("amiga")
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["needs_materialization"], [{"issue": 795, "title": "Inbox source fidelity"}])
+        self.assertEqual(result["projection"]["lanes"], [])
+
     def test_reconcile_fails_when_issue_has_multiple_active_mirrors(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

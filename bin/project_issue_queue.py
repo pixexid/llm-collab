@@ -490,6 +490,9 @@ def reconcile_queue(project_id: str) -> dict:
             needs_materialization.append({"issue": issue.number, "title": issue.title})
             continue
         open_mirrors = [mirror for mirror in mirrors if mirror.get("status") != "done"]
+        if not open_mirrors:
+            needs_materialization.append({"issue": issue.number, "title": issue.title})
+            continue
         if len(open_mirrors) > 1:
             duplicate_mirrors.append(
                 {
