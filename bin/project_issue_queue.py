@@ -20,12 +20,22 @@ from _python_runtime import require_python
 require_python()
 
 import argparse
+import hashlib
 import json
 import re
 
 sys.path.insert(0, str(Path(__file__).parent))
 import _backlog
-from _helpers import display_path, find_task_by_id, get_project, parse_frontmatter, project_state_dir, utc_iso, write_file
+from _helpers import (
+    all_task_files,
+    display_path,
+    find_task_by_id,
+    get_project,
+    parse_frontmatter,
+    project_state_dir,
+    utc_iso,
+    write_file,
+)
 
 QUEUE_STATES = {"ready", "queued", "blocked", "active", "review", "done"}
 QUEUE_FILE_NAME = "issue-queue.json"
@@ -36,8 +46,10 @@ ISSUE_RE = re.compile(r"\bGH[- #]+(\d+)\b", re.IGNORECASE)
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Show, validate, or render a project issue queue.")
-    parser.add_argument("command", choices=("show", "validate", "sync-markdown", "archive-complete"))
+    parser.add_argument("command", choices=("show", "validate", "sync-markdown", "archive-complete", "reconcile"))
     parser.add_argument("--project", required=True, help="project_id from projects.json")
+    parser.add_argument("--json", action="store_true", dest="json_output", help="Emit machine-readable JSON.")
+    parser.add_argument("--write", action="store_true", help="Write reconciled queue projection to disk.")
     parser.add_argument(
         "--require-clean-backlog",
         action="store_true",
@@ -101,10 +113,136 @@ def extract_issue_number(frontmatter: dict, task_path: Path) -> int | None:
     return None
 
 
+def project_task_mirrors(project_id: str) -> dict[int, list[dict]]:
+    mirrors: dict[int, list[dict]] = {}
+    for task_path in all_task_files():
+        frontmatter, _ = parse_frontmatter(task_path.read_text())
+        scoped_project = frontmatter.get("project_id")
+        if scoped_project not in (project_id, None, "", "null"):
+            continue
+        issue = extract_issue_number(frontmatter, task_path)
+        if issue is None:
+            continue
+        task_id = frontmatter.get("task_id")
+        if not isinstance(task_id, str):
+            continue
+        mirrors.setdefault(issue, []).append(
+            {
+                "path": task_path,
+                "frontmatter": frontmatter,
+                "task_id": task_id,
+                "status": frontmatter.get("status") if isinstance(frontmatter.get("status"), str) else "open",
+            }
+        )
+    return mirrors
+
+
+def mirror_sort_key(mirror: dict) -> tuple[int, str]:
+    status = mirror.get("status")
+    status_rank = {
+        "in_progress": 0,
+        "review": 1,
+        "open": 2,
+        "blocked": 3,
+        "done": 4,
+    }.get(status, 5)
+    return status_rank, str(mirror["path"])
+
+
+def canonical_mirror(mirrors: list[dict]) -> dict:
+    return sorted(mirrors, key=mirror_sort_key)[0]
+
+
 def normalize_depends(values: object) -> list[str]:
     if not isinstance(values, list):
         return []
     return [str(value) for value in values]
+
+
+def task_status(task_id: str) -> str | None:
+    task_path = find_task_by_id(task_id)
+    if task_path is None:
+        return None
+    frontmatter, _ = parse_frontmatter(task_path.read_text())
+    status = frontmatter.get("status")
+    return status if isinstance(status, str) else None
+
+
+def completed_tasks(payload: dict) -> set[str]:
+    completed = {
+        str(entry.get("task_id"))
+        for entry in payload.get("completed_recently", [])
+        if isinstance(entry, dict) and entry.get("task_id")
+    }
+    for lane in payload.get("lanes", []):
+        if isinstance(lane, dict) and lane.get("task_status") == "done" and lane.get("task_id"):
+            completed.add(str(lane["task_id"]))
+    return completed
+
+
+def completed_issues(payload: dict) -> set[int]:
+    completed: set[int] = set()
+    for entry in payload.get("completed_recently", []):
+        if isinstance(entry, dict) and isinstance(entry.get("issue"), int):
+            completed.add(entry["issue"])
+    for lane in payload.get("lanes", []):
+        if (
+            isinstance(lane, dict)
+            and lane.get("task_status") == "done"
+            and isinstance(lane.get("issue"), int)
+        ):
+            completed.add(lane["issue"])
+    return completed
+
+
+def dependency_is_satisfied(task_id: str, completed_task_ids: set[str]) -> bool:
+    return task_id in completed_task_ids or task_status(task_id) == "done"
+
+
+def dependency_blockers(depends_on: list[str], completed_task_ids: set[str]) -> list[str]:
+    return [task_id for task_id in depends_on if not dependency_is_satisfied(task_id, completed_task_ids)]
+
+
+def blocker_is_satisfied(blocker: object, completed_task_ids: set[str], completed_issue_ids: set[int]) -> bool:
+    if not isinstance(blocker, str):
+        return False
+    stripped = blocker.strip()
+    if stripped in completed_task_ids:
+        return True
+    issue_match = re.fullmatch(r"GH[- #]*(\d+)", stripped, re.IGNORECASE)
+    if issue_match and int(issue_match.group(1)) in completed_issue_ids:
+        return True
+    if "queue order" not in stripped.lower():
+        return False
+    if any(task_id in stripped for task_id in completed_task_ids):
+        return True
+    return any(re.search(rf"\bGH[- #]*{issue}\b", stripped, re.IGNORECASE) for issue in completed_issue_ids)
+
+
+def unblock_satisfied_lanes(payload: dict) -> None:
+    completed_task_ids = completed_tasks(payload)
+    completed_issue_ids = completed_issues(payload)
+
+    for lane in payload.get("lanes", []):
+        if not isinstance(lane, dict) or lane.get("queue_state") != "blocked":
+            continue
+
+        depends_on = normalize_depends(lane.get("depends_on"))
+        if depends_on and not all(dependency_is_satisfied(dep, completed_task_ids) for dep in depends_on):
+            continue
+
+        blockers = normalize_depends(lane.get("blocked_by"))
+        remaining_blockers = [
+            blocker
+            for blocker in blockers
+            if not blocker_is_satisfied(blocker, completed_task_ids, completed_issue_ids)
+        ]
+        if remaining_blockers:
+            lane["blocked_by"] = remaining_blockers
+            continue
+
+        lane["queue_state"] = "queued"
+        lane["blocked_by"] = []
 
 
 def validate_queue(project_id: str, payload: dict) -> tuple[list[str], list[str]]:
@@ -244,6 +382,187 @@ def backlog_consistency_errors(project_id: str, payload: dict) -> tuple[list[str
     return errors, warnings
 
 
+def lane_reason(lane: dict) -> str:
+    if lane.get("queue_state") == "blocked":
+        blockers = normalize_depends(lane.get("blocked_by"))
+        return "blocked_by:" + ",".join(blockers or normalize_depends(lane.get("depends_on")))
+    if lane.get("task_status") == "done":
+        return "done"
+    if lane.get("needs_refinement"):
+        return "needs_refinement"
+    if lane.get("needs_acceptance"):
+        return "needs_acceptance"
+    return str(lane.get("queue_state", "unknown"))
+
+
+def lane_next_action(lane: dict) -> str:
+    if lane.get("needs_refinement"):
+        return "refine"
+    if lane.get("needs_acceptance"):
+        return "accept"
+    if lane.get("queue_state") == "ready":
+        return "activate"
+    return lane_reason(lane)
+
+
+def no_ready_lane_errors(project_id: str, payload: dict) -> tuple[list[str], list[str]]:
+    lanes = [lane for lane in payload.get("lanes", []) if isinstance(lane, dict)]
+    if next_ready_lane(payload) is not None:
+        return [], []
+    if any(lane.get("queue_state") in {"active", "review"} for lane in lanes):
+        return [], []
+    if not lanes:
+        return [], []
+    genuinely_blocked = [
+        lane
+        for lane in lanes
+        if lane.get("queue_state") == "blocked" and (lane.get("blocked_by") or lane.get("depends_on"))
+    ]
+    if len(genuinely_blocked) == len(lanes):
+        return [], []
+    diagnostics = ", ".join(
+        f"GH-{lane.get('issue')}:{lane_reason(lane)}" for lane in sorted(lanes, key=lambda item: item.get("order", 0))
+    )
+    return [f"queue has eligible lanes but no ready lane for {project_id}: {diagnostics}"], []
+
+
+def reconciliation_input_hash(project_id: str, issues: list[_backlog.BacklogIssue], mirrors: dict[int, list[dict]]) -> str:
+    task_inputs = []
+    for issue, issue_mirrors in sorted(mirrors.items()):
+        for mirror in sorted(issue_mirrors, key=lambda item: str(item["path"])):
+            frontmatter = mirror["frontmatter"]
+            task_inputs.append(
+                {
+                    "issue": issue,
+                    "task_id": mirror["task_id"],
+                    "status": frontmatter.get("status"),
+                    "owner": frontmatter.get("owner"),
+                    "depends_on": normalize_depends(frontmatter.get("depends_on")),
+                    "refined_by": frontmatter.get("refined_by"),
+                    "skip_refinement": frontmatter.get("skip_refinement"),
+                    "accepted_by": frontmatter.get("accepted_by"),
+                    "path": display_path(mirror["path"]),
+                }
+            )
+    raw = json.dumps(
+        {
+            "project_id": project_id,
+            "issues": [{"number": issue.number, "title": issue.title, "labels": issue.labels} for issue in issues],
+            "tasks": task_inputs,
+        },
+        sort_keys=True,
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def reconcile_queue(project_id: str) -> dict:
+    try:
+        eligible_issues = _backlog.eligible_open_issues(project_id)
+    except _backlog.BacklogUnavailable as exc:
+        return {
+            "ok": False,
+            "backlog": "unknown",
+            "project_id": project_id,
+            "reason": str(exc),
+            "projection": None,
+        }
+
+    mirrors_by_issue = project_task_mirrors(project_id)
+    previous_payload = load_queue(project_id) if queue_exists(project_id) else {"completed_recently": []}
+    completed_task_ids = completed_tasks(previous_payload)
+    completed_issue_ids = completed_issues(previous_payload)
+    for issue, mirrors in mirrors_by_issue.items():
+        for mirror in mirrors:
+            if mirror.get("status") == "done":
+                completed_task_ids.add(mirror["task_id"])
+                completed_issue_ids.add(issue)
+
+    lanes: list[dict] = []
+    needs_materialization: list[dict] = []
+    duplicate_mirrors: list[dict] = []
+    completed_recently = previous_payload.get("completed_recently", [])
+    if not isinstance(completed_recently, list):
+        completed_recently = []
+
+    for issue in eligible_issues:
+        mirrors = mirrors_by_issue.get(issue.number, [])
+        if not mirrors:
+            needs_materialization.append({"issue": issue.number, "title": issue.title})
+            continue
+        open_mirrors = [mirror for mirror in mirrors if mirror.get("status") != "done"]
+        if len(open_mirrors) > 1:
+            duplicate_mirrors.append(
+                {
+                    "issue": issue.number,
+                    "tasks": [mirror["task_id"] for mirror in sorted(open_mirrors, key=mirror_sort_key)],
+                }
+            )
+        mirror = canonical_mirror(mirrors)
+        frontmatter = mirror["frontmatter"]
+        task_status_value = str(frontmatter.get("status") or "open")
+        if task_status_value == "done":
+            continue
+        depends_on = normalize_depends(frontmatter.get("depends_on"))
+        blockers = dependency_blockers(depends_on, completed_task_ids)
+        refined = bool(frontmatter.get("refined_by")) or bool(frontmatter.get("skip_refinement"))
+        needs_acceptance = (
+            frontmatter.get("created_by") == "claude"
+            and bool(frontmatter.get("refined_by"))
+            and not bool(frontmatter.get("accepted_by"))
+        )
+        if task_status_value == "in_progress":
+            queue_state = "active"
+        elif task_status_value == "review":
+            queue_state = "review"
+        elif task_status_value == "blocked" or blockers:
+            queue_state = "blocked"
+        else:
+            queue_state = "queued"
+
+        lanes.append(
+            {
+                "order": len(lanes) + 1,
+                "issue": issue.number,
+                "task_id": mirror["task_id"],
+                "owner": str(frontmatter.get("owner") or "unassigned"),
+                "task_status": task_status_value,
+                "queue_state": queue_state,
+                "tier": frontmatter.get("tier"),
+                "lane_type": frontmatter.get("lane_type"),
+                "depends_on": depends_on,
+                "blocked_by": blockers,
+                "needs_refinement": not refined,
+                "needs_acceptance": needs_acceptance,
+                "title": issue.title,
+                "notes": "derived by reconcile",
+            }
+        )
+
+    projection = {
+        "project_id": project_id,
+        "generated_by": "project_issue_queue.py reconcile",
+        "generated_utc": utc_iso(),
+        "input_hash": reconciliation_input_hash(project_id, eligible_issues, mirrors_by_issue),
+        "backlog": "known",
+        "source": "github_issues_and_task_mirrors",
+        "source_issue": previous_payload.get("source_issue"),
+        "source_task": previous_payload.get("source_task"),
+        "needs_materialization": needs_materialization,
+        "duplicate_mirrors": duplicate_mirrors,
+        "completed_recently": completed_recently[-10:],
+        "lanes": lanes,
+    }
+    normalize_lanes(projection)
+    return {
+        "ok": not needs_materialization and not duplicate_mirrors,
+        "backlog": "known",
+        "project_id": project_id,
+        "needs_materialization": needs_materialization,
+        "duplicate_mirrors": duplicate_mirrors,
+        "projection": projection,
+    }
+
+
 def render_markdown(payload: dict) -> str:
     project_id = payload.get("project_id", "amiga")
     lanes = sorted(payload.get("lanes", []), key=lambda lane: lane["order"])
@@ -256,7 +575,7 @@ def render_markdown(payload: dict) -> str:
     lines = [
         "# Amiga Ordered Issue Queue",
         "",
-        f"> Generated from `issue-queue.json`. Edit the JSON, then run `python3 bin/project_issue_queue.py sync-markdown --project {project_id}`.",
+        f"> Generated from GitHub issues and task mirrors. Run `python3 bin/project_issue_queue.py reconcile --project {project_id} --write` to refresh this projection.",
         "",
         f"- Last updated: `{last_updated}`",
         f"- Source issue: `GH-{source_issue}`",
@@ -265,7 +584,8 @@ def render_markdown(payload: dict) -> str:
 
     if ready_lane:
         lines.append(
-            f"- Next ready lane: `GH-{ready_lane['issue']}` / `{ready_lane['task_id']}` / `{ready_lane['owner']}`"
+            f"- Next ready lane: `GH-{ready_lane['issue']}` / `{ready_lane['task_id']}` / `{ready_lane['owner']}` "
+            f"({lane_next_action(ready_lane)})"
         )
     else:
         lines.append("- Next ready lane: none")
@@ -304,10 +624,11 @@ def render_markdown(payload: dict) -> str:
 
     for lane in lanes:
         depends_on = ", ".join(lane.get("depends_on", [])) or "-"
+        tier = lane["tier"] if lane.get("tier") is not None else "-"
         notes = str(lane.get("notes", "-")).replace("|", "/")
         lines.append(
             f"| {lane['order']} | GH-{lane['issue']} | {lane['task_id']} | {lane['owner']} | "
-            f"{lane['task_status']} | {lane['queue_state']} | {lane['tier']} | {depends_on} | {notes} |"
+            f"{lane['task_status']} | {lane['queue_state']} | {tier} | {depends_on} | {notes} |"
         )
 
     return "\n".join(lines) + "\n"
@@ -321,9 +642,16 @@ def show_queue(payload: dict) -> str:
     for lane in lanes:
         lines.append(
             f"{lane['order']:>2}. GH-{lane['issue']} | {lane['task_id']} | {lane['owner']} | "
-            f"task={lane['task_status']} | queue={lane['queue_state']}"
+            f"task={lane['task_status']} | queue={lane['queue_state']} | next={lane_next_action(lane)}"
         )
     return "\n".join(lines)
+
+
+def projection_input_changed(project_id: str, projection: dict) -> bool:
+    if not queue_exists(project_id):
+        return True
+    existing = load_queue(project_id)
+    return existing.get("input_hash") != projection.get("input_hash")
 
 
 def sync_markdown(project_id: str, payload: dict) -> Path:
@@ -353,6 +681,9 @@ def find_lane(payload: dict, task_id: str) -> dict | None:
 
 def normalize_lanes(payload: dict) -> None:
     lanes = sorted(payload.get("lanes", []), key=lambda lane: lane["order"])
+    payload["lanes"] = lanes
+
+    unblock_satisfied_lanes(payload)
 
     for index, lane in enumerate(lanes, start=1):
         lane["order"] = index
@@ -449,6 +780,34 @@ def mark_lane_transition(project_id: str, task_id: str, *, owner: str, task_stat
 
 def main() -> int:
     args = parse_args()
+
+    if args.command == "reconcile":
+        result = reconcile_queue(args.project)
+        if result.get("backlog") == "unknown":
+            if args.json_output:
+                print(json.dumps(result, indent=2))
+            else:
+                print(f"[error] GitHub backlog state unknown for {args.project}: {result.get('reason')}", file=sys.stderr)
+            return 1
+        projection = result["projection"]
+        if args.write:
+            sync_markdown(args.project, projection)
+        if args.json_output:
+            print(json.dumps(result, indent=2))
+        else:
+            if args.write:
+                print(f"reconciled: {display_path(queue_json_path(args.project))}")
+                print(f"markdown: {display_path(queue_markdown_path(args.project))}")
+            else:
+                print(show_queue(projection))
+            if result.get("needs_materialization"):
+                issues = ", ".join(f"GH-{item['issue']}" for item in result["needs_materialization"])
+                print(f"needs materialization: {issues}")
+            if result.get("duplicate_mirrors"):
+                issues = ", ".join(f"GH-{item['issue']}" for item in result["duplicate_mirrors"])
+                print(f"duplicate mirrors: {issues}")
+        return 0 if result.get("ok") else 1
+
     payload = load_queue(args.project)
 
     if args.command == "show":
@@ -457,6 +816,9 @@ def main() -> int:
 
     if args.command == "validate":
         errors, warnings = validate_queue(args.project, payload)
+        ready_errors, ready_warnings = no_ready_lane_errors(args.project, payload)
+        errors.extend(ready_errors)
+        warnings.extend(ready_warnings)
         if not args.skip_backlog_check:
             backlog_errors, backlog_warnings = backlog_consistency_errors(args.project, payload)
             errors.extend(backlog_errors)
@@ -476,7 +838,8 @@ def main() -> int:
         ready_lane = next_ready_lane(payload)
         if ready_lane:
             print(
-                f"next ready lane: GH-{ready_lane['issue']} / {ready_lane['task_id']} / {ready_lane['owner']}"
+                f"next ready lane: GH-{ready_lane['issue']} / {ready_lane['task_id']} / {ready_lane['owner']} "
+                f"({lane_next_action(ready_lane)})"
             )
         elif payload.get("lanes"):
             print("queue has no ready lane")
@@ -505,6 +868,7 @@ def main() -> int:
         print(f"archived_md: {display_path(archived_md)}")
         return 0
 
+    normalize_lanes(payload)
     errors, warnings = validate_queue(args.project, payload)
     if errors:
         print("[error] Queue is invalid; fix queue JSON before syncing markdown.", file=sys.stderr)

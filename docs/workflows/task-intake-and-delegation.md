@@ -55,8 +55,8 @@ remaining issue-sized lanes.
 
 - keep the queue outside chat threads
 - read it during fresh-session recovery before selecting the next lane
-- update it whenever lane order, owner, queue state, dependency state, or task status changes
-- when the queue has a generated Markdown view, regenerate it after JSON edits
+- update task mirrors and GitHub issue state, then run `python3 bin/project_issue_queue.py reconcile --project <project_id> --write` to refresh the runtime queue projection
+- do not hand-edit queue state to clear blockers or materialize lanes unless repairing a reconcile failure with an explicit note
 - if `claim_task.py --status in_progress` targets a queued lane that is not `ready`, the transition should fail unless an explicit queue-override flag is used
 
 ## Autonomous queue loop
@@ -123,6 +123,7 @@ queue is not proof that GitHub-backed work is empty.
 
 Before activating code implementation:
 
+- run `python3 bin/project_issue_queue.py reconcile --project <project_id> --write`; if it reports `needs_materialization`, duplicate mirrors, DRIFT, or `backlog unknown`, repair/report that queue state before activation
 - run `python3 bin/project_issue_queue.py validate --project <project_id>` and treat DRIFT or unknown GitHub backlog state as a blocker
 - keep only the earliest unblocked design dependency in `ready`; backend or runtime implementation lanes stay `queued` or `blocked` until their design dependency is done
 - use `lane_type` values such as `design`, `design-surface-spec`, `design-handoff`, or `design-template` to filter design views from the single issue queue

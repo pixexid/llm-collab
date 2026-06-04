@@ -24,7 +24,6 @@ import json
 import subprocess
 
 sys.path.insert(0, str(Path(__file__).parent))
-import _backlog
 import project_issue_queue as issue_queue
 from _helpers import (
     ROOT,
@@ -71,26 +70,26 @@ def queue_summaries() -> list[dict]:
         project_id = project.get("id")
         if not isinstance(project_id, str) or not issue_queue.queue_exists(project_id):
             continue
-        payload = issue_queue.load_queue(project_id)
-        ready_lane = issue_queue.next_ready_lane(payload)
-        backlog_status = "not_checked"
+        backlog_status = "clean"
         missing_issues: list[int] = []
         backlog_error = None
-        try:
-            eligible = _backlog.eligible_open_issues(project_id)
-            queued_issues = {
-                lane.get("issue")
-                for lane in payload.get("lanes", [])
-                if isinstance(lane, dict) and isinstance(lane.get("issue"), int)
-            }
-            missing_issues = [issue.number for issue in eligible if issue.number not in queued_issues]
-            backlog_status = "drift" if missing_issues else "clean"
-        except _backlog.BacklogUnavailable as exc:
+        result = issue_queue.reconcile_queue(project_id)
+        if result.get("backlog") == "unknown":
             backlog_status = "unknown"
-            backlog_error = str(exc)
-        except ValueError as exc:
-            backlog_status = "error"
-            backlog_error = str(exc)
+            backlog_error = str(result.get("reason"))
+            payload = issue_queue.load_queue(project_id)
+        else:
+            payload = result["projection"]
+            if issue_queue.projection_input_changed(project_id, payload):
+                issue_queue.sync_markdown(project_id, payload)
+            missing_issues = [
+                int(item["issue"])
+                for item in result.get("needs_materialization", [])
+                if isinstance(item, dict) and isinstance(item.get("issue"), int)
+            ]
+            if missing_issues or result.get("duplicate_mirrors"):
+                backlog_status = "drift"
+        ready_lane = issue_queue.next_ready_lane(payload)
         summaries.append(
             {
                 "project_id": project_id,
@@ -99,6 +98,7 @@ def queue_summaries() -> list[dict]:
                 "ready_lane": ready_lane,
                 "backlog_status": backlog_status,
                 "missing_issues": missing_issues,
+                "duplicate_mirrors": result.get("duplicate_mirrors", []),
                 "backlog_error": backlog_error,
             }
         )
@@ -178,8 +178,19 @@ def main():
                 continue
             if item["backlog_status"] == "drift":
                 issues = ", ".join(f"GH-{issue}" for issue in item["missing_issues"])
+                duplicate_issues = ", ".join(
+                    f"GH-{entry['issue']}"
+                    for entry in item.get("duplicate_mirrors", [])
+                    if isinstance(entry, dict) and isinstance(entry.get("issue"), int)
+                )
+                details = []
+                if issues:
+                    details.append(f"missing eligible GitHub issue(s): {issues}")
+                if duplicate_issues:
+                    details.append(f"duplicate task mirror(s): {duplicate_issues}")
+                detail = "; ".join(details) or "queue projection drift"
                 print(
-                    f"  - {item['project_id']}: DRIFT queue missing eligible GitHub issue(s): {issues} "
+                    f"  - {item['project_id']}: DRIFT {detail} "
                     f"({item['queue_path']})"
                 )
                 continue
@@ -190,6 +201,7 @@ def main():
             if ready:
                 print(
                     f"  - {item['project_id']}: next ready GH-{ready['issue']} / {ready['task_id']} / {ready['owner']} "
+                    f"({issue_queue.lane_next_action(ready)}) "
                     f"({item['queue_path']})"
                 )
             else:
