@@ -38,7 +38,7 @@ Minimum pre-activation gate:
 2. verify branch exists
 3. verify worktree exists
 4. record exact branch/worktree/base metadata in task/chat
-5. only then request operator relay
+5. only then request worker activation by ringing/notifying the assigned worker through the approved mailbox + doorbell path
 
 ## Provisioning ownership
 
@@ -58,7 +58,7 @@ Minimum pre-activation gate:
 2. verify branch exists
 3. verify worktree exists
 4. record exact branch/worktree/base metadata in task/chat
-5. only then request operator relay
+5. only then request worker activation by ringing/notifying the assigned worker through the approved mailbox + doorbell path
 
 ## Required metadata
 
@@ -78,7 +78,9 @@ Track on each worktree entry:
 
 - refuse removal of dirty worktree unless explicitly forced
 - refuse retirement before integration unless explicitly forced
-- workers do not push or open PRs
+- never push to `main`; the implementer role may push its assigned task branch
+  and open its lane PR only when granted git/PR authority (see
+  `commit-push-prs.md`). Merge/release stays with the release-gate role.
 - worker-owned isolated implementation lanes require a checkpoint commit before the task can move to `review`
 - orchestrator acceptance must include branch verification plus `git status --short --untracked-files=all` before integrating a worker slice
 - after merge, remove retired worker worktrees before deleting their local branches

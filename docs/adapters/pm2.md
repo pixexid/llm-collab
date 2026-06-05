@@ -122,31 +122,41 @@ Why:
   - `~/.claude/projects/<project-slug>/...`
 - Writing the CLI/project session store does not guarantee that a new thread appears in the desktop app sidebar
 
-Watcher policy for Claude:
+Watcher policy for desktop-app agents:
 
-- safe: record durable work in `llm-collab` and notify that a Claude desktop
-  bridge plan is needed
-- safe: let a Codex heartbeat drive Claude desktop through Computer Use
-- safe: if Computer Use cannot inspect or send, keep the Codex heartbeat active,
-  try reasonable app-control recovery paths, and record a blocker for
-  Codex/Computer Use retry or tooling repair
+PM2/heartbeat is **not the primary wake mechanism**. The primary path is the
+bidirectional Computer-Use doorbell with `llm-collab` as the durable mailbox (see
+`claude-code-desktop-computer-use-bridge.md`). PM2/heartbeat is only the bounded,
+provisional safety-fuse — used when a doorbell ring is blocked or a worker is
+visibly running and a handoff is expected, task-scoped and auto-deleted on
+handoff/ack/blocker (see `session-autobridge-runbook.md`).
+
+- primary: ring the recipient's app directly with the Computer-Use doorbell after
+  the idle gate passes; record durable work in `llm-collab`
+- safety-fuse only: let a heartbeat drive a desktop app through Computer Use when
+  a ring is blocked or a response is expected from a running worker
+- safety-fuse only: if Computer Use cannot inspect or send, keep the bounded
+  heartbeat active, try reasonable app-control recovery paths, and record a
+  blocker for Computer Use retry or tooling repair
 - unsafe: claim a PM2 watcher created a new app-visible desktop thread
 - unsafe by default: synthesize sidebar visibility by writing app cache/index files directly
 - unsafe: use `claude -p`, `claude --resume`, or `~/.claude/projects` as proof
   that the visible desktop thread changed
-- unsafe: ask the operator to wake Claude or paste the bridge prompt before
-  Codex has exhausted Computer Use/app-control recovery
+- unsafe: ask the operator to wake an agent or paste the bridge prompt before
+  Computer Use/app-control recovery has been exhausted
 
-If an operator needs Claude desktop visibility, the recommended flow is:
+If desktop visibility is needed, the recommended flow is:
 
 1. write the task/message to `Chats/` with `deliver.py`
-2. create a Codex-side bridge plan and heartbeat
-3. have the heartbeat wake Codex, not Claude
-4. Codex uses Computer Use to open/select/create the Claude desktop thread and
-   sends the bounded prompt
-5. while Claude is running, the heartbeat observes only
-6. once Claude is idle/awaiting input, Codex reads the visible response and
-   records it back into the Codex thread and `llm-collab`
+2. ring the recipient's app directly via the Computer-Use doorbell (idle-gated)
+   with one short sender-tagged pointer to the durable packet
+3. the recipient drains its unread inbox and acts; it rings back on handoff
+4. only if the ring is blocked or a running worker's response is expected, create
+   a bounded provisional safety-fuse heartbeat under the constraints in
+   `session-autobridge-runbook.md`
+5. while the target is running, the heartbeat observes only
+6. once the target is idle/awaiting input, read the visible response and record
+   it back into `llm-collab`
 7. delete the heartbeat when the response is recorded, blocked, timed out, or no
    longer needed
 

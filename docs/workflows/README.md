@@ -9,9 +9,11 @@ Only `projects/_example/` is intended to be tracked in the open-source repo. Rea
 Recommended read order:
 
 1. `session-startup.md`
-2. `claude-code-desktop-computer-use-bridge.md` when Claude desktop app
-   interaction or unattended Claude responses are expected
-3. `session-autobridge-runbook.md`
+2. `claude-code-desktop-computer-use-bridge.md` — the canonical agent-to-agent
+   comms reference (bidirectional Computer-Use doorbell + `llm-collab` mailbox);
+   read whenever desktop-app agents need to notify each other
+3. `session-autobridge-runbook.md` — provisional safety-fuse only (polling is no
+   longer the primary wake; see the doorbell doc)
 4. `task-intake-and-delegation.md`
 5. `review-and-handoff.md`
 6. `isolated-worktrees.md`

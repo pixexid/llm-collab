@@ -6,6 +6,28 @@ project/chat so future messages can be routed to that parked worker session.
 Use it to reduce short manual relays. Do not use it to make workers fully
 autonomous.
 
+## Status: provisional safety-fuse, not the primary wake
+
+The primary agent-to-agent wake mechanism is now the **bidirectional Computer-Use
+doorbell** (see `claude-code-desktop-computer-use-bridge.md`): whichever agent
+finishes work or needs something rings the other immediately, with `llm-collab`
+as the durable mailbox. Routine/continuous polling is **deprecated** as the
+primary wake — it wastes tokens and a heartbeat set on guessed timing can fire
+into changed context.
+
+Session autobridge and PM2/heartbeat polling survive only as a bounded,
+**provisional/experimental safety-fuse**, on trial, with hard constraints:
+
+- only when a doorbell attempt is blocked, or a worker is visibly running and a
+  handoff is expected
+- task-scoped: tied to one specific task/worktree/branch and its chat
+- auto-deletes on handoff/ack/blocker; must not outlive its task/chat
+- never the primary path, never a standing always-on watcher
+- must be fixed or removed if it misbehaves on real tasks
+
+If the safety-fuse causes stale-context or duplicate-wake issues in practice,
+remove it and rely on the doorbell + mailbox-drain self-heal.
+
 ## Safety Defaults
 
 - Prefer `notify` or `auto-read` over `auto-reply`.

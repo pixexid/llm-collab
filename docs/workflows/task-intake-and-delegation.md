@@ -4,21 +4,42 @@
 
 One implementation owner, one scope, one verification plan.
 
+### Roles (worker-agnostic)
+
+Describe responsibilities as roles, not hardcoded people. The same agent may hold
+different roles on different lanes, and assignment follows task fit, current
+context, and operator direction.
+
+- **Queue owner / status mutator** — owns the canonical queue order, activation,
+  and status transitions. In Amiga this defaults to **Codex** because the queue
+  tooling and status mutation currently run there; this is a tooling constraint,
+  not a hierarchy. If the tooling later supports another owner, the role moves
+  with the tooling.
+- **Planner / refiner** — owns spec, acceptance criteria, risk analysis, and
+  phase/sequencing. The refinement gate requires `refined_by: claude` (see
+  Planning And Acceptance Gate).
+- **Implementer** — owns the diff in the assigned worktree. Roles are per-lane:
+  by skill, backend lanes lean Codex and frontend/UI-UX lanes lean Claude, but
+  either agent may implement either side when the task fits. There is exactly one
+  writer per lane/worktree.
+- **Reviewer / gate** — independent acceptance. The implementer never solely
+  approves their own lane; the other agent reviews it. Planning-phase cross-review
+  is mandatory for non-trivial lanes (a bad plan is the highest-cost failure) and
+  a pre-merge second-eyes pass is mandatory on implementation.
+
 For Amiga work, use at most one Codex-managed internal subagent for a task. Do
 not stack several Codex-managed subagents on the same implementation lane.
 External collaborators do not count against that internal subagent limit.
-Codex is the orchestrator, reviewer, queue owner, and merge/release gate owner.
 Codex-owned implementation should use managed Codex Thread Coordination workers
 by default. Native subagents are focused local support lanes for review, repo
 mapping, docs sync, verification, and recovery. `cdx2` is disabled legacy
 routing for Amiga; use it only when the operator explicitly re-enables cdx2 for
 one specific task.
-Claude is the first-choice UI/UX implementation worker for Claude-owned UI/UX
-lanes, not merely a refinement or review agent. Claude may own the actual UI
-diff, rendered parity repair, D8 pass, review evidence, and handoff for that
-lane.
-The one-writer rule still applies: do not make Claude and a Codex-managed
-internal subagent implementation writers for the same files in the same task.
+
+The one-writer rule still applies: do not make two agents (or an agent and a
+Codex-managed internal subagent) implementation writers for the same files in the
+same task. Other workers on that lane are reviewers/advisors unless scopes are
+explicitly disjoint.
 
 ## Intake order
 
@@ -33,7 +54,7 @@ internal subagent implementation writers for the same files in the same task.
 8. assign one implementation owner
 9. send one clear delegation message
 10. move task to `in_progress` (gated — requires `refined_by: claude` or `skip_refinement: true`)
-11. then request activation relay
+11. then activate the assigned worker directly through the approved mailbox + doorbell path
 12. then begin implementation
 
 For Codex-owned implementation, the implementation owner is a managed Codex
@@ -369,7 +390,7 @@ When isolated worktrees are used, include:
   - `git status --short --untracked-files=all`
   - disposition of any remaining tracked or untracked files
 
-For worker-owned isolated lanes, those values must be provisioned and verified by the orchestrator before relay.
+For worker-owned isolated lanes, those values must be provisioned and verified by the orchestrator before worker activation.
 Do not phrase a planned branch/worktree as already assigned.
 
 For UI/UX implementation lanes, the delegation brief must also name:
@@ -428,20 +449,26 @@ When multiple workers are involved, state activation order explicitly:
 - who should wait
 - what condition triggers next activation
 
-## Relay enforcement (hard rule)
+## Activation enforcement (hard rule)
 
-Do not request operator relay for workers that are not ready to start.
+Do not activate workers that are not ready to start. Activation is queue-owner
+controlled and happens by directly activating the assigned worker through the
+approved mailbox + doorbell path after the gates pass — not by asking the
+operator to relay.
 
-- Send relay only for workers in `in_progress` state that should execute now.
+- Activate only workers in `in_progress` state that should execute now.
 - A worker is not ready to start until its required branch/worktree already exists when isolated mode is expected.
-- For queued workers, update task ownership/status and keep instructions in task/chat, but do not request activation relay yet.
-- When a queued worker becomes ready, send a single activation message and then request relay.
+- For queued workers, update task ownership/status and keep instructions in task/chat, but do not ring/activate them yet.
+- When a queued worker becomes ready, send one activation message (mailbox packet) and ring it via the doorbell.
 
-Required operator instruction format:
+Required activation-state wording:
 
 - single activation: `activate <worker> now`
 - parallel activation: `activate <worker-a> + <worker-b> now in parallel`
 - queue-only instruction: `do not activate yet; waiting on <condition>`
 
-Never dump multiple relay prompts without explicit activation order.
-If order is sequential, provide only the first relay and wait until the trigger condition is met before requesting the next.
+These describe the queue-owner's recorded activation intent; the worker is then
+activated directly via mailbox + doorbell, not via an operator paste/relay.
+
+Never ring/activate multiple workers without explicit activation order.
+If order is sequential, activate only the first and wait until the trigger condition is met before activating the next.

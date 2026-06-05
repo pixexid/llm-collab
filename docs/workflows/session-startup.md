@@ -128,35 +128,38 @@ Operational rule:
 - do not claim that `llm-collab`, PM2, or Claude CLI can safely create a brand
   new Claude desktop app thread
 - do not synthesize desktop-visible Claude threads by writing local app cache/index files
-- use Claude desktop as an operator-facing UI controlled through Computer Use
-- use `Chats/` messages as the transport of record
-- when any Claude action or response is expected while the operator is away,
-  Codex must plan a Codex-side heartbeat that wakes Codex and inspects Claude
-  desktop through Computer Use
+- use a desktop app as an operator-facing UI controlled through Computer Use
+- use `Chats/` messages as the transport of record (the durable mailbox)
+- the primary agent-to-agent wake is the **bidirectional Computer-Use doorbell**:
+  whichever agent finishes work or needs something rings the other immediately
+  (see `claude-code-desktop-computer-use-bridge.md`). A Codex-side heartbeat is
+  only the provisional safety-fuse — never the primary wake (see
+  `session-autobridge-runbook.md`).
 
-Safest task-grade workflow for Claude desktop:
+Safest task-grade workflow for desktop-app agents:
 
 1. `llm-collab` delivers the task into `Chats/` with `deliver.py`
-   - for Claude Desktop, `desktop_bridge_required` means Codex must continue to
+   - for Claude Desktop, `desktop_bridge_required` means the sender continues via
      Computer Use; it is not a manual operator relay request
-2. Codex uses Computer Use to open/select the Claude desktop thread, or creates a
-   new visible thread by generating a UUID plus short title, clicking
+2. the sender uses Computer Use to open/select the recipient's desktop thread, or
+   creates a new visible thread by generating a UUID plus short title, clicking
    `New session`, and sending one one-line wake prompt
-3. Codex sends a visible prompt only after the Claude idle input gate passes:
-   active row not `Running`, empty focused composer, no visible `Stop`, and no
-   visible queued messages with `Remove queued message`
-4. Codex types exactly one short visible wake prompt that points Claude to the
-   exact `llm-collab` inbox/chat/message path. Do not paste full task context,
-   acceptance criteria, or multi-paragraph implementation briefs into Claude
-   Desktop; the durable `Chats/` packet is the source of truth. The prompt must
-   be one line, under roughly 240 characters, and never contain newline-split
-   bridge details. If more detail is needed, update the durable chat packet and
-   wake Claude with the same one-line pointer only after Claude is idle.
-5. Codex creates a heartbeat only while a Claude response is expected
-6. each heartbeat checks Claude desktop through Computer Use; if Claude is
-   running, it waits; if Claude is idle/awaiting input, it reads and records the
-   response
-7. Codex deletes the heartbeat when the response is recorded, blocked, timed
+3. the sender rings only after the idle input gate passes: active row not
+   `Running`, empty focused composer, no visible `Stop`, and no visible queued
+   messages with `Remove queued message`
+4. the sender types exactly one short sender-tagged wake prompt that points the
+   recipient to the exact `llm-collab` inbox/chat/message path. Do not paste full
+   task context, acceptance criteria, or multi-paragraph briefs into the app; the
+   durable `Chats/` packet is the source of truth. The prompt must be one line,
+   under roughly 240 characters, and never contain newline-split bridge details.
+   The recipient drains its full unread inbox after the ring.
+5. if (and only if) a response is expected and a doorbell ring is blocked or a
+   worker is visibly running, create a bounded provisional safety-fuse heartbeat
+   under the constraints in `session-autobridge-runbook.md` (task-scoped,
+   auto-deletes on handoff/ack/blocker, never primary)
+6. a safety-fuse heartbeat checks the app through Computer Use; if the recipient
+   is running, it waits; if idle/awaiting input, it reads and records the response
+7. delete the safety-fuse heartbeat when the response is recorded, blocked, timed
    out, or no longer needed
 
 After `desktop_bridge_required`, Codex owns the visible Claude Desktop wake

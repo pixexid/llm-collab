@@ -46,6 +46,23 @@ For `shared-supabase-required` lanes, handoff replies and the linked task contra
 - `db_advisors_result` for schema-change lanes
 - `db_runtime_validation`
 
+## Independent review gate (cross-review)
+
+The implementer never solely approves their own lane. Review is a separate role
+from implementation (see role model in `task-intake-and-delegation.md`).
+
+- **Planning-phase cross-review is mandatory for non-trivial lanes.** The agent
+  that did not author the plan reviews the spec/AC/risk analysis before
+  activation. A bad plan is the highest-cost failure, so this is the most
+  important gate.
+- **Pre-merge second-eyes is mandatory** on implementation. The reviewing agent
+  inspects the actual diff (and rendered/DB evidence where relevant) before the
+  lane is treated as PR-ready/accepted.
+- Cross-review is symmetric: each agent reviews the other's lanes. The Amiga
+  queue-owner default (Codex) still records status transitions and the
+  acceptance read, but "reviewer" is a role either agent fills depending on who
+  implemented the lane.
+
 ## Task status guide
 
 - `open`: created, not started
@@ -156,6 +173,13 @@ state as the GitHub Codex signal, and do not request another GitHub Codex review
 unless the fix materially expands the PR or changes code semantics. Do not
 substitute stale inline review-thread objects for current PR state. Delete the
 heartbeat before post-merge cleanup.
+
+When the PR comment needs implementer action, route it through the mailbox and
+doorbell immediately instead of leaving the PR-wait heartbeat to poll in silence.
+The packet must name the PR, review thread/comment, current head SHA, exact
+finding, and required fix scope. If the wait cannot progress because the
+implementer has not acknowledged, the next heartbeat escalates by doorbell with
+the blocker rather than waiting for operator discovery.
 
 When a persistent queue-runner heartbeat is active, each task-specific wait must
 update `autonomous-loop.json` before it waits and again before it resumes. This
