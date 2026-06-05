@@ -38,7 +38,7 @@ Minimum pre-activation gate:
 2. verify branch exists
 3. verify worktree exists
 4. record exact branch/worktree/base metadata in task/chat
-5. only then request operator relay
+5. only then request worker activation by ringing/notifying the assigned worker through the approved mailbox + doorbell path
 
 ## Provisioning ownership
 
@@ -58,7 +58,7 @@ Minimum pre-activation gate:
 2. verify branch exists
 3. verify worktree exists
 4. record exact branch/worktree/base metadata in task/chat
-5. only then request operator relay
+5. only then request worker activation by ringing/notifying the assigned worker through the approved mailbox + doorbell path
 
 ## Required metadata
 
