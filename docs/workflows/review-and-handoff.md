@@ -174,6 +174,13 @@ unless the fix materially expands the PR or changes code semantics. Do not
 substitute stale inline review-thread objects for current PR state. Delete the
 heartbeat before post-merge cleanup.
 
+When the PR comment needs implementer action, route it through the mailbox and
+doorbell immediately instead of leaving the PR-wait heartbeat to poll in silence.
+The packet must name the PR, review thread/comment, current head SHA, exact
+finding, and required fix scope. If the wait cannot progress because the
+implementer has not acknowledged, the next heartbeat escalates by doorbell with
+the blocker rather than waiting for operator discovery.
+
 When a persistent queue-runner heartbeat is active, each task-specific wait must
 update `autonomous-loop.json` before it waits and again before it resumes. This
 keeps one authoritative loop state instead of several stale heartbeats making

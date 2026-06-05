@@ -103,6 +103,13 @@ and create or update a Codex heartbeat attached to the current thread with a
 6-minute cadence. Each heartbeat must re-check the PR checks, review state,
 review threads/comments, automatic connector reactions, and merge state.
 
+PR-wait heartbeats are a safety-fuse, not the primary routing path. When a
+heartbeat or queue owner finds actionable PR feedback that needs the implementer
+to change their branch, it must send a durable mailbox packet and ring the
+implementer with the doorbell immediately after the idle gate passes. Do not
+silently wait for the next heartbeat or depend on the operator to notice the PR
+comment.
+
 When the operator has authorized the merge path for the PR or PR class, the
 heartbeat may complete the wait after it verifies the latest head has green
 required checks, clean `mergeStateStatus`, local/orchestrator review completed,
@@ -133,6 +140,11 @@ the manual branch-diff review and required local/CI checks, treat the resolved
 review thread plus current PR state as the GitHub Codex signal, then continue
 toward merge without asking GitHub Codex for another review when the fix is
 narrow.
+
+If the wait cannot self-progress because checks stalled, review state is
+ambiguous, or the implementer has not acknowledged a routed review-fix request,
+the heartbeat must escalate by doorbell with the exact blocker and next action.
+Delete or rewrite any PR-wait heartbeat that misses this escalation path.
 
 Request another GitHub Codex review only when the follow-up materially changes
 the PR, for example:
