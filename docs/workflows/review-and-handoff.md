@@ -46,6 +46,23 @@ For `shared-supabase-required` lanes, handoff replies and the linked task contra
 - `db_advisors_result` for schema-change lanes
 - `db_runtime_validation`
 
+## Independent review gate (cross-review)
+
+The implementer never solely approves their own lane. Review is a separate role
+from implementation (see role model in `task-intake-and-delegation.md`).
+
+- **Planning-phase cross-review is mandatory for non-trivial lanes.** The agent
+  that did not author the plan reviews the spec/AC/risk analysis before
+  activation. A bad plan is the highest-cost failure, so this is the most
+  important gate.
+- **Pre-merge second-eyes is mandatory** on implementation. The reviewing agent
+  inspects the actual diff (and rendered/DB evidence where relevant) before the
+  lane is treated as PR-ready/accepted.
+- Cross-review is symmetric: each agent reviews the other's lanes. The Amiga
+  queue-owner default (Codex) still records status transitions and the
+  acceptance read, but "reviewer" is a role either agent fills depending on who
+  implemented the lane.
+
 ## Task status guide
 
 - `open`: created, not started

@@ -1,372 +1,198 @@
-# Claude Code Desktop Computer Use Bridge
+# Desktop Computer-Use Doorbell (Agent-to-Agent Comms)
 
-This is the unattended bridge workflow for Claude Code in the Claude desktop
-app. It is intentionally separate from `claude --resume`, `claude -p`, and
-other Claude Code CLI flows.
+This is the agent-to-agent communication workflow for collaborators running in
+dedicated desktop apps (e.g. Claude in `/Applications/Claude.app`, Codex in
+`/Applications/Codex.app`). It is intentionally separate from `claude --resume`,
+`claude -p`, and other CLI/session-file flows.
 
-## Goal
+> Supersedes the earlier one-directional model in which only Codex drove Claude
+> and the sole wake mechanism was a Codex heartbeat. The doorbell is now
+> **bidirectional and event-driven**: whichever agent finishes a unit of work or
+> needs something rings the other immediately. The heartbeat survives only as a
+> bounded, provisional **safety-fuse** (see below), not as the primary path.
 
-Let Codex and Claude Code desktop exchange bounded messages while the operator
-is away, with `llm-collab` preserving the durable task/message record and Codex
-driving the visible Claude desktop app through Computer Use.
+## Two channels: mailbox + doorbell
 
-Claude desktop does not wake itself from `llm-collab`. If a Claude action or
-response is expected, Codex must use Computer Use to interact with the visible
-Claude desktop prompt, exactly as the operator would.
+- **Mailbox = `llm-collab` (durable source of truth).** Every task, handoff,
+  blocker, clarification, decision, and piece of evidence is a file written with
+  `deliver.py`. Nothing load-bearing lives only in an app's visible thread.
+- **Doorbell = Computer Use (immediate, event-driven nudge).** The moment an
+  agent finishes a task, hits a blocker, needs a clarification, or completes a
+  handoff, it uses Computer Use to bring the other agent's desktop app to front
+  and type one short, sender-tagged pointer to the durable packet. This wakes the
+  recipient *now* instead of waiting on a scheduled check.
 
-## Transport Choice
+The mailbox is the record; the doorbell is the notification. A doorbell with no
+corresponding mailbox packet is not valid for task-grade work.
 
-For task-grade work, use this order:
+## Sender identifier convention
 
-1. Use `deliver.py` to write the instruction to `Chats/` and Claude's
-   `agents/claude/inbox.json`.
-2. Create or update a Claude desktop bridge plan in the active Codex thread.
-3. Codex uses Computer Use against `/Applications/Claude.app`.
-4. Codex opens/selects the intended Claude desktop thread, or creates a new one
-   by generating a UUID plus short title, clicking `New session`, and sending
-   the first prompt with the bridge title line.
-5. Codex types exactly one short one-line bridge prompt into the visible Claude
-   prompt. For task-grade work, full context stays in the durable
-   `llm-collab` packet; the visible prompt only points Claude to the exact
-   inbox/chat/message path.
-6. A Codex heartbeat keeps waking this Codex thread while Claude is expected to
-   answer.
-7. On each heartbeat, Codex inspects the Claude app with Computer Use. If Claude
-   is running, Codex observes only. If Claude is idle/awaiting input, Codex
-   reads the visible response, records it in this Codex thread and optionally in
-   `llm-collab`, then stops or schedules the next explicit turn.
+Because agents now type directly into each other's apps, every agent-to-agent
+message must carry a sender identifier so the recipient can attribute it. The
+operator never tags their own messages.
 
-For non-task chat with Claude, `llm-collab` is optional. Computer Use is still
-mandatory whenever a Claude response is expected and the operator will not be
-present to read it.
+- `[BRIDGE <8-char-uuid-prefix>] ...` — a durable bridge pointer routed via
+  `llm-collab`.
+- `[from <agent>] ...` or `[<agent> doorbell] ...` — a direct Computer-Use ring
+  (there is no message frontmatter on a direct ring, so the inline tag is what
+  disambiguates).
+- **Untagged plain text is operator-origin by convention.** Treat a tagged
+  message as peer-agent coordination; reply/hand back through the durable
+  mailbox, not only the ring.
 
-`llm-collab` is the transport and audit log, not the wake mechanism. It does not
-notify the current Codex thread, and it does not make Claude desktop read its
-inbox. The active wake mechanism is a Codex heartbeat attached to the current
-Codex thread.
+## Ringing the doorbell
 
-When `deliver.py --to claude --project amiga` reports
-`desktop_bridge_required`, Codex should continue to Computer Use in the same
-thread. This is not an operator relay request. Do not print or act on a manual
-operator relay for Claude Desktop; Claude Desktop wake/status work must stay in
-the Claude app through Codex-owned Computer Use/app inspection.
+For task-grade work, in order:
 
-Use shell commands for `llm-collab` filesystem checks and message recording.
-Use Computer Use only for Claude desktop interaction.
+1. Write the durable instruction/handoff with `deliver.py` to `Chats/` and the
+   recipient's `agents/<agent>/inbox.json`.
+2. Bring the recipient's desktop app to front with Computer Use (by display name
+   or bundle id). The app may live on a secondary/AirPlay display — switch to it
+   first if needed.
+3. **Pass the idle input gate** (see next section) before typing. If it fails,
+   do not type; record the blocker in the mailbox and recover safely.
+4. Type exactly **one short, sender-tagged, one-line pointer** to the exact
+   inbox/chat/message path. Full context stays in the durable packet, never in
+   the visible prompt.
+5. Send it (single message, no newlines, no split fragments).
+6. Verify the ring landed (the recipient's composer cleared / the message
+   appears / the recipient began processing). Record the ring in your own thread
+   and, when relevant, in the mailbox.
 
-Do not use `claude --resume`, `claude -p`, or `~/.claude/projects/...` as the
-desktop bridge. Those are CLI/project-session surfaces and do not prove the
-operator-visible Claude Code desktop thread changed.
+For non-task ad-hoc chat, the mailbox is optional, but a sender tag is still
+required and the idle gate still applies.
 
-## Health Diagnostics
+## Idle input gate (mandatory before every ring)
 
-If Computer Use cannot inspect Claude desktop, do not switch to CLI/session-file
-bridging. Record the blocker and gather only coarse shell diagnostics:
+Never type over an active turn. Before sending, confirm ALL of:
+
+- the recipient's active thread/sidebar row is not `Running`
+- the composer is empty and focused
+- no visible `Stop` button for an active turn
+- no visible queued messages with a `Remove queued message` affordance
+- no transitional setup text such as `Creating worktree...`
+
+If any item fails, do not type. Wait briefly and re-check, or record the blocker
+in the mailbox. Typing into a running turn can fragment the message into queued
+chunks and corrupt the active turn.
+
+If Computer Use cannot inspect the app at all (capture/accessibility blocked),
+record the blocker in the mailbox and recover safely (bring app to front by
+bundle id, retry, repair app permissions). Ask the operator to relay only when
+app access is genuinely blocked and self-recovery has failed. Do not fall back to
+`claude --resume`, `claude -p`, Electron-store writes, or `~/.claude/projects`.
+
+## After a ring: drain the full inbox
+
+A doorbell points at one packet, but the recipient should **drain its entire
+unread inbox** on wake, not just read the referenced file:
+
+```bash
+python3 bin/inbox.py --me <agent> --project <project-id> --limit 5
+```
+
+This makes a missed doorbell self-healing: the next ring surfaces any earlier
+unread packets too. There is no routine polling backstop by default (see
+safety-fuse).
+
+## A doorbell is not an acceptance artifact
+
+A ring (or a visible answer) never by itself means a lane is done or accepted.
+Completion/handoff still requires durable evidence:
+
+- a mailbox handoff or chat note from the implementer
+- task mirror status/activity update
+- assigned-worktree dirty status or a checkpoint commit after activation
+
+`status: in_progress` alone is not durable progress; it only proves activation.
+
+## Provisional safety-fuse (heartbeat) — experimental
+
+Routine/continuous polling is **deprecated** as the primary wake mechanism
+(token cost + stale-context risk). A bounded heartbeat survives only as a
+provisional **safety-fuse**, on trial, with hard constraints:
+
+- **Only** when a doorbell attempt is blocked, or a worker is visibly running and
+  a handoff is expected.
+- **Task-scoped**: tied to one specific task/worktree/branch and its chat.
+- **Auto-deletes** on handoff/ack/blocker; must not outlive its task/chat.
+- **Never the primary path**, never a standing always-on watcher.
+- Must be fixed or removed if it misbehaves on real tasks.
+
+When a safety-fuse heartbeat is active, the Codex-side tooling below is the
+reference implementation; the same discipline applies symmetrically to any agent
+running one.
+
+### Health diagnostics (safety-fuse)
+
+If Computer Use cannot inspect the other app, do not switch to CLI/session-file
+bridging. Record the blocker and gather only coarse shell diagnostics, e.g.:
 
 ```bash
 python3 bin/claude_desktop_bridge_health.py --json
 ```
 
-This helper reports whether Claude appears to be running, frontmost, visible,
-holding power assertions, and whether the main Claude process appears busy by
-CPU. It deliberately does not read Claude message content, prompt state, thread
-titles, URLs, or local session stores. A healthy shell report is not proof that
-the bridge is usable; the bridge is usable only after `get_app_state` succeeds
-through Computer Use and the visible target thread/prompt can be inspected.
+This reports whether the app appears running, frontmost, visible, holding power
+assertions, and whether its main process appears busy by CPU. It deliberately
+does not read message content, prompt state, thread titles, URLs, or local
+session stores. A healthy shell report is not proof the doorbell is usable; that
+is proven only after Computer Use inspects the visible target thread/prompt and
+the idle gate passes. CPU-busy is not proof of lane progress — pair it with
+durable lane evidence before describing progress.
 
-Operator wake is not a Claude Desktop bridge path. If Computer Use is
-unavailable, cannot inspect Claude, cannot pass the idle input gate, or a send
-attempt fails, Codex must keep ownership of the Claude app path: bring Claude to
-front by bundle id, use Computer Use app inspection/click/type, run coarse
-Claude bridge health checks, wait/retry via heartbeat when Claude is busy, and
-record any accessibility/capture blocker. Keep the heartbeat active for
-Codex/Computer Use retry, app-permission repair, or automation fix. Do not ask
-the operator to relay, paste, click, or manually wake Claude. Do not fall back
-to Claude CLI, Electron store writes,
-or `~/.claude/projects`.
+### Cadence (safety-fuse only)
 
-For unattended heartbeats, run this helper before calling Computer Use. If it
-reports busy Claude CPU, treat Claude as mid-turn and skip Computer Use for that
-wakeup; report the coarse active status instead. The local-agent process count
-is context, not a blocker by itself, because idle Claude desktop sessions can
-leave helper processes resident. When the helper says Claude is visible/frontmost
-but not busy, Computer Use should be tried next. If Computer Use still times out,
-treat the lane as blocked on Computer Use accessibility/capture. Do not
-interrupt or restart Claude from a heartbeat. Keep the heartbeat active only
-when there is a concrete pending Claude relay; otherwise stop it and record the
-blocker.
+Set heartbeat cadence per relay, scoped to the expectation, and delete it the
+moment the expected response is recorded, blocked, or no longer needed:
 
-CPU-busy Claude is not proof that the target lane is progressing. For
-task-grade work, pair the health signal with durable lane evidence before
-describing progress:
+- short response expected: tight minute-level
+- long implementation/verification: slower, with what state counts as a useful
+  update
+- waiting only for final handoff: moderate, notify only on awaiting-input/new
+  response/blocked/errored
+- no longer needed: delete immediately
 
-- Codex inbox handoff or chat note from Claude
-- task mirror status/activity update
-- assigned worktree dirty status or checkpoint commit after activation
-
-`status: in_progress` by itself is not durable progress. It only proves the lane
-was activated. Treat it as progress only when it is paired with a new handoff,
-blocked/review/done state, worktree dirt, or a checkpoint that did not exist on
-the previous wakeup.
-
-If the activation packet remains unread, Codex has no handoff, and the assigned
-worktree is unchanged, report "no durable lane progress yet" even if Claude
-desktop is CPU-busy.
-
-## Desktop Thread Facts
-
-Computer Use can drive Claude desktop at the visible UI level. A live smoke test
-proved this sequence:
-
-- click `New session`
-- type a bounded exact-token prompt
-- press/send the prompt
-- observe a new sidebar row titled `Bridge lifecycle smoke test`
-- observe the visible URL change to
-  `claude.ai/epitaxy/local_ff7039ba-10da-450a-943c-99c73744cb72`
-- read the exact response `CLAUDE_DESKTOP_THREAD_CREATED_OK`
-- wait until the sidebar state settles to `Idle` and the prompt is available
-
-A Claude desktop thread does not become a useful bridge target until the first
-prompt has been sent and the resulting visible thread title/local URL have been
-observed. The `local_*` id is a desktop UI target only. Do not convert it to a
-CLI session id.
-
-After a send, Claude may show transitional states such as `Creating worktree...`.
-The bridge must treat `Running`, a visible `Stop` button, or any setup/progress
-text as "do not send another prompt".
-
-## Heartbeat Prompt
-
-Only Codex needs a heartbeat. Claude desktop does not need a separate heartbeat:
-Claude runs after prompt input, then waits for the next visible prompt.
-
-Use a Codex thread heartbeat rather than a PM2 process for this bridge, because
-PM2 cannot call Computer Use tools.
-
-Heartbeat instructions:
-
-```text
-Use shell only for llm-collab inbox checks and relay recording. Use Computer Use
-only for Claude desktop interaction. Do not use Claude Code CLI, `claude -p`,
-`claude --resume`, or `~/.claude/projects` as the bridge.
-
-Peek inboxes first:
-- Set `<llm-collab-checkout>` to the active llm-collab checkout path.
-- Set `<project-id>` to the collaboration project id for this task.
-- cd <llm-collab-checkout>
-- python3 bin/inbox.py --me codex --project <project-id> --peek --limit 5
-- python3 bin/inbox.py --me claude --project <project-id> --peek --limit 5
-
-Run `python3 bin/claude_desktop_bridge_health.py --json`. If it reports busy
-Claude CPU, report the coarse active status and wait for the next heartbeat
-without calling Computer Use. Otherwise inspect `/Applications/Claude.app` with
-Computer Use. If Claude visibly shows `Stop`, is creating a worktree, or is
-otherwise mid-turn, report the visible status briefly and wait for the next
-heartbeat. If Claude is idle/awaiting input and there is a prepared outbound
-prompt in this Codex thread, type only that prompt into the visible Claude
-desktop prompt and send it. On later heartbeats, read the latest visible Claude
-response from the accessibility tree and relay the actionable result back into
-this Codex thread and, when relevant, into llm-collab with deliver.py or a chat
-note.
-
-If Claude is stopped, errored, or the prompt field is unavailable, report that in
-this Codex thread and do not use the CLI fallback.
-```
-
-There is no always-on active heartbeat by default. Create a Codex heartbeat only
-when Claude has been prompted or will be prompted and a response is expected.
-Delete it as soon as the planned response is recorded, blocked, or no longer
-needed.
-
-## Cadence Policy
-
-Set the heartbeat cadence per relay, not once forever:
-
-- Short response expected: use a tight minute-level heartbeat.
-- Long implementation or verification task: use a slower heartbeat and include
-  what state counts as a useful update.
-- Waiting only for final handoff: use a moderate heartbeat and notify only when
-  Claude is awaiting input with a new response, blocked, or errored.
-- Bridge no longer needed: delete the heartbeat immediately.
-
-For each outbound Claude desktop message, the sender should also set or update
-the heartbeat with the expected response window and the specific thread/action
-context. Otherwise the watcher can only report that Claude is idle or awaiting
-input; it cannot infer the next safe prompt.
-
-The heartbeat only sends to Claude when this Codex thread contains an explicit
-outbound directive. This prevents a watcher from accidentally starting the next
-Amiga queue lane or interrupting a running Claude turn.
-
-For ordered design queues, the heartbeat should not stay permanently hardcoded
-to one issue. At the start of each wakeup, compute the current ready lane:
-
-```bash
-python3 bin/project_design_queue.py ready-context --project <project-id> --json
-```
-
-For the full heartbeat decision, prefer the consolidated status command:
+A heartbeat sends only when an explicit outbound directive exists; it must never
+start the next queue lane or interrupt a running turn on its own. For ordered
+Amiga queues, recompute the ready lane each wakeup rather than hardcoding an
+issue:
 
 ```bash
 python3 bin/project_design_queue.py bridge-status --project <project-id> --json
 ```
 
-This combines the current ready lane, activation packet read/unread state, Codex
-handoff inbox state, task mirror status, assigned worktree dirty/head state, and
-coarse Claude Desktop health. Use its `classification` first:
-
-- `durable-progress-visible`: verify handoff/task/worktree evidence before touching Claude desktop
-- `cpu-busy-no-durable-progress`: report coarse active status plus "no durable lane progress yet"; do not call Computer Use on that wakeup, and also report any active `computer_use_blocker`
-- `idle-no-durable-progress`: try Computer Use once; if `get_app_state` times out, record a Computer Use capture/accessibility blocker
-- `computer-use-cooldown-no-durable-progress`: a recent idle-timeout blocker is still cooling down; report the blocker and do not call Computer Use
-- `missing-bridge-metadata`: repair metadata before touching Claude desktop
-- `queue-empty` or `no-ready-lane`: stop the relay and report queue state
-
-After an `idle-no-durable-progress` Computer Use timeout, record the blocker:
+Use its `classification` (e.g. `durable-progress-visible`,
+`cpu-busy-no-durable-progress`, `idle-no-durable-progress`,
+`computer-use-cooldown-no-durable-progress`, `missing-bridge-metadata`,
+`queue-empty`/`no-ready-lane`) to decide whether to inspect the app, wait, or
+stop. After an idle-timeout, record the cooldown:
 
 ```bash
-python3 bin/project_design_queue.py record-computer-use-timeout --project <project-id> --reason "Computer Use get_app_state timed out after 120s"
+python3 bin/project_design_queue.py record-computer-use-timeout --project <project-id> --reason "Computer Use get_app_state timed out"
 ```
 
-This writes runtime-local state under the project state root and makes
-`bridge-status` report a cooldown classification for the same task until the
-retry window expires. Continue checking for durable progress during cooldown.
-Repeated timeouts increase the cooldown from 30 minutes up to a 2-hour cap, so
-an unattended loop keeps watching durable evidence without repeatedly spending a
-full Computer Use timeout on the same blocked desktop state.
-When `computer_use_blocker.active` is true, prefer its
-`recommended_next_check_minutes` value for the next heartbeat cadence instead of
-continuing a short fixed interval.
+## New thread naming
 
-Use the returned `task_id`, `worktree`, `branch`, `bridge_thread_uuid`,
-`bridge_visible_prefix`, `claude_desktop_thread_title`, and
-`claude_activation_message_path` as the live target. If
-`bridge_metadata_complete` is false, stop before touching Claude desktop and
-record the missing bridge metadata. If only bridge naming fields are missing,
-prepare them with:
-
-```bash
-python3 bin/project_design_queue.py ensure-bridge-metadata --project <project-id> --all-active
-```
-
-This only writes UUID/title/sidebar-prefix metadata to task mirrors. It does
-not create worktrees, send `llm-collab` messages, or activate queued lanes. A
-lane is not relay-ready until `ready-context` reports no missing metadata,
-including worktree, branch, and activation message path. After a lane is
-accepted and `claim_task.py` advances the queue, run `ready-context` again and
-update the heartbeat target for the newly ready lane.
-
-When the ready lane is bridge-complete, generate the exact bounded prompt to
-type into Claude desktop with:
-
-```bash
-python3 bin/project_design_queue.py desktop-prompt --project <project-id>
-```
-
-The heartbeat may type only this generated prompt, or an explicit operator
-directive, into the visible Claude prompt. Do not reconstruct the prompt by hand
-from stale heartbeat text.
-
-## Operating Plan
-
-The bridge is useful only when an outbound message creates an expectation that
-Claude will answer. Every Claude desktop relay needs a small plan packet before
-the heartbeat is created or updated.
-
-Plan packet fields:
-
-- `bridge_goal`: why Claude is being contacted.
-- `transport`: `llm-collab` for task-grade work, `direct-ui` for ad hoc chat.
-- `collab_message_path`: exact `Chats/...` path when `llm-collab` is used.
-- `target_thread`: continue current Claude desktop thread or create a new one.
-- `bridge_thread_uuid`: UUID generated before creating a new Claude desktop
-  thread.
-- `short_thread_title`: short human title that should appear in the Claude
-  sidebar.
-- `expected_response`: exact signal that means Claude answered usefully.
-- `expected_window`: short, medium, or long wait.
-- `heartbeat_cadence`: the concrete poll interval for this relay.
-- `timeout_action`: what Codex should do if Claude stays busy or silent.
-- `recording_target`: where to persist the answer, if not only this Codex
-  thread.
-- `stop_condition`: when to delete the heartbeat.
-
-Default cadence mapping:
-
-- `short`: 1-2 minutes for quick review, ack, or exact-token checks.
-- `medium`: 5-10 minutes for investigation or small patch work.
-- `long`: 15-30 minutes for implementation, verification, or browser work.
-
-Task-grade outbound lifecycle:
-
-1. Send the durable instruction with `deliver.py`.
-2. Create or update the bridge plan in the Codex thread.
-3. Prepare an explicit Claude desktop prompt. Use a short one-line "check this
-   exact inbox/chat/message" prompt. Full task context belongs in the durable
-   `llm-collab` packet, not in Claude Desktop visible prompt text.
-4. Use Computer Use to create/select the Claude desktop thread and send exactly
-   one one-line wake prompt after the idle input gate passes.
-5. Create or update the Codex heartbeat with the expected response window.
-6. Heartbeat watches the visible Claude desktop state.
-7. Once Claude is idle/awaiting input, Codex reads the visible response and
-   records it in this thread and in `llm-collab` when required.
-8. Delete the heartbeat unless a specific follow-up prompt is already planned.
-
-No active plan means no send. In that state a heartbeat may report app/inbox
-status, but it must not infer what Claude should do next.
-
-## New Thread Naming
-
-Every new Claude desktop thread must start with a unique bridge id and a short
-title. This prevents the sidebar from filling with indistinguishable titles such
-as `Check inbox messages` or `Check and review inbox messages`.
-
-Before clicking `New session`, generate:
-
-- `bridge_thread_uuid`: a full UUID for durable binding and audit
-- `short_thread_title`: a compact label for the Claude sidebar, for example
-  `GH-361 review workflow`
-
-Send the first visible prompt in this format, only after the
-Claude idle input gate passes:
-
-- active sidebar row is not `Running`
-- composer is empty and focused
-- no visible `Stop` button
-- no visible queued messages with `Remove queued message`
-
-If any item fails, do not type into Claude Desktop. Wait for the next heartbeat
-or record a blocker. Adding a prompt while Claude is running can fragment the
-message into queued chunks and confuse the active turn.
-
-Use this compact one-line prompt format:
+Every new desktop thread must start with a unique bridge id and a short title so
+the sidebar does not fill with indistinguishable rows. Before clicking
+`New session`, generate a `bridge_thread_uuid` (full UUID, durable binding/audit)
+and a `short_thread_title` (compact sidebar label, e.g. `GH-361 review
+workflow`). Send the first visible prompt only after the idle gate passes, in the
+compact one-line form:
 
 ```text
 [BRIDGE <8-char-uuid-prefix>] Read <collab_message_path or latest CHAT-id packet> and execute it.
 ```
 
-Keep the visible prompt under roughly 240 characters. Use the same
-`bridge_thread_uuid` in the bridge plan and any later `llm-collab` note. The
-full UUID, chat id, message path, task body, acceptance criteria, and gates must
-live in the durable `llm-collab` packet or bridge record, not in Claude Desktop
-visible prompt text.
+Keep the visible prompt under ~240 characters. The full UUID, chat id, message
+path, task body, acceptance criteria, and gates live in the durable mailbox
+packet, not in visible prompt text. Never paste task bodies or multi-paragraph
+briefs into the app for task-grade work, and never split one bridge across
+multiple visible messages.
 
-Do not paste task bodies, acceptance criteria, long implementation briefs, or
-multi-paragraph context into Claude Desktop for task-grade work. Put that
-content in the durable `llm-collab` `Chats/` packet and wake Claude with only
-the bridge pointer.
+## Completion detection
 
-Never send task-grade Claude Desktop prompts with newlines or split one bridge
-across multiple visible messages. If the app shows multiple queued Codex
-fragments or queued remove affordances after sending, remove the queued
-fragments if safe, record the bridge as failed, and do not stack replacement
-prompts.
-
-## Completion Detection
-
-Do not treat a visible answer alone as complete. A Claude turn is settled only
-when all of these are true:
+A turn is settled only when ALL are true:
 
 - the visible response needed by the plan is present
 - the sidebar row is no longer `Running`
@@ -374,69 +200,31 @@ when all of these are true:
 - the Send button is disabled only because the prompt is empty
 - there is no visible `Stop` control for the active turn
 
-Do not require Claude to end with bridge protocol tokens. Claude should write
-the normal task result, blocker, question, or handoff content needed for the
-work. Codex decides the heartbeat state by reading that visible response plus
-the settled UI state, then recording the meaningful content into `llm-collab`
-when needed.
+Agents should write the normal task result, blocker, question, or handoff — no
+required protocol tokens. The reader decides state from the visible response plus
+the settled UI, then records the meaningful content into the mailbox.
 
-## Thread Selection
-
-Codex side:
-
-- Continue the current Codex thread when the operator wants the bridge watcher to
-  stay active and report Claude state here.
-- Stay in the current Codex thread after an Amiga issue is merged/cleaned up by
-  default. Start a fresh Codex thread only when the operator explicitly asks for
-  a fresh session/handoff, context safety requires a boundary, or Codex cannot
-  safely continue in the current thread.
-- Before starting a new lane or ending the current thread, preserve any workflow
-  docs, repo instructions, skills, queue scripts, bridge docs, or agent-memory
-  edits by committing/PR'ing them, explicitly bundling them into the next lane,
-  or abandoning them with operator approval.
-
-Claude side:
-
-- Continue the current Claude desktop thread only when the visible project/title
-  match the active task, or when the outbound directive explicitly says to
-  continue it.
-- Create a new Claude desktop thread only by using Computer Use: click
-  `New session`, select/confirm the intended project/worktree controls, type the
-  first prompt with `[BRIDGE <8-char-uuid-prefix>] <short_thread_title>`, and
-  send it. Then read back the visible project, title, and `local_*` URL before
-  binding the thread to a plan.
-- If the visible Claude thread is unrelated, busy, or ambiguous, the heartbeat
-  reports the blocker in Codex and does not send anything.
-
-Do not create a Claude desktop thread by writing Electron stores, IndexedDB,
-`~/.claude/projects`, or CLI/project-session files.
-
-## Operator Safety
+## Operator safety
 
 - Do not paste secrets, credentials, persona passwords, or private browser data
-  into Claude desktop.
-- Do not start unrelated Amiga queue lanes from the desktop bridge.
-- If a prompt is a product implementation instruction, it must still name the
-  issue/task, worktree, allowed files, and verification expectations.
-- Keep every relay visible in the Codex thread; no hidden desktop-only state.
-- Use one active Claude desktop controller heartbeat at a time unless a future
-  implementation adds explicit per-thread UI locking. Multiple plans may exist,
-  but only one heartbeat should drive the visible Claude app.
+  into any agent app.
+- Do not start unrelated Amiga queue lanes from the doorbell.
+- A product-implementation ring must still name the issue/task, worktree, allowed
+  files, and verification expectations in the durable packet.
+- Keep every relay visible/durable; no hidden desktop-only state.
+- Do not create desktop threads by writing Electron stores, IndexedDB,
+  `~/.claude/projects`, or CLI/project-session files.
 
-## Failure Modes
+## Failure modes
 
-- If Claude desktop is idle/awaiting input, Codex can safely read the last answer
-  and decide whether an explicit next prompt exists.
-- If Claude desktop is still generating, shows `Stop`, or is creating a
-  worktree, Codex should not interrupt it.
-- If Computer Use cannot see the prompt or transcript, the bridge is paused; do
-  not fall back to Claude CLI. For idle-time Computer Use timeouts, record the
-  blocker with `project_design_queue.py record-computer-use-timeout` so later
-  heartbeats apply the cooldown classification while still checking durable
-  progress. Retry via Codex/Computer Use after cooldown or repair the Computer
-  Use/tooling blocker; do not escalate to an operator manual wake.
-- If the app-visible thread changes, re-read the app state and confirm the
-  project/title before sending anything.
-- If a heartbeat times out, record `timed_out`, delete the heartbeat, and leave
-  the `llm-collab` message unread or visibly unresolved rather than inventing a
-  response.
+- Recipient idle/awaiting input: safe to read the last answer and decide whether
+  an explicit next ring exists.
+- Recipient still generating / shows `Stop` / creating a worktree: do not
+  interrupt; the idle gate forbids the ring.
+- Computer Use cannot see the prompt/transcript: the doorbell is paused; record
+  the blocker (for the safety-fuse path, `record-computer-use-timeout` applies a
+  cooldown) and retry via Computer Use after repair. Do not fall back to CLI.
+- App-visible thread changed: re-read app state and confirm project/title before
+  sending anything.
+- Safety-fuse heartbeat times out: record `timed_out`, delete the heartbeat, and
+  leave the mailbox message visibly unresolved rather than inventing a response.

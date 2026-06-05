@@ -6,10 +6,21 @@ No lane is PR-ready until local validation and required metadata are complete.
 
 ## Hard rules
 
-- workers do not push
-- do not push directly to `main`
+- never push directly to `main`; only the release-gate role merges to `main`
+- the implementer role may create/commit on its assigned task branch and, when
+  granted git/PR authority, push that branch and open a PR for its own lane —
+  but only within the assigned worktree and under the safeguards below. Any
+  worker (including Claude) may hold this authority per the role model in
+  `task-intake-and-delegation.md`; it is not reserved to one named agent.
+- the merge/release gate stays with the queue-owner/release-gate role (Codex by
+  default in Amiga, a tooling constraint): independent review, merge-state
+  inspection, and the merge itself are not performed by the implementer on their
+  own lane
 - do not open PRs without linked tracking context (issue/task)
 - require full local verification for the affected surface before PR
+- commit only on the assigned worktree branch; verify
+  `git branch --show-current` before each commit; out-of-scope work becomes a
+  separate task/branch/PR so no shared repo/branch is left dirty
 
 ## Suggested branch layers
 
