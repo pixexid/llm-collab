@@ -54,7 +54,7 @@ explicitly disjoint.
 8. assign one implementation owner
 9. send one clear delegation message
 10. move task to `in_progress` (gated — requires `refined_by: claude` or `skip_refinement: true`)
-11. then request activation relay
+11. then activate the assigned worker directly through the approved mailbox + doorbell path
 12. then begin implementation
 
 For Codex-owned implementation, the implementation owner is a managed Codex
@@ -390,7 +390,7 @@ When isolated worktrees are used, include:
   - `git status --short --untracked-files=all`
   - disposition of any remaining tracked or untracked files
 
-For worker-owned isolated lanes, those values must be provisioned and verified by the orchestrator before relay.
+For worker-owned isolated lanes, those values must be provisioned and verified by the orchestrator before worker activation.
 Do not phrase a planned branch/worktree as already assigned.
 
 For UI/UX implementation lanes, the delegation brief must also name:
@@ -449,20 +449,26 @@ When multiple workers are involved, state activation order explicitly:
 - who should wait
 - what condition triggers next activation
 
-## Relay enforcement (hard rule)
+## Activation enforcement (hard rule)
 
-Do not request operator relay for workers that are not ready to start.
+Do not activate workers that are not ready to start. Activation is queue-owner
+controlled and happens by directly activating the assigned worker through the
+approved mailbox + doorbell path after the gates pass — not by asking the
+operator to relay.
 
-- Send relay only for workers in `in_progress` state that should execute now.
+- Activate only workers in `in_progress` state that should execute now.
 - A worker is not ready to start until its required branch/worktree already exists when isolated mode is expected.
-- For queued workers, update task ownership/status and keep instructions in task/chat, but do not request activation relay yet.
-- When a queued worker becomes ready, send a single activation message and then request relay.
+- For queued workers, update task ownership/status and keep instructions in task/chat, but do not ring/activate them yet.
+- When a queued worker becomes ready, send one activation message (mailbox packet) and ring it via the doorbell.
 
-Required operator instruction format:
+Required activation-state wording:
 
 - single activation: `activate <worker> now`
 - parallel activation: `activate <worker-a> + <worker-b> now in parallel`
 - queue-only instruction: `do not activate yet; waiting on <condition>`
 
-Never dump multiple relay prompts without explicit activation order.
-If order is sequential, provide only the first relay and wait until the trigger condition is met before requesting the next.
+These describe the queue-owner's recorded activation intent; the worker is then
+activated directly via mailbox + doorbell, not via an operator paste/relay.
+
+Never ring/activate multiple workers without explicit activation order.
+If order is sequential, activate only the first and wait until the trigger condition is met before activating the next.
