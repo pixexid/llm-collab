@@ -37,20 +37,42 @@ Do not create the review branch from a worker lane until the worker handoff acce
 For Amiga, this means invoking the repo-local `amiga-pre-pr-review` skill before
 commit, push, or PR.
 
-Before committing or opening a PR, the orchestrator must manually review the
-final branch diff against the target branch or merge base. Treat this as the
-primary code-review gate:
+Before committing or opening a PR, an independent reviewer must manually review
+the final branch diff against the target branch or merge base. The reviewer is
+not the implementer. Treat this as the primary code-review gate:
 
 - review against the merge base or target branch, not just the last edited file
 - check correctness, regressions, missing verification, contract drift, and
   workflow/process consistency
-- fix actionable findings before commit when the fix is local and bounded
+- classify findings as blocker, follow-up, or note
+- fix all blockers before commit when the fix is local and bounded
 - rerun the affected verification after fixes
 - only then commit, push, and open the PR
 
 This manual branch-diff review is the repeated review loop. GitHub Codex PR
 review is an external safety net, not the mechanism that should discover routine
 issues for the first time.
+
+The standard Amiga mechanism is collab/doorbell review: the implementer sends
+the final branch, base ref or merge base, final head SHA, scope, and verification
+evidence in the linked chat; the reviewer returns findings in the same durable
+chat. Codex normally reviews Claude-authored lanes and opens the PR after a
+clean result. Claude, Gemini, or another independent reviewer reviews
+Codex-authored lanes; Codex may still run the PR opener, but the review result
+and notes must come from the independent reviewer. If Codex is unavailable,
+Claude may use the Codex MCP/review surface as a fallback, but the review
+artifact must still be recorded in llm-collab with reviewer, implementer, base
+or merge base, final head SHA, result, mechanism/source, and re-review
+disposition. The Codex app `/code review` UI is operator-facing and should not
+be documented as an agent-callable requirement.
+
+For Amiga, `pnpm pr:open` is the mechanical bypass guard for this workflow. It
+requires `--review-result` and `--review-notes` for PR creation/editing. Allowed
+results are `clean`, `clean-after-fixes`, `blocked`, `skipped (docs-only)`, and
+`skipped (non-runtime)`; `blocked` cannot open a ready PR. Skip values require a
+clear rationale in the notes. The opener rejects self-review notes and rejects
+notes whose `Head SHA:` does not match the current branch head, so a stale clean
+review cannot cover later commits.
 
 Do not manually comment `@codex review` when opening a PR. If GitHub Codex is
 enabled for the repository, consume the automatic PR review/comment/reaction

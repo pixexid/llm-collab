@@ -55,13 +55,24 @@ from implementation (see role model in `task-intake-and-delegation.md`).
   that did not author the plan reviews the spec/AC/risk analysis before
   activation. A bad plan is the highest-cost failure, so this is the most
   important gate.
-- **Pre-merge second-eyes is mandatory** on implementation. The reviewing agent
+- **Pre-PR second-eyes is mandatory** on implementation. The reviewing agent
   inspects the actual diff (and rendered/DB evidence where relevant) before the
-  lane is treated as PR-ready/accepted.
+  lane is treated as PR-ready/accepted. The review artifact must name reviewer,
+  implementer, base ref or merge base, final head SHA, result, mechanism/source,
+  and any re-review disposition.
 - Cross-review is symmetric: each agent reviews the other's lanes. The Amiga
   queue-owner default (Codex) still records status transitions and the
   acceptance read, but "reviewer" is a role either agent fills depending on who
   implemented the lane.
+- Codex normally reviews Claude-authored implementation lanes through the
+  collab/doorbell loop and opens the PR after a clean result. Claude, Gemini, or
+  another independent reviewer reviews Codex-authored lanes. Codex may still
+  run the PR opener for a Codex-authored lane, but the recorded pre-PR review
+  result and notes must come from the independent reviewer.
+- If Codex is unavailable, Claude may obtain the review through the Codex
+  MCP/review surface. Record that fallback artifact in the linked chat before
+  PR creation. GitHub Codex PR review is a post-PR backstop and PR-wait signal,
+  not the pre-PR review of record.
 
 ## Task status guide
 
