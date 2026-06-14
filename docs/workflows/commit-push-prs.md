@@ -70,7 +70,9 @@ For Amiga, `pnpm pr:open` is the mechanical bypass guard for this workflow. It
 requires `--review-result` and `--review-notes` for PR creation/editing. Allowed
 results are `clean`, `clean-after-fixes`, `blocked`, `skipped (docs-only)`, and
 `skipped (non-runtime)`; `blocked` cannot open a ready PR. Skip values require a
-clear rationale in the notes.
+clear rationale in the notes. The opener rejects self-review notes and rejects
+notes whose `Head SHA:` does not match the current branch head, so a stale clean
+review cannot cover later commits.
 
 Do not manually comment `@codex review` when opening a PR. If GitHub Codex is
 enabled for the repository, consume the automatic PR review/comment/reaction
