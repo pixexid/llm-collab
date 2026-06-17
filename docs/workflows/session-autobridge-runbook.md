@@ -20,9 +20,13 @@ Session autobridge and PM2/heartbeat polling survive only as a bounded,
 
 - only when a doorbell attempt is blocked, or a worker is visibly running and a
   handoff is expected
+- for collab-loop waits such as PR/CI, bot-review comments, inbox replies, and
+  doorbell handoffs, Claude owns the ongoing monitor; Codex should hand the
+  watch to Claude instead of keeping an in-thread heartbeat alive
 - task-scoped: tied to one specific task/worktree/branch and its chat
 - auto-deletes on handoff/ack/blocker; must not outlive its task/chat
 - never the primary path, never a standing always-on watcher
+- one monitor per purpose; clear stale prior monitors before creating a new one
 - must be fixed or removed if it misbehaves on real tasks
 
 If the safety-fuse causes stale-context or duplicate-wake issues in practice,

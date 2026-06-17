@@ -7,6 +7,12 @@ PM2 is entirely optional. You can check your inbox manually at any time with:
 python bin/inbox.py --me <agent_id>
 ```
 
+For Amiga collab-loop waits, Claude owns ongoing PR/CI, bot-review, inbox-reply,
+and doorbell monitoring. Codex should prefer an attended one-shot check and hand
+continuing watches to Claude instead of keeping a Codex thread heartbeat alive.
+If Codex must create a monitor, use one monitor per purpose, clear stale prior
+monitors first, and delete or update it as soon as its purpose is served.
+
 Manual one-shot watcher runs use the same Codex refresh defaults as PM2:
 
 ```bash

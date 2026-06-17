@@ -106,6 +106,18 @@ For Codex manual watcher checks, `watch_inbox.py` should behave the same as the 
 - `LLM_COLLAB_CODEX_UI_REFRESH_METHOD=cdp`
 - `LLM_COLLAB_CODEX_CDP_PORT=9223`
 
+## Collab-loop monitor ownership
+
+Claude owns ongoing collab-loop monitoring for PR/CI status, bot-review
+comments, inbox replies, and doorbell handoffs. Codex should usually check live
+state once while actively gating/reviewing, then hand any continuing watch to
+Claude through the durable mailbox.
+
+Use a Codex heartbeat only for a genuinely Codex-side wait or when Claude cannot
+own the watch. Before creating one, clear any stale monitor for the same target.
+Keep one monitor per purpose, and delete or update it as soon as the purpose is
+served.
+
 ## Claude Desktop Rule
 
 Treat the Claude desktop app as a human-driven UI surface that Codex may drive
