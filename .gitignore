@@ -1,6 +1,7 @@
 # Runtime config (created by scripts/init.py)
+# Note: agents.json IS tracked — it is the shared agent roster, not per-machine.
+# collab.config.json and projects.json remain local-only (paths/state differ per host).
 /collab.config.json
-/agents.json
 /projects.json
 
 # Per-agent runtime state (inbox pointers, memory, identity)
