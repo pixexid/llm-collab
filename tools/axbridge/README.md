@@ -80,12 +80,23 @@ targets a specific window (default 0).
 - **Strict idle-gate:** `ring` re-checks for a Stop button immediately before
   pressing; aborts (`8`) if the target became busy. Apps won't submit while busy.
 
-## Per-app submit notes (validated 2026-06-21)
+## Per-app support matrix (validated 2026-06-21)
 
-- **Codex / ZCode:** Send button responds to `AXPress` — submits via mechanism 1.
-- **Claude Desktop:** Send button **ignores `AXPress`** and `AXConfirm`; submits
-  only via mechanism 3 — the **posted Return key** (`key-return`). Round-trip
-  Codex→Claude proven (`VERIFIED: submitted via key-return`).
+axsend writes the composer via `AXValue`. Chat-style composers accept it;
+code-editor-style composers (Monaco/CodeMirror-like) silently reject it and would
+need real key-event typing (not yet implemented).
+
+| App | `AXValue` write | Submit path | Doorbell |
+|-----|-----------------|-------------|----------|
+| **Codex** | ✅ accepts | `AXPress` send arrow | ✅ proven bidirectional |
+| **Claude Desktop** | ✅ accepts | `key-return` (ignores AXPress/AXConfirm) | ✅ proven (received Codex ring) |
+| **ZCode** | ❌ rejects (editor composer) | n/a | needs key-event typing |
+| **Antigravity (Gemini)** | ❌ rejects (editor composer) | n/a | needs key-event typing |
+
+Safety: `ring --submit` only presses a **confident** send button (unlabeled icon,
+or labeled send/submit) and never a side-effecting control (e.g. Antigravity's
+"Record voice memo"); otherwise it falls through to AXConfirm/key-return. Honest
+`--verify` returns 7 when nothing submits (the ZCode/Antigravity case).
 
 ## Limits / next
 

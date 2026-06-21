@@ -329,11 +329,15 @@ func cmdRing(app: String, text: String, submit: Bool, windowIndex: Int, dryRun: 
         FileHandle.standardError.write("no editable composer found in window\n".data(using: .utf8)!)
         return 3
     }
+    // Focus first — harmless, and some apps only accept AXValue when focused.
+    AXUIElementSetAttributeValue(composer, kAXFocusedAttribute as CFString, kCFBooleanTrue)
     let setErr = AXUIElementSetAttributeValue(composer, kAXValueAttribute as CFString, text as CFString)
     if setErr != .success {
         FileHandle.standardError.write("set value failed: \(setErr.rawValue)\n".data(using: .utf8)!)
         return 4
     }
+    // NOTE: some apps (Antigravity's code-editor composer) accept this call but
+    // silently keep the field empty; the honest --verify below then returns 7.
     print("composer set (role=\(role(composer)))")
 
     if submit {
@@ -345,7 +349,10 @@ func cmdRing(app: String, text: String, submit: Bool, windowIndex: Int, dryRun: 
         let windowControls: Set<String> = ["AXCloseButton", "AXMinimizeButton", "AXZoomButton",
                                             "AXFullScreenButton", "AXToolbarButton"]
         let nonSendLabels = ["add files", "custom", "medium", "dictate", "model", "attach",
-                             "more", "agent", "branch", "environment"]
+                             "more", "agent", "branch", "environment",
+                             // side-effecting controls that must never be pressed as "send"
+                             "voice", "record", "memo", "mic", "microphone", "audio",
+                             "image", "photo", "camera", "screenshot", "settings"]
         let buttons = all.filter { role($0) == "AXButton" }
         var button: AXUIElement? = nil
         if let cf = frame(composer) {
@@ -366,14 +373,21 @@ func cmdRing(app: String, text: String, submit: Bool, windowIndex: Int, dryRun: 
         if button == nil {
             button = buttons.first { label($0).lowercased().contains("send") || label($0).lowercased().contains("submit") }
         }
-        guard let button = button else {
-            FileHandle.standardError.write("composer set but no send button found; submit skipped\n".data(using: .utf8)!)
-            return 5
-        }
-        let bf = frame(button).map { String(format: "x=%.0f y=%.0f", $0.x, $0.y) } ?? "?"
-        let tgt = "label=\"\(label(button).prefix(20))\" sub=\"\(subrole(button))\" \(bf)"
+        // Only press the resolved button if it is a CONFIDENT send target: an
+        // unlabeled icon button (the send arrow) or one labeled send/submit. A
+        // labeled non-send button (e.g. "Record voice memo") is never pressed —
+        // we fall straight to AXConfirm/key-return, which is side-effect-free.
+        let buttonOK: Bool = {
+            guard let b = button else { return false }
+            let l = label(b).lowercased()
+            return l.isEmpty || l.contains("send") || l.contains("submit")
+        }()
+        let bf = button.flatMap(frame).map { String(format: "x=%.0f y=%.0f", $0.x, $0.y) } ?? "none"
+        let tgt = button.map { "label=\"\(label($0).prefix(20))\" sub=\"\(subrole($0))\" \(bf)" } ?? "no button"
         if dryRun {
-            print("DRY-RUN send target: \(tgt) (not pressed)")
+            print(buttonOK
+                ? "DRY-RUN send target: \(tgt) — will press, then AXConfirm/key-return (not pressed)"
+                : "DRY-RUN no confident send button (resolved: \(tgt)) — will submit via AXConfirm/key-return only (not pressed)")
             return 0
         }
         // Re-check idle RIGHT before pressing. Chat apps (e.g. Claude Desktop)
@@ -393,11 +407,28 @@ func cmdRing(app: String, text: String, submit: Bool, windowIndex: Int, dryRun: 
             let fresh = windows(appElement(named: app)?.0 ?? el).first ?? win
             return messageLanded(fresh, sentText: text)
         }
+        func keyReturn() {
+            AXUIElementSetAttributeValue(composer, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+            postReturnKey(pid: pid)
+        }
+        // Without --verify we can't tell which mechanism worked, so do the single
+        // safest: press a confident send button, else key-return.
+        if !verify {
+            if buttonOK, let b = button {
+                AXUIElementPerformAction(b, kAXPressAction as CFString)
+                print("send pressed (\(tgt)) [no --verify]")
+            } else {
+                keyReturn()
+                print("submitted via key-return (no confident button) [no --verify]")
+            }
+            return 0
+        }
         var method = ""
-        // 1. Press the resolved Send button (works for Codex/ZCode).
-        AXUIElementPerformAction(button, kAXPressAction as CFString)
-        if !verify { print("send pressed (\(tgt)) [no --verify]"); return 0 }
-        if landed() { method = "button-press" }
+        // 1. Press the resolved Send button ONLY if it's a confident send target.
+        if buttonOK, let b = button {
+            AXUIElementPerformAction(b, kAXPressAction as CFString)
+            if landed() { method = "button-press" }
+        }
         // 2. AXConfirm on the composer (text fields that submit on confirm).
         if method.isEmpty {
             AXUIElementPerformAction(composer, kAXConfirmAction as CFString)
@@ -406,8 +437,7 @@ func cmdRing(app: String, text: String, submit: Bool, windowIndex: Int, dryRun: 
         // 3. Focus the composer + post a real Return to the app's pid (no focus
         //    steal). The universal submit for Enter-to-send composers.
         if method.isEmpty {
-            AXUIElementSetAttributeValue(composer, kAXFocusedAttribute as CFString, kCFBooleanTrue)
-            postReturnKey(pid: pid)
+            keyReturn()
             if landed() { method = "key-return" }
         }
 
