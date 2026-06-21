@@ -76,15 +76,16 @@ func setComposerText(_ composer: AXUIElement, pid: pid_t, _ text: String) -> Boo
     usleep(90_000)
     func current() -> String { str(composer, kAXValueAttribute) ?? "" }
     if text.isEmpty {
-        // Clearing a (possibly stuck) draft. The AXValue "" write above clears
-        // fields that accept it; Electron composers (ZCode/Antigravity) reject
-        // it and keep the stale draft, so confirm it actually emptied and fall
-        // back to a real key-event select-all+delete when it didn't. Returning
-        // success on the unverified AXValue write would leave the stuck draft.
-        if current().isEmpty { return true }
+        // Clearing a (possibly stuck) draft. Don't gate on the AXValue readback:
+        // Electron composers (ZCode/Antigravity) don't reflect the draft through
+        // AXValue, so `current().isEmpty` is true even when a draft is stuck —
+        // which would skip the clear AND falsely report success. Always issue the
+        // key-event select-all+delete (best effort) and report success; verify
+        // separately with `axsend confirm` (the AXValue readback can't be trusted
+        // for these apps).
         selectAllAndDelete(pid: pid)
         usleep(120_000)
-        return current().isEmpty
+        return true
     }
     func has() -> Bool { current().contains(String(text.prefix(20))) }
     if has() { return true }
@@ -613,6 +614,54 @@ func cmdRing(app: String, text: String, submit: Bool, windowIndex: Int, dryRun: 
     return 0
 }
 
+// Read-only delivery feedback — confirm whether a message actually sent WITHOUT
+// needing a screenshot/computer-use. Call after `ring` (or anytime) with the
+// sent text (a prefix is fine). Verdict + exit code:
+//   delivered (0): the text appears as a conversation turn above the composer
+//   stuck (7):     the text is still sitting in the composer (NOT sent)
+//   absent (8):    the text is in neither (wrong window, or never typed)
+// Electron composers (ZCode/Antigravity) don't expose the draft via AXValue, so
+// "stuck" also matches the draft rendered as static text at/below the composer.
+func cmdConfirm(app: String, text: String, windowIndex: Int) -> Int32 {
+    guard AXIsProcessTrusted() else {
+        FileHandle.standardError.write("AX not trusted; run `axsend check`.\n".data(using: .utf8)!); return 2
+    }
+    guard let (el, _) = appElement(named: app) else {
+        FileHandle.standardError.write("app not found: \(app)\n".data(using: .utf8)!); return 1
+    }
+    let wins = windows(el)
+    guard !wins.isEmpty else {
+        FileHandle.standardError.write("no windows for \(app)\n".data(using: .utf8)!); return 1
+    }
+    let win = wins[max(0, min(windowIndex, wins.count - 1))]
+    let needle = String(text.prefix(30))
+    guard !needle.isEmpty else { print("nothing to confirm (empty text)"); return 0 }
+
+    let composer = findComposer(win)
+    let composerTop = composer.flatMap { frame($0)?.y }
+    var stuck = (composer.flatMap { str($0, kAXValueAttribute) } ?? "").contains(needle)
+    if !stuck, let top = composerTop {
+        // Electron draft: rendered as static text at/below the composer top.
+        stuck = flatten(win).contains { e in
+            guard role(e) == "AXStaticText", let v = str(e, kAXValueAttribute), v.contains(needle),
+                  let f = frame(e) else { return false }
+            return f.y >= top - 4
+        }
+    }
+    let delivered = messageLanded(win, sentText: text)
+    let proc = isProcessing(win)
+    if delivered {
+        print("delivered: text appears as a sent message\(proc ? "; recipient is processing" : "")")
+        return 0
+    }
+    if stuck {
+        FileHandle.standardError.write("stuck: text is still in the composer — NOT sent. Re-ring when idle, or clear with `ring --text \"\"`.\n".data(using: .utf8)!)
+        return 7
+    }
+    FileHandle.standardError.write("absent: text not found as a sent message or a draft (wrong window, or never typed).\n".data(using: .utf8)!)
+    return 8
+}
+
 // MARK: - Arg parsing
 
 func argValue(_ key: String) -> String? {
@@ -624,7 +673,8 @@ func hasFlag(_ key: String) -> Bool { CommandLine.arguments.contains(key) }
 
 let args = CommandLine.arguments
 guard args.count >= 2 else {
-    print("usage: axsend <check|tree|ring> [...]")
+    print("usage: axsend <check|tree|state|ring|type|confirm> [...]")
+    print("  confirm --app <app> --text <sent-text>   read-only: did it send? (exit 0 delivered / 7 stuck / 8 absent)")
     exit(64)
 }
 switch args[1] {
@@ -654,6 +704,11 @@ case "type":
         print("--app and --text required"); exit(64)
     }
     exit(cmdType(app: app, text: text, submit: hasFlag("--submit"), verify: hasFlag("--verify")))
+case "confirm":
+    guard let app = argValue("--app"), let text = argValue("--text") else {
+        print("--app and --text required"); exit(64)
+    }
+    exit(cmdConfirm(app: app, text: text, windowIndex: Int(argValue("--window-index") ?? "0") ?? 0))
 default:
     print("unknown command: \(args[1])"); exit(64)
 }

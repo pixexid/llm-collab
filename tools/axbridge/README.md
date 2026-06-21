@@ -42,14 +42,32 @@ bin/axsend ring  --app Codex --submit --dry-run --text "x"
 # Set + press send, then confirm the text actually landed in the conversation
 bin/axsend ring  --app Codex --submit --verify --text "[from claude] ..."
 
+# Feedback WITHOUT a screenshot — did the message actually send? Call after any
+# ring (or anytime). This is the reliable check; DO NOT use computer-use to verify.
+#   exit 0 delivered | exit 7 stuck-in-composer (NOT sent) | exit 8 absent
+bin/axsend confirm --app Codex --text "[from claude] ..."
+
+# If confirm says "stuck": re-ring (the ring clears the old draft + retypes +
+# resends) or clear the draft explicitly, then re-ring:
+bin/axsend ring --app Codex --text ""        # best-effort key-event clear
+
 # Post-send / anytime: is the recipient processing, and what are recent messages
-# (including their reply)? — the reliable check; composer-empty is NOT proof.
+# (including their reply)?
 bin/axsend state --app Codex
 ```
 
 Exit codes: `ring --verify` returns 7 if the sent text isn't found in the
-conversation after the press (treat as "did not land"). `--submit` returns 5 if
-no send button resolved, 6 if the press failed.
+conversation after the press (treat as "did not land"; the draft is cleared so
+nothing is left stuck). `confirm` returns 0 delivered / 7 stuck-in-composer /
+8 absent. `--submit` returns 5 if no send button resolved, 6 if the press failed.
+
+**Electron apps (ZCode/Antigravity) — the verification rule:** these composers
+accept key events but do NOT reflect text back through `AXValue`, so you cannot
+read the draft/empty state via AX. NEVER trust a read-back of the composer, and
+NEVER fall back to a screenshot to check — use `axsend confirm`, which checks the
+*conversation* (the sent message appears as a real turn) and the *draft* (rendered
+as static text at the composer), both of which ARE readable. A handoff is done
+only when `confirm` reports `delivered` (exit 0).
 
 `--app` matches by localized name or bundle id (substring ok). `--window-index N`
 targets a specific window (default 0).
