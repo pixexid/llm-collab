@@ -1,0 +1,77 @@
+# axsend — focus-independent AX doorbell bridge
+
+Rings another agent app's composer (Codex, ZCode, Claude Desktop) using the
+macOS Accessibility API (AXUIElement) — **no screenshots, no window raising, no
+focus stealing**. Built because screenshot-based computer-use grabs focus while
+the operator is working and misroutes keystrokes across overlapping windows.
+
+## Build
+
+```bash
+cd tools/axbridge && swiftc -O axsend.swift -o axsend
+# symlinked at ../../bin/axsend
+```
+
+## Permission
+
+The process that runs `axsend` must be enabled in
+**System Settings → Privacy & Security → Accessibility**. Check with:
+
+```bash
+bin/axsend check        # -> "AX trusted: YES"
+```
+
+## Usage
+
+```bash
+# Inspect an app's tree to find the composer + send button
+bin/axsend tree  --app Codex --editable-only
+
+# Dump the app element's raw attributes (debugging which process is real)
+bin/axsend attrs --app Codex
+
+# Idle-gate: empty AXTextArea value == composer is empty, safe to ring
+bin/axsend tree  --app Codex --editable-only | grep AXTextArea
+
+# Set composer text only (draft, no send)
+bin/axsend ring  --app Codex --text "hello"
+
+# See which button send would press WITHOUT pressing (do this on any new app)
+bin/axsend ring  --app Codex --submit --dry-run --text "x"
+
+# Set + press send, then confirm the text actually landed in the conversation
+bin/axsend ring  --app Codex --submit --verify --text "[from claude] ..."
+
+# Post-send / anytime: is the recipient processing, and what are recent messages
+# (including their reply)? — the reliable check; composer-empty is NOT proof.
+bin/axsend state --app Codex
+```
+
+Exit codes: `ring --verify` returns 7 if the sent text isn't found in the
+conversation after the press (treat as "did not land"). `--submit` returns 5 if
+no send button resolved, 6 if the press failed.
+
+`--app` matches by localized name or bundle id (substring ok). `--window-index N`
+targets a specific window (default 0).
+
+## How it targets things
+
+- **Right process:** an app has several same-named processes (GPU/helper/menu-extra).
+  axsend prefers `activationPolicy == .regular` with `windows > 0` — the dock-extra
+  helper reports `AXTitle = com.apple.dock.external.extra.arm64` and 0 windows.
+- **Electron wake-up:** sets `AXManualAccessibility` + `AXEnhancedUserInterface` on
+  the app element so Chromium exposes its web tree.
+- **Composer:** the editable node with a non-empty `AXPlaceholderValue` (the real
+  `AXTextArea`), not a wrapper `AXGroup` (setting `AXValue` on a wrapper no-ops).
+- **Send button:** geometry-based — the rightmost `AXButton` in the composer's
+  own toolbar band (same vertical zone), excluding window controls
+  (close/minimize/zoom) and known non-send controls. Document-order heuristics
+  are unsafe: they once grabbed the window minimize button. Always
+  `ring --submit --dry-run` on a new app first to print the resolved target.
+
+## Limits / next
+
+- Validated on Codex. ZCode and Claude Desktop expose composers too; per-app send
+  button heuristics may need tuning (`tree` to inspect).
+- Pairs with the llm-collab mailbox: `deliver.py` is the durable record, `axsend`
+  is the doorbell nudge.
