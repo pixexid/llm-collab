@@ -36,6 +36,21 @@ running process enabled in Privacy & Security → Accessibility. Falls back to
 screenshot computer-use only if AX fails for a target. Full reference:
 `tools/axbridge/README.md` and the Claude Code `ax-doorbell` skill.
 
+**Validated across all four agent apps (2026-06-21):**
+
+| App | Composer write | Submit | Status |
+|-----|----------------|--------|--------|
+| Codex | `AXValue` | send-arrow `AXPress` | ✅ proven bidirectional |
+| Claude Desktop | `AXValue` | `key-return` | ✅ proven |
+| ZCode | key-event typing | "Send" button | ✅ proven (replied to a typed ring) |
+| Antigravity (Gemini) | key-event typing | `key-return` | ✅ typed + submitted |
+
+`ring` adapts automatically: it writes via `AXValue`, and if the field rejects it
+(ZCode/Antigravity are Electron code-editor composers that silently drop `AXValue`
+writes) it falls back to real **key-event typing** (`CGEventPostToPid` +
+`keyboardSetUnicodeString`, no focus steal). So the doorbell is universal across
+every agent desktop app — no screenshots, no focus theft, in either direction.
+
 ## Two channels: mailbox + doorbell
 
 - **Mailbox = `llm-collab` (durable source of truth).** Every task, handoff,
