@@ -11,6 +11,31 @@ dedicated desktop apps (e.g. Claude in `/Applications/Claude.app`, Codex in
 > needs something rings the other immediately. The heartbeat survives only as a
 > bounded, provisional **safety-fuse** (see below), not as the primary path.
 
+## Preferred doorbell transport: `axsend` (AX bridge, no focus steal)
+
+Ring the other agent with the **Accessibility-API bridge** rather than
+screenshot computer-use. Screenshot tools must raise the target window and steal
+the operator's keyboard focus, and on overlapping windows they misroute
+keystrokes. `axsend` sets the composer text and presses send through AXUIElement
+**without raising the window or touching focus**, and reads replies without a
+screenshot.
+
+```bash
+AX=/Users/pixexid/Projects/llm-collab/bin/axsend-ensure   # auto-builds if needed
+$AX state --app Codex                                   # idle-gate: processing? + recent msgs
+$AX ring  --app Codex --submit --dry-run --text "x"     # confirm send target (new app/window)
+$AX ring  --app Codex --submit --verify --text "[from <me>] <pointer to durable packet>"
+$AX state --app Codex                                   # read the reply
+```
+
+Rules: deliver the durable packet with `deliver.py` FIRST (mailbox = truth);
+idle-gate before every ring; `--dry-run` first on any new app; `--verify` (returns
+non-zero if the text didn't land — empty composer is NOT proof of send). Any agent
+(Codex, Claude, Gemini, ZCode) can call `axsend-ensure` via shell. Needs the
+running process enabled in Privacy & Security → Accessibility. Falls back to
+screenshot computer-use only if AX fails for a target. Full reference:
+`tools/axbridge/README.md` and the Claude Code `ax-doorbell` skill.
+
 ## Two channels: mailbox + doorbell
 
 - **Mailbox = `llm-collab` (durable source of truth).** Every task, handoff,
