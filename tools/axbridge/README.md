@@ -83,8 +83,9 @@ targets a specific window (default 0).
 ## Per-app submit notes (validated 2026-06-21)
 
 - **Codex / ZCode:** Send button responds to `AXPress` — submits via mechanism 1.
-- **Claude Desktop:** Send button **ignores `AXPress`**; submits via mechanism 2/3
-  (`AXConfirm` or the posted Return key). Round-trip Codex→Claude proven.
+- **Claude Desktop:** Send button **ignores `AXPress`** and `AXConfirm`; submits
+  only via mechanism 3 — the **posted Return key** (`key-return`). Round-trip
+  Codex→Claude proven (`VERIFIED: submitted via key-return`).
 
 ## Limits / next
 
