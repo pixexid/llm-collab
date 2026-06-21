@@ -595,18 +595,11 @@ func cmdRing(app: String, text: String, submit: Bool, windowIndex: Int, dryRun: 
             AXUIElementSetAttributeValue(composer, kAXFocusedAttribute as CFString, kCFBooleanTrue)
             postReturnKey(pid: pid, command: command)
         }
-        // Without --verify we can't tell which mechanism worked, so do the single
-        // safest: press a confident send button, else key-return.
-        if !verify {
-            if buttonOK, let b = button {
-                AXUIElementPerformAction(b, kAXPressAction as CFString)
-                print("send pressed (\(tgt)) [no --verify]")
-            } else {
-                keyReturn()
-                print("submitted via key-return (no confident button) [no --verify]")
-            }
-            return 0
-        }
+        // NOTE: there is intentionally NO fire-and-forget path. The old `--no-verify`
+        // single-press did ONE plain Return, which on a code-editor composer
+        // (ZCode/Antigravity) inserts a NEWLINE instead of sending and silently
+        // strands the text. `--submit` ALWAYS runs the enforced verify+retry below,
+        // so a send can never be left unconfirmed or stuck. (`verify` is ignored.)
         // Enforced verify + auto-retry. Verification is NOT a separate step a
         // worker can forget: the submit cascade runs, EACH method is confirmed by
         // landed() (the text appears as a real conversation turn), and if no method
@@ -739,9 +732,9 @@ case "ring":
     }
     exit(cmdRing(app: app, text: text, submit: hasFlag("--submit"),
                  windowIndex: Int(argValue("--window-index") ?? "0") ?? 0, dryRun: hasFlag("--dry-run"),
-                 // Verify is ENFORCED by default for --submit (auto-retry until a
-                 // confirmed/queued delivery). `--no-verify` opts out (fire-and-forget).
-                 verify: !hasFlag("--no-verify")))
+                 // Verify is ALWAYS enforced for --submit (auto-retry until a confirmed
+                 // or queued delivery); there is no fire-and-forget opt-out.
+                 verify: true))
 case "type":
     guard let app = argValue("--app"), let text = argValue("--text") else {
         print("--app and --text required"); exit(64)

@@ -43,7 +43,6 @@ bin/axsend ring  --app Codex --submit --dry-run --text "x"
 # a NEW conversation turn (freshness baseline — no stale-match), auto-retries the
 # whole cascade if not, and exits 0 ONLY on a confirmed (or queued) delivery.
 bin/axsend ring  --app Codex --submit --text "[from claude] ..."
-# --no-verify opts out (fire-and-forget, no confirmation).
 
 # Feedback WITHOUT a screenshot — did the message actually send? Call after any
 # ring (or anytime). This is the reliable check; DO NOT use computer-use to verify.
