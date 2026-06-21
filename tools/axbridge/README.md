@@ -68,6 +68,23 @@ targets a specific window (default 0).
   (close/minimize/zoom) and known non-send controls. Document-order heuristics
   are unsafe: they once grabbed the window minimize button. Always
   `ring --submit --dry-run` on a new app first to print the resolved target.
+- **Submit (multi-mechanism):** some composers ignore `AXPress` on the Send
+  button. `ring --submit` tries, in order, verifying after each: (1) `AXPress`
+  the Send button, (2) `AXConfirm` on the composer, (3) focus the composer and
+  post a real **Return key to the app's PID** (`CGEventPostToPid` — no focus
+  steal). Stops at the first that actually lands.
+- **`--verify` (honest):** requires the text to have **left the composer** AND
+  appear as a conversation message above it. A stuck draft can never
+  false-positive. Returns `7` if not landed, `8` if the target went busy before
+  the press (so it never leaves a stuck draft).
+- **Strict idle-gate:** `ring` re-checks for a Stop button immediately before
+  pressing; aborts (`8`) if the target became busy. Apps won't submit while busy.
+
+## Per-app submit notes (validated 2026-06-21)
+
+- **Codex / ZCode:** Send button responds to `AXPress` — submits via mechanism 1.
+- **Claude Desktop:** Send button **ignores `AXPress`**; submits via mechanism 2/3
+  (`AXConfirm` or the posted Return key). Round-trip Codex→Claude proven.
 
 ## Limits / next
 

@@ -19,6 +19,17 @@
 
 import Cocoa
 import ApplicationServices
+import CoreGraphics
+
+// Post a Return keypress directly to a process (no focus steal, no window raise)
+// — the universal "submit" for chat composers whose Send button ignores AXPress.
+func postReturnKey(pid: pid_t) {
+    let src = CGEventSource(stateID: .combinedSessionState)
+    let down = CGEvent(keyboardEventSource: src, virtualKey: 0x24, keyDown: true)  // 0x24 = Return
+    let up = CGEvent(keyboardEventSource: src, virtualKey: 0x24, keyDown: false)
+    down?.postToPid(pid)
+    up?.postToPid(pid)
+}
 
 // MARK: - AX helpers
 
@@ -200,10 +211,34 @@ func isProcessing(_ win: AXUIElement) -> Bool {
     flatten(win).contains { role($0) == "AXButton" && label($0).lowercased().contains("stop") }
 }
 
+func findComposer(_ win: AXUIElement) -> AXUIElement? {
+    let all = flatten(win)
+    func placeholder(_ e: AXUIElement) -> String { str(e, "AXPlaceholderValue") ?? "" }
+    return all.last(where: { role($0) == "AXTextArea" })
+        ?? all.last(where: { role($0) == "AXTextField" })
+        ?? all.last(where: { isEditable($0) && !placeholder($0).isEmpty })
+        ?? all.last(where: { isEditable($0) })
+}
+
 func messageLanded(_ win: AXUIElement, sentText: String) -> Bool {
     let needle = String(sentText.prefix(30))
     guard !needle.isEmpty else { return true }
-    return conversationTexts(win).contains { $0.contains(needle) }
+    let composer = findComposer(win)
+    // NECESSARY: the text must have LEFT the composer. If the composer still
+    // holds it, the send did not submit (recipient was busy / press no-op) — no
+    // amount of conversation-text matching can override a stuck draft.
+    if let c = composer, let v = str(c, kAXValueAttribute), v.contains(needle) {
+        return false
+    }
+    // SUFFICIENT: it now appears as a real conversation message, ABOVE the
+    // composer (the draft, if echoed, renders at/below the composer top).
+    let composerTop = composer.flatMap { frame($0)?.y }
+    return flatten(win).contains { e in
+        guard role(e) == "AXStaticText",
+              let v = str(e, kAXValueAttribute), v.contains(needle) else { return false }
+        if let top = composerTop, let f = frame(e) { return f.y < top - 4 }
+        return true
+    }
 }
 
 func cmdState(app: String) -> Int32 {
@@ -265,7 +300,7 @@ func cmdRing(app: String, text: String, submit: Bool, windowIndex: Int, dryRun: 
         FileHandle.standardError.write("AX not trusted; run `axsend check`.\n".data(using: .utf8)!)
         return 2
     }
-    guard let (el, _) = appElement(named: app) else {
+    guard let (el, pid) = appElement(named: app) else {
         FileHandle.standardError.write("app not found: \(app)\n".data(using: .utf8)!)
         return 1
     }
@@ -341,22 +376,47 @@ func cmdRing(app: String, text: String, submit: Bool, windowIndex: Int, dryRun: 
             print("DRY-RUN send target: \(tgt) (not pressed)")
             return 0
         }
-        let pressErr = AXUIElementPerformAction(button, kAXPressAction as CFString)
-        if pressErr != .success {
-            FileHandle.standardError.write("press failed: \(pressErr.rawValue)\n".data(using: .utf8)!)
-            return 6
+        // Re-check idle RIGHT before pressing. Chat apps (e.g. Claude Desktop)
+        // won't submit while busy — pressing Send just leaves a stuck draft and
+        // flips to a Stop button. If the target went busy since the composer was
+        // set, abort instead of leaving a stuck draft.
+        let preWin = windows(appElement(named: app)?.0 ?? el).first ?? win
+        if isProcessing(preWin) {
+            FileHandle.standardError.write("target became busy before send — not submitting (would leave a stuck draft). Re-ring when idle; clear the draft with `ring --text \"\"`.\n".data(using: .utf8)!)
+            return 8
         }
-        print("send pressed (\(tgt))")
+        // Submit via multiple mechanisms — some composers (Claude Desktop) ignore
+        // AXPress on the Send button. Try in order, verifying after each; stop at
+        // the first that actually lands the message as a real turn.
+        func landed() -> Bool {
+            Thread.sleep(forTimeInterval: 1.0)
+            let fresh = windows(appElement(named: app)?.0 ?? el).first ?? win
+            return messageLanded(fresh, sentText: text)
+        }
+        var method = ""
+        // 1. Press the resolved Send button (works for Codex/ZCode).
+        AXUIElementPerformAction(button, kAXPressAction as CFString)
+        if !verify { print("send pressed (\(tgt)) [no --verify]"); return 0 }
+        if landed() { method = "button-press" }
+        // 2. AXConfirm on the composer (text fields that submit on confirm).
+        if method.isEmpty {
+            AXUIElementPerformAction(composer, kAXConfirmAction as CFString)
+            if landed() { method = "composer-confirm" }
+        }
+        // 3. Focus the composer + post a real Return to the app's pid (no focus
+        //    steal). The universal submit for Enter-to-send composers.
+        if method.isEmpty {
+            AXUIElementSetAttributeValue(composer, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+            postReturnKey(pid: pid)
+            if landed() { method = "key-return" }
+        }
 
         if verify {
-            // capture_after: confirm the text actually landed in the conversation
-            // (composer clearing is NOT proof). Re-fetch the window fresh.
-            Thread.sleep(forTimeInterval: 1.2)
-            let freshWin = windows(appElement(named: app)?.0 ?? el).first ?? win
-            if messageLanded(freshWin, sentText: text) {
-                print("VERIFIED: message present in conversation\(isProcessing(freshWin) ? "; recipient is processing" : "")")
+            if !method.isEmpty {
+                let fresh = windows(appElement(named: app)?.0 ?? el).first ?? win
+                print("VERIFIED: submitted via \(method)\(isProcessing(fresh) ? "; recipient is processing" : "")")
             } else {
-                FileHandle.standardError.write("WARN: sent text not found in conversation — send may not have landed\n".data(using: .utf8)!)
+                FileHandle.standardError.write("WARN: not landed after button-press, composer-confirm, and key-return — send did not submit\n".data(using: .utf8)!)
                 return 7
             }
         }
