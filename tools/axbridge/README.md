@@ -39,8 +39,11 @@ bin/axsend ring  --app Codex --text "hello"
 # See which button send would press WITHOUT pressing (do this on any new app)
 bin/axsend ring  --app Codex --submit --dry-run --text "x"
 
-# Set + press send, then confirm the text actually landed in the conversation
-bin/axsend ring  --app Codex --submit --verify --text "[from claude] ..."
+# Set + press send. Verify is ENFORCED by default: it confirms the text landed as
+# a NEW conversation turn (freshness baseline — no stale-match), auto-retries the
+# whole cascade if not, and exits 0 ONLY on a confirmed (or queued) delivery.
+bin/axsend ring  --app Codex --submit --text "[from claude] ..."
+# --no-verify opts out (fire-and-forget, no confirmation).
 
 # Feedback WITHOUT a screenshot — did the message actually send? Call after any
 # ring (or anytime). This is the reliable check; DO NOT use computer-use to verify.
@@ -60,7 +63,7 @@ bin/axsend state --app Codex
 
 Exit codes: `ring --verify` returns 7 if the sent text isn't found in the
 conversation after the press (treat as "did not land"; the draft is cleared so
-nothing is left stuck). `confirm` returns 0 delivered / 7 not-delivered. `--submit` returns 5 if no send button resolved, 6 if the press failed.
+nothing is left stuck). `confirm` returns 0 delivered / 7 not-delivered. `ring --submit` (verify default) exits 0 on a confirmed delivery OR a QUEUED accept (recipient busy — message taken, will render when its turn ends; never resend), and 7 only after all retries fail with the recipient idle. `--submit` returns 5 if no send button resolved, 6 if the press failed.
 
 **Electron apps (ZCode/Antigravity) — the verification rule:** these composers
 accept key events but do NOT reflect text back through `AXValue`, so you cannot

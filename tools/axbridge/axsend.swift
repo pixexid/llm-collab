@@ -387,7 +387,11 @@ func findComposer(_ win: AXUIElement) -> AXUIElement? {
 }
 
 func messageLanded(_ win: AXUIElement, sentText: String) -> Bool {
-    let needle = String(sentText.prefix(30))
+    // Match a longer prefix (40) so a short, non-unique opening can't collide with
+    // a stale older turn. NOTE: standalone `confirm` has no before/after baseline,
+    // so it's a best-effort re-check — the authoritative freshness-aware verify is
+    // in `ring --submit` (it counts NEW turns against a pre-send baseline).
+    let needle = String(sentText.prefix(40))
     guard !needle.isEmpty else { return true }
     let composer = findComposer(win)
     // NECESSARY: the text must have LEFT the composer. If the composer still
@@ -565,10 +569,27 @@ func cmdRing(app: String, text: String, submit: Bool, windowIndex: Int, dryRun: 
         // Submit via multiple mechanisms — some composers (Claude Desktop) ignore
         // AXPress on the Send button. Try in order, verifying after each; stop at
         // the first that actually lands the message as a real turn.
-        func landed() -> Bool {
+        // Freshness baseline: count the real conversation turns that ALREADY
+        // contain this text BEFORE we submit. A delivery is confirmed only when a
+        // NEW turn appears (the count increases) — so a stale older turn with the
+        // same text can't false-confirm, and the retry can't be fooled by a copy
+        // it (or a prior attempt) already sent.
+        let needle = String(text.prefix(40))
+        func turnsWithNeedle(_ w: AXUIElement) -> Int {
+            guard !needle.isEmpty else { return 0 }
+            let top = findComposer(w).flatMap { frame($0)?.y }
+            return flatten(w).filter { e in
+                guard role(e) == "AXStaticText", let v = str(e, kAXValueAttribute),
+                      v.contains(needle), let f = frame(e) else { return false }
+                if let t = top { return f.y < t - 4 }   // above the composer = a real turn, not the draft
+                return true
+            }.count
+        }
+        let baseline = turnsWithNeedle(win)
+        func deliveredFresh() -> Bool {
             Thread.sleep(forTimeInterval: 1.0)
-            let fresh = windows(appElement(named: app)?.0 ?? el).first ?? win
-            return messageLanded(fresh, sentText: text)
+            let w = windows(appElement(named: app)?.0 ?? el).first ?? win
+            return turnsWithNeedle(w) > baseline
         }
         func keyReturn(command: Bool = false) {
             AXUIElementSetAttributeValue(composer, kAXFocusedAttribute as CFString, kCFBooleanTrue)
@@ -586,45 +607,59 @@ func cmdRing(app: String, text: String, submit: Bool, windowIndex: Int, dryRun: 
             }
             return 0
         }
+        // Enforced verify + auto-retry. Verification is NOT a separate step a
+        // worker can forget: the submit cascade runs, EACH method is confirmed by
+        // landed() (the text appears as a real conversation turn), and if no method
+        // lands the draft is cleared and the WHOLE cascade retries. `ring --submit`
+        // returns 0 ONLY on a confirmed delivery, non-zero (7) after all attempts.
         var method = ""
-        // 1. Press the resolved Send button ONLY if it's a confident send target.
-        if buttonOK, let b = button {
-            AXUIElementPerformAction(b, kAXPressAction as CFString)
-            if landed() { method = "button-press" }
-        }
-        // 2. AXConfirm on the composer (text fields that submit on confirm).
-        if method.isEmpty {
-            AXUIElementPerformAction(composer, kAXConfirmAction as CFString)
-            if landed() { method = "composer-confirm" }
-        }
-        // 3. Cmd+Return — submit gesture for code-editor composers (ZCode et al.)
-        //    where a plain Return inserts a NEWLINE instead of sending (and would
-        //    pollute the draft). Must come before plain Return for those apps.
-        if method.isEmpty {
-            keyReturn(command: true)
-            if landed() { method = "cmd-return" }
-        }
-        // 4. Focus the composer + post a plain Return to the app's pid (no focus
-        //    steal). The submit for Enter-to-send composers (Claude Desktop).
-        if method.isEmpty {
-            keyReturn()
-            if landed() { method = "key-return" }
-        }
-
-        if verify {
-            if !method.isEmpty {
-                let fresh = windows(appElement(named: app)?.0 ?? el).first ?? win
-                print("VERIFIED: submitted via \(method)\(isProcessing(fresh) ? "; recipient is processing" : "")")
-            } else {
-                // No method landed — text is still unsent in the composer. Try a
-                // best-effort key-event clear (unreliable on some Electron
-                // composers), then tell the caller the reliable recovery: re-ring
-                // with the message (the next ring clears the old draft + resends).
-                selectAllAndDelete(pid: pid)
-                FileHandle.standardError.write("WARN: not landed after button-press, composer-confirm, cmd-return, and key-return — send did NOT submit. Recover by re-ringing with the message (it clears the draft + resends); confirm with `axsend confirm`.\n".data(using: .utf8)!)
-                return 7
+        var queued = false
+        let maxAttempts = 3
+        func busyNow() -> Bool { isProcessing(windows(appElement(named: app)?.0 ?? el).first ?? win) }
+        attempts: for attempt in 1...maxAttempts {
+            if attempt > 1 {
+                // A prior submit may have landed just after our check — re-confirm a
+                // FRESH turn before resending so we never double-send.
+                if deliveredFresh() { method = "confirmed on re-check"; break attempts }
+                // If the recipient is now busy, the prior submit was ACCEPTED and is
+                // queued (renders when the current turn ends) — never retry into a
+                // busy agent (that double-sends). Report queued.
+                if busyNow() { queued = true; break attempts }
+                _ = setComposerText(composer, pid: pid, text)   // repopulate cleanly (clear + retype)
             }
+            // 1. confident send button
+            if buttonOK, let b = button {
+                AXUIElementPerformAction(b, kAXPressAction as CFString)
+                if deliveredFresh() { method = "button-press"; break attempts }
+            }
+            // 2. AXConfirm on the composer
+            AXUIElementPerformAction(composer, kAXConfirmAction as CFString)
+            if deliveredFresh() { method = "composer-confirm"; break attempts }
+            // 3. Cmd+Return (code-editor composers — plain Return inserts a newline)
+            keyReturn(command: true)
+            if deliveredFresh() { method = "cmd-return"; break attempts }
+            // 4. plain Return (Enter-to-send composers)
+            keyReturn()
+            if deliveredFresh() { method = "key-return"; break attempts }
+            // No FRESH turn this attempt. If the recipient is now busy, our submit
+            // was accepted + queued — stop (retrying would double-send).
+            if busyNow() { queued = true; break attempts }
+            // Idle + not delivered → genuinely stuck; clear the draft and retry.
+            selectAllAndDelete(pid: pid)
         }
+        if !method.isEmpty {
+            print("VERIFIED: submitted via \(method)\(busyNow() ? "; recipient is processing" : "")")
+            return 0
+        }
+        if queued {
+            // Accepted but not yet a visible turn because the recipient is busy.
+            // SUCCESS for the doorbell — it delivers when the current turn ends. Do
+            // NOT resend; a later `axsend confirm` will show the delivered turn.
+            print("QUEUED: recipient busy — message accepted, will deliver when its current turn ends. Do not resend.")
+            return 0
+        }
+        FileHandle.standardError.write("WARN: NOT DELIVERED after \(maxAttempts) attempts (button-press, composer-confirm, cmd-return, key-return each, draft cleared between) and recipient is idle — likely on a non-chat screen. Re-ring; check with `axsend confirm`.\n".data(using: .utf8)!)
+        return 7
     }
     return 0
 }
@@ -649,7 +684,7 @@ func cmdConfirm(app: String, text: String, windowIndex: Int) -> Int32 {
         FileHandle.standardError.write("no windows for \(app)\n".data(using: .utf8)!); return 1
     }
     let win = wins[max(0, min(windowIndex, wins.count - 1))]
-    let needle = String(text.prefix(30))
+    let needle = String(text.prefix(40))
     guard !needle.isEmpty else { print("nothing to confirm (empty text)"); return 0 }
 
     // Only the DELIVERED signal is reliable on Electron: a sent message renders
@@ -703,7 +738,10 @@ case "ring":
         print("--app and --text required"); exit(64)
     }
     exit(cmdRing(app: app, text: text, submit: hasFlag("--submit"),
-                 windowIndex: Int(argValue("--window-index") ?? "0") ?? 0, dryRun: hasFlag("--dry-run"), verify: hasFlag("--verify")))
+                 windowIndex: Int(argValue("--window-index") ?? "0") ?? 0, dryRun: hasFlag("--dry-run"),
+                 // Verify is ENFORCED by default for --submit (auto-retry until a
+                 // confirmed/queued delivery). `--no-verify` opts out (fire-and-forget).
+                 verify: !hasFlag("--no-verify")))
 case "type":
     guard let app = argValue("--app"), let text = argValue("--text") else {
         print("--app and --text required"); exit(64)
