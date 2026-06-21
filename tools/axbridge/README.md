@@ -82,21 +82,28 @@ targets a specific window (default 0).
 
 ## Per-app support matrix (validated 2026-06-21)
 
-axsend writes the composer via `AXValue`. Chat-style composers accept it;
-code-editor-style composers (Monaco/CodeMirror-like) silently reject it and would
-need real key-event typing (not yet implemented).
+`ring` populates the composer via `AXValue` if the field accepts it, else falls
+back to **key-event typing** (`CGEventPostToPid` + `keyboardSetUnicodeString`, no
+focus steal) for Electron code-editor composers that reject `AXValue`. Submit then
+tries the send button, `AXConfirm`, and a posted Return.
 
-| App | `AXValue` write | Submit path | Doorbell |
-|-----|-----------------|-------------|----------|
-| **Codex** | ✅ accepts | `AXPress` send arrow | ✅ proven bidirectional |
-| **Claude Desktop** | ✅ accepts | `key-return` (ignores AXPress/AXConfirm) | ✅ proven (received Codex ring) |
-| **ZCode** | ❌ rejects (editor composer) | n/a | needs key-event typing |
-| **Antigravity (Gemini)** | ❌ rejects (editor composer) | n/a | needs key-event typing |
+| App | Composer write | Submit | Status |
+|-----|----------------|--------|--------|
+| **Codex** | `AXValue` | send-arrow `AXPress` | ✅ proven bidirectional |
+| **Claude Desktop** | `AXValue` | `key-return` | ✅ proven (received Codex ring) |
+| **ZCode** | **key-typing** (rejects `AXValue`) | "Send" button | ✅ proven (replied to a typed ring) |
+| **Antigravity (Gemini)** | **key-typing** (rejects `AXValue`) | `key-return` | ✅ typed + submitted |
 
-Safety: `ring --submit` only presses a **confident** send button (unlabeled icon,
-or labeled send/submit) and never a side-effecting control (e.g. Antigravity's
-"Record voice memo"); otherwise it falls through to AXConfirm/key-return. Honest
-`--verify` returns 7 when nothing submits (the ZCode/Antigravity case).
+Both ZCode and Antigravity are Electron apps with code-editor-style composers
+(Monaco/CodeMirror) that silently reject programmatic `AXValue` writes — the
+key-event typing path is what makes the doorbell work for them.
+
+Safety: `ring --submit` only presses a **confident** send button (unlabeled icon
+or labeled send/submit), never a side-effecting control (e.g. Antigravity's
+"Record voice memo"). Honest `--verify` returns 7 if nothing actually submits.
+
+The `type` command exposes key-typing directly: `axsend type --app <name>
+--text "..." [--submit] [--verify]`.
 
 ## Limits / next
 
