@@ -44,14 +44,14 @@ bin/axsend ring  --app Codex --submit --verify --text "[from claude] ..."
 
 # Feedback WITHOUT a screenshot — did the message actually send? Call after any
 # ring (or anytime). This is the reliable check; DO NOT use computer-use to verify.
-#   exit 0 delivered | exit 7 stuck-in-composer (NOT sent) | exit 8 absent
+#   exit 0 delivered | exit 7 not-delivered (draft or never typed)
 bin/axsend confirm --app Codex --text "[from claude] ..."
 
-# If confirm says "stuck": RE-RING with the message — the ring clears the old
+# If confirm says "not-delivered": RE-RING with the message — the ring clears the old
 # draft + retypes + resends (verified on Electron). Then confirm again.
 bin/axsend ring  --app Codex --submit --verify --text "[from claude] ..."
-# (`ring --text ""` is only a best-effort clear and is UNRELIABLE on Electron
-#  composers — re-ringing is the reliable recovery, not the empty clear.)
+# (`ring --text ""` now reliably clears Electron drafts too: it wakes focus then
+#  runs two select-all strategies. Re-ring is the all-in-one recovery.)
 
 # Post-send / anytime: is the recipient processing, and what are recent messages
 # (including their reply)?
@@ -60,16 +60,17 @@ bin/axsend state --app Codex
 
 Exit codes: `ring --verify` returns 7 if the sent text isn't found in the
 conversation after the press (treat as "did not land"; the draft is cleared so
-nothing is left stuck). `confirm` returns 0 delivered / 7 stuck-in-composer /
-8 absent. `--submit` returns 5 if no send button resolved, 6 if the press failed.
+nothing is left stuck). `confirm` returns 0 delivered / 7 not-delivered. `--submit` returns 5 if no send button resolved, 6 if the press failed.
 
 **Electron apps (ZCode/Antigravity) — the verification rule:** these composers
 accept key events but do NOT reflect text back through `AXValue`, so you cannot
 read the draft/empty state via AX. NEVER trust a read-back of the composer, and
 NEVER fall back to a screenshot to check — use `axsend confirm`, which checks the
-*conversation* (the sent message appears as a real turn) and the *draft* (rendered
-as static text at the composer), both of which ARE readable. A handoff is done
-only when `confirm` reports `delivered` (exit 0).
+*conversation* (the sent message appears as a real turn ABOVE the composer) — the
+one signal that IS reliably AX-readable. The composer's own draft/empty state is
+NOT reliable (blank AXValue + stale cached static-text nodes), so confirm reports
+delivered vs not, not a draft state. A handoff is done only when `confirm` reports
+`delivered` (exit 0); if not-delivered, re-ring (it reliably clears + resends).
 
 `--app` matches by localized name or bundle id (substring ok). `--window-index N`
 targets a specific window (default 0).

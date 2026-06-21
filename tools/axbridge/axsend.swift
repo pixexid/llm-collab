@@ -58,12 +58,26 @@ func typeUnicode(pid: pid_t, _ text: String) {
 // AXValue writes before typing a fresh message.
 func selectAllAndDelete(pid: pid_t) {
     let src = CGEventSource(stateID: .combinedSessionState)
-    let aDown = CGEvent(keyboardEventSource: src, virtualKey: 0x00, keyDown: true); aDown?.flags = .maskCommand; aDown?.postToPid(pid)
-    let aUp = CGEvent(keyboardEventSource: src, virtualKey: 0x00, keyDown: false); aUp?.flags = .maskCommand; aUp?.postToPid(pid)
-    usleep(30_000)
-    let dDown = CGEvent(keyboardEventSource: src, virtualKey: 0x33, keyDown: true); dDown?.postToPid(pid)  // 0x33 = Delete
-    let dUp = CGEvent(keyboardEventSource: src, virtualKey: 0x33, keyDown: false); dUp?.postToPid(pid)
-    usleep(30_000)
+    func key(_ kc: CGKeyCode, _ flags: CGEventFlags = []) {
+        let d = CGEvent(keyboardEventSource: src, virtualKey: kc, keyDown: true); d?.flags = flags; d?.postToPid(pid)
+        let u = CGEvent(keyboardEventSource: src, virtualKey: kc, keyDown: false); u?.flags = flags; u?.postToPid(pid)
+        usleep(15_000)
+    }
+    // A cold Electron composer (ZCode/Antigravity) ignores the first key chord
+    // until a key event has woken it — a cold Cmd+A then no-ops and the Backspace
+    // deletes a single char (leaving a partial draft that concatenates with the
+    // next message). Wake focus with a benign cursor move first, then clear with
+    // TWO select-all strategies (different editors honor different ones), each
+    // followed by delete. Idempotent on an already-empty field.
+    key(0x7C)                                  // Right arrow — wake the field, no content change
+    usleep(40_000)
+    key(0x00, .maskCommand)                    // Cmd+A (select all)
+    key(0x33)                                  // Backspace (delete selection)
+    usleep(20_000)
+    key(0x7D, .maskCommand)                    // Cmd+Down — cursor to absolute end
+    key(0x7E, [.maskCommand, .maskShift])      // Cmd+Shift+Up — select to start
+    key(0x33)                                  // Backspace (delete selection)
+    usleep(20_000)
 }
 
 // Set the composer text: AXValue if the field accepts it, else key-event typing
@@ -638,29 +652,19 @@ func cmdConfirm(app: String, text: String, windowIndex: Int) -> Int32 {
     let needle = String(text.prefix(30))
     guard !needle.isEmpty else { print("nothing to confirm (empty text)"); return 0 }
 
-    let composer = findComposer(win)
-    let composerTop = composer.flatMap { frame($0)?.y }
-    var stuck = (composer.flatMap { str($0, kAXValueAttribute) } ?? "").contains(needle)
-    if !stuck, let top = composerTop {
-        // Electron draft: rendered as static text at/below the composer top.
-        stuck = flatten(win).contains { e in
-            guard role(e) == "AXStaticText", let v = str(e, kAXValueAttribute), v.contains(needle),
-                  let f = frame(e) else { return false }
-            return f.y >= top - 4
-        }
-    }
-    let delivered = messageLanded(win, sentText: text)
+    // Only the DELIVERED signal is reliable on Electron: a sent message renders
+    // as a real conversation turn ABOVE the composer (AX-readable), whereas the
+    // composer's own draft/empty state is NOT reliably readable (AXValue is blank
+    // and the subtree keeps stale cached static-text nodes that false-positive a
+    // "stuck draft"). So report delivered vs not — and recovery for not-delivered
+    // is always the same: re-ring (the ring reliably clears any draft + resends).
     let proc = isProcessing(win)
-    if delivered {
+    if messageLanded(win, sentText: text) {
         print("delivered: text appears as a sent message\(proc ? "; recipient is processing" : "")")
         return 0
     }
-    if stuck {
-        FileHandle.standardError.write("stuck: text is still in the composer — NOT sent. Recover by re-ringing with the message (the ring clears the old draft + resends); then confirm again.\n".data(using: .utf8)!)
-        return 7
-    }
-    FileHandle.standardError.write("absent: text not found as a sent message or a draft (wrong window, or never typed).\n".data(using: .utf8)!)
-    return 8
+    FileHandle.standardError.write("not delivered: text is not a sent message (it's a draft or was never typed). Recover by re-ringing with the message — the ring reliably clears any stuck draft and resends — then confirm again.\n".data(using: .utf8)!)
+    return 7
 }
 
 // MARK: - Arg parsing
@@ -675,7 +679,7 @@ func hasFlag(_ key: String) -> Bool { CommandLine.arguments.contains(key) }
 let args = CommandLine.arguments
 guard args.count >= 2 else {
     print("usage: axsend <check|tree|state|ring|type|confirm> [...]")
-    print("  confirm --app <app> --text <sent-text>   read-only: did it send? (exit 0 delivered / 7 stuck / 8 absent)")
+    print("  confirm --app <app> --text <sent-text>   read-only: delivered? (exit 0 delivered / 7 not delivered)")
     exit(64)
 }
 switch args[1] {
