@@ -23,10 +23,13 @@ import CoreGraphics
 
 // Post a Return keypress directly to a process (no focus steal, no window raise)
 // — the universal "submit" for chat composers whose Send button ignores AXPress.
-func postReturnKey(pid: pid_t) {
+func postReturnKey(pid: pid_t, command: Bool = false) {
     let src = CGEventSource(stateID: .combinedSessionState)
     let down = CGEvent(keyboardEventSource: src, virtualKey: 0x24, keyDown: true)  // 0x24 = Return
     let up = CGEvent(keyboardEventSource: src, virtualKey: 0x24, keyDown: false)
+    // Cmd+Return is the submit gesture for code-editor composers (ZCode et al.)
+    // where a plain Return inserts a newline instead of sending.
+    if command { down?.flags = .maskCommand; up?.flags = .maskCommand }
     down?.postToPid(pid)
     up?.postToPid(pid)
 }
@@ -71,8 +74,19 @@ func setComposerText(_ composer: AXUIElement, pid: pid_t, _ text: String) -> Boo
     usleep(80_000)
     AXUIElementSetAttributeValue(composer, kAXValueAttribute as CFString, text as CFString)
     usleep(90_000)
-    if text.isEmpty { return true }
-    func has() -> Bool { (str(composer, kAXValueAttribute) ?? "").contains(String(text.prefix(20))) }
+    func current() -> String { str(composer, kAXValueAttribute) ?? "" }
+    if text.isEmpty {
+        // Clearing a (possibly stuck) draft. The AXValue "" write above clears
+        // fields that accept it; Electron composers (ZCode/Antigravity) reject
+        // it and keep the stale draft, so confirm it actually emptied and fall
+        // back to a real key-event select-all+delete when it didn't. Returning
+        // success on the unverified AXValue write would leave the stuck draft.
+        if current().isEmpty { return true }
+        selectAllAndDelete(pid: pid)
+        usleep(120_000)
+        return current().isEmpty
+    }
+    func has() -> Bool { current().contains(String(text.prefix(20))) }
     if has() { return true }
     // AXValue rejected — clear any draft and type as real key events.
     selectAllAndDelete(pid: pid)
@@ -94,25 +108,41 @@ func cmdType(app: String, text: String, submit: Bool, verify: Bool) -> Int32 {
     if isProcessing(win) {
         FileHandle.standardError.write("target busy — not typing.\n".data(using: .utf8)!); return 8
     }
-    // Focus the composer so the key events land in it, then type.
+    // Focus the composer so the key events land in it, clear any stale draft
+    // (e.g. a stray newline left by a prior failed submit), then type.
     AXUIElementSetAttributeValue(composer, kAXFocusedAttribute as CFString, kCFBooleanTrue)
     usleep(120_000)
+    if !text.isEmpty { selectAllAndDelete(pid: pid) }
     typeUnicode(pid: pid, text)
     print("typed \(text.count) chars into \(app)")
+    var method = ""
     if submit {
         usleep(120_000)
         if isProcessing(win) {
             FileHandle.standardError.write("became busy before submit — skipped.\n".data(using: .utf8)!); return 8
         }
-        postReturnKey(pid: pid)
+        func landed() -> Bool {
+            Thread.sleep(forTimeInterval: 1.0)
+            let fresh = windows(appElement(named: app)?.0 ?? el).first ?? win
+            return messageLanded(fresh, sentText: text)
+        }
+        // Cmd+Return first — code-editor composers (ZCode) treat plain Return as
+        // a newline, not a send. Fall back to plain Return for Enter-to-send apps.
+        postReturnKey(pid: pid, command: true)
+        if landed() { method = "cmd-return" }
+        if method.isEmpty {
+            AXUIElementSetAttributeValue(composer, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+            postReturnKey(pid: pid)
+            if landed() { method = "key-return" }
+        }
     }
     if verify {
-        Thread.sleep(forTimeInterval: 1.2)
-        let fresh = windows(appElement(named: app)?.0 ?? el).first ?? win
         if submit {
-            if messageLanded(fresh, sentText: text) { print("VERIFIED: submitted via typed-key-return") }
-            else { FileHandle.standardError.write("WARN: not landed after typing+Return\n".data(using: .utf8)!); return 7 }
+            if !method.isEmpty { print("VERIFIED: submitted via \(method)") }
+            else { FileHandle.standardError.write("WARN: not landed after cmd-return + key-return\n".data(using: .utf8)!); return 7 }
         } else {
+            Thread.sleep(forTimeInterval: 1.2)
+            let fresh = windows(appElement(named: app)?.0 ?? el).first ?? win
             let v = findComposer(fresh).flatMap { str($0, kAXValueAttribute) } ?? ""
             if v.contains(String(text.prefix(20))) { print("VERIFIED: text is in the composer") }
             else { FileHandle.standardError.write("WARN: typed text not visible in composer\n".data(using: .utf8)!); return 7 }
@@ -298,7 +328,24 @@ func conversationTexts(_ win: AXUIElement) -> [String] {
 }
 
 func isProcessing(_ win: AXUIElement) -> Bool {
-    flatten(win).contains { role($0) == "AXButton" && label($0).lowercased().contains("stop") }
+    // The generating-state "stop" button: labeled exactly "stop" (Codex) or
+    // "stop generating"/"stop streaming"/"stop response" (other agents), and it
+    // sits in the composer's column. A loose contains("stop") substring match
+    // falsely tripped on a sidebar chat titled "Stop booking generation loop"
+    // (row button "Open Stop booking generation loop") — reporting a phantom
+    // Stop button forever and gating EVERY submit to that app. Match the real
+    // control by label shape + composer-column position instead.
+    let composerX = findComposer(win).flatMap { frame($0)?.x }
+    return flatten(win).contains { el in
+        guard role(el) == "AXButton" else { return false }
+        let l = label(el).lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        guard l == "stop" || l.hasPrefix("stop generating")
+            || l.hasPrefix("stop streaming") || l.hasPrefix("stop response") else { return false }
+        // Real stop button lives with the composer; reject anything far to its
+        // left (sidebar/chrome). Fall through to label-only if no composer found.
+        if let cx = composerX, let f = frame(el), f.x < cx - 60 { return false }
+        return true
+    }
 }
 
 func findComposer(_ win: AXUIElement) -> AXUIElement? {
@@ -494,9 +541,9 @@ func cmdRing(app: String, text: String, submit: Bool, windowIndex: Int, dryRun: 
             let fresh = windows(appElement(named: app)?.0 ?? el).first ?? win
             return messageLanded(fresh, sentText: text)
         }
-        func keyReturn() {
+        func keyReturn(command: Bool = false) {
             AXUIElementSetAttributeValue(composer, kAXFocusedAttribute as CFString, kCFBooleanTrue)
-            postReturnKey(pid: pid)
+            postReturnKey(pid: pid, command: command)
         }
         // Without --verify we can't tell which mechanism worked, so do the single
         // safest: press a confident send button, else key-return.
@@ -521,8 +568,15 @@ func cmdRing(app: String, text: String, submit: Bool, windowIndex: Int, dryRun: 
             AXUIElementPerformAction(composer, kAXConfirmAction as CFString)
             if landed() { method = "composer-confirm" }
         }
-        // 3. Focus the composer + post a real Return to the app's pid (no focus
-        //    steal). The universal submit for Enter-to-send composers.
+        // 3. Cmd+Return — submit gesture for code-editor composers (ZCode et al.)
+        //    where a plain Return inserts a NEWLINE instead of sending (and would
+        //    pollute the draft). Must come before plain Return for those apps.
+        if method.isEmpty {
+            keyReturn(command: true)
+            if landed() { method = "cmd-return" }
+        }
+        // 4. Focus the composer + post a plain Return to the app's pid (no focus
+        //    steal). The submit for Enter-to-send composers (Claude Desktop).
         if method.isEmpty {
             keyReturn()
             if landed() { method = "key-return" }
