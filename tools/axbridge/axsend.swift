@@ -31,6 +31,96 @@ func postReturnKey(pid: pid_t) {
     up?.postToPid(pid)
 }
 
+// Type text as real key events into a process (no focus steal). For composers
+// that reject AXValue writes (Electron code-editors: ZCode, Antigravity), this
+// is the only way to populate the field. keyboardSetUnicodeString lets us post
+// arbitrary characters without keycode mapping; postToPid targets the bg app.
+func typeUnicode(pid: pid_t, _ text: String) {
+    let src = CGEventSource(stateID: .combinedSessionState)
+    for scalar in text.unicodeScalars {
+        var chars = Array(String(scalar).utf16)
+        if let down = CGEvent(keyboardEventSource: src, virtualKey: 0, keyDown: true) {
+            down.keyboardSetUnicodeString(stringLength: chars.count, unicodeString: &chars)
+            down.postToPid(pid)
+        }
+        if let up = CGEvent(keyboardEventSource: src, virtualKey: 0, keyDown: false) {
+            up.keyboardSetUnicodeString(stringLength: chars.count, unicodeString: &chars)
+            up.postToPid(pid)
+        }
+        usleep(2000)  // small gap so editors process each input event
+    }
+}
+
+// Select-all + delete via key events — to clear an editor composer that ignores
+// AXValue writes before typing a fresh message.
+func selectAllAndDelete(pid: pid_t) {
+    let src = CGEventSource(stateID: .combinedSessionState)
+    let aDown = CGEvent(keyboardEventSource: src, virtualKey: 0x00, keyDown: true); aDown?.flags = .maskCommand; aDown?.postToPid(pid)
+    let aUp = CGEvent(keyboardEventSource: src, virtualKey: 0x00, keyDown: false); aUp?.flags = .maskCommand; aUp?.postToPid(pid)
+    usleep(30_000)
+    let dDown = CGEvent(keyboardEventSource: src, virtualKey: 0x33, keyDown: true); dDown?.postToPid(pid)  // 0x33 = Delete
+    let dUp = CGEvent(keyboardEventSource: src, virtualKey: 0x33, keyDown: false); dUp?.postToPid(pid)
+    usleep(30_000)
+}
+
+// Set the composer text: AXValue if the field accepts it, else key-event typing
+// (Electron code-editors like ZCode/Antigravity reject AXValue). Returns false
+// only if neither path put the text in.
+func setComposerText(_ composer: AXUIElement, pid: pid_t, _ text: String) -> Bool {
+    AXUIElementSetAttributeValue(composer, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+    usleep(80_000)
+    AXUIElementSetAttributeValue(composer, kAXValueAttribute as CFString, text as CFString)
+    usleep(90_000)
+    if text.isEmpty { return true }
+    func has() -> Bool { (str(composer, kAXValueAttribute) ?? "").contains(String(text.prefix(20))) }
+    if has() { return true }
+    // AXValue rejected — clear any draft and type as real key events.
+    selectAllAndDelete(pid: pid)
+    typeUnicode(pid: pid, text)
+    usleep(120_000)
+    return has()
+}
+
+func cmdType(app: String, text: String, submit: Bool, verify: Bool) -> Int32 {
+    guard AXIsProcessTrusted() else {
+        FileHandle.standardError.write("AX not trusted; run `axsend check`.\n".data(using: .utf8)!); return 2
+    }
+    guard let (el, pid) = appElement(named: app), let win = windows(el).first else {
+        FileHandle.standardError.write("app/window not found: \(app)\n".data(using: .utf8)!); return 1
+    }
+    guard let composer = findComposer(win) else {
+        FileHandle.standardError.write("no composer found\n".data(using: .utf8)!); return 3
+    }
+    if isProcessing(win) {
+        FileHandle.standardError.write("target busy — not typing.\n".data(using: .utf8)!); return 8
+    }
+    // Focus the composer so the key events land in it, then type.
+    AXUIElementSetAttributeValue(composer, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+    usleep(120_000)
+    typeUnicode(pid: pid, text)
+    print("typed \(text.count) chars into \(app)")
+    if submit {
+        usleep(120_000)
+        if isProcessing(win) {
+            FileHandle.standardError.write("became busy before submit — skipped.\n".data(using: .utf8)!); return 8
+        }
+        postReturnKey(pid: pid)
+    }
+    if verify {
+        Thread.sleep(forTimeInterval: 1.2)
+        let fresh = windows(appElement(named: app)?.0 ?? el).first ?? win
+        if submit {
+            if messageLanded(fresh, sentText: text) { print("VERIFIED: submitted via typed-key-return") }
+            else { FileHandle.standardError.write("WARN: not landed after typing+Return\n".data(using: .utf8)!); return 7 }
+        } else {
+            let v = findComposer(fresh).flatMap { str($0, kAXValueAttribute) } ?? ""
+            if v.contains(String(text.prefix(20))) { print("VERIFIED: text is in the composer") }
+            else { FileHandle.standardError.write("WARN: typed text not visible in composer\n".data(using: .utf8)!); return 7 }
+        }
+    }
+    return 0
+}
+
 // MARK: - AX helpers
 
 func attr(_ el: AXUIElement, _ key: String) -> AnyObject? {
@@ -329,15 +419,12 @@ func cmdRing(app: String, text: String, submit: Bool, windowIndex: Int, dryRun: 
         FileHandle.standardError.write("no editable composer found in window\n".data(using: .utf8)!)
         return 3
     }
-    // Focus first — harmless, and some apps only accept AXValue when focused.
-    AXUIElementSetAttributeValue(composer, kAXFocusedAttribute as CFString, kCFBooleanTrue)
-    let setErr = AXUIElementSetAttributeValue(composer, kAXValueAttribute as CFString, text as CFString)
-    if setErr != .success {
-        FileHandle.standardError.write("set value failed: \(setErr.rawValue)\n".data(using: .utf8)!)
+    // AXValue if the field accepts it, else key-event typing (Electron editors
+    // like ZCode/Antigravity reject AXValue and need real keystrokes).
+    if !setComposerText(composer, pid: pid, text) {
+        FileHandle.standardError.write("could not put text in composer (AXValue rejected and key-typing failed)\n".data(using: .utf8)!)
         return 4
     }
-    // NOTE: some apps (Antigravity's code-editor composer) accept this call but
-    // silently keep the field empty; the honest --verify below then returns 7.
     print("composer set (role=\(role(composer)))")
 
     if submit {
@@ -490,6 +577,11 @@ case "ring":
     }
     exit(cmdRing(app: app, text: text, submit: hasFlag("--submit"),
                  windowIndex: Int(argValue("--window-index") ?? "0") ?? 0, dryRun: hasFlag("--dry-run"), verify: hasFlag("--verify")))
+case "type":
+    guard let app = argValue("--app"), let text = argValue("--text") else {
+        print("--app and --text required"); exit(64)
+    }
+    exit(cmdType(app: app, text: text, submit: hasFlag("--submit"), verify: hasFlag("--verify")))
 default:
     print("unknown command: \(args[1])"); exit(64)
 }
