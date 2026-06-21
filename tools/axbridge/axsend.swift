@@ -602,11 +602,12 @@ func cmdRing(app: String, text: String, submit: Bool, windowIndex: Int, dryRun: 
                 let fresh = windows(appElement(named: app)?.0 ?? el).first ?? win
                 print("VERIFIED: submitted via \(method)\(isProcessing(fresh) ? "; recipient is processing" : "")")
             } else {
-                // No method landed — the text is still sitting unsent in the
-                // composer. Clear it so a failed doorbell never leaves a stuck
-                // draft that pollutes the recipient's next input.
+                // No method landed — text is still unsent in the composer. Try a
+                // best-effort key-event clear (unreliable on some Electron
+                // composers), then tell the caller the reliable recovery: re-ring
+                // with the message (the next ring clears the old draft + resends).
                 selectAllAndDelete(pid: pid)
-                FileHandle.standardError.write("WARN: not landed after button-press, composer-confirm, cmd-return, and key-return — send did not submit; cleared the draft\n".data(using: .utf8)!)
+                FileHandle.standardError.write("WARN: not landed after button-press, composer-confirm, cmd-return, and key-return — send did NOT submit. Recover by re-ringing with the message (it clears the draft + resends); confirm with `axsend confirm`.\n".data(using: .utf8)!)
                 return 7
             }
         }
@@ -655,7 +656,7 @@ func cmdConfirm(app: String, text: String, windowIndex: Int) -> Int32 {
         return 0
     }
     if stuck {
-        FileHandle.standardError.write("stuck: text is still in the composer — NOT sent. Re-ring when idle, or clear with `ring --text \"\"`.\n".data(using: .utf8)!)
+        FileHandle.standardError.write("stuck: text is still in the composer — NOT sent. Recover by re-ringing with the message (the ring clears the old draft + resends); then confirm again.\n".data(using: .utf8)!)
         return 7
     }
     FileHandle.standardError.write("absent: text not found as a sent message or a draft (wrong window, or never typed).\n".data(using: .utf8)!)

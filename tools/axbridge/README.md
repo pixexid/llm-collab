@@ -47,9 +47,11 @@ bin/axsend ring  --app Codex --submit --verify --text "[from claude] ..."
 #   exit 0 delivered | exit 7 stuck-in-composer (NOT sent) | exit 8 absent
 bin/axsend confirm --app Codex --text "[from claude] ..."
 
-# If confirm says "stuck": re-ring (the ring clears the old draft + retypes +
-# resends) or clear the draft explicitly, then re-ring:
-bin/axsend ring --app Codex --text ""        # best-effort key-event clear
+# If confirm says "stuck": RE-RING with the message — the ring clears the old
+# draft + retypes + resends (verified on Electron). Then confirm again.
+bin/axsend ring  --app Codex --submit --verify --text "[from claude] ..."
+# (`ring --text ""` is only a best-effort clear and is UNRELIABLE on Electron
+#  composers — re-ringing is the reliable recovery, not the empty clear.)
 
 # Post-send / anytime: is the recipient processing, and what are recent messages
 # (including their reply)?
