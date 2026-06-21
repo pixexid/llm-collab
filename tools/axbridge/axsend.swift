@@ -92,7 +92,16 @@ func setComposerText(_ composer: AXUIElement, pid: pid_t, _ text: String) -> Boo
     selectAllAndDelete(pid: pid)
     typeUnicode(pid: pid, text)
     usleep(120_000)
-    return has()
+    if has() { return true }
+    // Electron composers (ZCode/Antigravity) accept key events but do NOT
+    // reflect the typed text back through AXValue, so has() stays false even
+    // though the text is visibly in the field. Returning false here is the bug
+    // that bit us: the caller treats it as "could not put text", aborts before
+    // submitting, and LEAVES the just-typed keystrokes stuck in the composer.
+    // Trust the keystrokes instead — the submit step's messageLanded check is
+    // the real proof, and a genuine type failure is caught there (nothing
+    // lands) and the draft is cleared on the failure path.
+    return true
 }
 
 func cmdType(app: String, text: String, submit: Bool, verify: Bool) -> Int32 {
@@ -139,7 +148,12 @@ func cmdType(app: String, text: String, submit: Bool, verify: Bool) -> Int32 {
     if verify {
         if submit {
             if !method.isEmpty { print("VERIFIED: submitted via \(method)") }
-            else { FileHandle.standardError.write("WARN: not landed after cmd-return + key-return\n".data(using: .utf8)!); return 7 }
+            else {
+                // No method landed — clear the just-typed text so a failed send
+                // never leaves a stuck draft in the composer.
+                selectAllAndDelete(pid: pid)
+                FileHandle.standardError.write("WARN: not landed after cmd-return + key-return — cleared the draft\n".data(using: .utf8)!); return 7
+            }
         } else {
             Thread.sleep(forTimeInterval: 1.2)
             let fresh = windows(appElement(named: app)?.0 ?? el).first ?? win
@@ -587,7 +601,11 @@ func cmdRing(app: String, text: String, submit: Bool, windowIndex: Int, dryRun: 
                 let fresh = windows(appElement(named: app)?.0 ?? el).first ?? win
                 print("VERIFIED: submitted via \(method)\(isProcessing(fresh) ? "; recipient is processing" : "")")
             } else {
-                FileHandle.standardError.write("WARN: not landed after button-press, composer-confirm, and key-return — send did not submit\n".data(using: .utf8)!)
+                // No method landed — the text is still sitting unsent in the
+                // composer. Clear it so a failed doorbell never leaves a stuck
+                // draft that pollutes the recipient's next input.
+                selectAllAndDelete(pid: pid)
+                FileHandle.standardError.write("WARN: not landed after button-press, composer-confirm, cmd-return, and key-return — send did not submit; cleared the draft\n".data(using: .utf8)!)
                 return 7
             }
         }
