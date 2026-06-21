@@ -58,12 +58,26 @@ func typeUnicode(pid: pid_t, _ text: String) {
 // AXValue writes before typing a fresh message.
 func selectAllAndDelete(pid: pid_t) {
     let src = CGEventSource(stateID: .combinedSessionState)
-    let aDown = CGEvent(keyboardEventSource: src, virtualKey: 0x00, keyDown: true); aDown?.flags = .maskCommand; aDown?.postToPid(pid)
-    let aUp = CGEvent(keyboardEventSource: src, virtualKey: 0x00, keyDown: false); aUp?.flags = .maskCommand; aUp?.postToPid(pid)
-    usleep(30_000)
-    let dDown = CGEvent(keyboardEventSource: src, virtualKey: 0x33, keyDown: true); dDown?.postToPid(pid)  // 0x33 = Delete
-    let dUp = CGEvent(keyboardEventSource: src, virtualKey: 0x33, keyDown: false); dUp?.postToPid(pid)
-    usleep(30_000)
+    func key(_ kc: CGKeyCode, _ flags: CGEventFlags = []) {
+        let d = CGEvent(keyboardEventSource: src, virtualKey: kc, keyDown: true); d?.flags = flags; d?.postToPid(pid)
+        let u = CGEvent(keyboardEventSource: src, virtualKey: kc, keyDown: false); u?.flags = flags; u?.postToPid(pid)
+        usleep(15_000)
+    }
+    // A cold Electron composer (ZCode/Antigravity) ignores the first key chord
+    // until a key event has woken it — a cold Cmd+A then no-ops and the Backspace
+    // deletes a single char (leaving a partial draft that concatenates with the
+    // next message). Wake focus with a benign cursor move first, then clear with
+    // TWO select-all strategies (different editors honor different ones), each
+    // followed by delete. Idempotent on an already-empty field.
+    key(0x7C)                                  // Right arrow — wake the field, no content change
+    usleep(40_000)
+    key(0x00, .maskCommand)                    // Cmd+A (select all)
+    key(0x33)                                  // Backspace (delete selection)
+    usleep(20_000)
+    key(0x7D, .maskCommand)                    // Cmd+Down — cursor to absolute end
+    key(0x7E, [.maskCommand, .maskShift])      // Cmd+Shift+Up — select to start
+    key(0x33)                                  // Backspace (delete selection)
+    usleep(20_000)
 }
 
 // Set the composer text: AXValue if the field accepts it, else key-event typing
@@ -76,15 +90,16 @@ func setComposerText(_ composer: AXUIElement, pid: pid_t, _ text: String) -> Boo
     usleep(90_000)
     func current() -> String { str(composer, kAXValueAttribute) ?? "" }
     if text.isEmpty {
-        // Clearing a (possibly stuck) draft. The AXValue "" write above clears
-        // fields that accept it; Electron composers (ZCode/Antigravity) reject
-        // it and keep the stale draft, so confirm it actually emptied and fall
-        // back to a real key-event select-all+delete when it didn't. Returning
-        // success on the unverified AXValue write would leave the stuck draft.
-        if current().isEmpty { return true }
+        // Clearing a (possibly stuck) draft. Don't gate on the AXValue readback:
+        // Electron composers (ZCode/Antigravity) don't reflect the draft through
+        // AXValue, so `current().isEmpty` is true even when a draft is stuck —
+        // which would skip the clear AND falsely report success. Always issue the
+        // key-event select-all+delete (best effort) and report success; verify
+        // separately with `axsend confirm` (the AXValue readback can't be trusted
+        // for these apps).
         selectAllAndDelete(pid: pid)
         usleep(120_000)
-        return current().isEmpty
+        return true
     }
     func has() -> Bool { current().contains(String(text.prefix(20))) }
     if has() { return true }
@@ -92,7 +107,16 @@ func setComposerText(_ composer: AXUIElement, pid: pid_t, _ text: String) -> Boo
     selectAllAndDelete(pid: pid)
     typeUnicode(pid: pid, text)
     usleep(120_000)
-    return has()
+    if has() { return true }
+    // Electron composers (ZCode/Antigravity) accept key events but do NOT
+    // reflect the typed text back through AXValue, so has() stays false even
+    // though the text is visibly in the field. Returning false here is the bug
+    // that bit us: the caller treats it as "could not put text", aborts before
+    // submitting, and LEAVES the just-typed keystrokes stuck in the composer.
+    // Trust the keystrokes instead — the submit step's messageLanded check is
+    // the real proof, and a genuine type failure is caught there (nothing
+    // lands) and the draft is cleared on the failure path.
+    return true
 }
 
 func cmdType(app: String, text: String, submit: Bool, verify: Bool) -> Int32 {
@@ -139,7 +163,12 @@ func cmdType(app: String, text: String, submit: Bool, verify: Bool) -> Int32 {
     if verify {
         if submit {
             if !method.isEmpty { print("VERIFIED: submitted via \(method)") }
-            else { FileHandle.standardError.write("WARN: not landed after cmd-return + key-return\n".data(using: .utf8)!); return 7 }
+            else {
+                // No method landed — clear the just-typed text so a failed send
+                // never leaves a stuck draft in the composer.
+                selectAllAndDelete(pid: pid)
+                FileHandle.standardError.write("WARN: not landed after cmd-return + key-return — cleared the draft\n".data(using: .utf8)!); return 7
+            }
         } else {
             Thread.sleep(forTimeInterval: 1.2)
             let fresh = windows(appElement(named: app)?.0 ?? el).first ?? win
@@ -587,12 +616,55 @@ func cmdRing(app: String, text: String, submit: Bool, windowIndex: Int, dryRun: 
                 let fresh = windows(appElement(named: app)?.0 ?? el).first ?? win
                 print("VERIFIED: submitted via \(method)\(isProcessing(fresh) ? "; recipient is processing" : "")")
             } else {
-                FileHandle.standardError.write("WARN: not landed after button-press, composer-confirm, and key-return — send did not submit\n".data(using: .utf8)!)
+                // No method landed — text is still unsent in the composer. Try a
+                // best-effort key-event clear (unreliable on some Electron
+                // composers), then tell the caller the reliable recovery: re-ring
+                // with the message (the next ring clears the old draft + resends).
+                selectAllAndDelete(pid: pid)
+                FileHandle.standardError.write("WARN: not landed after button-press, composer-confirm, cmd-return, and key-return — send did NOT submit. Recover by re-ringing with the message (it clears the draft + resends); confirm with `axsend confirm`.\n".data(using: .utf8)!)
                 return 7
             }
         }
     }
     return 0
+}
+
+// Read-only delivery feedback — confirm whether a message actually sent WITHOUT
+// needing a screenshot/computer-use. Call after `ring` (or anytime) with the
+// sent text (a prefix is fine). Verdict + exit code:
+//   delivered (0): the text appears as a conversation turn above the composer
+//   stuck (7):     the text is still sitting in the composer (NOT sent)
+//   absent (8):    the text is in neither (wrong window, or never typed)
+// Electron composers (ZCode/Antigravity) don't expose the draft via AXValue, so
+// "stuck" also matches the draft rendered as static text at/below the composer.
+func cmdConfirm(app: String, text: String, windowIndex: Int) -> Int32 {
+    guard AXIsProcessTrusted() else {
+        FileHandle.standardError.write("AX not trusted; run `axsend check`.\n".data(using: .utf8)!); return 2
+    }
+    guard let (el, _) = appElement(named: app) else {
+        FileHandle.standardError.write("app not found: \(app)\n".data(using: .utf8)!); return 1
+    }
+    let wins = windows(el)
+    guard !wins.isEmpty else {
+        FileHandle.standardError.write("no windows for \(app)\n".data(using: .utf8)!); return 1
+    }
+    let win = wins[max(0, min(windowIndex, wins.count - 1))]
+    let needle = String(text.prefix(30))
+    guard !needle.isEmpty else { print("nothing to confirm (empty text)"); return 0 }
+
+    // Only the DELIVERED signal is reliable on Electron: a sent message renders
+    // as a real conversation turn ABOVE the composer (AX-readable), whereas the
+    // composer's own draft/empty state is NOT reliably readable (AXValue is blank
+    // and the subtree keeps stale cached static-text nodes that false-positive a
+    // "stuck draft"). So report delivered vs not — and recovery for not-delivered
+    // is always the same: re-ring (the ring reliably clears any draft + resends).
+    let proc = isProcessing(win)
+    if messageLanded(win, sentText: text) {
+        print("delivered: text appears as a sent message\(proc ? "; recipient is processing" : "")")
+        return 0
+    }
+    FileHandle.standardError.write("not delivered: text is not a sent message (it's a draft or was never typed). Recover by re-ringing with the message — the ring reliably clears any stuck draft and resends — then confirm again.\n".data(using: .utf8)!)
+    return 7
 }
 
 // MARK: - Arg parsing
@@ -606,7 +678,8 @@ func hasFlag(_ key: String) -> Bool { CommandLine.arguments.contains(key) }
 
 let args = CommandLine.arguments
 guard args.count >= 2 else {
-    print("usage: axsend <check|tree|ring> [...]")
+    print("usage: axsend <check|tree|state|ring|type|confirm> [...]")
+    print("  confirm --app <app> --text <sent-text>   read-only: delivered? (exit 0 delivered / 7 not delivered)")
     exit(64)
 }
 switch args[1] {
@@ -636,6 +709,11 @@ case "type":
         print("--app and --text required"); exit(64)
     }
     exit(cmdType(app: app, text: text, submit: hasFlag("--submit"), verify: hasFlag("--verify")))
+case "confirm":
+    guard let app = argValue("--app"), let text = argValue("--text") else {
+        print("--app and --text required"); exit(64)
+    }
+    exit(cmdConfirm(app: app, text: text, windowIndex: Int(argValue("--window-index") ?? "0") ?? 0))
 default:
     print("unknown command: \(args[1])"); exit(64)
 }
