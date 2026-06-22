@@ -368,10 +368,18 @@ func isProcessing(_ win: AXUIElement) -> Bool {
     return flatten(win).contains { el in
         guard role(el) == "AXButton" else { return false }
         let l = label(el).lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
-        guard l == "stop" || l.hasPrefix("stop generating")
-            || l.hasPrefix("stop streaming") || l.hasPrefix("stop response") else { return false }
-        // Real stop button lives with the composer; reject anything far to its
-        // left (sidebar/chrome). Fall through to label-only if no composer found.
+        // Generating-state controls differ per app:
+        //  - Codex / Claude / ZCode: a button labeled exactly "stop" (or
+        //    "stop generating|streaming|response").
+        //  - Antigravity (Gemini): NO "stop" label — instead a "Thinking for Ns"
+        //    indicator and a "Cancel (⌃C)" interrupt button, both only present
+        //    while generating ("Thought for Ns" / no Cancel = done).
+        let isStop = l == "stop" || l.hasPrefix("stop generating")
+            || l.hasPrefix("stop streaming") || l.hasPrefix("stop response")
+        let isGenerating = l.hasPrefix("thinking for") || l.hasPrefix("cancel (⌃c") || l.hasPrefix("cancel (^c")
+        guard isStop || isGenerating else { return false }
+        // Real control lives with the composer; reject anything far to its left
+        // (sidebar/chrome). Fall through to label-only if no composer found.
         if let cx = composerX, let f = frame(el), f.x < cx - 60 { return false }
         return true
     }
@@ -640,7 +648,15 @@ func cmdRing(app: String, text: String, submit: Bool, windowIndex: Int, dryRun: 
             selectAllAndDelete(pid: pid)
         }
         if !method.isEmpty {
-            print("VERIFIED: submitted via \(method)\(busyNow() ? "; recipient is processing" : "")")
+            // If the recipient is mid-run, the message landed but is QUEUED behind
+            // its current turn — say so explicitly so the sender gets the queued
+            // confirmation AT SEND TIME (not after the run consumes it; on a long
+            // run you can't wait). Otherwise it delivered to an idle recipient.
+            if busyNow() {
+                print("VERIFIED (QUEUED): submitted via \(method) — recipient is BUSY; message is queued behind its current run and will be read when that run ends.")
+            } else {
+                print("VERIFIED: submitted via \(method)")
+            }
             return 0
         }
         if queued {
