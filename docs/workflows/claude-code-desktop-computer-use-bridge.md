@@ -11,6 +11,43 @@ dedicated desktop apps (e.g. Claude in `/Applications/Claude.app`, Codex in
 > needs something rings the other immediately. The heartbeat survives only as a
 > bounded, provisional **safety-fuse** (see below), not as the primary path.
 
+## Communication tiers: llm-collab vs direct ax (choose by PURPOSE)
+
+Two channels, picked by what the message IS — not by convenience:
+
+- **llm-collab (durable / work channel)** — task delegation, handoffs, status
+  changes, anything a worker must **act on as work**, long context, and anything
+  that must **survive a thread/context loss**. It is the mailbox of record; read
+  at the worker's own pace from the inbox. If it needs to be remembered,
+  recovered, or done-as-work → it goes here.
+- **Direct ax doorbell (real-time / thinking channel)** — discuss an
+  implementation plan, expand/explore ideas, get **feedback before opening an
+  issue or task** (don't open issues with zero prior planning/research), resolve
+  a **decision between workers**, quick coordination. Ephemeral — NOT in the
+  mailbox, so never put a task/decision/handoff *only* in a direct ax msg.
+
+**Ask the right worker, not the operator.** Engineering / plan / decision
+questions go to **Codex (or the worker who owns that area) over the direct
+channel**, not to the operator. The operator decides product, visual/UX, scope,
+and business calls — not technical implementation. Routing eng decisions to the
+operator stalls the work (they can't adjudicate them).
+
+**Queueing to a busy recipient is SAFE and expected.** Do NOT wait/poll for the
+other agent to be idle — ring them; if they're busy the message queues and is
+processed when their current turn ends. Queueing is *insurance* that the receiver
+gets the message even if it already saw it on another channel; it does **not**
+corrupt the running turn (only a forced steer would), and queued msgs are
+cancelable on the receiver side. Every worker can queue, in every direction.
+Sender discipline: **don't re-ring the same message repeatedly** (one queue is
+enough). Receiver discipline: when not running, read queued msgs; ignore a queued
+copy you already handled from the inbox while running.
+
+**Verification is enforced, not optional.** `ring --submit` verifies by default
+(exit 0 = delivered or queued; non-zero = not delivered, re-ring). NEVER use
+computer-use/screenshots to check whether a doorbell sent — that's the ring's
+exit code (and `axsend confirm` for a later re-check). Validated bidirectionally
+2026-06-21: Claude ⇄ Codex ⇄ ZCode ⇄ Antigravity.
+
 ## Preferred doorbell transport: `axsend` (AX bridge, no focus steal)
 
 Ring the other agent with the **Accessibility-API bridge** rather than
