@@ -569,10 +569,12 @@ func cmdRing(app: String, text: String, submit: Bool, windowIndex: Int, dryRun: 
         // message (it renders when the current turn ends) — queueing is insurance
         // that the receiver gets it without the sender polling for idle, and it
         // does NOT corrupt the running turn (only a forced steer would). So we do
-        // NOT abort on busy. The submit cascade below detects this: no fresh turn
-        // appears while busy → it reports QUEUED (and a first successful submit
-        // empties the composer, so the remaining cascade methods can't re-queue a
-        // duplicate). Sender discipline: don't re-ring the same message repeatedly.
+        // NOT abort on busy. The submit cascade below classifies the result: a FRESH
+        // turn with our text → DELIVERED; no fresh turn while busy → QUEUED
+        // (UNCONFIRMED — busy alone can't prove the text entered THIS thread vs a new
+        // one). A first successful submit empties the composer, so the remaining
+        // cascade methods can't re-queue a duplicate. Sender discipline: don't re-ring
+        // the same message repeatedly; the mailbox packet is the durable record.
         // Submit via multiple mechanisms — some composers (Claude Desktop) ignore
         // AXPress on the Send button. Try in order, verifying after each; stop at
         // the first that actually lands the message as a real turn.
@@ -648,22 +650,26 @@ func cmdRing(app: String, text: String, submit: Bool, windowIndex: Int, dryRun: 
             selectAllAndDelete(pid: pid)
         }
         if !method.isEmpty {
-            // If the recipient is mid-run, the message landed but is QUEUED behind
-            // its current turn — say so explicitly so the sender gets the queued
-            // confirmation AT SEND TIME (not after the run consumes it; on a long
-            // run you can't wait). Otherwise it delivered to an idle recipient.
-            if busyNow() {
-                print("VERIFIED (QUEUED): submitted via \(method) — recipient is BUSY; message is queued behind its current run and will be read when that run ends.")
-            } else {
-                print("VERIFIED: submitted via \(method)")
-            }
+            // A FRESH turn with our text appeared above the composer → the message
+            // is DELIVERED (a visible conversation turn), full stop. Do NOT call this
+            // "queued": a delivered turn is not queued. busyNow() here only means the
+            // recipient has STARTED processing the message we just delivered (normal)
+            // — OR that the send spawned a NEW thread that is now running (the
+            // landing-screen hazard). Either way the text was submitted as a turn, so
+            // reporting "QUEUED behind its current run" was wrong feedback (the bug
+            // the operator caught 2026-06-22).
+            print("VERIFIED: submitted via \(method) — delivered as a conversation turn.")
             return 0
         }
         if queued {
-            // Accepted but not yet a visible turn because the recipient is busy.
-            // SUCCESS for the doorbell — it delivers when the current turn ends. Do
-            // NOT resend; a later `axsend confirm` will show the delivered turn.
-            print("QUEUED: recipient busy — message accepted, will deliver when its current turn ends. Do not resend.")
+            // Recipient went busy during the cascade but NO fresh turn rendered. The
+            // message was likely accepted and queued behind the current run — BUT
+            // busy-ness alone cannot confirm it entered THIS thread's queue: a send
+            // into a new-task/landing composer also makes the app busy on a brand new
+            // thread. Report this honestly as UNCONFIRMED rather than a queued
+            // success; the mailbox packet is the real record. Verify with `axsend
+            // confirm`, and do NOT blindly resend (risks a duplicate or new thread).
+            print("QUEUED (UNCONFIRMED): recipient went busy with no visible turn — likely queued behind its run, but axsend cannot confirm it landed in THIS thread vs a new one. Verify with `axsend confirm`; do not resend.")
             return 0
         }
         FileHandle.standardError.write("WARN: NOT DELIVERED after \(maxAttempts) attempts (button-press, composer-confirm, cmd-return, key-return each, draft cleared between) and recipient is idle — likely on a non-chat screen. Re-ring; check with `axsend confirm`.\n".data(using: .utf8)!)
