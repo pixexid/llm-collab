@@ -557,15 +557,14 @@ func cmdRing(app: String, text: String, submit: Bool, windowIndex: Int, dryRun: 
                 : "DRY-RUN no confident send button (resolved: \(tgt)) — will submit via AXConfirm/key-return only (not pressed)")
             return 0
         }
-        // Re-check idle RIGHT before pressing. Chat apps (e.g. Claude Desktop)
-        // won't submit while busy — pressing Send just leaves a stuck draft and
-        // flips to a Stop button. If the target went busy since the composer was
-        // set, abort instead of leaving a stuck draft.
-        let preWin = windows(appElement(named: app)?.0 ?? el).first ?? win
-        if isProcessing(preWin) {
-            FileHandle.standardError.write("target became busy before send — not submitting (would leave a stuck draft). Re-ring when idle; clear the draft with `ring --text \"\"`.\n".data(using: .utf8)!)
-            return 8
-        }
+        // Sending to a BUSY recipient is allowed and SAFE: the app queues the
+        // message (it renders when the current turn ends) — queueing is insurance
+        // that the receiver gets it without the sender polling for idle, and it
+        // does NOT corrupt the running turn (only a forced steer would). So we do
+        // NOT abort on busy. The submit cascade below detects this: no fresh turn
+        // appears while busy → it reports QUEUED (and a first successful submit
+        // empties the composer, so the remaining cascade methods can't re-queue a
+        // duplicate). Sender discipline: don't re-ring the same message repeatedly.
         // Submit via multiple mechanisms — some composers (Claude Desktop) ignore
         // AXPress on the Send button. Try in order, verifying after each; stop at
         // the first that actually lands the message as a real turn.
