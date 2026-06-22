@@ -67,3 +67,9 @@ node_modules/
 
 # axsend compiled binary symlink (rebuilt by axsend-ensure)
 bin/axsend
+
+# runtime / session state + local secrets (never commit)
+.secrets/
+.runtime/
+tmp/
+Artifacts/
