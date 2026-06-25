@@ -123,23 +123,24 @@ For task-grade work, in order:
 
 1. Write the durable instruction/handoff with `deliver.py` to `Chats/` and the
    recipient's `agents/<agent>/inbox.json`.
-2. Bring the recipient's desktop app to front with Computer Use (by display name
-   or bundle id). The app may live on a secondary/AirPlay display — switch to it
-   first if needed.
-3. **Pass the idle input gate** (see next section) before typing. If it fails,
-   do not type; record the blocker in the mailbox and recover safely.
-4. Type exactly **one short, sender-tagged, one-line pointer** to the exact
+2. Ring the recipient with `axsend ring --submit --verify`, even if the recipient
+   is busy. The busy case is expected: the one-line pointer queues behind the
+   current turn and reinforces delivery of the durable packet.
+3. Type exactly **one short, sender-tagged, one-line pointer** to the exact
    inbox/chat/message path. Full context stays in the durable packet, never in
    the visible prompt.
-5. Send it (single message, no newlines, no split fragments).
-6. Verify the ring landed (the recipient's composer cleared / the message
-   appears / the recipient began processing). Record the ring in your own thread
-   and, when relevant, in the mailbox.
+4. Treat exit 0 (`delivered`, `confirmed`, or `queued`) as a successful doorbell.
+   If `axsend` reports not delivered, run `axsend confirm`; if still absent,
+   retry once or record the exact AX blocker in the mailbox.
+5. Use screenshot/keyboard Computer Use only as fallback when `axsend` is
+   unavailable. In that fallback path, pass the idle input gate before typing.
+6. Record the ring result in your own thread and, when relevant, in the mailbox.
 
 For non-task ad-hoc chat, the mailbox is optional, but a sender tag is still
-required and the idle gate still applies.
+required. Prefer `axsend`; the idle gate applies only to screenshot/keyboard
+Computer Use fallback.
 
-## Idle input gate (mandatory before every ring)
+## Idle input gate (Computer Use fallback only)
 
 Never type over an active turn. Before sending, confirm ALL of:
 
