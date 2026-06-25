@@ -74,10 +74,9 @@ clear rationale in the notes. The opener rejects self-review notes and rejects
 notes whose `Head SHA:` does not match the current branch head, so a stale clean
 review cannot cover later commits.
 
-Do not manually comment `@codex review` when opening a PR. If GitHub Codex is
-enabled for the repository, consume the automatic PR review/comment/reaction
-when it appears. If no automatic artifact appears, use the opportunistic policy
-below instead of creating a manual review request.
+Rely on the automatic GitHub Codex review flow for ready PRs. Consume the
+automatic PR review/comment/reaction when it appears. If no automatic artifact
+appears, use the opportunistic policy below.
 
 ## PR requirements
 
@@ -112,10 +111,8 @@ policy:
 - automatic GitHub Codex review/comments are consumed when they appear
 - GitHub Codex review must not become an infinite wait when no new review
   artifact appears after PR creation
-- do not request another GitHub Codex review after a narrow fix that directly
-  addresses a PR comment and does not materially expand the diff; the
-  current-head GitHub Codex artifact requirement is waived only for that narrow
-  review-fix commit
+- after review-fix commits, consume automatic artifacts when they arrive and
+  otherwise use the current PR state after the heartbeat inspection
 - if the connector fails, stays silent, or only reacts positively, the
   orchestrator may proceed after inspecting the full PR comment/review state
   and confirming there is no current actionable feedback
@@ -160,22 +157,13 @@ waiting indefinitely for a comment when the connector signaled clean review via
 reaction. If review feedback lands, fix or respond to it, push the update, rerun
 the manual branch-diff review and required local/CI checks, treat the resolved
 review thread plus current PR state as the GitHub Codex signal, then continue
-toward merge without asking GitHub Codex for another review when the fix is
-narrow.
+toward merge.
 
 If the wait cannot self-progress because checks stalled, review state is
 ambiguous, or the implementer has not acknowledged a routed review-fix request,
 the heartbeat must escalate by doorbell with the exact blocker and next action.
 Delete or rewrite any PR-wait heartbeat that misses this escalation path.
 
-Request another GitHub Codex review only when the follow-up materially changes
-the PR, for example:
-
-- broad refactor or new behavior beyond the reviewed comment
-- new files or surface area not covered by the prior review
-- DB, API, auth, security, payment, deployment, or workflow semantics changed
-- merge-conflict resolution changed code meaning
-- CI failure required non-trivial edits
 
 Keep the heartbeat active until rerun checks, merge state, and current PR
 comments/reviews are clean. Delete the PR-wait heartbeat immediately after the

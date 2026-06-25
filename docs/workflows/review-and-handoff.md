@@ -173,17 +173,16 @@ signal is clean. A clean signal can be either the latest reviewed-head
 `chatgpt-codex-connector` review/comment with no actionable issues, the
 connector's positive reaction to the PR or reviewed head with no later
 actionable comments, or a resolved narrow review-fix commit whose current PR
-state has no unresolved actionable feedback. Do not manually comment
-`@codex review` when opening a PR, and do not wait indefinitely for a comment if
+state has no unresolved actionable feedback. Rely on the automatic GitHub Codex
+review flow for ready PRs, and do not wait indefinitely for a comment if
 the connector used a reaction or if no new connector artifact appears after the
 configured heartbeat cycle and local/orchestrator review is clean.
 
 If GitHub Codex comments on the PR, fix the pointed issue, rerun the manual
 branch-diff review and required checks, treat the resolved review thread plus current PR
-state as the GitHub Codex signal, and do not request another GitHub Codex review
-unless the fix materially expands the PR or changes code semantics. Do not
-substitute stale inline review-thread objects for current PR state. Delete the
-heartbeat before post-merge cleanup.
+state as the GitHub Codex signal, and consume automatic artifacts when they
+arrive. Do not substitute stale inline review-thread objects for current PR
+state. Delete the heartbeat before post-merge cleanup.
 
 When the PR comment needs implementer action, route it through the mailbox and
 doorbell immediately instead of leaving the PR-wait heartbeat to poll in silence.
