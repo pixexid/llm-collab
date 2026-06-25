@@ -123,12 +123,12 @@ For task-grade work, in order:
 
 1. Write the durable instruction/handoff with `deliver.py` to `Chats/` and the
    recipient's `agents/<agent>/inbox.json`.
-2. Ring the recipient with `axsend ring --submit --verify`, even if the recipient
-   is busy. The busy case is expected: the one-line pointer queues behind the
-   current turn and reinforces delivery of the durable packet.
-3. Type exactly **one short, sender-tagged, one-line pointer** to the exact
-   inbox/chat/message path. Full context stays in the durable packet, never in
-   the visible prompt.
+2. Ring the recipient with `axsend ring --submit --verify --text "<pointer>"`
+   even if the recipient is busy. The busy case is expected: the one-line pointer
+   queues behind the current turn and reinforces delivery of the durable packet.
+   Use exactly **one short, sender-tagged, one-line pointer** to the exact
+   inbox/chat/message path as the `--text` value. Full context stays in the
+   durable packet, never in the visible prompt.
 4. Treat exit 0 (`delivered`, `confirmed`, or `queued`) as a successful doorbell.
    If `axsend` reports not delivered, run `axsend confirm`; if still absent,
    retry once or record the exact AX blocker in the mailbox.
