@@ -649,6 +649,16 @@ func cmdRing(app: String, text: String, submit: Bool, windowIndex: Int, dryRun: 
             // Idle + not delivered → genuinely stuck; clear the draft and retry.
             selectAllAndDelete(pid: pid)
         }
+        // ZCode can accept the submit and start processing before its sent-message
+        // AXStaticText is visible to the one-second per-method checks above.
+        // Give the conversation tree one last chance to expose the fresh turn
+        // before classifying the delivery as queued or failed.
+        for _ in 0..<4 {
+            if deliveredFresh() {
+                method = "confirmed on final settle"
+                break
+            }
+        }
         if !method.isEmpty {
             // A FRESH turn with our text appeared above the composer → the message
             // is DELIVERED (a visible conversation turn), full stop. Do NOT call this
