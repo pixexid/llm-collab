@@ -4,4 +4,38 @@
 set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 bash "$root/tools/axbridge/build.sh" >/dev/null
-exec "$root/tools/axbridge/axsend" "$@"
+
+app=""
+text=""
+is_ring=0
+has_submit=0
+args=("$@")
+if [[ "${1:-}" == "ring" ]]; then
+  is_ring=1
+fi
+
+for ((i = 0; i < ${#args[@]}; i++)); do
+  case "${args[$i]}" in
+    --app)
+      if (( i + 1 < ${#args[@]} )); then app="${args[$((i + 1))]}"; fi
+      ;;
+    --text)
+      if (( i + 1 < ${#args[@]} )); then text="${args[$((i + 1))]}"; fi
+      ;;
+    --submit)
+      has_submit=1
+      ;;
+  esac
+done
+
+set +e
+"$root/tools/axbridge/axsend" "$@"
+status=$?
+set -e
+if (( status != 0 )); then
+  exit "$status"
+fi
+
+if (( is_ring == 1 && has_submit == 1 )) && [[ -n "$app" && -n "$text" ]]; then
+  "$root/tools/axbridge/axsend" confirm --app "$app" --text "$text"
+fi
