@@ -1,253 +1,374 @@
 # llm-collab
 
-A file-based multi-agent collaboration workspace for LLMs, AI agents, and CLI tools.
+`llm-collab` is a file-based, multi-agent coordination runtime for work across
+multiple projects and repositories.
 
-Zero infrastructure. Git-native. Human-inspectable. Works offline.
+The core mailbox and task system uses local files—no application server or
+database is required. GitHub, PM2, macOS Accessibility doorbells, and desktop
+notifications are optional adapters for teams that need them.
 
----
+## Current state
 
-## What is this?
+- **Project-scoped core** — new chats, messages, and tasks require a registered
+  `project_id`; delivery rejects chat/project mismatches; queues and task
+  contracts require exact project matches.
+- **Durable mailbox** — `Chats/` is the transport of record, while per-agent
+  inboxes store lightweight pointers to unread and read messages.
+- **Ordered execution queues** — GitHub issues can act as the backlog source of
+  truth, with project-local `issue-queue.json` files serving as the runtime
+  execution cache. The separate design queue is a legacy migration surface.
+- **Task activation gates** — non-trivial tasks require implementation-risk
+  analysis and Claude refinement before they can move to `in_progress`.
+  Claude-authored and Claude-planned tasks also require Codex acceptance.
+- **Isolated implementation lanes** — worktree metadata, checkpoint commits,
+  independent review, project preflight, and post-merge cleanup are supported
+  as mechanical gates.
+- **Explicit activation transports** — runtime sessions, AX-capable desktop
+  apps, project-configured Claude Desktop fallback, and human relay are distinct
+  activation paths. Missing transports report `activation_unavailable`.
+- **Local project state** — real queues, runbooks, routing policy, and memory
+  templates live under `{project_state_root}/{project_id}/`, normally outside
+  this public Git checkout.
 
-`llm-collab` is a **template workspace** that lets multiple LLM instances (Claude Code, Codex, Gemini, custom agents) collaborate on shared projects through structured file-based messaging, task tracking, and identity management.
+Project-scoped is the default; universal behavior is the exception. Read
+[Multi-Project Support](docs/multi-project.md#scoping-principles) before adding
+a project or changing shared tooling.
 
-No servers. No databases. No external services required. Every message, task, and state change is a file you can read, diff, and commit.
+## Agent entrypoint
 
-## Key capabilities
+Automated workers must read [`AGENTS.md`](AGENTS.md) before operating a project
+lane or changing this shared runtime. It defines mandatory project boundaries,
+the new-project setup gate, shared-checkout safety, and verification rules.
 
-- **Multi-agent messaging** — agents send/receive messages via `Chats/` threads with per-agent inbox pointers
-- **Task tracking** — full lifecycle from `open → in_progress → blocked → review → done`
-- **Identity isolation** — each agent has a dedicated `identity.md`, `memory.md`, and `inbox.json`; multi-account same-model agents (e.g. Codex + CDX2) are fully disambiguated
-- **Human relay handoff** — when sending to a human-relay agent, the system auto-generates a ready-to-paste activation prompt for the operator
-- **Multi-project support** — messages and tasks carry `project_id`; a single workspace coordinates across many repos
-- **PM2 watchers** — optional background polling with desktop notifications
-- **Git worktrees** — optional per-agent isolated branches for parallel implementation
-- **Memory snippets** — auto-generated collab-awareness snippets for Claude Code, Codex, and any LLM
+Each product repository should also provide its own `AGENTS.md` or equivalent
+worker instructions that bind collaboration commands to the exact checkout and
+`--project <id>`.
 
-## Architecture in one diagram
+## Repository and runtime layout
 
-```
+Tracked template and tooling:
+
+```text
 llm-collab/
-├── collab.config.json      workspace settings
-├── agents.json             agent roster + activation config
-├── projects.json           project registry (repos, preflight, github)
-├── projects/_example/      public template for local project state
-│
-├── agents/
-│   ├── {agent_id}/
-│   │   ├── identity.md     WHO this agent is (first thing read at bootstrap)
-│   │   ├── memory.md       persistent memory for this agent
-│   │   └── inbox.json      pointer index of unread messages
-│
-├── Chats/                  canonical message threads (full content)
-│   └── {date}_{title}__{CHAT-id}/
-│       ├── meta.json
-│       ├── overview.md
-│       ├── {ts}_to-{agent}_{slug}.md
-│       └── {ts}_from-{agent}_{slug}.md
-│
-├── Tasks/
-│   ├── active/             open, in_progress, blocked, review
-│   ├── backlog/            planned but not started
-│   └── done/               completed
-│
-├── bin/                    CLI scripts
-├── pm2/                    PM2 ecosystem config
-├── scripts/                setup utilities
-└── docs/                   documentation
-
-Local project queues, runbooks, routing policy, and memory templates should live
-outside this Git checkout via `project_state_root`, for example
-`~/.local/share/llm-collab/projects/{project_id}/`.
+├── AGENTS.md                 shared worker contract
+├── README.md
+├── bin/                      collaboration commands and launcher
+├── scripts/                  initialization and migration utilities
+├── docs/                     schemas, adapters, and workflow runbooks
+├── tests/                    Python unit and integration tests
+├── examples/                 public configuration examples
+├── projects/_example/        public project-state template
+├── pm2/                      optional watcher configuration
+└── .githooks/                local commit safety guard
 ```
+
+Workspace-local data, normally gitignored:
+
+```text
+llm-collab/
+├── collab.config.json        workspace paths and runtime settings
+├── agents.json               collaborator identities and activation config
+├── projects.json             registered project contracts
+├── agents/{agent_id}/        identity, memory, and inbox pointers
+├── Chats/                    durable message threads
+├── Tasks/                    active, backlog, and completed task mirrors
+├── State/                    runtime bindings and watcher state
+├── Index/                    generated indexes and reports
+└── Logs/                     local process logs
+```
+
+Project-local operational state should live outside the checkout:
+
+```text
+~/.local/share/llm-collab/projects/
+└── {project_id}/
+    ├── issue-queue.json
+    ├── issue-queue.md
+    ├── roles-and-routing.md
+    ├── runbooks/
+    └── memory-templates/
+```
+
+## Requirements
+
+- Python 3.10+
+- Git for repository and worktree operations
+- GitHub CLI (`gh`) only for GitHub-backed projects
+- PM2 only for background inbox watchers
+- macOS Accessibility permission only for AX doorbells
+
+Use `bin/llm-collab` for collaboration commands. It selects a compatible Python
+runtime even when the system `python3` is older. Use Python 3.10 or newer
+directly for initialization and test discovery.
 
 ## Quickstart
 
-### Python command runner
-
-Run collaboration commands through the repo launcher:
+### 1. Clone and initialize a new workspace
 
 ```bash
-bin/llm-collab session_bootstrap.py --agent codex
-bin/llm-collab inbox.py --me codex --project amiga --limit 5
+git clone https://github.com/pixexid/llm-collab ~/Projects/llm-collab
+cd ~/Projects/llm-collab
+python3.11 scripts/init.py
 ```
 
-The launcher selects Python 3.10+ even on macOS machines where bare `python3`
-resolves to the system Python. Direct command entrypoints also fail fast with a
-clear version message if they are run under an older interpreter.
+Initialization creates local `collab.config.json`, `agents.json`,
+`projects.json`, and per-agent identity, memory, and inbox files. It asks for:
 
-### 1. Clone the template
+- the projects root and external project-state root;
+- collaborator IDs, roles, and activation types;
+- project repositories, preflight commands, and optional GitHub integration.
+
+After initialization, add optional project contracts such as
+`ui_ux.required_design_docs`, `db.shared_supabase_project_ref`,
+`db.required_surfaces`, and `claude_desktop_bridge` directly to that project's
+`projects.json` entry.
+
+`scripts/init.py` reinitializes the workspace. To add a project to an existing
+workspace, edit `projects.json` instead of rerunning initialization.
+
+### 2. Bootstrap each agent
 
 ```bash
-git clone https://github.com/pixexid/llm-collab ~/Projects/_collab
-cd ~/Projects/_collab
+bin/llm-collab session_bootstrap.py --agent orchestrator
+bin/llm-collab inbox.py --me orchestrator --project my-app --limit 5 --peek
 ```
 
-### 2. Initialize your workspace
+Bootstrap prints the agent identity, unread inbox summary, queue recovery state,
+and watcher status. Use `--peek` when inspecting messages without marking them
+read.
+
+### 3. Create a project-scoped chat and task
 
 ```bash
-python3 scripts/init.py
+bin/llm-collab new_chat.py \
+  --title "Implement checkout flow" \
+  --project my-app
+
+bin/llm-collab new_task.py \
+  --title "Implement checkout API" \
+  --created-by orchestrator \
+  --owner worker \
+  --project my-app \
+  --repo-targets app \
+  --path-targets src/routes/checkout.py
 ```
 
-The init script will ask you to:
-- Name your workspace
-- Set your projects root path for code repositories
-- Set your project state root path for local queues/runbooks/memory
-- Define your agents (identities, roles, activation types)
-- Register your projects (repos, preflight commands, GitHub integration)
+For a non-trivial task, complete its `## Implementation Risk Analysis`, then
+run the planning/refinement and acceptance workflow described in
+[Task Intake and Delegation](docs/workflows/task-intake-and-delegation.md)
+before moving it to `in_progress`.
 
-It then generates `collab.config.json`, `agents.json`, `projects.json`, and `agents/{id}/identity.md` + `agents/{id}/memory.md` for each agent.
-
-### 3. Bootstrap each agent session
-
-At the start of every LLM session, run:
+### 4. Deliver the durable task packet
 
 ```bash
-python3 bin/session_bootstrap.py --agent <your_agent_id>
-```
-
-This outputs your `identity.md` first (so you know who you are), then shows your unread inbox.
-
-### 4. Generate memory snippets for your LLM tools
-
-```bash
-# For Claude Code
-python3 bin/init_agent_memory.py --agent claude --target claude-code --write
-
-# For Codex
-python3 bin/init_agent_memory.py --agent codex --target codex
-
-# Universal (copy/paste into any LLM)
-python3 bin/init_agent_memory.py --agent orchestrator --target generic
-```
-
-### 5. Create a chat and start messaging
-
-```bash
-# Create a project-scoped chat thread
-python3 bin/new_chat.py --title "Implement checkout flow" --project my-app
-
-# Send a message
-bin/deliver.py \
+bin/llm-collab deliver.py \
   --chat last \
   --from orchestrator \
   --to worker \
   --project my-app \
-  --title "Implement the checkout API endpoint" \
+  --related-task TASK-... \
+  --title "Implement checkout API" \
   --body-file brief.md
-
-# Read inbox
-python3 bin/inbox.py --me worker --project my-app
 ```
 
-## Core concepts
+`deliver.py` writes the packet before reporting how the recipient can be
+activated. The mailbox packet is the source of truth; a doorbell is only a wake
+signal.
 
-### Identity isolation
+## Project boundaries
 
-Each agent has a dedicated directory under `agents/{id}/`:
+| Scope | Source | Examples |
+|---|---|---|
+| Universal | `agents.json` and shared workflow contracts | collaborator identity, activation type, task lifecycle, mailbox mechanics |
+| Project registry | `projects.json` | repositories, GitHub repo, preflight, design docs, DB refs, tool surfaces |
+| Project runtime | `{project_state_root}/{project_id}/` | queue, routing policy, runbooks, project memory templates |
+| Task-specific | task frontmatter and body | owner, worktree, touched paths, evidence, explicit contract overrides |
 
-| File | Purpose |
-|------|---------|
-| `identity.md` | Tells the LLM who it is; read first at every bootstrap |
-| `memory.md` | Persistent memory owned by this agent |
-| `inbox.json` | Pointer index to unread messages in `Chats/` |
+The core enforces these boundaries:
 
-This prevents the most common multi-agent failure mode: an agent reading messages meant for a different identity, or not knowing which identity to assume.
+- `new_chat.py`, `new_task.py`, and `deliver.py` require a registered project;
+- a message cannot be delivered into a chat owned by another project;
+- task-contract validation rejects missing or unknown projects;
+- queue reconciliation and validation use exact task/project matches;
+- non-Amiga projects do not inherit Amiga design docs, database refs, or MCP
+  surfaces;
+- AX routing uses explicit `activation.ax_app`, not an agent display name.
 
-### Human relay agents
+Amiga compatibility remains explicitly gated to `project_id == "amiga"`; it is
+not a workspace default.
 
-When you have two accounts of the same LLM (e.g. two Codex accounts), configure the second as `activation.type: "human_relay"`. When any agent sends a message to a human-relay agent, `deliver.py` automatically prints a ready-to-paste activation prompt:
+### GitHub adapter isolation
 
-```
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-⚠  Worker requires human relay.
-   Share this prompt with the operator to activate them:
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-You are Worker (worker). Read only messages addressed to 'worker'.
-
-Bootstrap your session by running:
-  python3 /path/to/_collab/bin/session_bootstrap.py --agent worker
-
-Then read your inbox and execute your latest task.
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-```
-
-### Message routing
-
-Messages live in `Chats/` (permanent record). Agent inboxes (`agents/{id}/inbox.json`) hold lightweight pointers — no content duplication, no symlinks. Reading the inbox loads content from `Chats/` on demand.
-
-### Multi-project support
-
-Every message and task carries a `project_id`. A single workspace can coordinate work across multiple repos:
+GitHub mirror and report commands always require exact task/project matches.
+The older `--strict-project` option remains accepted as a deprecated no-op so
+existing automation keeps working:
 
 ```bash
-python3 bin/inbox.py --me orchestrator --project my-app
-python3 bin/task_board.py --project docs-site
+bin/llm-collab check_github_task_mirrors.py \
+  --project my-app
+
+bin/llm-collab report_github_project_task_sync.py \
+  --project my-app
 ```
+
+The generated report defaults to
+`{project_state_root}/my-app/github-project-task-sync.md`, so one project cannot
+overwrite another project's report.
+
+## Adding a project to an existing workspace
+
+1. Add a unique project entry to `projects.json` with `id`, `display_name`,
+   `repos`, `default_branch_base`, `preflight_command`, and `github`.
+2. Add project-specific `ui_ux`, `db`, and `claude_desktop_bridge` values only
+   when applicable. Never copy another project's paths, refs, or tool names.
+3. Create `{project_state_root}/{project_id}/` and add local routing/runbook
+   overrides there. Do not commit real project state under `projects/`.
+4. Add product-repository worker instructions that use the exact checkout and
+   `--project <id>`.
+5. For a GitHub-backed project, materialize and validate the queue:
+
+   ```bash
+   bin/llm-collab project_issue_queue.py reconcile --project <id> --write
+   bin/llm-collab project_issue_queue.py validate --project <id>
+   ```
+
+   Projects without GitHub integration can use the local task board without a
+   GitHub-backed issue queue.
+6. Create a representative task, sync its contract, and validate assignment:
+
+   ```bash
+   bin/llm-collab task_contract.py sync --task TASK-... --write
+   bin/llm-collab task_contract.py validate \
+     --task TASK-... \
+     --stage assignment
+   ```
+
+7. Confirm that the task, generated guidance, queue, and runtime state contain
+   no paths, database refs, tool surfaces, or policies from another project.
+
+See [Multi-Project Support](docs/multi-project.md) for the complete project
+schema and examples.
+
+## Tasks, queues, and activation
+
+### Task lifecycle and planning gate
+
+Tasks move through `open → in_progress → blocked/review → done`.
+
+- Non-trivial tasks require a completed implementation-risk analysis.
+- `plan_task.py` and `refine_task.py` record Claude planning/refinement.
+- `claim_task.py` blocks `in_progress` unless the task has
+  `refined_by: claude` or an explicit trivial-task `skip_refinement: true`.
+- A task both created and planned by Claude requires `accepted_by: codex`
+  before activation.
+- Queue order, project preflight, UI/UX evidence, and database evidence can add
+  further transition gates.
+
+### Queue model
+
+For GitHub-backed projects:
+
+- open eligible GitHub issues are the backlog source of truth;
+- `{project_state_root}/{project_id}/issue-queue.json` is the runtime execution
+  cache for order, ownership, dependencies, and lane type;
+- `project_issue_queue.py reconcile` refreshes that projection;
+- `project_issue_queue.py validate` checks task mirrors, ordering, dependencies,
+  and GitHub backlog consistency;
+- new design work uses design `lane_type` values in the issue queue;
+- `design-queue.json` is retained only for legacy migration and bridge metadata.
+
+### Activation model
+
+| Activation | Behavior |
+|---|---|
+| Dispatchable runtime session | Message can be routed to the bound runtime session |
+| `cli_session` with `activation.ax_app` | `deliver.py` prints an AX doorbell command |
+| Terminal-only `cli_session` | Requires a dispatchable runtime session |
+| Project-configured non-CLI Claude fallback | Reports `desktop_bridge_required` |
+| `human_relay` | Prints a human handoff prompt |
+| Missing transport | Reports `activation_unavailable` with a reason |
+
+See [Session Startup](docs/workflows/session-startup.md) and the
+[desktop-app doorbell workflow](docs/workflows/claude-code-desktop-computer-use-bridge.md)
+for operational safety rules.
 
 ## Command reference
 
+Prefix collaboration commands with `bin/llm-collab`:
+
 | Command | Purpose |
-|---------|---------|
-| `session_bootstrap.py --agent <id>` | Initialize session, print identity, show inbox |
-| `inbox.py --me <id>` | List unread messages |
-| `bin/deliver.py --from <id> --to <id> --chat last --title "..."` | Send a message |
-| `new_chat.py --title "..." --project <id>` | Create a chat thread |
-| `new_task.py --title "..." --created-by <id>` | Create a task |
-| `claim_task.py --task TASK-xxx --owner <id> --status in_progress` | Claim/update a task |
-| `task_board.py` | List all tasks |
-| `reindex.py` | Regenerate `Index/index.md` |
-| `check_github_task_mirrors.py --project <id>` | Detect GitHub issue/task mirror drift |
-| `report_github_project_task_sync.py --project <id>` | Generate GitHub Project/task alignment report |
-| `pm2_watchers.py start --all` | Start background inbox watchers |
-| `worktree_ctl.py create --task TASK-xxx --agent <id> --repo my-app` | Create isolated git worktree |
-| `init_agent_memory.py --agent <id> --target generic` | Generate LLM memory snippet |
+|---|---|
+| `session_bootstrap.py --agent <id>` | Recover identity, inbox, queue, and watcher state |
+| `inbox.py --me <id> --project <project>` | Read project-filtered messages |
+| `new_chat.py --title "..." --project <project>` | Create a project-owned chat |
+| `new_task.py --title "..." --created-by <id> --project <project>` | Create a project-owned task |
+| `deliver.py --chat <chat> --from <id> --to <id> --project <project> --title "..."` | Write a durable message and report activation requirements |
+| `task_board.py --project <project>` | List project tasks |
+| `plan_task.py --task <task>` / `refine_task.py --task <task>` | Record Claude planning/refinement |
+| `claim_task.py --task <task> --owner <id> --status <status>` | Apply gated ownership/status transitions |
+| `task_contract.py sync/validate ...` | Sync and validate UI/UX and database task contracts |
+| `project_issue_queue.py reconcile/validate --project <project>` | Refresh or validate a GitHub-backed execution queue |
+| `worktree_ctl.py create/list/preflight/...` | Manage isolated implementation worktrees |
+| `pm2_watchers.py start/status/logs ...` | Manage optional inbox watchers |
+| `autonomous_loop.py start/update/show/clear --project <project>` | Record persistent queue-runner state |
+| `post_merge_cleanup.py --project <project> ...` | Audit or clean integrated worktrees and branches |
+| `init_agent_memory.py --agent <id> --target <target>` | Generate collaboration-aware worker guidance |
+| `check_github_task_mirrors.py --project <project>` | Audit exact-project GitHub issue/task mirrors |
+| `report_github_project_task_sync.py --project <project>` | Write a project-local GitHub Project/task report |
 
-Full reference: [docs/schema-reference.md](docs/schema-reference.md)
+Legacy aliases remain available for migration:
 
-Note: when `claim_task.py` transitions a task to `in_progress` or `review`, it runs project preflight with browser checks skipped (`--browser-check skip`). Browser checks stay lane-gated for runtime/UI changes.
+- `msg.py` → `deliver.py`
+- `watcher_ctl.py` → `pm2_watchers.py`
 
-Legacy migration aliases:
-- `msg.py` -> `deliver.py`
-- `watcher_ctl.py` -> `pm2_watchers.py`
+## Git and local-state safety
 
-For `human_relay` recipients, `deliver.py` prints a first-time onboarding relay prompt (docs + memory update instructions) only once, then switches to short “check inbox” relay prompts after awareness is recorded in local runtime state.
+Runtime configuration, live chats/tasks, agent memory, queues, logs, and secrets
+are gitignored by default. Public examples live under `examples/` and
+`projects/_example/`.
 
-### Activation-gated relay policy
-
-Use relay prompts only when a worker should start immediately.
-
-- Do not request relay for queued/not-ready workers.
-- If multiple workers are queued, provide only the relay for the worker that should act now.
-- For sequential lanes, wait for the trigger condition before requesting the next relay.
-- For parallel-safe lanes, explicitly say: `activate <worker-a> + <worker-b> now in parallel`.
-- A queue may have multiple active workers when each worker owns a distinct task, branch, and worktree.
-- Use read-only planning, repo-mapping, review, docs, and release-check workers in parallel with implementation whenever they can unblock later lanes without touching the active writer's code.
-- Before activating parallel implementation writers, record a non-overlap check covering touched files/routes, shared APIs/data/schema, generated artifacts, validation resources, and merge order.
-- If overlap is uncertain, keep one implementation writer and use additional workers only for read-only prep/review.
-
-## What this is NOT
-
-- Not a real-time chat system (async file-based)
-- Not a hosted service (runs entirely on your machine)
-- Not opinionated about which LLMs you use (any model, any CLI)
-- Not ACP/A2A compliant (deliberately simpler; see [docs/acp-comparison.md](docs/acp-comparison.md) if curious)
-
-## Requirements
-
-- Python 3.9+
-- Git (for worktree features)
-- PM2 (optional, for background watchers): `npm install -g pm2`
-
-## Local Safety Guards
-
-This repo ships a local pre-commit hook at `.githooks/pre-commit` that blocks commits of runtime workspace state and common sensitive file patterns.
-
-Enable it locally:
+This repository includes `.githooks/pre-commit`, which blocks common secrets and
+runtime workspace state. Enable it with:
 
 ```bash
 git config core.hooksPath .githooks
 ```
+
+Before switching or pulling in a persistent shared checkout, inspect:
+
+```bash
+git status --short --branch --untracked-files=all
+```
+
+Do not discard another lane's tracked changes or untracked local files.
+
+## Verification
+
+Run the full suite with Python 3.10 or newer:
+
+```bash
+python3.11 -m unittest discover -s tests
+git diff --check
+```
+
+## Documentation map
+
+- [Getting Started](docs/getting-started.md)
+- [Multi-Project Support](docs/multi-project.md)
+- [Schema Reference](docs/schema-reference.md)
+- [Identity System](docs/identity-system.md)
+- [Workflow index](docs/workflows/README.md)
+- [GitHub adapter](docs/adapters/github.md)
+- [PM2 adapter](docs/adapters/pm2.md)
+- [Migration from Amiga](docs/migration/from-amiga.md)
+- [ACP comparison](docs/acp-comparison.md)
+
+## What this is not
+
+- a hosted service or real-time chat system;
+- a replacement for project-specific repository instructions;
+- a universal store for product-specific paths, credentials, or policy;
+- ACP/A2A compliance—the design is deliberately simpler.
 
 ## License
 

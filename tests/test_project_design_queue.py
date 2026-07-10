@@ -289,6 +289,7 @@ class ProjectDesignQueueTest(unittest.TestCase):
             [
                 "---",
                 "task_id: TASK-A",
+                "project_id: amiga",
                 "owner: claude",
                 "status: open",
                 "depends_on: []",
@@ -410,6 +411,7 @@ class ProjectDesignQueueTest(unittest.TestCase):
                 [
                     "---",
                     "task_id: TASK-A",
+                    "project_id: amiga",
                     "owner: claude",
                     "status: in_progress",
                     "depends_on: []",
@@ -436,6 +438,58 @@ class ProjectDesignQueueTest(unittest.TestCase):
                     )
 
             self.assertEqual(errors, [])
+
+    def test_validate_rejects_task_from_another_project(self) -> None:
+        # #given
+        payload = {
+            "artifact_type": "ordered_design_queue",
+            "project_id": "nuvyr",
+            "lanes": [
+                {
+                    "order": 1,
+                    "issue": 72,
+                    "task_id": "TASK-A",
+                    "owner": "claude",
+                    "task_status": "open",
+                    "queue_state": "queued",
+                    "lane_type": "design-spec",
+                    "depends_on": [],
+                }
+            ],
+        }
+        task_body = "\n".join(
+            [
+                "---",
+                "task_id: TASK-A",
+                "project_id: amiga",
+                "owner: claude",
+                "status: open",
+                "depends_on: []",
+                "ui_ux_lane: true",
+                "---",
+                "",
+            ]
+        )
+
+        class FakeTaskPath:
+            def read_text(self) -> str:
+                return task_body
+
+        # #when
+        with patch.object(project_design_queue, "get_project", return_value={"id": "nuvyr"}):
+            with patch.object(project_design_queue, "find_task_by_id", return_value=FakeTaskPath()):
+                errors, _ = project_design_queue.validate_queue(
+                    "nuvyr",
+                    payload,
+                    check_github=False,
+                    check_issue_mirror=False,
+                )
+
+        # #then
+        self.assertIn(
+            "lane 1 project mismatch for TASK-A: queue 'nuvyr' vs task 'amiga'",
+            errors,
+        )
 
     def test_validate_reports_missing_materialized_dependency_artifact(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -733,6 +787,27 @@ class ProjectDesignQueueTest(unittest.TestCase):
         self.assertIn("- Active lane: `GH-2` / `TASK-A` / `claude` / `active`", rendered)
         self.assertIn("- Next queued lane: `GH-6` / `TASK-B` / `claude`", rendered)
 
+    def test_render_markdown_uses_registered_project_name(self) -> None:
+        # #given
+        payload = {
+            "project_id": "nuvyr",
+            "artifact_type": "ordered_design_queue",
+            "mode": "legacy",
+            "lanes": [],
+        }
+
+        # #when
+        with patch.object(
+            project_design_queue,
+            "get_project",
+            return_value={"id": "nuvyr", "display_name": "Nuvyr"},
+        ):
+            rendered = project_design_queue.render_markdown(payload)
+
+        # #then
+        self.assertIn("# Nuvyr Design Queue", rendered)
+        self.assertNotIn("Amiga", rendered)
+
     def test_validation_status_line_reports_active_lane_when_no_ready_lane(self) -> None:
         payload = {
             "lanes": [
@@ -989,6 +1064,8 @@ class ProjectDesignQueueTest(unittest.TestCase):
         self.assertIn("bridge_thread_uuid: 12345678-1234-1234-1234-123456789abc", prompt)
         self.assertIn("/tmp/message.md", prompt)
         self.assertIn("codex/claude/task-a", prompt)
+        self.assertIn("project's main checkout", prompt)
+        self.assertNotIn("main amiga checkout", prompt)
 
     def test_render_desktop_prompt_rejects_missing_bridge_metadata(self) -> None:
         context = {

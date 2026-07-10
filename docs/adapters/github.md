@@ -53,14 +53,19 @@ Reads a GitHub Projects board and reflects item statuses in local tasks.
 
 ```bash
 # Mirror open issues to local tasks
-python bin/check_github_task_mirrors.py --project my-app
+bin/llm-collab check_github_task_mirrors.py --project my-app
 
 # Report sync state between local tasks and GitHub project board
-python bin/report_github_project_task_sync.py --project my-app
+bin/llm-collab report_github_project_task_sync.py --project my-app
 ```
 
-By default, both scripts include legacy unscoped tasks (`project_id` missing) for migration compatibility.
-Use `--strict-project` to require exact `project_id` match only.
+Both scripts require exact `project_id` matches. Projectless and foreign task
+mirrors are always excluded. The report defaults to
+`{project_state_root}/{project_id}/github-project-task-sync.md`.
+
+The deprecated `--strict-project` option remains accepted as a no-op for older
+automation. Use `scripts/migrate_from_amiga.py` for intentional legacy
+backfills instead of weakening normal adapter scope.
 
 ---
 

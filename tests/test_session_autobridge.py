@@ -54,7 +54,13 @@ class SessionAutobridgeTest(unittest.TestCase):
                         "id": "amiga",
                         "display_name": "Amiga",
                         "repos": {"app": "."},
-                    }
+                        "claude_desktop_bridge": True,
+                    },
+                    {
+                        "id": "nuvyr",
+                        "display_name": "Nuvyr",
+                        "repos": {"app": "."},
+                    },
                 ]
             },
         )
@@ -1429,7 +1435,7 @@ class SessionAutobridgeTest(unittest.TestCase):
         delivered_text = delivered_candidates[-1].read_text()
         self.assertIn("target_session_id: claude-bound-session-42", delivered_text)
 
-    def test_deliver_prints_computer_use_bridge_for_claude_desktop_target(self):
+    def test_deliver_prefers_ax_doorbell_for_claude_cli_session_target(self):
         root = self.make_workspace()
         self.add_agent(
             root,
@@ -1444,7 +1450,7 @@ class SessionAutobridgeTest(unittest.TestCase):
             {
                 "id": "claude",
                 "display_name": "Claude",
-                "activation": {"type": "cli_session", "watcher_enabled": True},
+                "activation": {"type": "cli_session", "watcher_enabled": True, "ax_app": "Claude"},
             },
         )
         self.create_chat(
@@ -1473,7 +1479,7 @@ class SessionAutobridgeTest(unittest.TestCase):
             ],
             cwd=root,
             text=True,
-            input="Use the durable packet, then wake Claude Desktop with Computer Use.",
+            input="Use the durable packet, then ring Claude with axsend.",
             capture_output=True,
             check=True,
         )
@@ -1481,13 +1487,250 @@ class SessionAutobridgeTest(unittest.TestCase):
         result_payload = json.loads(deliver_result.stdout.split("\n\n", 1)[0])
         self.assertFalse(result_payload["relay_required"])
         self.assertFalse(result_payload["operator_relay_required"])
+        self.assertFalse(result_payload["desktop_bridge_required"])
+        self.assertTrue(result_payload["ax_doorbell_required"])
+        self.assertIn("AX DOORBELL REQUIRED", deliver_result.stdout)
+        self.assertIn("axsend-ensure ring --app", deliver_result.stdout)
+        self.assertNotIn("CLAUDE DESKTOP BRIDGE REQUIRED", deliver_result.stdout)
+        self.assertNotIn("RELAY REQUIRED FOR OPERATOR", deliver_result.stdout)
+
+    def test_deliver_uses_project_configured_desktop_bridge_for_non_cli_claude_target(self):
+        # #given
+        root = self.make_workspace()
+        self.add_agent(
+            root,
+            {
+                "id": "codex",
+                "display_name": "Codex",
+                "activation": {"type": "cli_session", "watcher_enabled": True},
+            },
+        )
+        self.add_agent(
+            root,
+            {
+                "id": "claude",
+                "display_name": "Claude",
+                "activation": {"type": "human_relay", "watcher_enabled": True},
+            },
+        )
+        self.create_chat(
+            root,
+            chat_dir_name="2026-04-23_claude-desktop-fallback__CHAT-BRIDGE2",
+            chat_id="CHAT-BRIDGE2",
+            project_id="amiga",
+        )
+
+        # #when
+        deliver_result = subprocess.run(
+            [
+                sys.executable,
+                str(DELIVER_SCRIPT),
+                "--chat",
+                "CHAT-BRIDGE2",
+                "--from",
+                "codex",
+                "--to",
+                "claude",
+                "--project",
+                "amiga",
+                "--title",
+                "Claude desktop fallback",
+                "--body-file",
+                "-",
+            ],
+            cwd=root,
+            text=True,
+            input="Use the configured desktop bridge fallback.",
+            capture_output=True,
+            check=True,
+        )
+
+        # #then
+        result_payload = json.loads(deliver_result.stdout.split("\n\n", 1)[0])
         self.assertTrue(result_payload["desktop_bridge_required"])
-        self.assertIn("[BRIDGE ", result_payload["desktop_bridge_prompt"])
-        self.assertLessEqual(len(result_payload["desktop_bridge_prompt"]), 240)
+        self.assertFalse(result_payload["ax_doorbell_required"])
+        self.assertFalse(result_payload["operator_relay_required"])
         self.assertIn("CLAUDE DESKTOP BRIDGE REQUIRED", deliver_result.stdout)
-        self.assertIn("Computer Use", deliver_result.stdout)
-        self.assertIn("Do not ask the operator to relay, paste, click, or manually wake Claude.", deliver_result.stdout)
-        self.assertNotIn("until Codex has exhausted Computer Use/app-control recovery", deliver_result.stdout)
+
+    def test_deliver_prints_ax_doorbell_for_cli_session_worker_without_operator_relay(self):
+        root = self.make_workspace()
+        self.add_agent(
+            root,
+            {
+                "id": "codex",
+                "display_name": "Codex",
+                "activation": {"type": "cli_session", "watcher_enabled": True},
+            },
+        )
+        self.add_agent(
+            root,
+            {
+                "id": "zcode",
+                "display_name": "ZCode Worker",
+                "activation": {"type": "cli_session", "watcher_enabled": True, "ax_app": "ZCode"},
+            },
+        )
+        self.create_chat(
+            root,
+            chat_dir_name="2026-06-26_zcode-doorbell__CHAT-ZCODE1",
+            chat_id="CHAT-ZCODE1",
+            project_id="nuvyr",
+        )
+
+        deliver_result = subprocess.run(
+            [
+                sys.executable,
+                str(DELIVER_SCRIPT),
+                "--chat",
+                "CHAT-ZCODE1",
+                "--from",
+                "codex",
+                "--to",
+                "zcode",
+                "--project",
+                "nuvyr",
+                "--title",
+                "ZCode doorbell",
+                "--body-file",
+                "-",
+            ],
+            cwd=root,
+            text=True,
+            input="Use the durable packet, then ring ZCode with axsend.",
+            capture_output=True,
+            check=True,
+        )
+
+        result_payload = json.loads(deliver_result.stdout.split("\n\n", 1)[0])
+        self.assertFalse(result_payload["relay_required"])
+        self.assertFalse(result_payload["operator_relay_required"])
+        self.assertFalse(result_payload["desktop_bridge_required"])
+        self.assertTrue(result_payload["ax_doorbell_required"])
+        self.assertIn("[from codex]", result_payload["ax_doorbell_prompt"])
+        self.assertIn("AX DOORBELL REQUIRED", deliver_result.stdout)
+        self.assertIn('axsend-ensure ring --app "ZCode"', deliver_result.stdout)
+        self.assertNotIn('--app "ZCode Worker"', deliver_result.stdout)
+        self.assertIn("do not ask the operator to relay", deliver_result.stdout)
+        self.assertNotIn("RELAY REQUIRED FOR OPERATOR", deliver_result.stdout)
+
+    def test_deliver_reports_terminal_only_cli_session_as_unavailable(self):
+        # #given
+        root = self.make_workspace()
+        self.add_agent(
+            root,
+            {
+                "id": "codex",
+                "display_name": "Codex",
+                "activation": {"type": "cli_session", "watcher_enabled": True},
+            },
+        )
+        self.add_agent(
+            root,
+            {
+                "id": "terminal-worker",
+                "display_name": "Terminal Worker",
+                "activation": {"type": "cli_session", "watcher_enabled": True},
+            },
+        )
+        self.create_chat(
+            root,
+            chat_dir_name="2026-07-10_terminal-only__CHAT-TERM1",
+            chat_id="CHAT-TERM1",
+            project_id="nuvyr",
+        )
+
+        # #when
+        deliver_result = subprocess.run(
+            [
+                sys.executable,
+                str(DELIVER_SCRIPT),
+                "--chat",
+                "CHAT-TERM1",
+                "--from",
+                "codex",
+                "--to",
+                "terminal-worker",
+                "--project",
+                "nuvyr",
+                "--title",
+                "Terminal delivery",
+                "--body-file",
+                "-",
+            ],
+            cwd=root,
+            text=True,
+            input="Use the durable packet.",
+            capture_output=True,
+            check=True,
+        )
+
+        # #then
+        result_payload = json.loads(deliver_result.stdout.split("\n\n", 1)[0])
+        self.assertTrue(result_payload["activation_unavailable"])
+        self.assertFalse(result_payload["relay_required"])
+        self.assertFalse(result_payload["ax_doorbell_required"])
+        self.assertIn("activation.ax_app", result_payload["activation_unavailable_reason"])
+        self.assertIn("ACTIVATION UNAVAILABLE", deliver_result.stdout)
+        self.assertNotIn("RELAY REQUIRED FOR OPERATOR", deliver_result.stdout)
+
+    def test_deliver_reports_api_trigger_without_runtime_as_unavailable(self):
+        # #given
+        root = self.make_workspace()
+        self.add_agent(
+            root,
+            {
+                "id": "codex",
+                "display_name": "Codex",
+                "activation": {"type": "cli_session", "watcher_enabled": True},
+            },
+        )
+        self.add_agent(
+            root,
+            {
+                "id": "hook",
+                "display_name": "Webhook Worker",
+                "activation": {"type": "api_trigger", "watcher_enabled": False},
+            },
+        )
+        self.create_chat(
+            root,
+            chat_dir_name="2026-07-10_api-trigger__CHAT-API1",
+            chat_id="CHAT-API1",
+            project_id="nuvyr",
+        )
+
+        # #when
+        deliver_result = subprocess.run(
+            [
+                sys.executable,
+                str(DELIVER_SCRIPT),
+                "--chat",
+                "CHAT-API1",
+                "--from",
+                "codex",
+                "--to",
+                "hook",
+                "--project",
+                "nuvyr",
+                "--title",
+                "API delivery",
+                "--body-file",
+                "-",
+            ],
+            cwd=root,
+            text=True,
+            input="Use the durable packet.",
+            capture_output=True,
+            check=True,
+        )
+
+        # #then
+        result_payload = json.loads(deliver_result.stdout.split("\n\n", 1)[0])
+        self.assertTrue(result_payload["activation_unavailable"])
+        self.assertFalse(result_payload["relay_required"])
+        self.assertFalse(result_payload["operator_relay_required"])
+        self.assertIn("api_trigger", result_payload["activation_unavailable_reason"])
+        self.assertIn("ACTIVATION UNAVAILABLE", deliver_result.stdout)
         self.assertNotIn("RELAY REQUIRED FOR OPERATOR", deliver_result.stdout)
 
     def test_deliver_suppresses_manual_relay_when_autobridge_target_is_dispatchable(self):

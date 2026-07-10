@@ -128,20 +128,15 @@ def archive_closed_task(path: Path, issue_number: int) -> Path:
     return target
 
 
-def task_in_scope(frontmatter: dict, project_id: str, strict_project: bool) -> bool:
-    scoped = frontmatter.get("project_id")
-    if scoped == project_id:
-        return True
-    if strict_project:
-        return False
-    return scoped in (None, "", "null")
+def task_in_scope(frontmatter: dict, project_id: str) -> bool:
+    return frontmatter.get("project_id") == project_id
 
 
-def iter_project_task_mirrors(project_id: str, strict_project: bool) -> list[Path]:
+def iter_project_task_mirrors(project_id: str) -> list[Path]:
     result: list[Path] = []
     for path in all_task_files():
         fm, _ = parse_frontmatter(path.read_text())
-        if not task_in_scope(fm, project_id, strict_project):
+        if not task_in_scope(fm, project_id):
             continue
         if extract_issue_number(path) is None:
             continue
@@ -161,7 +156,7 @@ def main() -> int:
     parser.add_argument(
         "--strict-project",
         action="store_true",
-        help="Only include tasks with exact project_id match; exclude legacy unscoped tasks.",
+        help="Deprecated no-op; exact project_id matching is always enforced.",
     )
     args = parser.parse_args()
 
@@ -181,7 +176,7 @@ def main() -> int:
     mirrors = []
     archived_paths: list[Path] = []
 
-    for path in iter_project_task_mirrors(args.project, args.strict_project):
+    for path in iter_project_task_mirrors(args.project):
         issue_number = extract_issue_number(path)
         if issue_number is None:
             continue

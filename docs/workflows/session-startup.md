@@ -120,9 +120,11 @@ served.
 
 ## Claude Desktop Rule
 
-Treat the Claude desktop app as a human-driven UI surface that Codex may drive
-only through Computer Use. Do not treat Claude desktop as a CLI/project-session
-target.
+Route Claude according to its registered activation type, explicit doorbell
+capability, and active project configuration. A Claude agent registered as
+`cli_session` uses AX only when `activation.ax_app` is configured. A project may
+set `claude_desktop_bridge: true` as a fallback only when its Claude target is
+not a CLI session.
 
 Important distinction:
 
@@ -140,41 +142,36 @@ Operational rule:
 - do not claim that `llm-collab`, PM2, or Claude CLI can safely create a brand
   new Claude desktop app thread
 - do not synthesize desktop-visible Claude threads by writing local app cache/index files
-- use a desktop app as an operator-facing UI controlled through Computer Use
 - use `Chats/` messages as the transport of record (the durable mailbox)
-- the primary agent-to-agent wake is the **bidirectional Computer-Use doorbell**:
-  whichever agent finishes work or needs something rings the other immediately
-  (see `claude-code-desktop-computer-use-bridge.md`). A Codex-side heartbeat is
-  only the provisional safety-fuse — never the primary wake (see
-  `session-autobridge-runbook.md`).
+- the primary agent-to-agent wake for AX-capable `cli_session` workers is the
+  **bidirectional AX doorbell** (see
+  `claude-code-desktop-computer-use-bridge.md`); terminal-only sessions require a
+  dispatchable runtime binding
+- screenshot/keyboard Computer Use is a fallback for a project-configured
+  non-CLI Claude Desktop bridge, never the universal default
 
 Safest task-grade workflow for desktop-app agents:
 
 1. `llm-collab` delivers the task into `Chats/` with `deliver.py`
-   - for Claude Desktop, `desktop_bridge_required` means the sender continues via
-     Computer Use; it is not a manual operator relay request
-2. the sender uses Computer Use to open/select the recipient's desktop thread, or
-   creates a new visible thread by generating a UUID plus short title, clicking
-   `New session`, and sending one one-line wake prompt
-3. the sender rings only after the idle input gate passes: active row not
-   `Running`, empty focused composer, no visible `Stop`, and no visible queued
-   messages with `Remove queued message`
-4. the sender types exactly one short sender-tagged wake prompt that points the
+   - for an AX-capable `cli_session` worker, including Claude when configured,
+     `ax_doorbell_required` means the
+     sender rings the worker with the printed `axsend-ensure ring` command; it is
+     not a manual operator relay request
+   - `desktop_bridge_required` is the project-configured non-CLI Claude fallback
+   - `activation_unavailable` means the durable packet exists but neither a
+     dispatchable runtime nor an explicit wake transport is configured
+2. the sender rings once with the printed AX command; a busy recipient may queue
+   the one-line pointer behind its active turn
+3. the sender sends exactly one short sender-tagged wake prompt that points the
    recipient to the exact `llm-collab` inbox/chat/message path. Do not paste full
    task context, acceptance criteria, or multi-paragraph briefs into the app; the
    durable `Chats/` packet is the source of truth. The prompt must be one line,
    under roughly 240 characters, and never contain newline-split bridge details.
    The recipient drains its full unread inbox after the ring.
-5. if (and only if) a response is expected and a doorbell ring is blocked or a
-   worker is visibly running, create a bounded provisional safety-fuse heartbeat
-   under the constraints in `session-autobridge-runbook.md` (task-scoped,
-   auto-deletes on handoff/ack/blocker, never primary)
-6. a safety-fuse heartbeat checks the app through Computer Use; if the recipient
-   is running, it waits; if idle/awaiting input, it reads and records the response
-7. delete the safety-fuse heartbeat when the response is recorded, blocked, timed
-   out, or no longer needed
+4. if AX cannot deliver or confirm, record the exact blocker; use Computer Use
+   only for an explicitly configured desktop-bridge fallback
 
-After `desktop_bridge_required`, Codex owns the visible Claude Desktop wake
+Only after `desktop_bridge_required`, Codex owns the visible Claude Desktop wake
 through Computer Use. If Computer Use is unavailable, blocked by a non-idle
 Claude state, cannot inspect the app, or fails to send, Codex must keep
 ownership of the Claude app path: bring Claude to front by bundle id, use

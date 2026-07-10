@@ -24,11 +24,11 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).parent))
 from _helpers import (
-    ROOT,
     all_task_files,
     ensure_project,
     get_project,
     parse_frontmatter,
+    project_state_dir,
     utc_iso,
 )
 
@@ -167,20 +167,15 @@ def load_project_items(project_number: int, owner: str, repo: str) -> dict[int, 
     return items
 
 
-def task_in_scope(frontmatter: dict, project_id: str, strict_project: bool) -> bool:
-    scoped = frontmatter.get("project_id")
-    if scoped == project_id:
-        return True
-    if strict_project:
-        return False
-    return scoped in (None, "", "null")
+def task_in_scope(frontmatter: dict, project_id: str) -> bool:
+    return frontmatter.get("project_id") == project_id
 
 
-def load_local_mirrors(project_id: str, strict_project: bool) -> dict[int, dict[str, Any]]:
+def load_local_mirrors(project_id: str) -> dict[int, dict[str, Any]]:
     mirrors: dict[int, dict[str, Any]] = {}
     for path in all_task_files():
         fm, body = parse_frontmatter(path.read_text())
-        if not task_in_scope(fm, project_id, strict_project):
+        if not task_in_scope(fm, project_id):
             continue
         title = str(fm.get("title", ""))
 
@@ -216,6 +211,10 @@ def assess_status_alignment(project_status: str, local_status: str, owner: str) 
     if project_status == "Done" and local_status != "done":
         return "review"
     return "ok"
+
+
+def default_output_path(project_id: str) -> Path:
+    return project_state_dir(project_id) / "github-project-task-sync.md"
 
 
 def render_markdown(
@@ -298,12 +297,12 @@ def main() -> int:
     parser.add_argument(
         "--strict-project",
         action="store_true",
-        help="Only include tasks with exact project_id match; exclude legacy unscoped tasks.",
+        help="Deprecated no-op; exact project_id matching is always enforced.",
     )
     parser.add_argument(
         "--output",
-        default=str(ROOT / "Index" / "github_project_task_sync.md"),
-        help="Markdown report output path",
+        default=None,
+        help="Markdown report output path (default: project_state_root/<project_id>/github-project-task-sync.md)",
     )
     args = parser.parse_args()
 
@@ -320,7 +319,7 @@ def main() -> int:
     issues, epic_issues = split_epics(all_open_issues)
     project_title = load_project_title(project_number, owner)
     project_items = load_project_items(project_number, owner, repo)
-    mirrors = load_local_mirrors(args.project, args.strict_project)
+    mirrors = load_local_mirrors(args.project)
 
     project_url = f"https://github.com/users/{owner}/projects/{project_number}"
     generated_at = utc_iso()
@@ -335,7 +334,7 @@ def main() -> int:
         mirrors,
     )
 
-    output_path = Path(args.output)
+    output_path = Path(args.output).expanduser() if args.output else default_output_path(args.project)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(markdown, encoding="utf-8")
 

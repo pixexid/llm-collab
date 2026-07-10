@@ -12,10 +12,14 @@ Real project directories are runtime-local. Prefer a `project_state_root` outsid
 - `runbooks/`: local project runbooks
 - `memory-templates/`: local agent memory snippets
 
-To create a real queue for a project:
+For a GitHub-backed project, create the real queue from its registered backlog:
 
 ```bash
 mkdir -p ~/.local/share/llm-collab/projects/my-app
-cp projects/_example/issue-queue.example.json ~/.local/share/llm-collab/projects/my-app/issue-queue.json
-python3 bin/project_issue_queue.py sync-markdown --project my-app
+bin/llm-collab project_issue_queue.py reconcile --project my-app --write
+bin/llm-collab project_issue_queue.py validate --project my-app
 ```
+
+Projects without GitHub integration can use local tasks without an issue queue.
+`issue-queue.example.json` documents the schema only; do not copy its placeholder
+lanes into a real project queue.

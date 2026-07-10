@@ -190,6 +190,106 @@ accepted_by: null
         self.assertEqual(lane["blocked_by"], [])
         self.assertTrue(lane["needs_refinement"])
 
+    def test_reconcile_ignores_projectless_and_foreign_project_mirrors(self) -> None:
+        # #given
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            projectless = self.write_task(
+                root,
+                "2026-07-10_gh-901-projectless__TASK-NULL01.md",
+                """---
+task_id: TASK-NULL01
+title: GH-901 Projectless
+status: open
+owner: unassigned
+project_id: null
+---
+""",
+            )
+            foreign = self.write_task(
+                root,
+                "2026-07-10_gh-901-amiga__TASK-AMIGA1.md",
+                """---
+task_id: TASK-AMIGA1
+title: GH-901 Amiga
+status: open
+owner: unassigned
+project_id: amiga
+---
+""",
+            )
+            nuvyr = self.write_task(
+                root,
+                "2026-07-10_gh-901-nuvyr__TASK-NUVYR1.md",
+                """---
+task_id: TASK-NUVYR1
+title: GH-901 Nuvyr
+status: open
+owner: unassigned
+project_id: nuvyr
+skip_refinement: true
+---
+""",
+            )
+            issue = _backlog.BacklogIssue(number=901, title="Nuvyr task", labels=())
+
+            # #when
+            with patch.object(_backlog, "eligible_open_issues", return_value=[issue]):
+                with patch.object(
+                    project_issue_queue,
+                    "all_task_files",
+                    return_value=[projectless, foreign, nuvyr],
+                ):
+                    with patch.object(project_issue_queue, "queue_exists", return_value=False):
+                        result = project_issue_queue.reconcile_queue("nuvyr")
+
+        # #then
+        self.assertEqual(result["duplicate_mirrors"], [])
+        self.assertEqual(result["projection"]["lanes"][0]["task_id"], "TASK-NUVYR1")
+
+    def test_validate_rejects_task_from_another_project(self) -> None:
+        # #given
+        payload = {
+            "project_id": "nuvyr",
+            "lanes": [
+                {
+                    "order": 1,
+                    "issue": 72,
+                    "task_id": "TASK-A",
+                    "owner": "unassigned",
+                    "task_status": "open",
+                    "queue_state": "ready",
+                    "tier": None,
+                    "depends_on": [],
+                }
+            ],
+        }
+        task_body = """---
+task_id: TASK-A
+title: GH-72 Foreign task
+project_id: amiga
+owner: unassigned
+status: open
+depends_on: []
+---
+"""
+
+        class FakeTaskPath:
+            name = "2026-07-10_gh-72-foreign__TASK-A.md"
+
+            def read_text(self) -> str:
+                return task_body
+
+        # #when
+        with patch.object(project_issue_queue, "find_task_by_id", return_value=FakeTaskPath()):
+            errors, _ = project_issue_queue.validate_queue("nuvyr", payload)
+
+        # #then
+        self.assertIn(
+            "lane 1 project mismatch for TASK-A: queue 'nuvyr' vs task 'amiga'",
+            errors,
+        )
+
     def test_reconcile_reports_missing_task_mirror_without_writing_empty(self) -> None:
         issue = _backlog.BacklogIssue(number=900, title="Unmirrored issue", labels=())
 
@@ -402,6 +502,28 @@ accepted_by: null
         rendered = project_issue_queue.render_markdown(payload)
 
         self.assertIn("- Next ready lane: `GH-784` / `TASK-E8C28D` / `claude` (refine)", rendered)
+
+    def test_render_markdown_uses_registered_project_name_and_clean_empty_sources(self) -> None:
+        payload = {
+            "project_id": "nuvyr",
+            "last_updated_utc": "2026-07-10T05:32:42+00:00",
+            "source_issue": None,
+            "source_task": None,
+            "lanes": [],
+        }
+
+        with patch.object(
+            project_issue_queue,
+            "get_project",
+            return_value={"id": "nuvyr", "display_name": "Nuvyr"},
+        ):
+            rendered = project_issue_queue.render_markdown(payload)
+
+        self.assertIn("# Nuvyr Ordered Issue Queue", rendered)
+        self.assertIn("- Source issue: none", rendered)
+        self.assertIn("- Source task: none", rendered)
+        self.assertNotIn("Amiga", rendered)
+        self.assertNotIn("GH-None", rendered)
 
 
 if __name__ == "__main__":

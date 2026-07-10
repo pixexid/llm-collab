@@ -15,15 +15,16 @@ deliver.py — Send a message from one agent to another.
 Writes the message to Chats/ (canonical record) and appends
 a pointer to the recipient's agents/{id}/inbox.json.
 
-If the recipient is a Claude Desktop target, prints a Computer Use bridge
-instruction instead of a human relay prompt. If the recipient has
-activation.type == "human_relay", prints a ready-to-paste handoff prompt for
-the human operator.
+If a CLI-session recipient explicitly configures activation.ax_app, prints an
+AX doorbell instruction. Projects may opt Claude into a desktop-bridge fallback
+for non-CLI targets. If the recipient has activation.type == "human_relay",
+prints a ready-to-paste handoff prompt for the human operator. Other unresolved
+activation types report an explicit unavailable state.
 
 Usage:
-  bin/deliver.py --chat last --from orchestrator --to worker --title "Implement feature X"
-  echo "Body text" | bin/deliver.py --chat CHAT-abc123 --from orchestrator --to worker --title "..."
-  bin/deliver.py --chat last --from orchestrator --to worker --title "..." --body-file brief.md
+  bin/deliver.py --chat last --from orchestrator --to worker --project my-app --title "Implement feature X"
+  echo "Body text" | bin/deliver.py --chat CHAT-abc123 --from orchestrator --to worker --project my-app --title "..."
+  bin/deliver.py --chat last --from orchestrator --to worker --project my-app --title "..." --body-file brief.md
 """
 
 import argparse
@@ -35,12 +36,12 @@ from _helpers import (
     CHATS_DIR,
     add_to_inbox,
     agent_ids,
-    build_handoff_prompt,
     ensure_project,
     has_collab_awareness,
     set_collab_awareness,
     find_chat_by_partial,
     get_agent,
+    get_project,
     is_human_relay,
     python_cmd,
     load_chat_meta,
@@ -135,8 +136,34 @@ def resolve_bound_runtime_session_id(project_id: str, chat_id: str, agent_id: st
     return str(runtime_session_id)
 
 
-def is_claude_desktop_bridge_target(project_id: str, recipient_id: str) -> bool:
-    return project_id == "amiga" and recipient_id == "claude"
+def is_claude_desktop_bridge_target(
+    project_id: str,
+    recipient_agent: dict,
+    recipient_id: str,
+) -> bool:
+    project = get_project(project_id) or {}
+    activation_type = recipient_agent.get("activation", {}).get("type")
+    return (
+        bool(project.get("claude_desktop_bridge"))
+        and recipient_id == "claude"
+        and activation_type != "cli_session"
+    )
+
+
+def ax_doorbell_app(recipient_agent: dict) -> str | None:
+    ax_app = recipient_agent.get("activation", {}).get("ax_app")
+    if not isinstance(ax_app, str) or not ax_app.strip():
+        return None
+    return ax_app.strip()
+
+
+def is_ax_doorbell_target(recipient_agent: dict, recipient_id: str) -> bool:
+    activation_type = recipient_agent.get("activation", {}).get("type")
+    return (
+        recipient_id != "operator"
+        and activation_type == "cli_session"
+        and ax_doorbell_app(recipient_agent) is not None
+    )
 
 
 def build_desktop_bridge_prompt(chat_id: str, recipient_id: str, message_path: Path) -> str:
@@ -274,17 +301,51 @@ def main():
         },
     )
 
+    ax_doorbell_required = (
+        args.recipient != "operator"
+        and not autobridge_ready
+        and is_ax_doorbell_target(recipient_agent, args.recipient)
+    )
+    ax_doorbell_prompt = (
+        f"[from {args.sender}] Read latest {args.recipient} packet in {chat_id}: {to_path.name}"
+        if ax_doorbell_required
+        else None
+    )
     desktop_bridge_required = (
         args.recipient != "operator"
         and not autobridge_ready
-        and is_claude_desktop_bridge_target(args.project, args.recipient)
+        and not ax_doorbell_required
+        and is_claude_desktop_bridge_target(args.project, recipient_agent, args.recipient)
     )
     desktop_bridge_prompt = (
         build_desktop_bridge_prompt(chat_id, args.recipient, to_path)
         if desktop_bridge_required
         else None
     )
-    operator_relay_required = args.recipient != "operator" and not autobridge_ready and not desktop_bridge_required
+    operator_relay_required = (
+        args.recipient != "operator"
+        and not autobridge_ready
+        and not desktop_bridge_required
+        and not ax_doorbell_required
+        and is_human_relay(recipient_agent)
+    )
+    activation_unavailable = (
+        args.recipient != "operator"
+        and not autobridge_ready
+        and not desktop_bridge_required
+        and not ax_doorbell_required
+        and not operator_relay_required
+    )
+    activation_unavailable_reason = None
+    if activation_unavailable:
+        if recipient_type == "cli_session":
+            activation_unavailable_reason = (
+                "cli_session has no dispatchable runtime session or activation.ax_app"
+            )
+        else:
+            activation_unavailable_reason = (
+                f"activation type {recipient_type!r} has no dispatchable runtime session"
+            )
 
     result = {
         "chat_id": chat_id,
@@ -296,6 +357,10 @@ def main():
         "operator_relay_required": operator_relay_required,
         "desktop_bridge_required": desktop_bridge_required,
         "desktop_bridge_prompt": desktop_bridge_prompt,
+        "ax_doorbell_required": ax_doorbell_required,
+        "ax_doorbell_prompt": ax_doorbell_prompt,
+        "activation_unavailable": activation_unavailable,
+        "activation_unavailable_reason": activation_unavailable_reason,
         "resolved_target_session_id": args.target_session_id,
         "autobridge_ready": autobridge_ready,
         "autobridge_session_id": autobridge_target.get("session_id") if autobridge_target else None,
@@ -327,25 +392,44 @@ def main():
             sender_id=args.sender,
             first_time=bool(first_time_awareness),
         )
-    elif not autobridge_ready:
+    elif ax_doorbell_required:
         recipient_display = recipient_agent.get("display_name", args.recipient)
+        ax_app = ax_doorbell_app(recipient_agent)
         border = "━" * 60
         print(f"\n{border}")
-        print("📨 RELAY REQUIRED FOR OPERATOR:")
+        print("🔔 AX DOORBELL REQUIRED")
         print(border)
         print()
         print(
-            f"Please send this to {recipient_display} ({args.recipient}) "
-            f"for chat {chat_id} (project: {args.project}):"
+            f"Ring {recipient_display} ({args.recipient}) with axsend; "
+            "do not ask the operator to relay."
         )
         print()
+        print("One-line prompt:")
+        print(ax_doorbell_prompt)
+        print()
+        print("Command:")
         print(
-            build_handoff_prompt(
-                recipient_agent,
-                sender_id=args.sender,
-                first_time=bool(first_time_awareness),
-            )
+            f"{ROOT}/bin/axsend-ensure ring --app {json.dumps(ax_app)} "
+            f"--submit --verify --text {json.dumps(ax_doorbell_prompt)}"
         )
+        print()
+        print("If axsend fails after retry/confirm, record the AX blocker in the mailbox.")
+        print(border)
+    elif activation_unavailable:
+        recipient_display = recipient_agent.get("display_name", args.recipient)
+        border = "━" * 60
+        print(f"\n{border}")
+        print("⚠️  ACTIVATION UNAVAILABLE")
+        print(border)
+        print()
+        print(
+            f"The durable packet for {recipient_display} ({args.recipient}) was written, "
+            "but no wake transport is configured."
+        )
+        print()
+        print(f"Reason: {activation_unavailable_reason}")
+        print("Configure a dispatchable runtime session or activation.ax_app, then retry the wake.")
         print()
         print(border)
 

@@ -93,11 +93,11 @@ every agent desktop app — no screenshots, no focus theft, in either direction.
 - **Mailbox = `llm-collab` (durable source of truth).** Every task, handoff,
   blocker, clarification, decision, and piece of evidence is a file written with
   `deliver.py`. Nothing load-bearing lives only in an app's visible thread.
-- **Doorbell = Computer Use (immediate, event-driven nudge).** The moment an
-  agent finishes a task, hits a blocker, needs a clarification, or completes a
-  handoff, it uses Computer Use to bring the other agent's desktop app to front
-  and type one short, sender-tagged pointer to the durable packet. This wakes the
-  recipient *now* instead of waiting on a scheduled check.
+- **Doorbell = AX (immediate, event-driven nudge).** The moment an agent finishes
+  a task, hits a blocker, needs a clarification, or completes a handoff, it uses
+  `axsend ring --submit --verify` to send one short, sender-tagged pointer to the
+  durable packet. Screenshot/keyboard Computer Use is a fallback only when AX is
+  unavailable and the target path is explicitly configured for desktop bridging.
 
 The mailbox is the record; the doorbell is the notification. A doorbell with no
 corresponding mailbox packet is not valid for task-grade work.
@@ -110,7 +110,7 @@ operator never tags their own messages.
 
 - `[BRIDGE <8-char-uuid-prefix>] ...` — a durable bridge pointer routed via
   `llm-collab`.
-- `[from <agent>] ...` or `[<agent> doorbell] ...` — a direct Computer-Use ring
+- `[from <agent>] ...` or `[<agent> doorbell] ...` — a direct AX or fallback ring
   (there is no message frontmatter on a direct ring, so the inline tag is what
   disambiguates).
 - **Untagged plain text is operator-origin by convention.** Treat a tagged
