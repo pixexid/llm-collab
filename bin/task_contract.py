@@ -424,7 +424,7 @@ def sync_ui_ux_contract(frontmatter: dict, body: str) -> tuple[dict, list[str]]:
         project_id = _normalize_text(updated.get("project_id"))
         project_required_docs = _project_required_design_docs(updated)
         required_docs = _normalize_list(updated.get("required_design_docs"))
-        if project_id and project_id != "amiga":
+        if project_id != "amiga":
             required_docs = [doc for doc in required_docs if doc != AMIGA_DESIGN_DOC]
         required_docs = [
             *project_required_docs,
@@ -521,9 +521,9 @@ def sync_db_contract(frontmatter: dict, body: str) -> tuple[dict, list[str]]:
         existing_project_ref = _normalize_text(updated.get("db_project_ref"))
         existing_required_surfaces = _normalize_list(updated.get("db_required_surfaces"))
         project_id = _normalize_text(updated.get("project_id"))
-        if project_id and project_id != "amiga" and existing_project_ref == AMIGA_SHARED_SUPABASE_PROJECT_REF:
+        if project_id != "amiga" and existing_project_ref == AMIGA_SHARED_SUPABASE_PROJECT_REF:
             existing_project_ref = ""
-        if project_id and project_id != "amiga":
+        if project_id != "amiga":
             existing_required_surfaces = [
                 surface
                 for surface in existing_required_surfaces
@@ -706,11 +706,12 @@ def validate_db_contract(frontmatter: dict, body: str, *, stage: str) -> tuple[l
     errors: list[str] = []
     fm, _ = sync_db_contract(frontmatter, body)
     db_impact = _normalize_text(fm.get("db_impact"))
+    raw_project_ref = _normalize_text(frontmatter.get("db_project_ref"))
     summary = {
         "db_impact": db_impact,
         "db_impact_detection": fm.get("db_impact_detection", "auto"),
         "db_impact_detection_reasons": _normalize_list(fm.get("db_impact_detection_reasons")),
-        "db_project_ref": _normalize_text(fm.get("db_project_ref")),
+        "db_project_ref": raw_project_ref,
         "db_schema_change_detected": _normalize_bool(fm.get("db_schema_change_detected")) is True,
     }
 
@@ -722,10 +723,9 @@ def validate_db_contract(frontmatter: dict, body: str, *, stage: str) -> tuple[l
         return errors, summary
 
     project_ref, project_required_surfaces = _project_db_contract(fm)
-    actual_project_ref = _normalize_text(fm.get("db_project_ref"))
-    if project_ref and actual_project_ref != project_ref:
+    if project_ref and raw_project_ref != project_ref:
         errors.append(f"Shared Supabase lane must set project-configured `db_project_ref: {project_ref}`.")
-    elif not project_ref and not actual_project_ref:
+    elif not project_ref and not raw_project_ref:
         errors.append(
             "Shared Supabase lane must configure `db.shared_supabase_project_ref` for the project "
             "or provide an explicit task-level `db_project_ref`."

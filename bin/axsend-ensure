@@ -29,13 +29,18 @@ for ((i = 0; i < ${#args[@]}; i++)); do
 done
 
 set +e
-"$root/tools/axbridge/axsend" "$@"
-status=$?
+output_file="$(mktemp "${TMPDIR:-/tmp}/axsend-ensure.XXXXXX")"
+trap 'rm -f "$output_file"' EXIT
+"$root/tools/axbridge/axsend" "$@" | tee "$output_file"
+status=${PIPESTATUS[0]}
 set -e
 if (( status != 0 )); then
   exit "$status"
 fi
 
 if (( is_ring == 1 && has_submit == 1 )) && [[ -n "$app" && -n "$text" ]]; then
+  if grep -Fq "QUEUED (UNCONFIRMED):" "$output_file"; then
+    exit 0
+  fi
   "$root/tools/axbridge/axsend" confirm --app "$app" --text "$text"
 fi

@@ -64,6 +64,7 @@ class TaskContractUiVisualFeedbackTest(unittest.TestCase):
     def test_ui_review_requires_feedback_request_not_operator_reply(self) -> None:
         # #given
         frontmatter = {
+            "project_id": "amiga",
             "ui_ux_lane": True,
             "ui_ux_mode": "implementation",
             "required_design_docs": [task_contract.AMIGA_DESIGN_DOC],
@@ -224,6 +225,67 @@ class TaskContractProjectDbConfigTest(unittest.TestCase):
         self.assertIn("db_project_ref", changed)
         self.assertIn("db_required_surfaces", changed)
 
+    def test_configured_project_validation_rejects_unsynced_foreign_ref(self) -> None:
+        # #given
+        frontmatter = {
+            "project_id": "other",
+            "db_impact": "shared-supabase-required",
+            "db_project_ref": "foreign-project-ref",
+            "db_required_surfaces": ["supabase_other.execute_sql"],
+        }
+        project = {
+            "id": "other",
+            "db": {
+                "shared_supabase_project_ref": "other-project-ref",
+                "required_surfaces": ["supabase_other.execute_sql"],
+            },
+        }
+
+        # #when
+        with patch.object(task_contract, "get_project", return_value=project):
+            errors, summary = task_contract.validate_db_contract(
+                frontmatter,
+                "Apply a shared Supabase migration.",
+                stage="plan",
+            )
+
+        # #then
+        self.assertEqual(summary["db_project_ref"], "foreign-project-ref")
+        self.assertIn(
+            "Shared Supabase lane must set project-configured `db_project_ref: other-project-ref`.",
+            errors,
+        )
+
+    def test_configured_project_validation_rejects_missing_persisted_ref(self) -> None:
+        # #given
+        frontmatter = {
+            "project_id": "other",
+            "db_impact": "shared-supabase-required",
+            "db_required_surfaces": ["supabase_other.execute_sql"],
+        }
+        project = {
+            "id": "other",
+            "db": {
+                "shared_supabase_project_ref": "other-project-ref",
+                "required_surfaces": ["supabase_other.execute_sql"],
+            },
+        }
+
+        # #when
+        with patch.object(task_contract, "get_project", return_value=project):
+            errors, summary = task_contract.validate_db_contract(
+                frontmatter,
+                "Apply a shared Supabase migration.",
+                stage="plan",
+            )
+
+        # #then
+        self.assertEqual(summary["db_project_ref"], "")
+        self.assertIn(
+            "Shared Supabase lane must set project-configured `db_project_ref: other-project-ref`.",
+            errors,
+        )
+
     def test_unconfigured_non_amiga_project_requires_explicit_db_contract(self) -> None:
         # #given
         frontmatter = {
@@ -299,7 +361,10 @@ class TaskContractProjectIdentityTest(unittest.TestCase):
         frontmatter = {
             "ui_ux_lane": True,
             "ui_ux_mode": "docs_only",
+            "required_design_docs": [task_contract.AMIGA_DESIGN_DOC],
             "db_impact": "shared-supabase-required",
+            "db_project_ref": task_contract.AMIGA_SHARED_SUPABASE_PROJECT_REF,
+            "db_required_surfaces": task_contract.AMIGA_SHARED_SUPABASE_REQUIRED_SURFACES,
         }
         body = "Update UI design docs and apply a shared database migration."
 
@@ -310,7 +375,7 @@ class TaskContractProjectIdentityTest(unittest.TestCase):
         # #then
         self.assertEqual(synced["required_design_docs"], [])
         self.assertIsNone(synced["db_project_ref"])
-        self.assertEqual(synced["db_required_surfaces"], [])
+        self.assertEqual(synced["db_required_surfaces"], ["supabase CLI"])
         self.assertIn("Task must set a registered `project_id`.", errors)
         self.assertEqual(summary["project"], {"project_id": None, "registered": False})
 

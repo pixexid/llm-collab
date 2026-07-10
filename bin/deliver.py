@@ -36,6 +36,7 @@ from _helpers import (
     CHATS_DIR,
     add_to_inbox,
     agent_ids,
+    build_handoff_prompt,
     ensure_project,
     has_collab_awareness,
     set_collab_awareness,
@@ -245,6 +246,14 @@ def main():
     recipient_type = recipient_agent.get("activation", {}).get("type")
     should_consider_onboarding = recipient_type != "human" and not args.skip_awareness_instruction
     first_time_awareness = should_consider_onboarding and not has_collab_awareness(args.recipient)
+
+    if first_time_awareness:
+        onboarding = build_handoff_prompt(
+            recipient_agent,
+            sender_id=args.sender,
+            first_time=True,
+        )
+        body = f"{onboarding}\n\n---\n\n## Work packet\n\n{body or '(no body)'}"
 
     content = build_message(args, body, chat_id)
     slug = slugify(args.title, max_len=40)

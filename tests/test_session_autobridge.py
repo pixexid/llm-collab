@@ -1612,6 +1612,14 @@ class SessionAutobridgeTest(unittest.TestCase):
         self.assertNotIn('--app "ZCode Worker"', deliver_result.stdout)
         self.assertIn("do not ask the operator to relay", deliver_result.stdout)
         self.assertNotIn("RELAY REQUIRED FOR OPERATOR", deliver_result.stdout)
+        delivered_candidates = sorted(
+            (root / "Chats" / "2026-06-26_zcode-doorbell__CHAT-ZCODE1").glob("*_to-zcode_*.md")
+        )
+        self.assertTrue(delivered_candidates)
+        delivered_text = delivered_candidates[-1].read_text()
+        self.assertIn("First-time setup required before task work:", delivered_text)
+        self.assertIn(f"{root}/AGENTS.md", delivered_text)
+        self.assertIn("Use the durable packet, then ring ZCode with axsend.", delivered_text)
 
     def test_deliver_reports_terminal_only_cli_session_as_unavailable(self):
         # #given
