@@ -407,7 +407,10 @@ def validate_issue_queue_mirror(project_id: str, design_payload: dict, errors: l
 
 
 def render_markdown(payload: dict) -> str:
-    project_id = payload.get("project_id", "amiga")
+    configured_project_id = payload.get("project_id")
+    project_id = str(configured_project_id or "project")
+    project = get_project(project_id) if configured_project_id else None
+    project_name = (project or {}).get("display_name") or (project_id if configured_project_id else "Project")
     lanes = sorted(payload.get("lanes", []), key=lambda lane: lane["order"])
     completed = payload.get("completed_recently", [])
     last_updated = payload.get("last_updated_utc", "unknown")
@@ -416,7 +419,7 @@ def render_markdown(payload: dict) -> str:
     next_queued = next((lane for lane in lanes if lane.get("queue_state") == "queued"), None)
 
     lines = [
-        "# Amiga Design Queue",
+        f"# {project_name} Design Queue",
         "",
         f"> Source: `design-queue.json`. This is a legacy design-first queue artifact. New design lanes should live in `issue-queue.json` with a design `lane_type`.",
         "> Do not treat an empty design queue as proof that project work is done; validate the GitHub-backed issue queue.",
@@ -673,7 +676,7 @@ def render_desktop_prompt(context: dict) -> str:
             "Assigned branch:",
             str(context["branch"]),
             "",
-            "Start with session bootstrap as claude, then follow the activation packet exactly. Do not use the Claude CLI bridge. Do not write into the main amiga checkout or any internal .claude worktree.",
+            "Start with session bootstrap as claude, then follow the activation packet exactly. Do not use the Claude CLI bridge. Do not write into the project's main checkout or any internal .claude worktree.",
         ]
     )
 

@@ -4,7 +4,8 @@ This guide walks you through setting up a fresh `llm-collab` workspace from scra
 
 ## Prerequisites
 
-- Python 3.9+
+- Python 3.10+ (`bin/llm-collab` selects a compatible interpreter for
+  collaboration commands; direct test discovery must also use Python 3.10+)
 - Git
 - PM2 (optional): `npm install -g pm2`
 
@@ -157,7 +158,7 @@ python bin/deliver.py \
   --title "Auth implementation task"
 ```
 
-For `human_relay` recipients, `deliver.py` prints a one-time onboarding relay prompt (read docs + update memory file) the first time they receive work. Later relays are short “check inbox” prompts once awareness is tracked locally.
+For reachable `cli_session` recipients, `deliver.py` prints an AX doorbell command; run that instead of asking the operator to relay. For true `human_relay` recipients, `deliver.py` can still print a one-time onboarding relay prompt (read docs + update memory file) the first time they receive work. Later relays are short “check inbox” prompts once awareness is tracked locally.
 
 ## Daily workflow
 

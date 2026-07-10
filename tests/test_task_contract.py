@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -95,6 +96,172 @@ class TaskContractUiVisualFeedbackTest(unittest.TestCase):
 
         # #then
         self.assertEqual(errors, [])
+
+
+class TaskContractProjectDesignDocsTest(unittest.TestCase):
+    def test_amiga_ui_contract_keeps_amiga_design_doc_default(self) -> None:
+        # #given
+        frontmatter = {
+            "project_id": "amiga",
+            "ui_ux_lane": True,
+            "ui_ux_mode": "docs_only",
+        }
+
+        # #when
+        synced, _changed = task_contract.sync_ui_ux_contract(frontmatter, "Update UI workflow docs.")
+
+        # #then
+        self.assertEqual(synced["required_design_docs"], [task_contract.AMIGA_DESIGN_DOC])
+
+    def test_project_config_replaces_foreign_amiga_default_and_preserves_task_docs(self) -> None:
+        # #given
+        project_docs = ["/projects/nuvyr/docs/product/website-design.md"]
+        frontmatter = {
+            "project_id": "nuvyr",
+            "ui_ux_lane": True,
+            "ui_ux_mode": "docs_only",
+            "required_design_docs": [
+                task_contract.AMIGA_DESIGN_DOC,
+                "/projects/nuvyr/docs/product/canonical-facts.md",
+            ],
+        }
+
+        # #when
+        with patch.object(
+            task_contract,
+            "get_project",
+            return_value={"id": "nuvyr", "ui_ux": {"required_design_docs": project_docs}},
+        ):
+            synced, changed = task_contract.sync_ui_ux_contract(frontmatter, "Update public UI docs.")
+
+        # #then
+        self.assertEqual(
+            synced["required_design_docs"],
+            [*project_docs, "/projects/nuvyr/docs/product/canonical-facts.md"],
+        )
+        self.assertIn("required_design_docs", changed)
+
+    def test_unconfigured_non_amiga_project_requires_explicit_design_source(self) -> None:
+        # #given
+        frontmatter = {
+            "project_id": "other",
+            "ui_ux_lane": True,
+            "ui_ux_mode": "docs_only",
+            "required_design_docs": [task_contract.AMIGA_DESIGN_DOC],
+        }
+
+        # #when
+        with patch.object(task_contract, "get_project", return_value={"id": "other"}):
+            errors, summary = task_contract.validate_ui_ux_contract(
+                frontmatter,
+                "Update public UI docs.",
+                stage="plan",
+            )
+
+        # #then
+        self.assertEqual(summary["required_design_docs"], [])
+        self.assertIn(
+            "UI/UX lane must list at least one project design source in `required_design_docs`.",
+            errors,
+        )
+
+
+class TaskContractProjectDbConfigTest(unittest.TestCase):
+    def test_amiga_db_contract_keeps_legacy_defaults(self) -> None:
+        # #given
+        frontmatter = {
+            "project_id": "amiga",
+            "db_impact": "shared-supabase-required",
+        }
+
+        # #when
+        synced, _changed = task_contract.sync_db_contract(frontmatter, "Apply a shared Supabase migration.")
+
+        # #then
+        self.assertEqual(synced["db_project_ref"], task_contract.AMIGA_SHARED_SUPABASE_PROJECT_REF)
+        self.assertEqual(
+            synced["db_required_surfaces"],
+            task_contract.AMIGA_SHARED_SUPABASE_REQUIRED_SURFACES,
+        )
+
+    def test_project_db_config_replaces_foreign_amiga_defaults(self) -> None:
+        # #given
+        project_surfaces = ["supabase_other.execute_sql", "supabase CLI"]
+        frontmatter = {
+            "project_id": "other",
+            "db_impact": "shared-supabase-required",
+            "db_project_ref": task_contract.AMIGA_SHARED_SUPABASE_PROJECT_REF,
+            "db_required_surfaces": task_contract.AMIGA_SHARED_SUPABASE_REQUIRED_SURFACES,
+        }
+
+        # #when
+        with patch.object(
+            task_contract,
+            "get_project",
+            return_value={
+                "id": "other",
+                "db": {
+                    "shared_supabase_project_ref": "other-project-ref",
+                    "required_surfaces": project_surfaces,
+                },
+            },
+        ):
+            synced, changed = task_contract.sync_db_contract(frontmatter, "Apply a shared Supabase migration.")
+
+        # #then
+        self.assertEqual(synced["db_project_ref"], "other-project-ref")
+        self.assertEqual(synced["db_required_surfaces"], project_surfaces)
+        self.assertIn("db_project_ref", changed)
+        self.assertIn("db_required_surfaces", changed)
+
+    def test_unconfigured_non_amiga_project_requires_explicit_db_contract(self) -> None:
+        # #given
+        frontmatter = {
+            "project_id": "other",
+            "db_impact": "shared-supabase-required",
+        }
+
+        # #when
+        with patch.object(task_contract, "get_project", return_value={"id": "other"}):
+            errors, summary = task_contract.validate_db_contract(
+                frontmatter,
+                "Apply a shared Supabase migration.",
+                stage="plan",
+            )
+
+        # #then
+        self.assertEqual(summary["db_project_ref"], "")
+        self.assertIn(
+            "Shared Supabase lane must configure `db.shared_supabase_project_ref` for the project "
+            "or provide an explicit task-level `db_project_ref`.",
+            errors,
+        )
+        self.assertIn(
+            "Shared Supabase lane must configure project `db.required_surfaces` or provide "
+            "explicit task-level `db_required_surfaces`.",
+            errors,
+        )
+
+    def test_unconfigured_non_amiga_project_accepts_explicit_task_db_contract(self) -> None:
+        # #given
+        frontmatter = {
+            "project_id": "other",
+            "db_impact": "shared-supabase-required",
+            "db_project_ref": "explicit-project-ref",
+            "db_required_surfaces": ["project_db.execute_sql", "project db CLI"],
+        }
+
+        # #when
+        with patch.object(task_contract, "get_project", return_value={"id": "other"}):
+            errors, summary = task_contract.validate_db_contract(
+                frontmatter,
+                "Apply a shared database migration.",
+                stage="plan",
+            )
+
+        # #then
+        self.assertEqual(errors, [])
+        self.assertEqual(summary["db_project_ref"], "explicit-project-ref")
 
 
 if __name__ == "__main__":

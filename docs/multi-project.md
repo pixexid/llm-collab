@@ -4,6 +4,56 @@ A single `llm-collab` workspace can coordinate agent work across multiple code r
 
 ---
 
+## Scoping principles
+
+`llm-collab` is a multi-project runtime. Project-scoped is the default;
+universal is the exception.
+
+- **Project-scoped:** messages, chats, tasks, queues, worktrees,
+  design/product sources, verification commands, database contracts, GitHub
+  repositories, runbooks, and runtime state under
+  `{project_state_root}/{project_id}/`. Every message and task carries a
+  `project_id`; every project-aware inbox, task, and queue operation passes
+  `--project <id>`.
+- **Universal only when project-independent by construction:** agent identities
+  and activation types in `agents.json`, mailbox and doorbell mechanics, the
+  seven-section executor packet, task lifecycle states, and the one-writer-per-
+  lane rule.
+- **No cross-project inheritance:** anything a contract injects or validates —
+  including design docs, database refs, tool surfaces, and preflight commands —
+  resolves from that project's `projects.json` entry or is stated explicitly
+  at task level. Hardcoding one project's value in `bin/` is a defect.
+
+### Onboarding a new project
+
+1. Add a `projects.json` entry with `id`, `display_name`, `repos`,
+   `default_branch_base`, `preflight_command`, and `github`. Add
+   `ui_ux.required_design_docs`, `db.*`, or `claude_desktop_bridge` only when
+   applicable.
+2. Initialize `{project_state_root}/{project_id}/` through queue reconciliation,
+   then add a project README that records the coordination chat, roles, and
+   routing policy.
+3. Add product-repository instructions such as `AGENTS.md`, worker-specific
+   files, and a collaboration skill that bind agents to the exact checkout and
+   `--project <id>`.
+4. Run that project's inbox, task, and queue checks. Sync a representative task
+   contract and confirm that no other project's defaults appear.
+
+### Changing `llm-collab`
+
+Workflow and tooling changes are first-class deliverables, not side effects of
+product work:
+
+- keep one writer for the change lane; if another writer is active in this
+  checkout, yield and coordinate through the mailbox;
+- keep project values out of `bin/`; use `projects.json` configuration, with an
+  explicit legacy fallback only when backward compatibility requires it;
+- update `docs/schema-reference.md` and focused tests with contract changes;
+- run the full suite with Python 3.10 or newer:
+  `python3.11 -m unittest discover -s tests`.
+
+---
+
 ## The model
 
 Every message and task carries a `project_id` that identifies which project the communication is about. This allows:
@@ -37,6 +87,14 @@ Edit `projects.json` (or regenerate with `python scripts/init.py`):
       },
       "default_branch_base": "main",
       "preflight_command": ["pnpm", "preflight", "--json"],
+      "claude_desktop_bridge": false,
+      "ui_ux": {
+        "required_design_docs": ["/absolute/path/to/my-app/DESIGN.md"]
+      },
+      "db": {
+        "shared_supabase_project_ref": "project-ref",
+        "required_surfaces": ["supabase_my_app.execute_sql", "supabase CLI"]
+      },
       "github": {
         "enabled": true,
         "repo": "owner/my-app",
@@ -64,6 +122,20 @@ Edit `projects.json` (or regenerate with `python scripts/init.py`):
 ```
 
 Repo paths are relative to `projects_root` (from `collab.config.json`). Project runtime state, such as queues and local runbooks, is separate and resolves from `project_state_root`.
+
+For UI/UX projects, set `ui_ux.required_design_docs` to the project's own
+canonical design sources. The task-contract helper prepends those documents to
+UI/UX tasks and removes the Amiga default from non-Amiga projects. Additional
+task-specific design sources remain allowed.
+
+Set `db.shared_supabase_project_ref` and `db.required_surfaces` only for projects
+that use the shared-Supabase task contract. Non-Amiga projects never inherit
+Amiga's project ref or MCP surface names; an unconfigured database lane must
+provide both values explicitly at task level.
+
+`claude_desktop_bridge` is an opt-in fallback for Claude targets that are not
+configured as CLI sessions. CLI-session workers use the project-independent AX
+doorbell path first.
 
 ### Project state root
 

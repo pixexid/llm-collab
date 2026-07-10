@@ -567,22 +567,27 @@ def reconcile_queue(project_id: str) -> dict:
 
 
 def render_markdown(payload: dict) -> str:
-    project_id = payload.get("project_id", "amiga")
+    configured_project_id = payload.get("project_id")
+    project_id = str(configured_project_id or "project")
+    project = get_project(project_id) if configured_project_id else None
+    project_name = (project or {}).get("display_name") or (project_id if configured_project_id else "Project")
     lanes = sorted(payload.get("lanes", []), key=lambda lane: lane["order"])
     completed = payload.get("completed_recently", [])
     last_updated = payload.get("last_updated_utc", "unknown")
     source_issue = payload.get("source_issue")
     source_task = payload.get("source_task")
+    source_issue_label = f"`GH-{source_issue}`" if isinstance(source_issue, int) else "none"
+    source_task_label = f"`{source_task}`" if source_task else "none"
 
     ready_lane = next((lane for lane in lanes if lane.get("queue_state") == "ready"), None)
     lines = [
-        "# Amiga Ordered Issue Queue",
+        f"# {project_name} Ordered Issue Queue",
         "",
         f"> Generated from GitHub issues and task mirrors. Run `python3 bin/project_issue_queue.py reconcile --project {project_id} --write` to refresh this projection.",
         "",
         f"- Last updated: `{last_updated}`",
-        f"- Source issue: `GH-{source_issue}`",
-        f"- Source task: `{source_task}`",
+        f"- Source issue: {source_issue_label}",
+        f"- Source task: {source_task_label}",
     ]
 
     if ready_lane:

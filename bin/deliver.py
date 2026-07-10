@@ -15,10 +15,10 @@ deliver.py — Send a message from one agent to another.
 Writes the message to Chats/ (canonical record) and appends
 a pointer to the recipient's agents/{id}/inbox.json.
 
-If the recipient is a Claude Desktop target, prints a Computer Use bridge
-instruction instead of a human relay prompt. If the recipient has
-activation.type == "human_relay", prints a ready-to-paste handoff prompt for
-the human operator.
+If the recipient is a CLI-session target, prints an AX doorbell instruction.
+Projects may opt Claude into a desktop-bridge fallback for non-CLI targets. If
+the recipient has activation.type == "human_relay", prints a ready-to-paste
+handoff prompt for the human operator.
 
 Usage:
   bin/deliver.py --chat last --from orchestrator --to worker --title "Implement feature X"
@@ -41,6 +41,7 @@ from _helpers import (
     set_collab_awareness,
     find_chat_by_partial,
     get_agent,
+    get_project,
     is_human_relay,
     python_cmd,
     load_chat_meta,
@@ -136,7 +137,13 @@ def resolve_bound_runtime_session_id(project_id: str, chat_id: str, agent_id: st
 
 
 def is_claude_desktop_bridge_target(project_id: str, recipient_id: str) -> bool:
-    return project_id == "amiga" and recipient_id == "claude"
+    project = get_project(project_id) or {}
+    return bool(project.get("claude_desktop_bridge")) and recipient_id == "claude"
+
+
+def is_ax_doorbell_target(project_id: str, recipient_agent: dict, recipient_id: str) -> bool:
+    activation_type = recipient_agent.get("activation", {}).get("type")
+    return recipient_id != "operator" and activation_type == "cli_session"
 
 
 def build_desktop_bridge_prompt(chat_id: str, recipient_id: str, message_path: Path) -> str:
@@ -274,9 +281,20 @@ def main():
         },
     )
 
+    ax_doorbell_required = (
+        args.recipient != "operator"
+        and not autobridge_ready
+        and is_ax_doorbell_target(args.project, recipient_agent, args.recipient)
+    )
+    ax_doorbell_prompt = (
+        f"[from {args.sender}] Read latest {args.recipient} packet in {chat_id}: {to_path.name}"
+        if ax_doorbell_required
+        else None
+    )
     desktop_bridge_required = (
         args.recipient != "operator"
         and not autobridge_ready
+        and not ax_doorbell_required
         and is_claude_desktop_bridge_target(args.project, args.recipient)
     )
     desktop_bridge_prompt = (
@@ -284,7 +302,13 @@ def main():
         if desktop_bridge_required
         else None
     )
-    operator_relay_required = args.recipient != "operator" and not autobridge_ready and not desktop_bridge_required
+    operator_relay_required = (
+        args.recipient != "operator"
+        and not autobridge_ready
+        and not desktop_bridge_required
+        and not ax_doorbell_required
+        and is_human_relay(recipient_agent)
+    )
 
     result = {
         "chat_id": chat_id,
@@ -296,6 +320,8 @@ def main():
         "operator_relay_required": operator_relay_required,
         "desktop_bridge_required": desktop_bridge_required,
         "desktop_bridge_prompt": desktop_bridge_prompt,
+        "ax_doorbell_required": ax_doorbell_required,
+        "ax_doorbell_prompt": ax_doorbell_prompt,
         "resolved_target_session_id": args.target_session_id,
         "autobridge_ready": autobridge_ready,
         "autobridge_session_id": autobridge_target.get("session_id") if autobridge_target else None,
@@ -327,6 +353,29 @@ def main():
             sender_id=args.sender,
             first_time=bool(first_time_awareness),
         )
+    elif ax_doorbell_required:
+        recipient_display = recipient_agent.get("display_name", args.recipient)
+        border = "━" * 60
+        print(f"\n{border}")
+        print("🔔 AX DOORBELL REQUIRED")
+        print(border)
+        print()
+        print(
+            f"Ring {recipient_display} ({args.recipient}) with axsend; "
+            "do not ask the operator to relay."
+        )
+        print()
+        print("One-line prompt:")
+        print(ax_doorbell_prompt)
+        print()
+        print("Command:")
+        print(
+            f"{ROOT}/bin/axsend-ensure ring --app {json.dumps(recipient_display)} "
+            f"--submit --verify --text {json.dumps(ax_doorbell_prompt)}"
+        )
+        print()
+        print("If axsend fails after retry/confirm, record the AX blocker in the mailbox.")
+        print(border)
     elif not autobridge_ready:
         recipient_display = recipient_agent.get("display_name", args.recipient)
         border = "━" * 60

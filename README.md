@@ -23,6 +23,10 @@ No servers. No databases. No external services required. Every message, task, an
 - **Git worktrees** — optional per-agent isolated branches for parallel implementation
 - **Memory snippets** — auto-generated collab-awareness snippets for Claude Code, Codex, and any LLM
 
+Project-scoped is the default and universal behavior is the exception. See
+[Multi-Project Support](docs/multi-project.md#scoping-principles) before adding
+a project or changing shared workflow tooling.
+
 ## Architecture in one diagram
 
 ```
@@ -235,7 +239,8 @@ Use relay prompts only when a worker should start immediately.
 
 ## Requirements
 
-- Python 3.9+
+- Python 3.10+ (use `bin/llm-collab` for commands; use a 3.10+ interpreter,
+  such as `python3.11`, for direct `unittest` discovery)
 - Git (for worktree features)
 - PM2 (optional, for background watchers): `npm install -g pm2`
 

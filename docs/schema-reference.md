@@ -114,6 +114,14 @@ Project registry. Created by `scripts/init.py`. Gitignored.
       },
       "default_branch_base": "main",
       "preflight_command": ["pnpm", "preflight", "--json"],
+      "claude_desktop_bridge": false,
+      "ui_ux": {
+        "required_design_docs": ["/absolute/path/to/project/DESIGN.md"]
+      },
+      "db": {
+        "shared_supabase_project_ref": "project-ref",
+        "required_surfaces": ["supabase_my_app.execute_sql", "supabase CLI"]
+      },
       "github": {
         "enabled": true,
         "repo": "owner/my-app",
@@ -135,6 +143,10 @@ Project registry. Created by `scripts/init.py`. Gitignored.
 | `repos` | object | Map of repo ID → path (relative to `projects_root` or absolute) |
 | `default_branch_base` | string | Default git ref for worktree creation |
 | `preflight_command` | string[] or null | Command to validate before task integration |
+| `claude_desktop_bridge` | bool | Optional Claude Desktop fallback for a non-CLI Claude target. CLI-session workers use AX first. |
+| `ui_ux.required_design_docs` | string[] | Optional project-specific design sources prepended to every UI/UX task contract. Non-Amiga projects must configure these or provide explicit task-level design docs. |
+| `db.shared_supabase_project_ref` | string | Optional shared Supabase project ref required by database-impact task contracts. Non-Amiga projects do not inherit Amiga's ref. |
+| `db.required_surfaces` | string[] | Optional project-specific CLI or MCP surfaces required by shared-database task contracts. |
 | `github.enabled` | bool | Whether GitHub integration is active |
 | `github.repo` | string | `owner/repo` format |
 | `github.project_number` | int | GitHub Projects board number |
@@ -660,9 +672,9 @@ Local runtime state used to avoid repeating first-time collaboration onboarding 
 Notes:
 - this file is runtime-only and gitignored (`State/`)
 - `deliver.py` uses it to print first-time onboarding relay prompts for `human_relay` recipients, then avoid repeating those long prompts
-- Claude Desktop recipients are not relay recipients. For those sends,
-  `deliver.py` reports `desktop_bridge_required` and a one-line bridge prompt
-  for Codex to send through the Claude app with Computer Use. If Computer Use is
-  blocked, record the blocker, keep the heartbeat active, and retry through
-  Codex-owned Computer Use/app inspection or repair tooling. Do not ask the
-  operator to relay, paste, click, or manually wake Claude.
+- Reachable `cli_session` workers, including Claude, are not relay recipients.
+  For those sends, `deliver.py` reports `ax_doorbell_required` and prints the
+  `axsend-ensure ring --submit --verify` command the sender should run.
+- A project may enable `claude_desktop_bridge` for a non-CLI Claude target. Only
+  that fallback reports `desktop_bridge_required` and uses Computer Use; it does
+  not override AX routing for a Claude agent registered as `cli_session`.

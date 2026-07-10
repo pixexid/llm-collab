@@ -733,6 +733,27 @@ class ProjectDesignQueueTest(unittest.TestCase):
         self.assertIn("- Active lane: `GH-2` / `TASK-A` / `claude` / `active`", rendered)
         self.assertIn("- Next queued lane: `GH-6` / `TASK-B` / `claude`", rendered)
 
+    def test_render_markdown_uses_registered_project_name(self) -> None:
+        # #given
+        payload = {
+            "project_id": "nuvyr",
+            "artifact_type": "ordered_design_queue",
+            "mode": "legacy",
+            "lanes": [],
+        }
+
+        # #when
+        with patch.object(
+            project_design_queue,
+            "get_project",
+            return_value={"id": "nuvyr", "display_name": "Nuvyr"},
+        ):
+            rendered = project_design_queue.render_markdown(payload)
+
+        # #then
+        self.assertIn("# Nuvyr Design Queue", rendered)
+        self.assertNotIn("Amiga", rendered)
+
     def test_validation_status_line_reports_active_lane_when_no_ready_lane(self) -> None:
         payload = {
             "lanes": [
@@ -989,6 +1010,8 @@ class ProjectDesignQueueTest(unittest.TestCase):
         self.assertIn("bridge_thread_uuid: 12345678-1234-1234-1234-123456789abc", prompt)
         self.assertIn("/tmp/message.md", prompt)
         self.assertIn("codex/claude/task-a", prompt)
+        self.assertIn("project's main checkout", prompt)
+        self.assertNotIn("main amiga checkout", prompt)
 
     def test_render_desktop_prompt_rejects_missing_bridge_metadata(self) -> None:
         context = {

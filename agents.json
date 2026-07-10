@@ -55,6 +55,16 @@
         "base_model": "claude",
         "identity_note": "You are Antigravity (antigravity). Read only messages addressed to 'antigravity'."
       }
+    },
+    {
+      "id": "zcode",
+      "display_name": "ZCode",
+      "role": "implementation",
+      "notes": "Implementation and secondary review. GLM-5.2 (builtin:zai-coding-plan/GLM-5.2).",
+      "activation": {
+        "type": "cli_session",
+        "watcher_enabled": true
+      }
     }
   ]
 }

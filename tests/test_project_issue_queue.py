@@ -403,6 +403,28 @@ accepted_by: null
 
         self.assertIn("- Next ready lane: `GH-784` / `TASK-E8C28D` / `claude` (refine)", rendered)
 
+    def test_render_markdown_uses_registered_project_name_and_clean_empty_sources(self) -> None:
+        payload = {
+            "project_id": "nuvyr",
+            "last_updated_utc": "2026-07-10T05:32:42+00:00",
+            "source_issue": None,
+            "source_task": None,
+            "lanes": [],
+        }
+
+        with patch.object(
+            project_issue_queue,
+            "get_project",
+            return_value={"id": "nuvyr", "display_name": "Nuvyr"},
+        ):
+            rendered = project_issue_queue.render_markdown(payload)
+
+        self.assertIn("# Nuvyr Ordered Issue Queue", rendered)
+        self.assertIn("- Source issue: none", rendered)
+        self.assertIn("- Source task: none", rendered)
+        self.assertNotIn("Amiga", rendered)
+        self.assertNotIn("GH-None", rendered)
+
 
 if __name__ == "__main__":
     unittest.main()
