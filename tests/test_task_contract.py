@@ -256,6 +256,36 @@ class TaskContractProjectDbConfigTest(unittest.TestCase):
             errors,
         )
 
+    def test_configured_project_validation_rejects_missing_persisted_ref(self) -> None:
+        # #given
+        frontmatter = {
+            "project_id": "other",
+            "db_impact": "shared-supabase-required",
+            "db_required_surfaces": ["supabase_other.execute_sql"],
+        }
+        project = {
+            "id": "other",
+            "db": {
+                "shared_supabase_project_ref": "other-project-ref",
+                "required_surfaces": ["supabase_other.execute_sql"],
+            },
+        }
+
+        # #when
+        with patch.object(task_contract, "get_project", return_value=project):
+            errors, summary = task_contract.validate_db_contract(
+                frontmatter,
+                "Apply a shared Supabase migration.",
+                stage="plan",
+            )
+
+        # #then
+        self.assertEqual(summary["db_project_ref"], "")
+        self.assertIn(
+            "Shared Supabase lane must set project-configured `db_project_ref: other-project-ref`.",
+            errors,
+        )
+
     def test_unconfigured_non_amiga_project_requires_explicit_db_contract(self) -> None:
         # #given
         frontmatter = {

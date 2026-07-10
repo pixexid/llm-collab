@@ -707,12 +707,11 @@ def validate_db_contract(frontmatter: dict, body: str, *, stage: str) -> tuple[l
     fm, _ = sync_db_contract(frontmatter, body)
     db_impact = _normalize_text(fm.get("db_impact"))
     raw_project_ref = _normalize_text(frontmatter.get("db_project_ref"))
-    synced_project_ref = _normalize_text(fm.get("db_project_ref"))
     summary = {
         "db_impact": db_impact,
         "db_impact_detection": fm.get("db_impact_detection", "auto"),
         "db_impact_detection_reasons": _normalize_list(fm.get("db_impact_detection_reasons")),
-        "db_project_ref": raw_project_ref or synced_project_ref,
+        "db_project_ref": raw_project_ref,
         "db_schema_change_detected": _normalize_bool(fm.get("db_schema_change_detected")) is True,
     }
 
@@ -724,10 +723,9 @@ def validate_db_contract(frontmatter: dict, body: str, *, stage: str) -> tuple[l
         return errors, summary
 
     project_ref, project_required_surfaces = _project_db_contract(fm)
-    actual_project_ref = raw_project_ref or synced_project_ref
-    if project_ref and actual_project_ref != project_ref:
+    if project_ref and raw_project_ref != project_ref:
         errors.append(f"Shared Supabase lane must set project-configured `db_project_ref: {project_ref}`.")
-    elif not project_ref and not actual_project_ref:
+    elif not project_ref and not raw_project_ref:
         errors.append(
             "Shared Supabase lane must configure `db.shared_supabase_project_ref` for the project "
             "or provide an explicit task-level `db_project_ref`."
