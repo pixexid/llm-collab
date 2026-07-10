@@ -673,7 +673,11 @@ Local runtime state used to avoid repeating first-time collaboration onboarding 
 
 Notes:
 - this file is runtime-only and gitignored (`State/`)
-- `deliver.py` uses it to print first-time onboarding relay prompts for `human_relay` recipients, then avoid repeating those long prompts
+- `deliver.py` prepends first-time onboarding to the recipient's durable mailbox
+  packet before marking awareness, so AX and runtime-dispatched workers receive
+  the same setup contract as human-relay recipients
+- `human_relay` recipients also receive the onboarding in the printed handoff
+  prompt; later deliveries omit it once awareness is tracked locally
 - AX-capable `cli_session` workers configure `activation.ax_app`. For those
   sends, `deliver.py` reports `ax_doorbell_required` and prints the
   `axsend-ensure ring --submit --verify` command the sender should run.

@@ -162,10 +162,11 @@ python bin/deliver.py \
 For `cli_session` recipients with `activation.ax_app`, `deliver.py` prints an AX
 doorbell command; run that instead of asking the operator to relay. Terminal-only
 CLI sessions require a dispatchable runtime session and otherwise report
-`activation_unavailable`. For true `human_relay` recipients, `deliver.py` can
-still print a one-time onboarding relay prompt (read docs + update memory file)
-the first time they receive work. Later relays are short “check inbox” prompts
-once awareness is tracked locally.
+`activation_unavailable`. The first durable packet to any non-human recipient
+includes the collaboration onboarding contract (read docs + update memory
+files) before awareness is recorded. True `human_relay` recipients also receive
+that setup in the printed handoff prompt. Later deliveries use short “check
+inbox” prompts once awareness is tracked locally.
 
 ## Daily workflow
 

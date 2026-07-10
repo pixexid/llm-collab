@@ -64,6 +64,11 @@ Exit codes: `ring --verify` returns 7 if the sent text isn't found in the
 conversation after the press (treat as "did not land"; the draft is cleared so
 nothing is left stuck). `confirm` returns 0 delivered / 7 not-delivered. `ring --submit` (verify default) exits 0 on a confirmed delivery OR a QUEUED accept (recipient busy — message taken, will render when its turn ends; never resend), and 7 only after all retries fail with the recipient idle. `--submit` returns 5 if no send button resolved, 6 if the press failed.
 
+`bin/axsend-ensure` preserves that queued exit-0 result. It runs the additional
+standalone `confirm` only after a visibly verified ring; a queued turn is not yet
+present in the conversation tree, so post-confirming it would create a false
+failure and invite an unsafe duplicate send.
+
 **Electron apps (ZCode/Antigravity) — the verification rule:** these composers
 accept key events but do NOT reflect text back through `AXValue`, so you cannot
 read the draft/empty state via AX. NEVER trust a read-back of the composer, and
