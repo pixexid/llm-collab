@@ -312,5 +312,7 @@ python bin/deliver.py \
 ## Notes
 
 - `new_chat.py` and `deliver.py` require `--project`, and each chat has a single `project_id` in `meta.json`.
-- Task files should also carry `project_id`; legacy unscoped tasks are still read for migration/back-compat.
+- New and active task files must carry `project_id`; project-aware queues,
+  reports, and adapters exclude unscoped tasks. Use explicit migration tooling
+  to backfill legacy data.
 - For single-project setups, pass that project ID consistently instead of leaving fields null.

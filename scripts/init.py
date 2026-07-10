@@ -93,28 +93,35 @@ def build_identity_md(agent: dict, workspace_name: str, all_agent_ids: list[str]
         "",
         f"At the start of every session, run:",
         f"```",
-        f"python {ROOT}/bin/session_bootstrap.py --agent {aid}",
+        f"{ROOT}/bin/llm-collab session_bootstrap.py --agent {aid}",
         f"```",
         "",
         "## Key Commands",
         "",
         f"```bash",
         f"# Check inbox",
-        f"python {ROOT}/bin/inbox.py --me {aid}",
+        f"{ROOT}/bin/llm-collab inbox.py --me {aid}",
         "",
         f"# Send message",
-        f'{ROOT}/bin/deliver.py --chat last --from {aid} --to <agent> --project <project_id> --title "..."',
+        f'{ROOT}/bin/llm-collab deliver.py --chat last --from {aid} --to <agent> --project <project_id> --title "..."',
         "",
         f"# Create task",
-        f'python {ROOT}/bin/new_task.py --title "..." --created-by {aid} --project <project_id>',
+        f'{ROOT}/bin/llm-collab new_task.py --title "..." --created-by {aid} --project <project_id>',
         "",
         f"# Task board",
-        f"python {ROOT}/bin/task_board.py",
+        f"{ROOT}/bin/llm-collab task_board.py",
         f"```",
         "",
         f"## Active Projects",
         "",
         f"{project_list}",
+        "",
+        "## Project Boundary",
+        "",
+        "- Project-scoped is the default; universal behavior is the exception.",
+        "- Use one registered `project_id` for every chat, message, task, queue, and report.",
+        "- Never reuse another project's paths, design docs, database refs, tools, or policy.",
+        "- Read the target repository instructions and the workspace `AGENTS.md` before acting.",
         "",
         f"## Other Agents",
         "",
@@ -379,18 +386,21 @@ def main():
     print("1. Bootstrap each agent session:")
     for a in agents:
         if a.get("activation", {}).get("type") not in ("human",):
-            print(f"   python bin/session_bootstrap.py --agent {a['id']}")
+            print(f"   bin/llm-collab session_bootstrap.py --agent {a['id']}")
     print()
     print("2. Generate memory snippets for your LLM tools:")
     for a in agents:
         if a.get("activation", {}).get("type") not in ("human",):
-            print(f"   python bin/init_agent_memory.py --agent {a['id']} --target generic")
+            print(f"   bin/llm-collab init_agent_memory.py --agent {a['id']} --target generic")
     print()
     print("3. Start PM2 watchers (optional, requires pm2):")
-    print("   python bin/pm2_watchers.py start --all")
+    print("   bin/llm-collab pm2_watchers.py start --all")
     print()
     print("4. Create your first chat:")
-    print('   python bin/new_chat.py --title "..." --project <project_id>')
+    print('   bin/llm-collab new_chat.py --title "..." --project <project_id>')
+    print()
+    print("5. Complete each project's optional UI/UX, DB, and bridge contract:")
+    print("   See docs/multi-project.md and AGENTS.md before activating workers.")
     print()
     print("Done. See docs/getting-started.md for the full workflow.\n")
 

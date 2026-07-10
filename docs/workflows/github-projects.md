@@ -26,14 +26,17 @@ If GitHub project state and local task state disagree, resolve it in the same se
 ## Mirror + sync tools
 
 ```bash
-python bin/check_github_task_mirrors.py --project <project_id>
-python bin/check_github_task_mirrors.py --project <project_id> --archive-closed-active
-python bin/report_github_project_task_sync.py --project <project_id>
+bin/llm-collab check_github_task_mirrors.py --project <project_id>
+bin/llm-collab check_github_task_mirrors.py --project <project_id> --archive-closed-active
+bin/llm-collab report_github_project_task_sync.py --project <project_id>
 ```
+
+All mirror lookups use exact project matching. The sync report is written to
+`{project_state_root}/{project_id}/github-project-task-sync.md` unless
+`--output` overrides it.
 
 ## Alignment semantics
 
 - `ok`: no action needed
 - `mismatch`: execution drift, fix immediately
 - `review`: possible valid state but needs human judgement
-

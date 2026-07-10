@@ -776,28 +776,31 @@ def build_handoff_prompt(
         "identity_note",
         f"You are {display_name} ({agent_id}). Read only messages addressed to '{agent_id}'.",
     )
-    py = python_cmd()
-    bootstrap_cmd = f"{py} {ROOT}/bin/session_bootstrap.py --agent {agent['id']}"
+    runner = f"{ROOT}/bin/llm-collab"
+    bootstrap_cmd = f"{runner} session_bootstrap.py --agent {agent['id']}"
     memory_path = f"{ROOT}/agents/{agent_id}/memory.md"
     if first_time:
         lines = [
             identity_note,
             "",
             "First-time setup required before task work:",
-            f"1) Read docs: {ROOT}/README.md",
-            f"2) Read docs: {ROOT}/docs/getting-started.md",
-            f"3) Read docs: {ROOT}/docs/identity-system.md",
-            f"4) Read docs: {ROOT}/docs/workflows/README.md",
-            "5) Update memory files now:",
+            f"1) Read worker contract: {ROOT}/AGENTS.md",
+            f"2) Read docs: {ROOT}/README.md",
+            f"3) Read docs: {ROOT}/docs/multi-project.md",
+            f"4) Read docs: {ROOT}/docs/getting-started.md",
+            f"5) Read docs: {ROOT}/docs/identity-system.md",
+            f"6) Read docs: {ROOT}/docs/workflows/README.md",
+            "7) Update memory files now:",
             "   - Your main/global memory file for this model account.",
             "   - The repo/project memory file used when working on this project.",
             f"   - Local collab memory file: {memory_path}",
             "",
             "Memory updates must include:",
             f"- Bootstrap: {bootstrap_cmd}",
-            f"- Inbox: {py} {ROOT}/bin/inbox.py --me {agent_id}",
-            f"- Deliver: {py} {ROOT}/bin/deliver.py --chat last --from {agent_id} --to <agent> --project <project_id> --title \"...\"",
+            f"- Inbox: {runner} inbox.py --me {agent_id}",
+            f"- Deliver: {runner} deliver.py --chat last --from {agent_id} --to <agent> --project <project_id> --title \"...\"",
             "- Rule: always bootstrap and check inbox at session start.",
+            "- Rule: project-scoped is the default; never reuse another project's paths, DB refs, tools, or policy.",
             "",
             "Then bootstrap now and execute your latest inbox message.",
             f"  {bootstrap_cmd}",

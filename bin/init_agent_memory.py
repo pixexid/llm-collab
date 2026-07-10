@@ -7,10 +7,10 @@ and how to use the collab system. Can optionally write the snippet directly
 to a supported LLM's memory system.
 
 Usage:
-  python bin/init_agent_memory.py --agent orchestrator --target generic
-  python bin/init_agent_memory.py --agent claude --target claude-code
-  python bin/init_agent_memory.py --agent orchestrator --target codex
-  python bin/init_agent_memory.py --agent claude --target claude-md --project-path /path/to/project
+  bin/llm-collab init_agent_memory.py --agent orchestrator --target generic
+  bin/llm-collab init_agent_memory.py --agent claude --target claude-code
+  bin/llm-collab init_agent_memory.py --agent orchestrator --target codex
+  bin/llm-collab init_agent_memory.py --agent claude --target claude-md --project-path /path/to/project
 """
 
 from __future__ import annotations
@@ -73,14 +73,20 @@ def build_snippet(agent_id: str) -> str:
         f"**Your identity file**: `{ROOT}/agents/{agent_id}/identity.md`",
         "",
         "**Quick commands:**",
-        f"- Bootstrap session: `python {ROOT}/bin/session_bootstrap.py --agent {agent_id}`",
-        f"- Read inbox: `python {ROOT}/bin/inbox.py --me {agent_id}`",
-        f"- Send message: `{ROOT}/bin/deliver.py --chat last --from {agent_id} --to <agent> --project <project_id> --title \"...\"`",
-        f"- Create task: `python {ROOT}/bin/new_task.py --title \"...\" --created-by {agent_id} --project <project_id>`",
-        f"- Task board: `python {ROOT}/bin/task_board.py`",
+        f"- Bootstrap session: `{ROOT}/bin/llm-collab session_bootstrap.py --agent {agent_id}`",
+        f"- Read inbox: `{ROOT}/bin/llm-collab inbox.py --me {agent_id}`",
+        f"- Send message: `{ROOT}/bin/llm-collab deliver.py --chat last --from {agent_id} --to <agent> --project <project_id> --title \"...\"`",
+        f"- Create task: `{ROOT}/bin/llm-collab new_task.py --title \"...\" --created-by {agent_id} --project <project_id>`",
+        f"- Task board: `{ROOT}/bin/llm-collab task_board.py`",
         "",
         f"**Active projects**: {project_list}",
         f"**Other agents**: {', '.join(other_agents) if other_agents else '(none)'}",
+        "",
+        "**Project boundary:**",
+        "- Project-scoped is the default; universal behavior is the exception.",
+        "- Use one registered project ID for every chat, message, task, queue, and report.",
+        "- Never reuse another project's paths, design docs, database refs, tools, or policy.",
+        "- Read the target repository instructions and the workspace AGENTS.md before acting.",
         "",
         "Always bootstrap your session at the start of each conversation.",
         "Always check your inbox before starting new work.",
