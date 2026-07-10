@@ -176,7 +176,7 @@ python /path/to/_collab/bin/session_bootstrap.py --agent worker
 python /path/to/_collab/bin/inbox.py --me worker
 
 # Send message
-python /path/to/_collab/bin/deliver.py --chat last --from worker --to <agent> --title "..."
+python /path/to/_collab/bin/deliver.py --chat last --from worker --to <agent> --project <project_id> --title "..."
 
 # Create task
 python /path/to/_collab/bin/new_task.py --title "..." --created-by worker --project <project_id>

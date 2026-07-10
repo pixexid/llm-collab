@@ -195,9 +195,9 @@ python3 bin/task_board.py --project docs-site
 |---------|---------|
 | `session_bootstrap.py --agent <id>` | Initialize session, print identity, show inbox |
 | `inbox.py --me <id>` | List unread messages |
-| `bin/deliver.py --from <id> --to <id> --chat last --title "..."` | Send a message |
+| `bin/deliver.py --from <id> --to <id> --chat last --project <id> --title "..."` | Send a message |
 | `new_chat.py --title "..." --project <id>` | Create a chat thread |
-| `new_task.py --title "..." --created-by <id>` | Create a task |
+| `new_task.py --title "..." --created-by <id> --project <id>` | Create a task |
 | `claim_task.py --task TASK-xxx --owner <id> --status in_progress` | Claim/update a task |
 | `task_board.py` | List all tasks |
 | `reindex.py` | Regenerate `Index/index.md` |

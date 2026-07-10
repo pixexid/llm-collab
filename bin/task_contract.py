@@ -35,6 +35,11 @@ AMIGA_SHARED_SUPABASE_REQUIRED_SURFACES = [
     "supabase_amiga.get_advisors",
     "supabase CLI",
 ]
+AMIGA_PROJECT_SPECIFIC_SUPABASE_SURFACES = {
+    "supabase_amiga.get_project",
+    "supabase_amiga.execute_sql",
+    "supabase_amiga.get_advisors",
+}
 DB_IMPACT_VALUES = {"none", "local-schema-only", "shared-supabase-required"}
 DEFAULT_DESIGN_SKILLS = ["impeccable"]
 DESIGN_THINKING_DISPOSITIONS = {"shipped", "deferred", "out_of_scope"}
@@ -126,7 +131,7 @@ def _project_required_design_docs(frontmatter: dict) -> list[str]:
         legacy_design_doc = _normalize_text(ui_ux_config.get("design_doc"))
         if legacy_design_doc:
             return [legacy_design_doc]
-    if project_id in {"", "amiga"}:
+    if project_id == "amiga":
         return [AMIGA_DESIGN_DOC]
     return []
 
@@ -140,7 +145,7 @@ def _project_db_contract(frontmatter: dict) -> tuple[str, list[str]]:
         required_surfaces = _normalize_list(db_config.get("required_surfaces"))
         if project_ref or required_surfaces:
             return project_ref, required_surfaces
-    if project_id in {"", "amiga"}:
+    if project_id == "amiga":
         return AMIGA_SHARED_SUPABASE_PROJECT_REF, list(AMIGA_SHARED_SUPABASE_REQUIRED_SURFACES)
     return "", []
 
@@ -516,13 +521,14 @@ def sync_db_contract(frontmatter: dict, body: str) -> tuple[dict, list[str]]:
         existing_project_ref = _normalize_text(updated.get("db_project_ref"))
         existing_required_surfaces = _normalize_list(updated.get("db_required_surfaces"))
         project_id = _normalize_text(updated.get("project_id"))
-        if project_id not in {"", "amiga"} and existing_project_ref == AMIGA_SHARED_SUPABASE_PROJECT_REF:
+        if project_id and project_id != "amiga" and existing_project_ref == AMIGA_SHARED_SUPABASE_PROJECT_REF:
             existing_project_ref = ""
-        if (
-            project_id not in {"", "amiga"}
-            and existing_required_surfaces == AMIGA_SHARED_SUPABASE_REQUIRED_SURFACES
-        ):
-            existing_required_surfaces = []
+        if project_id and project_id != "amiga":
+            existing_required_surfaces = [
+                surface
+                for surface in existing_required_surfaces
+                if surface not in AMIGA_PROJECT_SPECIFIC_SUPABASE_SURFACES
+            ]
         merged_required_surfaces = [
             *project_required_surfaces,
             *[
@@ -532,7 +538,7 @@ def sync_db_contract(frontmatter: dict, body: str) -> tuple[dict, list[str]]:
             ],
         ]
         defaults: dict[str, object] = {
-            "db_project_ref": existing_project_ref or project_ref or None,
+            "db_project_ref": project_ref or existing_project_ref or None,
             "db_required_surfaces": merged_required_surfaces,
             "db_migration_files": _normalize_list(updated.get("db_migration_files")),
             "db_apply_result": updated.get("db_apply_result"),
@@ -758,9 +764,19 @@ def validate_db_contract(frontmatter: dict, body: str, *, stage: str) -> tuple[l
 
 
 def validate_task_contract(frontmatter: dict, body: str, *, stage: str) -> tuple[list[str], dict]:
+    project_id = _normalize_text(frontmatter.get("project_id"))
+    project_errors: list[str] = []
+    if not project_id:
+        project_errors.append("Task must set a registered `project_id`.")
+    elif get_project(project_id) is None:
+        project_errors.append(f"Task references unknown `project_id: {project_id}`.")
     ui_errors, ui_summary = validate_ui_ux_contract(frontmatter, body, stage=stage)
     db_errors, db_summary = validate_db_contract(frontmatter, body, stage=stage)
-    return ui_errors + db_errors, {"ui_ux": ui_summary, "db": db_summary}
+    return project_errors + ui_errors + db_errors, {
+        "project": {"project_id": project_id or None, "registered": bool(project_id and not project_errors)},
+        "ui_ux": ui_summary,
+        "db": db_summary,
+    }
 
 
 def write_synced_task(task_path: Path, frontmatter: dict, body: str) -> dict:

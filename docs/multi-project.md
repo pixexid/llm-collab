@@ -134,8 +134,9 @@ Amiga's project ref or MCP surface names; an unconfigured database lane must
 provide both values explicitly at task level.
 
 `claude_desktop_bridge` is an opt-in fallback for Claude targets that are not
-configured as CLI sessions. CLI-session workers use the project-independent AX
-doorbell path first.
+configured as CLI sessions. A CLI-session worker uses the project-independent AX
+doorbell only when its agent entry explicitly sets `activation.ax_app`; otherwise
+it needs a dispatchable runtime session.
 
 ### Project state root
 
@@ -175,11 +176,12 @@ python bin/deliver.py \
   --repo-targets app,api \
   --path-targets "src/routes/checkout.ts,src/types/order.ts"
 
-# Not project-specific (e.g. meta/planning discussions)
+# Meta/planning work still attaches to its owning registered project
 python bin/deliver.py \
   --chat last \
   --from orchestrator \
   --to researcher \
+  --project my-app \
   --title "Research caching strategies"
 ```
 

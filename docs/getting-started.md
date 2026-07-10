@@ -50,7 +50,7 @@ For each LLM agent, choose an activation type:
 
 | Type | When to use |
 |------|------------|
-| `cli_session` | LLM CLI is always open in a terminal; background watcher runs |
+| `cli_session` | LLM CLI has a persistent session; optionally configure an AX app/bundle target for direct doorbells |
 | `human_relay` | Human must start a new LLM session and paste the handoff prompt |
 | `api_trigger` | External webhook triggers the agent (advanced) |
 
@@ -155,10 +155,17 @@ python bin/deliver.py \
   --chat last \
   --from orchestrator \
   --to worker \
+  --project my-app \
   --title "Auth implementation task"
 ```
 
-For reachable `cli_session` recipients, `deliver.py` prints an AX doorbell command; run that instead of asking the operator to relay. For true `human_relay` recipients, `deliver.py` can still print a one-time onboarding relay prompt (read docs + update memory file) the first time they receive work. Later relays are short “check inbox” prompts once awareness is tracked locally.
+For `cli_session` recipients with `activation.ax_app`, `deliver.py` prints an AX
+doorbell command; run that instead of asking the operator to relay. Terminal-only
+CLI sessions require a dispatchable runtime session and otherwise report
+`activation_unavailable`. For true `human_relay` recipients, `deliver.py` can
+still print a one-time onboarding relay prompt (read docs + update memory file)
+the first time they receive work. Later relays are short “check inbox” prompts
+once awareness is tracked locally.
 
 ## Daily workflow
 
@@ -175,7 +182,7 @@ python bin/inbox.py --me orchestrator
 python bin/task_board.py --project my-app
 
 # Delegate work
-python bin/deliver.py --chat last --from orchestrator --to worker --title "..."
+python bin/deliver.py --chat last --from orchestrator --to worker --project my-app --title "..."
 
 # Update task status
 python bin/claim_task.py --task TASK-xxx --owner orchestrator --status review
@@ -198,6 +205,7 @@ python bin/claim_task.py --task TASK-xxx --owner worker --status in_progress
 # Mark done and report back
 python bin/claim_task.py --task TASK-xxx --owner worker --status done
 python bin/deliver.py --chat last --from worker --to orchestrator \
+  --project my-app \
   --title "Auth implementation complete" \
   --related-task TASK-xxx
 ```

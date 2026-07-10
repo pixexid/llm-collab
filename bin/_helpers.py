@@ -796,7 +796,7 @@ def build_handoff_prompt(
             "Memory updates must include:",
             f"- Bootstrap: {bootstrap_cmd}",
             f"- Inbox: {py} {ROOT}/bin/inbox.py --me {agent_id}",
-            f"- Deliver: {py} {ROOT}/bin/deliver.py --chat last --from {agent_id} --to <agent> --title \"...\"",
+            f"- Deliver: {py} {ROOT}/bin/deliver.py --chat last --from {agent_id} --to <agent> --project <project_id> --title \"...\"",
             "- Rule: always bootstrap and check inbox at session start.",
             "",
             "Then bootstrap now and execute your latest inbox message.",

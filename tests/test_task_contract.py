@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 import sys
 import unittest
 from pathlib import Path
@@ -184,14 +185,20 @@ class TaskContractProjectDbConfigTest(unittest.TestCase):
             task_contract.AMIGA_SHARED_SUPABASE_REQUIRED_SURFACES,
         )
 
-    def test_project_db_config_replaces_foreign_amiga_defaults(self) -> None:
+    def test_project_db_config_replaces_foreign_ref_and_augmented_amiga_surfaces(self) -> None:
         # #given
         project_surfaces = ["supabase_other.execute_sql", "supabase CLI"]
         frontmatter = {
             "project_id": "other",
             "db_impact": "shared-supabase-required",
-            "db_project_ref": task_contract.AMIGA_SHARED_SUPABASE_PROJECT_REF,
-            "db_required_surfaces": task_contract.AMIGA_SHARED_SUPABASE_REQUIRED_SURFACES,
+            "db_project_ref": "foreign-project-ref",
+            "db_required_surfaces": [
+                "supabase CLI",
+                "supabase_amiga.execute_sql",
+                "project_specific.read_only_probe",
+                "supabase_amiga.get_project",
+                "supabase_amiga.get_advisors",
+            ],
         }
 
         # #when
@@ -210,7 +217,10 @@ class TaskContractProjectDbConfigTest(unittest.TestCase):
 
         # #then
         self.assertEqual(synced["db_project_ref"], "other-project-ref")
-        self.assertEqual(synced["db_required_surfaces"], project_surfaces)
+        self.assertEqual(
+            synced["db_required_surfaces"],
+            [*project_surfaces, "project_specific.read_only_probe"],
+        )
         self.assertIn("db_project_ref", changed)
         self.assertIn("db_required_surfaces", changed)
 
@@ -262,6 +272,83 @@ class TaskContractProjectDbConfigTest(unittest.TestCase):
         # #then
         self.assertEqual(errors, [])
         self.assertEqual(summary["db_project_ref"], "explicit-project-ref")
+
+    def test_unconfigured_non_amiga_project_preserves_generic_supabase_cli_surface(self) -> None:
+        # #given
+        frontmatter = {
+            "project_id": "other",
+            "db_impact": "shared-supabase-required",
+            "db_project_ref": "explicit-project-ref",
+            "db_required_surfaces": ["project_db.execute_sql", "supabase CLI"],
+        }
+
+        # #when
+        with patch.object(task_contract, "get_project", return_value={"id": "other"}):
+            synced, _ = task_contract.sync_db_contract(frontmatter, "Apply a shared database migration.")
+
+        # #then
+        self.assertEqual(
+            synced["db_required_surfaces"],
+            ["project_db.execute_sql", "supabase CLI"],
+        )
+
+
+class TaskContractProjectIdentityTest(unittest.TestCase):
+    def test_missing_project_does_not_inherit_amiga_and_fails_validation(self) -> None:
+        # #given
+        frontmatter = {
+            "ui_ux_lane": True,
+            "ui_ux_mode": "docs_only",
+            "db_impact": "shared-supabase-required",
+        }
+        body = "Update UI design docs and apply a shared database migration."
+
+        # #when
+        synced, _ = task_contract.sync_task_contract(frontmatter, body)
+        errors, summary = task_contract.validate_task_contract(frontmatter, body, stage="plan")
+
+        # #then
+        self.assertEqual(synced["required_design_docs"], [])
+        self.assertIsNone(synced["db_project_ref"])
+        self.assertEqual(synced["db_required_surfaces"], [])
+        self.assertIn("Task must set a registered `project_id`.", errors)
+        self.assertEqual(summary["project"], {"project_id": None, "registered": False})
+
+    def test_unknown_project_fails_high_level_validation(self) -> None:
+        # #given
+        frontmatter = {
+            "project_id": "unknown",
+            "ui_ux_lane": False,
+            "db_impact": "none",
+        }
+
+        # #when
+        with patch.object(task_contract, "get_project", return_value=None):
+            errors, summary = task_contract.validate_task_contract(frontmatter, "Backend task.", stage="plan")
+
+        # #then
+        self.assertIn("Task references unknown `project_id: unknown`.", errors)
+        self.assertEqual(summary["project"], {"project_id": "unknown", "registered": False})
+
+
+class TaskCreationProjectTest(unittest.TestCase):
+    def test_new_task_requires_project_argument(self) -> None:
+        # #given
+        command = [
+            sys.executable,
+            str(REPO_ROOT / "bin" / "new_task.py"),
+            "--title",
+            "Projectless task",
+            "--created-by",
+            "codex",
+        ]
+
+        # #when
+        result = subprocess.run(command, cwd=REPO_ROOT, text=True, capture_output=True, check=False)
+
+        # #then
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("--project", result.stderr)
 
 
 if __name__ == "__main__":

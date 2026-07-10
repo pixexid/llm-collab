@@ -103,7 +103,7 @@ def build_identity_md(agent: dict, workspace_name: str, all_agent_ids: list[str]
         f"python {ROOT}/bin/inbox.py --me {aid}",
         "",
         f"# Send message",
-        f'{ROOT}/bin/deliver.py --chat last --from {aid} --to <agent> --title "..."',
+        f'{ROOT}/bin/deliver.py --chat last --from {aid} --to <agent> --project <project_id> --title "..."',
         "",
         f"# Create task",
         f'python {ROOT}/bin/new_task.py --title "..." --created-by {aid} --project <project_id>',
@@ -177,6 +177,12 @@ def collect_agents() -> list[dict]:
 
         if atype == "cli_session":
             activation["watcher_enabled"] = yn("  Enable background inbox watcher?", default=True)
+            ax_app = prompt(
+                "  AX app name or bundle id for direct doorbell (blank for terminal-only)",
+                default="",
+            )
+            if ax_app:
+                activation["ax_app"] = ax_app
         elif atype == "human_relay":
             activation["watcher_enabled"] = False
             base_model = prompt("  Base model/CLI (e.g. codex, claude, gemini)", default="")

@@ -122,11 +122,12 @@ Do not stop on these states:
 
 `llm-collab` messages are part of the loop, not a side channel. Before sending a
 worker follow-up, update the task/issue if scope changed, write one consolidated
-message, and use the approved worker bridge. For any `cli_session` worker,
-including Claude, use the AX command printed by `deliver.py`. Use Computer Use
-only when `deliver.py` reports the project-configured non-CLI
-`desktop_bridge_required` fallback. Record a failed bridge precisely; do not use
-routine operator relay as the first fallback.
+message, and use the approved worker bridge. For a `cli_session` worker with
+`activation.ax_app`, use the AX command printed by `deliver.py`. A terminal-only
+CLI worker needs a dispatchable runtime session. Use Computer Use only when
+`deliver.py` reports the project-configured non-CLI `desktop_bridge_required`
+fallback. Treat `activation_unavailable` as a configuration blocker, record it
+precisely, and do not misreport it as routine operator relay.
 
 There should be one active queue-runner heartbeat for a project loop. A
 task-specific heartbeat may exist only as a child wait for Claude, a worker

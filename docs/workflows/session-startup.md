@@ -120,11 +120,11 @@ served.
 
 ## Claude Desktop Rule
 
-Route Claude according to its registered activation type and the active project
-configuration. A Claude agent registered as `cli_session` uses the same AX
-doorbell as every other reachable CLI-session worker. A project may set
-`claude_desktop_bridge: true` as a fallback only when its Claude target is not a
-CLI session.
+Route Claude according to its registered activation type, explicit doorbell
+capability, and active project configuration. A Claude agent registered as
+`cli_session` uses AX only when `activation.ax_app` is configured. A project may
+set `claude_desktop_bridge: true` as a fallback only when its Claude target is
+not a CLI session.
 
 Important distinction:
 
@@ -143,20 +143,23 @@ Operational rule:
   new Claude desktop app thread
 - do not synthesize desktop-visible Claude threads by writing local app cache/index files
 - use `Chats/` messages as the transport of record (the durable mailbox)
-- the primary agent-to-agent wake for `cli_session` workers is the
+- the primary agent-to-agent wake for AX-capable `cli_session` workers is the
   **bidirectional AX doorbell** (see
-  `claude-code-desktop-computer-use-bridge.md`)
+  `claude-code-desktop-computer-use-bridge.md`); terminal-only sessions require a
+  dispatchable runtime binding
 - screenshot/keyboard Computer Use is a fallback for a project-configured
   non-CLI Claude Desktop bridge, never the universal default
 
 Safest task-grade workflow for desktop-app agents:
 
 1. `llm-collab` delivers the task into `Chats/` with `deliver.py`
-   - for every reachable `cli_session` worker, including Claude,
+   - for an AX-capable `cli_session` worker, including Claude when configured,
      `ax_doorbell_required` means the
      sender rings the worker with the printed `axsend-ensure ring` command; it is
      not a manual operator relay request
    - `desktop_bridge_required` is the project-configured non-CLI Claude fallback
+   - `activation_unavailable` means the durable packet exists but neither a
+     dispatchable runtime nor an explicit wake transport is configured
 2. the sender rings once with the printed AX command; a busy recipient may queue
    the one-line pointer behind its active turn
 3. the sender sends exactly one short sender-tagged wake prompt that points the

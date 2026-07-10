@@ -46,7 +46,7 @@ def parse_args():
     p.add_argument("--owner", default="unassigned", help="Assignee agent ID (default: unassigned)")
     p.add_argument("--priority", default="normal", choices=TASK_PRIORITIES)
     p.add_argument("--status", default="open", choices=["open", "in_progress"])
-    p.add_argument("--project", default=None, help="project_id this task belongs to")
+    p.add_argument("--project", required=True, help="registered project_id this task belongs to")
     p.add_argument("--repo-targets", default="", help="Comma-separated repo IDs in scope")
     p.add_argument("--path-targets", default="", help="Comma-separated file/dir paths in scope")
     p.add_argument("--related-chat", default=None, help="CHAT-id cross-reference")
@@ -78,7 +78,7 @@ def main():
     ensure_agent_enabled(args.created_by, context="task creation")
     if args.owner != "unassigned":
         ensure_agent_enabled(args.owner, context="task ownership")
-    ensure_project(args.project, allow_none=True)
+    ensure_project(args.project, allow_none=False)
 
     if args.status == "in_progress" and not args.skip_refinement:
         print(

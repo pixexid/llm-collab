@@ -20,7 +20,7 @@
       "id": "codex",
       "display_name": "Codex",
       "role": "primary_orchestrator",
-      "activation": { "type": "cli_session", "watcher_enabled": true }
+      "activation": { "type": "cli_session", "watcher_enabled": true, "ax_app": "Codex" }
     },
     {
       "id": "cdx2",
@@ -37,13 +37,13 @@
       "id": "claude",
       "display_name": "Claude",
       "role": "implementation",
-      "activation": { "type": "cli_session", "watcher_enabled": true }
+      "activation": { "type": "cli_session", "watcher_enabled": true, "ax_app": "Claude" }
     },
     {
       "id": "gemini",
       "display_name": "Gemini",
       "role": "research",
-      "activation": { "type": "cli_session", "watcher_enabled": true }
+      "activation": { "type": "cli_session", "watcher_enabled": true, "ax_app": "Gemini" }
     },
     {
       "id": "antigravity",
@@ -63,7 +63,8 @@
       "notes": "Implementation and secondary review. GLM-5.2 (builtin:zai-coding-plan/GLM-5.2).",
       "activation": {
         "type": "cli_session",
-        "watcher_enabled": true
+        "watcher_enabled": true,
+        "ax_app": "ZCode"
       }
     }
   ]

@@ -50,7 +50,8 @@ Agent roster. Created by `scripts/init.py`. Gitignored.
       "notes": "Plans work and delegates to workers.",
       "activation": {
         "type": "cli_session",
-        "watcher_enabled": true
+        "watcher_enabled": true,
+        "ax_app": "Codex"
       }
     },
     {
@@ -84,6 +85,7 @@ Agent roster. Created by `scripts/init.py`. Gitignored.
 |-------|------|----------|-------------|
 | `type` | string | yes | `"cli_session"`, `"human_relay"`, `"human"`, `"api_trigger"` |
 | `watcher_enabled` | bool | no | Whether PM2 should manage a background watcher for this agent |
+| `ax_app` | string | no | For AX-capable `cli_session` agents: localized macOS app name or bundle ID used by `axsend`. Omit for terminal-only sessions. |
 | `base_model` | string | no | For `human_relay`: which LLM this maps to (informational) |
 | `identity_note` | string | no | For `human_relay`: shown in handoff prompt to disambiguate identity |
 
@@ -91,7 +93,7 @@ Agent roster. Created by `scripts/init.py`. Gitignored.
 
 | Type | Watcher | Handoff prompt | Use for |
 |------|---------|----------------|---------|
-| `cli_session` | optional | no | LLM CLIs with persistent sessions |
+| `cli_session` | optional | no | LLM CLIs with persistent sessions; direct AX wake requires `ax_app` |
 | `human_relay` | no | **yes** | Second account of same LLM, or manual sessions |
 | `human` | no | no | Human operators |
 | `api_trigger` | no | no | Webhook-triggered agents |
@@ -193,7 +195,7 @@ sent_utc: 2026-04-07T10:00:00+00:00
 | `title` | string | Short semantic title |
 | `priority` | string | `low`, `normal`, `high`, `urgent` |
 | `tags` | string[] | Custom labels |
-| `project_id` | string or null | Project this message relates to |
+| `project_id` | string | Registered project this message belongs to |
 | `related_task` | string or null | `TASK-{id}` cross-reference |
 | `repo_targets` | string[] | Which repos are in scope |
 | `path_targets` | string[] | File/directory scope |
@@ -255,7 +257,7 @@ ui_ux_lane: true
 ui_ux_mode: implementation
 ui_ux_detection: auto
 ui_ux_detection_reasons: [src/routes/app/bookings.index.tsx]
-required_design_docs: [/Users/pixexid/Projects/amiga/docs/ui_ux/DESIGN.md]
+required_design_docs: [/absolute/path/to/my-app/DESIGN.md]
 required_design_skills: [impeccable]
 impeccable_commands_required: [/impeccable craft, /polish]
 impeccable_required: true
@@ -285,7 +287,7 @@ design_doc_update_decision: null
 | `requested_by` | string | Who requested the work |
 | `created_utc` | string | ISO 8601 timestamp |
 | `priority` | string | `low`, `normal`, `high`, `urgent` |
-| `project_id` | string or null | Project this task belongs to |
+| `project_id` | string | Registered project this task belongs to |
 | `related_chat` | string or null | `CHAT-{id}` cross-reference |
 | `related_paths` | string[] | File/directory paths involved |
 | `repo_targets` | string[] | Repos in scope |
@@ -672,9 +674,12 @@ Local runtime state used to avoid repeating first-time collaboration onboarding 
 Notes:
 - this file is runtime-only and gitignored (`State/`)
 - `deliver.py` uses it to print first-time onboarding relay prompts for `human_relay` recipients, then avoid repeating those long prompts
-- Reachable `cli_session` workers, including Claude, are not relay recipients.
-  For those sends, `deliver.py` reports `ax_doorbell_required` and prints the
+- AX-capable `cli_session` workers configure `activation.ax_app`. For those
+  sends, `deliver.py` reports `ax_doorbell_required` and prints the
   `axsend-ensure ring --submit --verify` command the sender should run.
+- A terminal-only `cli_session` needs a dispatchable runtime session. Without
+  either transport, `deliver.py` reports `activation_unavailable` instead of
+  silently requesting operator relay.
 - A project may enable `claude_desktop_bridge` for a non-CLI Claude target. Only
   that fallback reports `desktop_bridge_required` and uses Computer Use; it does
   not override AX routing for a Claude agent registered as `cli_session`.

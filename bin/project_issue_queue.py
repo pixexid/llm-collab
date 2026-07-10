@@ -118,7 +118,7 @@ def project_task_mirrors(project_id: str) -> dict[int, list[dict]]:
     for task_path in all_task_files():
         frontmatter, _ = parse_frontmatter(task_path.read_text())
         scoped_project = frontmatter.get("project_id")
-        if scoped_project not in (project_id, None, "", "null"):
+        if scoped_project != project_id:
             continue
         issue = extract_issue_number(frontmatter, task_path)
         if issue is None:
@@ -309,6 +309,12 @@ def validate_queue(project_id: str, payload: dict) -> tuple[list[str], list[str]
             continue
 
         frontmatter, _ = parse_frontmatter(task_path.read_text())
+        task_project_id = frontmatter.get("project_id")
+        if task_project_id != project_id:
+            errors.append(
+                f"lane {order} project mismatch for {task_id}: "
+                f"queue {project_id!r} vs task {task_project_id!r}"
+            )
         task_issue = extract_issue_number(frontmatter, task_path)
         if task_issue != issue:
             errors.append(

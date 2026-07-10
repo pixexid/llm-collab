@@ -275,6 +275,13 @@ def validate_queue(
             continue
         frontmatter, _ = parse_frontmatter(task_path.read_text())
 
+        task_project_id = frontmatter.get("project_id")
+        if task_project_id != project_id:
+            errors.append(
+                f"lane {order} project mismatch for {task_id}: "
+                f"queue {project_id!r} vs task {task_project_id!r}"
+            )
+
         if frontmatter.get("owner") != owner:
             errors.append(
                 f"lane {order} owner mismatch for {task_id}: queue {owner!r} vs task {frontmatter.get('owner')!r}"
