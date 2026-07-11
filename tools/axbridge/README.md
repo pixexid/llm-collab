@@ -142,14 +142,16 @@ tries the send button, `AXConfirm`, and a posted Return.
 ZCode is an Electron code-editor composer that rejects programmatic `AXValue`
 writes — the key-event typing path makes the doorbell work for it.
 
-**Antigravity/Gemini (PR78 R5):** no explicit composer-identity profile is
+**Antigravity/Gemini (PR78 R5/R6):** no explicit composer-identity profile is
 captured, so `profileFor` returns `.unknown` and resolution FAILS CLOSED rather
 than silently reusing Claude's "Prompt" matching (which would drive a broken
 doorbell). To support either app, inspect its live composer identity, add an
-explicit `ComposerProfile` case + fixtures, and record live evidence. Until then
-`agents.json` `ax_app` routing for `gemini`/`antigravity` will fail closed with a
-clear "no native chat composer found" message — the durable mailbox remains the
-delivery channel.
+explicit `ComposerProfile` case + fixtures, and record live evidence. Routing is
+aligned so no watcher attempts the unsupported doorbell: `gemini`'s
+`activation.ax_app` was REMOVED (terminal-only `cli_session`), and `antigravity`
+is a `human_relay` with `watcher_enabled: false` and no `ax_app` — so `deliver.py`
+routes neither to an AX ring (regression: `tests/test_deliver_ax_routing.py`). The
+durable mailbox remains their delivery channel.
 
 Safety: `ring --submit` only presses a **confident** send button (unlabeled icon
 or labeled send/submit), never a side-effecting control (e.g. Antigravity's

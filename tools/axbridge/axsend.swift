@@ -4,7 +4,9 @@
 // set text in its composer, and press its send button WITHOUT raising the
 // window or stealing keyboard focus from whatever the operator is doing.
 //
-// Build:  swiftc -O axsend.swift -o axsend
+// Build:  ./build.sh   (or: swiftc -O -parse-as-library axsend.swift send-resolution.swift -o axsend)
+//         The pure send-resolution.swift module is a separate source; the old
+//         single-file `swiftc axsend.swift` no longer compiles (PR78 R4+).
 // Trust:  the process running this (Terminal/the binary) must be enabled in
 //         System Settings > Privacy & Security > Accessibility.
 //
