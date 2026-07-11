@@ -75,21 +75,44 @@ struct EditableInfo {
     let inWebArea: Bool     // descendant of an AXWebArea (Browser/preview content)
 }
 
-// The native chat composer's identity. `title` carries its non-value identity
-// (AXTitle / AXDescription / AXPlaceholderValue / AXHelp — whichever the app
-// exposes "Prompt" on); `placeholder` carries the value/placeholder text
-// ("Type / for commands"). The composer is identified STRICTLY by this identity
-// — NOT by web-area membership: Claude/Codex are Electron apps whose whole UI is
-// under an AXWebArea, so the native composer itself reports inWebArea=true. The
-// "Prompt" identity is the strict proof (R3 item 1) and precisely excludes every
-// other editable — browser chrome (Page URL) and embedded form fields (a "Name",
-// "Enter your address", etc.) — because none of them carry it.
-func editableIsNativePrompt(_ e: EditableInfo) -> Bool {
+// PR78 R4: per-app composer identity. Claude/Codex/ZCode are Electron apps whose
+// whole UI (incl. the native composer) is under an AXWebArea, so a composer is
+// identified STRICTLY by its app-specific field identity — never by web-area
+// membership. Live AX evidence (2026-07-11): Claude composer = AXTextArea
+// identity "Prompt" (+ "Type / for commands"); Codex AND ZCode composer =
+// AXTextArea identity "Ask for follow-up changes" (they are disambiguated by
+// app/bundle upstream, not by this string). The DOM/CSS fingerprints Codex
+// proposed (ProseMirror class, composer-surface-chrome ancestor) are NOT exposed
+// via AXUIElement, so the readable field identity is the stable key.
+enum ComposerProfile: Equatable {
+    case claude
+    case codex
+    case zcode
+}
+
+// Is this editable THIS profile's native chat composer? Browser chrome (Page
+// URL) and generic embedded form fields never match, because none carry the
+// app's composer identity. Zero or multiple matches must fail closed upstream.
+func editableIsNativeComposer(_ e: EditableInfo, _ profile: ComposerProfile) -> Bool {
     if editableIsBrowserChrome(e) { return false }
     let id = e.title.lowercased()
     let val = e.placeholder.lowercased()
-    if id == "prompt" || id.hasPrefix("prompt ") || id.hasSuffix(" prompt") { return true }
-    return id.contains("type / for commands") || val.contains("type / for commands")
+    switch profile {
+    case .claude:
+        if id == "prompt" || id.hasPrefix("prompt ") || id.hasSuffix(" prompt") { return true }
+        return id.contains("type / for commands") || val.contains("type / for commands")
+    case .codex, .zcode:
+        // Codex/ZCode composer: AXTextArea whose non-draft field identity is
+        // "Ask for follow-up changes" (the value may prefix a ⏎ glyph). Require
+        // the AXTextArea role so a same-named button/label can't match.
+        guard e.role == "AXTextArea" else { return false }
+        return id.contains("ask for follow-up changes") || val.contains("ask for follow-up changes")
+    }
+}
+
+// Backward-compatible Claude alias (the pre-R4 Prompt-only identity).
+func editableIsNativePrompt(_ e: EditableInfo) -> Bool {
+    editableIsNativeComposer(e, .claude)
 }
 
 private let nativeEditableRoles: Set<String> = ["AXTextArea", "AXTextField", "AXComboBox"]
@@ -102,10 +125,11 @@ func editableIsBrowserChrome(_ e: EditableInfo) -> Bool {
     return t == "page url" || t.contains("url") || t == "address"
 }
 
-// A window holds a usable native composer if it has the Prompt identity, or a
-// non-web native text field that is not browser chrome.
-func windowHasNativeComposer(_ eds: [EditableInfo]) -> Bool {
-    eds.contains(where: editableIsNativePrompt)
+// A window holds a usable native composer if it carries the profile's composer
+// identity, or (looser fallback for display/tree only) a non-web native text
+// field that is not browser chrome.
+func windowHasNativeComposer(_ eds: [EditableInfo], _ profile: ComposerProfile = .claude) -> Bool {
+    eds.contains { editableIsNativeComposer($0, profile) }
         || eds.contains { !$0.inWebArea && nativeEditableRoles.contains($0.role) && !editableIsBrowserChrome($0) }
 }
 
@@ -125,20 +149,25 @@ enum ConvWindowPick: Equatable {
 // Choose the conversation window across all app windows. Explicit index (when the
 // caller passes one) always wins — auto/unset is a distinct nil, so an explicit
 // index 0 is honored — but an out-of-range/negative explicit index is REJECTED,
-// not clamped (R3 item 2). Auto is PROMPT-ONLY: exactly one native Prompt window
-// -> that window; >1 -> ambiguous; zero -> none (never window 0 or a generic
-// editable, R3 items 1+4). The SAME resolver drives ring/state/confirm/type and
-// every post-send refresh so verification never drifts to another window.
-// Composer strictness within the chosen window (Prompt-only) is enforced by
-// windowComposer/promptComposer at the AX layer.
-func pickConversationWindow(_ windows: [[EditableInfo]], preferIndex: Int?) -> ConvWindowPick {
+// not clamped (R3 item 2). Auto is COMPOSER-IDENTITY-ONLY for the given app
+// profile (R4): exactly one window carrying that profile's native composer
+// identity -> that window; >1 -> ambiguous; zero -> none (never window 0 or a
+// generic editable, R3 items 1+4). This is how Codex's two same-title "ChatGPT"
+// windows disambiguate — only the chat window carries the "Ask for follow-up
+// changes" composer; the avatar-overlay shell has none. The SAME resolver drives
+// ring/state/confirm/type and every post-send refresh so verification never
+// drifts to another window.
+func pickConversationWindow(_ windows: [[EditableInfo]], preferIndex: Int?,
+                            profile: ComposerProfile = .claude) -> ConvWindowPick {
     guard !windows.isEmpty else { return .none }
     if let idx = preferIndex {
         guard idx >= 0 && idx < windows.count else { return .invalidIndex }
         return .index(idx)
     }
-    let promptWindows = windows.indices.filter { windows[$0].contains(where: editableIsNativePrompt) }
-    if promptWindows.count > 1 { return .ambiguous }
-    if let i = promptWindows.first { return .index(i) }
+    let composerWindows = windows.indices.filter { i in
+        windows[i].contains { editableIsNativeComposer($0, profile) }
+    }
+    if composerWindows.count > 1 { return .ambiguous }
+    if let i = composerWindows.first { return .index(i) }
     return .none
 }

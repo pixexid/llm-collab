@@ -170,6 +170,55 @@ check(pickConversationWindow([auxWindow0, chatWindow1], preferIndex: nil) == .in
 //     fail closed rather than write into Page URL.
 check(!windowHasNativeComposer(urlOnly), "Browser-only (Page URL) window: no native composer for mutating paths")
 
+// --- PR78 R4: per-app composer identity (Codex / ZCode) ---
+// Live evidence 2026-07-11: Codex has TWO windows both titled "ChatGPT" — an
+// avatar-overlay shell (no composer) and the active chat (AXTextArea identity
+// "Ask for follow-up changes", value may prefix a ⏎). ZCode uses the same
+// composer identity. Claude's "Prompt" identity must be unaffected.
+let codexOverlay: [EditableInfo] = [
+    // avatar-overlay shell: no composer, maybe stray non-composer editables
+    EditableInfo(role: "AXTextField", title: "Search", placeholder: "", inWebArea: true),
+]
+let codexChat: [EditableInfo] = [
+    EditableInfo(role: "AXTextArea", title: "Ask for follow-up changes",
+                 placeholder: "⏎Ask for follow-up changes", inWebArea: true),
+]
+
+// R4-1: Codex two same-title windows -> only the chat window (index 1) resolves.
+check(pickConversationWindow([codexOverlay, codexChat], preferIndex: nil, profile: .codex) == .index(1),
+      "R4: Codex overlay+chat -> picks the chat window with the follow-up composer")
+// R4-2: reordered (chat first) still resolves by identity, not position.
+check(pickConversationWindow([codexChat, codexOverlay], preferIndex: nil, profile: .codex) == .index(0),
+      "R4: Codex chat-first -> picks index 0 by composer identity")
+// R4-3: missing Codex composer (both overlay/shell) -> none (fail closed).
+check(pickConversationWindow([codexOverlay, codexOverlay], preferIndex: nil, profile: .codex) == .none,
+      "R4: Codex with no follow-up composer -> none (fail closed, never window 0)")
+// R4-4: duplicate Codex composer windows in auto -> ambiguous (fail closed).
+check(pickConversationWindow([codexChat, codexChat], preferIndex: nil, profile: .codex) == .ambiguous,
+      "R4: two Codex composer windows -> ambiguous (fail closed)")
+// R4-5: explicit index disambiguates duplicate Codex composers.
+check(pickConversationWindow([codexChat, codexChat], preferIndex: 0, profile: .codex) == .index(0),
+      "R4: explicit index disambiguates two Codex composer windows")
+// R4-6: ZCode uses the same follow-up composer identity.
+let zcodeChat: [EditableInfo] = [
+    EditableInfo(role: "AXTextArea", title: "Ask for follow-up changes", placeholder: "", inWebArea: true),
+]
+check(pickConversationWindow([codexOverlay, zcodeChat], preferIndex: nil, profile: .zcode) == .index(1),
+      "R4: ZCode follow-up composer resolves")
+check(windowHasNativeComposer(zcodeChat, .zcode), "R4: ZCode window has a native composer")
+// R4-7: cross-profile isolation — Claude's "Prompt" is NOT a Codex composer, and
+// the Codex "Ask for follow-up changes" is NOT a Claude composer. Each profile
+// only matches its own identity (fail closed otherwise).
+check(pickConversationWindow([chatWindow1], preferIndex: nil, profile: .codex) == .none,
+      "R4: a Claude Prompt window is not a Codex composer -> none under .codex")
+check(pickConversationWindow([codexChat], preferIndex: nil, profile: .claude) == .none,
+      "R4: a Codex follow-up window is not a Claude composer -> none under .claude")
+check(!editableIsNativeComposer(EditableInfo(role: "AXButton", title: "Ask for follow-up changes", placeholder: "", inWebArea: true), .codex),
+      "R4: a same-named non-AXTextArea (button) is not the Codex composer")
+// R4-8: Claude Prompt path is unchanged under the default profile.
+check(pickConversationWindow([auxWindow0, chatWindow1], preferIndex: nil, profile: .claude) == .index(1),
+      "R4: Claude .claude profile still resolves the Prompt window (no regression)")
+
 if failures == 0 { print("\nALL PASS (send-resolution)"); exit(0) }
 else { print("\n\(failures) FAILURE(S)"); exit(1) }
 }
