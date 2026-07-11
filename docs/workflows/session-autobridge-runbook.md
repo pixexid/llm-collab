@@ -8,17 +8,20 @@ autonomous.
 
 ## Status: provisional safety-fuse, not the primary wake
 
-The primary agent-to-agent wake mechanism for an AX-capable `cli_session` is the
-busy-safe, queued-delivery **bidirectional AX doorbell**
-(`axsend-ensure ring --submit --verify`; see
+Current `deliver.py` gives a matching dispatchable session autobridge precedence
+and suppresses `ax_doorbell_required` for that packet. The primary wake for an
+AX-capable `cli_session` only when no such autobridge resolves is the busy-safe
+**bidirectional AX doorbell** (`axsend-ensure ring --submit --verify`; see
 `claude-code-desktop-computer-use-bridge.md`). Ring once even when the recipient
-is busy; exit 0 means the one-line pointer was delivered or queued behind the
-active turn. The idle input gate applies only to attended screenshot/keyboard
-Computer Use fallback, not to AX `ring`. Computer Use is the recovery path when
-AX cannot safely target or verify the native composer, and for an explicitly
-configured non-CLI desktop bridge. `llm-collab` remains the durable mailbox.
-Routine/continuous polling is **deprecated** as the primary wake — it wastes
-tokens and a heartbeat set on guessed timing can fire into changed context.
+is busy. `VERIFIED` exit 0 confirms delivery. `QUEUED (UNCONFIRMED)` exit 0 does
+not prove exact-thread delivery: preserve the durable mailbox packet, record the
+unconfirmed blocker/follow-up, and never re-ring. The idle input gate applies
+only to attended screenshot/keyboard Computer Use fallback, not to AX `ring`.
+Computer Use is the recovery path when AX cannot safely target or verify the
+native composer, and for an explicitly configured non-CLI desktop bridge.
+`llm-collab` remains the durable mailbox. Routine/continuous polling is
+**deprecated** as the primary wake — it wastes tokens and a heartbeat set on
+guessed timing can fire into changed context.
 
 Session autobridge and PM2/heartbeat polling survive only as a bounded,
 **provisional/experimental safety-fuse**, on trial, with hard constraints:

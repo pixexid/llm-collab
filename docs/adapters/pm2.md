@@ -52,9 +52,21 @@ after reboot even though the current ecosystem would not create it.
 After roster/watcher changes, compare `python bin/pm2_watchers.py status --all`
 and `pm2 list` with current `watcher_enabled: true` entries. Stop/delete stale
 named processes (`python bin/pm2_watchers.py delete --agent <id>` while the ID
-remains in the roster, otherwise `pm2 delete <workspace>-<agent>`), start/ensure
-the intended set, then run `pm2 save` so reboot state matches the reconciled
-process list. Do not treat a healthy stale PM2 process as proof that current
+remains in the roster, otherwise `pm2 delete <workspace>-<agent>`). Then apply
+the current ecosystem definition to every intended watcher before saving:
+
+```bash
+pm2 startOrRestart pm2/ecosystem.config.cjs --only <workspace>-<agent> --update-env
+```
+
+Repeat that command for each intended existing watcher, or omit `--only` to
+apply the current ecosystem to the full enabled set. `pm2_watchers.py ensure`
+only starts a missing process; when a process is already online it does not
+reload changed arguments or environment. Likewise, restarting only by stored
+PM2 name does not re-read the ecosystem definition. Run `pm2 save` only after
+the intended processes have been started/restarted from the current ecosystem
+and status matches the roster, so reboot state preserves the reconciled
+configuration. Do not treat a healthy stale PM2 process as proof that current
 routing policy authorizes it.
 
 ---
@@ -133,10 +145,17 @@ adapters, but it cannot perform Codex Computer Use recovery.
 
 Current safe ordering:
 
-- first write the durable `llm-collab` packet
-- for an AX-capable `cli_session` with `activation.ax_app`, use
-  `axsend-ensure ring --submit --verify` once as the primary wake even when the
-  recipient is busy; exit 0 means delivered/queued, so never repeatedly re-ring
+- if AX must be the primary wake, first ensure no matching dispatchable session
+  autobridge is active; current `deliver.py` gives `autobridge_ready` precedence
+  and suppresses `ax_doorbell_required`
+- write the durable `llm-collab` packet and inspect the delivery result; when it
+  reports `autobridge_ready: true`, the current Phase 1 route is session
+  autobridge, not AX
+- only when it reports `ax_doorbell_required: true`, use
+  `axsend-ensure ring --submit --verify` once even when the recipient is busy.
+  `VERIFIED` exit 0 confirms delivery;
+  `QUEUED (UNCONFIRMED)` exit 0 preserves the mailbox/blocker follow-up but does
+  not prove exact-thread delivery and must not be re-rung
 - use attended Computer Use only as fallback/recovery when AX cannot safely
   inspect/target/send, or for an explicitly project-configured non-CLI desktop
   bridge; apply the idle input gate before this screenshot/keyboard fallback
@@ -157,8 +176,9 @@ PM2/heartbeat is only the bounded, provisional safety-fuse described in
 `session-autobridge-runbook.md`.
 
 - primary: ring the registered AX app once, even while it is busy, with one short
-  pointer to the durable packet; treat exit 0 as delivered/queued and do not
-  repeatedly re-ring
+  pointer to the durable packet. `VERIFIED` exit 0 confirms delivery;
+  `QUEUED (UNCONFIRMED)` remains unresolved, preserves the mailbox/follow-up,
+  must not be re-rung, and cannot be reported as exact-thread delivery
 - recovery: if AX targets an embedded preview/web field or cannot verify the
   native composer, preserve the packet, stop sending, and use an attended Codex
   turn with Computer Use plus
@@ -180,8 +200,10 @@ If desktop visibility is needed, the recommended flow is:
 
 1. write the task/message to `Chats/` with `deliver.py`
 2. ring the recipient's registered app via AX once even if it is busy, with one
-   short sender-tagged pointer to the durable packet; exit 0 means
-   delivered/queued and must not be repeatedly re-rung
+   short sender-tagged pointer to the durable packet. Record `VERIFIED` exit 0 as
+   confirmed delivery. Record `QUEUED (UNCONFIRMED)` exit 0 as unresolved,
+   preserve the mailbox/blocker follow-up, never re-ring it, and do not claim
+   exact-thread delivery
 3. the recipient drains its unread inbox and acts; it rings back on handoff
 4. if AX targets the wrong editable surface or cannot verify delivery, run the
    attended Computer Use recovery above, then retry AX once the real composer is

@@ -153,17 +153,30 @@ Operational rule:
   new Claude desktop app thread
 - do not synthesize desktop-visible Claude threads by writing local app cache/index files
 - use `Chats/` messages as the transport of record (the durable mailbox)
-- the primary agent-to-agent wake for AX-capable `cli_session` workers is the
-  **bidirectional AX doorbell** (see
+- when no matching dispatchable session autobridge exists and `deliver.py`
+  reports `ax_doorbell_required: true`, the primary wake for an AX-capable
+  `cli_session` worker is the **bidirectional AX doorbell** (see
   `claude-code-desktop-computer-use-bridge.md`); terminal-only sessions require a
   dispatchable runtime binding
 - attended Computer Use is fallback/recovery when AX cannot safely target or
   verify the native composer, and for a project-configured non-CLI Claude
   Desktop bridge; it is never the universal first path
 
+Current Phase 1 routing gives a matching dispatchable session autobridge
+precedence. When `deliver.py` reports `autobridge_ready: true`, it intentionally
+suppresses both `ax_doorbell_required` and `desktop_bridge_required`; that packet
+uses the separately documented session-autobridge path and its retry limitations.
+Do not describe AX as primary for that packet. If the workflow requires AX as
+the primary wake, avoid registering the matching dispatchable autobridge or
+deactivate it before calling `deliver.py` (see
+`session-autobridge-runbook.md#deactivate-a-session`), then verify the delivery
+result actually reports `ax_doorbell_required: true`.
+
 Safest task-grade workflow for desktop-app agents:
 
 1. `llm-collab` delivers the task into `Chats/` with `deliver.py`
+   - `autobridge_ready: true` takes precedence and means no AX doorbell was
+     requested for this packet
    - for an AX-capable `cli_session` worker, including Claude when configured,
      `ax_doorbell_required` means the
      sender rings the worker with the printed `axsend-ensure ring` command; it is
@@ -171,8 +184,12 @@ Safest task-grade workflow for desktop-app agents:
    - `desktop_bridge_required` is the project-configured non-CLI Claude fallback
    - `activation_unavailable` means the durable packet exists but neither a
      dispatchable runtime nor an explicit wake transport is configured
-2. the sender rings once with the printed AX command; a busy recipient may queue
-   the one-line pointer behind its active turn
+2. when `ax_doorbell_required` is true, the sender rings once with the printed AX
+   command; a busy recipient may queue the one-line pointer behind its active
+   turn. `VERIFIED` exit 0 confirms delivery. `QUEUED (UNCONFIRMED)` exit 0 does
+   not prove the pointer entered the intended thread: preserve the mailbox
+   packet, record the unconfirmed blocker/follow-up, never re-ring it, and do not
+   claim exact-thread delivery without later confirmation or recipient evidence
 3. the sender sends exactly one short sender-tagged wake prompt that points the
    recipient to the exact `llm-collab` inbox/chat/message path. Do not paste full
    task context, acceptance criteria, or multi-paragraph briefs into the app; the

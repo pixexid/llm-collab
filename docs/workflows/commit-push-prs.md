@@ -124,12 +124,15 @@ review threads/comments, automatic connector reactions, and merge state.
 
 PR-wait heartbeats are a safety-fuse, not the primary routing path. When a
 heartbeat or queue owner finds actionable PR feedback that needs the implementer
-to change their branch, it must send a durable mailbox packet and ring the
-implementer once with the AX doorbell, even if the implementer is busy. Treat
-exit 0 as delivered/queued and never repeatedly re-ring the same message. The
-idle input gate applies only if attended screenshot/keyboard Computer Use is
-needed as fallback. Do not silently wait for the next heartbeat or depend on the
-operator to notice the PR comment.
+to change their branch, it must send a durable mailbox packet and inspect the
+`deliver.py` result. If `autobridge_ready: true`, the current Phase 1 route is
+session autobridge and no AX doorbell was requested. If
+`ax_doorbell_required: true`, ring the implementer once with AX even if busy.
+`VERIFIED` exit 0 confirms delivery; `QUEUED (UNCONFIRMED)` exit 0 preserves the
+mailbox/blocker follow-up but is not exact-thread delivery proof and must not be
+re-rung. The idle input gate applies only if attended screenshot/keyboard
+Computer Use is needed as fallback. Do not silently wait for the next heartbeat
+or depend on the operator to notice the PR comment.
 
 When the operator has authorized the merge path for the PR or PR class, the
 heartbeat may complete the wait after it verifies the latest head has green

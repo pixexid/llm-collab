@@ -39,9 +39,8 @@ bin/axsend ring  --app Codex --text "hello"
 # See which button send would press WITHOUT pressing (do this on any new app)
 bin/axsend ring  --app Codex --submit --dry-run --text "x"
 
-# Set + press send. Verify is ENFORCED by default: it confirms the text landed as
-# a NEW conversation turn (freshness baseline — no stale-match), auto-retries the
-# whole cascade if not, and exits 0 ONLY on a confirmed (or queued) delivery.
+# Set + press send. Verification is ENFORCED by default. Exit 0 is either
+# VERIFIED or QUEUED (UNCONFIRMED); classify the output as documented below.
 bin/axsend ring  --app Codex --submit --text "[from claude] ..."
 
 # Feedback WITHOUT a screenshot — did the message actually send? Call after any
@@ -50,7 +49,7 @@ bin/axsend ring  --app Codex --submit --text "[from claude] ..."
 bin/axsend confirm --app Codex --text "[from claude] ..."
 
 # Only after a non-zero/not-delivered result, retry once — the ring clears the old
-# draft + retypes + resends (verified on Electron). Never re-ring exit-0 queued/delivered.
+# draft + retypes + resends (verified on Electron). Never re-ring either exit-0 result.
 bin/axsend ring  --app Codex --submit --verify --text "[from claude] ..."
 # (`ring --text ""` now reliably clears Electron drafts too: it wakes focus then
 #  runs two select-all strategies. One retry is the all-in-one recovery.)
@@ -62,12 +61,21 @@ bin/axsend state --app Codex
 
 Exit codes: `ring --verify` returns 7 if the sent text isn't found in the
 conversation after the press (treat as "did not land"; the draft is cleared so
-nothing is left stuck). `confirm` returns 0 delivered / 7 not-delivered. `ring --submit` (verify default) exits 0 on a confirmed delivery OR a QUEUED accept (recipient busy — message taken, will render when its turn ends; never resend), and 7 only after all retries fail with the recipient idle. `--submit` returns 5 if no send button resolved, 6 if the press failed.
+nothing is left stuck). `confirm` returns 0 delivered / 7 not-delivered.
+`ring --submit` (verify default) exits 0 with either `VERIFIED` or
+`QUEUED (UNCONFIRMED)`. Only `VERIFIED` confirms a visible conversation turn.
+Queued-unconfirmed means the recipient became busy during submit, but it does
+not prove the message entered the intended thread. Never resend it; preserve the
+mailbox packet, record the unconfirmed blocker/follow-up, and do not claim
+exact-thread delivery until later confirmation or recipient evidence. Exit 7
+means not delivered after bounded internal attempts while idle. `--submit`
+returns 5 if no send button resolved, 6 if the press failed.
 
-`bin/axsend-ensure` preserves that queued exit-0 result. It runs the additional
-standalone `confirm` only after a visibly verified ring; a queued turn is not yet
-present in the conversation tree, so post-confirming it would create a false
-failure and invite an unsafe duplicate send.
+`bin/axsend-ensure` preserves the queued-unconfirmed exit-0 result. It runs the
+additional standalone `confirm` only after a visibly verified ring; a queued
+turn is not yet present in the conversation tree, so immediate post-confirming
+would create a false failure and invite an unsafe duplicate send. The caller
+must record queued-unconfirmed as unresolved and follow up without re-ringing.
 
 **Electron apps (ZCode/Antigravity) — the verification rule:** these composers
 accept key events but do NOT reflect text back through `AXValue`, so you cannot
@@ -76,9 +84,9 @@ NEVER fall back to a screenshot to check — use `axsend confirm`, which checks 
 *conversation* (the sent message appears as a real turn ABOVE the composer) — the
 one signal that IS reliably AX-readable. The composer's own draft/empty state is
 NOT reliable (blank AXValue + stale cached static-text nodes), so confirm reports
-delivered vs not, not a draft state. Exit 0 from the original ring means
-delivered/queued and must not be re-rung. After a non-zero/not-delivered result,
-retry once; do not repeatedly re-ring.
+delivered vs not, not a draft state. `VERIFIED` exit 0 confirms delivery;
+`QUEUED (UNCONFIRMED)` exit 0 remains unresolved but must not be re-rung. After a
+non-zero/not-delivered result, retry once; do not repeatedly re-ring.
 
 `--app` matches by localized name or bundle id (substring ok). `--window-index N`
 targets a specific window (default 0).
@@ -104,13 +112,16 @@ targets a specific window (default 0).
   steal). Stops at the first that actually lands.
 - **`--verify` (honest):** requires the text to have **left the composer** AND
   appear as a conversation message above it. A stuck draft can never
-  false-positive. It returns 0 for delivered/queued and `7` when the message did
-  not land; a busy recipient is not an AX ring failure.
+  false-positive. It returns 0 with either `VERIFIED` or
+  `QUEUED (UNCONFIRMED)` and `7` when the message did not land. A busy recipient
+  is not an AX ring failure, but queued-unconfirmed is not exact-thread delivery
+  proof.
 - **Busy-safe queueing:** `ring` is allowed while the recipient is busy. It
-  submits one message, exits 0 when delivered or queued, and must not be
-  repeatedly re-rung. `tree`/`state` are optional diagnostics, not AX ring idle
-  gates. The idle input gate applies only to attended screenshot/keyboard
-  Computer Use fallback.
+  submits one message and must not be repeatedly re-rung. `VERIFIED` confirms
+  delivery; `QUEUED (UNCONFIRMED)` preserves the mailbox/follow-up but cannot be
+  reported as exact-thread delivery. `tree`/`state` are optional diagnostics,
+  not AX ring idle gates. The idle input gate applies only to attended
+  screenshot/keyboard Computer Use fallback.
 
 ## Per-app support matrix (validated 2026-06-21)
 

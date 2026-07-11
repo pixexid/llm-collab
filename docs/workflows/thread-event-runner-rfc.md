@@ -980,7 +980,9 @@ Before Phase 2 handoff:
   adapter-approved replay cursor selection, reject implicit checkpoint copying,
   and prove old events/projections cannot migrate or create delivery state;
 - capability and path violations fail closed;
-- no code path calls app-server `turn/start`.
+- no new Thread Event Runner Phase 2 code path calls app-server `turn/start`.
+  This proof is scoped to the runner implementation; legacy session autobridge
+  intentionally retains its separately documented `turn/start` path.
 
 Phase 3 validation order is mandatory:
 
