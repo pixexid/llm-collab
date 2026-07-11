@@ -8,9 +8,13 @@ the operator is working and misroutes keystrokes across overlapping windows.
 ## Build
 
 ```bash
-cd tools/axbridge && swiftc -O axsend.swift -o axsend
-# symlinked at ../../bin/axsend
+cd tools/axbridge && ./build.sh        # rebuilds only when source is newer; symlinks ../../bin/axsend
+# or explicitly (two sources, library mode — required since PR78 R4):
+swiftc -O -parse-as-library axsend.swift send-resolution.swift -o axsend
 ```
+
+The pure `send-resolution.swift` module is a separate source; a single-file
+`swiftc axsend.swift` no longer compiles. Run tests with `./test.sh`.
 
 ## Permission
 
@@ -89,7 +93,10 @@ delivered vs not, not a draft state. `VERIFIED` exit 0 confirms delivery;
 non-zero/not-delivered result, retry once; do not repeatedly re-ring.
 
 `--app` matches by localized name or bundle id (substring ok). `--window-index N`
-targets a specific window (default 0).
+targets a specific window. It is OPTIONAL: when ABSENT the resolver is in AUTO
+mode (nil) and picks the one window carrying the app's native composer (failing
+closed on none/ambiguous); an explicit index — including `0` — is honored and, if
+out of range, REJECTED (not clamped). Absent is not the same as `0`.
 
 ## How it targets things
 
@@ -98,12 +105,22 @@ targets a specific window (default 0).
   helper reports `AXTitle = com.apple.dock.external.extra.arm64` and 0 windows.
 - **Electron wake-up:** sets `AXManualAccessibility` + `AXEnhancedUserInterface` on
   the app element so Chromium exposes its web tree.
-- **Composer:** the editable node with a non-empty `AXPlaceholderValue` (the real
-  `AXTextArea`), not a wrapper `AXGroup` (setting `AXValue` on a wrapper no-ops).
-- **Send button:** geometry-based — the rightmost `AXButton` in the composer's
-  own toolbar band (same vertical zone), excluding window controls
-  (close/minimize/zoom) and known non-send controls. Document-order heuristics
-  are unsafe: they once grabbed the window minimize button. Always
+- **Composer (PR78 R4/R5 — app-profile identity):** the composer is identified by
+  its app-specific field identity, NOT web-area membership (Electron renders the
+  native composer inside an `AXWebArea`). `profileFor(--app)` selects the profile:
+  Claude = `AXTextArea` identity **"Prompt"**; Codex/ZCode = `AXTextArea` identity
+  **"Ask for follow-up changes"** (Codex's two same-title "ChatGPT" windows
+  disambiguate by this composer identity, not the window title). An UNRECOGNIZED
+  app resolves to `.unknown` and FAILS CLOSED — it never silently inherits
+  Claude's matching. Every path (ring/state/type/confirm + each post-send refresh)
+  re-resolves by this identity and fails closed on loss (no stale-window fallback).
+- **Send button:** geometry-based — the rightmost unlabeled `AXButton` (the send
+  arrow) in the composer's own toolbar band, scoped to the composer's `composerPane`
+  and to the composer's OWN chat `AXWebArea`. A button in a DIFFERENT (foreign)
+  web area — an embedded Browser/preview pane's Run/Stop — is excluded (R5: the
+  real Electron send arrow lives in the same chat web area as the composer, so a
+  blanket "exclude all web-area buttons" wrongly removed it). Window controls
+  (close/minimize/zoom) and known non-send labels are excluded. Always
   `ring --submit --dry-run` on a new app first to print the resolved target.
 - **Submit (multi-mechanism):** some composers ignore `AXPress` on the Send
   button. `ring --submit` tries, in order, verifying after each: (1) `AXPress`
@@ -123,23 +140,33 @@ targets a specific window (default 0).
   not AX ring idle gates. The idle input gate applies only to attended
   screenshot/keyboard Computer Use fallback.
 
-## Per-app support matrix (validated 2026-06-21)
+## Per-app support matrix (composer identity revalidated 2026-07-11, PR78 R4/R5)
 
 `ring` populates the composer via `AXValue` if the field accepts it, else falls
 back to **key-event typing** (`CGEventPostToPid` + `keyboardSetUnicodeString`, no
 focus steal) for Electron code-editor composers that reject `AXValue`. Submit then
 tries the send button, `AXConfirm`, and a posted Return.
 
-| App | Composer write | Submit | Status |
-|-----|----------------|--------|--------|
-| **Codex** | `AXValue` | send-arrow `AXPress` | ✅ proven bidirectional |
-| **Claude Desktop** | `AXValue` | `key-return` | ✅ proven (received Codex ring) |
-| **ZCode** | **key-typing** (rejects `AXValue`) | "Send" button | ✅ proven (replied to a typed ring) |
-| **Antigravity (Gemini)** | **key-typing** (rejects `AXValue`) | `key-return` | ✅ typed + submitted |
+| App | Composer identity | Submit | Status (2026-07-11) |
+|-----|-------------------|--------|---------------------|
+| **Codex** | `AXTextArea` "Ask for follow-up changes" (bundle `com.openai.codex`) | send-arrow `AXPress` (same chat web area) | ✅ resolves + confirmed delivery |
+| **Claude Desktop** | `AXTextArea` "Prompt" | `key-return` fallback | ✅ resolves, no regression |
+| **ZCode** | `AXTextArea` "Ask for follow-up changes" | "Send" button | ✅ resolves; `Send` dry-run target |
+| **Antigravity / Gemini** | ❌ no profile yet → `.unknown` | — | ⚠️ **FAILS CLOSED** — AX doorbell unsupported pending live composer-identity capture |
 
-Both ZCode and Antigravity are Electron apps with code-editor-style composers
-(Monaco/CodeMirror) that silently reject programmatic `AXValue` writes — the
-key-event typing path is what makes the doorbell work for them.
+ZCode is an Electron code-editor composer that rejects programmatic `AXValue`
+writes — the key-event typing path makes the doorbell work for it.
+
+**Antigravity/Gemini (PR78 R5/R6):** no explicit composer-identity profile is
+captured, so `profileFor` returns `.unknown` and resolution FAILS CLOSED rather
+than silently reusing Claude's "Prompt" matching (which would drive a broken
+doorbell). To support either app, inspect its live composer identity, add an
+explicit `ComposerProfile` case + fixtures, and record live evidence. Routing is
+aligned so no watcher attempts the unsupported doorbell: `gemini`'s
+`activation.ax_app` was REMOVED (terminal-only `cli_session`), and `antigravity`
+is a `human_relay` with `watcher_enabled: false` and no `ax_app` — so `deliver.py`
+routes neither to an AX ring (regression: `tests/test_deliver_ax_routing.py`). The
+durable mailbox remains their delivery channel.
 
 Safety: `ring --submit` only presses a **confident** send button (unlabeled icon
 or labeled send/submit), never a side-effecting control (e.g. Antigravity's

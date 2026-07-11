@@ -9,6 +9,12 @@ app=""
 text=""
 is_ring=0
 has_submit=0
+# Preserve whether --window-index was supplied AND its exact value (incl. 0), so
+# the follow-up confirm targets the SAME window the ring did. axsend now treats
+# nil/auto (absent) as distinct from an explicit index, so dropping it here would
+# let confirm auto-resolve a different window than an explicit ring sent to (PR78 R2).
+win_index_supplied=0
+win_index=""
 args=("$@")
 if [[ "${1:-}" == "ring" ]]; then
   is_ring=1
@@ -22,11 +28,52 @@ for ((i = 0; i < ${#args[@]}; i++)); do
     --text)
       if (( i + 1 < ${#args[@]} )); then text="${args[$((i + 1))]}"; fi
       ;;
+    --window-index)
+      if (( i + 1 < ${#args[@]} )); then win_index="${args[$((i + 1))]}"; win_index_supplied=1; fi
+      ;;
     --submit)
       has_submit=1
       ;;
   esac
 done
+
+# The follow-up confirm/turns commands target the SAME window the ring did:
+# forward --window-index only when explicitly supplied (incl. 0); otherwise leave
+# it absent so it auto-resolves the native chat window, matching the ring (R2).
+subcmd_args() {   # subcmd_args <confirm|turns>
+  cmd_args=("$1" --app "$app" --text "$text")
+  if (( win_index_supplied == 1 )); then
+    cmd_args+=(--window-index "$win_index")
+  fi
+}
+# Read the conversation-turn count for this exact text. Returns the number ONLY
+# when `axsend turns` EXITED 0 AND printed a numeric — otherwise empty (PR78 R8).
+# cmdTurns prints "0" on a trust/app/window resolution failure while returning
+# NONZERO; capturing the process exit status (not the pipeline's) prevents that
+# untrustworthy "0" from being taken as a real baseline of zero (which could
+# falsely promote a later stale-identical turn). Empty => promotion is blocked.
+turn_count() {
+  subcmd_args turns
+  local out st
+  set +e
+  out="$("$root/tools/axbridge/axsend" "${cmd_args[@]}" 2>/dev/null)"
+  st=$?
+  set -e
+  out="$(printf '%s' "$out" | tail -1)"
+  if (( st == 0 )) && [[ "$out" =~ ^[0-9]+$ ]]; then printf '%s' "$out"; else printf ''; fi
+}
+
+is_submit_ring=0
+if (( is_ring == 1 && has_submit == 1 )) && [[ -n "$app" && -n "$text" ]]; then
+  is_submit_ring=1
+fi
+
+# PR78 R7: capture a pre-ring turn baseline so a delayed promotion requires a
+# strictly NEW turn (a real fresh delivery), never a stale identical earlier turn.
+baseline_turns=""
+if (( is_submit_ring == 1 )); then
+  baseline_turns="$(turn_count)"
+fi
 
 set +e
 output_file="$(mktemp "${TMPDIR:-/tmp}/axsend-ensure.XXXXXX")"
@@ -34,13 +81,37 @@ trap 'rm -f "$output_file"' EXIT
 "$root/tools/axbridge/axsend" "$@" | tee "$output_file"
 status=${PIPESTATUS[0]}
 set -e
+
 if (( status != 0 )); then
+  # A `ring --submit` can exit 7 (NOT DELIVERED) even though the target exposed the
+  # sent turn just AFTER the ring's internal settle window — live ZCode did this.
+  # Promote ONLY on a freshness-safe signal: the turn count for this exact text
+  # strictly INCREASED vs a TRUSTWORTHY pre-ring baseline (a genuinely new turn).
+  # This never promotes from a stale identical earlier turn, and NEVER resends.
+  # Requires a numeric baseline that came from a SUCCESSFUL `axsend turns` (see
+  # turn_count) — a "0" printed on a resolution failure is treated as untrustworthy
+  # (empty) and blocks promotion (PR78 R8). Applies ONLY to exit 7: exit 9 is
+  # ambiguous post-submit identity loss and is NEVER auto-promoted — after identity
+  # loss a later auto-resolution cannot prove it is the same frozen window/thread,
+  # so the durable mailbox stays authoritative and the caller must not auto-re-ring.
+  # Genuine setup/arg failures (1/2/3/64) propagate as-is.
+  if (( status == 7 && is_submit_ring == 1 )) && [[ -n "$baseline_turns" ]]; then
+    for _attempt in 1 2 3 4; do
+      sleep 2
+      after_turns="$(turn_count)"
+      if [[ -n "$after_turns" ]] && (( after_turns > baseline_turns )); then
+        echo "[axsend-ensure] ring exited 7 but a NEW conversation turn appeared (${baseline_turns} -> ${after_turns}) — promoting to success on independent fresh-turn proof (no resend)."
+        exit 0
+      fi
+    done
+  fi
   exit "$status"
 fi
 
-if (( is_ring == 1 && has_submit == 1 )) && [[ -n "$app" && -n "$text" ]]; then
+if (( is_submit_ring == 1 )); then
   if grep -Fq "QUEUED (UNCONFIRMED):" "$output_file"; then
     exit 0
   fi
-  "$root/tools/axbridge/axsend" confirm --app "$app" --text "$text"
+  subcmd_args confirm
+  "$root/tools/axbridge/axsend" "${cmd_args[@]}"
 fi
