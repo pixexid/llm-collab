@@ -134,11 +134,12 @@ adapters, but it cannot perform Codex Computer Use recovery.
 Current safe ordering:
 
 - first write the durable `llm-collab` packet
-- for an AX-capable `cli_session` with `activation.ax_app`, use the idle-gated
-  `axsend-ensure ring --submit --verify` AX doorbell as the primary wake
+- for an AX-capable `cli_session` with `activation.ax_app`, use
+  `axsend-ensure ring --submit --verify` once as the primary wake even when the
+  recipient is busy; exit 0 means delivered/queued, so never repeatedly re-ring
 - use attended Computer Use only as fallback/recovery when AX cannot safely
   inspect/target/send, or for an explicitly project-configured non-CLI desktop
-  bridge
+  bridge; apply the idle input gate before this screenshot/keyboard fallback
 - PM2/heartbeat remains a bounded observation safety-fuse, not the primary wake
 
 Why:
@@ -155,15 +156,17 @@ Watcher policy for desktop-app agents:
 PM2/heartbeat is only the bounded, provisional safety-fuse described in
 `session-autobridge-runbook.md`.
 
-- primary: ring the registered AX app after the idle gate with one short pointer
-  to the durable packet
+- primary: ring the registered AX app once, even while it is busy, with one short
+  pointer to the durable packet; treat exit 0 as delivered/queued and do not
+  repeatedly re-ring
 - recovery: if AX targets an embedded preview/web field or cannot verify the
   native composer, preserve the packet, stop sending, and use an attended Codex
-  turn with Computer Use plus `axsend tree --editable-only` to remove/blank the
+  turn with Computer Use plus
+  `bin/axsend-ensure tree --app <app> --editable-only` to remove/blank the
   competing field and verify the real native prompt before resuming AX
 - fallback: use Computer Use to send only when AX remains unavailable/unsafe or
-  the project explicitly configured a non-CLI desktop bridge; still apply the
-  same idle gate and one-line pointer rule
+  the project explicitly configured a non-CLI desktop bridge; apply the Computer
+  Use idle input gate and one-line pointer rule
 - never convert one AX targeting incident into a standing mailbox-only or
   AX-disabled policy
 - unsafe: claim a PM2 watcher created a new app-visible desktop thread
@@ -176,8 +179,9 @@ PM2/heartbeat is only the bounded, provisional safety-fuse described in
 If desktop visibility is needed, the recommended flow is:
 
 1. write the task/message to `Chats/` with `deliver.py`
-2. ring the recipient's registered app via AX (idle-gated) with one short
-   sender-tagged pointer to the durable packet
+2. ring the recipient's registered app via AX once even if it is busy, with one
+   short sender-tagged pointer to the durable packet; exit 0 means
+   delivered/queued and must not be repeatedly re-rung
 3. the recipient drains its unread inbox and acts; it rings back on handoff
 4. if AX targets the wrong editable surface or cannot verify delivery, run the
    attended Computer Use recovery above, then retry AX once the real composer is

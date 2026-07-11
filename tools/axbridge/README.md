@@ -25,13 +25,13 @@ bin/axsend check        # -> "AX trusted: YES"
 
 ```bash
 # Inspect an app's tree to find the composer + send button
-bin/axsend tree  --app Codex --editable-only
+bin/axsend-ensure tree --app Codex --editable-only
 
 # Dump the app element's raw attributes (debugging which process is real)
 bin/axsend attrs --app Codex
 
-# Idle-gate: empty AXTextArea value == composer is empty, safe to ring
-bin/axsend tree  --app Codex --editable-only | grep AXTextArea
+# Optional targeting diagnostic; this is not an AX ring idle gate
+bin/axsend-ensure tree --app Codex --editable-only | grep AXTextArea
 
 # Set composer text only (draft, no send)
 bin/axsend ring  --app Codex --text "hello"
@@ -49,11 +49,11 @@ bin/axsend ring  --app Codex --submit --text "[from claude] ..."
 #   exit 0 delivered | exit 7 not-delivered (draft or never typed)
 bin/axsend confirm --app Codex --text "[from claude] ..."
 
-# If confirm says "not-delivered": RE-RING with the message — the ring clears the old
-# draft + retypes + resends (verified on Electron). Then confirm again.
+# Only after a non-zero/not-delivered result, retry once — the ring clears the old
+# draft + retypes + resends (verified on Electron). Never re-ring exit-0 queued/delivered.
 bin/axsend ring  --app Codex --submit --verify --text "[from claude] ..."
 # (`ring --text ""` now reliably clears Electron drafts too: it wakes focus then
-#  runs two select-all strategies. Re-ring is the all-in-one recovery.)
+#  runs two select-all strategies. One retry is the all-in-one recovery.)
 
 # Post-send / anytime: is the recipient processing, and what are recent messages
 # (including their reply)?
@@ -76,8 +76,9 @@ NEVER fall back to a screenshot to check — use `axsend confirm`, which checks 
 *conversation* (the sent message appears as a real turn ABOVE the composer) — the
 one signal that IS reliably AX-readable. The composer's own draft/empty state is
 NOT reliable (blank AXValue + stale cached static-text nodes), so confirm reports
-delivered vs not, not a draft state. A handoff is done only when `confirm` reports
-`delivered` (exit 0); if not-delivered, re-ring (it reliably clears + resends).
+delivered vs not, not a draft state. Exit 0 from the original ring means
+delivered/queued and must not be re-rung. After a non-zero/not-delivered result,
+retry once; do not repeatedly re-ring.
 
 `--app` matches by localized name or bundle id (substring ok). `--window-index N`
 targets a specific window (default 0).
@@ -103,10 +104,13 @@ targets a specific window (default 0).
   steal). Stops at the first that actually lands.
 - **`--verify` (honest):** requires the text to have **left the composer** AND
   appear as a conversation message above it. A stuck draft can never
-  false-positive. Returns `7` if not landed, `8` if the target went busy before
-  the press (so it never leaves a stuck draft).
-- **Strict idle-gate:** `ring` re-checks for a Stop button immediately before
-  pressing; aborts (`8`) if the target became busy. Apps won't submit while busy.
+  false-positive. It returns 0 for delivered/queued and `7` when the message did
+  not land; a busy recipient is not an AX ring failure.
+- **Busy-safe queueing:** `ring` is allowed while the recipient is busy. It
+  submits one message, exits 0 when delivered or queued, and must not be
+  repeatedly re-rung. `tree`/`state` are optional diagnostics, not AX ring idle
+  gates. The idle input gate applies only to attended screenshot/keyboard
+  Computer Use fallback.
 
 ## Per-app support matrix (validated 2026-06-21)
 

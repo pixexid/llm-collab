@@ -125,9 +125,11 @@ review threads/comments, automatic connector reactions, and merge state.
 PR-wait heartbeats are a safety-fuse, not the primary routing path. When a
 heartbeat or queue owner finds actionable PR feedback that needs the implementer
 to change their branch, it must send a durable mailbox packet and ring the
-implementer with the doorbell immediately after the idle gate passes. Do not
-silently wait for the next heartbeat or depend on the operator to notice the PR
-comment.
+implementer once with the AX doorbell, even if the implementer is busy. Treat
+exit 0 as delivered/queued and never repeatedly re-ring the same message. The
+idle input gate applies only if attended screenshot/keyboard Computer Use is
+needed as fallback. Do not silently wait for the next heartbeat or depend on the
+operator to notice the PR comment.
 
 When the operator has authorized the merge path for the PR or PR class, the
 heartbeat may complete the wait after it verifies the latest head has green
