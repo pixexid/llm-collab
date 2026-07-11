@@ -29,6 +29,9 @@ notifications are optional adapters for teams that need them.
 - **Local project state** — real queues, runbooks, routing policy, and memory
   templates live under `{project_state_root}/{project_id}/`, normally outside
   this public Git checkout.
+- **Separate scheduled-work surfaces** — Codex app automations remain app-owned.
+  The proposed Thread Event Runner is a separate, currently unimplemented local
+  subscription/ledger design; it does not own or mirror app automation state.
 
 Project-scoped is the default; universal behavior is the exception. Read
 [Multi-Project Support](docs/multi-project.md#scoping-principles) before adding
@@ -292,6 +295,19 @@ See [Session Startup](docs/workflows/session-startup.md) and the
 [desktop-app doorbell workflow](docs/workflows/claude-code-desktop-computer-use-bridge.md)
 for operational safety rules.
 
+### Thread Event Runner versus app automations
+
+The [Thread Event Runner RFC](docs/workflows/thread-event-runner-rfc.md) defines
+a Phase 1 architecture and threat contract for durable local event
+subscriptions. It does **not** add a daemon, database, PM2 process, adapter, or
+exact-thread dispatch behavior in the current release.
+
+Codex app automations remain owned by the Codex app, including their schedules,
+thread behavior, lifecycle, UI, and storage. A future runner subscription would
+be an independently managed local record for observing external state. Neither
+surface may silently import, pause, cancel, deduplicate, or take ownership of
+the other.
+
 ## Command reference
 
 Prefix collaboration commands with `bin/llm-collab`:
@@ -358,6 +374,7 @@ git diff --check
 - [Schema Reference](docs/schema-reference.md)
 - [Identity System](docs/identity-system.md)
 - [Workflow index](docs/workflows/README.md)
+- [Thread Event Runner RFC](docs/workflows/thread-event-runner-rfc.md)
 - [GitHub adapter](docs/adapters/github.md)
 - [PM2 adapter](docs/adapters/pm2.md)
 - [Migration from Amiga](docs/migration/from-amiga.md)

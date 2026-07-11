@@ -92,14 +92,24 @@ When validating worker wake/resume behavior, do not target the active operator t
 Use a disposable worker session instead, especially for Codex app tests:
 
 1. bind or refresh a disposable worker session
-2. if testing queue protection, make that disposable session busy first
+2. if testing failure retry, use a bounded adapter that is known to return
+   nonzero before runtime acceptance on its first pass
 3. send the routed message to the disposable target session
 4. inspect watcher/inbox state
 
-Queue-protection acceptance for Codex:
+Current retry acceptance (not busy-queue protection):
 
-- busy target session: message must stay in `unread` and appear in `queued`
-- idle target session on the next watcher pass: message must drain from `queued` and move to `read`
+- a known pre-acceptance runtime failure emits `autobridge_failed` and leaves
+  the message in `unread`
+- a later known-success watcher pass emits `autobridge_consumed` and moves the
+  message to `read`
+
+Session autobridge currently has no authoritative Codex busy/idle check, no
+inbox `queued` field, and no `autobridge_deferred_busy` event. Do not use a
+running operator thread to test retries or describe this behavior as safe busy
+deferral. The planned transactional contract is in
+`thread-event-runner-rfc.md`; exact-thread delivery remains disabled there
+until busy and turn-acceptance/idempotency behavior is integration-proven.
 
 For Codex manual watcher checks, `watch_inbox.py` should behave the same as the PM2 watcher by default:
 
@@ -143,16 +153,30 @@ Operational rule:
   new Claude desktop app thread
 - do not synthesize desktop-visible Claude threads by writing local app cache/index files
 - use `Chats/` messages as the transport of record (the durable mailbox)
-- the primary agent-to-agent wake for AX-capable `cli_session` workers is the
-  **bidirectional AX doorbell** (see
+- when no matching dispatchable session autobridge exists and `deliver.py`
+  reports `ax_doorbell_required: true`, the primary wake for an AX-capable
+  `cli_session` worker is the **bidirectional AX doorbell** (see
   `claude-code-desktop-computer-use-bridge.md`); terminal-only sessions require a
   dispatchable runtime binding
-- screenshot/keyboard Computer Use is a fallback for a project-configured
-  non-CLI Claude Desktop bridge, never the universal default
+- attended Computer Use is fallback/recovery when AX cannot safely target or
+  verify the native composer, and for a project-configured non-CLI Claude
+  Desktop bridge; it is never the universal first path
+
+Current Phase 1 routing gives a matching dispatchable session autobridge
+precedence. When `deliver.py` reports `autobridge_ready: true`, it intentionally
+suppresses both `ax_doorbell_required` and `desktop_bridge_required`; that packet
+uses the separately documented session-autobridge path and its retry limitations.
+Do not describe AX as primary for that packet. If the workflow requires AX as
+the primary wake, avoid registering the matching dispatchable autobridge or
+deactivate it before calling `deliver.py` (see
+`session-autobridge-runbook.md#deactivate-a-session`), then verify the delivery
+result actually reports `ax_doorbell_required: true`.
 
 Safest task-grade workflow for desktop-app agents:
 
 1. `llm-collab` delivers the task into `Chats/` with `deliver.py`
+   - `autobridge_ready: true` takes precedence and means no AX doorbell was
+     requested for this packet
    - for an AX-capable `cli_session` worker, including Claude when configured,
      `ax_doorbell_required` means the
      sender rings the worker with the printed `axsend-ensure ring` command; it is
@@ -160,18 +184,28 @@ Safest task-grade workflow for desktop-app agents:
    - `desktop_bridge_required` is the project-configured non-CLI Claude fallback
    - `activation_unavailable` means the durable packet exists but neither a
      dispatchable runtime nor an explicit wake transport is configured
-2. the sender rings once with the printed AX command; a busy recipient may queue
-   the one-line pointer behind its active turn
+2. when `ax_doorbell_required` is true, the sender rings once with the printed AX
+   command; a busy recipient may queue the one-line pointer behind its active
+   turn. `VERIFIED` exit 0 confirms delivery. `QUEUED (UNCONFIRMED)` exit 0 does
+   not prove the pointer entered the intended thread: preserve the mailbox
+   packet, record the unconfirmed blocker/follow-up, never re-ring it, and do not
+   claim exact-thread delivery without later confirmation or recipient evidence
 3. the sender sends exactly one short sender-tagged wake prompt that points the
    recipient to the exact `llm-collab` inbox/chat/message path. Do not paste full
    task context, acceptance criteria, or multi-paragraph briefs into the app; the
    durable `Chats/` packet is the source of truth. The prompt must be one line,
    under roughly 240 characters, and never contain newline-split bridge details.
    The recipient drains its full unread inbox after the ring.
-4. if AX cannot deliver or confirm, record the exact blocker; use Computer Use
-   only for an explicitly configured desktop-bridge fallback
+4. if AX resolves an embedded preview/web field or cannot deliver/confirm, stop
+   sending but preserve the packet. In an attended Codex turn, use Computer Use
+   plus `bin/axsend-ensure tree --app <app> --editable-only` to remove/blank the
+   competing field, select the correct window, clear probes, and verify the
+   native composer; resume AX after repair, or use one idle-gated Computer Use
+   send as the bounded fallback. Never turn one targeting incident into a
+   standing AX-disabled rule.
 
-Only after `desktop_bridge_required`, Codex owns the visible Claude Desktop wake
+After `desktop_bridge_required` or an AX targeting/delivery failure enters the
+attended recovery path, Codex owns the visible Claude Desktop recovery/wake
 through Computer Use. If Computer Use is unavailable, blocked by a non-idle
 Claude state, cannot inspect the app, or fails to send, Codex must keep
 ownership of the Claude app path: bring Claude to front by bundle id, use

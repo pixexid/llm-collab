@@ -36,9 +36,38 @@ npm install -g pm2
 
 ## How it works
 
-`pm2/ecosystem.config.cjs` reads `agents.json` dynamically and generates one PM2 app per agent where `activation.watcher_enabled: true` and type is not `human_relay` or `human`.
+`pm2/ecosystem.config.cjs` reads `agents.json` dynamically and generates one PM2
+app per agent where `activation.watcher_enabled: true`. The current ecosystem
+file does not filter by activation type. `human` and `human_relay` entries are
+normally configured with watchers disabled, but setting their flag to `true`
+will currently create a watcher.
 
 App naming: `{workspace_name}-{agent_id}` (workspace_name from `collab.config.json`)
+
+PM2 materializes this configuration when a process is started/reloaded; changing
+`agents.json` does not automatically remove or reconfigure an already-running
+process. A PM2 process saved before an agent was disabled/removed can also return
+after reboot even though the current ecosystem would not create it.
+
+After roster/watcher changes, compare `python bin/pm2_watchers.py status --all`
+and `pm2 list` with current `watcher_enabled: true` entries. Stop/delete stale
+named processes (`python bin/pm2_watchers.py delete --agent <id>` while the ID
+remains in the roster, otherwise `pm2 delete <workspace>-<agent>`). Then apply
+the current ecosystem definition to every intended watcher before saving:
+
+```bash
+pm2 startOrRestart pm2/ecosystem.config.cjs --only <workspace>-<agent> --update-env
+```
+
+Repeat that command for each intended existing watcher, or omit `--only` to
+apply the current ecosystem to the full enabled set. `pm2_watchers.py ensure`
+only starts a missing process; when a process is already online it does not
+reload changed arguments or environment. Likewise, restarting only by stored
+PM2 name does not re-read the ecosystem definition. Run `pm2 save` only after
+the intended processes have been started/restarted from the current ecosystem
+and status matches the roster, so reboot state preserves the reconciled
+configuration. Do not treat a healthy stale PM2 process as proof that current
+routing policy authorizes it.
 
 ---
 
@@ -83,41 +112,54 @@ Notifications can be disabled globally: `"notifications_enabled": false` in `col
 
 ---
 
-## Busy-session behavior
+## Current retry behavior (no busy queue)
 
-Autobridge delivery does not interrupt a busy Codex session.
+The current session autobridge does **not** obtain an authoritative Codex thread
+busy/idle state and does not implement a distinct busy queue. In particular:
 
-If a targeted Codex runtime thread is already active:
+- `agents/<agent>/inbox.json` has `unread` and `read`; it has no autobridge
+  `queued` field
+- the watcher does not emit `autobridge_deferred_busy`
+- an attempted runtime trigger that returns nonzero emits `autobridge_failed`
+  and leaves the message unread
+- each later watcher pass considers unread messages again; a successful runtime
+  result emits `autobridge_consumed` and moves the message to `read`
 
-- the watcher emits `autobridge_deferred_busy`
-- the message remains in `unread`
-- the inbox records a `queued` entry with session metadata
-- the next watcher pass retries that queued message first for the same target session
+This retry shape applies to PM2-backed and one-shot/manual `watch_inbox.py`
+runs. A failure is not proof that a busy runtime rejected the turn before
+acceptance, so this behavior must not be described as safe busy deferral. Avoid
+targeting a running operator thread.
 
-When the target session returns to idle, the next watcher pass drains the queued message and emits `autobridge_consumed`.
-
-This applies to:
-
-- PM2-backed watchers
-- one-shot/manual `watch_inbox.py` runs
+The planned [Thread Event Runner](../workflows/thread-event-runner-rfc.md)
+defines transactional busy deferral, coalescing, leases, and ambiguous-delivery
+reconciliation. None of those guarantees are implemented by the current PM2
+watcher.
 
 ---
 
-## Claude Desktop Constraint
+## Desktop-app constraint and wake priority
 
-PM2/watcher automation must not be treated as the controller for the Claude
-desktop app. PM2 can watch `llm-collab` inbox files and dispatch shell/runtime
-adapters, but it cannot call Codex Computer Use tools.
+PM2/watcher automation must not be treated as the controller for a desktop app.
+PM2 can watch `llm-collab` inbox files and dispatch configured shell/runtime
+adapters, but it cannot perform Codex Computer Use recovery.
 
-Current safe assumption:
+Current safe ordering:
 
-- Codex app visible refresh is automatable
-- Claude desktop app interaction is automatable only from a live Codex turn using
-  Computer Use
-- Claude desktop fresh sidebar thread creation is safe only when Computer Use
-  generates a UUID plus short title, clicks `New session`, sends the first
-  visible prompt beginning with `[BRIDGE <8-char-uuid-prefix>] <short title>`,
-  and verifies the new sidebar title/local URL
+- if AX must be the primary wake, first ensure no matching dispatchable session
+  autobridge is active; current `deliver.py` gives `autobridge_ready` precedence
+  and suppresses `ax_doorbell_required`
+- write the durable `llm-collab` packet and inspect the delivery result; when it
+  reports `autobridge_ready: true`, the current Phase 1 route is session
+  autobridge, not AX
+- only when it reports `ax_doorbell_required: true`, use
+  `axsend-ensure ring --submit --verify` once even when the recipient is busy.
+  `VERIFIED` exit 0 confirms delivery;
+  `QUEUED (UNCONFIRMED)` exit 0 preserves the mailbox/blocker follow-up but does
+  not prove exact-thread delivery and must not be re-rung
+- use attended Computer Use only as fallback/recovery when AX cannot safely
+  inspect/target/send, or for an explicitly project-configured non-CLI desktop
+  bridge; apply the idle input gate before this screenshot/keyboard fallback
+- PM2/heartbeat remains a bounded observation safety-fuse, not the primary wake
 
 Why:
 
@@ -130,58 +172,66 @@ Why:
 
 Watcher policy for desktop-app agents:
 
-PM2/heartbeat is **not the primary wake mechanism**. The primary path is the
-bidirectional Computer-Use doorbell with `llm-collab` as the durable mailbox (see
-`claude-code-desktop-computer-use-bridge.md`). PM2/heartbeat is only the bounded,
-provisional safety-fuse — used when a doorbell ring is blocked or a worker is
-visibly running and a handoff is expected, task-scoped and auto-deleted on
-handoff/ack/blocker (see `session-autobridge-runbook.md`).
+PM2/heartbeat is only the bounded, provisional safety-fuse described in
+`session-autobridge-runbook.md`.
 
-- primary: ring the recipient's app directly with the Computer-Use doorbell after
-  the idle gate passes; record durable work in `llm-collab`
-- safety-fuse only: let a heartbeat drive a desktop app through Computer Use when
-  a ring is blocked or a response is expected from a running worker
-- safety-fuse only: if Computer Use cannot inspect or send, keep the bounded
-  heartbeat active, try reasonable app-control recovery paths, and record a
-  blocker for Computer Use retry or tooling repair
+- primary: ring the registered AX app once, even while it is busy, with one short
+  pointer to the durable packet. `VERIFIED` exit 0 confirms delivery;
+  `QUEUED (UNCONFIRMED)` remains unresolved, preserves the mailbox/follow-up,
+  must not be re-rung, and cannot be reported as exact-thread delivery
+- recovery: if AX targets an embedded preview/web field or cannot verify the
+  native composer, preserve the packet, stop sending, and use an attended Codex
+  turn with Computer Use plus
+  `bin/axsend-ensure tree --app <app> --editable-only` to remove/blank the
+  competing field and verify the real native prompt before resuming AX
+- fallback: use Computer Use to send only when AX remains unavailable/unsafe or
+  the project explicitly configured a non-CLI desktop bridge; apply the Computer
+  Use idle input gate and one-line pointer rule
+- never convert one AX targeting incident into a standing mailbox-only or
+  AX-disabled policy
 - unsafe: claim a PM2 watcher created a new app-visible desktop thread
 - unsafe by default: synthesize sidebar visibility by writing app cache/index files directly
 - unsafe: use `claude -p`, `claude --resume`, or `~/.claude/projects` as proof
   that the visible desktop thread changed
 - unsafe: ask the operator to wake an agent or paste the bridge prompt before
-  Computer Use/app-control recovery has been exhausted
+  AX plus attended Computer Use/app-control recovery has been exhausted
 
 If desktop visibility is needed, the recommended flow is:
 
 1. write the task/message to `Chats/` with `deliver.py`
-2. ring the recipient's app directly via the Computer-Use doorbell (idle-gated)
-   with one short sender-tagged pointer to the durable packet
+2. ring the recipient's registered app via AX once even if it is busy, with one
+   short sender-tagged pointer to the durable packet. Record `VERIFIED` exit 0 as
+   confirmed delivery. Record `QUEUED (UNCONFIRMED)` exit 0 as unresolved,
+   preserve the mailbox/blocker follow-up, never re-ring it, and do not claim
+   exact-thread delivery
 3. the recipient drains its unread inbox and acts; it rings back on handoff
-4. only if the ring is blocked or a running worker's response is expected, create
-   a bounded provisional safety-fuse heartbeat under the constraints in
-   `session-autobridge-runbook.md`
-5. while the target is running, the heartbeat observes only
-6. once the target is idle/awaiting input, read the visible response and record
-   it back into `llm-collab`
-7. delete the heartbeat when the response is recorded, blocked, timed out, or no
-   longer needed
+4. if AX targets the wrong editable surface or cannot verify delivery, run the
+   attended Computer Use recovery above, then retry AX once the real composer is
+   verified; use Computer Use send only as the bounded fallback
+5. only if the ring is blocked or a running worker's response is expected, create
+   a bounded provisional safety-fuse heartbeat
+6. while the target is running, the heartbeat observes only; delete it when the
+   response is recorded, blocked, timed out, or no longer needed
 
 ---
 
-## Disposable queue test
+## Disposable retry test
 
-Use a disposable Codex thread for queue validation. Do not target an active operator thread.
+Use a disposable runtime adapter/session for retry validation. Do not target an
+active operator thread and do not treat this as a busy-deferral test.
 
-Canonical flow:
+Current test shape:
 
-1. register or refresh a disposable Codex autobridge session
-2. start a long-running turn on that disposable Codex thread
-3. send a targeted worker message to that exact Codex runtime session
-4. run one watcher pass while the thread is busy
-5. confirm `autobridge_deferred_busy` and that the message remains in `unread` plus `queued`
-6. wait for the disposable thread to return to idle
-7. run a second watcher pass
-8. confirm `autobridge_consumed`, `unread: []`, and `queued: []`
+1. register a disposable autobridge session with a bounded test adapter
+2. deliver one message to that exact disposable target
+3. make the adapter return nonzero on the first watcher pass
+4. confirm `autobridge_failed` and that the message remains in `unread`
+5. make the adapter return success on a later watcher pass
+6. confirm `autobridge_consumed`, `unread: []`, and the message in `read`
+
+This proves failure retry and eventual consumption only. Authoritative Codex
+busy detection, coalescing, and no-duplicate delivery remain future runner
+integration gates.
 
 Useful inspection points:
 

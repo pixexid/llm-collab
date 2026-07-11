@@ -42,10 +42,15 @@ Sender discipline: **don't re-ring the same message repeatedly** (one queue is
 enough). Receiver discipline: when not running, read queued msgs; ignore a queued
 copy you already handled from the inbox while running.
 
-**Verification is enforced, not optional.** `ring --submit` verifies by default
-(exit 0 = delivered or queued; non-zero = not delivered, re-ring). NEVER use
-computer-use/screenshots to check whether a doorbell sent — that's the ring's
-exit code (and `axsend confirm` for a later re-check). Validated bidirectionally
+**Verification is enforced, not optional.** `ring --submit` verifies by default.
+Exit 0 with `VERIFIED` confirms a visible conversation turn. Exit 0 with
+`QUEUED (UNCONFIRMED)` means only that the recipient became busy during submit;
+it does not prove the pointer landed in the intended thread. Preserve the
+durable mailbox packet, record the unconfirmed state and follow-up, never
+re-ring that pointer, and do not claim exact-thread delivery until later
+`axsend confirm`, inbox consumption, or a recipient handoff supplies evidence.
+A non-zero result is not delivered and permits one bounded retry. NEVER use
+Computer Use/screenshots to verify an AX send. Validated bidirectionally
 2026-06-21: Claude ⇄ Codex ⇄ ZCode ⇄ Antigravity.
 
 ## Preferred doorbell transport: `axsend` (AX bridge, no focus steal)
@@ -59,18 +64,22 @@ screenshot.
 
 ```bash
 AX=/Users/pixexid/Projects/llm-collab/bin/axsend-ensure   # auto-builds if needed
-$AX state --app Codex                                   # idle-gate: processing? + recent msgs
+$AX state --app Codex                                   # optional status + recent messages
 $AX ring  --app Codex --submit --dry-run --text "x"     # confirm send target (new app/window)
 $AX ring  --app Codex --submit --verify --text "[from <me>] <pointer to durable packet>"
 $AX state --app Codex                                   # read the reply
 ```
 
 Rules: deliver the durable packet with `deliver.py` FIRST (mailbox = truth);
-idle-gate before every ring; `--dry-run` first on any new app; `--verify` (returns
-non-zero if the text didn't land — empty composer is NOT proof of send). Any agent
-(Codex, Claude, Gemini, ZCode) can call `axsend-ensure` via shell. Needs the
-running process enabled in Privacy & Security → Accessibility. Falls back to
-screenshot computer-use only if AX fails for a target. Full reference:
+ring once even when the recipient is busy. `VERIFIED` exit 0 is confirmed;
+`QUEUED (UNCONFIRMED)` exit 0 must be recorded and followed up without re-ringing
+or claiming exact-thread delivery. Use `--dry-run` first on any new app and
+`--verify` (non-zero means the text did not land; an empty composer is not proof
+of send). The idle input gate applies only to attended screenshot/keyboard
+Computer Use fallback. Any agent (Codex, Claude, Gemini, ZCode) can call
+`axsend-ensure` via shell. Needs the running process enabled in Privacy &
+Security → Accessibility. Falls back to screenshot Computer Use only if AX fails
+for a target. Full reference:
 `tools/axbridge/README.md` and the Claude Code `ax-doorbell` skill.
 
 **Validated across all four agent apps (2026-06-21):**
@@ -124,14 +133,17 @@ For task-grade work, in order:
 1. Write the durable instruction/handoff with `deliver.py` to `Chats/` and the
    recipient's `agents/<agent>/inbox.json`.
 2. Ring the recipient with `axsend ring --submit --verify --text "<pointer>"`
-   even if the recipient is busy. The busy case is expected: the one-line pointer
-   queues behind the current turn and reinforces delivery of the durable packet.
-   Use exactly **one short, sender-tagged, one-line pointer** to the exact
+   even if the recipient is busy. The one-line pointer may queue behind the
+   current turn, but the ring result must be classified as described below. Use
+   exactly **one short, sender-tagged, one-line pointer** to the exact
    inbox/chat/message path as the `--text` value. Full context stays in the
    durable packet, never in the visible prompt.
-4. Treat exit 0 (`delivered`, `confirmed`, or `queued`) as a successful doorbell.
-   If `axsend` reports not delivered, run `axsend confirm`; if still absent,
-   retry once or record the exact AX blocker in the mailbox.
+4. Classify exit 0 by output: `VERIFIED` confirms delivery;
+   `QUEUED (UNCONFIRMED)` does not. For queued-unconfirmed, keep the mailbox
+   packet unresolved, record the blocker/follow-up, never re-ring, and wait for
+   later `axsend confirm`, inbox consumption, or recipient handoff evidence. If
+   `axsend` exits non-zero, run `axsend confirm`; if still absent, retry once or
+   record the exact AX blocker in the mailbox.
 5. Use screenshot/keyboard Computer Use only as fallback when `axsend` is
    unavailable. In that fallback path, pass the idle input gate before typing.
 6. Record the ring result in your own thread and, when relevant, in the mailbox.
@@ -214,9 +226,11 @@ This reports whether the app appears running, frontmost, visible, holding power
 assertions, and whether its main process appears busy by CPU. It deliberately
 does not read message content, prompt state, thread titles, URLs, or local
 session stores. A healthy shell report is not proof the doorbell is usable; that
-is proven only after Computer Use inspects the visible target thread/prompt and
-the idle gate passes. CPU-busy is not proof of lane progress — pair it with
-durable lane evidence before describing progress.
+is proven by the AX ring exit result and, when needed, `axsend confirm`. A
+healthy shell report is also not proof an attended Computer Use fallback is
+safe; that requires visible target inspection and the idle input gate. CPU-busy
+is not proof of lane progress — pair it with durable lane evidence before
+describing progress.
 
 ### Cadence (safety-fuse only)
 
@@ -297,11 +311,16 @@ the settled UI, then records the meaningful content into the mailbox.
 
 - Recipient idle/awaiting input: safe to read the last answer and decide whether
   an explicit next ring exists.
-- Recipient still generating / shows `Stop` / creating a worktree: do not
-  interrupt; the idle gate forbids the ring.
-- Computer Use cannot see the prompt/transcript: the doorbell is paused; record
-  the blocker (for the safety-fuse path, `record-computer-use-timeout` applies a
-  cooldown) and retry via Computer Use after repair. Do not fall back to CLI.
+- Recipient still generating / shows `Stop` / creating a worktree: one AX ring
+  is allowed and may queue the pointer behind the active turn. If the result is
+  `QUEUED (UNCONFIRMED)`, preserve the mailbox/follow-up, never re-ring, and do
+  not claim exact-thread delivery. Do not use screenshot/keyboard Computer Use
+  until the idle input gate passes.
+- Computer Use cannot see the prompt/transcript: the Computer Use fallback is
+  paused; record the blocker (for the safety-fuse path,
+  `record-computer-use-timeout` applies a cooldown) and retry that fallback
+  after repair. AX may still ring once when it can target and verify the native
+  composer. Do not fall back to CLI.
 - App-visible thread changed: re-read app state and confirm project/title before
   sending anything.
 - Safety-fuse heartbeat times out: record `timed_out`, delete the heartbeat, and

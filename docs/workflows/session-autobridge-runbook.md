@@ -8,12 +8,20 @@ autonomous.
 
 ## Status: provisional safety-fuse, not the primary wake
 
-The primary agent-to-agent wake mechanism is now the **bidirectional Computer-Use
-doorbell** (see `claude-code-desktop-computer-use-bridge.md`): whichever agent
-finishes work or needs something rings the other immediately, with `llm-collab`
-as the durable mailbox. Routine/continuous polling is **deprecated** as the
-primary wake — it wastes tokens and a heartbeat set on guessed timing can fire
-into changed context.
+Current `deliver.py` gives a matching dispatchable session autobridge precedence
+and suppresses `ax_doorbell_required` for that packet. The primary wake for an
+AX-capable `cli_session` only when no such autobridge resolves is the busy-safe
+**bidirectional AX doorbell** (`axsend-ensure ring --submit --verify`; see
+`claude-code-desktop-computer-use-bridge.md`). Ring once even when the recipient
+is busy. `VERIFIED` exit 0 confirms delivery. `QUEUED (UNCONFIRMED)` exit 0 does
+not prove exact-thread delivery: preserve the durable mailbox packet, record the
+unconfirmed blocker/follow-up, and never re-ring. The idle input gate applies
+only to attended screenshot/keyboard Computer Use fallback, not to AX `ring`.
+Computer Use is the recovery path when AX cannot safely target or verify the
+native composer, and for an explicitly configured non-CLI desktop bridge.
+`llm-collab` remains the durable mailbox. Routine/continuous polling is
+**deprecated** as the primary wake — it wastes tokens and a heartbeat set on
+guessed timing can fire into changed context.
 
 Session autobridge and PM2/heartbeat polling survive only as a bounded,
 **provisional/experimental safety-fuse**, on trial, with hard constraints:
@@ -46,14 +54,21 @@ remove it and rely on the doorbell + mailbox-drain self-heal.
   review-fix loop.
 - Keep operator-visible chat notes enabled; autobridge activity must stay
   visible in `Chats/`.
-- Do not target an active operator thread for queue/busy tests.
-- Treat Claude desktop as a human-visible UI controlled through Computer Use,
-  not as a `session_autobridge.py` runtime target. Fresh Claude desktop threads
-  can be created only by visible app interaction: generate a UUID plus short
-  title, click `New session`, send the first prompt beginning with
+- Do not target an active operator thread for retry tests.
+- Treat Claude desktop as a human-visible UI, not as a
+  `session_autobridge.py` runtime target. Ring an existing verified native
+  composer through AX first. Computer Use owns attended AX recovery/fallback and
+  fresh thread creation: generate a UUID plus short title, click `New session`,
+  send the first prompt beginning with
   `[BRIDGE <8-char-uuid-prefix>] <short title>`, then verify the sidebar title
   and `local_*` URL. Do not claim a PM2 watcher, CLI resume, or filesystem write
   created a desktop-visible thread.
+- If AX resolves an embedded preview/web field or cannot verify the native
+  prompt, stop sending but preserve the durable packet. Use attended Computer
+  Use plus `bin/axsend-ensure tree --app <app> --editable-only` to remove/blank
+  the competing field, select the correct window, clear probes, and verify the
+  real native composer before resuming AX. Do not record a standing mailbox-only
+  or AX-disabled policy from one targeting incident.
 - For Claude-owned collaboration lanes, inspect the visible Claude app before
   treating inbox or queue state as final. If Claude is visibly asking a related
   question, waiting for direction, or reporting Read/Agent/tool errors, Codex
@@ -61,13 +76,14 @@ remove it and rely on the doorbell + mailbox-drain self-heal.
   for a final inbox handoff while Claude is blocked in the app.
 - If Claude is stale, idle with no durable progress, or repeatedly erroring,
   first try to wake or repair the same thread with a durable unblock packet plus
-  one short bridge after the idle gate passes. Restart or reopen Claude only
-  from an attended Codex recovery turn or after explicit operator instruction;
-  unattended heartbeats must notify with the observed blocker instead of
-  interrupting or restarting Claude. Create a new Claude thread only when the
-  current thread is full, unrecoverably corrupted, repeatedly loses tool access,
-  or still cannot continue after attended recovery; include a full continuity
-  packet for the same task.
+  one short AX bridge; it may queue behind an active turn. Apply the idle input
+  gate only if recovery falls back to screenshot/keyboard Computer Use. Restart
+  or reopen Claude only from an attended Codex recovery turn or after explicit
+  operator instruction; unattended heartbeats must notify with the observed
+  blocker instead of interrupting or restarting Claude. Create a new Claude
+  thread only when the current thread is full, unrecoverably corrupted,
+  repeatedly loses tool access, or still cannot continue after attended
+  recovery; include a full continuity packet for the same task.
 
 ## Activate A Session
 
@@ -179,17 +195,26 @@ For Codex, manual and PM2 watcher runs default to:
 - `LLM_COLLAB_CODEX_UI_REFRESH_METHOD=cdp`
 - `LLM_COLLAB_CODEX_CDP_PORT=9223`
 
-## Busy Or Queued Messages
+## Current Retry Behavior (No Busy Queue)
 
-When a targeted Codex runtime session is busy, the watcher must defer instead of
-interrupting:
+Session autobridge currently has no authoritative Codex busy/idle check, no
+inbox `queued` field, and no `autobridge_deferred_busy` event. Do not rely on it
+to protect a running target from a stacked or ambiguous `turn/start`.
 
-- message remains in `agents/<agent>/inbox.json` under `unread`
-- message appears in `queued`
-- watcher emits `autobridge_deferred_busy`
-- later watcher passes retry while the message remains unread
-- when the runtime becomes idle, watcher emits `autobridge_consumed` and moves
-  the message to `read`
+The implemented behavior is narrower:
+
+- a runtime trigger that reports nonzero emits `autobridge_failed`
+- the matching message remains under `unread`
+- later watcher passes consider the unread message again
+- a later successful runtime result emits `autobridge_consumed` and moves the
+  message to `read`
+
+Because a transport failure may occur after runtime acceptance, an automatic
+retry is not a proven exactly-once contract. Use disposable sessions for tests
+and do not target an active operator thread. Transactional busy deferral,
+coalescing, leases/fencing, and ambiguous-delivery reconciliation belong to the
+planned [Thread Event Runner](thread-event-runner-rfc.md), not this provisional
+autobridge.
 
 If a message is intentionally abandoned, clear it explicitly by marking it read:
 
@@ -197,10 +222,9 @@ If a message is intentionally abandoned, clear it explicitly by marking it read:
 python3 bin/inbox.py --me codex --mark-all-read
 ```
 
-Use this only when the unread queue is known to be stale. For a single stale
+Use this only when the unread set is known to be stale. For a single stale
 message, edit `agents/<agent>/inbox.json` carefully or write a small local
-maintenance script that moves that exact path from `unread` to `read` and
-removes the matching `queued` entry.
+maintenance script that moves that exact path from `unread` to `read`.
 
 ## Deactivate A Session
 
@@ -242,7 +266,11 @@ For a real-worker session, also prove:
 
 - `deliver.py` resolves the expected `target_session_id`
 - watcher emits `autobridge_dispatch`
-- busy target emits `autobridge_deferred_busy`
-- later idle pass emits `autobridge_consumed`
-- `unread` and `queued` are empty after consumption
+- a known pre-acceptance runtime failure emits `autobridge_failed` and leaves the
+  message unread
+- a later known-success pass emits `autobridge_consumed`
+- `unread` is empty and the message is present in `read` after consumption
 - a chat note records the pickup/dispatch event for the operator
+
+This proof does not establish busy deferral or safe retry after ambiguous
+runtime acceptance.

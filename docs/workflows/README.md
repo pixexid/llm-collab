@@ -14,8 +14,11 @@ Recommended read order:
    read whenever desktop-app agents need to notify each other
 3. `session-autobridge-runbook.md` — provisional safety-fuse only (polling is no
    longer the primary wake; see the doorbell doc)
-4. `task-intake-and-delegation.md`
-5. `review-and-handoff.md`
-6. `isolated-worktrees.md`
-7. `commit-push-prs.md`
-8. `github-projects.md`
+4. `thread-event-runner-rfc.md` — Phase 1 architecture/threat contract for a
+   planned durable event runner; no runner or exact-thread dispatcher is
+   implemented by this RFC
+5. `task-intake-and-delegation.md`
+6. `review-and-handoff.md`
+7. `isolated-worktrees.md`
+8. `commit-push-prs.md`
+9. `github-projects.md`
