@@ -43,7 +43,48 @@ trap 'rm -f "$output_file"' EXIT
 "$root/tools/axbridge/axsend" "$@" | tee "$output_file"
 status=${PIPESTATUS[0]}
 set -e
+
+# The follow-up confirm targets the SAME window the ring did: forward
+# --window-index only when explicitly supplied (incl. 0); otherwise leave it
+# absent so confirm auto-resolves the native chat window, matching the ring
+# (PR78 R2).
+build_confirm_args() {
+  confirm_args=(confirm --app "$app" --text "$text")
+  if (( win_index_supplied == 1 )); then
+    confirm_args+=(--window-index "$win_index")
+  fi
+}
+
 if (( status != 0 )); then
+  # PR78 R6: a `ring --submit` can exit 7 (NOT DELIVERED) even though the target
+  # exposed the sent turn just AFTER the ring's internal settle window — live
+  # ZCode did exactly this. Run ONE delayed confirm as the LAST authority before
+  # propagating the failure; promote to success ONLY if confirm shows delivered,
+  # and NEVER resend (a resend would duplicate a message that already landed).
+  # This applies solely to exit 7 on a `ring --submit` with app+text: genuine
+  # setup/identity/ambiguous/arg failures (1/2/3/64) propagate immediately and
+  # are never masked.
+  if (( status == 7 && is_ring == 1 && has_submit == 1 )) && [[ -n "$app" && -n "$text" ]]; then
+    build_confirm_args
+    # Bounded settle: the target can expose the sent turn slightly after the
+    # ring's window, and its chat window can be transiently unresolvable ("no
+    # windows") for a moment right after the ring (live ZCode did both). Poll the
+    # confirm a few times before giving up. This is verification only — it NEVER
+    # resends, so it cannot duplicate a message that already landed.
+    confirm_status=1
+    for _attempt in 1 2 3 4; do
+      sleep 2
+      set +e
+      "$root/tools/axbridge/axsend" "${confirm_args[@]}"
+      confirm_status=$?
+      set -e
+      if (( confirm_status == 0 )); then break; fi
+    done
+    if (( confirm_status == 0 )); then
+      echo "[axsend-ensure] ring exited 7 but a delayed confirm shows the message delivered — promoting to success (no resend)."
+      exit 0
+    fi
+  fi
   exit "$status"
 fi
 
@@ -51,12 +92,6 @@ if (( is_ring == 1 && has_submit == 1 )) && [[ -n "$app" && -n "$text" ]]; then
   if grep -Fq "QUEUED (UNCONFIRMED):" "$output_file"; then
     exit 0
   fi
-  # Preserve the SAME window the ring targeted: forward --window-index to confirm
-  # only when it was explicitly supplied (incl. 0); otherwise leave it absent so
-  # confirm auto-resolves the native chat window, matching the ring (PR78 R2).
-  confirm_args=(confirm --app "$app" --text "$text")
-  if (( win_index_supplied == 1 )); then
-    confirm_args+=(--window-index "$win_index")
-  fi
+  build_confirm_args
   "$root/tools/axbridge/axsend" "${confirm_args[@]}"
 fi
