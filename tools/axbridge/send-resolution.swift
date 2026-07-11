@@ -98,17 +98,29 @@ func windowHasNativeComposer(_ eds: [EditableInfo]) -> Bool {
         || eds.contains { !$0.inWebArea && nativeEditableRoles.contains($0.role) && !editableIsBrowserChrome($0) }
 }
 
-// Choose the conversation window index across all app windows. Explicit index
-// (when the caller passes one) always wins — auto/unset is a distinct nil, so an
-// explicit index 0 is honored (fixes the "index 0 == unset" ambiguity). Auto
-// prefers the window holding the native "Prompt" composer, then any window with a
-// non-web native editable, then 0. Returns nil only when there are no windows.
-// The SAME resolver is used for ring/state/confirm and every post-send refresh so
+// Result of conversation-window selection. `ambiguous` fails closed: in auto mode
+// more than one window carries a native Prompt composer, so a send could target
+// one chat while verification inspects another (PR78 R2). The caller must then
+// require an explicit --window-index.
+enum ConvWindowPick: Equatable {
+    case index(Int)
+    case none        // no windows / no native composer anywhere
+    case ambiguous   // auto mode, >1 native Prompt window
+}
+
+// Choose the conversation window across all app windows. Explicit index (when the
+// caller passes one) always wins — auto/unset is a distinct nil, so an explicit
+// index 0 is honored (fixes the "index 0 == unset" ambiguity). Auto: if >1 window
+// has a native Prompt composer, fail closed (ambiguous); else the single Prompt
+// window; else any window with a non-web native editable; else window 0. The SAME
+// resolver drives ring/state/confirm/type and every post-send refresh so
 // verification never drifts to an auxiliary window (issue #77 multi-window).
-func pickConversationWindowIndex(_ windows: [[EditableInfo]], preferIndex: Int?) -> Int? {
-    guard !windows.isEmpty else { return nil }
-    if let idx = preferIndex { return max(0, min(idx, windows.count - 1)) }
-    if let i = windows.firstIndex(where: { $0.contains(where: editableIsNativePrompt) }) { return i }
-    if let i = windows.firstIndex(where: { windowHasNativeComposer($0) }) { return i }
-    return 0
+func pickConversationWindow(_ windows: [[EditableInfo]], preferIndex: Int?) -> ConvWindowPick {
+    guard !windows.isEmpty else { return .none }
+    if let idx = preferIndex { return .index(max(0, min(idx, windows.count - 1))) }
+    let promptWindows = windows.indices.filter { windows[$0].contains(where: editableIsNativePrompt) }
+    if promptWindows.count > 1 { return .ambiguous }
+    if let i = promptWindows.first { return .index(i) }
+    if let i = windows.firstIndex(where: { windowHasNativeComposer($0) }) { return .index(i) }
+    return .index(0)
 }

@@ -123,12 +123,24 @@ func cmdType(app: String, text: String, submit: Bool, verify: Bool, windowIndex:
     guard AXIsProcessTrusted() else {
         FileHandle.standardError.write("AX not trusted; run `axsend check`.\n".data(using: .utf8)!); return 2
     }
-    guard let (el, pid) = appElement(named: app),
-          let win = resolveConversationWindow(el, preferIndex: windowIndex) else {
-        FileHandle.standardError.write("app/window not found: \(app)\n".data(using: .utf8)!); return 1
+    guard let (el, pid) = appElement(named: app) else {
+        FileHandle.standardError.write("app not found: \(app)\n".data(using: .utf8)!); return 1
     }
-    guard let composer = findComposer(win) else {
-        FileHandle.standardError.write("no composer found\n".data(using: .utf8)!); return 3
+    // Same strict conversation resolution + fail-closed policy as `ring`: never
+    // type into a Browser/preview window, a web input, or a Page URL field (PR78
+    // R2). Ambiguity (>1 native chat window) requires an explicit --window-index.
+    let (pick, wins) = resolveConversationPick(el, preferIndex: windowIndex)
+    let win: AXUIElement
+    switch pick {
+    case .ambiguous:
+        FileHandle.standardError.write("ambiguous: multiple native chat windows — pass --window-index to select one\n".data(using: .utf8)!); return 3
+    case .none:
+        FileHandle.standardError.write("no native chat window found\n".data(using: .utf8)!); return 1
+    case let .index(i):
+        win = wins[i]
+    }
+    guard let composer = windowComposer(win) else {
+        FileHandle.standardError.write("no native chat composer found (Page URL/web inputs excluded)\n".data(using: .utf8)!); return 3
     }
     if isProcessing(win) {
         FileHandle.standardError.write("target busy — not typing.\n".data(using: .utf8)!); return 8
@@ -315,14 +327,21 @@ func editableInfos(_ win: AXUIElement) -> [EditableInfo] {
 }
 
 // THE shared conversation-window resolver. Every path — ring, state, confirm,
-// and each post-send refresh/delivered/busy check — resolves the window through
-// this so verification never drifts to an auxiliary (Browser/preview) window.
-// `preferIndex` is nil for auto/unset; an explicit index (incl. 0) always wins.
-func resolveConversationWindow(_ appEl: AXUIElement, preferIndex: Int?) -> AXUIElement? {
+// type, and each post-send refresh/delivered/busy check — resolves the window
+// through this so verification never drifts to an auxiliary (Browser/preview)
+// window. `preferIndex` is nil for auto/unset; an explicit index (incl. 0) wins.
+// Returns the pick so callers can fail closed on `.ambiguous` (>1 Prompt window).
+func resolveConversationPick(_ appEl: AXUIElement, preferIndex: Int?) -> (pick: ConvWindowPick, windows: [AXUIElement]) {
     let wins = windows(appEl)
-    guard !wins.isEmpty else { return nil }
-    guard let idx = pickConversationWindowIndex(wins.map(editableInfos), preferIndex: preferIndex) else { return nil }
-    return wins[idx]
+    return (pickConversationWindow(wins.map(editableInfos), preferIndex: preferIndex), wins)
+}
+
+// Convenience: the resolved window, or nil for none/ambiguous. Used by post-send
+// refresh closures where the ambiguity was already rejected before sending.
+func resolveConversationWindow(_ appEl: AXUIElement, preferIndex: Int?) -> AXUIElement? {
+    let (pick, wins) = resolveConversationPick(appEl, preferIndex: preferIndex)
+    if case let .index(i) = pick, i < wins.count { return wins[i] }
+    return nil
 }
 
 // MARK: - App lookup
@@ -483,16 +502,11 @@ func isProcessing(_ win: AXUIElement) -> Bool {
 }
 
 func findComposer(_ win: AXUIElement) -> AXUIElement? {
-    // Prefer the native "Prompt" composer; never resolve to an embedded web input
-    // (Browser/preview form fields) — those are excluded so delivery checks read
-    // the real chat composer (issue #77).
-    if let p = promptComposer(win) { return p }
-    let all = flatten(win).filter { !isInWebArea($0) }
-    func placeholder(_ e: AXUIElement) -> String { str(e, "AXPlaceholderValue") ?? "" }
-    return all.last(where: { role($0) == "AXTextArea" })
-        ?? all.last(where: { role($0) == "AXTextField" })
-        ?? all.last(where: { isEditable($0) && !placeholder($0).isEmpty })
-        ?? all.last(where: { isEditable($0) })
+    // The native chat composer only — same strict policy as windowComposer:
+    // never an embedded web input, never Browser chrome (Page URL/address). Used
+    // by delivery/confirm checks so they reference the real composer (issue #77 /
+    // PR78 R2). Returns nil rather than falling back to a URL/aux field.
+    windowComposer(win)
 }
 
 func messageLanded(_ win: AXUIElement, sentText: String) -> Bool {
@@ -586,16 +600,27 @@ func cmdRing(app: String, text: String, submit: Bool, windowIndex: Int?, dryRun:
         return 1
     }
     // Stable conversation-window selection via the SHARED resolver. `windowIndex`
-    // is now an optional: nil = auto (pick the window holding the native chat
-    // composer, excluding Browser/preview windows); an explicit index (incl. 0)
-    // always wins. Every post-send refresh re-resolves through the same path so
-    // verification never drifts to an auxiliary window (PR78 review).
-    guard let win0 = resolveConversationWindow(el, preferIndex: windowIndex),
-          let composer = windowComposer(win0) else {
+    // is optional: nil = auto (pick the window holding the native chat composer,
+    // excluding Browser/preview windows); an explicit index (incl. 0) wins. Fail
+    // CLOSED on ambiguity (>1 native Prompt window) — the caller must then pass an
+    // explicit --window-index (PR78 R2). Every post-send refresh re-resolves the
+    // same way so verification never drifts to an auxiliary/other window.
+    let (pick, wins) = resolveConversationPick(el, preferIndex: windowIndex)
+    let win: AXUIElement
+    switch pick {
+    case .ambiguous:
+        FileHandle.standardError.write("ambiguous: multiple native chat windows — pass --window-index to select one\n".data(using: .utf8)!)
+        return 3
+    case .none:
         FileHandle.standardError.write("no native chat composer found (embedded web/URL inputs are excluded)\n".data(using: .utf8)!)
         return 3
+    case let .index(i):
+        win = wins[i]
     }
-    let win = win0
+    guard let composer = windowComposer(win) else {
+        FileHandle.standardError.write("no native chat composer found in selected window (Page URL/web inputs excluded)\n".data(using: .utf8)!)
+        return 3
+    }
     // AXValue if the field accepts it, else key-event typing (Electron editors
     // like ZCode/Antigravity reject AXValue and need real keystrokes).
     if !setComposerText(composer, pid: pid, text) {
@@ -860,7 +885,18 @@ guard args.count >= 2 else {
 }
 // --window-index is optional: absent = nil (auto-select the native chat window);
 // an explicit value (incl. 0) is honored. This distinguishes auto from index 0.
-let winIdx: Int? = argValue("--window-index").flatMap { Int($0) }
+// A PRESENT-but-invalid value fails closed (usage error) — a bad explicit
+// selector must never silently degrade to auto (PR78 R2).
+let winIdx: Int?
+if let raw = argValue("--window-index") {
+    guard let parsed = Int(raw) else {
+        FileHandle.standardError.write("invalid --window-index: \(raw) (must be a non-negative integer)\n".data(using: .utf8)!)
+        exit(64)
+    }
+    winIdx = parsed
+} else {
+    winIdx = nil
+}
 switch args[1] {
 case "attrs":
     guard let app = argValue("--app") else { print("--app required"); exit(64) }

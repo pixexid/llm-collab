@@ -9,6 +9,12 @@ app=""
 text=""
 is_ring=0
 has_submit=0
+# Preserve whether --window-index was supplied AND its exact value (incl. 0), so
+# the follow-up confirm targets the SAME window the ring did. axsend now treats
+# nil/auto (absent) as distinct from an explicit index, so dropping it here would
+# let confirm auto-resolve a different window than an explicit ring sent to (PR78 R2).
+win_index_supplied=0
+win_index=""
 args=("$@")
 if [[ "${1:-}" == "ring" ]]; then
   is_ring=1
@@ -21,6 +27,9 @@ for ((i = 0; i < ${#args[@]}; i++)); do
       ;;
     --text)
       if (( i + 1 < ${#args[@]} )); then text="${args[$((i + 1))]}"; fi
+      ;;
+    --window-index)
+      if (( i + 1 < ${#args[@]} )); then win_index="${args[$((i + 1))]}"; win_index_supplied=1; fi
       ;;
     --submit)
       has_submit=1
@@ -42,5 +51,12 @@ if (( is_ring == 1 && has_submit == 1 )) && [[ -n "$app" && -n "$text" ]]; then
   if grep -Fq "QUEUED (UNCONFIRMED):" "$output_file"; then
     exit 0
   fi
-  "$root/tools/axbridge/axsend" confirm --app "$app" --text "$text"
+  # Preserve the SAME window the ring targeted: forward --window-index to confirm
+  # only when it was explicitly supplied (incl. 0); otherwise leave it absent so
+  # confirm auto-resolves the native chat window, matching the ring (PR78 R2).
+  confirm_args=(confirm --app "$app" --text "$text")
+  if (( win_index_supplied == 1 )); then
+    confirm_args+=(--window-index "$win_index")
+  fi
+  "$root/tools/axbridge/axsend" "${confirm_args[@]}"
 fi
