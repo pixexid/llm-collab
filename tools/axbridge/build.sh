@@ -3,10 +3,12 @@
 # source is newer than the binary. Safe to call from any session/agent.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
-src="$here/axsend.swift"
 bin="$here/axsend"
-if [ ! -f "$bin" ] || [ "$src" -nt "$bin" ]; then
-  swiftc -O "$src" -o "$bin"
+# Non-test Swift sources (axsend.swift + the pure send-resolution module).
+srcs=("$here/axsend.swift" "$here/send-resolution.swift")
+newest=$(ls -t "${srcs[@]}" | head -1)
+if [ ! -f "$bin" ] || [ "$newest" -nt "$bin" ]; then
+  swiftc -O -parse-as-library "${srcs[@]}" -o "$bin"
   echo "built $bin"
 else
   echo "up-to-date $bin"

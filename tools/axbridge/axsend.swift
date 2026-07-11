@@ -228,6 +228,62 @@ func sendButtonScore(_ el: AXUIElement) -> Int {
     return 0
 }
 
+func parent(_ el: AXUIElement) -> AXUIElement? {
+    guard let p = attr(el, kAXParentAttribute) else { return nil }
+    return (p as! AXUIElement)
+}
+
+// A subtree contains an embedded web view (Browser pane / preview). Chromium/
+// WebKit surface web content under an AXWebArea; its inputs and toolbar controls
+// (e.g. a preview "Run <server>" button) live inside that subtree.
+func hasWebArea(_ el: AXUIElement) -> Bool {
+    flatten(el).contains { role($0) == "AXWebArea" }
+}
+
+// True if `el` is itself, or a descendant of, an AXWebArea — i.e. embedded web
+// content, never the native chat composer or its send button.
+func isInWebArea(_ el: AXUIElement) -> Bool {
+    var node: AXUIElement? = el
+    var steps = 0
+    while let n = node, steps < 40 {
+        if role(n) == "AXWebArea" { return true }
+        node = parent(n); steps += 1
+    }
+    return false
+}
+
+// The composer's own pane: the LARGEST ancestor subtree that contains the
+// composer but NO AXWebArea. The Browser pane is (or contains) an AXWebArea, so
+// the moment we would ascend to a common ancestor of both the chat input and the
+// Browser pane, that ancestor's subtree contains the web area and we stop. The
+// returned node scopes the send-button search to the chat input region and can
+// never include the Browser pane's Run/Stop controls.
+func composerPane(_ composer: AXUIElement) -> AXUIElement {
+    var best = composer
+    var node = composer
+    var steps = 0
+    while let p = parent(node), steps < 20 {
+        if hasWebArea(p) { break }   // ascending further would pull in the web pane
+        best = p
+        node = p
+        steps += 1
+    }
+    return best
+}
+
+// The Claude native chat composer, identified by its stable "Prompt" identity
+// (AXTextArea titled/described "Prompt", or its "Type / for commands"
+// placeholder), and NOT inside a web area. Falls back to nil so callers can use
+// their looser role-based pick (still web-area-excluded).
+func promptComposer(_ win: AXUIElement) -> AXUIElement? {
+    let editables = flatten(win).filter { isEditable($0) && !isInWebArea($0) }
+    func placeholder(_ e: AXUIElement) -> String { str(e, "AXPlaceholderValue") ?? "" }
+    return editables.last { e in
+        let t = (str(e, kAXTitleAttribute) ?? str(e, kAXDescriptionAttribute) ?? "").lowercased()
+        return t == "prompt"
+    } ?? editables.last { placeholder($0).lowercased().contains("type / for commands") }
+}
+
 // MARK: - App lookup
 
 // Electron/Chromium apps hide their web accessibility tree until a client
@@ -386,7 +442,11 @@ func isProcessing(_ win: AXUIElement) -> Bool {
 }
 
 func findComposer(_ win: AXUIElement) -> AXUIElement? {
-    let all = flatten(win)
+    // Prefer the native "Prompt" composer; never resolve to an embedded web input
+    // (Browser/preview form fields) — those are excluded so delivery checks read
+    // the real chat composer (issue #77).
+    if let p = promptComposer(win) { return p }
+    let all = flatten(win).filter { !isInWebArea($0) }
     func placeholder(_ e: AXUIElement) -> String { str(e, "AXPlaceholderValue") ?? "" }
     return all.last(where: { role($0) == "AXTextArea" })
         ?? all.last(where: { role($0) == "AXTextField" })
@@ -487,24 +547,36 @@ func cmdRing(app: String, text: String, submit: Bool, windowIndex: Int, dryRun: 
         FileHandle.standardError.write("no windows for \(app)\n".data(using: .utf8)!)
         return 1
     }
-    let win = wins[max(0, min(windowIndex, wins.count - 1))]
-    let all = flatten(win)
-
-    // Composer selection, best-first. A real AXTextArea/AXTextField is the most
-    // reliable (works even when it already holds text and shows no placeholder);
-    // placeholder-bearing node and last-editable are looser fallbacks.
-    // Role priority: a real AXTextArea/AXTextField is the visible composer;
-    // AXComboBox is often an autocomplete wrapper (ZCode), so try it only after.
-    // Within a role, prefer the node that carries a placeholder (the input).
-    func placeholder(_ e: AXUIElement) -> String { str(e, "AXPlaceholderValue") ?? "" }
-    func pick(_ r: String) -> AXUIElement? {
-        all.last(where: { role($0) == r && !placeholder($0).isEmpty }) ?? all.last(where: { role($0) == r })
+    // Stable conversation-window selection. An explicit --window-index still wins
+    // (0 is the historical default and means "unset" for most callers), but when
+    // it is 0 we auto-pick the window that actually holds the native chat
+    // composer — so callers no longer need to pass --window-index 1 just because
+    // an embedded Browser/preview spawned a second window.
+    func windowComposer(_ w: AXUIElement) -> AXUIElement? {
+        if let p = promptComposer(w) { return p }
+        let editables = flatten(w).filter { isEditable($0) && !isInWebArea($0) }
+        func ph(_ e: AXUIElement) -> String { str(e, "AXPlaceholderValue") ?? "" }
+        return editables.last { role($0) == "AXTextArea" && !ph($0).isEmpty }
+            ?? editables.last { role($0) == "AXTextArea" }
+            ?? editables.last { role($0) == "AXTextField" && !ph($0).isEmpty }
+            ?? editables.last { role($0) == "AXTextField" }
+            ?? editables.last { !ph($0).isEmpty }
+            ?? editables.last
     }
-    let composer = pick("AXTextArea") ?? pick("AXTextField") ?? pick("AXComboBox")
-        ?? all.last(where: { isEditable($0) && !placeholder($0).isEmpty })
-        ?? all.last(where: { isEditable($0) })
-    guard let composer = composer else {
-        FileHandle.standardError.write("no editable composer found in window\n".data(using: .utf8)!)
+    let win: AXUIElement
+    let composer: AXUIElement
+    if windowIndex > 0 {
+        win = wins[min(windowIndex, wins.count - 1)]
+        guard let c = windowComposer(win) else {
+            FileHandle.standardError.write("no editable composer found in window\n".data(using: .utf8)!)
+            return 3
+        }
+        composer = c
+    } else if let (w, c) = wins.lazy.compactMap({ w in windowComposer(w).map { (w, $0) } }).first {
+        win = w
+        composer = c
+    } else {
+        FileHandle.standardError.write("no native chat composer found in any window (embedded web inputs are excluded)\n".data(using: .utf8)!)
         return 3
     }
     // AXValue if the field accepts it, else key-event typing (Electron editors
@@ -521,48 +593,45 @@ func cmdRing(app: String, text: String, submit: Bool, windowIndex: Int, dryRun: 
         // own toolbar row (same vertical band, just below the text). Take the
         // RIGHTMOST button in that band, excluding window controls and the known
         // non-send toolbar controls. This avoids grabbing a sidebar/window button.
-        let windowControls: Set<String> = ["AXCloseButton", "AXMinimizeButton", "AXZoomButton",
-                                            "AXFullScreenButton", "AXToolbarButton"]
-        let nonSendLabels = ["add files", "custom", "medium", "dictate", "model", "attach",
-                             "more", "agent", "branch", "environment",
-                             // side-effecting controls that must never be pressed as "send"
-                             "voice", "record", "memo", "mic", "microphone", "audio",
-                             "image", "photo", "camera", "screenshot", "settings"]
-        let buttons = all.filter { role($0) == "AXButton" }
-        var button: AXUIElement? = nil
-        if let cf = frame(composer) {
-            let bandTop = cf.y - 12
-            let bandBottom = cf.y + cf.h + 90
-            let inBand = buttons.filter { b in
-                guard !windowControls.contains(subrole(b)) else { return false }
-                guard let bf = frame(b), bf.y >= bandTop, bf.y <= bandBottom else { return false }
-                let lbl = label(b).lowercased()
-                return !nonSendLabels.contains(where: { lbl.contains($0) })
-            }
-            // Prefer an unlabeled icon button (the send arrow); else rightmost.
-            let preferred = inBand.filter { label($0).isEmpty }
-            button = (preferred.isEmpty ? inBand : preferred)
-                .max { (frame($0)?.x ?? -1) < (frame($1)?.x ?? -1) }
+        // Scope the send-button search to the composer's OWN pane — the largest
+        // ancestor subtree with no AXWebArea. The embedded Browser/preview pane is
+        // a web area, so its "Run <server>"/Stop controls are outside this subtree
+        // and can never be resolved as the send target (issue #77). Also drop any
+        // button that is itself inside a web area, belt-and-suspenders. The pure
+        // pick logic (send-resolution.swift) is unit-tested with synthetic
+        // multi-window / Browser-Run fixtures.
+        let pane = composerPane(composer)
+        let buttons = flatten(pane).filter { role($0) == "AXButton" && !isInWebArea($0) }
+        let cf = frame(composer)
+        let candidates: [SendButtonCandidate] = buttons.map { b in
+            let bf = frame(b)
+            return SendButtonCandidate(label: label(b), subrole: subrole(b),
+                                       x: bf?.x ?? -1, y: bf?.y ?? .infinity,
+                                       inWebArea: isInWebArea(b))
         }
-        // Fallback: explicitly send/submit-labeled button anywhere.
+        var button: AXUIElement? = nil
+        if let cf = cf, let idx = pickSendButtonIndex(candidates, composerY: cf.y, composerH: cf.h) {
+            button = buttons[idx]
+        }
+        // Fallback: explicitly send/submit-labeled button within the pane.
         if button == nil {
             button = buttons.first { label($0).lowercased().contains("send") || label($0).lowercased().contains("submit") }
         }
         // Only press the resolved button if it is a CONFIDENT send target: an
         // unlabeled icon button (the send arrow) or one labeled send/submit. A
-        // labeled non-send button (e.g. "Record voice memo") is never pressed —
-        // we fall straight to AXConfirm/key-return, which is side-effect-free.
-        let buttonOK: Bool = {
-            guard let b = button else { return false }
-            let l = label(b).lowercased()
-            return l.isEmpty || l.contains("send") || l.contains("submit")
-        }()
+        // labeled non-send button is never pressed — we fall straight to
+        // AXConfirm/key-return, which is side-effect-free.
+        let buttonOK: Bool = button.map { sendResolutionIsConfident(label($0)) } ?? false
         let bf = button.flatMap(frame).map { String(format: "x=%.0f y=%.0f", $0.x, $0.y) } ?? "none"
         let tgt = button.map { "label=\"\(label($0).prefix(20))\" sub=\"\(subrole($0))\" \(bf)" } ?? "no button"
         if dryRun {
+            // Side-effect-free probe: the composer was populated above to resolve
+            // the send target; clear it so a dry-run never leaves a stray draft
+            // (issue #77). Best-effort key-event clear (Electron-safe).
+            _ = setComposerText(composer, pid: pid, "")
             print(buttonOK
-                ? "DRY-RUN send target: \(tgt) — will press, then AXConfirm/key-return (not pressed)"
-                : "DRY-RUN no confident send button (resolved: \(tgt)) — will submit via AXConfirm/key-return only (not pressed)")
+                ? "DRY-RUN send target: \(tgt) — will press, then AXConfirm/key-return (not pressed; draft cleared)"
+                : "DRY-RUN no confident send button (resolved: \(tgt)) — will submit via AXConfirm/key-return only (not pressed; draft cleared)")
             return 0
         }
         // Sending to a BUSY recipient is allowed and SAFE: the app queues the
@@ -757,6 +826,9 @@ func argValue(_ key: String) -> String? {
 }
 func hasFlag(_ key: String) -> Bool { CommandLine.arguments.contains(key) }
 
+@main
+enum AxsendMain {
+static func main() {
 let args = CommandLine.arguments
 guard args.count >= 2 else {
     print("usage: axsend <check|tree|state|ring|type|confirm> [...]")
@@ -800,4 +872,6 @@ case "confirm":
     exit(cmdConfirm(app: app, text: text, windowIndex: Int(argValue("--window-index") ?? "0") ?? 0))
 default:
     print("unknown command: \(args[1])"); exit(64)
+}
+}
 }
