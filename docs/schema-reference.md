@@ -485,8 +485,11 @@ accepted as an ambiguous mutation target.
   "handler_name": "action-first-thread-note",
   "handler_version": "1",
   "capability_profile_id": "observe.mailbox",
+  "capability_profile_version": "1",
+  "source_identity_hash": "sha256-hex",
   "config_json": {},
   "schedule_json": {},
+  "delivery_enabled": false,
   "expires_at_utc": null,
   "created_at_utc": "2026-01-01T00:00:00Z"
 }
@@ -497,11 +500,14 @@ Planned lifecycle states are `active`, `paused`, `cancelling`, `cancelled`,
 revision with a deferred composite foreign key valid only inside the atomic
 insert/head-advance transaction. Checkpoints, events, deliveries, and attempts
 also carry `(subscription_id, subscription_revision)` and have composite foreign
-keys to the same frozen snapshot. Adapter, handler, capability profile, exact
-target identity, and project binding come from trusted registries/evidence and
-cannot be rewritten. Mutable updates require the expected current revision,
-insert a new snapshot, and atomically advance the head. Retargeting or changing
-a source kind requires cancel plus create.
+keys to the same frozen snapshot. Adapter name/version, handler name/version,
+capability-profile identity/version, exact target, source kind,
+registry-declared source identity, and project binding come from trusted
+registries/evidence and cannot be rewritten by an ordinary revision. Mutable
+updates require the expected current revision, may change only
+registry-declared mutable config or policy, insert a new snapshot retaining all
+frozen identities, and atomically advance the head. Any identity/version,
+retargeting, or source change requires cancel plus create.
 
 Pause freezes unleased open deliveries and makes them ineligible; a pre-send
 lease returns to its prior state, while `dispatching`/`reconciling` work keeps
@@ -627,6 +633,15 @@ notification. Invalid diagnostics retain at most one row per
 subscription/revision/reason per 15 minutes and 100 per subscription; excess
 occurrences increment a counter only.
 
+Phase 2 may also store an optional bounded `simulation_projections` row for an
+event/revision. It contains only a projected action class, normalized
+coalescing key/window estimate, count/bytes, timestamps, and expiry, with
+`deliverable = false`. It has no lineage, delivery, attempt, lease, target,
+quarantine, retry, acceptance, idempotency, or dispatch foreign key/state. It is
+analytical evidence only: no claim or dispatch query may read it, and Phase 3
+must never convert, copy, claim, or promote it. Retention may expire it without
+affecting events or checkpoints.
+
 ### Planned delivery record
 
 ```json
@@ -751,11 +766,26 @@ rationale never clears quarantine or permits a duplicate.
 Dead letters are typed. `dispatch_failure` has no generic replay operation; a
 replacement requires ledger-stored authoritative `not_accepted` evidence tied
 to the exact attempt and remains in the same lineage. `acceptance_unknown` and
-unresolved quarantine are never replayable. `invalid_observation` may be
-reprocessed only after a corrected immutable revision through a separate
-`reprocess-observation` operation; it creates a fresh observation linked to the
-dead letter, inherits no delivery retry/attempt state, creates no delivery
-directly, and passes normal validation/classification/dedupe.
+unresolved quarantine are never replayable. `invalid_observation` correction
+uses one of two explicit operations:
+
+- Same-subscription `reprocess-observation` requires a new immutable revision
+  that changes only registry-declared mutable config or policy and retains the
+  exact adapter name/version, handler name/version, capability-profile
+  identity/version, target, source kind, and source identity.
+- An adapter, handler, profile, version, target, source-kind, or source-identity
+  change requires cancel plus create and `cross-subscription-reprocess`. That
+  operation links the original dead letter and source subscription/revision to
+  the new subscription/revision and requires trusted registry evidence that the
+  new adapter can parse the bounded old evidence format. Without compatibility,
+  the new subscription waits for a fresh source observation.
+
+Both operations create a fresh observation linked to the dead letter and an
+immutable `observation_reprocesses` record, then pass normal envelope validation,
+classification, project/origin and lineage dedupe, and cursor/replay policy.
+They create no delivery directly and inherit no delivery, attempt, retry,
+lineage, lease, acceptance, target-quarantine, or lineage-quarantine state.
+Phase 2 reprocessing remains permanently non-deliverable projection only.
 
 ### Planned dead-letter record
 
@@ -775,6 +805,9 @@ directly, and passes normal validation/classification/dedupe.
   "target_quarantined": true,
   "lineage_quarantined": true,
   "reprocess_allowed": false,
+  "reprocess_mode": null,
+  "reprocess_target_subscription_id": null,
+  "reprocess_target_revision": null,
   "acknowledged_at_utc": null
 }
 ```
@@ -782,27 +815,50 @@ directly, and passes normal validation/classification/dedupe.
 For a dispatch replacement, `acceptance` must be `not_accepted` and all three
 authoritative evidence fields must resolve the matching immutable attempt; the
 transaction consumes that evidence once and creates one next lineage generation.
-For `invalid_observation`, delivery/lineage/acceptance fields are null and
-`reprocess_allowed` becomes true only after a corrected revision is current.
+For `invalid_observation`, delivery/lineage/acceptance fields are null.
+`reprocess_allowed` becomes true only after the runner validates either a
+same-subscription mutable-policy revision or a cancel/create replacement with
+registry compatibility. `reprocess_mode` is then `same_subscription` or
+`cross_subscription`, and the target fields identify the exact immutable
+revision. The immutable `observation_reprocesses` row also stores the source
+subscription/revision, dead-letter ID, compatibility evidence, resulting fresh
+event ID, actor/time, and result; it never stores or inherits dispatch state.
 Acknowledgement changes visibility only and never changes either eligibility or
 quarantine.
 
 ### Planned supporting tables and transaction rule
 
 The ledger also requires `runner_instances`, `subscription_revisions`,
-`source_checkpoints`, `delivery_lineages`, `delivery_attempts`,
-`thread_quarantines`, `lineage_quarantines`, `dead_letters`, `audit_log`, and
-`schema_migrations`, all with foreign keys. Observation
-inserts/deduplicates a changed/actionable event, resolves/creates its
-ledger-derived lineage from the unique origin source/action key, updates or
-creates its coalesced delivery, advances the checkpoint, and writes bounded
-transition audit in one `BEGIN IMMEDIATE` transaction. An unchanged semantic
-quiet observation advances checkpoint/counters without event/audit insertion.
-Delivery claim, pre-send/quarantine authorization, lease renewal, and fenced
-result commit are separate short transactions around external work.
+`source_checkpoints`, `simulation_projections`, `delivery_lineages`,
+`delivery_attempts`, `thread_quarantines`, `lineage_quarantines`,
+`dead_letters`, `observation_reprocesses`, `audit_log`, and
+`schema_migrations`, all with their applicable foreign keys. Every observation
+transaction inserts/deduplicates a changed event, classifies it, advances the
+checkpoint, and writes bounded transition audit in one `BEGIN IMMEDIATE`
+transaction. An unchanged semantic quiet observation advances only
+checkpoint/counters without event/audit insertion.
 
-The exact-thread dispatcher is not part of Phase 2. Phase 3 first runs non-send
-contract tests, then uses only the test-mode-only
+The same transaction is phase-aware. In Phase 2 it may additionally write only
+a permanently non-deliverable `simulation_projections` row; it MUST NOT read or
+write `delivery_lineages`, `deliveries`, `delivery_attempts`, `thread_leases`,
+`thread_quarantines`, or `lineage_quarantines`, nor create retry, lease,
+acceptance, idempotency, or other later-promotable dispatch state. In Phase 3 or
+later, lineage/delivery derivation requires a new immutable delivery-enabled
+revision, the applicable delivery flags, and a fresh adapter observation under
+that revision. Phase 2 events/projections are never selected, converted, copied,
+claimed, or promoted. An approved replay must re-observe the source under the
+delivery-enabled revision and pass normal validation, classification,
+project/origin and lineage dedupe, and cursor policy. Delivery claim,
+pre-send/quarantine authorization, lease renewal, and fenced result commit are
+separate short transactions around external work.
+
+The exact-thread dispatcher is not part of Phase 2. Phase 2 proof requires zero
+new lineage, delivery, attempt, dispatch-lease, or target/lineage-quarantine rows
+after timer/filesystem/mailbox observation and reprocessing, plus proof that
+simulation rows have no claim/promotion path. Phase 3 first proves activation
+ignores Phase 2 events/projections and accepts delivery state only from a fresh
+observation under a new delivery-enabled revision, then runs non-send contract
+tests and uses only the test-mode-only
 `THREAD_EVENT_RUNNER_TEST_DISPATCH_DISPOSABLE_RUNTIME` gate for an isolated
 fault matrix and one disposable subscription. Production/project
 `THREAD_EVENT_RUNNER_DISPATCH_EXACT_THREAD` remains off until the later project
