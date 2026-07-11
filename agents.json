@@ -43,7 +43,7 @@
       "id": "gemini",
       "display_name": "Gemini",
       "role": "research",
-      "activation": { "type": "cli_session", "watcher_enabled": true, "ax_app": "Gemini" }
+      "activation": { "type": "cli_session", "watcher_enabled": true }
     },
     {
       "id": "antigravity",
