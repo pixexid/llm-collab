@@ -36,7 +36,11 @@ npm install -g pm2
 
 ## How it works
 
-`pm2/ecosystem.config.cjs` reads `agents.json` dynamically and generates one PM2 app per agent where `activation.watcher_enabled: true` and type is not `human_relay` or `human`.
+`pm2/ecosystem.config.cjs` reads `agents.json` dynamically and generates one PM2
+app per agent where `activation.watcher_enabled: true`. The current ecosystem
+file does not filter by activation type. `human` and `human_relay` entries are
+normally configured with watchers disabled, but setting their flag to `true`
+will currently create a watcher.
 
 App naming: `{workspace_name}-{agent_id}` (workspace_name from `collab.config.json`)
 
@@ -83,23 +87,28 @@ Notifications can be disabled globally: `"notifications_enabled": false` in `col
 
 ---
 
-## Busy-session behavior
+## Current retry behavior (no busy queue)
 
-Autobridge delivery does not interrupt a busy Codex session.
+The current session autobridge does **not** obtain an authoritative Codex thread
+busy/idle state and does not implement a distinct busy queue. In particular:
 
-If a targeted Codex runtime thread is already active:
+- `agents/<agent>/inbox.json` has `unread` and `read`; it has no autobridge
+  `queued` field
+- the watcher does not emit `autobridge_deferred_busy`
+- an attempted runtime trigger that returns nonzero emits `autobridge_failed`
+  and leaves the message unread
+- each later watcher pass considers unread messages again; a successful runtime
+  result emits `autobridge_consumed` and moves the message to `read`
 
-- the watcher emits `autobridge_deferred_busy`
-- the message remains in `unread`
-- the inbox records a `queued` entry with session metadata
-- the next watcher pass retries that queued message first for the same target session
+This retry shape applies to PM2-backed and one-shot/manual `watch_inbox.py`
+runs. A failure is not proof that a busy runtime rejected the turn before
+acceptance, so this behavior must not be described as safe busy deferral. Avoid
+targeting a running operator thread.
 
-When the target session returns to idle, the next watcher pass drains the queued message and emits `autobridge_consumed`.
-
-This applies to:
-
-- PM2-backed watchers
-- one-shot/manual `watch_inbox.py` runs
+The planned [Thread Event Runner](../workflows/thread-event-runner-rfc.md)
+defines transactional busy deferral, coalescing, leases, and ambiguous-delivery
+reconciliation. None of those guarantees are implemented by the current PM2
+watcher.
 
 ---
 
@@ -168,20 +177,23 @@ If desktop visibility is needed, the recommended flow is:
 
 ---
 
-## Disposable queue test
+## Disposable retry test
 
-Use a disposable Codex thread for queue validation. Do not target an active operator thread.
+Use a disposable runtime adapter/session for retry validation. Do not target an
+active operator thread and do not treat this as a busy-deferral test.
 
-Canonical flow:
+Current test shape:
 
-1. register or refresh a disposable Codex autobridge session
-2. start a long-running turn on that disposable Codex thread
-3. send a targeted worker message to that exact Codex runtime session
-4. run one watcher pass while the thread is busy
-5. confirm `autobridge_deferred_busy` and that the message remains in `unread` plus `queued`
-6. wait for the disposable thread to return to idle
-7. run a second watcher pass
-8. confirm `autobridge_consumed`, `unread: []`, and `queued: []`
+1. register a disposable autobridge session with a bounded test adapter
+2. deliver one message to that exact disposable target
+3. make the adapter return nonzero on the first watcher pass
+4. confirm `autobridge_failed` and that the message remains in `unread`
+5. make the adapter return success on a later watcher pass
+6. confirm `autobridge_consumed`, `unread: []`, and the message in `read`
+
+This proves failure retry and eventual consumption only. Authoritative Codex
+busy detection, coalescing, and no-duplicate delivery remain future runner
+integration gates.
 
 Useful inspection points:
 

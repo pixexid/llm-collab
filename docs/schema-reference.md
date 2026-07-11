@@ -398,6 +398,193 @@ All paths are relative to workspace root.
 
 ---
 
+## Planned State/thread_event_runner/runner.sqlite3 (not implemented)
+
+**Phase 1 contract only.** The repository does not currently create this
+database, run a Thread Event Runner daemon, or provide the delivery guarantees
+described below. See the
+[Thread Event Runner RFC](workflows/thread-event-runner-rfc.md) for the full
+architecture, state machines, threat review, and rollout gates.
+
+The planned ledger is a fresh SQLite database, independent of
+`State/session_autobridge/`. Every connection requires WAL mode, foreign keys,
+a 5-second busy timeout, and full synchronous writes:
+
+```sql
+PRAGMA journal_mode = WAL;
+PRAGMA foreign_keys = ON;
+PRAGMA busy_timeout = 5000;
+PRAGMA synchronous = FULL;
+```
+
+The directory is planned as mode `0700` and database-related files as `0600` on
+POSIX systems. All four identity fields below are non-null and exact:
+
+```text
+(project_id, runtime_home_id, runtime_home_realpath, native_thread_id)
+```
+
+`runtime_home_id` is the SHA-256 of the canonical absolute
+`runtime_home_realpath`. Missing, empty, `null`, prefix, display-name, and
+"latest" matches are invalid. Legacy wildcard matching is allowed only in an
+explicit migration tool and cannot become an active subscription.
+
+### Planned subscription record
+
+Logical `subscriptions` fields:
+
+```json
+{
+  "subscription_id": "UUID",
+  "name": "mailbox handoff watch",
+  "project_id": "my-app",
+  "runtime_home_id": "sha256-hex",
+  "runtime_home_realpath": "/absolute/path/to/CODEX_HOME",
+  "native_thread_id": "native-thread-id",
+  "agent_id": "orchestrator",
+  "chat_id": "CHAT-A1B2C3D4",
+  "task_id": "TASK-ABC123",
+  "adapter_name": "mailbox",
+  "adapter_version": "1",
+  "handler_name": "action-first-thread-note",
+  "handler_version": "1",
+  "capability_profile_id": "observe.mailbox",
+  "config_json": {},
+  "revision": 1,
+  "state": "active",
+  "next_run_utc": "2026-01-01T00:00:00Z",
+  "expires_at_utc": null,
+  "created_at_utc": "2026-01-01T00:00:00Z",
+  "updated_at_utc": "2026-01-01T00:00:00Z"
+}
+```
+
+Planned subscription states are `active`, `paused`, `cancelling`, `cancelled`,
+`expired`, and `error`. Adapter, handler, capability profile, and exact target
+identity come from trusted registries and are immutable. Mutable updates require
+the expected revision and atomically increment it. Retargeting or changing a
+source kind requires cancel plus create.
+
+### Planned event record
+
+Adapters return a bounded, data-only envelope. The runner adds subscription,
+identity, revision, receive timestamp, and hash after validation:
+
+```json
+{
+  "schema_version": 1,
+  "adapter_name": "mailbox",
+  "adapter_version": "1",
+  "event_type": "message_pointer_changed",
+  "source_event_id": "adapter-stable-id",
+  "source_cursor": "opaque-bounded-cursor",
+  "observed_at_utc": "2026-01-01T00:00:00Z",
+  "source_time_utc": null,
+  "subject": "bounded display text",
+  "coalescing_key": "mailbox:orchestrator:CHAT-A1B2C3D4",
+  "observed_state": "unread_message_present",
+  "expected_outcome": "message_acknowledged",
+  "why_not_done": "target_thread_not_yet_checked",
+  "next_unlock_action": "wake_origin_thread_when_delivery_is_enabled",
+  "severity": "actionable",
+  "payload": {}
+}
+```
+
+The planned serialized envelope limit is 64 KiB. `subject` and
+`coalescing_key` are each limited to 256 UTF-8 bytes. Payloads cannot select or
+override a project, runtime home, thread, adapter, handler, capability, command,
+tool, URL, module, path root, lease, retry policy, retention, or feature flag.
+
+Logical `events` rows reference the subscription and revision, store canonical
+envelope/hash/classification, and enforce source-event/hash uniqueness according
+to the registered adapter policy. Valid classifications are `observed`, `quiet`,
+`actionable`, `coalesced`, `delivery_created`, and `invalid`. A quiet observation
+updates the compact checkpoint/snapshot but creates no delivery or repeated
+operator notification.
+
+### Planned delivery record
+
+```json
+{
+  "delivery_id": "UUID",
+  "subscription_id": "UUID",
+  "subscription_revision": 1,
+  "project_id": "my-app",
+  "runtime_home_id": "sha256-hex",
+  "runtime_home_realpath": "/absolute/path/to/CODEX_HOME",
+  "native_thread_id": "native-thread-id",
+  "handler_name": "action-first-thread-note",
+  "coalescing_key": "mailbox:orchestrator:CHAT-A1B2C3D4",
+  "state": "pending",
+  "first_event_id": 1,
+  "last_event_id": 1,
+  "event_count": 1,
+  "attempt_count": 0,
+  "next_attempt_utc": "2026-01-01T00:00:00Z",
+  "expires_at_utc": "2026-01-02T00:00:00Z",
+  "lease_owner": null,
+  "lease_fence": null,
+  "attempt_token": null,
+  "cancel_requested": false
+}
+```
+
+Planned delivery states are `pending`, `leased`, `deferred_busy`,
+`dispatching`, `retry_wait`, `reconciling`, `delivered`, `cancelled`, `obsolete`,
+`expired`, and `dead_letter`. Busy deferral consumes no retry attempt.
+`reconciling` means runtime acceptance is unknown and MUST NOT auto-retry.
+
+Only open deliveries with the same exact identity, subscription/revision,
+handler, and normalized coalescing key may merge. A leased, dispatching,
+reconciling, or terminal delivery never accepts new events; those events create
+or join a successor delivery.
+
+Each external attempt has a unique attempt token and a numbered
+`delivery_attempts` row. An attempt records `not_accepted`, `accepted`, or
+`acceptance_unknown` plus bounded response/error evidence. Only authoritative
+`not_accepted` evidence permits automatic retry. Default planned retry policy is
+5 attempts, exponential backoff with full jitter, 5-second base, and 15-minute
+cap, bounded by delivery expiry.
+
+### Planned lease records
+
+`thread_leases` has one row per exact identity tuple. `subscription_leases` has
+one row per subscription. Both records contain:
+
+```json
+{
+  "owner_instance_id": "runner-instance-UUID",
+  "fence": 42,
+  "acquired_at_utc": "2026-01-01T00:00:00Z",
+  "renewed_at_utc": "2026-01-01T00:00:10Z",
+  "expires_at_utc": "2026-01-01T00:00:30Z"
+}
+```
+
+Every acquisition after expiry increments the monotonic fence. Claim,
+pre-send authorization, result commit, retry scheduling, and lease release use
+compare-and-swap checks on owner, fence, attempt token, subscription revision,
+and expected delivery state. A stale owner cannot complete or release newer
+work. No database transaction remains open during source I/O, sleeps,
+subprocesses, AX, network, or app-server calls.
+
+### Planned supporting tables and transaction rule
+
+The ledger also requires `runner_instances`, `source_checkpoints`,
+`delivery_attempts`, `dead_letters`, `audit_log`, and `schema_migrations`, all
+with foreign keys. Observation inserts/deduplicates the event, updates or
+creates its coalesced delivery, advances the checkpoint, and writes audit state
+in one `BEGIN IMMEDIATE` transaction. Delivery claim and fenced result commit
+are separate short transactions around external work.
+
+The exact-thread dispatcher is not part of Phase 2 and remains feature-disabled
+until authoritative thread busy state and `turn/start` acceptance/idempotency
+plus restart reconciliation are integration-proven. Phase 2 is limited to this
+SQLite ledger and read-only timer/filesystem/mailbox observation.
+
+---
+
 ## agents/{id}/identity.md
 
 Generated by `scripts/init.py`. Gitignored (contains local paths).

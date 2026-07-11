@@ -96,10 +96,19 @@ Use a disposable worker session instead, especially for Codex app tests:
 3. send the routed message to the disposable target session
 4. inspect watcher/inbox state
 
-Queue-protection acceptance for Codex:
+Current retry acceptance (not busy-queue protection):
 
-- busy target session: message must stay in `unread` and appear in `queued`
-- idle target session on the next watcher pass: message must drain from `queued` and move to `read`
+- a known pre-acceptance runtime failure emits `autobridge_failed` and leaves
+  the message in `unread`
+- a later known-success watcher pass emits `autobridge_consumed` and moves the
+  message to `read`
+
+Session autobridge currently has no authoritative Codex busy/idle check, no
+inbox `queued` field, and no `autobridge_deferred_busy` event. Do not use a
+running operator thread to test retries or describe this behavior as safe busy
+deferral. The planned transactional contract is in
+`thread-event-runner-rfc.md`; exact-thread delivery remains disabled there
+until busy and turn-acceptance/idempotency behavior is integration-proven.
 
 For Codex manual watcher checks, `watch_inbox.py` should behave the same as the PM2 watcher by default:
 

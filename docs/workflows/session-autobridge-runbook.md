@@ -179,17 +179,26 @@ For Codex, manual and PM2 watcher runs default to:
 - `LLM_COLLAB_CODEX_UI_REFRESH_METHOD=cdp`
 - `LLM_COLLAB_CODEX_CDP_PORT=9223`
 
-## Busy Or Queued Messages
+## Current Retry Behavior (No Busy Queue)
 
-When a targeted Codex runtime session is busy, the watcher must defer instead of
-interrupting:
+Session autobridge currently has no authoritative Codex busy/idle check, no
+inbox `queued` field, and no `autobridge_deferred_busy` event. Do not rely on it
+to protect a running target from a stacked or ambiguous `turn/start`.
 
-- message remains in `agents/<agent>/inbox.json` under `unread`
-- message appears in `queued`
-- watcher emits `autobridge_deferred_busy`
-- later watcher passes retry while the message remains unread
-- when the runtime becomes idle, watcher emits `autobridge_consumed` and moves
-  the message to `read`
+The implemented behavior is narrower:
+
+- a runtime trigger that reports nonzero emits `autobridge_failed`
+- the matching message remains under `unread`
+- later watcher passes consider the unread message again
+- a later successful runtime result emits `autobridge_consumed` and moves the
+  message to `read`
+
+Because a transport failure may occur after runtime acceptance, an automatic
+retry is not a proven exactly-once contract. Use disposable sessions for tests
+and do not target an active operator thread. Transactional busy deferral,
+coalescing, leases/fencing, and ambiguous-delivery reconciliation belong to the
+planned [Thread Event Runner](thread-event-runner-rfc.md), not this provisional
+autobridge.
 
 If a message is intentionally abandoned, clear it explicitly by marking it read:
 
@@ -197,10 +206,9 @@ If a message is intentionally abandoned, clear it explicitly by marking it read:
 python3 bin/inbox.py --me codex --mark-all-read
 ```
 
-Use this only when the unread queue is known to be stale. For a single stale
+Use this only when the unread set is known to be stale. For a single stale
 message, edit `agents/<agent>/inbox.json` carefully or write a small local
-maintenance script that moves that exact path from `unread` to `read` and
-removes the matching `queued` entry.
+maintenance script that moves that exact path from `unread` to `read`.
 
 ## Deactivate A Session
 
@@ -242,7 +250,11 @@ For a real-worker session, also prove:
 
 - `deliver.py` resolves the expected `target_session_id`
 - watcher emits `autobridge_dispatch`
-- busy target emits `autobridge_deferred_busy`
-- later idle pass emits `autobridge_consumed`
-- `unread` and `queued` are empty after consumption
+- a known pre-acceptance runtime failure emits `autobridge_failed` and leaves the
+  message unread
+- a later known-success pass emits `autobridge_consumed`
+- `unread` is empty and the message is present in `read` after consumption
 - a chat note records the pickup/dispatch event for the operator
+
+This proof does not establish busy deferral or safe retry after ambiguous
+runtime acceptance.
