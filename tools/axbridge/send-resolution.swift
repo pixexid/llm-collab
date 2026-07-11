@@ -75,10 +75,21 @@ struct EditableInfo {
     let inWebArea: Bool     // descendant of an AXWebArea (Browser/preview content)
 }
 
+// The native chat composer's identity. `title` carries its non-value identity
+// (AXTitle / AXDescription / AXPlaceholderValue / AXHelp — whichever the app
+// exposes "Prompt" on); `placeholder` carries the value/placeholder text
+// ("Type / for commands"). The composer is identified STRICTLY by this identity
+// — NOT by web-area membership: Claude/Codex are Electron apps whose whole UI is
+// under an AXWebArea, so the native composer itself reports inWebArea=true. The
+// "Prompt" identity is the strict proof (R3 item 1) and precisely excludes every
+// other editable — browser chrome (Page URL) and embedded form fields (a "Name",
+// "Enter your address", etc.) — because none of them carry it.
 func editableIsNativePrompt(_ e: EditableInfo) -> Bool {
-    if e.inWebArea { return false }
-    if e.title.lowercased() == "prompt" { return true }
-    return e.placeholder.lowercased().contains("type / for commands")
+    if editableIsBrowserChrome(e) { return false }
+    let id = e.title.lowercased()
+    let val = e.placeholder.lowercased()
+    if id == "prompt" || id.hasPrefix("prompt ") || id.hasSuffix(" prompt") { return true }
+    return id.contains("type / for commands") || val.contains("type / for commands")
 }
 
 private let nativeEditableRoles: Set<String> = ["AXTextArea", "AXTextField", "AXComboBox"]
@@ -98,29 +109,36 @@ func windowHasNativeComposer(_ eds: [EditableInfo]) -> Bool {
         || eds.contains { !$0.inWebArea && nativeEditableRoles.contains($0.role) && !editableIsBrowserChrome($0) }
 }
 
-// Result of conversation-window selection. `ambiguous` fails closed: in auto mode
-// more than one window carries a native Prompt composer, so a send could target
-// one chat while verification inspects another (PR78 R2). The caller must then
-// require an explicit --window-index.
+// Result of conversation-window selection. Fails closed (PR78 R2+R3):
+//  - `none`         : no PROVEN native Prompt composer in any window (auto). Never
+//                     falls back to window 0 or a generic editable (R3 item 4).
+//  - `ambiguous`    : auto mode, >1 native Prompt window (R2).
+//  - `invalidIndex` : an explicit index is negative or >= window count. Rejected,
+//                     never clamped (R3 item 2).
 enum ConvWindowPick: Equatable {
     case index(Int)
-    case none        // no windows / no native composer anywhere
-    case ambiguous   // auto mode, >1 native Prompt window
+    case none
+    case ambiguous
+    case invalidIndex
 }
 
 // Choose the conversation window across all app windows. Explicit index (when the
 // caller passes one) always wins — auto/unset is a distinct nil, so an explicit
-// index 0 is honored (fixes the "index 0 == unset" ambiguity). Auto: if >1 window
-// has a native Prompt composer, fail closed (ambiguous); else the single Prompt
-// window; else any window with a non-web native editable; else window 0. The SAME
-// resolver drives ring/state/confirm/type and every post-send refresh so
-// verification never drifts to an auxiliary window (issue #77 multi-window).
+// index 0 is honored — but an out-of-range/negative explicit index is REJECTED,
+// not clamped (R3 item 2). Auto is PROMPT-ONLY: exactly one native Prompt window
+// -> that window; >1 -> ambiguous; zero -> none (never window 0 or a generic
+// editable, R3 items 1+4). The SAME resolver drives ring/state/confirm/type and
+// every post-send refresh so verification never drifts to another window.
+// Composer strictness within the chosen window (Prompt-only) is enforced by
+// windowComposer/promptComposer at the AX layer.
 func pickConversationWindow(_ windows: [[EditableInfo]], preferIndex: Int?) -> ConvWindowPick {
     guard !windows.isEmpty else { return .none }
-    if let idx = preferIndex { return .index(max(0, min(idx, windows.count - 1))) }
+    if let idx = preferIndex {
+        guard idx >= 0 && idx < windows.count else { return .invalidIndex }
+        return .index(idx)
+    }
     let promptWindows = windows.indices.filter { windows[$0].contains(where: editableIsNativePrompt) }
     if promptWindows.count > 1 { return .ambiguous }
     if let i = promptWindows.first { return .index(i) }
-    if let i = windows.firstIndex(where: { windowHasNativeComposer($0) }) { return .index(i) }
-    return .index(0)
+    return .none
 }

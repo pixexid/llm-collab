@@ -135,12 +135,14 @@ func cmdType(app: String, text: String, submit: Bool, verify: Bool, windowIndex:
     case .ambiguous:
         FileHandle.standardError.write("ambiguous: multiple native chat windows — pass --window-index to select one\n".data(using: .utf8)!); return 3
     case .none:
-        FileHandle.standardError.write("no native chat window found\n".data(using: .utf8)!); return 1
+        FileHandle.standardError.write("no native Prompt chat window found\n".data(using: .utf8)!); return 1
+    case .invalidIndex:
+        FileHandle.standardError.write("invalid --window-index for \(app): out of range (\(wins.count) window(s))\n".data(using: .utf8)!); return 64
     case let .index(i):
         win = wins[i]
     }
     guard let composer = windowComposer(win) else {
-        FileHandle.standardError.write("no native chat composer found (Page URL/web inputs excluded)\n".data(using: .utf8)!); return 3
+        FileHandle.standardError.write("no native Prompt composer in the selected window\n".data(using: .utf8)!); return 3
     }
     if isProcessing(win) {
         FileHandle.standardError.write("target busy — not typing.\n".data(using: .utf8)!); return 8
@@ -289,39 +291,45 @@ func composerPane(_ composer: AXUIElement) -> AXUIElement {
 // placeholder), and NOT inside a web area. Falls back to nil so callers can use
 // their looser role-based pick (still web-area-excluded).
 func promptComposer(_ win: AXUIElement) -> AXUIElement? {
-    let editables = flatten(win).filter { isEditable($0) && !isInWebArea($0) }
-    func placeholder(_ e: AXUIElement) -> String { str(e, "AXPlaceholderValue") ?? "" }
-    return editables.last { e in
-        let t = (str(e, kAXTitleAttribute) ?? str(e, kAXDescriptionAttribute) ?? "").lowercased()
-        return t == "prompt"
-    } ?? editables.last { placeholder($0).lowercased().contains("type / for commands") }
+    // Match the SAME identity the pure picker uses (editableIsNativePrompt), built
+    // from fieldIdentity (title/desc/placeholder/help) + value. Do NOT filter on
+    // isInWebArea: Electron chat apps render the native composer itself inside an
+    // AXWebArea, so the "Prompt" identity — not web membership — is the proof.
+    flatten(win).filter { isEditable($0) }.last { e in
+        editableIsNativePrompt(EditableInfo(role: role(e),
+                                            title: fieldIdentity(e),
+                                            placeholder: str(e, kAXValueAttribute) ?? str(e, "AXPlaceholderValue") ?? "",
+                                            inWebArea: isInWebArea(e)))
+    }
 }
 
-// The native composer element within a window: the Prompt field, else the last
-// non-web native text field that is not browser chrome (Page URL). Mirrors
-// windowHasNativeComposer / editableIsBrowserChrome from send-resolution.swift.
+// The native chat composer within a window — PROMPT-ONLY (R3 item 1). Returns
+// nil rather than falling back to a generic Name/Search field or Browser chrome
+// (Page URL), so every mutating (ring/type) and verify (confirm/state) path
+// requires the proven chat composer identity and fails closed otherwise.
 func windowComposer(_ win: AXUIElement) -> AXUIElement? {
-    if let p = promptComposer(win) { return p }
-    func ph(_ e: AXUIElement) -> String { str(e, "AXPlaceholderValue") ?? "" }
-    func chrome(_ e: AXUIElement) -> Bool {
-        let t = (str(e, kAXTitleAttribute) ?? str(e, kAXDescriptionAttribute) ?? "").lowercased()
-        return t == "page url" || t.contains("url") || t == "address"
+    promptComposer(win)
+}
+
+// A field's non-value identity: the first non-empty of title / description /
+// placeholder / help. This is where an app exposes a stable name like "Prompt";
+// the VALUE (typed text) is deliberately excluded so a draft can't change identity.
+func fieldIdentity(_ e: AXUIElement) -> String {
+    for k in [kAXTitleAttribute, kAXDescriptionAttribute, "AXPlaceholderValue", "AXHelp"] {
+        if let s = str(e, k), !s.isEmpty { return s }
     }
-    let editables = flatten(win).filter { isEditable($0) && !isInWebArea($0) && !chrome($0) }
-    return editables.last { role($0) == "AXTextArea" && !ph($0).isEmpty }
-        ?? editables.last { role($0) == "AXTextArea" }
-        ?? editables.last { role($0) == "AXTextField" && !ph($0).isEmpty }
-        ?? editables.last { role($0) == "AXTextField" }
-        ?? editables.last { !ph($0).isEmpty }
-        ?? editables.last
+    return ""
 }
 
 // Editable fields of a window as EditableInfo for the shared window picker.
+// `title` = the field identity; `placeholder` = the field VALUE (used for the
+// "Type / for commands" composer signal). Kept as those field names to match the
+// pure send-resolution.swift contract.
 func editableInfos(_ win: AXUIElement) -> [EditableInfo] {
     flatten(win).filter { isEditable($0) }.map { e in
         EditableInfo(role: role(e),
-                     title: str(e, kAXTitleAttribute) ?? str(e, kAXDescriptionAttribute) ?? "",
-                     placeholder: str(e, "AXPlaceholderValue") ?? "",
+                     title: fieldIdentity(e),
+                     placeholder: str(e, kAXValueAttribute) ?? str(e, "AXPlaceholderValue") ?? "",
                      inWebArea: isInWebArea(e))
     }
 }
@@ -584,7 +592,16 @@ func cmdTree(app: String, maxDepth: Int, editableOnly: Bool) -> Int32 {
             let v = (str(e, kAXValueAttribute) ?? "").prefix(40).replacingOccurrences(of: "\n", with: "⏎")
             let edit = isEditable(e) ? " [EDITABLE]" : ""
             let sb = sendButtonScore(e) > 0 ? " [SEND?\(sendButtonScore(e))]" : ""
-            print(String(repeating: "  ", count: d) + "\(role(e)) \"\(label(e).prefix(40))\" val=\"\(v)\"\(edit)\(sb)")
+            // Mark the resolved native chat composer so `tree` doubles as a
+            // resolution probe (the Prompt identity, not web membership).
+            var prompt = ""
+            if isEditable(e) {
+                let info = EditableInfo(role: role(e), title: fieldIdentity(e),
+                                        placeholder: str(e, kAXValueAttribute) ?? str(e, "AXPlaceholderValue") ?? "",
+                                        inWebArea: isInWebArea(e))
+                if editableIsNativePrompt(info) { prompt = " [PROMPT]" }
+            }
+            print(String(repeating: "  ", count: d) + "\(role(e)) \"\(label(e).prefix(40))\" val=\"\(v)\"\(edit)\(sb)\(prompt)")
         }
     }
     return 0
@@ -612,13 +629,16 @@ func cmdRing(app: String, text: String, submit: Bool, windowIndex: Int?, dryRun:
         FileHandle.standardError.write("ambiguous: multiple native chat windows — pass --window-index to select one\n".data(using: .utf8)!)
         return 3
     case .none:
-        FileHandle.standardError.write("no native chat composer found (embedded web/URL inputs are excluded)\n".data(using: .utf8)!)
+        FileHandle.standardError.write("no native Prompt chat composer found (auto mode requires a proven chat window)\n".data(using: .utf8)!)
         return 3
+    case .invalidIndex:
+        FileHandle.standardError.write("invalid --window-index for \(app): out of range (\(wins.count) window(s))\n".data(using: .utf8)!)
+        return 64
     case let .index(i):
         win = wins[i]
     }
     guard let composer = windowComposer(win) else {
-        FileHandle.standardError.write("no native chat composer found in selected window (Page URL/web inputs excluded)\n".data(using: .utf8)!)
+        FileHandle.standardError.write("no native Prompt composer in the selected window (generic/URL/web fields are not accepted)\n".data(using: .utf8)!)
         return 3
     }
     // AXValue if the field accepts it, else key-event typing (Electron editors
@@ -706,16 +726,24 @@ func cmdRing(app: String, text: String, submit: Bool, windowIndex: Int?, dryRun:
             }.count
         }
         let baseline = turnsWithNeedle(win)
-        // Re-resolve the SAME conversation window after an app re-fetch — never
-        // fall back to .first, which on a multi-window app inspects an auxiliary
-        // (Browser/preview) window and misreads delivery/busy state (PR78 review).
-        func freshConvWindow() -> AXUIElement {
+        // Freeze the selected conversation identity at send time (R3 item 3): its
+        // window title. After an app re-fetch we re-resolve the conversation window
+        // AND require the SAME identity — never fall back to .first or a stale AX
+        // element. If the target is missing, ambiguous, or a different window at the
+        // same index (reorder / a second Prompt appeared), freshConvWindow returns
+        // nil and the verify/busy checks fail closed (report not-delivered) rather
+        // than confirming against the wrong conversation.
+        let frozenTitle = str(win, kAXTitleAttribute) ?? ""
+        func freshConvWindow() -> AXUIElement? {
             let appEl = appElement(named: app)?.0 ?? el
-            return resolveConversationWindow(appEl, preferIndex: windowIndex) ?? win
+            guard let w = resolveConversationWindow(appEl, preferIndex: windowIndex) else { return nil }
+            if (str(w, kAXTitleAttribute) ?? "") != frozenTitle { return nil }
+            return w
         }
         func deliveredFresh() -> Bool {
             Thread.sleep(forTimeInterval: 1.0)
-            return turnsWithNeedle(freshConvWindow()) > baseline
+            guard let w = freshConvWindow() else { return false }
+            return turnsWithNeedle(w) > baseline
         }
         func keyReturn(command: Bool = false) {
             AXUIElementSetAttributeValue(composer, kAXFocusedAttribute as CFString, kCFBooleanTrue)
@@ -734,7 +762,9 @@ func cmdRing(app: String, text: String, submit: Bool, windowIndex: Int?, dryRun:
         var method = ""
         var queued = false
         let maxAttempts = 3
-        func busyNow() -> Bool { isProcessing(freshConvWindow()) }
+        // If the target identity is lost/ambiguous, treat as NOT busy so the loop
+        // stops queuing and falls through to the honest NOT-DELIVERED path.
+        func busyNow() -> Bool { guard let w = freshConvWindow() else { return false }; return isProcessing(w) }
         attempts: for attempt in 1...maxAttempts {
             if attempt > 1 {
                 // A prior submit may have landed just after our check — re-confirm a

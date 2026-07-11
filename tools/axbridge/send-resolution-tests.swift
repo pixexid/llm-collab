@@ -126,18 +126,32 @@ check(pickConversationWindow([auxWindow0, chatWindow1], preferIndex: 0) == .inde
       "explicit index 0 honored (not treated as unset)")
 check(pickConversationWindow([auxWindow0, chatWindow1], preferIndex: 1) == .index(1),
       "explicit index 1 honored")
-check(pickConversationWindow([auxWindow0, chatWindow1], preferIndex: 9) == .index(1),
-      "explicit out-of-range index clamps to last")
+// R3 item 2: out-of-range / negative explicit indices are REJECTED, never clamped.
+check(pickConversationWindow([auxWindow0, chatWindow1], preferIndex: 2) == .invalidIndex,
+      "explicit out-of-range index -> invalidIndex (not clamped)")
+check(pickConversationWindow([auxWindow0, chatWindow1], preferIndex: -1) == .invalidIndex,
+      "explicit negative index -> invalidIndex")
 
-// 12) No native composer anywhere -> window 0 fallback; no windows -> none.
-check(pickConversationWindow([auxWindow0], preferIndex: nil) == .index(0),
-      "no native composer -> window 0 fallback")
+// 12) R3 item 4: auto with no proven native Prompt -> none (never window 0).
+check(pickConversationWindow([auxWindow0], preferIndex: nil) == .none,
+      "auto, no Prompt anywhere -> none (never window 0)")
 check(pickConversationWindow([], preferIndex: nil) == .none,
       "no windows -> none")
 
 // 13) Page URL field is not mistaken for a native composer.
 let urlOnly: [EditableInfo] = [EditableInfo(role: "AXTextField", title: "Page URL", placeholder: "", inWebArea: false)]
 check(!windowHasNativeComposer(urlOnly), "Page URL field alone is not a native composer")
+
+// R3 item 1: a generic native Name/Search field is NOT a chat composer -> auto
+// resolves to none (mutating paths must not write into it).
+let nameSearchWindow: [EditableInfo] = [
+    EditableInfo(role: "AXTextField", title: "Name", placeholder: "Your name", inWebArea: false),
+    EditableInfo(role: "AXTextField", title: "Search", placeholder: "Search", inWebArea: false),
+]
+check(pickConversationWindow([nameSearchWindow], preferIndex: nil) == .none,
+      "auto: window with only Name/Search fields -> none (Prompt-only)")
+check(pickConversationWindow([nameSearchWindow, chatWindow1], preferIndex: nil) == .index(1),
+      "auto: picks the Prompt window over a Name/Search window")
 
 // --- PR78 R2 safety cases ---
 // 14) Two native Prompt windows in AUTO mode -> ambiguous (fail closed).
