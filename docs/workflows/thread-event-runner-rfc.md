@@ -137,12 +137,15 @@ The runner does not:
    configuration schema, source capabilities, payload limits, and cursor rules.
 3. **Adapters** observe an approved source and return bounded untrusted event
    data. An adapter cannot select a handler, capability profile, or target.
-4. **Trusted handler registry** maps a fixed handler name to reviewed
-   classification/coalescing code and a fixed capability profile.
+4. **Trusted handler and dispatch-profile registries** map fixed names to
+   reviewed classification/coalescing code. A dispatch profile additionally
+   binds one handler/capability version, pointer-template version, target class,
+   and bounded delivery/retry policy.
 5. **SQLite ledger** is the source of truth for subscriptions, checkpoints,
    observations, delivery state, leases, attempts, audit, and dead letters.
-6. **Dispatcher** is a separately gated component. It may use only the target
-   and capability profile already frozen on the subscription.
+6. **Dispatcher** is a separately gated component. It may use only the exact
+   target and complete dispatch profile frozen when a `delivery_capable`
+   subscription is created.
 7. **Compactor** applies bounded retention without deleting active or unresolved
    state.
 
@@ -215,6 +218,13 @@ Each handler registration freezes:
 - maximum prompt/diagnostic bytes;
 - capability profile ID;
 - whether delivery is allowed at all in the current rollout phase.
+
+Each dispatch-profile registration freezes its own name/version plus the exact
+handler name/version, capability-profile name/version, pointer-template version,
+allowed adapter/event and target class, coalescing/retry/expiry bounds, and
+runtime-attestation requirements. An `observation_only` subscription has no
+dispatch profile. A `delivery_capable` subscription selects one registered
+profile at creation, and ordinary revision cannot add, remove, or change it.
 
 The dispatcher uses one fixed, trusted pointer-only prompt template. It may
 render only canonical runner-owned identifiers such as `delivery_id`,
@@ -405,8 +415,8 @@ schema migration that preserves the stated constraints.
 | Table | Required purpose and constraints |
 |---|---|
 | `runner_instances` | Stable instance UUID, start/heartbeat/stop timestamps, version; used as lease owner identity. |
-| `subscriptions` | UUID primary key and lifecycle/current-head row only: name, state, `current_revision`, created/updated timestamps. It points to one immutable revision and does not carry mutable adapter/config snapshots; IDs, not names, are authoritative. |
-| `subscription_revisions` | Immutable frozen snapshot with composite primary key `(subscription_id, revision)`: exact target and registry-declared source identity plus project-binding evidence; trusted adapter/handler/profile names and versions; validated config; schedule, expiry, quiet/coalescing policy, delivery-enabled posture, and creation actor/time. An ordinary update inserts a new row while retaining every frozen identity; existing rows are never rewritten. |
+| `subscriptions` | UUID primary key and lifecycle/current-head row only: name, state, immutable `subscription_mode` (`observation_only` or `delivery_capable`), `current_revision`, and created/updated timestamps. It points to one immutable revision and does not carry mutable adapter/config snapshots; IDs, not names, are authoritative. Mode can never change through revision. |
+| `subscription_revisions` | Immutable frozen snapshot with composite primary key `(subscription_id, revision)`: exact target and registry-declared source identity plus project-binding evidence; trusted adapter/handler/profile names and versions; validated config; schedule, expiry, quiet/coalescing policy, and creation actor/time. A `delivery_capable` subscription additionally freezes its dispatch-profile identity/version and delivery policy. An ordinary update inserts a new row while retaining mode and every frozen identity; existing rows are never rewritten. |
 | `source_checkpoints` | One row per subscription/revision with opaque bounded cursor, semantic quiet snapshot/hash, counters, and last observation time; composite foreign key to `subscription_revisions`. |
 | `events` | Monotonic ID; subscription/revision; stable source event ID; canonical envelope/hash; classification; coalescing key; timestamps; composite foreign key to `subscription_revisions`. Unique `(subscription_id, revision, source_event_id)` and `(subscription_id, revision, envelope_hash)` as adapter-policy permits. |
 | `simulation_projections` | Optional Phase 2-only analytical record keyed to an event/revision: bounded projected action class, coalescing key/window estimate, count/bytes, and expiry. Every row is permanently `deliverable = false`. It has no delivery, lineage, attempt, lease, target, quarantine, retry, idempotency, or dispatch foreign key/state and can never be claimed, converted, or promoted. |
@@ -419,6 +429,7 @@ schema migration that preserves the stated constraints.
 | `subscription_leases` | One row per subscription; owner instance, monotonic fence, expiry; prevents concurrent polling/checkpoint advancement. |
 | `dead_letters` | Typed as `dispatch_failure` or `invalid_observation`; reason code, actionable diagnostic, first/last failure, acknowledgement, reprocessing eligibility, authoritative acceptance evidence reference, lineage/quarantine reference, and retained tombstone metadata. |
 | `observation_reprocesses` | Immutable operator operation linking one `invalid_observation` dead letter to its target subscription/revision and resulting fresh event, with mode `same_subscription` or `cross_subscription`, source subscription/revision, compatibility evidence, actor/time, and result. It contains no inherited delivery, attempt, lineage, or quarantine state. |
+| `subscription_activation_links` | Audit-only Phase 2-to-Phase 3 successor link: cancelled observation-only subscription/revision, newly created delivery-capable subscription/revision, operator-selected `start_now` or registry-approved replay cursor/evidence, actor, and timestamps. It shares no event, projection, checkpoint, lineage, delivery, attempt, lease, retry, or quarantine state. |
 | `audit_log` | Append-only state transitions and management operations with actor, object, from/to state, revision/fence, reason code, and bounded metadata. |
 | `schema_migrations` | Applied version, checksum, time, tool version, and backup reference. |
 
@@ -469,15 +480,16 @@ occur while a database transaction is open.
      lease, idempotency, acceptance, or other state that could later become
      dispatchable.
    - In Phase 3 or later, lineage/delivery derivation is allowed only for a
-     fresh observation under a new immutable revision whose delivery posture is
-     enabled and only while the required delivery flag gates pass. The runner
-     then resolves/creates the ledger-derived lineage from the unique origin
-     source/action key and updates/creates an eligible coalesced delivery.
+     fresh observation under a separately created `delivery_capable`
+     subscription with a frozen dispatch profile and only while the required
+     delivery flag gates pass. The runner then resolves/creates the
+     ledger-derived lineage from the unique origin source/action key and
+     updates/creates an eligible coalesced delivery.
      Existing Phase 2 events and projections are ignored for dispatch and are
      never converted, copied, claimed, or promoted. An approved source replay
-     must be observed again by the adapter under the delivery-enabled revision
-     and pass normal validation, classification, origin/lineage dedupe, and
-     cursor policy as a fresh Phase 3 observation.
+     must be observed again by the adapter under the new delivery-capable
+     subscription and pass normal validation, classification, origin/event and
+     lineage dedupe, and cursor policy as a fresh Phase 3 observation.
 5. Commit all of those changes together. A cursor is never advanced without the
    corresponding event/dedup decision being durable.
 
@@ -640,26 +652,32 @@ inherits delivery retry/attempt semantics. Correction has two explicit paths:
 
 - `reprocess-observation` remains on the same subscription only when a new
   immutable revision changes registry-declared mutable config or policy while
-  retaining the exact adapter name/version, handler name/version, capability
-  profile name/version, target identity, source kind, and registry-declared
-  source identity. The operation parses the original bounded source evidence
-  into a fresh observation linked by `reprocesses_dead_letter_id` and an
-  immutable `observation_reprocesses` row.
-- Any adapter, handler, capability-profile, version, target, source-kind, or
-  source-identity change requires cancellation plus creation of a new
-  subscription. An explicit `cross-subscription-reprocess` operation must link
+  retaining subscription mode and the exact dispatch-profile, adapter,
+  handler, and capability-profile names/versions, target identity, source kind,
+  and registry-declared source identity. The operation parses the original
+  bounded source evidence into a fresh observation linked by
+  `reprocesses_dead_letter_id` and an immutable `observation_reprocesses` row.
+- Any subscription-mode, dispatch-profile, adapter, handler,
+  capability-profile, version, target, source-kind, or source-identity change
+  requires cancellation plus creation of a new subscription. An explicit
+  `cross-subscription-reprocess` operation must link
   the original dead letter and old subscription/revision to the new
   subscription/revision. It is allowed only when the trusted target adapter
   registry declares compatibility with the bounded old evidence format.
   Otherwise the new subscription must wait for a fresh source observation.
 
-Both paths run normal envelope validation, classification, project/origin and
-lineage dedupe, and cursor/replay policy. They create no delivery directly and
-copy no delivery, attempt, lineage, retry, acceptance, lease, target quarantine,
-or lineage quarantine state. Phase 2 reprocessing remains projection-only and
-transactionally no-delivery. Ordinary subscription revision cannot rewrite a
-frozen registry or source identity, and acknowledgement alone cannot make an
-invalid observation reprocessable.
+Both paths run normal envelope validation, classification, project/origin/event
+dedupe, and cursor/replay policy. If the target is a Phase 2
+`observation_only` subscription, reprocessing may write only the fresh event,
+checkpoint, bounded audit, and optional `simulation_projections` row; it MUST
+NOT read or write `delivery_lineages` or any other dispatch table. Lineage
+dedupe applies only when the target is a separately created Phase 3
+`delivery_capable` subscription and the reprocessed evidence becomes a fresh
+observation under its frozen dispatch profile and active delivery gates. Neither
+path copies delivery, attempt, lineage, retry, acceptance, lease, target
+quarantine, or lineage quarantine state. Ordinary subscription revision cannot
+rewrite a frozen registry/source identity or change subscription mode, and
+acknowledgement alone cannot make an invalid observation reprocessable.
 
 ## Ambiguous delivery reconciliation
 
@@ -709,11 +727,12 @@ are not authoritative.
   it by inserting a new immutable `subscription_revisions` row and advancing the
   lifecycle row's current-head pointer. Lost updates fail with a conflict; old
   snapshots remain queryable for every checkpoint/event/delivery/attempt.
-- Adapter name/version, handler name/version, capability-profile name/version,
-  target identity, source kind, and registry-declared source identity are
-  immutable across every ordinary revision of one subscription. Changing any
-  of them requires cancel plus create; an ordinary revision cannot serve as a
-  version or identity migration.
+- Subscription mode, adapter name/version, handler name/version,
+  capability-profile name/version, dispatch-profile name/version, target
+  identity, source kind, and registry-declared source identity are immutable
+  across every ordinary revision of one subscription. Changing any of them
+  requires cancel plus create; an ordinary revision cannot serve as a version,
+  identity, or observation-to-delivery migration.
 - Schedule, expiry, quiet/coalescing thresholds, and validated adapter options
   may update only if the registry declares them mutable.
 - Each cursor-affecting update declares `preserve_cursor`, `start_now`, or an
@@ -860,6 +879,23 @@ Session autobridge is migration input, not the new ledger.
 - Shadow observation may run beside a legacy dispatcher only when runner
   delivery is disabled. The same source/target must never have two dispatch
   owners.
+- Phase 3 activation is a successor operation, never an update of the Phase 2
+  subscription. In one revision-checked management flow, cancel the
+  `observation_only` subscription, create a new `delivery_capable` subscription
+  with its dispatch profile frozen at creation, and append a
+  `subscription_activation_links` record plus audit entries linking old to new.
+  The link is provenance only and shares no dispatch lineage or state.
+- The operator MUST choose exactly one checkpoint policy for the new
+  subscription: `start_now`, which establishes a new source checkpoint after
+  the old subscription is cancelled, or a replay cursor explicitly supported
+  and validated by the registered adapter. The old checkpoint is evidence, not
+  the new subscription's mutable cursor, and is never copied implicitly.
+- Phase 2 events and `simulation_projections` remain attached to the cancelled
+  subscription and never migrate or promote. Replay re-reads the source through
+  the adapter under the new subscription; the first resulting fresh observation
+  passes envelope/project/origin/event dedupe and then lineage dedupe before it
+  may create any lineage or delivery state. If the source cannot replay from an
+  approved cursor, the new subscription waits for a post-activation observation.
 - Per-subscription cutover order is: pause legacy dispatch, establish and audit
   the runner checkpoint, verify no legacy in-flight action, enable the reviewed
   runner phase flag, then observe before any delivery flag changes.
@@ -891,7 +927,7 @@ gate.
 |---|---|---|
 | 1 | This architecture/threat contract only | No runtime flags or processes. |
 | 2 | SQLite ledger; management/status; read-only timer, filesystem, and mailbox observation; optional permanently non-deliverable `simulation_projections`; no lineage, delivery, attempt, dispatch lease/quarantine, retry, or thread-wake state | `THREAD_EVENT_RUNNER_ENABLED=1`, `THREAD_EVENT_RUNNER_OBSERVE=1`, allowlist limited to `timer,filesystem,mailbox`; `THREAD_EVENT_RUNNER_DISPATCH_EXACT_THREAD=0` and the test dispatch flag off. Observation transactions are structurally barred from dispatch tables. |
-| 3 | Exact-thread dispatcher plus mandatory immutable revisions, project binding, pointer-only prompt, runtime capability enforcement, lease/quarantine/fencing, retry, dead-letter, busy-deferral, and reconciliation substrate. Activation creates a new delivery-enabled revision and uses only fresh Phase 3 observations; Phase 2 events/projections remain non-deliverable history. | Production dispatch remains off. After non-send contract tests, use only `THREAD_EVENT_RUNNER_TEST_DISPATCH_DISPOSABLE_RUNTIME=1` for the isolated dispatch/fault matrix and then one disposable subscription. |
+| 3 | Exact-thread dispatcher plus mandatory immutable revisions, project binding, pointer-only prompt, runtime capability enforcement, lease/quarantine/fencing, retry, dead-letter, busy-deferral, and reconciliation substrate. Activation cancels the Phase 2 observation-only subscription and creates a separate delivery-capable subscription with a frozen dispatch profile; only fresh observations under the new subscription may create delivery state. Phase 2 events/projections remain non-deliverable history. | Production dispatch remains off. After non-send contract tests, use only `THREAD_EVENT_RUNNER_TEST_DISPATCH_DISPOSABLE_RUNTIME=1` for the isolated dispatch/fault matrix and then one disposable subscription. |
 | 4 | Broader multi-runner, crash, sleep/wake, clock-change, load, runtime-upgrade, and quarantine-recovery hardening | Test-only disposable dispatch may continue; production/project dispatch remains off. |
 | 5 | Process, GitHub, queue/task/worktree, and AX safety adapters | Each adapter has a separate allowlist/feature flag and reviewed capability profile; AX mutation is not implied by observation; production/project dispatch remains off. |
 | 6 | Project pilots, observability, legacy cutover, documented rollback | After explicit approval, set `THREAD_EVENT_RUNNER_DISPATCH_EXACT_THREAD=1` for one exact subscription at a time; no workspace-wide wildcard enablement. |
@@ -910,28 +946,35 @@ Before Phase 2 handoff:
   project isolation, deterministic timer occurrence IDs, all missed-fire/DST
   policies, unavailable tzdb, sleep/wake, and forward/backward clock tests pass;
 - timer, filesystem, mailbox, replay, and invalid-observation reprocessing tests
-  prove Phase 2 observation leaves zero new rows in `delivery_lineages`,
-  `deliveries`, `delivery_attempts`, `thread_leases`, `thread_quarantines`, and
-  `lineage_quarantines`; any `simulation_projections` rows are permanently
-  non-deliverable, have no dispatch foreign keys/state, and cannot be claimed or
-  promoted;
-- ordinary revision and same-subscription reprocess tests reject every frozen
-  adapter/handler/profile name or version, target, source-kind, and source-
-  identity change; cross-subscription correction requires cancel plus create,
-  registry compatibility evidence, explicit linkage, and no inherited delivery
-  state;
+  use a SQLite authorizer/trace to prove Phase 2 observation does not read or
+  write `delivery_lineages` or any other dispatch table and leaves zero new rows
+  in `delivery_lineages`, `deliveries`, `delivery_attempts`, `thread_leases`,
+  `thread_quarantines`, and `lineage_quarantines`; any
+  `simulation_projections` rows are permanently non-deliverable, have no
+  dispatch foreign keys/state, and cannot be claimed or promoted;
+- ordinary revision and same-subscription reprocess tests reject subscription-
+  mode, dispatch-profile, adapter/handler/capability-profile name or version,
+  target, source-kind, and source-identity changes; cross-subscription
+  correction requires cancel plus create, registry compatibility evidence,
+  explicit linkage, and no inherited delivery state;
+- Phase 3 activation tests require cancel plus create, freeze the new dispatch
+  profile, record an audit-only old-to-new link, require explicit `start_now` or
+  adapter-approved replay cursor selection, reject implicit checkpoint copying,
+  and prove old events/projections cannot migrate or create delivery state;
 - capability and path violations fail closed;
 - no code path calls app-server `turn/start`.
 
 Phase 3 validation order is mandatory:
 
-1. Complete all non-send contract tests with both dispatch flags off. Prove
-   Phase 3 activation cannot select, convert, copy, claim, or promote a Phase 2
-   event or projection. Create a new immutable delivery-enabled revision; only
-   an adapter observation made under that revision and the active delivery
-   gates may enter normal validation/origin/lineage dedupe and create delivery
-   state. Any replay must use an adapter-approved replay point and that same
-   fresh-observation path.
+1. Complete all non-send contract tests with both dispatch flags off. Prove an
+   observation-only subscription cannot gain delivery capability by revision.
+   Phase 3 activation must cancel it and create a separate delivery-capable
+   subscription with a frozen dispatch profile and audit-only old-to-new link.
+   The operator selects `start_now` or an adapter-approved replay cursor; no old
+   checkpoint, event, projection, lineage, delivery, attempt, lease, retry, or
+   quarantine state migrates. Only the first fresh adapter observation under the
+   new subscription and active delivery gates may pass origin/event plus lineage
+   dedupe and create delivery state.
 2. In an isolated test runtime and temporary ledger, enable only
    `THREAD_EVENT_RUNNER_TEST_DISPATCH_DISPOSABLE_RUNTIME` and run the complete
    dispatch/fault matrix. No normal project target is accepted.
