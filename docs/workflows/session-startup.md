@@ -181,10 +181,11 @@ Safest task-grade workflow for desktop-app agents:
    The recipient drains its full unread inbox after the ring.
 4. if AX resolves an embedded preview/web field or cannot deliver/confirm, stop
    sending but preserve the packet. In an attended Codex turn, use Computer Use
-   plus `axsend tree --editable-only` to remove/blank the competing field,
-   select the correct window, clear probes, and verify the native composer;
-   resume AX after repair, or use one idle-gated Computer Use send as the bounded
-   fallback. Never turn one targeting incident into a standing AX-disabled rule.
+   plus `bin/axsend-ensure tree --app <app> --editable-only` to remove/blank the
+   competing field, select the correct window, clear probes, and verify the
+   native composer; resume AX after repair, or use one idle-gated Computer Use
+   send as the bounded fallback. Never turn one targeting incident into a
+   standing AX-disabled rule.
 
 After `desktop_bridge_required` or an AX targeting/delivery failure enters the
 attended recovery path, Codex owns the visible Claude Desktop recovery/wake

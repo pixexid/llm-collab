@@ -10,9 +10,8 @@ feature flags, and guarantees are planned contracts for later phases.
 
 Source continuity:
 
-- GitHub issue `pixexid/llm-collab#79` and its Phase 1 freeze comment
-- Amiga `CHAT-D0397480`, especially the evidence-tagged Claude background-task
-  architecture packet from 2026-07-11
+- GitHub issue `pixexid/llm-collab#79`, including its Phase 1 freeze comment and
+  evidence-tagged background-task architecture record
 - the current session-autobridge RFC, runbook, implementation, and tests
 
 ## Purpose
@@ -38,7 +37,8 @@ The runner must make these properties mechanical:
 ### Confirmed Claude behavior
 
 The following is confirmed only as observable behavior of the Claude harness
-used in `CHAT-D0397480`; it is not a claim about Claude Desktop internals:
+recorded for issue `pixexid/llm-collab#79`; it is not a claim about Claude
+Desktop internals:
 
 - A thread can create a monitor or background command. Output lines and process
   completion become harness task notifications in the originating thread.
@@ -386,12 +386,24 @@ truncated into a different semantic event.
 The new ledger is independent of session autobridge:
 
 ```text
-State/thread_event_runner/runner.sqlite3
+{project_state_root}/{project_id}/thread-event-runner/runner.sqlite3
 ```
 
-`State/` is gitignored runtime state. The directory MUST be mode `0700` and the
+Management MUST resolve `project_state_root` from `collab.config.json`, require
+an exact registered and path-component-safe `project_id`, and derive this path;
+callers cannot supply an arbitrary ledger path. Canonical resolution MUST remain
+inside `{project_state_root}/{project_id}/` and fail closed on a missing,
+unregistered, empty, traversal, symlink-escape, or mismatched project. Each
+database belongs to exactly one project. Its project-bound rows MUST match the
+owning directory's project ID, and a process opened for another project MUST
+fail before migration, observation, or dispatch.
+
+The per-project `thread-event-runner/` directory MUST be mode `0700` and the
 database, WAL, shared-memory, backup, and export files MUST be mode `0600` where
-the platform supports POSIX permissions.
+the platform supports POSIX permissions. WAL/shared-memory siblings and every
+generated backup or export MUST remain beneath that same per-project directory;
+runner output never falls back to workspace-level `State/` or another project's
+state directory.
 
 Every connection MUST apply and verify:
 
@@ -945,6 +957,12 @@ Before Phase 2 handoff:
   dedupe, quiet-state, coalescing simulation, cancellation/update, retention,
   project isolation, deterministic timer occurrence IDs, all missed-fire/DST
   policies, unavailable tzdb, sleep/wake, and forward/backward clock tests pass;
+- two registered projects resolve distinct ledgers beneath their own
+  `{project_state_root}/{project_id}/thread-event-runner/` directories; tests
+  reject unregistered/traversal/symlink-escape IDs, arbitrary path overrides,
+  mismatched owning-project rows, and opening one project's ledger in another
+  project's context, while WAL, shared-memory, backup, and export artifacts stay
+  inside the owning directory;
 - timer, filesystem, mailbox, replay, and invalid-observation reprocessing tests
   use a SQLite authorizer/trace to prove Phase 2 observation does not read or
   write `delivery_lineages` or any other dispatch table and leaves zero new rows

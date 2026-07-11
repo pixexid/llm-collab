@@ -9,13 +9,16 @@ autonomous.
 ## Status: provisional safety-fuse, not the primary wake
 
 The primary agent-to-agent wake mechanism for an AX-capable `cli_session` is the
-idle-gated **bidirectional AX doorbell** (`axsend-ensure ring --submit --verify`;
-see `claude-code-desktop-computer-use-bridge.md`). Computer Use is the attended
-fallback/recovery path when AX cannot safely target or verify the native
-composer, and for an explicitly configured non-CLI desktop bridge. `llm-collab`
-remains the durable mailbox. Routine/continuous polling is **deprecated** as the
-primary wake — it wastes tokens and a heartbeat set on guessed timing can fire
-into changed context.
+busy-safe, queued-delivery **bidirectional AX doorbell**
+(`axsend-ensure ring --submit --verify`; see
+`claude-code-desktop-computer-use-bridge.md`). Ring once even when the recipient
+is busy; exit 0 means the one-line pointer was delivered or queued behind the
+active turn. The idle input gate applies only to attended screenshot/keyboard
+Computer Use fallback, not to AX `ring`. Computer Use is the recovery path when
+AX cannot safely target or verify the native composer, and for an explicitly
+configured non-CLI desktop bridge. `llm-collab` remains the durable mailbox.
+Routine/continuous polling is **deprecated** as the primary wake — it wastes
+tokens and a heartbeat set on guessed timing can fire into changed context.
 
 Session autobridge and PM2/heartbeat polling survive only as a bounded,
 **provisional/experimental safety-fuse**, on trial, with hard constraints:
@@ -59,10 +62,10 @@ remove it and rely on the doorbell + mailbox-drain self-heal.
   created a desktop-visible thread.
 - If AX resolves an embedded preview/web field or cannot verify the native
   prompt, stop sending but preserve the durable packet. Use attended Computer
-  Use plus `axsend tree --editable-only` to remove/blank the competing field,
-  select the correct window, clear probes, and verify the real native composer
-  before resuming AX. Do not record a standing AX-disabled/mailbox-only policy
-  from one targeting incident.
+  Use plus `bin/axsend-ensure tree --app <app> --editable-only` to remove/blank
+  the competing field, select the correct window, clear probes, and verify the
+  real native composer before resuming AX. Do not record a standing mailbox-only
+  or AX-disabled policy from one targeting incident.
 - For Claude-owned collaboration lanes, inspect the visible Claude app before
   treating inbox or queue state as final. If Claude is visibly asking a related
   question, waiting for direction, or reporting Read/Agent/tool errors, Codex
@@ -70,13 +73,14 @@ remove it and rely on the doorbell + mailbox-drain self-heal.
   for a final inbox handoff while Claude is blocked in the app.
 - If Claude is stale, idle with no durable progress, or repeatedly erroring,
   first try to wake or repair the same thread with a durable unblock packet plus
-  one short bridge after the idle gate passes. Restart or reopen Claude only
-  from an attended Codex recovery turn or after explicit operator instruction;
-  unattended heartbeats must notify with the observed blocker instead of
-  interrupting or restarting Claude. Create a new Claude thread only when the
-  current thread is full, unrecoverably corrupted, repeatedly loses tool access,
-  or still cannot continue after attended recovery; include a full continuity
-  packet for the same task.
+  one short AX bridge; it may queue behind an active turn. Apply the idle input
+  gate only if recovery falls back to screenshot/keyboard Computer Use. Restart
+  or reopen Claude only from an attended Codex recovery turn or after explicit
+  operator instruction; unattended heartbeats must notify with the observed
+  blocker instead of interrupting or restarting Claude. Create a new Claude
+  thread only when the current thread is full, unrecoverably corrupted,
+  repeatedly loses tool access, or still cannot continue after attended
+  recovery; include a full continuity packet for the same task.
 
 ## Activate A Session
 

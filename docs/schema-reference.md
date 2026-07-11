@@ -400,11 +400,13 @@ Per-agent pointer index. Gitignored (runtime state).
 }
 ```
 
-All paths are relative to workspace root.
+All inbox message paths above are relative to workspace root. Project runtime
+state paths below resolve from `project_state_root` and may be outside the Git
+checkout.
 
 ---
 
-## Planned State/thread_event_runner/runner.sqlite3 (not implemented)
+## Planned project_state_root/{project_id}/thread-event-runner/runner.sqlite3 (not implemented)
 
 **Phase 1 contract only.** The repository does not currently create this
 database, run a Thread Event Runner daemon, or provide the delivery guarantees
@@ -412,9 +414,24 @@ described below. See the
 [Thread Event Runner RFC](workflows/thread-event-runner-rfc.md) for the full
 architecture, state machines, threat review, and rollout gates.
 
-The planned ledger is a fresh SQLite database, independent of
-`State/session_autobridge/`. Every connection requires WAL mode, foreign keys,
-a 5-second busy timeout, and full synchronous writes:
+The planned ledger is a fresh per-project SQLite database, independent of
+session autobridge, at:
+
+```text
+{project_state_root}/{project_id}/thread-event-runner/runner.sqlite3
+```
+
+`project_state_root` comes from `collab.config.json`; `project_id` must be an
+exact registered, path-component-safe ID. The runner derives this path and does
+not accept an arbitrary ledger-path override. Canonical resolution must remain
+inside the matching `{project_state_root}/{project_id}/` directory and rejects
+missing/unregistered IDs, traversal, symlink escape, or project mismatch before
+migration or use. Each database belongs to exactly one project, and all
+project-bound rows must match that owning project ID. Opening one project's
+database from another project's context fails closed.
+
+Every connection requires WAL mode, foreign keys, a 5-second busy timeout, and
+full synchronous writes:
 
 ```sql
 PRAGMA journal_mode = WAL;
@@ -423,8 +440,11 @@ PRAGMA busy_timeout = 5000;
 PRAGMA synchronous = FULL;
 ```
 
-The directory is planned as mode `0700` and database-related files as `0600` on
-POSIX systems. All four identity fields below are non-null and exact:
+The per-project `thread-event-runner/` directory is planned as mode `0700` and
+database, WAL, shared-memory, backup, and export files as `0600` on POSIX
+systems. All generated runner artifacts remain under that owning directory;
+there is no workspace-level `State/` fallback. All four identity fields below
+are non-null and exact:
 
 ```text
 (project_id, runtime_home_id, runtime_home_realpath, native_thread_id)
@@ -887,10 +907,14 @@ separate short transactions around external work.
 The exact-thread dispatcher is not part of Phase 2. A SQLite authorizer/trace
 must prove Phase 2 observation and reprocessing do not read or write
 `delivery_lineages` or any other dispatch table. Phase 2 proof also requires
-zero new lineage, delivery, attempt, dispatch-lease, or
-target/lineage-quarantine rows after timer/filesystem/mailbox observation and
-reprocessing, plus proof that simulation rows have no claim/promotion path.
-Phase 3 first proves an
+two registered projects to resolve distinct databases beneath their own
+`{project_state_root}/{project_id}/thread-event-runner/` directories. It rejects
+unregistered/traversal/symlink-escape IDs, arbitrary path overrides, owning-row
+project mismatches, and cross-project opens; WAL, shared-memory, backup, and
+export files remain inside the owning directory. Proof also requires zero new
+lineage, delivery, attempt, dispatch-lease, or target/lineage-quarantine rows
+after timer/filesystem/mailbox observation and reprocessing, plus proof that
+simulation rows have no claim/promotion path. Phase 3 first proves an
 observation-only subscription cannot gain delivery capability by revision;
 activation cancels it, creates a separate delivery-capable subscription with a
 frozen dispatch profile, records only an audit successor link, and requires
