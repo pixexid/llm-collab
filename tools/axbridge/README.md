@@ -181,3 +181,21 @@ The `type` command exposes key-typing directly: `axsend type --app <name>
   button heuristics may need tuning (`tree` to inspect).
 - Pairs with the llm-collab mailbox: `deliver.py` is the durable record, `axsend`
   is the doorbell nudge.
+
+## Computer Use supervision
+
+AX remains the routine doorbell for every collaborator, including Codex. It is
+the normal transport after a durable `deliver.py` packet and should not be
+disabled or bypassed merely because a desktop app needs recovery.
+
+Codex exclusively owns attended Computer Use control of collaborator desktop
+apps. Use that supervisory path when the work requires visible state inspection,
+navigation, thread creation or switching, usage-limit handling, unsafe-composer
+recovery, or an unblock that the mailbox plus `axsend state` cannot safely
+resolve. Other collaborators continue to use durable packets plus AX and send
+Codex a durable intervention request instead of independently driving another
+agent's desktop UI.
+
+Computer Use is a serialized control and recovery plane, not a replacement
+doorbell. Once Codex has restored a safe target/thread, normal delivery returns
+to one verified AX ring.
