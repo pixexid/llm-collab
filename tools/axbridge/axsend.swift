@@ -651,14 +651,24 @@ func cmdRing(app: String, text: String, submit: Bool, windowIndex: Int, dryRun: 
             // where this window can't see it, deliveredFresh() stays false, and
             // each retry landed another copy). Only retry when the composer
             // VERIFIABLY still holds our text — a readable leftover proves the
-            // submit was ignored, so retrying can't duplicate. Blank/unreadable
-            // readback (Electron) is NOT proof either way → stop and report
-            // unconfirmed; the caller confirms with `axsend confirm`.
+            // submit was ignored, so retrying can't duplicate.
             let leftover = str(composer, kAXValueAttribute) ?? ""
             if leftover.contains(String(text.prefix(20))) {
                 selectAllAndDelete(pid: pid)
             } else {
-                queued = true; break attempts
+                // Composer readback is blank/unreadable. On Electron composers
+                // AXValue is blank even when a draft is stuck, so we CANNOT tell
+                // "submit accepted" from "submit no-op with the text still stuck".
+                // Do NOT resend (anti-duplicate) and do NOT set `queued` — a
+                // QUEUED (UNCONFIRMED) print makes bin/axsend-ensure exit 0 without
+                // running the follow-up confirm, silently losing a handoff that
+                // never landed (bot P1, PR #74). Break and fall through to the
+                // NOT-DELIVERED path: the final-settle deliveredFresh() check
+                // below still promotes a real late delivery to VERIFIED, and a
+                // genuine no-op returns non-zero so the wrapper/caller runs
+                // `axsend confirm` (the conversation-turn check is the only
+                // reliable signal for these apps).
+                break attempts
             }
         }
         // ZCode can accept the submit and start processing before its sent-message
