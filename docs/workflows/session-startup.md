@@ -92,7 +92,8 @@ When validating worker wake/resume behavior, do not target the active operator t
 Use a disposable worker session instead, especially for Codex app tests:
 
 1. bind or refresh a disposable worker session
-2. if testing queue protection, make that disposable session busy first
+2. if testing failure retry, use a bounded adapter that is known to return
+   nonzero before runtime acceptance on its first pass
 3. send the routed message to the disposable target session
 4. inspect watcher/inbox state
 
@@ -156,8 +157,9 @@ Operational rule:
   **bidirectional AX doorbell** (see
   `claude-code-desktop-computer-use-bridge.md`); terminal-only sessions require a
   dispatchable runtime binding
-- screenshot/keyboard Computer Use is a fallback for a project-configured
-  non-CLI Claude Desktop bridge, never the universal default
+- attended Computer Use is fallback/recovery when AX cannot safely target or
+  verify the native composer, and for a project-configured non-CLI Claude
+  Desktop bridge; it is never the universal first path
 
 Safest task-grade workflow for desktop-app agents:
 
@@ -177,10 +179,15 @@ Safest task-grade workflow for desktop-app agents:
    durable `Chats/` packet is the source of truth. The prompt must be one line,
    under roughly 240 characters, and never contain newline-split bridge details.
    The recipient drains its full unread inbox after the ring.
-4. if AX cannot deliver or confirm, record the exact blocker; use Computer Use
-   only for an explicitly configured desktop-bridge fallback
+4. if AX resolves an embedded preview/web field or cannot deliver/confirm, stop
+   sending but preserve the packet. In an attended Codex turn, use Computer Use
+   plus `axsend tree --editable-only` to remove/blank the competing field,
+   select the correct window, clear probes, and verify the native composer;
+   resume AX after repair, or use one idle-gated Computer Use send as the bounded
+   fallback. Never turn one targeting incident into a standing AX-disabled rule.
 
-Only after `desktop_bridge_required`, Codex owns the visible Claude Desktop wake
+After `desktop_bridge_required` or an AX targeting/delivery failure enters the
+attended recovery path, Codex owns the visible Claude Desktop recovery/wake
 through Computer Use. If Computer Use is unavailable, blocked by a non-idle
 Claude state, cannot inspect the app, or fails to send, Codex must keep
 ownership of the Claude app path: bring Claude to front by bundle id, use

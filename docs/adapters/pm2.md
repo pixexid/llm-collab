@@ -44,6 +44,19 @@ will currently create a watcher.
 
 App naming: `{workspace_name}-{agent_id}` (workspace_name from `collab.config.json`)
 
+PM2 materializes this configuration when a process is started/reloaded; changing
+`agents.json` does not automatically remove or reconfigure an already-running
+process. A PM2 process saved before an agent was disabled/removed can also return
+after reboot even though the current ecosystem would not create it.
+
+After roster/watcher changes, compare `python bin/pm2_watchers.py status --all`
+and `pm2 list` with current `watcher_enabled: true` entries. Stop/delete stale
+named processes (`python bin/pm2_watchers.py delete --agent <id>` while the ID
+remains in the roster, otherwise `pm2 delete <workspace>-<agent>`), start/ensure
+the intended set, then run `pm2 save` so reboot state matches the reconciled
+process list. Do not treat a healthy stale PM2 process as proof that current
+routing policy authorizes it.
+
 ---
 
 ## Commands
@@ -112,21 +125,21 @@ watcher.
 
 ---
 
-## Claude Desktop Constraint
+## Desktop-app constraint and wake priority
 
-PM2/watcher automation must not be treated as the controller for the Claude
-desktop app. PM2 can watch `llm-collab` inbox files and dispatch shell/runtime
-adapters, but it cannot call Codex Computer Use tools.
+PM2/watcher automation must not be treated as the controller for a desktop app.
+PM2 can watch `llm-collab` inbox files and dispatch configured shell/runtime
+adapters, but it cannot perform Codex Computer Use recovery.
 
-Current safe assumption:
+Current safe ordering:
 
-- Codex app visible refresh is automatable
-- Claude desktop app interaction is automatable only from a live Codex turn using
-  Computer Use
-- Claude desktop fresh sidebar thread creation is safe only when Computer Use
-  generates a UUID plus short title, clicks `New session`, sends the first
-  visible prompt beginning with `[BRIDGE <8-char-uuid-prefix>] <short title>`,
-  and verifies the new sidebar title/local URL
+- first write the durable `llm-collab` packet
+- for an AX-capable `cli_session` with `activation.ax_app`, use the idle-gated
+  `axsend-ensure ring --submit --verify` AX doorbell as the primary wake
+- use attended Computer Use only as fallback/recovery when AX cannot safely
+  inspect/target/send, or for an explicitly project-configured non-CLI desktop
+  bridge
+- PM2/heartbeat remains a bounded observation safety-fuse, not the primary wake
 
 Why:
 
@@ -139,41 +152,40 @@ Why:
 
 Watcher policy for desktop-app agents:
 
-PM2/heartbeat is **not the primary wake mechanism**. The primary path is the
-bidirectional Computer-Use doorbell with `llm-collab` as the durable mailbox (see
-`claude-code-desktop-computer-use-bridge.md`). PM2/heartbeat is only the bounded,
-provisional safety-fuse — used when a doorbell ring is blocked or a worker is
-visibly running and a handoff is expected, task-scoped and auto-deleted on
-handoff/ack/blocker (see `session-autobridge-runbook.md`).
+PM2/heartbeat is only the bounded, provisional safety-fuse described in
+`session-autobridge-runbook.md`.
 
-- primary: ring the recipient's app directly with the Computer-Use doorbell after
-  the idle gate passes; record durable work in `llm-collab`
-- safety-fuse only: let a heartbeat drive a desktop app through Computer Use when
-  a ring is blocked or a response is expected from a running worker
-- safety-fuse only: if Computer Use cannot inspect or send, keep the bounded
-  heartbeat active, try reasonable app-control recovery paths, and record a
-  blocker for Computer Use retry or tooling repair
+- primary: ring the registered AX app after the idle gate with one short pointer
+  to the durable packet
+- recovery: if AX targets an embedded preview/web field or cannot verify the
+  native composer, preserve the packet, stop sending, and use an attended Codex
+  turn with Computer Use plus `axsend tree --editable-only` to remove/blank the
+  competing field and verify the real native prompt before resuming AX
+- fallback: use Computer Use to send only when AX remains unavailable/unsafe or
+  the project explicitly configured a non-CLI desktop bridge; still apply the
+  same idle gate and one-line pointer rule
+- never convert one AX targeting incident into a standing mailbox-only or
+  AX-disabled policy
 - unsafe: claim a PM2 watcher created a new app-visible desktop thread
 - unsafe by default: synthesize sidebar visibility by writing app cache/index files directly
 - unsafe: use `claude -p`, `claude --resume`, or `~/.claude/projects` as proof
   that the visible desktop thread changed
 - unsafe: ask the operator to wake an agent or paste the bridge prompt before
-  Computer Use/app-control recovery has been exhausted
+  AX plus attended Computer Use/app-control recovery has been exhausted
 
 If desktop visibility is needed, the recommended flow is:
 
 1. write the task/message to `Chats/` with `deliver.py`
-2. ring the recipient's app directly via the Computer-Use doorbell (idle-gated)
-   with one short sender-tagged pointer to the durable packet
+2. ring the recipient's registered app via AX (idle-gated) with one short
+   sender-tagged pointer to the durable packet
 3. the recipient drains its unread inbox and acts; it rings back on handoff
-4. only if the ring is blocked or a running worker's response is expected, create
-   a bounded provisional safety-fuse heartbeat under the constraints in
-   `session-autobridge-runbook.md`
-5. while the target is running, the heartbeat observes only
-6. once the target is idle/awaiting input, read the visible response and record
-   it back into `llm-collab`
-7. delete the heartbeat when the response is recorded, blocked, timed out, or no
-   longer needed
+4. if AX targets the wrong editable surface or cannot verify delivery, run the
+   attended Computer Use recovery above, then retry AX once the real composer is
+   verified; use Computer Use send only as the bounded fallback
+5. only if the ring is blocked or a running worker's response is expected, create
+   a bounded provisional safety-fuse heartbeat
+6. while the target is running, the heartbeat observes only; delete it when the
+   response is recorded, blocked, timed out, or no longer needed
 
 ---
 

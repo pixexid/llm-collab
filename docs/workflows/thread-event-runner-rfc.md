@@ -97,7 +97,11 @@ Local code cannot safely infer these contracts:
 - whether `turn/start` was rejected before acceptance, accepted exactly once,
   or accepted before a transport failure;
 - a runtime-enforced idempotency key or queryable client delivery token;
-- a stable reconciliation query for an accepted turn after runner restart.
+- a stable reconciliation query for an accepted turn after runner restart;
+- authoritative native thread metadata that binds its cwd/repository to the
+  requested registered project at creation and immediately before dispatch;
+- runtime-enforced tool, filesystem-root, network, and UI capability restriction
+  for a runner-started turn, with an attestation of the applied profile.
 
 The exact-thread dispatcher MUST remain feature-disabled until these behaviors
 are integration-proven against the supported Codex runtime. A successful
@@ -159,7 +163,9 @@ Every subscription and delivery MUST bind this immutable tuple:
 - `runtime_home_realpath` is the canonical absolute `CODEX_HOME` after symlink
   resolution. It must exist and must not be a parent/prefix wildcard.
 - `runtime_home_id` is `sha256(utf8(runtime_home_realpath))`, stored alongside
-  the path so equality is auditable rather than hash-only.
+  the path so equality is auditable rather than hash-only. This hash is only a
+  stable local namespace key. It is **not** an account identity, credential, or
+  authentication fingerprint.
 - `native_thread_id` is the runtime's exact thread identifier, not an agent ID,
   chat ID, "latest thread", or display title.
 
@@ -169,10 +175,25 @@ fail closed. `chat_id`, `task_id`, and `agent_id` are optional audit metadata;
 when present, they must resolve within the same exact project and cannot change
 the target identity.
 
-Before any future dispatch, the dispatcher MUST prove that the selected
-app-server process has the exact canonical runtime home and that the resumed
-thread ID equals `native_thread_id`. A subscription update cannot retarget the
-identity tuple; retargeting requires cancel plus create.
+At create time, the runner MUST resolve one repo ID and canonical repo path from
+the exact `projects.json` entry, then obtain authoritative native thread
+metadata from the supported runtime. The thread's authoritative cwd/repository
+binding must be inside that exact registered repo, must not resolve to another
+project, and must be stored as immutable revision evidence: repo ID and
+realpath, native cwd realpath, evidence source/version/hash, and verification
+time. A caller-supplied cwd or a local session-index guess is not authoritative.
+If the runtime cannot supply a verifiable project/cwd binding, targeted
+subscription creation fails closed. A future unbound observation-only record
+would require a separate schema and is not part of this contract.
+
+Immediately before any future dispatch, the runner MUST re-obtain the same
+authoritative binding, prove that the selected authenticated app-server process
+has the exact canonical runtime home, and prove that the resumed thread ID,
+project repo, and native cwd still match the frozen revision. Drift moves the
+delivery to a fail-closed diagnostic state without sending. Endpoint
+authentication/process attestation is separate from `runtime_home_id`; the path
+hash alone never authorizes a connection. A subscription update cannot retarget
+the identity tuple or project binding; retargeting requires cancel plus create.
 
 ## Trusted registry and capability model
 
@@ -195,6 +216,26 @@ Each handler registration freezes:
 - capability profile ID;
 - whether delivery is allowed at all in the current rollout phase.
 
+The dispatcher uses one fixed, trusted pointer-only prompt template. It may
+render only canonical runner-owned identifiers such as `delivery_id`,
+`subscription_id`, and `attempt_token`; it MUST NOT interpolate `subject`,
+payload, observed state, reason text, source paths, chat content, or any other
+event-controlled string. Rendered identifiers must pass their exact UUID/token
+grammar, contain no control characters or newlines, and be serialized into the
+JSON-RPC request by a structured encoder rather than shell/string
+concatenation. Event detail is retrieved later through a trusted bounded reader
+for that delivery ID. That reader returns canonical JSON with all strings UTF-8
+validated and JSON-escaped under an explicit `untrusted_event` data field;
+control/NUL bytes and unknown fields fail closed. It never renders event data as
+system/developer instructions, markdown, shell, tool names, or prompt suffixes.
+
+The capability profile must be enforced by the target runtime, not merely
+described in the prompt. Before delivery is enabled, the runtime must restrict
+the runner-started turn to the frozen tool set, filesystem roots, network/UI
+permissions, and read/write mode and return authoritative evidence that the
+profile was applied. If the supported runtime cannot enforce and attest those
+limits, `dispatch.codex_exact_thread` remains disabled.
+
 Capability profiles are reviewed constants such as
 `observe.timer`, `observe.filesystem`, `observe.mailbox`, and a future
 `dispatch.codex_exact_thread`. A subscription may request only a registry-valid
@@ -202,8 +243,15 @@ adapter/handler/profile combination. The event envelope cannot add or widen a
 capability.
 
 Filesystem configurations MUST use canonical approved roots, reject traversal
-and NUL bytes, and define symlink policy. Phase 2 filesystem observation is
-restricted to metadata and bounded file content under explicit roots. Mailbox
+and NUL bytes, and prohibit symlink following. Path-string `realpath` checks are
+not sufficient because they race. Each observation must open the registered
+root directory, record and verify its device/inode identity, walk every relative
+segment with directory-fd-anchored `openat`/equivalent and no-follow flags, and
+post-open verify the final fd plus root identity before reading metadata or
+bounded content. Events supply relative names only and the adapter reopens the
+target through this anchored walk. If the platform cannot provide equivalent
+fd-anchored traversal and post-open verification, the filesystem adapter fails
+closed and stays disabled; it does not fall back to a path-only check. Mailbox
 observation parses only exact-project durable message paths and treats message
 body/frontmatter as untrusted data.
 
@@ -283,20 +331,26 @@ schema migration that preserves the stated constraints.
 | Table | Required purpose and constraints |
 |---|---|
 | `runner_instances` | Stable instance UUID, start/heartbeat/stop timestamps, version; used as lease owner identity. |
-| `subscriptions` | UUID primary key; immutable exact identity tuple; trusted adapter/handler/profile; validated config JSON; positive revision; state; schedule; expiry; timestamps. Unique active name within exact identity. |
-| `source_checkpoints` | One row per subscription/revision with opaque bounded cursor, normalized observed snapshot/hash, and last observation time; foreign key with cascade. |
-| `events` | Monotonic ID; subscription/revision; stable source event ID; canonical envelope/hash; classification; coalescing key; timestamps. Unique `(subscription_id, revision, source_event_id)` and `(subscription_id, revision, envelope_hash)` as adapter-policy permits. |
-| `deliveries` | UUID; exact identity copied and foreign-keyed to subscription; revision; handler; coalescing key; state; event range/count; due/expiry; retry count; lease/fence; cancellation/update marker. At most one open coalescing bucket per subscription revision/key. |
-| `delivery_attempts` | UUID attempt token; delivery; fence; numbered attempt; started/finished time; acceptance classification; bounded response/error; unique `(delivery_id, attempt_number)` and unique attempt token. |
+| `subscriptions` | UUID primary key and lifecycle/current-head row only: name, state, `current_revision`, created/updated timestamps. It points to one immutable revision and does not carry mutable adapter/config snapshots; IDs, not names, are authoritative. |
+| `subscription_revisions` | Immutable frozen snapshot with composite primary key `(subscription_id, revision)`: exact identity and project-binding evidence; trusted adapter/handler/profile versions; validated config; schedule, expiry, quiet/coalescing policy, and creation actor/time. An update inserts a new row; existing rows are never rewritten. |
+| `source_checkpoints` | One row per subscription/revision with opaque bounded cursor, semantic quiet snapshot/hash, counters, and last observation time; composite foreign key to `subscription_revisions`. |
+| `events` | Monotonic ID; subscription/revision; stable source event ID; canonical envelope/hash; classification; coalescing key; timestamps; composite foreign key to `subscription_revisions`. Unique `(subscription_id, revision, source_event_id)` and `(subscription_id, revision, envelope_hash)` as adapter-policy permits. |
+| `deliveries` | UUID plus subscription/revision; exact identity copied from the frozen revision; handler; coalescing key/window; state and pre-lease state; event range/count/bytes; due/expiry; retry count; lease/fence; cancellation/update marker. Composite foreign key to `subscription_revisions`; at most one open coalescing bucket per revision/key/window. |
+| `delivery_attempts` | UUID attempt token plus delivery ID and subscription/revision; fence; numbered attempt; pre-dispatch project/runtime/capability attestation hashes and times; started/finished time; acceptance classification; bounded response/error. Composite foreign keys to both the matching `deliveries` identity/revision and `subscription_revisions`; unique `(delivery_id, attempt_number)` and unique attempt token. |
 | `thread_leases` | One row per exact identity; owner instance; monotonic fence integer; acquired/renewed/expires timestamps. Exact identity is the primary key. |
+| `thread_quarantines` | One row per exact identity while any delivery is `dispatching`, `reconciling`, or dead-lettered with unresolved acceptance. Stores delivery/attempt/revision, reason, created time, and resolution evidence. It survives lease expiry, release, runner restart, and subscription pause/cancel. |
 | `subscription_leases` | One row per subscription; owner instance, monotonic fence, expiry; prevents concurrent polling/checkpoint advancement. |
 | `dead_letters` | One row per terminal failed delivery or invalid observation; reason code, actionable diagnostic, first/last failure, acknowledgement, retained tombstone metadata. |
 | `audit_log` | Append-only state transitions and management operations with actor, object, from/to state, revision/fence, reason code, and bounded metadata. |
 | `schema_migrations` | Applied version, checksum, time, tool version, and backup reference. |
 
-Foreign keys are mandatory. Orphaned events, attempts, leases, or dead letters
-are corruption and MUST stop the affected operation. SQLite integrity and
-foreign-key checks are required before migration, after unclean shutdown
+Foreign keys are mandatory. `subscriptions.current_revision` has a composite
+foreign key back to its own `(subscription_id, revision)` row. Checkpoints,
+events, deliveries, and attempts all carry `subscription_id` plus revision and
+must resolve the same immutable snapshot; an attempt cannot point at a delivery
+from another revision. Orphaned events, attempts, leases, quarantines, or dead
+letters are corruption and MUST stop the affected operation. SQLite integrity
+and foreign-key checks are required before migration, after unclean shutdown
 recovery, and before a ledger is accepted after restore.
 
 ### Transaction boundaries
@@ -309,8 +363,11 @@ occur while a database transaction is open.
 
 1. Resolve and validate exact identity plus registry entries outside the write
    transaction.
-2. Inside one transaction, compare the expected revision, write the new state
-   or revision, mark superseded deliveries, and append audit.
+2. Inside one transaction, compare the expected current revision, insert the
+   complete immutable `subscription_revisions` snapshot, advance the lifecycle
+   row's current-head pointer, apply the frozen open-delivery disposition, and
+   append audit. The current-head composite foreign key is deferred only until
+   this transaction commits; it is never left dangling.
 3. Commit before returning success.
 
 **Observation transaction**
@@ -318,33 +375,49 @@ occur while a database transaction is open.
 1. Poll under a valid subscription lease outside the transaction.
 2. Begin the transaction and re-check subscription state, revision, lease owner,
    and fence.
-3. Insert the deduplicated event, classify it, update or create an eligible
-   coalesced delivery, advance the source checkpoint, and append audit/state
-   transition records.
+3. Compute the registered semantic snapshot. If an unchanged quiet snapshot is
+   observed, advance only the checkpoint, quiet counters, and last-observed time;
+   do not insert an event or audit row. Otherwise insert/deduplicate the bounded
+   event, classify it, update or create an eligible coalesced delivery, advance
+   the source checkpoint, and append only the bounded transition audit.
 4. Commit all of those changes together. A cursor is never advanced without the
    corresponding event/dedup decision being durable.
 
 **Delivery claim transaction**
 
-1. Expire stale leases by timestamp, acquire the exact-thread lease, and
-   increment its fence.
+1. Check for any `thread_quarantines` row and any `dispatching` or `reconciling`
+   delivery for the exact identity. If either exists, claim fails regardless of
+   lease expiry or owner state. Only then expire a stale lease, acquire the
+   exact-thread lease, and increment its fence.
 2. Atomically compare-and-swap one eligible delivery to `leased`, store owner,
    fence, and a fresh attempt token, then append audit.
 3. Commit before any runtime inspection or dispatch.
 
 **Pre-send authorization transaction**
 
-After authoritative idle inspection and immediately before a future external
-send, re-check subscription revision/state, delivery state, cancellation marker,
-lease owner/expiry/fence, and feature flag. Compare-and-swap `leased` to
-`dispatching` and commit. Cancellation before this boundary prevents the send.
+After authoritative idle, project/thread binding, endpoint identity, and
+runtime capability-profile inspection and immediately before a future external
+send, re-check the frozen subscription revision, lifecycle state, delivery
+state, cancellation marker, lease owner/expiry/fence, and applicable test or
+production flag. Compare-and-swap `leased` to `dispatching`, insert the exact
+target's quarantine row, and commit before constructing the fixed pointer-only
+request. Cancellation before this boundary prevents the send. No external call
+occurs unless every attestation still matches the immutable revision.
 
 **Attempt result transaction**
 
 Persist the attempt result and compare-and-swap the delivery using the same
 owner, fence, and attempt token. A stale worker cannot complete, retry, or
-release a newer owner's delivery. Release or renew the thread lease in the same
-transaction.
+release a newer owner's delivery. A known accepted/delivered or authoritative
+not-accepted result resolves the quarantine in the same transaction; an unknown
+result moves the delivery to `reconciling` and leaves the quarantine in place.
+
+The owner renews the thread lease with short fenced transactions while an
+external call is outstanding; no transaction spans the call. If renewal fails
+before the request is sent, the worker must not send. If renewal fails after
+send or send status is uncertain, the delivery becomes `reconciling` and the
+quarantine survives the expired/released lease. Recovery may acquire a separate
+fenced reconciliation lease, but normal delivery claims remain blocked.
 
 ## State machines
 
@@ -353,13 +426,14 @@ transaction.
 ```text
 active <-> paused
 active|paused -> cancelling -> cancelled
-active|paused -> expired
+active|paused -> expiring -> expired
 active|paused -> error
-error -> paused|active        (explicit operator recovery)
+error -> paused|active|cancelling   (explicit operator recovery)
 ```
 
 - Only `active` subscriptions may poll.
-- `paused` preserves the checkpoint but creates no observations or deliveries.
+- `paused` preserves the checkpoint and open unleased deliveries but creates no
+  observations and makes those deliveries ineligible for claim.
 - `expired` and `cancelled` are terminal. Resumption creates a new subscription
   or explicit new revision according to management policy.
 - `error` is quiet after one actionable diagnostic and bounded health signal;
@@ -368,14 +442,16 @@ error -> paused|active        (explicit operator recovery)
 ### Event
 
 ```text
-observed -> quiet | actionable | invalid
+observed -> unchanged_quiet (checkpoint/counters only; no event row)
+observed -> changed_quiet | actionable | invalid
 actionable -> coalesced | delivery_created
-quiet|coalesced|delivery_created|invalid -> retained -> compacted
+changed_quiet|coalesced|delivery_created|invalid -> retained -> compacted
 ```
 
-`quiet` means the event advanced a checkpoint/snapshot but produced no thread
-wake, notification, or repeated audit line. `invalid` creates only a bounded
-diagnostic/dead letter according to reason.
+`unchanged_quiet` advances a checkpoint/snapshot but produces no event row,
+thread wake, notification, or audit line. `changed_quiet` may retain one bounded
+semantic transition event without delivery. `invalid` creates only a bounded,
+rate-limited diagnostic/dead letter according to reason.
 
 ### Delivery
 
@@ -385,6 +461,9 @@ pending -> leased -> dispatching -> delivered
 leased -> retry_wait -> pending
 dispatching -> retry_wait -> pending
 dispatching -> reconciling
+reconciling -> delivered
+reconciling -> retry_wait -> pending
+reconciling -> dead_letter (quarantine retained until safe disposition)
 pending|leased|deferred_busy|retry_wait -> cancelled|obsolete|expired
 pending|leased|dispatching|retry_wait|reconciling -> dead_letter
 ```
@@ -393,17 +472,28 @@ pending|leased|dispatching|retry_wait|reconciling -> dead_letter
 - `reconciling` is sticky and operator-visible. It never auto-transitions to a
   new attempt without authoritative evidence that the prior turn was not
   accepted.
+- Every normal claim checks both delivery state and the exact target's
+  quarantine. Lease expiry or release never makes a `dispatching`,
+  `reconciling`, or unresolved dead-letter target claimable.
 - `obsolete` means a subscription update superseded work before the dispatch
   acceptance boundary.
-- `delivered`, `cancelled`, `obsolete`, `expired`, and `dead_letter` are terminal.
+- `delivered`, `cancelled`, `obsolete`, `expired`, and `dead_letter` are terminal
+  delivery states. A terminal dead letter may still retain a target quarantine;
+  terminal delivery state alone does not authorize another turn.
 
 ## Quiet, coalescing, and retry behavior
 
 Handlers classify every valid event as `quiet` or `actionable` and populate the
 action-first fields `observed_state`, `expected_outcome`, `why_not_done`, and
 `next_unlock_action`. A healthy/running/non-actionable observation MUST remain
-quiet. The runner records a compact latest snapshot and metrics, not a new
-notification or unbounded repeated event log.
+quiet. Each handler defines a canonical **semantic quiet projection** containing
+only stable state needed to detect a meaningful transition. Cursor, observation
+and source timestamps, poll/occurrence counters, adapter latency, and other
+volatile metadata are excluded from its hash. When that semantic hash is
+unchanged, the observation transaction advances the cursor, latest time, and
+quiet counters without inserting an event or audit row. A changed semantic
+state may create one bounded transition event. This keeps healthy polling from
+becoming an event log.
 
 Coalescing is allowed only for `pending`, `deferred_busy`, or `retry_wait`
 deliveries with the same exact identity, subscription ID and revision, handler,
@@ -412,6 +502,17 @@ first/last event IDs, event count, severity, and due time according to the
 registered handler policy. It never changes target/capabilities and never folds
 into `leased`, `dispatching`, `reconciling`, or terminal work. An event arriving
 after a delivery is leased creates or joins a successor bucket.
+
+The default coalescing window is 60 seconds and a registry may raise it only to
+a hard maximum of 15 minutes. One bucket accepts at most 256 observations and
+64 KiB of canonical coalesced state. Reaching any window/count/byte bound seals
+the bucket; later observations create a successor bucket or increment a bounded
+overflow counter without retaining additional bodies. While the exact target is
+quarantined, at most one successor bucket per revision/key is retained; further
+occurrences increment a saturating 64-bit counter only. Invalid diagnostics are
+rate-limited to one retained diagnostic per subscription/revision/reason per 15
+minutes and at most 100 retained invalid diagnostics per subscription; excess
+occurrences update a counter only.
 
 Retries apply only when the runner has authoritative evidence that dispatch was
 not accepted. Default planned policy is 5 attempts with exponential backoff and
@@ -435,9 +536,26 @@ future `turn/start` request might mean the turn started. Such an attempt is
 
 The runner MUST NOT auto-retry an ambiguous attempt. Reconciliation may mark it
 `delivered` only from authoritative runtime evidence tied to the unique attempt
-token/turn ID, or may create a replacement only from authoritative evidence
-that the attempt was not accepted. If the runtime exposes neither proof, the
-delivery remains operator-visible and requires explicit disposition.
+token/turn ID. Authoritative evidence that the request was not accepted may
+transition it to `retry_wait` or create a replacement delivery that records
+`replaces_delivery_id`; the original attempt history remains immutable. The
+replacement is claimable only after the reconciliation transaction records that
+not-accepted evidence and resolves the quarantine.
+
+If the runtime exposes neither proof, the delivery remains operator-visible and
+the exact target remains quarantined across lease expiry, process restart,
+subscription pause/error/cancel, and dead-letter retention. Explicit operator
+dispositions are limited to:
+
+- record authoritative accepted evidence and mark `delivered`;
+- record authoritative not-accepted evidence and authorize one replacement;
+- move the item to `dead_letter` while retaining the quarantine and blocking all
+  later dispatch to that exact target;
+- retire/rebind to a different authoritatively verified native thread after
+  recording why duplicate execution on the old target can no longer occur.
+
+Acknowledging or replaying a dead letter does not clear an unresolved
+quarantine. A heuristic "probably failed" disposition is never sufficient.
 
 This is also the dispatcher rollout gate: exact-thread dispatch remains off
 until integration tests prove authoritative busy state plus `turn/start`
@@ -448,7 +566,9 @@ are not authoritative.
 ## Update and cancellation semantics
 
 - Every update requires the caller's expected revision and atomically increments
-  it. Lost updates fail with a conflict.
+  it by inserting a new immutable `subscription_revisions` row and advancing the
+  lifecycle row's current-head pointer. Lost updates fail with a conflict; old
+  snapshots remain queryable for every checkpoint/event/delivery/attempt.
 - Adapter/handler/profile, target identity, and source kind are immutable.
   Changing them requires cancel plus create.
 - Schedule, expiry, quiet/coalescing thresholds, and validated adapter options
@@ -458,12 +578,27 @@ are not authoritative.
 - An update marks old-revision open deliveries `obsolete`. A delivery already
   beyond the pre-send authorization boundary is recorded to completion or
   reconciliation, but cannot schedule follow-up work for the new revision.
+- Pause stops polling and new claims. Existing `pending`, `deferred_busy`, and
+  `retry_wait` deliveries remain frozen and ineligible; a `leased` delivery that
+  has not crossed pre-send authorization returns to its prior state. A
+  `dispatching` or `reconciling` delivery continues only through fenced result or
+  reconciliation handling and keeps the target quarantined.
+- Expiry moves the subscription to `expiring`, stops polling/claims, and marks
+  unleased work `expired`. Pre-send leased work becomes `expired` without a
+  call. `dispatching`/`reconciling` work must reach an authoritative outcome or
+  quarantined dead letter before the lifecycle row becomes terminal `expired`.
+- Error stops polling and new claims after one bounded diagnostic. Unleased open
+  work is preserved but ineligible for explicit recovery; pre-send leases are
+  released. In-flight/ambiguous work still follows fenced reconciliation and
+  quarantine rules. Only an explicit revision-checked recovery may return the
+  subscription to `paused` or `active`.
 - Cancel atomically moves the subscription to `cancelling`, prevents new polls,
   cancels unleased work, and marks leased work cancel-requested. Before the
   pre-send boundary it must stop. After that boundary it follows delivered or
   ambiguous reconciliation rules because external work cannot be recalled.
 - `cancelled` is reached only when no old-revision delivery is leased,
-  dispatching, or reconciling.
+  dispatching, or reconciling and no quarantine owned by that subscription
+  remains unresolved. Lease expiry never completes cancellation.
 
 ## Retention and compaction
 
@@ -479,9 +614,12 @@ operator-approved limits:
 | Terminal/dead-letter tombstones and management audit | 365 days |
 
 Active subscriptions, current checkpoints, open deliveries, unresolved
-`reconciling` work, unexpired leases, and schema migration history are never
-removed by age. Compaction deletes in batches of at most 1,000 rows per
-transaction, preserves hashes/reason/timestamps in tombstones, and yields
+`reconciling` work, target quarantines, unexpired leases, immutable revision
+snapshots plus delivery/attempt evidence referenced by a quarantine, and schema
+migration history are never removed by age. Unresolved quarantine overrides the
+ordinary dead-letter retention window. Compaction deletes in batches of at most
+1,000 rows per transaction, preserves hashes/reason/timestamps in tombstones,
+and yields
 between batches. WAL checkpointing and incremental vacuum run only in an idle
 maintenance window; no full `VACUUM` runs during observation or delivery.
 
@@ -497,13 +635,14 @@ unresolved delivery evidence to keep running.
 | Threat | Required mitigation |
 |---|---|
 | Event payload selects a command/tool/module | Payloads are data-only; trusted registries select fixed code and capability profiles. |
-| Project or thread confusion | Non-null exact identity tuple, exact registry lookup, no null/prefix/latest compatibility. |
-| Wrong Codex account/runtime | Canonical `CODEX_HOME` realpath plus fingerprint and exact app-server process match before dispatch. |
-| Duplicate observers or crash recovery | Subscription/thread leases, monotonic fencing, compare-and-swap transitions, transactional checkpoints. |
+| Project or thread confusion | Non-null exact identity tuple plus authoritative native cwd/repo binding at create and pre-dispatch; no null/prefix/latest compatibility. |
+| Wrong Codex account/runtime | Authenticated endpoint/process attestation plus exact canonical `CODEX_HOME`; path hash is only a namespace key, not authentication. |
+| Duplicate observers or crash recovery | Immutable revision snapshots, subscription/thread leases, monotonic fencing, target quarantine beyond lease expiry, compare-and-swap transitions, transactional checkpoints. |
 | Turn stacked into a busy thread | Authoritative busy check required; busy defers quietly without consuming retry budget. Dispatcher disabled until proven. |
 | Ambiguous `turn/start` acceptance | Unique attempt token, `reconciling` state, no automatic retry, authoritative reconciliation only. |
 | Cancel/update races | Expected revision, pre-send authorization boundary, stale-revision obsolescence, fenced completion. |
-| Filesystem traversal/symlink escape | Canonical registered roots, strict relative paths, explicit symlink policy, bounded reads. |
+| Prompt/content injection | Fixed pointer-only prompt; strict identifier grammar and structured encoding; event detail retrieved through a bounded trusted reader under runtime-enforced capabilities. |
+| Filesystem traversal/symlink escape | Directory-fd-anchored no-follow traversal, root/final-fd identity verification, strict relative names, bounded reads; disable when unavailable. |
 | Mailbox/chat content injection | Exact-project path validation; frontmatter/body remain untrusted event data and cannot widen routing/capabilities. |
 | Database tampering/corruption | Private permissions, foreign keys, integrity checks, migration checksums/backups, fail-closed startup. |
 | Disk/log amplification | Quiet-state suppression, envelope limits, batch compaction, retention windows, database size budget. |
@@ -525,10 +664,13 @@ cancel, dead-letter acknowledge/replay, compact, integrity-check, export, and
 status. Inspection must show:
 
 - exact target identity and subscription revision;
+- frozen authoritative project/cwd binding and latest drift check;
 - trusted adapter, handler, capability profile, and versions;
 - state, expiry, next poll/run, last checkpoint/event, and quiet snapshot;
 - open/coalesced delivery, lease owner/fence/expiry, retry count, and next retry;
 - cancellation/update status and any ambiguous/dead-letter diagnostic;
+- target quarantine owner/reason/resolution evidence and runtime capability
+  attestation;
 - feature flags that currently permit observation or delivery.
 
 Management output must redact bounded payload fields by default. JSON output is
@@ -562,8 +704,9 @@ Session autobridge is migration input, not the new ledger.
   JSONL events, lease expiry, or implied queue state as transactional truth.
 - An optional later migration command may read an autobridge binding only as an
   operator-reviewed candidate. It must require exact non-null project, canonical
-  runtime home, native thread ID, trusted registry mapping, and a chosen initial
-  cursor. Invalid/ambiguous records are reported, never wildcard-backfilled.
+  runtime home, native thread ID, authoritative native project/cwd binding,
+  trusted registry/capability mapping, and a chosen initial cursor.
+  Invalid/ambiguous records are reported, never wildcard-backfilled.
 - Shadow observation may run beside a legacy dispatcher only when runner
   delivery is disabled. The same source/target must never have two dispatch
   owners.
@@ -571,8 +714,10 @@ Session autobridge is migration input, not the new ledger.
   the runner checkpoint, verify no legacy in-flight action, enable the reviewed
   runner phase flag, then observe before any delivery flag changes.
 - Rollback disables delivery first, stops new claims, waits for or explicitly
-  reconciles in-flight work, stops the runner, and leaves the ledger read-only
-  for evidence. Legacy dispatch resumes only after ownership is unambiguous.
+  reconciles in-flight work, and preserves every unresolved target quarantine
+  before stopping the runner and leaving the ledger read-only for evidence.
+  Legacy dispatch resumes only after ownership is unambiguous and no unresolved
+  runner quarantine can collide with that target.
 - Schema migration takes a verified backup, uses a checksum/versioned migration,
   runs in an exclusive maintenance window, and performs integrity/foreign-key
   checks before commit. Failed migration restores the backup. Runtime rollback
@@ -583,14 +728,23 @@ Session autobridge is migration input, not the new ledger.
 All flags default off. Flags narrow the trusted registry; they never authorize
 unregistered code or weaken identity/capability checks.
 
+`THREAD_EVENT_RUNNER_TEST_DISPATCH_DISPOSABLE_RUNTIME` is a separately named,
+test-only escape hatch for breaking the dispatcher proof circularity. It is
+valid only with an explicit test build/mode, a temporary ledger, an
+authoritatively marked disposable runtime/thread, and the test adapter/profile
+allowlist. It rejects normal project/runtime targets even when the environment
+variable is set. It does not enable
+`THREAD_EVENT_RUNNER_DISPATCH_EXACT_THREAD`, which remains the production/project
+gate.
+
 | Phase | Planned scope | Required flag posture |
 |---|---|---|
 | 1 | This architecture/threat contract only | No runtime flags or processes. |
 | 2 | SQLite ledger; management/status; read-only timer, filesystem, and mailbox observation; quiet/coalescing simulation; no thread wake | `THREAD_EVENT_RUNNER_ENABLED=1`, `THREAD_EVENT_RUNNER_OBSERVE=1`, allowlist limited to `timer,filesystem,mailbox`; `THREAD_EVENT_RUNNER_DISPATCH_EXACT_THREAD=0`. |
-| 3 | Exact-thread dispatcher plus its mandatory lease, fencing, retry, dead-letter, busy-deferral, and reconciliation substrate, developed as one disabled safety slice | Dispatch flag remains off while any part of the pre-pilot gate is incomplete. Only after the entire gate passes may one disposable exact subscription opt in. |
-| 4 | Broader multi-runner, crash, sleep/wake, clock-change, load, and runtime-upgrade hardening | No project pilot or default-on rollout until the broader fault-injection gate passes. |
-| 5 | Process, GitHub, queue/task/worktree, and AX safety adapters | Each adapter has a separate allowlist/feature flag and reviewed capability profile; AX mutation is not implied by observation. |
-| 6 | Project pilots, observability, legacy cutover, documented rollback | Opt in one project/runtime/thread at a time; no workspace-wide wildcard enablement. |
+| 3 | Exact-thread dispatcher plus mandatory immutable revisions, project binding, pointer-only prompt, runtime capability enforcement, lease/quarantine/fencing, retry, dead-letter, busy-deferral, and reconciliation substrate | Production dispatch remains off. After non-send contract tests, use only `THREAD_EVENT_RUNNER_TEST_DISPATCH_DISPOSABLE_RUNTIME=1` for the isolated dispatch/fault matrix and then one disposable subscription. |
+| 4 | Broader multi-runner, crash, sleep/wake, clock-change, load, runtime-upgrade, and quarantine-recovery hardening | Test-only disposable dispatch may continue; production/project dispatch remains off. |
+| 5 | Process, GitHub, queue/task/worktree, and AX safety adapters | Each adapter has a separate allowlist/feature flag and reviewed capability profile; AX mutation is not implied by observation; production/project dispatch remains off. |
+| 6 | Project pilots, observability, legacy cutover, documented rollback | After explicit approval, set `THREAD_EVENT_RUNNER_DISPATCH_EXACT_THREAD=1` for one exact subscription at a time; no workspace-wide wildcard enablement. |
 
 Phase 2 is the next authorized implementation phase: **SQLite plus read-only
 timer/filesystem/mailbox observation only**. It must not extract or activate
@@ -607,7 +761,20 @@ Before Phase 2 handoff:
 - capability and path violations fail closed;
 - no code path calls app-server `turn/start`.
 
-Before any Phase 3 exact-thread pilot:
+Phase 3 validation order is mandatory:
+
+1. Complete all non-send contract tests with both dispatch flags off.
+2. In an isolated test runtime and temporary ledger, enable only
+   `THREAD_EVENT_RUNNER_TEST_DISPATCH_DISPOSABLE_RUNTIME` and run the complete
+   dispatch/fault matrix. No normal project target is accepted.
+3. After that matrix is green, run one exact disposable subscription under the
+   same test-only flag and inspect its full ledger/quarantine lifecycle.
+4. Return the test flag to off, complete Phase 4 hardening, and only then
+   consider one explicitly approved project pilot with
+   `THREAD_EVENT_RUNNER_DISPATCH_EXACT_THREAD=1` scoped to one exact
+   subscription.
+
+Before the isolated dispatch/fault matrix or disposable subscription can pass:
 
 - a disposable target proves an authoritative busy state and no turn is sent
   while busy;
@@ -620,12 +787,17 @@ Before any Phase 3 exact-thread pilot:
 - update/cancel races cannot target an old revision;
 - exact project/runtime-home/thread isolation is tested with at least two
   projects and two runtime homes;
-- ambiguous acceptance remains `reconciling` and does not auto-retry.
+- ambiguous acceptance remains `reconciling`, quarantines the target beyond
+  lease expiry/restart, and does not auto-retry;
+- create and pre-dispatch checks prove the authoritative native project/cwd
+  binding and detect drift;
+- the fixed pointer-only prompt contains no event-controlled bytes and the
+  runtime attests the frozen tool/capability profile.
 
-Phase 3 implementation order does not weaken this gate: the dispatcher may be
-built alongside the lease/fence/reconciliation substrate, but its feature flag
-stays off and no disposable turn is sent until every item above passes. Phase 4
-then broadens fault and load coverage before any project pilot.
+The test-only flag permits the integration evidence needed to evaluate this
+matrix without enabling production/project dispatch. Failure at any step turns
+both flags off and preserves the ledger for diagnosis. Project pilots are later
+than the disposable subscription and require the Phase 4 hardening gate.
 
 Until all of those are true, the safe operational model remains the durable
 mailbox plus currently approved doorbell/worker paths. This RFC authorizes no

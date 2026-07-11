@@ -8,10 +8,12 @@ autonomous.
 
 ## Status: provisional safety-fuse, not the primary wake
 
-The primary agent-to-agent wake mechanism is now the **bidirectional Computer-Use
-doorbell** (see `claude-code-desktop-computer-use-bridge.md`): whichever agent
-finishes work or needs something rings the other immediately, with `llm-collab`
-as the durable mailbox. Routine/continuous polling is **deprecated** as the
+The primary agent-to-agent wake mechanism for an AX-capable `cli_session` is the
+idle-gated **bidirectional AX doorbell** (`axsend-ensure ring --submit --verify`;
+see `claude-code-desktop-computer-use-bridge.md`). Computer Use is the attended
+fallback/recovery path when AX cannot safely target or verify the native
+composer, and for an explicitly configured non-CLI desktop bridge. `llm-collab`
+remains the durable mailbox. Routine/continuous polling is **deprecated** as the
 primary wake — it wastes tokens and a heartbeat set on guessed timing can fire
 into changed context.
 
@@ -46,14 +48,21 @@ remove it and rely on the doorbell + mailbox-drain self-heal.
   review-fix loop.
 - Keep operator-visible chat notes enabled; autobridge activity must stay
   visible in `Chats/`.
-- Do not target an active operator thread for queue/busy tests.
-- Treat Claude desktop as a human-visible UI controlled through Computer Use,
-  not as a `session_autobridge.py` runtime target. Fresh Claude desktop threads
-  can be created only by visible app interaction: generate a UUID plus short
-  title, click `New session`, send the first prompt beginning with
+- Do not target an active operator thread for retry tests.
+- Treat Claude desktop as a human-visible UI, not as a
+  `session_autobridge.py` runtime target. Ring an existing verified native
+  composer through AX first. Computer Use owns attended AX recovery/fallback and
+  fresh thread creation: generate a UUID plus short title, click `New session`,
+  send the first prompt beginning with
   `[BRIDGE <8-char-uuid-prefix>] <short title>`, then verify the sidebar title
   and `local_*` URL. Do not claim a PM2 watcher, CLI resume, or filesystem write
   created a desktop-visible thread.
+- If AX resolves an embedded preview/web field or cannot verify the native
+  prompt, stop sending but preserve the durable packet. Use attended Computer
+  Use plus `axsend tree --editable-only` to remove/blank the competing field,
+  select the correct window, clear probes, and verify the real native composer
+  before resuming AX. Do not record a standing AX-disabled/mailbox-only policy
+  from one targeting incident.
 - For Claude-owned collaboration lanes, inspect the visible Claude app before
   treating inbox or queue state as final. If Claude is visibly asking a related
   question, waiting for direction, or reporting Read/Agent/tool errors, Codex

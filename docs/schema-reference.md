@@ -84,7 +84,7 @@ Agent roster. Created by `scripts/init.py`. Gitignored.
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `type` | string | yes | `"cli_session"`, `"human_relay"`, `"human"`, `"api_trigger"` |
-| `watcher_enabled` | bool | no | Whether PM2 should manage a background watcher for this agent |
+| `watcher_enabled` | bool | no | Whether the current PM2 ecosystem should instantiate a background watcher. The ecosystem checks this flag only; it does not filter by activation `type`. |
 | `ax_app` | string | no | For AX-capable `cli_session` agents: localized macOS app name or bundle ID used by `axsend`. Omit for terminal-only sessions. |
 | `base_model` | string | no | For `human_relay`: which LLM this maps to (informational) |
 | `identity_note` | string | no | For `human_relay`: shown in handoff prompt to disambiguate identity |
@@ -93,10 +93,16 @@ Agent roster. Created by `scripts/init.py`. Gitignored.
 
 | Type | Watcher | Handoff prompt | Use for |
 |------|---------|----------------|---------|
-| `cli_session` | optional | no | LLM CLIs with persistent sessions; direct AX wake requires `ax_app` |
-| `human_relay` | no | **yes** | Second account of same LLM, or manual sessions |
-| `human` | no | no | Human operators |
-| `api_trigger` | no | no | Webhook-triggered agents |
+| `cli_session` | if enabled | no | LLM CLIs with persistent sessions; direct AX wake requires `ax_app` |
+| `human_relay` | if enabled | **yes** | Second account of same LLM, or manual sessions; normally configured with watcher disabled |
+| `human` | if enabled | no | Human operators; normally configured with watcher disabled |
+| `api_trigger` | if enabled | no | Webhook-triggered agents; normally configured with watcher disabled |
+
+The table describes current PM2 materialization, not a recommendation to enable
+watchers for every type. Any entry with `watcher_enabled: true` is instantiated
+on ecosystem start/reload. Existing or PM2-saved processes can outlive later
+roster/config edits until explicitly reconciled and re-saved; see
+[PM2 Watcher Adapter](adapters/pm2.md).
 
 ---
 
@@ -425,22 +431,52 @@ POSIX systems. All four identity fields below are non-null and exact:
 ```
 
 `runtime_home_id` is the SHA-256 of the canonical absolute
-`runtime_home_realpath`. Missing, empty, `null`, prefix, display-name, and
-"latest" matches are invalid. Legacy wildcard matching is allowed only in an
-explicit migration tool and cannot become an active subscription.
+`runtime_home_realpath`. It is a stable local namespace key, not an account
+identity, credential, or authentication fingerprint. Missing, empty, `null`,
+prefix, display-name, and "latest" matches are invalid. Legacy wildcard matching
+is allowed only in an explicit migration tool and cannot become an active
+subscription. Targeted subscription creation and delivery also require immutable
+authoritative native project evidence: registered repo ID/realpath, native
+thread cwd realpath, and evidence source/version/hash. That binding is verified
+at create and re-verified before dispatch; missing evidence or runtime drift
+fails closed.
 
 ### Planned subscription record
 
-Logical `subscriptions` fields:
+`subscriptions` is the lifecycle/current-head row:
 
 ```json
 {
   "subscription_id": "UUID",
   "name": "mailbox handoff watch",
+  "state": "active",
+  "current_revision": 1,
+  "created_at_utc": "2026-01-01T00:00:00Z",
+  "updated_at_utc": "2026-01-01T00:00:00Z"
+}
+```
+
+Subscription IDs are authoritative; names are display labels and are never
+accepted as an ambiguous mutation target.
+
+`subscription_revisions` contains the immutable frozen snapshot, keyed by
+`(subscription_id, revision)`:
+
+```json
+{
+  "subscription_id": "UUID",
+  "revision": 1,
   "project_id": "my-app",
   "runtime_home_id": "sha256-hex",
   "runtime_home_realpath": "/absolute/path/to/CODEX_HOME",
   "native_thread_id": "native-thread-id",
+  "project_repo_id": "app",
+  "project_repo_realpath": "/absolute/path/to/my-app",
+  "native_thread_cwd_realpath": "/absolute/path/to/my-app",
+  "project_binding_evidence_source": "authoritative-runtime-api",
+  "project_binding_evidence_version": "1",
+  "project_binding_evidence_hash": "sha256-hex",
+  "project_binding_verified_at_utc": "2026-01-01T00:00:00Z",
   "agent_id": "orchestrator",
   "chat_id": "CHAT-A1B2C3D4",
   "task_id": "TASK-ABC123",
@@ -450,20 +486,31 @@ Logical `subscriptions` fields:
   "handler_version": "1",
   "capability_profile_id": "observe.mailbox",
   "config_json": {},
-  "revision": 1,
-  "state": "active",
-  "next_run_utc": "2026-01-01T00:00:00Z",
+  "schedule_json": {},
   "expires_at_utc": null,
-  "created_at_utc": "2026-01-01T00:00:00Z",
-  "updated_at_utc": "2026-01-01T00:00:00Z"
+  "created_at_utc": "2026-01-01T00:00:00Z"
 }
 ```
 
-Planned subscription states are `active`, `paused`, `cancelling`, `cancelled`,
-`expired`, and `error`. Adapter, handler, capability profile, and exact target
-identity come from trusted registries and are immutable. Mutable updates require
-the expected revision and atomically increment it. Retargeting or changing a
-source kind requires cancel plus create.
+Planned lifecycle states are `active`, `paused`, `cancelling`, `cancelled`,
+`expiring`, `expired`, and `error`. The lifecycle row points to an immutable
+revision with a deferred composite foreign key valid only inside the atomic
+insert/head-advance transaction. Checkpoints, events, deliveries, and attempts
+also carry `(subscription_id, subscription_revision)` and have composite foreign
+keys to the same frozen snapshot. Adapter, handler, capability profile, exact
+target identity, and project binding come from trusted registries/evidence and
+cannot be rewritten. Mutable updates require the expected current revision,
+insert a new snapshot, and atomically advance the head. Retargeting or changing
+a source kind requires cancel plus create.
+
+Pause freezes unleased open deliveries and makes them ineligible; a pre-send
+lease returns to its prior state, while `dispatching`/`reconciling` work keeps
+its quarantine through authoritative resolution. Expiry enters `expiring`,
+expires unleased/pre-send work, and reaches terminal `expired` only after no
+in-flight/quarantine remains. Error stops polls/claims and preserves unleased
+work for explicit recovery while in-flight work reconciles. Cancellation cannot
+complete merely because a lease expired; `cancelled` requires no leased,
+dispatching, reconciling, or subscription-owned quarantine state.
 
 ### Planned event record
 
@@ -496,12 +543,26 @@ The planned serialized envelope limit is 64 KiB. `subject` and
 override a project, runtime home, thread, adapter, handler, capability, command,
 tool, URL, module, path root, lease, retry policy, retention, or feature flag.
 
-Logical `events` rows reference the subscription and revision, store canonical
-envelope/hash/classification, and enforce source-event/hash uniqueness according
-to the registered adapter policy. Valid classifications are `observed`, `quiet`,
-`actionable`, `coalesced`, `delivery_created`, and `invalid`. A quiet observation
-updates the compact checkpoint/snapshot but creates no delivery or repeated
-operator notification.
+Phase 2 filesystem configuration stores an approved root plus its device/inode
+identity. Observations use relative names, directory-fd-anchored no-follow
+traversal, and post-open root/final-fd verification. A platform without
+equivalent primitives cannot enable the adapter; canonical path-string checks
+alone are not accepted.
+
+Logical `events` rows carry a composite foreign key to the immutable
+subscription revision, store canonical envelope/hash/classification, and
+enforce source-event/hash uniqueness according to the registered adapter policy.
+Valid classifications are `observed`, `quiet`, `actionable`, `coalesced`,
+`delivery_created`, and `invalid`; a retained `quiet` row represents a changed
+semantic state, never an unchanged poll.
+
+The registered semantic quiet projection excludes cursor, source/observation
+timestamps, poll counters, latency, and other volatile metadata. If its hash is
+unchanged, one observation transaction advances only the checkpoint, latest
+time, and quiet counters; it creates no event, delivery, audit row, or operator
+notification. Invalid diagnostics retain at most one row per
+subscription/revision/reason per 15 minutes and 100 per subscription; excess
+occurrences increment a counter only.
 
 ### Planned delivery record
 
@@ -517,9 +578,12 @@ operator notification.
   "handler_name": "action-first-thread-note",
   "coalescing_key": "mailbox:orchestrator:CHAT-A1B2C3D4",
   "state": "pending",
+  "pre_lease_state": null,
   "first_event_id": 1,
   "last_event_id": 1,
   "event_count": 1,
+  "coalesced_bytes": 1024,
+  "coalescing_window_started_utc": "2026-01-01T00:00:00Z",
   "attempt_count": 0,
   "next_attempt_utc": "2026-01-01T00:00:00Z",
   "expires_at_utc": "2026-01-02T00:00:00Z",
@@ -538,14 +602,31 @@ Planned delivery states are `pending`, `leased`, `deferred_busy`,
 Only open deliveries with the same exact identity, subscription/revision,
 handler, and normalized coalescing key may merge. A leased, dispatching,
 reconciling, or terminal delivery never accepts new events; those events create
-or join a successor delivery.
+or join a successor delivery. Default coalescing window is 60 seconds with a
+hard 15-minute maximum; each bucket is capped at 256 observations and 64 KiB of
+canonical state. A full/sealed bucket creates a successor or bounded overflow
+counter. While its target is quarantined, at most one successor per revision/key
+is retained and further occurrences update a saturating 64-bit counter only.
 
 Each external attempt has a unique attempt token and a numbered
-`delivery_attempts` row. An attempt records `not_accepted`, `accepted`, or
-`acceptance_unknown` plus bounded response/error evidence. Only authoritative
-`not_accepted` evidence permits automatic retry. Default planned retry policy is
-5 attempts, exponential backoff with full jitter, 5-second base, and 15-minute
-cap, bounded by delivery expiry.
+`delivery_attempts` row that repeats subscription/revision and has composite
+foreign keys to both the matching delivery and immutable subscription revision.
+Each attempt also stores the immediately pre-dispatch authoritative
+project/runtime binding and runtime capability attestation hashes/times. An
+attempt records `not_accepted`, `accepted`, or `acceptance_unknown` plus bounded
+response/error evidence. Only authoritative `not_accepted` evidence permits
+automatic retry. Default planned retry policy is 5 attempts, exponential
+backoff with full jitter, 5-second base, and 15-minute cap, bounded by delivery
+expiry.
+
+The dispatch prompt is a fixed trusted pointer-only template containing only
+grammar-validated runner-owned IDs. No event envelope, subject, state, reason,
+path, or chat content is interpolated. The runtime must enforce and attest the
+frozen tool/filesystem/network/UI capability profile; prompt text is not a
+security boundary. A trusted delivery reader exposes detail only as bounded,
+UTF-8-validated, JSON-escaped canonical JSON under `untrusted_event`; it never
+renders event bytes as instructions, markdown, shell, or tool names. Without
+that runtime enforcement, delivery stays disabled.
 
 ### Planned lease records
 
@@ -569,19 +650,42 @@ and expected delivery state. A stale owner cannot complete or release newer
 work. No database transaction remains open during source I/O, sleeps,
 subprocesses, AX, network, or app-server calls.
 
+`thread_quarantines` has one row per exact target while a delivery is
+`dispatching`, `reconciling`, or dead-lettered with unresolved acceptance. It
+stores the delivery, subscription/revision, attempt token, reason, and resolution
+evidence. Every normal claim checks both this table and unresolved in-flight
+delivery state before lease acquisition. Quarantine survives lease
+expiry/release, runner restart, and subscription pause/error/cancel. Lease
+renewal uses short fenced transactions during an external call; if renewal fails
+after a possible send, the attempt becomes `acceptance_unknown` and quarantine
+remains.
+
+`reconciling` can become `delivered` from authoritative accepted evidence or
+`retry_wait`/a recorded replacement from authoritative not-accepted evidence.
+Operator dead-letter disposition keeps quarantine and blocks future turns unless
+the operator records authoritative resolution or retires/rebinds to a different
+verified native thread. Dead-letter acknowledgement/replay alone never clears
+quarantine or permits a duplicate.
+
 ### Planned supporting tables and transaction rule
 
-The ledger also requires `runner_instances`, `source_checkpoints`,
-`delivery_attempts`, `dead_letters`, `audit_log`, and `schema_migrations`, all
-with foreign keys. Observation inserts/deduplicates the event, updates or
-creates its coalesced delivery, advances the checkpoint, and writes audit state
-in one `BEGIN IMMEDIATE` transaction. Delivery claim and fenced result commit
-are separate short transactions around external work.
+The ledger also requires `runner_instances`, `subscription_revisions`,
+`source_checkpoints`, `delivery_attempts`, `thread_quarantines`, `dead_letters`,
+`audit_log`, and `schema_migrations`, all with foreign keys. Observation
+inserts/deduplicates a changed/actionable event, updates or creates its coalesced
+delivery, advances the checkpoint, and writes bounded transition audit in one
+`BEGIN IMMEDIATE` transaction. An unchanged semantic quiet observation advances
+checkpoint/counters without event/audit insertion. Delivery claim,
+pre-send/quarantine authorization, lease renewal, and fenced result commit are
+separate short transactions around external work.
 
-The exact-thread dispatcher is not part of Phase 2 and remains feature-disabled
-until authoritative thread busy state and `turn/start` acceptance/idempotency
-plus restart reconciliation are integration-proven. Phase 2 is limited to this
-SQLite ledger and read-only timer/filesystem/mailbox observation.
+The exact-thread dispatcher is not part of Phase 2. Phase 3 first runs non-send
+contract tests, then uses only the test-mode-only
+`THREAD_EVENT_RUNNER_TEST_DISPATCH_DISPOSABLE_RUNTIME` gate for an isolated
+fault matrix and one disposable subscription. Production/project
+`THREAD_EVENT_RUNNER_DISPATCH_EXACT_THREAD` remains off until the later project
+pilot gate. Phase 2 is limited to this SQLite ledger and read-only
+timer/filesystem/mailbox observation.
 
 ---
 
