@@ -37,6 +37,38 @@ for ((i = 0; i < ${#args[@]}; i++)); do
   esac
 done
 
+# The follow-up confirm/turns commands target the SAME window the ring did:
+# forward --window-index only when explicitly supplied (incl. 0); otherwise leave
+# it absent so it auto-resolves the native chat window, matching the ring (R2).
+subcmd_args() {   # subcmd_args <confirm|turns>
+  cmd_args=("$1" --app "$app" --text "$text")
+  if (( win_index_supplied == 1 )); then
+    cmd_args+=(--window-index "$win_index")
+  fi
+}
+# Read the conversation-turn count for this exact text; empty if not a numeric
+# (window unresolvable / not a ring --submit). Used as the freshness baseline.
+turn_count() {
+  subcmd_args turns
+  local out
+  set +e
+  out="$("$root/tools/axbridge/axsend" "${cmd_args[@]}" 2>/dev/null | tail -1)"
+  set -e
+  [[ "$out" =~ ^[0-9]+$ ]] && printf '%s' "$out" || printf ''
+}
+
+is_submit_ring=0
+if (( is_ring == 1 && has_submit == 1 )) && [[ -n "$app" && -n "$text" ]]; then
+  is_submit_ring=1
+fi
+
+# PR78 R7: capture a pre-ring turn baseline so a delayed promotion requires a
+# strictly NEW turn (a real fresh delivery), never a stale identical earlier turn.
+baseline_turns=""
+if (( is_submit_ring == 1 )); then
+  baseline_turns="$(turn_count)"
+fi
+
 set +e
 output_file="$(mktemp "${TMPDIR:-/tmp}/axsend-ensure.XXXXXX")"
 trap 'rm -f "$output_file"' EXIT
@@ -44,54 +76,31 @@ trap 'rm -f "$output_file"' EXIT
 status=${PIPESTATUS[0]}
 set -e
 
-# The follow-up confirm targets the SAME window the ring did: forward
-# --window-index only when explicitly supplied (incl. 0); otherwise leave it
-# absent so confirm auto-resolves the native chat window, matching the ring
-# (PR78 R2).
-build_confirm_args() {
-  confirm_args=(confirm --app "$app" --text "$text")
-  if (( win_index_supplied == 1 )); then
-    confirm_args+=(--window-index "$win_index")
-  fi
-}
-
 if (( status != 0 )); then
-  # PR78 R6: a `ring --submit` can exit 7 (NOT DELIVERED) even though the target
-  # exposed the sent turn just AFTER the ring's internal settle window — live
-  # ZCode did exactly this. Run ONE delayed confirm as the LAST authority before
-  # propagating the failure; promote to success ONLY if confirm shows delivered,
-  # and NEVER resend (a resend would duplicate a message that already landed).
-  # This applies solely to exit 7 on a `ring --submit` with app+text: genuine
-  # setup/identity/ambiguous/arg failures (1/2/3/64) propagate immediately and
-  # are never masked.
-  if (( status == 7 && is_ring == 1 && has_submit == 1 )) && [[ -n "$app" && -n "$text" ]]; then
-    build_confirm_args
-    # Bounded settle: the target can expose the sent turn slightly after the
-    # ring's window, and its chat window can be transiently unresolvable ("no
-    # windows") for a moment right after the ring (live ZCode did both). Poll the
-    # confirm a few times before giving up. This is verification only — it NEVER
-    # resends, so it cannot duplicate a message that already landed.
-    confirm_status=1
+  # A `ring --submit` can exit 7 (NOT DELIVERED) even though the target exposed the
+  # sent turn just AFTER the ring's internal settle window — live ZCode did this.
+  # Promote ONLY on a freshness-safe signal: the turn count for this exact text
+  # strictly INCREASED vs the pre-ring baseline (a genuinely new turn). This never
+  # promotes from a stale identical earlier turn, and NEVER resends. Applies solely
+  # to exit 7 with a captured numeric baseline: identity loss now exits 9 (not 7)
+  # and is never promoted; genuine setup/arg failures (1/2/3/64) propagate as-is.
+  if (( status == 7 && is_submit_ring == 1 )) && [[ -n "$baseline_turns" ]]; then
     for _attempt in 1 2 3 4; do
       sleep 2
-      set +e
-      "$root/tools/axbridge/axsend" "${confirm_args[@]}"
-      confirm_status=$?
-      set -e
-      if (( confirm_status == 0 )); then break; fi
+      after_turns="$(turn_count)"
+      if [[ -n "$after_turns" ]] && (( after_turns > baseline_turns )); then
+        echo "[axsend-ensure] ring exited 7 but a NEW conversation turn appeared (${baseline_turns} -> ${after_turns}) — promoting to success (no resend)."
+        exit 0
+      fi
     done
-    if (( confirm_status == 0 )); then
-      echo "[axsend-ensure] ring exited 7 but a delayed confirm shows the message delivered — promoting to success (no resend)."
-      exit 0
-    fi
   fi
   exit "$status"
 fi
 
-if (( is_ring == 1 && has_submit == 1 )) && [[ -n "$app" && -n "$text" ]]; then
+if (( is_submit_ring == 1 )); then
   if grep -Fq "QUEUED (UNCONFIRMED):" "$output_file"; then
     exit 0
   fi
-  build_confirm_args
-  "$root/tools/axbridge/axsend" "${confirm_args[@]}"
+  subcmd_args confirm
+  "$root/tools/axbridge/axsend" "${cmd_args[@]}"
 fi

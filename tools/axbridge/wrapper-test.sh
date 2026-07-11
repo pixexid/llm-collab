@@ -1,8 +1,11 @@
 #!/bin/bash
-# Focused regression for bin/axsend-ensure --window-index forwarding (PR78 R2):
-# the follow-up `confirm` must receive an explicitly-supplied --window-index
-# (incl. 0), and must NOT add one when it was absent. Uses a stub axsend that
-# records its argv, so no real AX/app is needed.
+# Regression for bin/axsend-ensure (PR78 R2/R6/R7). Uses a stub axsend that
+# records its argv and honors env so tests can drive:
+#  - --window-index forwarding to the follow-up commands (R2),
+#  - ring exit 7 (not delivered) + FRESHNESS-GATED delayed promotion (R7): a
+#    delayed promotion requires a STRICTLY NEW turn (turn count increase), never a
+#    stale identical earlier turn, and never a resend,
+#  - identity-loss exit 9 must NOT be promoted (R7).
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 root_src="$(cd "$here/../.." && pwd)"
@@ -11,82 +14,81 @@ mkdir -p "$tmp/tools/axbridge" "$tmp/bin"
 cp "$root_src/bin/axsend-ensure" "$tmp/bin/axsend-ensure"
 : > "$tmp/tools/axbridge/build.sh"   # noop build
 log="$tmp/argv.log"
-# Stub axsend: records argv, and honors RING_EXIT / CONFIRM_EXIT env so tests can
-# drive the not-delivered (exit 7) + delayed-confirm promotion path (PR78 R6).
+tcount="$tmp/turns_count"
+# Stub axsend: RING_EXIT sets the ring exit code; `turns` prints TURNS_BASELINE on
+# its first call (the wrapper's pre-ring baseline) and TURNS_AFTER on every call
+# after (post-ring polls). `confirm` reports delivered unless CONFIRM_EXIT!=0.
 cat > "$tmp/tools/axbridge/axsend" <<'STUB'
 #!/bin/bash
 echo "$@" >> "$AXSEND_STUB_LOG"
 case "$1" in
   ring)
-    if [ "${RING_EXIT:-0}" -eq 7 ]; then echo "WARN: NOT DELIVERED (stub)"; else echo "VERIFIED: stub ring (non-queued)"; fi
+    case "${RING_EXIT:-0}" in
+      7) echo "WARN: NOT DELIVERED (stub)";;
+      9) echo "identity lost (stub)";;
+      0) echo "VERIFIED: stub ring (non-queued)";;
+    esac
     exit "${RING_EXIT:-0}";;
+  turns)
+    n=$(cat "$AXSEND_STUB_TURNS_COUNT" 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > "$AXSEND_STUB_TURNS_COUNT"
+    if [ "$n" -eq 1 ]; then echo "${TURNS_BASELINE:-0}"; else echo "${TURNS_AFTER:-0}"; fi
+    exit 0;;
   confirm)
-    # Optional: fail until the Nth confirm attempt, then deliver (models a target
-    # whose window is transiently unresolvable right after the ring — PR78 R6).
-    if [ -n "${CONFIRM_DELIVER_ON_ATTEMPT:-}" ]; then
-      n=$(cat "$AXSEND_STUB_CONFIRM_COUNT" 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > "$AXSEND_STUB_CONFIRM_COUNT"
-      if [ "$n" -ge "$CONFIRM_DELIVER_ON_ATTEMPT" ]; then echo "delivered: stub (attempt $n)"; exit 0; else echo "no windows: stub (attempt $n)"; exit 1; fi
-    fi
     if [ "${CONFIRM_EXIT:-0}" -eq 0 ]; then echo "delivered: stub"; else echo "not delivered: stub"; fi
     exit "${CONFIRM_EXIT:-0}";;
 esac
 exit 0
 STUB
-ccount="$tmp/confirm_count"
-sed -i '' "s#\$AXSEND_STUB_LOG#$log#g; s#\$AXSEND_STUB_CONFIRM_COUNT#$ccount#g" "$tmp/tools/axbridge/axsend"
+sed -i '' "s#\$AXSEND_STUB_LOG#$log#g; s#\$AXSEND_STUB_TURNS_COUNT#$tcount#g" "$tmp/tools/axbridge/axsend"
 chmod +x "$tmp/tools/axbridge/axsend" "$tmp/bin/axsend-ensure"
 
 fails=0
-# run <ring_exit> <confirm_exit> <args...> -> sets $rc to the wrapper exit code.
-# set +e around the call so a nonzero wrapper exit (expected in the R6 cases) is
-# captured in $rc instead of killing this script under `set -e`.
+# run <ring_exit> <baseline> <after> <args...> -> sets $rc to the wrapper exit
+# code. set +e so an expected nonzero wrapper exit is captured, not fatal.
 run() {
-  : > "$log"
+  : > "$log"; : > "$tcount"
   set +e
-  RING_EXIT="$1" CONFIRM_EXIT="$2" "$tmp/bin/axsend-ensure" "${@:3}" >/dev/null 2>&1
+  RING_EXIT="$1" TURNS_BASELINE="$2" TURNS_AFTER="$3" "$tmp/bin/axsend-ensure" "${@:4}" >/dev/null 2>&1
   rc=$?
   set -e
 }
-confirm_line() { grep '^confirm ' "$log" || true; }
-assert() { if eval "$2"; then echo "ok   - $1"; else echo "FAIL - $1 (rc=$rc confirm='$(confirm_line)')"; fails=$((fails+1)); fi; }
+line() { grep "^$1 " "$log" || true; }
+count() { grep -c "^$1 " "$log" || true; }
+assert() { if eval "$2"; then echo "ok   - $1"; else echo "FAIL - $1 (rc=$rc)"; fails=$((fails+1)); fi; }
 
-# --window-index forwarding (PR78 R2), ring succeeds.
-run 0 0 ring --app Claude --text hi --submit --window-index 0
-assert "explicit --window-index 0 forwarded to confirm" '[[ "$(confirm_line)" == *"--window-index 0"* ]]'
-run 0 0 ring --app Claude --text hi --submit --window-index 1
-assert "explicit --window-index 1 forwarded to confirm" '[[ "$(confirm_line)" == *"--window-index 1"* ]]'
-run 0 0 ring --app Claude --text hi --submit
-assert "absent --window-index NOT added to confirm" '[[ "$(confirm_line)" != *"--window-index"* ]]'
+# R2: --window-index forwarding on a successful ring's follow-up confirm.
+run 0 0 0 ring --app Claude --text hi --submit --window-index 0
+assert "explicit --window-index 0 forwarded to confirm" '[[ "$(line confirm)" == *"--window-index 0"* ]]'
+run 0 0 0 ring --app Claude --text hi --submit --window-index 1
+assert "explicit --window-index 1 forwarded to confirm" '[[ "$(line confirm)" == *"--window-index 1"* ]]'
+run 0 0 0 ring --app Claude --text hi --submit
+assert "absent --window-index NOT added to confirm" '[[ "$(line confirm)" != *"--window-index"* ]]'
 
-# PR78 R6: ring exits 7 (not delivered) but a delayed confirm shows delivered ->
-# wrapper promotes to success (exit 0), and NEVER resends (no second ring).
-run 7 0 ring --app ZCode --text tok --submit
-assert "ring 7 + confirm delivered -> wrapper exit 0 (promoted)" '(( rc == 0 ))'
-assert "ring 7 + confirm delivered -> exactly one ring (no resend)" '[[ "$(grep -c "^ring " "$log")" == "1" ]]'
-assert "ring 7 promotion still runs the confirm" '[[ -n "$(confirm_line)" ]]'
+# R7: ring exit 7 + a NEW turn appears (baseline 0 -> after 1) -> promote to 0,
+# exactly one ring (no resend).
+run 7 0 1 ring --app ZCode --text tok --submit
+assert "ring 7 + new turn (0->1) -> wrapper exit 0 (freshness promote)" '(( rc == 0 ))'
+assert "freshness promote sends exactly one ring (no resend)" '[[ "$(count ring)" == "1" ]]'
 
-# ring exits 7 and confirm also NOT delivered -> wrapper stays nonzero (7).
-run 7 7 ring --app ZCode --text tok --submit
-assert "ring 7 + confirm not-delivered -> wrapper stays nonzero" '(( rc != 0 ))'
+# R7 CORE: a STALE identical prior turn (baseline 1) with a FAILED new ring (count
+# stays 1) must NOT promote — the old fix would falsely promote from mere existence.
+run 7 1 1 ring --app ZCode --text tok --submit
+assert "ring 7 + stale identical turn (1->1, no increase) -> stays nonzero" '(( rc != 0 ))'
 
-# PR78 R6: confirm is transiently unresolvable ("no windows") right after the
-# ring, then delivers on a later attempt -> bounded retry promotes to success.
-: > "$ccount"; : > "$log"
-set +e
-RING_EXIT=7 CONFIRM_DELIVER_ON_ATTEMPT=2 "$tmp/bin/axsend-ensure" ring --app ZCode --text tok --submit >/dev/null 2>&1
-rc=$?
-set -e
-assert "ring 7 + confirm delivers on 2nd attempt -> wrapper exit 0 (bounded retry)" '(( rc == 0 ))'
-assert "bounded retry still sends exactly one ring (no resend)" '[[ "$(grep -c "^ring " "$log")" == "1" ]]'
+# R7: identity loss exits 9 (distinct from 7) and must NEVER be promoted, even if a
+# turn count would otherwise look fresh.
+run 9 0 1 ring --app ZCode --text tok --submit
+assert "ring exit 9 (identity lost) -> propagates, never promoted" '(( rc == 9 ))'
 
-# Genuine setup/identity failure (exit 1) must propagate immediately, NOT masked
-# by a confirm, and must NOT run confirm at all.
-run 1 0 ring --app ZCode --text tok --submit
-assert "ring exit 1 (setup/identity) propagates, not masked" '(( rc == 1 ))'
-assert "ring exit 1 does NOT run a confirm" '[[ -z "$(confirm_line)" ]]'
+# R7: genuine setup/arg failure (exit 1) propagates and consults no turns/confirm.
+run 1 0 1 ring --app ZCode --text tok --submit
+assert "ring exit 1 (setup) propagates" '(( rc == 1 ))'
+# baseline turns is read once pre-ring (read-only, harmless); the point is exit 1
+# does NOT enter the post-ring promotion polling (which would add more turns calls).
+assert "ring exit 1 does NOT poll turns after the ring (baseline only)" '[[ "$(count turns)" == "1" ]]'
 
-# Forwarded explicit window index preserved in the exit-7 confirm path too.
-run 7 0 ring --app ZCode --text tok --submit --window-index 1
-assert "ring 7 promotion forwards explicit --window-index to confirm" '[[ "$(confirm_line)" == *"--window-index 1"* ]]'
+# R7: explicit --window-index preserved on the pre-ring baseline + post-ring turns.
+run 7 0 1 ring --app ZCode --text tok --submit --window-index 1
+assert "freshness path forwards explicit --window-index to turns" '[[ "$(line turns)" == *"--window-index 1"* ]]'
 
 if [ "$fails" -eq 0 ]; then echo; echo "ALL PASS (axsend-ensure wrapper)"; else echo; echo "$fails FAILURE(S)"; exit 1; fi

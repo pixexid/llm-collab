@@ -180,7 +180,9 @@ func cmdType(app: String, text: String, submit: Bool, verify: Bool, windowIndex:
         case .some(true): method = "cmd-return"
         case .none:
             selectAllAndDelete(pid: pid)
-            FileHandle.standardError.write("identity lost re-resolving \(app) after cmd-return — failing closed, no resend\n".data(using: .utf8)!); return 7
+            // Exit 9 == identity lost (distinct from 7 = not-landed-but-maybe-late),
+            // so the wrapper never applies late-confirm promotion here (PR78 R7).
+            FileHandle.standardError.write("identity lost re-resolving \(app) after cmd-return — failing closed, no resend\n".data(using: .utf8)!); return 9
         case .some(false): break
         }
         if method.isEmpty {
@@ -190,7 +192,7 @@ func cmdType(app: String, text: String, submit: Bool, verify: Bool, windowIndex:
             case .some(true): method = "key-return"
             case .none:
                 selectAllAndDelete(pid: pid)
-                FileHandle.standardError.write("identity lost re-resolving \(app) after key-return — failing closed\n".data(using: .utf8)!); return 7
+                FileHandle.standardError.write("identity lost re-resolving \(app) after key-return — failing closed\n".data(using: .utf8)!); return 9
             case .some(false): break
             }
         }
@@ -210,7 +212,7 @@ func cmdType(app: String, text: String, submit: Bool, verify: Bool, windowIndex:
             // (no `?? win` stale fallback) — PR78 R4 blocker 1.
             guard let fresh = resolveConversationWindow(appElement(named: app)?.0 ?? el,
                                                         preferIndex: windowIndex, profile: profile) else {
-                FileHandle.standardError.write("identity lost re-resolving \(app) for verify — failing closed\n".data(using: .utf8)!); return 7
+                FileHandle.standardError.write("identity lost re-resolving \(app) for verify — failing closed\n".data(using: .utf8)!); return 9
             }
             let v = findComposer(fresh, profile).flatMap { str($0, kAXValueAttribute) } ?? ""
             if v.contains(String(text.prefix(20))) { print("VERIFIED: text is in the composer") }
@@ -934,6 +936,16 @@ func cmdRing(app: String, text: String, submit: Bool, windowIndex: Int?, dryRun:
             print("QUEUED (UNCONFIRMED): recipient went busy with no visible turn — likely queued behind its run, but axsend cannot confirm it landed in THIS thread vs a new one. Verify with `axsend confirm`; do not resend.")
             return 0
         }
+        // PR78 R7: distinguish identity loss (the conversation window can no longer
+        // be re-resolved by identity) from an honest not-landed-but-maybe-late-render.
+        // Identity loss exits 9 so the wrapper NEVER applies late-confirm promotion
+        // to it (that would risk masking a lost wake); an honest late-render exits 7,
+        // where the wrapper's freshness-gated confirm may still promote a real
+        // delivery that rendered just after this window.
+        if freshConvWindow() == nil {
+            FileHandle.standardError.write("identity lost re-resolving \(app) after submit — failing closed (no promotion)\n".data(using: .utf8)!)
+            return 9
+        }
         FileHandle.standardError.write("WARN: NOT DELIVERED after \(maxAttempts) attempts (button-press, composer-confirm, cmd-return, key-return each, draft cleared between) and recipient is idle — likely on a non-chat screen. Re-ring; check with `axsend confirm`.\n".data(using: .utf8)!)
         return 7
     }
@@ -948,6 +960,36 @@ func cmdRing(app: String, text: String, submit: Bool, windowIndex: Int?, dryRun:
 //   absent (8):    the text is in neither (wrong window, or never typed)
 // Electron composers (ZCode/Antigravity) don't expose the draft via AXValue, so
 // "stuck" also matches the draft rendered as static text at/below the composer.
+// PR78 R7: print the number of real conversation TURNS (AXStaticText ABOVE the
+// composer) that contain the needle. The wrapper captures this BEFORE a ring and
+// requires a strictly LARGER count after, so a delayed promotion needs a genuinely
+// NEW turn — never a stale identical earlier turn (which would falsely promote a
+// failed ring and silently lose the current wake). Exit 0 = authoritative count
+// printed; nonzero = window not resolvable (count is not trustworthy).
+func cmdTurns(app: String, text: String, windowIndex: Int?) -> Int32 {
+    guard AXIsProcessTrusted() else {
+        FileHandle.standardError.write("AX not trusted; run `axsend check`.\n".data(using: .utf8)!); print("0"); return 2
+    }
+    guard let (el, _) = appElement(named: app) else {
+        FileHandle.standardError.write("app not found: \(app)\n".data(using: .utf8)!); print("0"); return 1
+    }
+    let profile = profileFor(app)
+    guard let win = resolveConversationWindow(el, preferIndex: windowIndex, profile: profile) else {
+        FileHandle.standardError.write("no windows for \(app)\n".data(using: .utf8)!); print("0"); return 1
+    }
+    let needle = String(text.prefix(40))
+    guard !needle.isEmpty else { print("0"); return 0 }
+    let top = findComposer(win, profile).flatMap { frame($0)?.y }
+    let count = flatten(win).filter { e in
+        guard role(e) == "AXStaticText", let v = str(e, kAXValueAttribute),
+              v.contains(needle), let f = frame(e) else { return false }
+        if let t = top { return f.y < t - 4 }   // above the composer = a real turn, not the draft
+        return true
+    }.count
+    print("\(count)")
+    return 0
+}
+
 func cmdConfirm(app: String, text: String, windowIndex: Int?) -> Int32 {
     guard AXIsProcessTrusted() else {
         FileHandle.standardError.write("AX not trusted; run `axsend check`.\n".data(using: .utf8)!); return 2
@@ -1020,6 +1062,11 @@ case "buttons":
 case "state":
     guard let app = argValue("--app") else { print("--app required"); exit(64) }
     exit(cmdState(app: app, windowIndex: winIdx))
+case "turns":
+    guard let app = argValue("--app"), let text = argValue("--text") else {
+        print("--app and --text required"); exit(64)
+    }
+    exit(cmdTurns(app: app, text: text, windowIndex: winIdx))
 case "check":
     exit(cmdCheck())
 case "tree":
