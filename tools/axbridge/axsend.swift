@@ -646,8 +646,20 @@ func cmdRing(app: String, text: String, submit: Bool, windowIndex: Int, dryRun: 
             // No FRESH turn this attempt. If the recipient is now busy, our submit
             // was accepted + queued — stop (retrying would double-send).
             if busyNow() { queued = true; break attempts }
-            // Idle + not delivered → genuinely stuck; clear the draft and retry.
-            selectAllAndDelete(pid: pid)
+            // NEVER blind-resend (the 3x-duplicate bug, operator-caught twice
+            // 2026-07-11: on a non-chat/landing screen the submit IS accepted
+            // where this window can't see it, deliveredFresh() stays false, and
+            // each retry landed another copy). Only retry when the composer
+            // VERIFIABLY still holds our text — a readable leftover proves the
+            // submit was ignored, so retrying can't duplicate. Blank/unreadable
+            // readback (Electron) is NOT proof either way → stop and report
+            // unconfirmed; the caller confirms with `axsend confirm`.
+            let leftover = str(composer, kAXValueAttribute) ?? ""
+            if leftover.contains(String(text.prefix(20))) {
+                selectAllAndDelete(pid: pid)
+            } else {
+                queued = true; break attempts
+            }
         }
         // ZCode can accept the submit and start processing before its sent-message
         // AXStaticText is visible to the one-second per-method checks above.
