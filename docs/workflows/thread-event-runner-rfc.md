@@ -255,6 +255,79 @@ closed and stays disabled; it does not fall back to a path-only check. Mailbox
 observation parses only exact-project durable message paths and treats message
 body/frontmatter as untrusted data.
 
+## Planned Phase 2 timer adapter contract
+
+The Phase 2 timer adapter is read-only observation: it computes due occurrences
+and writes bounded event/checkpoint state. It never dispatches a turn. The
+immutable subscription revision MUST materialize one of these schedule kinds:
+
+| Kind | Frozen fields and bounds |
+|---|---|
+| `one_shot` | `scheduled_at_utc` as RFC 3339 with `Z`; no implicit local time; at most 5 years after revision creation. |
+| `fixed_interval` | `anchor_utc` with `Z` plus integer `interval_seconds` from 60 through 31,536,000. Occurrences are `anchor + n * interval`, not "last wake + interval". |
+| `civil_recurring` | `frequency: daily|weekly`, second-precision `local_time`, explicit IANA `time_zone`, exact `tzdb_version`, and ISO weekdays 1=Monday through 7=Sunday for weekly schedules. Time-zone abbreviations, host-local defaults, and unversioned zone rules are invalid. |
+
+The runner must be able to load the exact frozen tzdb version. Missing or
+different zone rules move the subscription to `error` without producing an
+occurrence. Adopting a new tzdb version requires a new immutable revision plus
+an explicit cursor policy; it never silently changes an existing schedule.
+
+Each real scheduled instant has the deterministic occurrence ID:
+
+```text
+sha256(subscription_id | revision | schedule_kind | scheduled_instant_utc |
+       civil_local_label_or_empty | fold_index_or_zero)
+```
+
+`events` and checkpoints enforce uniqueness on that ID. Process restart,
+duplicate polls, backward wall-clock movement, and sleep/wake cannot re-emit an
+already recorded occurrence. Cursor state stores last occurrence ID and UTC
+instant, next UTC instant, frozen tzdb version, and bounded skipped/coalesced
+counters.
+
+Wall-clock UTC determines whether a persisted occurrence is due. In-process
+waiting uses a monotonic clock with a maximum 60-second recheck, never a single
+unbounded wall-clock sleep. After restart, system wake, or detected wall-clock
+jump, the adapter recomputes from the frozen schedule and checkpoint. If the
+clock moves backward, it waits until a not-yet-recorded scheduled instant is due;
+it never subtracts the clock delta from the checkpoint, generates a negative
+sleep, or replays an old occurrence.
+
+Every revision stores an explicit `missed_fire_policy`. Management materializes
+`coalesce` when omitted; the database never stores an implicit value. It also
+stores `max_lateness_seconds` (default 86,400; range 0 through 604,800):
+
+- `skip`: advance the checkpoint through eligible missed occurrences and update
+  a bounded skipped counter without an event.
+- `coalesce`: emit one event containing count plus first/last scheduled UTC and
+  occurrence IDs for eligible missed occurrences. Compute large counts
+  arithmetically rather than materializing every instant.
+- `catch_up`: emit only the most recent `catch_up_limit` eligible occurrences in
+  chronological order; `catch_up_limit` defaults to 4 and is bounded from 1
+  through 16. Older eligible occurrences increment the skipped counter without
+  individual events.
+
+Occurrences older than `max_lateness_seconds` always count as skipped, regardless
+of policy. A missed one-shot emits at most once when within the lateness window
+under `coalesce` or `catch_up`; `skip` or an exceeded window moves it to its
+terminal checkpoint without an event. One timer poll emits at most 16 individual
+events plus one coalesced summary, and all counters saturate at unsigned 64-bit
+maximum.
+
+For `civil_recurring`, the immutable revision also stores DST policies:
+
+- `ambiguous_time_policy: first|second|both|skip` for a repeated local time;
+  management materializes `first` by default. `both` produces two distinct UTC
+  instants/occurrence IDs with fold indexes 0 and 1.
+- `nonexistent_time_policy: skip|next_valid` for a spring-forward gap;
+  management materializes `skip` by default. `next_valid` uses the first valid
+  instant after the gap while retaining the original civil label and resolution
+  policy in the occurrence evidence.
+
+Timer adapter errors, missed-fire counters, and DST skips follow the same quiet
+and bounded-diagnostic rules as other adapters. No clock, sleep, or DST outcome
+may create a delivery in Phase 2 because exact-thread dispatch remains disabled.
+
 ## Bounded event envelope
 
 The adapter returns a data-only envelope. The planned logical schema is:
@@ -335,12 +408,14 @@ schema migration that preserves the stated constraints.
 | `subscription_revisions` | Immutable frozen snapshot with composite primary key `(subscription_id, revision)`: exact identity and project-binding evidence; trusted adapter/handler/profile versions; validated config; schedule, expiry, quiet/coalescing policy, and creation actor/time. An update inserts a new row; existing rows are never rewritten. |
 | `source_checkpoints` | One row per subscription/revision with opaque bounded cursor, semantic quiet snapshot/hash, counters, and last observation time; composite foreign key to `subscription_revisions`. |
 | `events` | Monotonic ID; subscription/revision; stable source event ID; canonical envelope/hash; classification; coalescing key; timestamps; composite foreign key to `subscription_revisions`. Unique `(subscription_id, revision, source_event_id)` and `(subscription_id, revision, envelope_hash)` as adapter-policy permits. |
-| `deliveries` | UUID plus subscription/revision; exact identity copied from the frozen revision; handler; coalescing key/window; state and pre-lease state; event range/count/bytes; due/expiry; retry count; lease/fence; cancellation/update marker. Composite foreign key to `subscription_revisions`; at most one open coalescing bucket per revision/key/window. |
+| `delivery_lineages` | Immutable semantic-work identity derived by the ledger from project, trusted handler/action class, and origin event/dedupe evidence. Stores origin key and terminal/resolution status. Callers cannot choose, replace, or detach a lineage ID. |
+| `deliveries` | UUID plus immutable `lineage_id`, lineage generation, optional `replaces_delivery_id`, and subscription/revision; exact identity copied from the frozen revision; handler; coalescing key/window; state and pre-lease state; event range/count/bytes; due/expiry; retry count; lease/fence; cancellation/update marker. Composite foreign key to `subscription_revisions` and foreign key to `delivery_lineages`; at most one open coalescing bucket per revision/key/window. |
 | `delivery_attempts` | UUID attempt token plus delivery ID and subscription/revision; fence; numbered attempt; pre-dispatch project/runtime/capability attestation hashes and times; started/finished time; acceptance classification; bounded response/error. Composite foreign keys to both the matching `deliveries` identity/revision and `subscription_revisions`; unique `(delivery_id, attempt_number)` and unique attempt token. |
 | `thread_leases` | One row per exact identity; owner instance; monotonic fence integer; acquired/renewed/expires timestamps. Exact identity is the primary key. |
 | `thread_quarantines` | One row per exact identity while any delivery is `dispatching`, `reconciling`, or dead-lettered with unresolved acceptance. Stores delivery/attempt/revision, reason, created time, and resolution evidence. It survives lease expiry, release, runner restart, and subscription pause/cancel. |
+| `lineage_quarantines` | One row per delivery lineage with ambiguous acceptance. Blocks every delivery/replacement in that lineage across subscription revisions, target threads, runtime homes, retire/rebind operations, and runner restarts until authoritative terminal-completion/not-accepted evidence resolves it. |
 | `subscription_leases` | One row per subscription; owner instance, monotonic fence, expiry; prevents concurrent polling/checkpoint advancement. |
-| `dead_letters` | One row per terminal failed delivery or invalid observation; reason code, actionable diagnostic, first/last failure, acknowledgement, retained tombstone metadata. |
+| `dead_letters` | Typed as `dispatch_failure` or `invalid_observation`; reason code, actionable diagnostic, first/last failure, acknowledgement, reprocessing eligibility, authoritative acceptance evidence reference, lineage/quarantine reference, and retained tombstone metadata. |
 | `audit_log` | Append-only state transitions and management operations with actor, object, from/to state, revision/fence, reason code, and bounded metadata. |
 | `schema_migrations` | Applied version, checksum, time, tool version, and backup reference. |
 
@@ -348,7 +423,10 @@ Foreign keys are mandatory. `subscriptions.current_revision` has a composite
 foreign key back to its own `(subscription_id, revision)` row. Checkpoints,
 events, deliveries, and attempts all carry `subscription_id` plus revision and
 must resolve the same immutable snapshot; an attempt cannot point at a delivery
-from another revision. Orphaned events, attempts, leases, quarantines, or dead
+from another revision. A replacement delivery must carry its predecessor's
+lineage ID, and the unique origin source/action mapping prevents recreating the
+same semantic work under a fresh lineage. Orphaned events, attempts, leases,
+lineages, quarantines, or dead
 letters are corruption and MUST stop the affected operation. SQLite integrity
 and foreign-key checks are required before migration, after unclean shutdown
 recovery, and before a ledger is accepted after restore.
@@ -378,17 +456,19 @@ occur while a database transaction is open.
 3. Compute the registered semantic snapshot. If an unchanged quiet snapshot is
    observed, advance only the checkpoint, quiet counters, and last-observed time;
    do not insert an event or audit row. Otherwise insert/deduplicate the bounded
-   event, classify it, update or create an eligible coalesced delivery, advance
-   the source checkpoint, and append only the bounded transition audit.
+   event, classify it, resolve/create its ledger-derived lineage from the unique
+   origin source/action key, update or create an eligible coalesced delivery,
+   advance the source checkpoint, and append only the bounded transition audit.
 4. Commit all of those changes together. A cursor is never advanced without the
    corresponding event/dedup decision being durable.
 
 **Delivery claim transaction**
 
-1. Check for any `thread_quarantines` row and any `dispatching` or `reconciling`
-   delivery for the exact identity. If either exists, claim fails regardless of
-   lease expiry or owner state. Only then expire a stale lease, acquire the
-   exact-thread lease, and increment its fence.
+1. Check for any `thread_quarantines` row or unresolved exact-target in-flight
+   delivery, then check the candidate's `lineage_quarantines` row and every
+   unresolved delivery in that lineage. If any exists, claim fails regardless
+   of target changes, lease expiry, or owner state. Only then expire a stale
+   lease, acquire the exact-thread lease, and increment its fence.
 2. Atomically compare-and-swap one eligible delivery to `leased`, store owner,
    fence, and a fresh attempt token, then append audit.
 3. Commit before any runtime inspection or dispatch.
@@ -400,17 +480,21 @@ runtime capability-profile inspection and immediately before a future external
 send, re-check the frozen subscription revision, lifecycle state, delivery
 state, cancellation marker, lease owner/expiry/fence, and applicable test or
 production flag. Compare-and-swap `leased` to `dispatching`, insert the exact
-target's quarantine row, and commit before constructing the fixed pointer-only
-request. Cancellation before this boundary prevents the send. No external call
-occurs unless every attestation still matches the immutable revision.
+target's quarantine row and the delivery lineage quarantine, and commit before
+constructing the fixed pointer-only request. Cancellation before this boundary
+prevents the send. No external call occurs unless every attestation still
+matches the immutable revision.
 
 **Attempt result transaction**
 
 Persist the attempt result and compare-and-swap the delivery using the same
 owner, fence, and attempt token. A stale worker cannot complete, retry, or
-release a newer owner's delivery. A known accepted/delivered or authoritative
-not-accepted result resolves the quarantine in the same transaction; an unknown
-result moves the delivery to `reconciling` and leaves the quarantine in place.
+release a newer owner's delivery. Authoritative terminal completion resolves
+both quarantines and closes the lineage; authoritative acceptance without a
+terminal result keeps both quarantines while the turn runs. Ledger-stored
+authoritative not-accepted evidence resolves both quarantines and may authorize
+exactly one next lineage generation. An unknown result moves the delivery to
+`reconciling` and leaves both quarantines in place.
 
 The owner renews the thread lease with short fenced transactions while an
 external call is outstanding; no transaction spans the call. If renewal fails
@@ -472,9 +556,9 @@ pending|leased|dispatching|retry_wait|reconciling -> dead_letter
 - `reconciling` is sticky and operator-visible. It never auto-transitions to a
   new attempt without authoritative evidence that the prior turn was not
   accepted.
-- Every normal claim checks both delivery state and the exact target's
-  quarantine. Lease expiry or release never makes a `dispatching`,
-  `reconciling`, or unresolved dead-letter target claimable.
+- Every normal claim checks delivery state plus exact-target and delivery-lineage
+  quarantine. Lease expiry, target retirement, rebind, or release never makes a
+  `dispatching`, `reconciling`, or unresolved dead-letter lineage claimable.
 - `obsolete` means a subscription update superseded work before the dispatch
   acceptance boundary.
 - `delivered`, `cancelled`, `obsolete`, `expired`, and `dead_letter` are terminal
@@ -523,10 +607,22 @@ bounded recheck cadence and consumes no retry attempt.
 
 After the retry/expiry bound, the delivery becomes `dead_letter` with an
 operator-actionable reason, exact identity, subscription/revision, event range,
-attempt history, and next recovery action. Dead-letter inspection and explicit
-acknowledgement are management operations; acknowledgement never replays work.
-A replay creates a new delivery with a new idempotency token after the operator
-confirms the prior attempt was not accepted.
+attempt history, lineage, acceptance classification, quarantine state, and next
+recovery action. A `dispatch_failure` dead letter has no generic replay path.
+Acknowledgement never creates work or clears a target/lineage quarantine. A
+replacement delivery is allowed only when the ledger already contains
+authoritative `not_accepted` evidence tied to the exact attempt token and the
+reconciliation transaction consumes that evidence while creating exactly one
+next generation in the same lineage. Operator assertion, acknowledgement,
+timeout, absence of output, or `acceptance_unknown` is insufficient.
+
+An `invalid_observation` dead letter is a different state machine and never
+inherits delivery retry/attempt semantics. After the adapter/config/handler is
+corrected through a new immutable subscription revision, an explicit
+`reprocess-observation` operation may parse the original bounded source evidence
+into a new observation linked by `reprocesses_dead_letter_id`. It does not copy
+delivery attempt count, does not create a delivery directly, cannot clear a
+lineage quarantine, and must pass normal validation/classification/dedupe again.
 
 ## Ambiguous delivery reconciliation
 
@@ -535,27 +631,34 @@ future `turn/start` request might mean the turn started. Such an attempt is
 `acceptance_unknown`, and its delivery MUST enter `reconciling`.
 
 The runner MUST NOT auto-retry an ambiguous attempt. Reconciliation may mark it
-`delivered` only from authoritative runtime evidence tied to the unique attempt
-token/turn ID. Authoritative evidence that the request was not accepted may
-transition it to `retry_wait` or create a replacement delivery that records
-`replaces_delivery_id`; the original attempt history remains immutable. The
-replacement is claimable only after the reconciliation transaction records that
-not-accepted evidence and resolves the quarantine.
+`delivered` only from authoritative terminal-completion evidence tied to the
+unique attempt token/turn ID. Evidence of acceptance without terminal completion
+keeps the delivery/quarantines in progress. Authoritative evidence that the
+request was not accepted may transition it to `retry_wait` or create a
+replacement delivery that records
+`replaces_delivery_id` and preserves the same `lineage_id`; the original attempt
+history remains immutable. The replacement is claimable only after the
+reconciliation transaction stores and consumes that exact not-accepted evidence
+and resolves both quarantines.
 
 If the runtime exposes neither proof, the delivery remains operator-visible and
 the exact target remains quarantined across lease expiry, process restart,
 subscription pause/error/cancel, and dead-letter retention. Explicit operator
 dispositions are limited to:
 
-- record authoritative accepted evidence and mark `delivered`;
+- record authoritative terminal accepted/completed evidence and mark
+  `delivered`;
 - record authoritative not-accepted evidence and authorize one replacement;
 - move the item to `dead_letter` while retaining the quarantine and blocking all
-  later dispatch to that exact target;
-- retire/rebind to a different authoritatively verified native thread after
-  recording why duplicate execution on the old target can no longer occur.
+  later dispatch in the lineage.
 
-Acknowledging or replaying a dead letter does not clear an unresolved
-quarantine. A heuristic "probably failed" disposition is never sufficient.
+Acknowledgement changes visibility only, and any generic replay request fails
+closed. Retiring/rebinding the target does not clear lineage quarantine and
+cannot move the same semantic work to another thread/runtime home. Only
+ledger-stored authoritative terminal-completion evidence closes the lineage
+without a replacement, or ledger-stored authoritative not-accepted evidence
+permits one same-lineage next generation. A heuristic "probably failed"
+disposition or narrative rationale is never sufficient.
 
 This is also the dispatcher rollout gate: exact-thread dispatch remains off
 until integration tests prove authoritative busy state plus `turn/start`
@@ -588,10 +691,12 @@ are not authoritative.
   call. `dispatching`/`reconciling` work must reach an authoritative outcome or
   quarantined dead letter before the lifecycle row becomes terminal `expired`.
 - Error stops polling and new claims after one bounded diagnostic. Unleased open
-  work is preserved but ineligible for explicit recovery; pre-send leases are
-  released. In-flight/ambiguous work still follows fenced reconciliation and
-  quarantine rules. Only an explicit revision-checked recovery may return the
-  subscription to `paused` or `active`.
+  work is preserved but ineligible until explicit revision-checked recovery;
+  pre-send leases are released. In-flight/ambiguous work still follows fenced
+  reconciliation and quarantine rules. Recovery compare-and-swaps only the
+  lifecycle row against the expected current revision: recovery to `active`
+  restores eligibility, recovery to `paused` keeps it frozen, and neither path
+  mutates the frozen revision. A config/policy change requires a new revision.
 - Cancel atomically moves the subscription to `cancelling`, prevents new polls,
   cancels unleased work, and marks leased work cancel-requested. Before the
   pre-send boundary it must stop. After that boundary it follows delivered or
@@ -614,13 +719,14 @@ operator-approved limits:
 | Terminal/dead-letter tombstones and management audit | 365 days |
 
 Active subscriptions, current checkpoints, open deliveries, unresolved
-`reconciling` work, target quarantines, unexpired leases, immutable revision
-snapshots plus delivery/attempt evidence referenced by a quarantine, and schema
-migration history are never removed by age. Unresolved quarantine overrides the
-ordinary dead-letter retention window. Compaction deletes in batches of at most
+`reconciling` work, target and lineage quarantines, unexpired leases, immutable
+revision snapshots plus delivery/attempt/authoritative-evidence records
+referenced by a quarantine, and schema migration history are never removed by
+age. Unresolved quarantine overrides the ordinary dead-letter retention window.
+Compaction deletes in batches of at most
 1,000 rows per transaction, preserves hashes/reason/timestamps in tombstones,
-and yields
-between batches. WAL checkpointing and incremental vacuum run only in an idle
+and yields between batches. WAL checkpointing and incremental vacuum run only
+in an idle
 maintenance window; no full `VACUUM` runs during observation or delivery.
 
 The planned default database size budget is 512 MiB. The soft limit is 80% of
@@ -637,9 +743,9 @@ unresolved delivery evidence to keep running.
 | Event payload selects a command/tool/module | Payloads are data-only; trusted registries select fixed code and capability profiles. |
 | Project or thread confusion | Non-null exact identity tuple plus authoritative native cwd/repo binding at create and pre-dispatch; no null/prefix/latest compatibility. |
 | Wrong Codex account/runtime | Authenticated endpoint/process attestation plus exact canonical `CODEX_HOME`; path hash is only a namespace key, not authentication. |
-| Duplicate observers or crash recovery | Immutable revision snapshots, subscription/thread leases, monotonic fencing, target quarantine beyond lease expiry, compare-and-swap transitions, transactional checkpoints. |
+| Duplicate observers or crash recovery | Immutable revision snapshots, subscription/thread leases, monotonic fencing, target and semantic-lineage quarantine beyond lease expiry/rebind, compare-and-swap transitions, transactional checkpoints. |
 | Turn stacked into a busy thread | Authoritative busy check required; busy defers quietly without consuming retry budget. Dispatcher disabled until proven. |
-| Ambiguous `turn/start` acceptance | Unique attempt token, `reconciling` state, no automatic retry, authoritative reconciliation only. |
+| Ambiguous `turn/start` acceptance | Unique attempt token, `reconciling` state, target plus semantic-lineage quarantine across rebinds, no generic replay, ledger-stored authoritative reconciliation only. |
 | Cancel/update races | Expected revision, pre-send authorization boundary, stale-revision obsolescence, fenced completion. |
 | Prompt/content injection | Fixed pointer-only prompt; strict identifier grammar and structured encoding; event detail retrieved through a bounded trusted reader under runtime-enforced capabilities. |
 | Filesystem traversal/symlink escape | Directory-fd-anchored no-follow traversal, root/final-fd identity verification, strict relative names, bounded reads; disable when unavailable. |
@@ -660,17 +766,20 @@ review and tests.
 ## Management surface
 
 The later CLI/API must support create, list, inspect, pause, resume, update,
-cancel, dead-letter acknowledge/replay, compact, integrity-check, export, and
-status. Inspection must show:
+cancel, dead-letter acknowledge, typed `reprocess-observation`, evidence-gated
+`replace-delivery`, compact, integrity-check, export, and status. There is no
+generic dead-letter replay command. Inspection must show:
 
 - exact target identity and subscription revision;
 - frozen authoritative project/cwd binding and latest drift check;
 - trusted adapter, handler, capability profile, and versions;
 - state, expiry, next poll/run, last checkpoint/event, and quiet snapshot;
 - open/coalesced delivery, lease owner/fence/expiry, retry count, and next retry;
+- delivery lineage/generation, predecessor, typed dead-letter operation, and any
+  ledger-stored authoritative acceptance evidence;
 - cancellation/update status and any ambiguous/dead-letter diagnostic;
-- target quarantine owner/reason/resolution evidence and runtime capability
-  attestation;
+- target and lineage quarantine owner/reason/resolution evidence and runtime
+  capability attestation;
 - feature flags that currently permit observation or delivery.
 
 Management output must redact bounded payload fields by default. JSON output is
@@ -714,10 +823,10 @@ Session autobridge is migration input, not the new ledger.
   the runner checkpoint, verify no legacy in-flight action, enable the reviewed
   runner phase flag, then observe before any delivery flag changes.
 - Rollback disables delivery first, stops new claims, waits for or explicitly
-  reconciles in-flight work, and preserves every unresolved target quarantine
-  before stopping the runner and leaving the ledger read-only for evidence.
-  Legacy dispatch resumes only after ownership is unambiguous and no unresolved
-  runner quarantine can collide with that target.
+  reconciles in-flight work, and preserves every unresolved target and lineage
+  quarantine before stopping the runner and leaving the ledger read-only for
+  evidence. Legacy dispatch resumes only after ownership is unambiguous and no
+  unresolved runner lineage can collide with that semantic work.
 - Schema migration takes a verified backup, uses a checksum/versioned migration,
   runs in an exclusive maintenance window, and performs integrity/foreign-key
   checks before commit. Failed migration restores the backup. Runtime rollback
@@ -757,7 +866,8 @@ Before Phase 2 handoff:
 
 - schema migration, foreign key, WAL/restart, observation/checkpoint atomicity,
   dedupe, quiet-state, coalescing simulation, cancellation/update, retention,
-  project isolation, sleep/wake, and clock-change tests pass;
+  project isolation, deterministic timer occurrence IDs, all missed-fire/DST
+  policies, unavailable tzdb, sleep/wake, and forward/backward clock tests pass;
 - capability and path violations fail closed;
 - no code path calls app-server `turn/start`.
 
@@ -788,7 +898,11 @@ Before the isolated dispatch/fault matrix or disposable subscription can pass:
 - exact project/runtime-home/thread isolation is tested with at least two
   projects and two runtime homes;
 - ambiguous acceptance remains `reconciling`, quarantines the target beyond
-  lease expiry/restart, and does not auto-retry;
+  lease expiry/restart, quarantines the semantic lineage across target
+  retire/rebind, and does not auto-retry or generic-replay;
+- dispatch dead letters require consumed ledger-stored `not_accepted` evidence
+  for one same-lineage replacement, while invalid-observation reprocessing
+  inherits no delivery attempt state and creates no delivery directly;
 - create and pre-dispatch checks prove the authoritative native project/cwd
   binding and detect drift;
 - the fixed pointer-only prompt contains no event-controlled bytes and the

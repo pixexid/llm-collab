@@ -508,9 +508,13 @@ lease returns to its prior state, while `dispatching`/`reconciling` work keeps
 its quarantine through authoritative resolution. Expiry enters `expiring`,
 expires unleased/pre-send work, and reaches terminal `expired` only after no
 in-flight/quarantine remains. Error stops polls/claims and preserves unleased
-work for explicit recovery while in-flight work reconciles. Cancellation cannot
-complete merely because a lease expired; `cancelled` requires no leased,
-dispatching, reconciling, or subscription-owned quarantine state.
+work as ineligible until explicit revision-checked recovery while in-flight work
+reconciles. Recovery compare-and-swaps the lifecycle row against the expected
+current revision without mutating the immutable snapshot: `active` restores
+eligibility and `paused` keeps it frozen. A config/policy change requires a new
+revision. Cancellation cannot complete merely because a lease expired;
+`cancelled` requires no leased, dispatching, reconciling, or
+subscription-owned quarantine state.
 
 ### Planned event record
 
@@ -549,6 +553,65 @@ traversal, and post-open root/final-fd verification. A platform without
 equivalent primitives cannot enable the adapter; canonical path-string checks
 alone are not accepted.
 
+### Planned Phase 2 timer adapter record
+
+Timer observation is planned and read-only; it cannot create a delivery or
+dispatch in Phase 2. The immutable revision stores one explicit schedule kind.
+A civil example is:
+
+```json
+{
+  "schedule_kind": "civil_recurring",
+  "frequency": "weekly",
+  "weekdays": [1, 3, 5],
+  "local_time": "09:30:00",
+  "time_zone": "America/Los_Angeles",
+  "tzdb_version": "2026a",
+  "ambiguous_time_policy": "first",
+  "nonexistent_time_policy": "skip",
+  "missed_fire_policy": "coalesce",
+  "max_lateness_seconds": 86400,
+  "catch_up_limit": 4
+}
+```
+
+Allowed kinds and bounds:
+
+- `one_shot`: RFC 3339 `scheduled_at_utc` with `Z`, at most 5 years ahead
+- `fixed_interval`: RFC 3339 `anchor_utc` with `Z` and integer
+  `interval_seconds` from 60 through 31,536,000; occurrence instants derive from
+  the anchor, not the last wake
+- `civil_recurring`: `daily` or `weekly`, second-precision local time, explicit
+  IANA zone and exact tzdb version, with ISO weekdays 1=Monday through 7=Sunday
+  for weekly schedules; abbreviations/host-local defaults are invalid
+
+The exact tzdb version must be loadable or the subscription enters `error`.
+Changing it requires a new immutable revision and explicit cursor policy. The
+source checkpoint stores last/next scheduled UTC, last occurrence ID, frozen
+tzdb version, and bounded skip/coalesce counters. Occurrence IDs are deterministic
+SHA-256 values over subscription ID, revision, schedule kind, scheduled UTC,
+civil label, and fold index, and are unique in the event/checkpoint ledger.
+
+Due decisions use wall-clock UTC; waits use monotonic time with at most a
+60-second recheck. Restart, wake, and clock jumps recompute from frozen schedule
+plus checkpoint. A backward clock never rewinds the checkpoint or re-emits an
+occurrence.
+
+`missed_fire_policy` is explicitly persisted as `skip`, `coalesce`, or
+`catch_up`; omitted management input materializes `coalesce`. Lateness defaults
+to 86,400 seconds and is bounded through 604,800. `catch_up_limit` defaults to 4
+and is bounded from 1 through 16; it emits only the most recent eligible
+occurrences, while older ones update a skipped counter. Coalesce emits one
+first/last/count summary. One poll emits at most 16 individual events plus one
+summary. A one-shot emits at most once inside the lateness window and otherwise
+terminates quietly according to policy.
+
+Civil schedules persist `ambiguous_time_policy: first|second|both|skip` (default
+materialized as `first`) and `nonexistent_time_policy: skip|next_valid` (default
+materialized as `skip`). `both` uses fold indexes 0/1 for distinct occurrence
+IDs; `next_valid` retains the original civil label and chosen resolution in
+evidence. All timer counters saturate at unsigned 64-bit maximum.
+
 Logical `events` rows carry a composite foreign key to the immutable
 subscription revision, store canonical envelope/hash/classification, and
 enforce source-event/hash uniqueness according to the registered adapter policy.
@@ -569,6 +632,9 @@ occurrences increment a counter only.
 ```json
 {
   "delivery_id": "UUID",
+  "lineage_id": "UUID",
+  "lineage_generation": 1,
+  "replaces_delivery_id": null,
   "subscription_id": "UUID",
   "subscription_revision": 1,
   "project_id": "my-app",
@@ -598,6 +664,12 @@ Planned delivery states are `pending`, `leased`, `deferred_busy`,
 `dispatching`, `retry_wait`, `reconciling`, `delivered`, `cancelled`, `obsolete`,
 `expired`, and `dead_letter`. Busy deferral consumes no retry attempt.
 `reconciling` means runtime acceptance is unknown and MUST NOT auto-retry.
+
+`delivery_lineages` stores one immutable semantic-work identity derived by the
+ledger from project, trusted handler/action class, and origin event/dedupe
+evidence. Callers cannot choose a new lineage for a replacement. The unique
+origin mapping plus `replaces_delivery_id` forces retry, rebind, and replacement
+deliveries to retain the same lineage and increment generation.
 
 Only open deliveries with the same exact identity, subscription/revision,
 handler, and normalized coalescing key may merge. A leased, dispatching,
@@ -660,24 +732,74 @@ renewal uses short fenced transactions during an external call; if renewal fails
 after a possible send, the attempt becomes `acceptance_unknown` and quarantine
 remains.
 
-`reconciling` can become `delivered` from authoritative accepted evidence or
-`retry_wait`/a recorded replacement from authoritative not-accepted evidence.
-Operator dead-letter disposition keeps quarantine and blocks future turns unless
-the operator records authoritative resolution or retires/rebinds to a different
-verified native thread. Dead-letter acknowledgement/replay alone never clears
-quarantine or permits a duplicate.
+`lineage_quarantines` independently blocks the semantic work across target
+changes. Every claim checks target and lineage quarantine plus unresolved
+in-flight state. Retiring/rebinding a thread or runtime home never clears the
+lineage. Authoritative terminal-completion evidence closes the lineage without
+replacement; acceptance without terminal completion remains quarantined.
+Ledger-stored authoritative `not_accepted` evidence may be consumed once to
+create the next same-lineage generation. Without either terminal/not-accepted
+evidence, the lineage remains blocked even if the old target is retired.
+
+`reconciling` can become `delivered` from authoritative terminal-completion
+evidence or `retry_wait`/a recorded replacement from authoritative not-accepted
+evidence. Acceptance without terminal completion keeps both quarantines.
+Operator dead-letter disposition keeps target and lineage quarantine and blocks
+future turns. Dead-letter acknowledgement, target retire/rebind, or narrative
+rationale never clears quarantine or permits a duplicate.
+
+Dead letters are typed. `dispatch_failure` has no generic replay operation; a
+replacement requires ledger-stored authoritative `not_accepted` evidence tied
+to the exact attempt and remains in the same lineage. `acceptance_unknown` and
+unresolved quarantine are never replayable. `invalid_observation` may be
+reprocessed only after a corrected immutable revision through a separate
+`reprocess-observation` operation; it creates a fresh observation linked to the
+dead letter, inherits no delivery retry/attempt state, creates no delivery
+directly, and passes normal validation/classification/dedupe.
+
+### Planned dead-letter record
+
+```json
+{
+  "dead_letter_id": "UUID",
+  "kind": "dispatch_failure",
+  "subscription_id": "UUID",
+  "subscription_revision": 1,
+  "event_id": null,
+  "delivery_id": "UUID",
+  "lineage_id": "UUID",
+  "acceptance": "acceptance_unknown",
+  "authoritative_evidence_attempt_token": null,
+  "authoritative_evidence_ref": null,
+  "authoritative_evidence_hash": null,
+  "target_quarantined": true,
+  "lineage_quarantined": true,
+  "reprocess_allowed": false,
+  "acknowledged_at_utc": null
+}
+```
+
+For a dispatch replacement, `acceptance` must be `not_accepted` and all three
+authoritative evidence fields must resolve the matching immutable attempt; the
+transaction consumes that evidence once and creates one next lineage generation.
+For `invalid_observation`, delivery/lineage/acceptance fields are null and
+`reprocess_allowed` becomes true only after a corrected revision is current.
+Acknowledgement changes visibility only and never changes either eligibility or
+quarantine.
 
 ### Planned supporting tables and transaction rule
 
 The ledger also requires `runner_instances`, `subscription_revisions`,
-`source_checkpoints`, `delivery_attempts`, `thread_quarantines`, `dead_letters`,
-`audit_log`, and `schema_migrations`, all with foreign keys. Observation
-inserts/deduplicates a changed/actionable event, updates or creates its coalesced
-delivery, advances the checkpoint, and writes bounded transition audit in one
-`BEGIN IMMEDIATE` transaction. An unchanged semantic quiet observation advances
-checkpoint/counters without event/audit insertion. Delivery claim,
-pre-send/quarantine authorization, lease renewal, and fenced result commit are
-separate short transactions around external work.
+`source_checkpoints`, `delivery_lineages`, `delivery_attempts`,
+`thread_quarantines`, `lineage_quarantines`, `dead_letters`, `audit_log`, and
+`schema_migrations`, all with foreign keys. Observation
+inserts/deduplicates a changed/actionable event, resolves/creates its
+ledger-derived lineage from the unique origin source/action key, updates or
+creates its coalesced delivery, advances the checkpoint, and writes bounded
+transition audit in one `BEGIN IMMEDIATE` transaction. An unchanged semantic
+quiet observation advances checkpoint/counters without event/audit insertion.
+Delivery claim, pre-send/quarantine authorization, lease renewal, and fenced
+result commit are separate short transactions around external work.
 
 The exact-thread dispatcher is not part of Phase 2. Phase 3 first runs non-send
 contract tests, then uses only the test-mode-only
