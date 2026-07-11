@@ -180,8 +180,12 @@ func cmdType(app: String, text: String, submit: Bool, verify: Bool, windowIndex:
         case .some(true): method = "cmd-return"
         case .none:
             selectAllAndDelete(pid: pid)
-            // Exit 9 == identity lost (distinct from 7 = not-landed-but-maybe-late),
-            // so the wrapper never applies late-confirm promotion here (PR78 R7).
+            // Exit 9 == identity lost (distinct from 7 = not-landed-but-maybe-late).
+            // The wrapper NEVER auto-promotes exit 9: after post-submit identity
+            // loss a later auto-resolution cannot prove it is the same frozen
+            // window/thread, so the durable mailbox stays authoritative and the
+            // caller must not auto-re-ring (PR78 R8). Only exit 7 gets fresh-turn
+            // promotion.
             FileHandle.standardError.write("identity lost re-resolving \(app) after cmd-return — failing closed, no resend\n".data(using: .utf8)!); return 9
         case .some(false): break
         }
@@ -936,14 +940,16 @@ func cmdRing(app: String, text: String, submit: Bool, windowIndex: Int?, dryRun:
             print("QUEUED (UNCONFIRMED): recipient went busy with no visible turn — likely queued behind its run, but axsend cannot confirm it landed in THIS thread vs a new one. Verify with `axsend confirm`; do not resend.")
             return 0
         }
-        // PR78 R7: distinguish identity loss (the conversation window can no longer
-        // be re-resolved by identity) from an honest not-landed-but-maybe-late-render.
-        // Identity loss exits 9 so the wrapper NEVER applies late-confirm promotion
-        // to it (that would risk masking a lost wake); an honest late-render exits 7,
-        // where the wrapper's freshness-gated confirm may still promote a real
-        // delivery that rendered just after this window.
+        // PR78 R7/R8: distinguish identity loss (the conversation window can no
+        // longer be re-resolved by identity) from an honest not-landed-but-maybe-
+        // late-render. Identity loss exits 9, honest late-render exits 7. The
+        // wrapper applies its freshness-gated promotion ONLY to exit 7: after a
+        // post-submit identity loss a later auto-resolution cannot prove it is the
+        // same frozen window/thread, so exit 9 is NEVER auto-promoted — it is an
+        // ambiguous state where the durable mailbox is authoritative and the caller
+        // must not auto-re-ring.
         if freshConvWindow() == nil {
-            FileHandle.standardError.write("identity lost re-resolving \(app) after submit — failing closed (no promotion)\n".data(using: .utf8)!)
+            FileHandle.standardError.write("identity lost re-resolving \(app) after submit — window unresolvable; exit 9 (ambiguous, never auto-promoted; mailbox authoritative)\n".data(using: .utf8)!)
             return 9
         }
         FileHandle.standardError.write("WARN: NOT DELIVERED after \(maxAttempts) attempts (button-press, composer-confirm, cmd-return, key-return each, draft cleared between) and recipient is idle — likely on a non-chat screen. Re-ring; check with `axsend confirm`.\n".data(using: .utf8)!)

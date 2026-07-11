@@ -31,8 +31,11 @@ case "$1" in
     exit "${RING_EXIT:-0}";;
   turns)
     n=$(cat "$AXSEND_STUB_TURNS_COUNT" 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > "$AXSEND_STUB_TURNS_COUNT"
-    if [ "$n" -eq 1 ]; then echo "${TURNS_BASELINE:-0}"; else echo "${TURNS_AFTER:-0}"; fi
-    exit 0;;
+    # First call = the wrapper's pre-ring baseline; later calls = post-ring polls.
+    # Each can print a value AND exit nonzero (models cmdTurns printing "0" on a
+    # resolution failure while returning nonzero — PR78 R8).
+    if [ "$n" -eq 1 ]; then echo "${TURNS_BASELINE:-0}"; exit "${TURNS_BASELINE_EXIT:-0}"; fi
+    echo "${TURNS_AFTER:-0}"; exit "${TURNS_AFTER_EXIT:-0}";;
   confirm)
     if [ "${CONFIRM_EXIT:-0}" -eq 0 ]; then echo "delivered: stub"; else echo "not delivered: stub"; fi
     exit "${CONFIRM_EXIT:-0}";;
@@ -75,10 +78,24 @@ assert "freshness promote sends exactly one ring (no resend)" '[[ "$(count ring)
 run 7 1 1 ring --app ZCode --text tok --submit
 assert "ring 7 + stale identical turn (1->1, no increase) -> stays nonzero" '(( rc != 0 ))'
 
-# R7: identity loss exits 9 (distinct from 7) and must NEVER be promoted, even if a
-# turn count would otherwise look fresh.
+# R8: exit 9 == post-submit identity loss is AMBIGUOUS and is NEVER auto-promoted
+# (a later auto-resolution cannot prove it is the same frozen window/thread). Even
+# with a turn-count that looks fresh, exit 9 stays 9.
 run 9 0 1 ring --app ZCode --text tok --submit
-assert "ring exit 9 (identity lost) -> propagates, never promoted" '(( rc == 9 ))'
+assert "ring exit 9 (identity lost) -> stays 9, never auto-promoted" '(( rc == 9 ))'
+
+# R8 CORE: an untrustworthy baseline — `axsend turns` prints "0" but EXITS NONZERO
+# (resolution failure) — must NOT be taken as a real baseline of 0. Otherwise a
+# later older identical turn (count 1) would falsely promote exit 7. With the
+# exit-status-aware turn_count the baseline is empty, so promotion is blocked and
+# the original exit 7 remains.
+: > "$log"; : > "$tcount"
+set +e
+RING_EXIT=7 TURNS_BASELINE=0 TURNS_BASELINE_EXIT=1 TURNS_AFTER=1 TURNS_AFTER_EXIT=0 \
+  "$tmp/bin/axsend-ensure" ring --app ZCode --text tok --submit >/dev/null 2>&1
+rc=$?
+set -e
+assert "ring 7 + untrustworthy baseline (turns prints 0 but exits nonzero) -> stays 7 (no false promote)" '(( rc == 7 ))'
 
 # R7: genuine setup/arg failure (exit 1) propagates and consults no turns/confirm.
 run 1 0 1 ring --app ZCode --text tok --submit
