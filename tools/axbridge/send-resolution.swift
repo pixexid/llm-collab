@@ -88,6 +88,11 @@ enum ComposerProfile: Equatable {
     case claude
     case codex
     case zcode
+    // An app with no known composer identity. editableIsNativeComposer always
+    // returns false for it, so resolution FAILS CLOSED (never silently inherits
+    // Claude's "Prompt" matching) — PR78 R5. Add an explicit profile with live
+    // evidence to support a new app.
+    case unknown
 }
 
 // Is this editable THIS profile's native chat composer? Browser chrome (Page
@@ -107,6 +112,9 @@ func editableIsNativeComposer(_ e: EditableInfo, _ profile: ComposerProfile) -> 
         // the AXTextArea role so a same-named button/label can't match.
         guard e.role == "AXTextArea" else { return false }
         return id.contains("ask for follow-up changes") || val.contains("ask for follow-up changes")
+    case .unknown:
+        // No known composer identity -> never matches -> resolution fails closed.
+        return false
     }
 }
 
@@ -129,7 +137,8 @@ func editableIsBrowserChrome(_ e: EditableInfo) -> Bool {
 // identity, or (looser fallback for display/tree only) a non-web native text
 // field that is not browser chrome.
 func windowHasNativeComposer(_ eds: [EditableInfo], _ profile: ComposerProfile = .claude) -> Bool {
-    eds.contains { editableIsNativeComposer($0, profile) }
+    if profile == .unknown { return false }   // fail closed: no looser fallback for an unsupported app
+    return eds.contains { editableIsNativeComposer($0, profile) }
         || eds.contains { !$0.inWebArea && nativeEditableRoles.contains($0.role) && !editableIsBrowserChrome($0) }
 }
 

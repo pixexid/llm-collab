@@ -290,6 +290,30 @@ func isInWebArea(_ el: AXUIElement) -> Bool {
     return false
 }
 
+// The nearest AXWebArea ancestor of `el` (itself if it is one), or nil. PR78 R4:
+// in Electron the native composer AND its send button live in the SAME chat
+// AXWebArea, while an embedded Browser/preview pane is a DIFFERENT AXWebArea. So
+// "is the send button foreign?" is not "is it in a web area" (everything is) but
+// "is it in a web area OTHER than the composer's".
+func webAreaOf(_ el: AXUIElement) -> AXUIElement? {
+    var node: AXUIElement? = el
+    var steps = 0
+    while let n = node, steps < 40 {
+        if role(n) == "AXWebArea" { return n }
+        node = parent(n); steps += 1
+    }
+    return nil
+}
+
+// True iff `el` is in a web area that is NOT `composerWA` (a preview/browser pane
+// rather than the composer's own chat web area). Buttons with no web area, or in
+// the composer's own web area, are NOT foreign.
+func isForeignWebArea(_ el: AXUIElement, composerWA: AXUIElement?) -> Bool {
+    guard let bWA = webAreaOf(el) else { return false }
+    guard let cWA = composerWA else { return true }   // composer has none but button does: foreign
+    return !CFEqual(bWA, cWA)
+}
+
 // The composer's own pane: the LARGEST ancestor subtree that contains the
 // composer but NO AXWebArea. The Browser pane is (or contains) an AXWebArea, so
 // the moment we would ascend to a common ancestor of both the chat input and the
@@ -313,15 +337,18 @@ func composerPane(_ composer: AXUIElement) -> AXUIElement {
 // (AXTextArea titled/described "Prompt", or its "Type / for commands"
 // placeholder), and NOT inside a web area. Falls back to nil so callers can use
 // their looser role-based pick (still web-area-excluded).
-// Map the caller's --app name to its composer identity profile (PR78 R4). Keyed
-// off the invocation string so `--app Codex` (bundle com.openai.codex, localized
-// "ChatGPT") and `--app ZCode` resolve their own composer identity; anything
-// else defaults to Claude's "Prompt".
+// Map the caller's --app name to its composer identity profile (PR78 R4/R5).
+// Keyed off the invocation string so `--app Codex` (bundle com.openai.codex,
+// localized "ChatGPT"), `--app ZCode`, and `--app Claude` resolve their own
+// composer identity. An UNRECOGNIZED app returns `.unknown` and FAILS CLOSED —
+// it must NOT silently inherit Claude's "Prompt" matching (PR78 R5). Add an
+// explicit profile with live composer evidence to support a new app.
 func profileFor(_ app: String) -> ComposerProfile {
     let a = app.lowercased()
     if a.contains("codex") { return .codex }
     if a.contains("zcode") { return .zcode }
-    return .claude
+    if a.contains("claude") { return .claude }
+    return .unknown
 }
 
 func promptComposer(_ win: AXUIElement, _ profile: ComposerProfile = .claude) -> AXUIElement? {
@@ -706,14 +733,23 @@ func cmdRing(app: String, text: String, submit: Bool, windowIndex: Int?, dryRun:
         // button that is itself inside a web area, belt-and-suspenders. The pure
         // pick logic (send-resolution.swift) is unit-tested with synthetic
         // multi-window / Browser-Run fixtures.
+        // Scope to the composer's own pane (composerPane already stops below any
+        // ancestor that also contains a DIFFERENT web area, so a Claude embedded
+        // Browser preview is structurally excluded). Within the pane, the send
+        // button lives in the SAME chat AXWebArea as the composer (Electron), so we
+        // do NOT drop web-area buttons wholesale (PR78 R4 blocker 2 — that removed
+        // the real Codex/ZCode send arrow). Instead mark a candidate `inWebArea`
+        // (foreign) only if it sits in a web area OTHER than the composer's; the
+        // pure picker rejects those, keeping the chat send arrow.
         let pane = composerPane(composer)
-        let buttons = flatten(pane).filter { role($0) == "AXButton" && !isInWebArea($0) }
+        let composerWA = webAreaOf(composer)
+        let buttons = flatten(pane).filter { role($0) == "AXButton" }
         let cf = frame(composer)
         let candidates: [SendButtonCandidate] = buttons.map { b in
             let bf = frame(b)
             return SendButtonCandidate(label: label(b), subrole: subrole(b),
                                        x: bf?.x ?? -1, y: bf?.y ?? .infinity,
-                                       inWebArea: isInWebArea(b))
+                                       inWebArea: isForeignWebArea(b, composerWA: composerWA))
         }
         var button: AXUIElement? = nil
         if let cf = cf, let idx = pickSendButtonIndex(candidates, composerY: cf.y, composerH: cf.h) {

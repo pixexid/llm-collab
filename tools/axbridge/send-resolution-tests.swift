@@ -213,11 +213,39 @@ check(pickConversationWindow([chatWindow1], preferIndex: nil, profile: .codex) =
       "R4: a Claude Prompt window is not a Codex composer -> none under .codex")
 check(pickConversationWindow([codexChat], preferIndex: nil, profile: .claude) == .none,
       "R4: a Codex follow-up window is not a Claude composer -> none under .claude")
+// R5: an unrecognized app (profile .unknown) matches NOTHING -> fail closed, so
+// no watcher silently drives a broken doorbell via Claude matching.
+check(pickConversationWindow([chatWindow1, codexChat], preferIndex: nil, profile: .unknown) == .none,
+      "R5: unknown profile matches no composer -> none (fail closed, never Claude fallback)")
+check(!windowHasNativeComposer(chatWindow1, .unknown), "R5: unknown profile sees no composer even in a Prompt window")
 check(!editableIsNativeComposer(EditableInfo(role: "AXButton", title: "Ask for follow-up changes", placeholder: "", inWebArea: true), .codex),
       "R4: a same-named non-AXTextArea (button) is not the Codex composer")
 // R4-8: Claude Prompt path is unchanged under the default profile.
 check(pickConversationWindow([auxWindow0, chatWindow1], preferIndex: nil, profile: .claude) == .index(1),
       "R4: Claude .claude profile still resolves the Prompt window (no regression)")
+
+// --- PR78 R5: Electron send button lives in the composer's OWN chat AXWebArea ---
+// Blocker 2: the real Codex/ZCode send arrow is INSIDE the chat web area (same as
+// the composer), while an embedded Browser/preview Run/Stop is in a DIFFERENT web
+// area. axsend.swift now sets a candidate's `inWebArea` to FOREIGN (a web area
+// other than the composer's), not "in any web area". So the chat send arrow is
+// inWebArea:false (not foreign) and gets picked; a preview Run is inWebArea:true
+// (foreign) and is rejected.
+do {
+    let cands = [
+        SendButtonCandidate(label: "", subrole: "", x: 900, y: 812, inWebArea: false), // send arrow, same web area
+        SendButtonCandidate(label: "Run gh-app", subrole: "", x: 960, y: 812, inWebArea: true), // preview Run, foreign
+    ]
+    check(pickSendButtonIndex(cands, composerY: cy, composerH: ch) == 0,
+          "R5: Electron chat send arrow (same web area) picked over a foreign preview Run")
+}
+// R5: if the ONLY candidate is a foreign-web-area control, resolve to nil (fall
+// back to AXConfirm/key-return, never press the preview's control).
+do {
+    let cands = [SendButtonCandidate(label: "Submit", subrole: "", x: 960, y: 812, inWebArea: true)]
+    check(pickSendButtonIndex(cands, composerY: cy, composerH: ch) == nil,
+          "R5: a foreign-web-area submit control is not pressed (nil -> key-return)")
+}
 
 if failures == 0 { print("\nALL PASS (send-resolution)"); exit(0) }
 else { print("\n\(failures) FAILURE(S)"); exit(1) }
