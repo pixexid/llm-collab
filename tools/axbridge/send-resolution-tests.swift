@@ -96,6 +96,49 @@ check(sendResolutionIsConfident("Submit message"), "confident: Submit")
 check(!sendResolutionIsConfident("Run app"), "not confident: Run app")
 check(!sendResolutionIsConfident("Record voice memo"), "not confident: Record voice memo")
 
+// --- Multi-window conversation-window selection (issue #77 / PR78 review) ---
+// Window 0 = auxiliary Browser/preview: a "Page URL" field + a web form input.
+// Window 1 = native chat: the "Prompt" composer. Every path (ring/verify/busy/
+// confirm/state) must select window 1 and ignore window 0.
+let auxWindow0: [EditableInfo] = [
+    EditableInfo(role: "AXTextField", title: "Page URL", placeholder: "", inWebArea: false),
+    EditableInfo(role: "AXTextArea", title: "", placeholder: "Full name", inWebArea: true),
+    EditableInfo(role: "AXTextArea", title: "", placeholder: "Gate codes, parking...", inWebArea: true),
+]
+let chatWindow1: [EditableInfo] = [
+    EditableInfo(role: "AXTextArea", title: "Prompt", placeholder: "Type / for commands", inWebArea: false),
+]
+
+// 8) Auto-selection picks the native chat window (1), never the aux window (0).
+check(pickConversationWindowIndex([auxWindow0, chatWindow1], preferIndex: nil) == 1,
+      "auto: selects native Prompt window 1, ignores aux window 0")
+
+// 9) Order-independent: native window first still resolves to it.
+check(pickConversationWindowIndex([chatWindow1, auxWindow0], preferIndex: nil) == 0,
+      "auto: native window found regardless of order")
+
+// 10) Aux window alone has NO native composer (Page URL + web inputs excluded).
+check(!windowHasNativeComposer(auxWindow0), "aux window has no native composer")
+check(windowHasNativeComposer(chatWindow1), "chat window has native composer")
+
+// 11) Explicit index wins — and explicit 0 is honored (distinct from unset/nil).
+check(pickConversationWindowIndex([auxWindow0, chatWindow1], preferIndex: 0) == 0,
+      "explicit index 0 honored (not treated as unset)")
+check(pickConversationWindowIndex([auxWindow0, chatWindow1], preferIndex: 1) == 1,
+      "explicit index 1 honored")
+check(pickConversationWindowIndex([auxWindow0, chatWindow1], preferIndex: 9) == 1,
+      "explicit out-of-range index clamps to last")
+
+// 12) No native composer anywhere -> falls back to 0 (not nil, unless no windows).
+check(pickConversationWindowIndex([auxWindow0], preferIndex: nil) == 0,
+      "no native composer -> window 0 fallback")
+check(pickConversationWindowIndex([], preferIndex: nil) == nil,
+      "no windows -> nil")
+
+// 13) Page URL field is not mistaken for a native composer.
+let urlOnly: [EditableInfo] = [EditableInfo(role: "AXTextField", title: "Page URL", placeholder: "", inWebArea: false)]
+check(!windowHasNativeComposer(urlOnly), "Page URL field alone is not a native composer")
+
 if failures == 0 { print("\nALL PASS (send-resolution)"); exit(0) }
 else { print("\n\(failures) FAILURE(S)"); exit(1) }
 }

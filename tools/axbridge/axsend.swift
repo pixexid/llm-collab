@@ -119,11 +119,12 @@ func setComposerText(_ composer: AXUIElement, pid: pid_t, _ text: String) -> Boo
     return true
 }
 
-func cmdType(app: String, text: String, submit: Bool, verify: Bool) -> Int32 {
+func cmdType(app: String, text: String, submit: Bool, verify: Bool, windowIndex: Int?) -> Int32 {
     guard AXIsProcessTrusted() else {
         FileHandle.standardError.write("AX not trusted; run `axsend check`.\n".data(using: .utf8)!); return 2
     }
-    guard let (el, pid) = appElement(named: app), let win = windows(el).first else {
+    guard let (el, pid) = appElement(named: app),
+          let win = resolveConversationWindow(el, preferIndex: windowIndex) else {
         FileHandle.standardError.write("app/window not found: \(app)\n".data(using: .utf8)!); return 1
     }
     guard let composer = findComposer(win) else {
@@ -147,7 +148,7 @@ func cmdType(app: String, text: String, submit: Bool, verify: Bool) -> Int32 {
         }
         func landed() -> Bool {
             Thread.sleep(forTimeInterval: 1.0)
-            let fresh = windows(appElement(named: app)?.0 ?? el).first ?? win
+            let fresh = resolveConversationWindow(appElement(named: app)?.0 ?? el, preferIndex: windowIndex) ?? win
             return messageLanded(fresh, sentText: text)
         }
         // Cmd+Return first — code-editor composers (ZCode) treat plain Return as
@@ -171,7 +172,7 @@ func cmdType(app: String, text: String, submit: Bool, verify: Bool) -> Int32 {
             }
         } else {
             Thread.sleep(forTimeInterval: 1.2)
-            let fresh = windows(appElement(named: app)?.0 ?? el).first ?? win
+            let fresh = resolveConversationWindow(appElement(named: app)?.0 ?? el, preferIndex: windowIndex) ?? win
             let v = findComposer(fresh).flatMap { str($0, kAXValueAttribute) } ?? ""
             if v.contains(String(text.prefix(20))) { print("VERIFIED: text is in the composer") }
             else { FileHandle.standardError.write("WARN: typed text not visible in composer\n".data(using: .utf8)!); return 7 }
@@ -282,6 +283,46 @@ func promptComposer(_ win: AXUIElement) -> AXUIElement? {
         let t = (str(e, kAXTitleAttribute) ?? str(e, kAXDescriptionAttribute) ?? "").lowercased()
         return t == "prompt"
     } ?? editables.last { placeholder($0).lowercased().contains("type / for commands") }
+}
+
+// The native composer element within a window: the Prompt field, else the last
+// non-web native text field that is not browser chrome (Page URL). Mirrors
+// windowHasNativeComposer / editableIsBrowserChrome from send-resolution.swift.
+func windowComposer(_ win: AXUIElement) -> AXUIElement? {
+    if let p = promptComposer(win) { return p }
+    func ph(_ e: AXUIElement) -> String { str(e, "AXPlaceholderValue") ?? "" }
+    func chrome(_ e: AXUIElement) -> Bool {
+        let t = (str(e, kAXTitleAttribute) ?? str(e, kAXDescriptionAttribute) ?? "").lowercased()
+        return t == "page url" || t.contains("url") || t == "address"
+    }
+    let editables = flatten(win).filter { isEditable($0) && !isInWebArea($0) && !chrome($0) }
+    return editables.last { role($0) == "AXTextArea" && !ph($0).isEmpty }
+        ?? editables.last { role($0) == "AXTextArea" }
+        ?? editables.last { role($0) == "AXTextField" && !ph($0).isEmpty }
+        ?? editables.last { role($0) == "AXTextField" }
+        ?? editables.last { !ph($0).isEmpty }
+        ?? editables.last
+}
+
+// Editable fields of a window as EditableInfo for the shared window picker.
+func editableInfos(_ win: AXUIElement) -> [EditableInfo] {
+    flatten(win).filter { isEditable($0) }.map { e in
+        EditableInfo(role: role(e),
+                     title: str(e, kAXTitleAttribute) ?? str(e, kAXDescriptionAttribute) ?? "",
+                     placeholder: str(e, "AXPlaceholderValue") ?? "",
+                     inWebArea: isInWebArea(e))
+    }
+}
+
+// THE shared conversation-window resolver. Every path — ring, state, confirm,
+// and each post-send refresh/delivered/busy check — resolves the window through
+// this so verification never drifts to an auxiliary (Browser/preview) window.
+// `preferIndex` is nil for auto/unset; an explicit index (incl. 0) always wins.
+func resolveConversationWindow(_ appEl: AXUIElement, preferIndex: Int?) -> AXUIElement? {
+    let wins = windows(appEl)
+    guard !wins.isEmpty else { return nil }
+    guard let idx = pickConversationWindowIndex(wins.map(editableInfos), preferIndex: preferIndex) else { return nil }
+    return wins[idx]
 }
 
 // MARK: - App lookup
@@ -479,11 +520,13 @@ func messageLanded(_ win: AXUIElement, sentText: String) -> Bool {
     }
 }
 
-func cmdState(app: String) -> Int32 {
+func cmdState(app: String, windowIndex: Int?) -> Int32 {
     guard let (el, _) = appElement(named: app) else {
         FileHandle.standardError.write("app not found: \(app)\n".data(using: .utf8)!); return 1
     }
-    guard let win = windows(el).first else { print("no windows"); return 1 }
+    // Same shared resolver as ring/confirm: inspect the native chat window, not
+    // an auxiliary Browser/preview window (PR78 review).
+    guard let win = resolveConversationWindow(el, preferIndex: windowIndex) else { print("no windows"); return 1 }
     print("processing: \(isProcessing(win) ? "YES (Stop button present)" : "no")")
     // The chat column shares the composer's x band; side panels (changes/diff,
     // sidebar) sit far left/right of it. Filter the display to that band so
@@ -533,7 +576,7 @@ func cmdTree(app: String, maxDepth: Int, editableOnly: Bool) -> Int32 {
     return 0
 }
 
-func cmdRing(app: String, text: String, submit: Bool, windowIndex: Int, dryRun: Bool, verify: Bool) -> Int32 {
+func cmdRing(app: String, text: String, submit: Bool, windowIndex: Int?, dryRun: Bool, verify: Bool) -> Int32 {
     guard AXIsProcessTrusted() else {
         FileHandle.standardError.write("AX not trusted; run `axsend check`.\n".data(using: .utf8)!)
         return 2
@@ -542,43 +585,17 @@ func cmdRing(app: String, text: String, submit: Bool, windowIndex: Int, dryRun: 
         FileHandle.standardError.write("app not found: \(app)\n".data(using: .utf8)!)
         return 1
     }
-    let wins = windows(el)
-    guard !wins.isEmpty else {
-        FileHandle.standardError.write("no windows for \(app)\n".data(using: .utf8)!)
-        return 1
-    }
-    // Stable conversation-window selection. An explicit --window-index still wins
-    // (0 is the historical default and means "unset" for most callers), but when
-    // it is 0 we auto-pick the window that actually holds the native chat
-    // composer — so callers no longer need to pass --window-index 1 just because
-    // an embedded Browser/preview spawned a second window.
-    func windowComposer(_ w: AXUIElement) -> AXUIElement? {
-        if let p = promptComposer(w) { return p }
-        let editables = flatten(w).filter { isEditable($0) && !isInWebArea($0) }
-        func ph(_ e: AXUIElement) -> String { str(e, "AXPlaceholderValue") ?? "" }
-        return editables.last { role($0) == "AXTextArea" && !ph($0).isEmpty }
-            ?? editables.last { role($0) == "AXTextArea" }
-            ?? editables.last { role($0) == "AXTextField" && !ph($0).isEmpty }
-            ?? editables.last { role($0) == "AXTextField" }
-            ?? editables.last { !ph($0).isEmpty }
-            ?? editables.last
-    }
-    let win: AXUIElement
-    let composer: AXUIElement
-    if windowIndex > 0 {
-        win = wins[min(windowIndex, wins.count - 1)]
-        guard let c = windowComposer(win) else {
-            FileHandle.standardError.write("no editable composer found in window\n".data(using: .utf8)!)
-            return 3
-        }
-        composer = c
-    } else if let (w, c) = wins.lazy.compactMap({ w in windowComposer(w).map { (w, $0) } }).first {
-        win = w
-        composer = c
-    } else {
-        FileHandle.standardError.write("no native chat composer found in any window (embedded web inputs are excluded)\n".data(using: .utf8)!)
+    // Stable conversation-window selection via the SHARED resolver. `windowIndex`
+    // is now an optional: nil = auto (pick the window holding the native chat
+    // composer, excluding Browser/preview windows); an explicit index (incl. 0)
+    // always wins. Every post-send refresh re-resolves through the same path so
+    // verification never drifts to an auxiliary window (PR78 review).
+    guard let win0 = resolveConversationWindow(el, preferIndex: windowIndex),
+          let composer = windowComposer(win0) else {
+        FileHandle.standardError.write("no native chat composer found (embedded web/URL inputs are excluded)\n".data(using: .utf8)!)
         return 3
     }
+    let win = win0
     // AXValue if the field accepts it, else key-event typing (Electron editors
     // like ZCode/Antigravity reject AXValue and need real keystrokes).
     if !setComposerText(composer, pid: pid, text) {
@@ -664,10 +681,16 @@ func cmdRing(app: String, text: String, submit: Bool, windowIndex: Int, dryRun: 
             }.count
         }
         let baseline = turnsWithNeedle(win)
+        // Re-resolve the SAME conversation window after an app re-fetch — never
+        // fall back to .first, which on a multi-window app inspects an auxiliary
+        // (Browser/preview) window and misreads delivery/busy state (PR78 review).
+        func freshConvWindow() -> AXUIElement {
+            let appEl = appElement(named: app)?.0 ?? el
+            return resolveConversationWindow(appEl, preferIndex: windowIndex) ?? win
+        }
         func deliveredFresh() -> Bool {
             Thread.sleep(forTimeInterval: 1.0)
-            let w = windows(appElement(named: app)?.0 ?? el).first ?? win
-            return turnsWithNeedle(w) > baseline
+            return turnsWithNeedle(freshConvWindow()) > baseline
         }
         func keyReturn(command: Bool = false) {
             AXUIElementSetAttributeValue(composer, kAXFocusedAttribute as CFString, kCFBooleanTrue)
@@ -686,7 +709,7 @@ func cmdRing(app: String, text: String, submit: Bool, windowIndex: Int, dryRun: 
         var method = ""
         var queued = false
         let maxAttempts = 3
-        func busyNow() -> Bool { isProcessing(windows(appElement(named: app)?.0 ?? el).first ?? win) }
+        func busyNow() -> Bool { isProcessing(freshConvWindow()) }
         attempts: for attempt in 1...maxAttempts {
             if attempt > 1 {
                 // A prior submit may have landed just after our check — re-confirm a
@@ -787,18 +810,18 @@ func cmdRing(app: String, text: String, submit: Bool, windowIndex: Int, dryRun: 
 //   absent (8):    the text is in neither (wrong window, or never typed)
 // Electron composers (ZCode/Antigravity) don't expose the draft via AXValue, so
 // "stuck" also matches the draft rendered as static text at/below the composer.
-func cmdConfirm(app: String, text: String, windowIndex: Int) -> Int32 {
+func cmdConfirm(app: String, text: String, windowIndex: Int?) -> Int32 {
     guard AXIsProcessTrusted() else {
         FileHandle.standardError.write("AX not trusted; run `axsend check`.\n".data(using: .utf8)!); return 2
     }
     guard let (el, _) = appElement(named: app) else {
         FileHandle.standardError.write("app not found: \(app)\n".data(using: .utf8)!); return 1
     }
-    let wins = windows(el)
-    guard !wins.isEmpty else {
+    // Same shared resolver as ring: confirm inspects the native chat window the
+    // ring targeted, not an auxiliary Browser/preview window (PR78 review).
+    guard let win = resolveConversationWindow(el, preferIndex: windowIndex) else {
         FileHandle.standardError.write("no windows for \(app)\n".data(using: .utf8)!); return 1
     }
-    let win = wins[max(0, min(windowIndex, wins.count - 1))]
     let needle = String(text.prefix(40))
     guard !needle.isEmpty else { print("nothing to confirm (empty text)"); return 0 }
 
@@ -835,6 +858,9 @@ guard args.count >= 2 else {
     print("  confirm --app <app> --text <sent-text>   read-only: delivered? (exit 0 delivered / 7 not delivered)")
     exit(64)
 }
+// --window-index is optional: absent = nil (auto-select the native chat window);
+// an explicit value (incl. 0) is honored. This distinguishes auto from index 0.
+let winIdx: Int? = argValue("--window-index").flatMap { Int($0) }
 switch args[1] {
 case "attrs":
     guard let app = argValue("--app") else { print("--app required"); exit(64) }
@@ -844,7 +870,7 @@ case "buttons":
     exit(cmdButtons(app: app))
 case "state":
     guard let app = argValue("--app") else { print("--app required"); exit(64) }
-    exit(cmdState(app: app))
+    exit(cmdState(app: app, windowIndex: winIdx))
 case "check":
     exit(cmdCheck())
 case "tree":
@@ -856,7 +882,7 @@ case "ring":
         print("--app and --text required"); exit(64)
     }
     exit(cmdRing(app: app, text: text, submit: hasFlag("--submit"),
-                 windowIndex: Int(argValue("--window-index") ?? "0") ?? 0, dryRun: hasFlag("--dry-run"),
+                 windowIndex: winIdx, dryRun: hasFlag("--dry-run"),
                  // Verify is ALWAYS enforced for --submit (auto-retry until a confirmed
                  // or queued delivery); there is no fire-and-forget opt-out.
                  verify: true))
@@ -864,12 +890,12 @@ case "type":
     guard let app = argValue("--app"), let text = argValue("--text") else {
         print("--app and --text required"); exit(64)
     }
-    exit(cmdType(app: app, text: text, submit: hasFlag("--submit"), verify: hasFlag("--verify")))
+    exit(cmdType(app: app, text: text, submit: hasFlag("--submit"), verify: hasFlag("--verify"), windowIndex: winIdx))
 case "confirm":
     guard let app = argValue("--app"), let text = argValue("--text") else {
         print("--app and --text required"); exit(64)
     }
-    exit(cmdConfirm(app: app, text: text, windowIndex: Int(argValue("--window-index") ?? "0") ?? 0))
+    exit(cmdConfirm(app: app, text: text, windowIndex: winIdx))
 default:
     print("unknown command: \(args[1])"); exit(64)
 }

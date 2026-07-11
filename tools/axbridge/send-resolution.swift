@@ -66,3 +66,49 @@ func sendResolutionIsConfident(_ label: String) -> Bool {
     let l = label.lowercased()
     return l.isEmpty || l.contains("send") || l.contains("submit")
 }
+
+// One editable field, flattened from a window, for window-selection decisions.
+struct EditableInfo {
+    let role: String        // AXTextArea / AXTextField / AXComboBox / ...
+    let title: String       // AXTitle or AXDescription
+    let placeholder: String // AXPlaceholderValue
+    let inWebArea: Bool     // descendant of an AXWebArea (Browser/preview content)
+}
+
+func editableIsNativePrompt(_ e: EditableInfo) -> Bool {
+    if e.inWebArea { return false }
+    if e.title.lowercased() == "prompt" { return true }
+    return e.placeholder.lowercased().contains("type / for commands")
+}
+
+private let nativeEditableRoles: Set<String> = ["AXTextArea", "AXTextField", "AXComboBox"]
+
+// The embedded Browser pane's address bar is a native (non-web) AXTextField but
+// is NEVER the chat composer. Exclude it (and any URL field) so a window that
+// only holds a Browser pane is not mistaken for a chat window.
+func editableIsBrowserChrome(_ e: EditableInfo) -> Bool {
+    let t = e.title.lowercased()
+    return t == "page url" || t.contains("url") || t == "address"
+}
+
+// A window holds a usable native composer if it has the Prompt identity, or a
+// non-web native text field that is not browser chrome.
+func windowHasNativeComposer(_ eds: [EditableInfo]) -> Bool {
+    eds.contains(where: editableIsNativePrompt)
+        || eds.contains { !$0.inWebArea && nativeEditableRoles.contains($0.role) && !editableIsBrowserChrome($0) }
+}
+
+// Choose the conversation window index across all app windows. Explicit index
+// (when the caller passes one) always wins — auto/unset is a distinct nil, so an
+// explicit index 0 is honored (fixes the "index 0 == unset" ambiguity). Auto
+// prefers the window holding the native "Prompt" composer, then any window with a
+// non-web native editable, then 0. Returns nil only when there are no windows.
+// The SAME resolver is used for ring/state/confirm and every post-send refresh so
+// verification never drifts to an auxiliary window (issue #77 multi-window).
+func pickConversationWindowIndex(_ windows: [[EditableInfo]], preferIndex: Int?) -> Int? {
+    guard !windows.isEmpty else { return nil }
+    if let idx = preferIndex { return max(0, min(idx, windows.count - 1)) }
+    if let i = windows.firstIndex(where: { $0.contains(where: editableIsNativePrompt) }) { return i }
+    if let i = windows.firstIndex(where: { windowHasNativeComposer($0) }) { return i }
+    return 0
+}
