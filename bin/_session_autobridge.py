@@ -549,8 +549,19 @@ def mark_message_processed(session: dict, message_path: str) -> None:
     save_session(session)
 
 
+def is_codex_self_target_message(message: dict) -> bool:
+    """Exclude every Codex self-target, including packets created before the guard."""
+    frontmatter = message.get("frontmatter", {})
+    return (
+        frontmatter.get("from") == "codex"
+        and frontmatter.get("to") == "codex"
+    )
+
+
 def should_skip_for_loop_protection(session: dict, message: dict) -> tuple[bool, str]:
     frontmatter = message.get("frontmatter", {})
+    if is_codex_self_target_message(message):
+        return True, "codex_self_target_thread_coordination"
     if frontmatter.get("autobridge_session_id") == session.get("session_id"):
         return True, "same_session_origin"
     if frontmatter.get("autobridge_hops", 0):

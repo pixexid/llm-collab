@@ -63,8 +63,14 @@ class AxsendEnsureTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             log.read_text().splitlines(),
-            ["ring --app ZCode --submit --verify --text wake"],
+            [
+                "turns --app ZCode --text wake",
+                "ring --app ZCode --submit --verify --text wake",
+            ],
         )
+        calls = log.read_text().splitlines()
+        self.assertEqual(sum(call.startswith("ring ") for call in calls), 1)
+        self.assertFalse(any(call.startswith("confirm ") for call in calls))
 
     def test_confirmed_ring_keeps_standalone_confirmation(self) -> None:
         # #given
@@ -80,6 +86,7 @@ class AxsendEnsureTest(unittest.TestCase):
         self.assertEqual(
             log.read_text().splitlines(),
             [
+                "turns --app ZCode --text wake",
                 "ring --app ZCode --submit --verify --text wake",
                 "confirm --app ZCode --text wake",
             ],

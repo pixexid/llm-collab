@@ -22,6 +22,7 @@ WATCH_INBOX_SCRIPT = REPO_ROOT / "bin" / "watch_inbox.py"
 sys.path.insert(0, str(REPO_ROOT / "bin"))
 
 import _session_autobridge as session_autobridge_lib
+from _helpers import parse_frontmatter
 
 
 def write(path: Path, content: str) -> None:
@@ -1435,6 +1436,139 @@ class SessionAutobridgeTest(unittest.TestCase):
         delivered_text = delivered_candidates[-1].read_text()
         self.assertIn("target_session_id: claude-bound-session-42", delivered_text)
 
+    def test_deliver_suppresses_codex_self_activation_for_amiga_and_non_amiga(self):
+        cases = (("amiga", "CHAT-SELF-AMIGA"), ("nuvyr", "CHAT-SELF-NUVYR"))
+        for project_id, chat_id in cases:
+            with self.subTest(project_id=project_id):
+                root = self.make_workspace()
+                self.add_agent(
+                    root,
+                    {
+                        "id": "codex",
+                        "display_name": "Codex",
+                        "activation": {
+                            "type": "cli_session",
+                            "watcher_enabled": True,
+                            "ax_app": "Codex",
+                        },
+                    },
+                )
+                chat_dir = self.create_chat(
+                    root,
+                    chat_dir_name=f"2026-07-12_codex-self-target__{chat_id}",
+                    chat_id=chat_id,
+                    project_id=project_id,
+                )
+
+                deliver_result = subprocess.run(
+                    [
+                        sys.executable,
+                        str(DELIVER_SCRIPT),
+                        "--chat",
+                        chat_id,
+                        "--from",
+                        "codex",
+                        "--to",
+                        "codex",
+                        "--project",
+                        project_id,
+                        "--title",
+                        "Codex self handoff",
+                        "--body-file",
+                        "-",
+                    ],
+                    cwd=root,
+                    text=True,
+                    input="Preserve this durable handoff without an app self-doorbell.",
+                    capture_output=True,
+                    check=True,
+                )
+
+                result_payload = json.loads(deliver_result.stdout.split("\n\n", 1)[0])
+                self.assertTrue(result_payload["thread_coordination_required"])
+                self.assertFalse(result_payload["autobridge_ready"])
+                self.assertFalse(result_payload["ax_doorbell_required"])
+                self.assertFalse(result_payload["desktop_bridge_required"])
+                self.assertFalse(result_payload["operator_relay_required"])
+                self.assertFalse(result_payload["activation_unavailable"])
+                self.assertIn("CODEX THREAD COORDINATION REQUIRED", deliver_result.stdout)
+                self.assertIn("read_thread", deliver_result.stdout)
+                self.assertIn("send_message_to_thread", deliver_result.stdout)
+                self.assertNotIn("AX DOORBELL REQUIRED", deliver_result.stdout)
+                self.assertNotIn("CLAUDE DESKTOP BRIDGE REQUIRED", deliver_result.stdout)
+                delivered_candidates = sorted(chat_dir.glob("*_to-codex_*.md"))
+                self.assertTrue(delivered_candidates)
+                self.assertIn(
+                    "Preserve this durable handoff without an app self-doorbell.",
+                    delivered_candidates[-1].read_text(),
+                )
+
+    def test_external_workers_can_still_ring_codex_for_amiga_and_non_amiga(self):
+        cases = (
+            ("amiga", "claude", "Claude", "CHAT-CLAUDE-CODEX"),
+            ("nuvyr", "zcode", "ZCode", "CHAT-ZCODE-CODEX"),
+        )
+        for project_id, sender_id, sender_display, chat_id in cases:
+            with self.subTest(project_id=project_id, sender_id=sender_id):
+                root = self.make_workspace()
+                self.add_agent(
+                    root,
+                    {
+                        "id": sender_id,
+                        "display_name": sender_display,
+                        "activation": {"type": "cli_session", "watcher_enabled": True},
+                    },
+                )
+                self.add_agent(
+                    root,
+                    {
+                        "id": "codex",
+                        "display_name": "Codex",
+                        "activation": {
+                            "type": "cli_session",
+                            "watcher_enabled": True,
+                            "ax_app": "Codex",
+                        },
+                    },
+                )
+                self.create_chat(
+                    root,
+                    chat_dir_name=f"2026-07-12_external-to-codex__{chat_id}",
+                    chat_id=chat_id,
+                    project_id=project_id,
+                )
+
+                deliver_result = subprocess.run(
+                    [
+                        sys.executable,
+                        str(DELIVER_SCRIPT),
+                        "--chat",
+                        chat_id,
+                        "--from",
+                        sender_id,
+                        "--to",
+                        "codex",
+                        "--project",
+                        project_id,
+                        "--title",
+                        "External handoff to root Codex",
+                        "--body-file",
+                        "-",
+                    ],
+                    cwd=root,
+                    text=True,
+                    input="Ring root Codex after preserving this packet.",
+                    capture_output=True,
+                    check=True,
+                )
+
+                result_payload = json.loads(deliver_result.stdout.split("\n\n", 1)[0])
+                self.assertFalse(result_payload["thread_coordination_required"])
+                self.assertTrue(result_payload["ax_doorbell_required"])
+                self.assertIn(f"[from {sender_id}]", result_payload["ax_doorbell_prompt"])
+                self.assertIn("AX DOORBELL REQUIRED", deliver_result.stdout)
+                self.assertIn('axsend-ensure ring --app "Codex"', deliver_result.stdout)
+
     def test_deliver_prefers_ax_doorbell_for_claude_cli_session_target(self):
         root = self.make_workspace()
         self.add_agent(
@@ -2159,6 +2293,210 @@ class SessionAutobridgeTest(unittest.TestCase):
         self.assertIn("summary_event: picked_up", note_text)
         self.assertIn("runtime_session_id: gemini-thread-1", note_text)
         self.assertIn("gemini picked up `Operator summary pickup`.", note_text)
+
+    def test_watch_inbox_skips_codex_self_target_but_activates_external_sender(self):
+        root = self.make_workspace()
+        self.add_agent(
+            root,
+            {
+                "id": "codex",
+                "display_name": "Codex",
+                "activation": {
+                    "type": "cli_session",
+                    "watcher_enabled": True,
+                    "ax_app": "Codex",
+                },
+            },
+        )
+        self.add_agent(
+            root,
+            {
+                "id": "claude",
+                "display_name": "Claude",
+                "activation": {"type": "cli_session", "watcher_enabled": True},
+            },
+        )
+        chat_dir = self.create_chat(
+            root,
+            chat_dir_name="2026-07-12_codex-watcher-guard__CHAT-CODEX-WATCH",
+            chat_id="CHAT-CODEX-WATCH",
+            project_id="amiga",
+        )
+        worker_script = root / "codex_watcher_runtime.py"
+        output_file = root / "codex_watcher_runtime_result.json"
+        write(
+            worker_script,
+            "\n".join(
+                [
+                    "import json",
+                    "import sys",
+                    "from pathlib import Path",
+                    "payload = json.load(sys.stdin)",
+                    "Path(sys.argv[1]).write_text(json.dumps(payload, indent=2))",
+                ]
+            ),
+        )
+        self.run_cli(
+            root,
+            "register",
+            "--session",
+            "SESSION-CODEX-WATCH",
+            "--agent",
+            "codex",
+            "--project",
+            "amiga",
+            "--chat",
+            "CHAT-CODEX-WATCH",
+            "--mode",
+            "auto-read",
+            "--wake-strategy",
+            "runtime_trigger",
+            "--runtime-family",
+            "codex_app",
+            "--runtime-session-id",
+            "codex-runtime-1",
+            "--runtime-session-source",
+            "first_read",
+            "--runtime-command",
+            json.dumps([sys.executable, str(worker_script), str(output_file)]),
+        )
+
+        self_delivery = subprocess.run(
+            [
+                sys.executable,
+                str(DELIVER_SCRIPT),
+                "--chat",
+                "CHAT-CODEX-WATCH",
+                "--from",
+                "codex",
+                "--to",
+                "codex",
+                "--project",
+                "amiga",
+                "--title",
+                "Codex self watcher guard",
+                "--sender-session-id",
+                "codex-root-1",
+                "--target-session-id",
+                "codex-runtime-1",
+                "--body-file",
+                "-",
+            ],
+            cwd=root,
+            text=True,
+            input="Keep this durable without waking a Codex runtime.",
+            capture_output=True,
+            check=True,
+        )
+        self_payload = json.loads(self_delivery.stdout.split("\n\n", 1)[0])
+        self.assertTrue(self_payload["thread_coordination_required"])
+        self.assertIsNone(self_payload["resolved_target_session_id"])
+        self_message = sorted(chat_dir.glob("*_to-codex_codex-self-watcher-guard.md"))[-1]
+        self_frontmatter, _ = parse_frontmatter(self_message.read_text())
+        self.assertTrue(self_frontmatter["autobridge_skip"])
+        self.assertEqual("codex_self_target", self_frontmatter["autobridge_skip_reason"])
+        self.assertIsNone(self_frontmatter["target_session_id"])
+
+        external_delivery = subprocess.run(
+            [
+                sys.executable,
+                str(DELIVER_SCRIPT),
+                "--chat",
+                "CHAT-CODEX-WATCH",
+                "--from",
+                "claude",
+                "--to",
+                "codex",
+                "--project",
+                "amiga",
+                "--title",
+                "External Codex watcher routing",
+                "--target-session-id",
+                "codex-runtime-1",
+                "--body-file",
+                "-",
+            ],
+            cwd=root,
+            text=True,
+            input="Wake the registered Codex runtime for this external handoff.",
+            capture_output=True,
+            check=True,
+        )
+        external_payload = json.loads(external_delivery.stdout.strip())
+        self.assertTrue(external_payload["autobridge_ready"])
+        self.assertFalse(external_payload["thread_coordination_required"])
+        external_message = sorted(
+            chat_dir.glob("*_to-codex_external-codex-watcher-routing.md")
+        )[-1]
+        external_frontmatter, _ = parse_frontmatter(external_message.read_text())
+        self.assertNotIn("autobridge_skip", external_frontmatter)
+        self.assertEqual("codex-runtime-1", external_frontmatter["target_session_id"])
+        legacy_self_rel = self.add_message(
+            root,
+            agent_id="codex",
+            chat_id="CHAT-CODEX-WATCH",
+            project_id="amiga",
+            title="Legacy Codex self packet",
+            sender_session_id="codex-legacy-root",
+            target_session_id="codex-runtime-1",
+            sender_agent_id="codex",
+        )
+
+        watcher_result = subprocess.run(
+            [
+                sys.executable,
+                str(WATCH_INBOX_SCRIPT),
+                "--me",
+                "codex",
+                "--max-polls",
+                "1",
+                "--json",
+            ],
+            cwd=root,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        watcher_events = [
+            json.loads(line) for line in watcher_result.stdout.splitlines() if line.strip()
+        ]
+        consumed_paths = {
+            event["message_path"]
+            for event in watcher_events
+            if event["event"] == "autobridge_consumed"
+        }
+        self_rel = str(self_message.relative_to(root))
+        external_rel = str(external_message.relative_to(root))
+        self.assertNotIn(self_rel, consumed_paths)
+        self.assertNotIn(legacy_self_rel, consumed_paths)
+        self.assertIn(external_rel, consumed_paths)
+
+        runtime_payload = json.loads(output_file.read_text())
+        self.assertEqual("claude", runtime_payload["message"]["from"])
+        self.assertEqual("External Codex watcher routing", runtime_payload["message"]["title"])
+
+        inbox = json.loads((root / "agents" / "codex" / "inbox.json").read_text())
+        self.assertIn(self_rel, inbox["unread"])
+        self.assertIn(legacy_self_rel, inbox["unread"])
+        self.assertIn(external_rel, inbox["read"])
+        event_log = root / "State" / "session_autobridge" / "events" / "SESSION-CODEX-WATCH.jsonl"
+        session_events = [json.loads(line) for line in event_log.read_text().splitlines()]
+        self.assertTrue(
+            any(
+                event.get("event") == "message_skipped"
+                and event.get("message_path") == self_rel
+                and event.get("reason") == "codex_self_target_thread_coordination"
+                for event in session_events
+            )
+        )
+        self.assertTrue(
+            any(
+                event.get("event") == "message_skipped"
+                and event.get("message_path") == legacy_self_rel
+                and event.get("reason") == "codex_self_target_thread_coordination"
+                for event in session_events
+            )
+        )
 
     def test_watch_inbox_autobridges_runtime_trigger_and_marks_message_read(self):
         root = self.make_workspace()

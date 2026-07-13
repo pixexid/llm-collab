@@ -11,6 +11,11 @@ dedicated desktop apps (e.g. Claude in `/Applications/Claude.app`, Codex in
 > needs something rings the other immediately. The heartbeat survives only as a
 > bounded, provisional **safety-fuse** (see below), not as the primary path.
 
+This desktop-app workflow applies only between distinct collaborator app
+identities. External workers such as Claude and ZCode may ring root Codex, and
+root Codex may ring those external apps. It does not apply to `codex -> codex`,
+root self-handoffs, or managed Codex workers.
+
 ## Communication tiers: llm-collab vs direct ax (choose by PURPOSE)
 
 Two channels, picked by what the message IS — not by convenience:
@@ -20,9 +25,10 @@ Two channels, picked by what the message IS — not by convenience:
   that must **survive a thread/context loss**. It is the mailbox of record; read
   at the worker's own pace from the inbox. If it needs to be remembered,
   recovered, or done-as-work → it goes here.
-- **Direct ax doorbell (real-time / thinking channel)** — discuss an
-  implementation plan, expand/explore ideas, get **feedback before opening an
-  issue or task** (don't open issues with zero prior planning/research), resolve
+- **Direct ax doorbell (real-time / thinking channel)** — discuss with a
+  distinct app collaborator an implementation plan, expand/explore ideas,
+  get **feedback before opening an issue or task** (don't open issues with zero
+  prior planning/research), resolve
   a **decision between workers**, quick coordination. Ephemeral — NOT in the
   mailbox, so never put a task/decision/handoff *only* in a direct ax msg.
 
@@ -33,14 +39,17 @@ and business calls — not technical implementation. Routing eng decisions to th
 operator stalls the work (they can't adjudicate them).
 
 **Queueing to a busy recipient is SAFE and expected.** Do NOT wait/poll for the
-other agent to be idle — ring them; if they're busy the message queues and is
-processed when their current turn ends. Queueing is *insurance* that the receiver
-gets the message even if it already saw it on another channel; it does **not**
-corrupt the running turn (only a forced steer would), and queued msgs are
-cancelable on the receiver side. Every worker can queue, in every direction.
-Sender discipline: **don't re-ring the same message repeatedly** (one queue is
-enough). Receiver discipline: when not running, read queued msgs; ignore a queued
-copy you already handled from the inbox while running.
+other agent to be idle merely because `Stop`, `Running`, or processing is
+visible. Send one AX doorbell on a supported distinct-app route; if the target
+is busy, the message queues and is processed when its current turn ends.
+Queueing is *insurance* that the receiver gets the message even if it already
+saw it on another channel; it does **not** corrupt the running turn (only a
+forced steer would), and queued messages are cancelable on the receiver side.
+The safety gate is a non-empty or unsafe composer, or the same pointer already
+present as a queued draft—not the busy state itself. Never stack or re-ring the
+same pointer; one queued copy is enough. Receiver discipline: when not running,
+read queued messages and ignore a queued copy already handled from the inbox.
+This policy does not authorize a Codex self-doorbell.
 
 **Verification is enforced, not optional.** `ring --submit` verifies by default.
 Exit 0 with `VERIFIED` confirms a visible conversation turn. Exit 0 with
@@ -52,6 +61,28 @@ re-ring that pointer, and do not claim exact-thread delivery until later
 A non-zero result is not delivered and permits one bounded retry. NEVER use
 Computer Use/screenshots to verify an AX send. Validated bidirectionally
 2026-06-21: Claude ⇄ Codex ⇄ ZCode ⇄ Antigravity.
+
+## Managed Codex and native subagent routing
+
+Managed Codex workers are not AX desktop-app recipients. Create the managed
+thread through Codex Thread Coordination, inspect it with `read_thread`, and
+send focused unblocks with `send_message_to_thread`. Keep the durable task/chat
+state in `llm-collab`, but never ring a Codex composer for `codex -> codex`.
+`deliver.py` preserves such a durable packet, suppresses app activation, and
+reports `thread_coordination_required: true`. The packet carries the persistent
+frontmatter guard `autobridge_skip: true` with
+`autobridge_skip_reason: codex_self_target`, and omits `target_session_id`.
+PM2 and manual `watch_inbox.py --me codex` dispatch both honor that sender-aware
+guard, leave the packet unread for durable recovery, and never runtime-trigger
+a Codex session from it. The watcher also excludes older `from: codex` /
+`to: codex` packets created before the persistent flag existed. External
+Claude/ZCode-to-Codex packets do not receive the guard and keep their normal AX
+or registered-runtime activation behavior.
+
+Native subagents use native subagent coordination for bounded local support.
+Do not route them through AX or Computer Use. Attended Computer Use is reserved
+for supervision and recovery of external collaborator desktop apps; it is not
+a managed-Codex task selector, wake path, or transport.
 
 ## Preferred doorbell transport: `axsend` (AX bridge, no focus steal)
 
@@ -76,10 +107,11 @@ ring once even when the recipient is busy. `VERIFIED` exit 0 is confirmed;
 or claiming exact-thread delivery. Use `--dry-run` first on any new app and
 `--verify` (non-zero means the text did not land; an empty composer is not proof
 of send). The idle input gate applies only to attended screenshot/keyboard
-Computer Use fallback. Any agent (Codex, Claude, Gemini, ZCode) can call
-`axsend-ensure` via shell. Needs the running process enabled in Privacy &
-Security → Accessibility. Falls back to screenshot Computer Use only if AX fails
-for a target. Full reference:
+Computer Use fallback. Any collaborator (Codex, Claude, Gemini, ZCode) can call
+`axsend-ensure` via shell for a distinct-app route, but Codex must not target
+itself or a managed Codex worker. Needs the running process enabled in Privacy &
+Security → Accessibility. Falls back to screenshot Computer Use only if AX
+fails for an external-app target. Full reference:
 `tools/axbridge/README.md` and the Claude Code `ax-doorbell` skill.
 
 **Validated across all four agent apps (2026-06-21):**
@@ -94,15 +126,17 @@ for a target. Full reference:
 `ring` adapts automatically: it writes via `AXValue`, and if the field rejects it
 (ZCode/Antigravity are Electron code-editor composers that silently drop `AXValue`
 writes) it falls back to real **key-event typing** (`CGEventPostToPid` +
-`keyboardSetUnicodeString`, no focus steal). So the doorbell is universal across
-every agent desktop app — no screenshots, no focus theft, in either direction.
+`keyboardSetUnicodeString`, no focus steal). The doorbell works in either
+direction between supported distinct app identities; that capability does not
+make it a Codex-to-Codex transport.
 
 ## Two channels: mailbox + doorbell
 
 - **Mailbox = `llm-collab` (durable source of truth).** Every task, handoff,
   blocker, clarification, decision, and piece of evidence is a file written with
   `deliver.py`. Nothing load-bearing lives only in an app's visible thread.
-- **Doorbell = AX (immediate, event-driven nudge).** The moment an agent finishes
+- **Doorbell = AX (immediate, event-driven nudge).** The moment one participant
+  in a distinct-app route finishes
   a task, hits a blocker, needs a clarification, or completes a handoff, it uses
   `axsend ring --submit --verify` to send one short, sender-tagged pointer to the
   durable packet. Screenshot/keyboard Computer Use is a fallback only when AX is
@@ -132,29 +166,37 @@ For task-grade work, in order:
 
 1. Write the durable instruction/handoff with `deliver.py` to `Chats/` and the
    recipient's `agents/<agent>/inbox.json`.
-2. Ring the recipient with `axsend ring --submit --verify --text "<pointer>"`
-   even if the recipient is busy. The one-line pointer may queue behind the
-   current turn, but the ring result must be classified as described below. Use
-   exactly **one short, sender-tagged, one-line pointer** to the exact
-   inbox/chat/message path as the `--text` value. Full context stays in the
-   durable packet, never in the visible prompt.
-4. Classify exit 0 by output: `VERIFIED` confirms delivery;
+2. If sender and recipient are both `codex`, stop app routing and use Thread
+   Coordination (`read_thread` / `send_message_to_thread`). Otherwise ring the
+   distinct external-app recipient with
+   `axsend ring --submit --verify --text "<pointer>"` even if the recipient is
+   busy. The one-line pointer may queue behind the current turn, but the ring
+   result must be classified as described below. Use exactly **one short,
+   sender-tagged, one-line pointer** to the exact inbox/chat/message path as the
+   `--text` value. Full context stays in the durable packet, never in the visible
+   prompt.
+3. Classify exit 0 by output: `VERIFIED` confirms delivery;
    `QUEUED (UNCONFIRMED)` does not. For queued-unconfirmed, keep the mailbox
    packet unresolved, record the blocker/follow-up, never re-ring, and wait for
    later `axsend confirm`, inbox consumption, or recipient handoff evidence. If
    `axsend` exits non-zero, run `axsend confirm`; if still absent, retry once or
    record the exact AX blocker in the mailbox.
-5. Use screenshot/keyboard Computer Use only as fallback when `axsend` is
-   unavailable. In that fallback path, pass the idle input gate before typing.
-6. Record the ring result in your own thread and, when relevant, in the mailbox.
+4. Use screenshot/keyboard Computer Use only as attended fallback or recovery
+   for an external collaborator app when `axsend` is unavailable or unsafe. In
+   that fallback path, pass the idle input gate before typing.
+5. Record the ring result in your own thread and, when relevant, in the mailbox.
 
 For non-task ad-hoc chat, the mailbox is optional, but a sender tag is still
-required. Prefer `axsend`; the idle gate applies only to screenshot/keyboard
-Computer Use fallback.
+required. Prefer `axsend` only on a supported distinct-app route; the idle gate
+applies only to attended screenshot/keyboard Computer Use fallback for an
+external collaborator app.
 
 ## Idle input gate (Computer Use fallback only)
 
-Never type over an active turn. Before sending, confirm ALL of:
+This gate applies only when attended screenshot/keyboard Computer Use must type
+into an external collaborator app. It does not apply to the focus-independent
+AX ring above: a visible `Stop` or processing state alone must not cause an AX
+idle wait. Before a Computer Use fallback send, confirm ALL of:
 
 - the recipient's active thread/sidebar row is not `Running`
 - the composer is empty and focused
