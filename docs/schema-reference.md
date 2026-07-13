@@ -1212,6 +1212,11 @@ Notes:
 - AX-capable `cli_session` workers configure `activation.ax_app`. For those
   sends, `deliver.py` reports `ax_doorbell_required` and prints the
   `axsend-ensure ring --submit --verify` command the sender should run.
+- `codex -> codex` is the sender-aware exception. `deliver.py` preserves the
+  durable packet, reports `thread_coordination_required: true`, and suppresses
+  dispatchable-runtime, AX, desktop-bridge, and operator-relay activation so a
+  managed worker can be inspected with `read_thread` and unblocked with
+  `send_message_to_thread`.
 - A terminal-only `cli_session` needs a dispatchable runtime session. Without
   either transport, `deliver.py` reports `activation_unavailable` instead of
   silently requesting operator relay.

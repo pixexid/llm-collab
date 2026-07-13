@@ -5,6 +5,13 @@ macOS Accessibility API (AXUIElement) — **no screenshots, no window raising, n
 focus stealing**. Built because screenshot-based computer-use grabs focus while
 the operator is working and misroutes keystrokes across overlapping windows.
 
+AX is a doorbell between distinct collaborator app identities. External
+workers such as Claude and ZCode may ring root Codex, and root Codex may ring an
+external worker. Never use AX for `codex -> codex`, a root self-handoff, or a
+managed Codex worker: use Codex Thread Coordination (`read_thread` /
+`send_message_to_thread`) instead. Native subagents use native subagent
+coordination, not an app doorbell.
+
 ## Build
 
 ```bash
@@ -184,17 +191,20 @@ The `type` command exposes key-typing directly: `axsend type --app <name>
 
 ## Computer Use supervision
 
-AX remains the routine doorbell for every collaborator, including Codex. It is
-the normal transport after a durable `deliver.py` packet and should not be
-disabled or bypassed merely because a desktop app needs recovery.
+AX remains the routine doorbell between distinct external collaborator apps,
+including an external worker ringing root Codex. It is the normal transport
+after a durable `deliver.py` packet for those routes and should not be disabled
+or bypassed merely because an external desktop app needs recovery. It is never
+a Codex-to-Codex or root-self transport.
 
-Codex exclusively owns attended Computer Use control of collaborator desktop
-apps. Use that supervisory path when the work requires visible state inspection,
-navigation, thread creation or switching, usage-limit handling, unsafe-composer
-recovery, or an unblock that the mailbox plus `axsend state` cannot safely
-resolve. Other collaborators continue to use durable packets plus AX and send
-Codex a durable intervention request instead of independently driving another
-agent's desktop UI.
+Codex exclusively owns attended Computer Use control of external collaborator
+desktop apps. Use that supervisory path when an external app requires visible
+state inspection, navigation, thread creation or switching, usage-limit
+handling, unsafe-composer recovery, or an unblock that the mailbox plus
+`axsend state` cannot safely resolve. Do not use Computer Use to select or route
+work to a Codex task. Other collaborators continue to use durable packets plus
+AX and send Codex a durable intervention request instead of independently
+driving another agent's desktop UI.
 
 Computer Use is a serialized control and recovery plane, not a replacement
 doorbell. Once Codex has restored a safe target/thread, normal delivery returns

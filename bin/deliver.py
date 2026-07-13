@@ -16,9 +16,11 @@ Writes the message to Chats/ (canonical record) and appends
 a pointer to the recipient's agents/{id}/inbox.json.
 
 If a CLI-session recipient explicitly configures activation.ax_app, prints an
-AX doorbell instruction. Projects may opt Claude into a desktop-bridge fallback
-for non-CLI targets. If the recipient has activation.type == "human_relay",
-prints a ready-to-paste handoff prompt for the human operator. Other unresolved
+AX doorbell instruction. Codex-to-Codex delivery is a deliberate exception:
+the durable packet is preserved, but app activation is suppressed in favor of
+Thread Coordination. Projects may opt Claude into a desktop-bridge fallback for
+non-CLI targets. If the recipient has activation.type == "human_relay", prints
+a ready-to-paste handoff prompt for the human operator. Other unresolved
 activation types report an explicit unavailable state.
 
 Usage:
@@ -158,10 +160,20 @@ def ax_doorbell_app(recipient_agent: dict) -> str | None:
     return ax_app.strip()
 
 
-def is_ax_doorbell_target(recipient_agent: dict, recipient_id: str) -> bool:
+def is_codex_self_target(sender_id: str, recipient_id: str) -> bool:
+    return sender_id == "codex" and recipient_id == "codex"
+
+
+def is_ax_doorbell_target(
+    recipient_agent: dict,
+    recipient_id: str,
+    *,
+    sender_id: str,
+) -> bool:
     activation_type = recipient_agent.get("activation", {}).get("type")
     return (
-        recipient_id != "operator"
+        not is_codex_self_target(sender_id, recipient_id)
+        and recipient_id != "operator"
         and activation_type == "cli_session"
         and ax_doorbell_app(recipient_agent) is not None
     )
@@ -178,6 +190,7 @@ def build_desktop_bridge_prompt(chat_id: str, recipient_id: str, message_path: P
 
 def main():
     args = parse_args()
+    thread_coordination_required = is_codex_self_target(args.sender, args.recipient)
 
     # Validate agents
     known = agent_ids()
@@ -233,12 +246,14 @@ def main():
             resolve_thread_pair_session_id(args.project, chat_id, args.recipient, args.sender)
             or resolve_bound_runtime_session_id(args.project, chat_id, args.recipient)
         )
-    autobridge_target = find_dispatchable_target_session(
-        agent_id=args.recipient,
-        project_id=args.project,
-        chat_id=chat_id,
-        target_session_id=args.target_session_id,
-    )
+    autobridge_target = None
+    if not thread_coordination_required:
+        autobridge_target = find_dispatchable_target_session(
+            agent_id=args.recipient,
+            project_id=args.project,
+            chat_id=chat_id,
+            target_session_id=args.target_session_id,
+        )
     autobridge_ready = autobridge_target is not None
 
     body = read_body(args.body_file)
@@ -313,7 +328,11 @@ def main():
     ax_doorbell_required = (
         args.recipient != "operator"
         and not autobridge_ready
-        and is_ax_doorbell_target(recipient_agent, args.recipient)
+        and is_ax_doorbell_target(
+            recipient_agent,
+            args.recipient,
+            sender_id=args.sender,
+        )
     )
     ax_doorbell_prompt = (
         f"[from {args.sender}] Read latest {args.recipient} packet in {chat_id}: {to_path.name}"
@@ -322,6 +341,7 @@ def main():
     )
     desktop_bridge_required = (
         args.recipient != "operator"
+        and not thread_coordination_required
         and not autobridge_ready
         and not ax_doorbell_required
         and is_claude_desktop_bridge_target(args.project, recipient_agent, args.recipient)
@@ -333,6 +353,7 @@ def main():
     )
     operator_relay_required = (
         args.recipient != "operator"
+        and not thread_coordination_required
         and not autobridge_ready
         and not desktop_bridge_required
         and not ax_doorbell_required
@@ -340,6 +361,7 @@ def main():
     )
     activation_unavailable = (
         args.recipient != "operator"
+        and not thread_coordination_required
         and not autobridge_ready
         and not desktop_bridge_required
         and not ax_doorbell_required
@@ -368,6 +390,7 @@ def main():
         "desktop_bridge_prompt": desktop_bridge_prompt,
         "ax_doorbell_required": ax_doorbell_required,
         "ax_doorbell_prompt": ax_doorbell_prompt,
+        "thread_coordination_required": thread_coordination_required,
         "activation_unavailable": activation_unavailable,
         "activation_unavailable_reason": activation_unavailable_reason,
         "resolved_target_session_id": args.target_session_id,
@@ -376,7 +399,23 @@ def main():
     }
     print(json.dumps(result, indent=2))
 
-    if desktop_bridge_required:
+    if thread_coordination_required:
+        border = "━" * 60
+        print(f"\n{border}")
+        print("🧭 CODEX THREAD COORDINATION REQUIRED")
+        print(border)
+        print()
+        print(
+            "The durable codex -> codex packet was written, but app activation "
+            "was intentionally suppressed."
+        )
+        print()
+        print("For a managed Codex worker, inspect it with read_thread and send focused")
+        print("unblocks with send_message_to_thread. Use native subagent coordination")
+        print("for bounded local support. Do not use AX or Computer Use to route this")
+        print("packet to a Codex task.")
+        print(border)
+    elif desktop_bridge_required:
         recipient_display = recipient_agent.get("display_name", args.recipient)
         border = "━" * 60
         print(f"\n{border}")

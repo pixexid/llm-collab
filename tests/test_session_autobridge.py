@@ -1435,6 +1435,139 @@ class SessionAutobridgeTest(unittest.TestCase):
         delivered_text = delivered_candidates[-1].read_text()
         self.assertIn("target_session_id: claude-bound-session-42", delivered_text)
 
+    def test_deliver_suppresses_codex_self_activation_for_amiga_and_non_amiga(self):
+        cases = (("amiga", "CHAT-SELF-AMIGA"), ("nuvyr", "CHAT-SELF-NUVYR"))
+        for project_id, chat_id in cases:
+            with self.subTest(project_id=project_id):
+                root = self.make_workspace()
+                self.add_agent(
+                    root,
+                    {
+                        "id": "codex",
+                        "display_name": "Codex",
+                        "activation": {
+                            "type": "cli_session",
+                            "watcher_enabled": True,
+                            "ax_app": "Codex",
+                        },
+                    },
+                )
+                chat_dir = self.create_chat(
+                    root,
+                    chat_dir_name=f"2026-07-12_codex-self-target__{chat_id}",
+                    chat_id=chat_id,
+                    project_id=project_id,
+                )
+
+                deliver_result = subprocess.run(
+                    [
+                        sys.executable,
+                        str(DELIVER_SCRIPT),
+                        "--chat",
+                        chat_id,
+                        "--from",
+                        "codex",
+                        "--to",
+                        "codex",
+                        "--project",
+                        project_id,
+                        "--title",
+                        "Codex self handoff",
+                        "--body-file",
+                        "-",
+                    ],
+                    cwd=root,
+                    text=True,
+                    input="Preserve this durable handoff without an app self-doorbell.",
+                    capture_output=True,
+                    check=True,
+                )
+
+                result_payload = json.loads(deliver_result.stdout.split("\n\n", 1)[0])
+                self.assertTrue(result_payload["thread_coordination_required"])
+                self.assertFalse(result_payload["autobridge_ready"])
+                self.assertFalse(result_payload["ax_doorbell_required"])
+                self.assertFalse(result_payload["desktop_bridge_required"])
+                self.assertFalse(result_payload["operator_relay_required"])
+                self.assertFalse(result_payload["activation_unavailable"])
+                self.assertIn("CODEX THREAD COORDINATION REQUIRED", deliver_result.stdout)
+                self.assertIn("read_thread", deliver_result.stdout)
+                self.assertIn("send_message_to_thread", deliver_result.stdout)
+                self.assertNotIn("AX DOORBELL REQUIRED", deliver_result.stdout)
+                self.assertNotIn("CLAUDE DESKTOP BRIDGE REQUIRED", deliver_result.stdout)
+                delivered_candidates = sorted(chat_dir.glob("*_to-codex_*.md"))
+                self.assertTrue(delivered_candidates)
+                self.assertIn(
+                    "Preserve this durable handoff without an app self-doorbell.",
+                    delivered_candidates[-1].read_text(),
+                )
+
+    def test_external_workers_can_still_ring_codex_for_amiga_and_non_amiga(self):
+        cases = (
+            ("amiga", "claude", "Claude", "CHAT-CLAUDE-CODEX"),
+            ("nuvyr", "zcode", "ZCode", "CHAT-ZCODE-CODEX"),
+        )
+        for project_id, sender_id, sender_display, chat_id in cases:
+            with self.subTest(project_id=project_id, sender_id=sender_id):
+                root = self.make_workspace()
+                self.add_agent(
+                    root,
+                    {
+                        "id": sender_id,
+                        "display_name": sender_display,
+                        "activation": {"type": "cli_session", "watcher_enabled": True},
+                    },
+                )
+                self.add_agent(
+                    root,
+                    {
+                        "id": "codex",
+                        "display_name": "Codex",
+                        "activation": {
+                            "type": "cli_session",
+                            "watcher_enabled": True,
+                            "ax_app": "Codex",
+                        },
+                    },
+                )
+                self.create_chat(
+                    root,
+                    chat_dir_name=f"2026-07-12_external-to-codex__{chat_id}",
+                    chat_id=chat_id,
+                    project_id=project_id,
+                )
+
+                deliver_result = subprocess.run(
+                    [
+                        sys.executable,
+                        str(DELIVER_SCRIPT),
+                        "--chat",
+                        chat_id,
+                        "--from",
+                        sender_id,
+                        "--to",
+                        "codex",
+                        "--project",
+                        project_id,
+                        "--title",
+                        "External handoff to root Codex",
+                        "--body-file",
+                        "-",
+                    ],
+                    cwd=root,
+                    text=True,
+                    input="Ring root Codex after preserving this packet.",
+                    capture_output=True,
+                    check=True,
+                )
+
+                result_payload = json.loads(deliver_result.stdout.split("\n\n", 1)[0])
+                self.assertFalse(result_payload["thread_coordination_required"])
+                self.assertTrue(result_payload["ax_doorbell_required"])
+                self.assertIn(f"[from {sender_id}]", result_payload["ax_doorbell_prompt"])
+                self.assertIn("AX DOORBELL REQUIRED", deliver_result.stdout)
+                self.assertIn('axsend-ensure ring --app "Codex"', deliver_result.stdout)
+
     def test_deliver_prefers_ax_doorbell_for_claude_cli_session_target(self):
         root = self.make_workspace()
         self.add_agent(
