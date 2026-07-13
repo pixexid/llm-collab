@@ -107,6 +107,7 @@ def build_message(args, body: str, chat_id: str) -> str:
     tags = [t.strip() for t in args.tags.split(",") if t.strip()]
     repo_targets = [r.strip() for r in args.repo_targets.split(",") if r.strip()]
     path_targets = [p.strip() for p in args.path_targets.split(",") if p.strip()]
+    codex_self_target = is_codex_self_target(args.sender, args.recipient)
 
     fm = {
         "chat_id": chat_id,
@@ -125,6 +126,9 @@ def build_message(args, body: str, chat_id: str) -> str:
         "path_targets": path_targets,
         "sent_utc": utc_iso(),
     }
+    if codex_self_target:
+        fm["autobridge_skip"] = True
+        fm["autobridge_skip_reason"] = "codex_self_target"
     return dump_frontmatter(fm, body or "(no body)")
 
 
@@ -235,17 +239,22 @@ def main():
         )
         sys.exit(1)
 
-    if args.sender_session_id is None:
-        args.sender_session_id = (
-            resolve_thread_pair_session_id(args.project, chat_id, args.sender, args.recipient)
-            or resolve_bound_runtime_session_id(args.project, chat_id, args.sender)
-        )
+    if thread_coordination_required:
+        # A Codex self-target is durable history only. Never retain a runtime
+        # target that a later watcher could interpret as an app wake request.
+        args.target_session_id = None
+    else:
+        if args.sender_session_id is None:
+            args.sender_session_id = (
+                resolve_thread_pair_session_id(args.project, chat_id, args.sender, args.recipient)
+                or resolve_bound_runtime_session_id(args.project, chat_id, args.sender)
+            )
 
-    if args.target_session_id is None:
-        args.target_session_id = (
-            resolve_thread_pair_session_id(args.project, chat_id, args.recipient, args.sender)
-            or resolve_bound_runtime_session_id(args.project, chat_id, args.recipient)
-        )
+        if args.target_session_id is None:
+            args.target_session_id = (
+                resolve_thread_pair_session_id(args.project, chat_id, args.recipient, args.sender)
+                or resolve_bound_runtime_session_id(args.project, chat_id, args.recipient)
+            )
     autobridge_target = None
     if not thread_coordination_required:
         autobridge_target = find_dispatchable_target_session(
@@ -289,7 +298,7 @@ def main():
     if first_time_awareness:
         set_collab_awareness(args.recipient, to_path)
 
-    if args.sender_session_id or args.target_session_id:
+    if not thread_coordination_required and (args.sender_session_id or args.target_session_id):
         update_thread_pair(
             args.project,
             chat_id,

@@ -1216,7 +1216,12 @@ Notes:
   durable packet, reports `thread_coordination_required: true`, and suppresses
   dispatchable-runtime, AX, desktop-bridge, and operator-relay activation so a
   managed worker can be inspected with `read_thread` and unblocked with
-  `send_message_to_thread`.
+  `send_message_to_thread`. Its message frontmatter records
+  `autobridge_skip: true`, `autobridge_skip_reason: codex_self_target`, and a
+  null `target_session_id`. Session dispatch excludes every `from: codex` /
+  `to: codex` packet, including durable packets created before the flag existed,
+  records a `codex_self_target_thread_coordination` skip, and leaves the packet
+  unread.
 - A terminal-only `cli_session` needs a dispatchable runtime session. Without
   either transport, `deliver.py` reports `activation_unavailable` instead of
   silently requesting operator relay.

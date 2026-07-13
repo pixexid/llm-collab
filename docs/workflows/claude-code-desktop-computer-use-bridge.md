@@ -39,15 +39,17 @@ and business calls — not technical implementation. Routing eng decisions to th
 operator stalls the work (they can't adjudicate them).
 
 **Queueing to a busy recipient is SAFE and expected.** Do NOT wait/poll for the
-other agent to be idle — ring them; if they're busy the message queues and is
-processed when their current turn ends. Queueing is *insurance* that the receiver
-gets the message even if it already saw it on another channel; it does **not**
-corrupt the running turn (only a forced steer would), and queued msgs are
-cancelable on the receiver side. Supported distinct-app senders can queue in
-either direction. Sender discipline: **don't re-ring the same message
-repeatedly** (one queue is enough). Receiver discipline: when not running, read
-queued msgs; ignore a queued copy you already handled from the inbox while
-running. This rule does not authorize a Codex self-doorbell.
+other agent to be idle merely because `Stop`, `Running`, or processing is
+visible. Send one AX doorbell on a supported distinct-app route; if the target
+is busy, the message queues and is processed when its current turn ends.
+Queueing is *insurance* that the receiver gets the message even if it already
+saw it on another channel; it does **not** corrupt the running turn (only a
+forced steer would), and queued messages are cancelable on the receiver side.
+The safety gate is a non-empty or unsafe composer, or the same pointer already
+present as a queued draft—not the busy state itself. Never stack or re-ring the
+same pointer; one queued copy is enough. Receiver discipline: when not running,
+read queued messages and ignore a queued copy already handled from the inbox.
+This policy does not authorize a Codex self-doorbell.
 
 **Verification is enforced, not optional.** `ring --submit` verifies by default.
 Exit 0 with `VERIFIED` confirms a visible conversation turn. Exit 0 with
@@ -67,7 +69,15 @@ thread through Codex Thread Coordination, inspect it with `read_thread`, and
 send focused unblocks with `send_message_to_thread`. Keep the durable task/chat
 state in `llm-collab`, but never ring a Codex composer for `codex -> codex`.
 `deliver.py` preserves such a durable packet, suppresses app activation, and
-reports `thread_coordination_required: true`.
+reports `thread_coordination_required: true`. The packet carries the persistent
+frontmatter guard `autobridge_skip: true` with
+`autobridge_skip_reason: codex_self_target`, and omits `target_session_id`.
+PM2 and manual `watch_inbox.py --me codex` dispatch both honor that sender-aware
+guard, leave the packet unread for durable recovery, and never runtime-trigger
+a Codex session from it. The watcher also excludes older `from: codex` /
+`to: codex` packets created before the persistent flag existed. External
+Claude/ZCode-to-Codex packets do not receive the guard and keep their normal AX
+or registered-runtime activation behavior.
 
 Native subagents use native subagent coordination for bounded local support.
 Do not route them through AX or Computer Use. Attended Computer Use is reserved
@@ -183,7 +193,10 @@ external collaborator app.
 
 ## Idle input gate (Computer Use fallback only)
 
-Never type over an active turn. Before sending, confirm ALL of:
+This gate applies only when attended screenshot/keyboard Computer Use must type
+into an external collaborator app. It does not apply to the focus-independent
+AX ring above: a visible `Stop` or processing state alone must not cause an AX
+idle wait. Before a Computer Use fallback send, confirm ALL of:
 
 - the recipient's active thread/sidebar row is not `Running`
 - the composer is empty and focused

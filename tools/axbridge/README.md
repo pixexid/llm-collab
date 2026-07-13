@@ -10,7 +10,9 @@ workers such as Claude and ZCode may ring root Codex, and root Codex may ring an
 external worker. Never use AX for `codex -> codex`, a root self-handoff, or a
 managed Codex worker: use Codex Thread Coordination (`read_thread` /
 `send_message_to_thread`) instead. Native subagents use native subagent
-coordination, not an app doorbell.
+coordination, not an app doorbell. `deliver.py` persists a sender-aware
+`autobridge_skip` guard on a `codex -> codex` packet so PM2 or manual inbox
+watchers cannot later turn that durable history into a runtime wake.
 
 ## Build
 
@@ -140,12 +142,16 @@ out of range, REJECTED (not clamped). Absent is not the same as `0`.
   `QUEUED (UNCONFIRMED)` and `7` when the message did not land. A busy recipient
   is not an AX ring failure, but queued-unconfirmed is not exact-thread delivery
   proof.
-- **Busy-safe queueing:** `ring` is allowed while the recipient is busy. It
-  submits one message and must not be repeatedly re-rung. `VERIFIED` confirms
+- **Busy-safe queueing:** `ring` is allowed while a distinct external
+  collaborator is busy. A visible `Stop`, `Running`, or processing state is not
+  an idle-wait requirement. Submit exactly one message; block only when the
+  composer is non-empty/unsafe or the same pointer is already queued, and never
+  stack or re-ring that pointer behind the running turn. `VERIFIED` confirms
   delivery; `QUEUED (UNCONFIRMED)` preserves the mailbox/follow-up but cannot be
   reported as exact-thread delivery. `tree`/`state` are optional diagnostics,
   not AX ring idle gates. The idle input gate applies only to attended
-  screenshot/keyboard Computer Use fallback.
+  screenshot/keyboard Computer Use fallback. This does not permit a
+  Codex-to-Codex AX doorbell.
 
 ## Per-app support matrix (composer identity revalidated 2026-07-11, PR78 R4/R5)
 
