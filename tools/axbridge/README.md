@@ -125,6 +125,9 @@ out of range, REJECTED (not clamped). Absent is not the same as `0`.
   app resolves to `.unknown` and FAILS CLOSED — it never silently inherits
   Claude's matching. Every path (ring/state/type/confirm + each post-send refresh)
   re-resolves by this identity and fails closed on loss (no stale-window fallback).
+  A resolver failure reports `no proven chat window/composer`; it does not imply
+  that the application exposes zero AX windows. Use `tree --app ...` when the
+  distinction between app-window enumeration and composer identity matters.
 - **Send button:** geometry-based — the rightmost unlabeled `AXButton` (the send
   arrow) in the composer's own toolbar band, scoped to the composer's `composerPane`
   and to the composer's OWN chat `AXWebArea`. A button in a DIFFERENT (foreign)
