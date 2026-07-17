@@ -183,6 +183,20 @@ let codexChat: [EditableInfo] = [
     EditableInfo(role: "AXTextArea", title: "Ask for follow-up changes",
                  placeholder: "⏎Ask for follow-up changes", inWebArea: true),
 ]
+let updatedCodexChat: [EditableInfo] = [
+    EditableInfo(role: "AXTextArea", title: "\nDo anything",
+                 placeholder: "⏎Do anything", inWebArea: true),
+]
+check(profileFor("com.openai.codex") == .codex,
+      "configured Codex bundle ID selects the Codex profile")
+check(profileFor("Codex") == .codex,
+      "legacy Codex app name selects the Codex profile")
+check(profileFor("ChatGPT") == .codex,
+      "updated localized ChatGPT app name selects the Codex profile")
+check(profileFor("Claude") == .claude,
+      "Claude app name remains isolated to the Claude profile")
+check(profileFor("unknown-electron-app") == .unknown,
+      "unrecognized app name remains fail-closed")
 
 // R4-1: Codex two same-title windows -> only the chat window (index 1) resolves.
 check(pickConversationWindow([codexOverlay, codexChat], preferIndex: nil, profile: .codex) == .index(1),
@@ -190,6 +204,12 @@ check(pickConversationWindow([codexOverlay, codexChat], preferIndex: nil, profil
 // R4-2: reordered (chat first) still resolves by identity, not position.
 check(pickConversationWindow([codexChat, codexOverlay], preferIndex: nil, profile: .codex) == .index(0),
       "R4: Codex chat-first -> picks index 0 by composer identity")
+check(pickConversationWindow([codexOverlay, updatedCodexChat], preferIndex: nil, profile: .codex) == .index(1),
+      "Codex 2026-07-16 Do anything composer resolves under the Codex profile")
+check(!editableIsNativeComposer(EditableInfo(role: "AXButton", title: "Do anything", placeholder: "", inWebArea: true), .codex),
+      "Codex Do anything identity still requires AXTextArea")
+check(pickConversationWindow([updatedCodexChat], preferIndex: nil, profile: .zcode) == .none,
+      "Codex Do anything identity does not widen the ZCode profile")
 // R4-3: missing Codex composer (both overlay/shell) -> none (fail closed).
 check(pickConversationWindow([codexOverlay, codexOverlay], preferIndex: nil, profile: .codex) == .none,
       "R4: Codex with no follow-up composer -> none (fail closed, never window 0)")

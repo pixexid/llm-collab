@@ -117,9 +117,11 @@ out of range, REJECTED (not clamped). Absent is not the same as `0`.
 - **Composer (PR78 R4/R5 — app-profile identity):** the composer is identified by
   its app-specific field identity, NOT web-area membership (Electron renders the
   native composer inside an `AXWebArea`). `profileFor(--app)` selects the profile:
-  Claude = `AXTextArea` identity **"Prompt"**; Codex/ZCode = `AXTextArea` identity
-  **"Ask for follow-up changes"** (Codex's two same-title "ChatGPT" windows
-  disambiguate by this composer identity, not the window title). An UNRECOGNIZED
+  Claude = `AXTextArea` identity **"Prompt"**; ZCode and older Codex builds use
+  **"Ask for follow-up changes"**; updated Codex Desktop builds use **"Do
+  anything"** while exposing localized app name `ChatGPT` and bundle
+  `com.openai.codex`. Codex's same-title windows disambiguate by composer
+  identity, not window title. An UNRECOGNIZED
   app resolves to `.unknown` and FAILS CLOSED — it never silently inherits
   Claude's matching. Every path (ring/state/type/confirm + each post-send refresh)
   re-resolves by this identity and fails closed on loss (no stale-window fallback).
@@ -162,7 +164,7 @@ tries the send button, `AXConfirm`, and a posted Return.
 
 | App | Composer identity | Submit | Status (2026-07-11) |
 |-----|-------------------|--------|---------------------|
-| **Codex** | `AXTextArea` "Ask for follow-up changes" (bundle `com.openai.codex`) | send-arrow `AXPress` (same chat web area) | ✅ resolves + confirmed delivery |
+| **Codex** | `AXTextArea` "Ask for follow-up changes" or "Do anything" (bundle `com.openai.codex`, localized app name may be `ChatGPT`) | send-arrow `AXPress` (same chat web area) | ✅ resolves + confirmed delivery |
 | **Claude Desktop** | `AXTextArea` "Prompt" | `key-return` fallback | ✅ resolves, no regression |
 | **ZCode** | `AXTextArea` "Ask for follow-up changes" | "Send" button | ✅ resolves; `Send` dry-run target |
 | **Antigravity / Gemini** | ❌ no profile yet → `.unknown` | — | ⚠️ **FAILS CLOSED** — AX doorbell unsupported pending live composer-identity capture |

@@ -79,9 +79,10 @@ struct EditableInfo {
 // whole UI (incl. the native composer) is under an AXWebArea, so a composer is
 // identified STRICTLY by its app-specific field identity — never by web-area
 // membership. Live AX evidence (2026-07-11): Claude composer = AXTextArea
-// identity "Prompt" (+ "Type / for commands"); Codex AND ZCode composer =
-// AXTextArea identity "Ask for follow-up changes" (they are disambiguated by
-// app/bundle upstream, not by this string). The DOM/CSS fingerprints Codex
+// identity "Prompt" (+ "Type / for commands"); ZCode and older Codex builds =
+// AXTextArea identity "Ask for follow-up changes". Codex Desktop 2026-07-16
+// (bundle com.openai.codex, localized app name "ChatGPT") changed that identity
+// to "Do anything". The DOM/CSS fingerprints Codex
 // proposed (ProseMirror class, composer-surface-chrome ancestor) are NOT exposed
 // via AXUIElement, so the readable field identity is the stable key.
 enum ComposerProfile: Equatable {
@@ -95,6 +96,17 @@ enum ComposerProfile: Equatable {
     case unknown
 }
 
+// Map the caller's --app value to its composer identity profile. Keep this in
+// the pure resolver module so configured bundle IDs and localized aliases are
+// covered by deterministic tests rather than only by live AX probes.
+func profileFor(_ app: String) -> ComposerProfile {
+    let a = app.lowercased()
+    if a.contains("codex") || a == "chatgpt" { return .codex }
+    if a.contains("zcode") { return .zcode }
+    if a.contains("claude") { return .claude }
+    return .unknown
+}
+
 // Is this editable THIS profile's native chat composer? Browser chrome (Page
 // URL) and generic embedded form fields never match, because none carry the
 // app's composer identity. Zero or multiple matches must fail closed upstream.
@@ -106,10 +118,18 @@ func editableIsNativeComposer(_ e: EditableInfo, _ profile: ComposerProfile) -> 
     case .claude:
         if id == "prompt" || id.hasPrefix("prompt ") || id.hasSuffix(" prompt") { return true }
         return id.contains("type / for commands") || val.contains("type / for commands")
-    case .codex, .zcode:
-        // Codex/ZCode composer: AXTextArea whose non-draft field identity is
-        // "Ask for follow-up changes" (the value may prefix a ⏎ glyph). Require
-        // the AXTextArea role so a same-named button/label can't match.
+    case .codex:
+        // Codex composer: retain the older identity and accept the 2026-07-16
+        // Desktop identity. Require AXTextArea so same-named buttons/labels do
+        // not match. Profile selection remains app/bundle-scoped upstream.
+        guard e.role == "AXTextArea" else { return false }
+        return id.contains("ask for follow-up changes")
+            || val.contains("ask for follow-up changes")
+            || id.trimmingCharacters(in: .whitespacesAndNewlines) == "do anything"
+            || val.trimmingCharacters(in: .whitespacesAndNewlines).hasSuffix("do anything")
+    case .zcode:
+        // ZCode still exposes the older follow-up identity. Keep it isolated
+        // from Codex aliases so an unrelated editable cannot become its target.
         guard e.role == "AXTextArea" else { return false }
         return id.contains("ask for follow-up changes") || val.contains("ask for follow-up changes")
     case .unknown:
