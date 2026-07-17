@@ -345,20 +345,6 @@ func composerPane(_ composer: AXUIElement) -> AXUIElement {
 // (AXTextArea titled/described "Prompt", or its "Type / for commands"
 // placeholder), and NOT inside a web area. Falls back to nil so callers can use
 // their looser role-based pick (still web-area-excluded).
-// Map the caller's --app name to its composer identity profile (PR78 R4/R5).
-// Keyed off the invocation string so `--app Codex` (bundle com.openai.codex,
-// localized "ChatGPT"), `--app ZCode`, and `--app Claude` resolve their own
-// composer identity. An UNRECOGNIZED app returns `.unknown` and FAILS CLOSED —
-// it must NOT silently inherit Claude's "Prompt" matching (PR78 R5). Add an
-// explicit profile with live composer evidence to support a new app.
-func profileFor(_ app: String) -> ComposerProfile {
-    let a = app.lowercased()
-    if a.contains("codex") { return .codex }
-    if a.contains("zcode") { return .zcode }
-    if a.contains("claude") { return .claude }
-    return .unknown
-}
-
 func promptComposer(_ win: AXUIElement, _ profile: ComposerProfile = .claude) -> AXUIElement? {
     // Match the SAME identity the pure picker uses (editableIsNativeComposer),
     // built from fieldIdentity (title/desc/placeholder/help) + value. Do NOT
@@ -621,7 +607,10 @@ func cmdState(app: String, windowIndex: Int?) -> Int32 {
     let profile = profileFor(app)
     // Same shared resolver as ring/confirm: inspect the native chat window, not
     // an auxiliary Browser/preview window (PR78 review).
-    guard let win = resolveConversationWindow(el, preferIndex: windowIndex, profile: profile) else { print("no windows"); return 1 }
+    guard let win = resolveConversationWindow(el, preferIndex: windowIndex, profile: profile) else {
+        print("no proven chat window/composer for \(app)")
+        return 1
+    }
     print("processing: \(isProcessing(win) ? "YES (Stop button present)" : "no")")
     // The chat column shares the composer's x band; side panels (changes/diff,
     // sidebar) and an embedded Browser pane sit far left/right of it. Filter to
@@ -981,7 +970,7 @@ func cmdTurns(app: String, text: String, windowIndex: Int?) -> Int32 {
     }
     let profile = profileFor(app)
     guard let win = resolveConversationWindow(el, preferIndex: windowIndex, profile: profile) else {
-        FileHandle.standardError.write("no windows for \(app)\n".data(using: .utf8)!); print("0"); return 1
+        FileHandle.standardError.write("no proven chat window/composer for \(app)\n".data(using: .utf8)!); print("0"); return 1
     }
     let needle = String(text.prefix(40))
     guard !needle.isEmpty else { print("0"); return 0 }
@@ -1006,7 +995,7 @@ func cmdConfirm(app: String, text: String, windowIndex: Int?) -> Int32 {
     // Same shared resolver as ring: confirm inspects the native chat window the
     // ring targeted, not an auxiliary Browser/preview window (PR78 review).
     guard let win = resolveConversationWindow(el, preferIndex: windowIndex, profile: profileFor(app)) else {
-        FileHandle.standardError.write("no windows for \(app)\n".data(using: .utf8)!); return 1
+        FileHandle.standardError.write("no proven chat window/composer for \(app)\n".data(using: .utf8)!); return 1
     }
     let needle = String(text.prefix(40))
     guard !needle.isEmpty else { print("nothing to confirm (empty text)"); return 0 }
