@@ -112,6 +112,9 @@ out of range, REJECTED (not clamped). Absent is not the same as `0`.
 - **Right process:** an app has several same-named processes (GPU/helper/menu-extra).
   axsend prefers `activationPolicy == .regular` with `windows > 0` — the dock-extra
   helper reports `AXTitle = com.apple.dock.external.extra.arm64` and 0 windows.
+  If multiple regular matching processes expose windows (for example two Codex
+  accounts), axsend fails closed with their PIDs instead of selecting by launch
+  order and risking delivery to the wrong account.
 - **Electron wake-up:** sets `AXManualAccessibility` + `AXEnhancedUserInterface` on
   the app element so Chromium exposes its web tree.
 - **Composer (PR78 R4/R5 — app-profile identity):** the composer is identified by
