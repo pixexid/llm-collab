@@ -126,7 +126,7 @@ func cmdType(app: String, text: String, submit: Bool, verify: Bool, windowIndex:
         FileHandle.standardError.write("AX not trusted; run `axsend check`.\n".data(using: .utf8)!); return 2
     }
     guard let (el, pid) = appElement(named: app) else {
-        FileHandle.standardError.write("app not found: \(app)\n".data(using: .utf8)!); return 1
+        FileHandle.standardError.write("\(appLookupFailureMessage(app))\n".data(using: .utf8)!); return 1
     }
     let profile = profileFor(app)
     // Same strict conversation resolution + fail-closed policy as `ring`: never
@@ -420,7 +420,14 @@ func enableManualAX(_ appEl: AXUIElement) {
     AXUIElementSetAttributeValue(appEl, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
 }
 
+private var appLookupFailure: String?
+
+func appLookupFailureMessage(_ name: String) -> String {
+    appLookupFailure ?? "app not found: \(name)"
+}
+
 func appElement(named name: String) -> (AXUIElement, pid_t)? {
+    appLookupFailure = nil
     let target = name.lowercased()
     // An app can have several processes sharing a name (GPU/helper/menu-extra).
     // Match candidates, then prefer a regular (Dock-icon) app that actually
@@ -430,23 +437,27 @@ func appElement(named name: String) -> (AXUIElement, pid_t)? {
         let bundle = (app.bundleIdentifier ?? "").lowercased()
         return local == target || bundle == target || local.contains(target) || bundle.contains(target)
     }
-    let ranked = matches.sorted { a, b in
-        let ar = a.activationPolicy == .regular ? 0 : 1
-        let br = b.activationPolicy == .regular ? 0 : 1
-        return ar < br
+    let candidates = matches.map { app -> (app: NSRunningApplication, element: AXUIElement, hasWindows: Bool) in
+        let element = AXUIElementCreateApplication(app.processIdentifier)
+        enableManualAX(element)
+        return (app, element, !windows(element).isEmpty)
     }
-    for app in ranked {
-        let el = AXUIElementCreateApplication(app.processIdentifier)
-        enableManualAX(el)
-        if windows(el).count > 0 { return (el, app.processIdentifier) }
+    let pick = pickAppEndpoint(candidates.map {
+        AppEndpointInfo(pid: $0.app.processIdentifier,
+                        regular: $0.app.activationPolicy == .regular,
+                        hasWindows: $0.hasWindows)
+    })
+    switch pick {
+    case let .index(index):
+        let candidate = candidates[index]
+        return (candidate.element, candidate.app.processIdentifier)
+    case let .ambiguous(pids):
+        let list = pids.map(String.init).joined(separator: ", ")
+        appLookupFailure = "ambiguous endpoint: \(pids.count) candidates for --app \(name) (pids \(list)) — refusing"
+        return nil
+    case .none:
+        return nil
     }
-    // Fall back to the best-ranked match even if windows aren't visible yet.
-    if let app = ranked.first {
-        let el = AXUIElementCreateApplication(app.processIdentifier)
-        enableManualAX(el)
-        return (el, app.processIdentifier)
-    }
-    return nil
 }
 
 func windows(_ appEl: AXUIElement) -> [AXUIElement] {
@@ -481,7 +492,7 @@ func flatten(_ el: AXUIElement, _ maxDepth: Int = 40) -> [AXUIElement] {
 
 func cmdAttrs(app: String) -> Int32 {
     guard let (el, pid) = appElement(named: app) else {
-        FileHandle.standardError.write("app not found: \(app)\n".data(using: .utf8)!)
+        FileHandle.standardError.write("\(appLookupFailureMessage(app))\n".data(using: .utf8)!)
         return 1
     }
     var names: CFArray?
@@ -513,7 +524,7 @@ func subrole(_ el: AXUIElement) -> String { str(el, kAXSubroleAttribute) ?? "" }
 
 func cmdButtons(app: String) -> Int32 {
     guard let (el, _) = appElement(named: app) else {
-        FileHandle.standardError.write("app not found: \(app)\n".data(using: .utf8)!); return 1
+        FileHandle.standardError.write("\(appLookupFailureMessage(app))\n".data(using: .utf8)!); return 1
     }
     for (i, w) in windows(el).enumerated() {
         let all = flatten(w)
@@ -602,7 +613,7 @@ func messageLanded(_ win: AXUIElement, sentText: String, _ profile: ComposerProf
 
 func cmdState(app: String, windowIndex: Int?) -> Int32 {
     guard let (el, _) = appElement(named: app) else {
-        FileHandle.standardError.write("app not found: \(app)\n".data(using: .utf8)!); return 1
+        FileHandle.standardError.write("\(appLookupFailureMessage(app))\n".data(using: .utf8)!); return 1
     }
     let profile = profileFor(app)
     // Same shared resolver as ring/confirm: inspect the native chat window, not
@@ -647,7 +658,7 @@ func cmdCheck() -> Int32 {
 
 func cmdTree(app: String, maxDepth: Int, editableOnly: Bool) -> Int32 {
     guard let (el, pid) = appElement(named: app) else {
-        FileHandle.standardError.write("app not found: \(app)\n".data(using: .utf8)!)
+        FileHandle.standardError.write("\(appLookupFailureMessage(app))\n".data(using: .utf8)!)
         return 1
     }
     print("# app=\(app) pid=\(pid) windows=\(windows(el).count)")
@@ -680,7 +691,7 @@ func cmdRing(app: String, text: String, submit: Bool, windowIndex: Int?, dryRun:
         return 2
     }
     guard let (el, pid) = appElement(named: app) else {
-        FileHandle.standardError.write("app not found: \(app)\n".data(using: .utf8)!)
+        FileHandle.standardError.write("\(appLookupFailureMessage(app))\n".data(using: .utf8)!)
         return 1
     }
     // Stable conversation-window selection via the SHARED resolver. `windowIndex`
@@ -966,7 +977,7 @@ func cmdTurns(app: String, text: String, windowIndex: Int?) -> Int32 {
         FileHandle.standardError.write("AX not trusted; run `axsend check`.\n".data(using: .utf8)!); print("0"); return 2
     }
     guard let (el, _) = appElement(named: app) else {
-        FileHandle.standardError.write("app not found: \(app)\n".data(using: .utf8)!); print("0"); return 1
+        FileHandle.standardError.write("\(appLookupFailureMessage(app))\n".data(using: .utf8)!); print("0"); return 1
     }
     let profile = profileFor(app)
     guard let win = resolveConversationWindow(el, preferIndex: windowIndex, profile: profile) else {
@@ -990,7 +1001,7 @@ func cmdConfirm(app: String, text: String, windowIndex: Int?) -> Int32 {
         FileHandle.standardError.write("AX not trusted; run `axsend check`.\n".data(using: .utf8)!); return 2
     }
     guard let (el, _) = appElement(named: app) else {
-        FileHandle.standardError.write("app not found: \(app)\n".data(using: .utf8)!); return 1
+        FileHandle.standardError.write("\(appLookupFailureMessage(app))\n".data(using: .utf8)!); return 1
     }
     // Same shared resolver as ring: confirm inspects the native chat window the
     // ring targeted, not an auxiliary Browser/preview window (PR78 review).

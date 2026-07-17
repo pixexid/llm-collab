@@ -187,6 +187,21 @@ let updatedCodexChat: [EditableInfo] = [
     EditableInfo(role: "AXTextArea", title: "\nDo anything",
                  placeholder: "⏎Do anything", inWebArea: true),
 ]
+check(pickAppEndpoint([
+    AppEndpointInfo(pid: 20953, regular: true, hasWindows: true),
+    AppEndpointInfo(pid: 41515, regular: true, hasWindows: true),
+]) == .ambiguous([20953, 41515]),
+      "two regular visible Codex endpoints fail closed instead of using launch order")
+check(pickAppEndpoint([
+    AppEndpointInfo(pid: 20953, regular: true, hasWindows: true),
+    AppEndpointInfo(pid: 21987, regular: false, hasWindows: false),
+]) == .index(0),
+      "one regular visible endpoint ignores a windowless helper")
+check(pickAppEndpoint([
+    AppEndpointInfo(pid: 21987, regular: false, hasWindows: false),
+    AppEndpointInfo(pid: 20953, regular: true, hasWindows: true),
+]) == .index(1),
+      "endpoint selection is not dependent on process enumeration order")
 check(profileFor("com.openai.codex") == .codex,
       "configured Codex bundle ID selects the Codex profile")
 check(profileFor("Codex") == .codex,

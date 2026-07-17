@@ -75,6 +75,45 @@ struct EditableInfo {
     let inWebArea: Bool     // descendant of an AXWebArea (Browser/preview content)
 }
 
+struct AppEndpointInfo {
+    let pid: Int32
+    let regular: Bool
+    let hasWindows: Bool
+}
+
+enum AppEndpointPick: Equatable {
+    case index(Int)
+    case none
+    case ambiguous([Int32])
+}
+
+// Select one app process without relying on launch order. Multiple regular,
+// window-bearing processes are distinct user-visible endpoints and must fail
+// closed; selecting the first can silently deliver into another account.
+func pickAppEndpoint(_ endpoints: [AppEndpointInfo]) -> AppEndpointPick {
+    let regularVisible = endpoints.indices.filter {
+        endpoints[$0].regular && endpoints[$0].hasWindows
+    }
+    if regularVisible.count > 1 {
+        return .ambiguous(regularVisible.map { endpoints[$0].pid }.sorted())
+    }
+    if let index = regularVisible.first { return .index(index) }
+
+    let visible = endpoints.indices.filter { endpoints[$0].hasWindows }
+    if visible.count > 1 {
+        return .ambiguous(visible.map { endpoints[$0].pid }.sorted())
+    }
+    if let index = visible.first { return .index(index) }
+
+    // With no visible windows, retain the old best-effort fallback so read-only
+    // commands can enable Electron AX and then fail at strict composer proof.
+    if let regular = endpoints.indices.first(where: { endpoints[$0].regular }) {
+        return .index(regular)
+    }
+    if endpoints.count == 1 { return .index(0) }
+    return .none
+}
+
 // PR78 R4: per-app composer identity. Claude/Codex/ZCode are Electron apps whose
 // whole UI (incl. the native composer) is under an AXWebArea, so a composer is
 // identified STRICTLY by its app-specific field identity — never by web-area
