@@ -86,6 +86,7 @@ Agent roster. Created by `scripts/init.py`. Gitignored.
 | `type` | string | yes | `"cli_session"`, `"human_relay"`, `"human"`, `"api_trigger"` |
 | `watcher_enabled` | bool | no | Whether the current PM2 ecosystem should instantiate a background watcher. The ecosystem checks this flag only; it does not filter by activation `type`. |
 | `ax_app` | string | no | For AX-capable `cli_session` agents: localized macOS app name or bundle ID used by `axsend`. Omit for terminal-only sessions. |
+| `ax_attended_only` | bool | no | GH-1547: set `true` when the agent's composer is `AXValue`-opaque (emptiness unprovable — e.g. ZCode, Antigravity). `deliver.py` then never emits a routine AX doorbell and instead prints an ATTENDED RECOVERY REQUIRED instruction routing control to Codex; this supersedes `human_relay` operator routing for the flagged agent. Must agree with the `axsend` binary's composer opacity table (`tools/axbridge/send-resolution.swift`) — `tests/test_deliver_ax_routing.py` enforces the agreement. |
 | `base_model` | string | no | For `human_relay`: which LLM this maps to (informational) |
 | `identity_note` | string | no | For `human_relay`: shown in handoff prompt to disambiguate identity |
 
@@ -1210,8 +1211,12 @@ Notes:
 - `human_relay` recipients also receive the onboarding in the printed handoff
   prompt; later deliveries omit it once awareness is tracked locally
 - AX-capable `cli_session` workers configure `activation.ax_app`. For those
-  sends, `deliver.py` reports `ax_doorbell_required` and prints the
-  `bin/axsend-ensure ring --submit --verify` command (from the llm-collab checkout root) the sender should run.
+  sends — ONLY when `ax_attended_only` is not `true` — `deliver.py` reports
+  `ax_doorbell_required` and prints the `bin/axsend-ensure ring --submit
+  --verify` command (from the llm-collab checkout root) the sender should run.
+  An `ax_attended_only: true` target (opaque composer, e.g. ZCode) instead
+  reports `ax_attended_recovery_required` with the Codex-attended recovery
+  instruction (GH-1547); no routine ring command is ever printed for it.
 - `codex -> codex` is the sender-aware exception. `deliver.py` preserves the
   durable packet, reports `thread_coordination_required: true`, and suppresses
   dispatchable-runtime, AX, desktop-bridge, and operator-relay activation so a

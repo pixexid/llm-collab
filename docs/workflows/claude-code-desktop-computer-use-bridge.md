@@ -138,11 +138,14 @@ fails for an external-app target. Full reference:
 | ZCode | `AXValue`-opaque | attended recovery only | ⚠️ routine ring holds because emptiness is unprovable |
 | Antigravity (Gemini) | unreadable/unproven | attended recovery only | ⚠️ routine AX target unsupported until composer safety is provable |
 
-The active registry and `deliver.py` still generate ZCode AX doorbell
-instructions; they do not yet enforce this target-side hold. Until
-the tracked runtime-enforcement follow-up lands, treat any generated routine
-instruction for an `AXValue`-opaque ZCode or Antigravity composer as HOLD plus
-Codex-attended recovery, never as command authorization.
+This target-side hold is ENFORCED (GH-1547). The registry marks ZCode and
+Antigravity `ax_attended_only`; `deliver.py` never emits a routine AX doorbell
+for them and instead prints an explicit ATTENDED RECOVERY REQUIRED instruction
+that routes control to Codex (never a silent mailbox-only fallback). The
+`axsend` binary independently refuses a routine `ring` against an opaque
+composer with exit 11 before any mutation; `--attended` (and the attended-only
+`type` command) unlock key-event typing solely inside a Codex-supervised
+recovery turn, with a loud warning.
 
 Routine `ring` requires readable `AXValue` proof that the native composer is
 empty. A rejected write, opaque value, unreadable state, or otherwise unprovable

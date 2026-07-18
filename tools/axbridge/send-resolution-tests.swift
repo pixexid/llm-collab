@@ -282,6 +282,38 @@ do {
           "R5: a foreign-web-area submit control is not pressed (nil -> key-return)")
 }
 
+// ---- GH-1547: composer opacity + routine-ring decision matrix ----
+// Opacity table: readable profiles trust an AXValue read; opaque never do.
+check(composerAXValueReadable(.claude) == true,  "1547: claude composer is AXValue-readable")
+check(composerAXValueReadable(.codex) == true,   "1547: codex composer is AXValue-readable")
+check(composerAXValueReadable(.zcode) == false,  "1547: zcode composer is AXValue-opaque")
+check(composerAXValueReadable(.unknown) == false, "1547: unknown profile is opaque (fails closed)")
+// Readable-empty rings (the proven Codex/Claude routine flow).
+check(routineRingDecision(profile: .codex, attended: false, axValue: "") == .proceed,
+      "1547: readable empty AXValue proceeds (codex)")
+check(routineRingDecision(profile: .claude, attended: false, axValue: "") == .proceed,
+      "1547: readable empty AXValue proceeds (claude)")
+// Readable-non-empty holds — a draft is never clobbered.
+check(routineRingDecision(profile: .claude, attended: false, axValue: "draft") == .refuseNonEmptyDraft,
+      "1547: readable non-empty draft refuses")
+// Readable profile but the runtime read failed: unprovable, refuse.
+check(routineRingDecision(profile: .codex, attended: false, axValue: nil) == .refuseUnreadableValue,
+      "1547: unreadable AXValue on a readable profile refuses")
+// Opaque profiles refuse routinely EVEN when AXValue reads empty — the read is
+// untrustworthy by definition (the negative high-risk direction: an invisible
+// draft must not be erased by select-all/delete/type).
+check(routineRingDecision(profile: .zcode, attended: false, axValue: "") == .refuseOpaqueProfile,
+      "1547: zcode refuses routine ring even on an empty-looking AXValue")
+check(routineRingDecision(profile: .zcode, attended: false, axValue: nil) == .refuseOpaqueProfile,
+      "1547: zcode refuses routine ring on unreadable AXValue")
+check(routineRingDecision(profile: .unknown, attended: false, axValue: "") == .refuseOpaqueProfile,
+      "1547: unknown profile refuses routine ring")
+// Attended recovery (explicit, Codex-supervised) unlocks every state.
+check(routineRingDecision(profile: .zcode, attended: true, axValue: nil) == .proceed,
+      "1547: attended mode proceeds on an opaque profile")
+check(routineRingDecision(profile: .claude, attended: true, axValue: "draft") == .proceed,
+      "1547: attended mode proceeds past a readable draft (supervised)")
+
 if failures == 0 { print("\nALL PASS (send-resolution)"); exit(0) }
 else { print("\n\(failures) FAILURE(S)"); exit(1) }
 }

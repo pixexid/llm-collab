@@ -53,6 +53,7 @@
         "type": "human_relay",
         "watcher_enabled": false,
         "base_model": "claude",
+        "ax_attended_only": true,
         "identity_note": "You are Antigravity (antigravity). Read only messages addressed to 'antigravity'."
       }
     },
@@ -64,7 +65,8 @@
       "activation": {
         "type": "cli_session",
         "watcher_enabled": true,
-        "ax_app": "ZCode"
+        "ax_app": "ZCode",
+        "ax_attended_only": true
       }
     }
   ]

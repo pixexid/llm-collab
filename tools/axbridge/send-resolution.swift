@@ -239,3 +239,44 @@ func pickConversationWindow(_ windows: [[EditableInfo]], preferIndex: Int?,
     if let i = composerWindows.first { return .index(i) }
     return .none
 }
+
+// GH-1547: composer opacity model + routine-ring safety decision (pure).
+//
+// A profile is AXValue-READABLE when its composer reflects the true draft
+// through kAXValueAttribute, so a read of "" is trustworthy proof of emptiness.
+// Electron code-editor composers (ZCode; Antigravity resolves to .unknown) do
+// NOT reflect drafts through AXValue — a read of "" proves nothing, so routine
+// emptiness is unprovable and only attended recovery may touch the composer.
+//
+// Keep each case on ONE line ending in an `// ax-...` marker: the registry
+// agreement fixture (tests/test_deliver_ax_routing.py) parses this table to
+// assert agents.json `ax_attended_only` hints agree with the binary.
+func composerAXValueReadable(_ profile: ComposerProfile) -> Bool {
+    switch profile {
+    case .claude: return true   // ax-readable
+    case .codex: return true    // ax-readable
+    case .zcode: return false   // ax-opaque
+    case .unknown: return false // ax-opaque
+    }
+}
+
+// Routine-ring safety decision, computed BEFORE any composer mutation.
+enum RoutineRingDecision: Equatable {
+    case proceed
+    case refuseOpaqueProfile   // composer tech cannot prove emptiness — attended recovery only
+    case refuseUnreadableValue // readable profile, but the AXValue read failed at runtime
+    case refuseNonEmptyDraft   // readable AXValue holds a draft — hold, never clobber
+}
+
+// The single authority for whether a `ring` may mutate the composer. Attended
+// mode (explicit --attended, Codex-supervised) bypasses the proof; every other
+// path requires a trustworthy readable AXValue that is exactly empty. All
+// refusals are decided here, before the caller performs ANY clear/select-all/
+// delete/type/submit — the mutation-free-refusal invariant of GH-1547.
+func routineRingDecision(profile: ComposerProfile, attended: Bool, axValue: String?) -> RoutineRingDecision {
+    if attended { return .proceed }
+    if !composerAXValueReadable(profile) { return .refuseOpaqueProfile }
+    guard let v = axValue else { return .refuseUnreadableValue }
+    if !v.isEmpty { return .refuseNonEmptyDraft }
+    return .proceed
+}

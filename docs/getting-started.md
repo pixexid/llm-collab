@@ -159,8 +159,11 @@ python bin/deliver.py \
   --title "Auth implementation task"
 ```
 
-For `cli_session` recipients with `activation.ax_app`, `deliver.py` prints an AX
-doorbell command; run that instead of asking the operator to relay. Terminal-only
+For `cli_session` recipients with `activation.ax_app` — when `ax_attended_only`
+is not `true` — `deliver.py` prints an AX doorbell command; run that instead of
+asking the operator to relay. An `ax_attended_only: true` recipient (opaque
+composer) instead reports `ax_attended_recovery_required` and routes control to
+Codex-attended recovery; never ring it routinely. Terminal-only
 CLI sessions require a dispatchable runtime session and otherwise report
 `activation_unavailable`. The first durable packet to any non-human recipient
 includes the collaboration onboarding contract (read docs + update memory
