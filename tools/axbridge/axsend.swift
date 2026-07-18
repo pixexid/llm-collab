@@ -121,7 +121,14 @@ func setComposerText(_ composer: AXUIElement, pid: pid_t, _ text: String) -> Boo
     return true
 }
 
-func cmdType(app: String, text: String, submit: Bool, verify: Bool, windowIndex: Int?) -> Int32 {
+func cmdType(app: String, text: String, submit: Bool, verify: Bool, windowIndex: Int?, attended: Bool = false) -> Int32 {
+    // GH-1547: `type` IS the key-event path. It exists only for Codex-attended
+    // recovery — refuse routine invocation before touching anything.
+    guard attended else {
+        FileHandle.standardError.write("REFUSED (no mutation): `type` is key-event typing and is attended-recovery only — rerun with --attended inside a Codex-supervised recovery turn.\n".data(using: .utf8)!)
+        return 11
+    }
+    FileHandle.standardError.write("⚠️ ATTENDED MODE: key-event typing bypasses composer-safety proof — Codex-supervised recovery only.\n".data(using: .utf8)!)
     guard AXIsProcessTrusted() else {
         FileHandle.standardError.write("AX not trusted; run `axsend check`.\n".data(using: .utf8)!); return 2
     }
@@ -685,7 +692,7 @@ func cmdTree(app: String, maxDepth: Int, editableOnly: Bool) -> Int32 {
     return 0
 }
 
-func cmdRing(app: String, text: String, submit: Bool, windowIndex: Int?, dryRun: Bool, verify: Bool) -> Int32 {
+func cmdRing(app: String, text: String, submit: Bool, windowIndex: Int?, dryRun: Bool, verify: Bool, attended: Bool = false) -> Int32 {
     guard AXIsProcessTrusted() else {
         FileHandle.standardError.write("AX not trusted; run `axsend check`.\n".data(using: .utf8)!)
         return 2
@@ -719,6 +726,27 @@ func cmdRing(app: String, text: String, submit: Bool, windowIndex: Int?, dryRun:
     guard let composer = windowComposer(win, profile) else {
         FileHandle.standardError.write("no native composer in the selected window for \(app) (generic/URL/web fields are not accepted)\n".data(using: .utf8)!)
         return 3
+    }
+    // GH-1547 composer-safety gate: decide BEFORE any mutation (no clear,
+    // select-all, delete, typing, or submit happens on a refusal — including
+    // --dry-run, whose probe also populates the composer). The decision is the
+    // pure routineRingDecision; every refusal routes to Codex-attended recovery.
+    let currentValue = str(composer, kAXValueAttribute)
+    switch routineRingDecision(profile: profile, attended: attended, axValue: currentValue) {
+    case .proceed:
+        if attended {
+            FileHandle.standardError.write("⚠️ ATTENDED MODE: bypassing composer-safety proof — Codex-supervised attended recovery only; key-event typing may overwrite draft state that AXValue cannot show.\n".data(using: .utf8)!)
+        }
+    case .refuseOpaqueProfile:
+        FileHandle.standardError.write("REFUSED (no mutation): \(app) composer is AXValue-opaque — emptiness cannot be proven, so a routine ring may not touch it. Keep the durable mailbox packet authoritative and request Codex-attended recovery; --attended is valid only inside that supervised recovery.\n".data(using: .utf8)!)
+        return 11
+    case .refuseUnreadableValue:
+        FileHandle.standardError.write("REFUSED (no mutation): could not read \(app) composer AXValue — emptiness is unprovable right now. Re-probe with `axsend tree --app \(app) --editable-only`; if the value stays unreadable, request Codex-attended recovery. Do not retype.\n".data(using: .utf8)!)
+        return 11
+    case .refuseNonEmptyDraft:
+        let n = currentValue?.count ?? 0
+        FileHandle.standardError.write("REFUSED (no mutation): \(app) composer holds a draft (\(n) chars) — not clobbering it. Wait for the draft to clear or request Codex-attended recovery to inspect/clear it.\n".data(using: .utf8)!)
+        return 11
     }
     // AXValue if the field accepts it, else key-event typing (Electron editors
     // like ZCode/Antigravity reject AXValue and need real keystrokes).
@@ -1087,12 +1115,15 @@ case "ring":
                  windowIndex: winIdx, dryRun: hasFlag("--dry-run"),
                  // Verify is ALWAYS enforced for --submit (auto-retry until a confirmed
                  // or queued delivery); there is no fire-and-forget opt-out.
-                 verify: true))
+                 verify: true,
+                 // GH-1547: explicit Codex-supervised attended recovery only —
+                 // bypasses the routine composer-safety proof with a loud warning.
+                 attended: hasFlag("--attended")))
 case "type":
     guard let app = argValue("--app"), let text = argValue("--text") else {
         print("--app and --text required"); exit(64)
     }
-    exit(cmdType(app: app, text: text, submit: hasFlag("--submit"), verify: hasFlag("--verify"), windowIndex: winIdx))
+    exit(cmdType(app: app, text: text, submit: hasFlag("--submit"), verify: hasFlag("--verify"), windowIndex: winIdx, attended: hasFlag("--attended")))
 case "confirm":
     guard let app = argValue("--app"), let text = argValue("--text") else {
         print("--app and --text required"); exit(64)

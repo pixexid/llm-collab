@@ -164,6 +164,14 @@ def ax_doorbell_app(recipient_agent: dict) -> str | None:
     return ax_app.strip()
 
 
+def ax_attended_only(recipient_agent: dict) -> bool:
+    """GH-1547 registry hint: the target's composer is AXValue-opaque, so
+    routine AX doorbells are forbidden — only Codex-attended recovery may
+    touch it. Must agree with the axsend binary's composer opacity table
+    (tools/axbridge/send-resolution.swift); a fixture asserts they match."""
+    return bool(recipient_agent.get("activation", {}).get("ax_attended_only"))
+
+
 def is_codex_self_target(sender_id: str, recipient_id: str) -> bool:
     return sender_id == "codex" and recipient_id == "codex"
 
@@ -180,6 +188,29 @@ def is_ax_doorbell_target(
         and recipient_id != "operator"
         and activation_type == "cli_session"
         and ax_doorbell_app(recipient_agent) is not None
+        # GH-1547: an AXValue-opaque target never gets a routine doorbell —
+        # it routes to Codex-attended recovery instead (never silently to
+        # mailbox-only).
+        and not ax_attended_only(recipient_agent)
+    )
+
+
+def is_ax_attended_recovery_target(
+    recipient_agent: dict,
+    recipient_id: str,
+    *,
+    sender_id: str,
+) -> bool:
+    """A cli_session AX target whose composer is opaque: the durable packet is
+    written as usual, but activation must be a Codex-attended recovery, never a
+    routine ring."""
+    activation_type = recipient_agent.get("activation", {}).get("type")
+    return (
+        not is_codex_self_target(sender_id, recipient_id)
+        and recipient_id != "operator"
+        and activation_type == "cli_session"
+        and ax_doorbell_app(recipient_agent) is not None
+        and ax_attended_only(recipient_agent)
     )
 
 
@@ -348,11 +379,28 @@ def main():
         if ax_doorbell_required
         else None
     )
+    ax_attended_recovery_required = (
+        args.recipient != "operator"
+        and not autobridge_ready
+        and is_ax_attended_recovery_target(
+            recipient_agent,
+            args.recipient,
+            sender_id=args.sender,
+        )
+    )
+    ax_attended_recovery_prompt = (
+        f"[from {args.sender}] ATTENDED-RECOVERY needed for {args.recipient}: "
+        f"read latest {args.recipient} packet in {chat_id}: {to_path.name} — "
+        f"composer is AX-opaque; routine rings are refused."
+        if ax_attended_recovery_required
+        else None
+    )
     desktop_bridge_required = (
         args.recipient != "operator"
         and not thread_coordination_required
         and not autobridge_ready
         and not ax_doorbell_required
+        and not ax_attended_recovery_required
         and is_claude_desktop_bridge_target(args.project, recipient_agent, args.recipient)
     )
     desktop_bridge_prompt = (
@@ -366,6 +414,7 @@ def main():
         and not autobridge_ready
         and not desktop_bridge_required
         and not ax_doorbell_required
+        and not ax_attended_recovery_required
         and is_human_relay(recipient_agent)
     )
     activation_unavailable = (
@@ -374,6 +423,7 @@ def main():
         and not autobridge_ready
         and not desktop_bridge_required
         and not ax_doorbell_required
+        and not ax_attended_recovery_required
         and not operator_relay_required
     )
     activation_unavailable_reason = None
@@ -399,6 +449,8 @@ def main():
         "desktop_bridge_prompt": desktop_bridge_prompt,
         "ax_doorbell_required": ax_doorbell_required,
         "ax_doorbell_prompt": ax_doorbell_prompt,
+        "ax_attended_recovery_required": ax_attended_recovery_required,
+        "ax_attended_recovery_prompt": ax_attended_recovery_prompt,
         "thread_coordination_required": thread_coordination_required,
         "activation_unavailable": activation_unavailable,
         "activation_unavailable_reason": activation_unavailable_reason,
@@ -449,6 +501,43 @@ def main():
             sender_id=args.sender,
             first_time=bool(first_time_awareness),
         )
+    elif ax_attended_recovery_required:
+        recipient_display = recipient_agent.get("display_name", args.recipient)
+        border = "\u2501" * 60
+        print(f"\n{border}")
+        print("\u26d4 ATTENDED RECOVERY REQUIRED \u2014 routine AX ring is refused")
+        print(border)
+        print()
+        print(
+            f"{recipient_display} ({args.recipient}) has an AXValue-opaque composer: "
+            "emptiness cannot be proven, so a routine axsend ring must not touch it "
+            "(the binary refuses with exit 11; do not bypass with --attended yourself)."
+        )
+        print()
+        print(
+            "The durable packet above stays authoritative. Route control to Codex, "
+            "the attended-recovery supervisor:"
+        )
+        print()
+        if args.sender == "codex":
+            print(
+                "You ARE the attended supervisor: perform the Codex-attended recovery "
+                f"for {recipient_display} (visible UI intervention, or `axsend ring "
+                f"--app {json.dumps(ax_doorbell_app(recipient_agent))} --attended ...` "
+                "inside your supervised turn) and verify the composer afterwards."
+            )
+        else:
+            print("One-line prompt:")
+            print(ax_attended_recovery_prompt)
+            print()
+            print("Command:")
+            print(
+                f"{ROOT}/bin/axsend-ensure ring --app \"Codex\" "
+                f"--submit --verify --text {json.dumps(ax_attended_recovery_prompt)}"
+            )
+        print()
+        print("Never fall back to mailbox-only silence: if Codex cannot be reached, record the blocker in the mailbox and keep the attended-recovery requirement visible.")
+        print(border)
     elif ax_doorbell_required:
         recipient_display = recipient_agent.get("display_name", args.recipient)
         ax_app = ax_doorbell_app(recipient_agent)

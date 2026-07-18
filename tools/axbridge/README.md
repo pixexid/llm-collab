@@ -42,11 +42,16 @@ one pointer may queue behind the active turn. A non-empty, unreadable,
 unprovable, or `AXValue`-opaque composer means hold and enter attended recovery;
 never infer empty or perform a blind ring.
 
-This proof gate is currently process-level policy, not atomically enforced by
-`cmdRing` or `setComposerText`. Until the tracked runtime-enforcement follow-up
-lands, the sender must perform an immediate readable empty-composer proof before
-sending; an opaque, unprovable, or concurrently changing composer state means
-hold and route to Codex-attended recovery.
+This proof gate is ENFORCED by the binary (GH-1547): routine `ring` computes a
+composer-safety decision BEFORE any mutation and refuses with **exit 11** when
+the target profile is `AXValue`-opaque (ZCode, unknown apps), the `AXValue`
+read fails, or a readable composer holds a draft. A refusal performs no clear,
+select-all, delete, typing, or submit. Key-event typing exists only behind the
+explicit `--attended` flag (`ring --attended`, and the `type` command which is
+attended-only), which prints a loud warning and is valid only inside a
+Codex-supervised attended-recovery turn. The sender-side readable
+empty-composer proof remains good practice for queue discipline, but the
+binary no longer relies on it for safety.
 
 ```bash
 # Inspect an app's tree to find the composer + send button
@@ -185,8 +190,8 @@ tries the send button, `AXConfirm`, and a posted Return.
 |-----|-------------------|--------|---------------------|
 | **Codex** | `AXTextArea` "Ask for follow-up changes" or "Do anything" (bundle `com.openai.codex`, localized app name may be `ChatGPT`) | send-arrow `AXPress` (same chat web area) | ✅ resolves + confirmed delivery |
 | **Claude Desktop** | `AXTextArea` "Prompt" | `key-return` fallback | ✅ resolves, no regression |
-| **ZCode** | `AXTextArea` "Ask for follow-up changes"; draft state is `AXValue`-opaque | "Send" button | ⚠️ identity resolves, but routine ring holds for attended recovery because emptiness is unprovable |
-| **Antigravity / Gemini** | ❌ no profile yet → `.unknown` | — | ⚠️ **FAILS CLOSED** — AX doorbell unsupported pending live composer-identity capture |
+| **ZCode** | `AXTextArea` "Ask for follow-up changes"; draft state is `AXValue`-opaque | "Send" button | ⛔ routine ring REFUSES (exit 11, enforced) — Codex-attended recovery only (`--attended`) |
+| **Antigravity / Gemini** | ❌ no profile yet → `.unknown` | — | ⛔ **FAILS CLOSED** — `.unknown` is opaque, routine ring REFUSES (exit 11); attended recovery only |
 
 ZCode is an Electron code-editor composer that rejects programmatic `AXValue`
 writes. The key-event typing path is available only within the attended recovery
@@ -208,8 +213,9 @@ Safety: `ring --submit` only presses a **confident** send button (unlabeled icon
 or labeled send/submit), never a side-effecting control (e.g. Antigravity's
 "Record voice memo"). Honest `--verify` returns 7 if nothing actually submits.
 
-The `type` command exposes key-typing directly: `axsend type --app <name>
---text "..." [--submit] [--verify]`.
+The `type` command exposes key-typing directly and is ATTENDED-ONLY (GH-1547):
+`axsend type --app <name> --text "..." --attended [--submit] [--verify]` —
+without `--attended` it refuses with exit 11 before touching anything.
 
 ## Limits / next
 
