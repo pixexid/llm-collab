@@ -156,16 +156,19 @@ policy:
 
 - the orchestrator's local review and required project gates are mandatory
 - automatic GitHub Codex review/comments are consumed when they appear
-- a `+1` (`thumbs-up`) reaction by `chatgpt-codex-connector` established after
-  the exact current OID became the PR head is the terminal clean-review signal
-  for that head; report the reaction and its exact timestamp immediately
+- a clean `chatgpt-codex-connector` review/comment that explicitly covers the
+  exact current OID is terminal for that head; a connector `+1` (`thumbs-up`)
+  reaction established after that OID became the PR head is terminal too.
+  Report the exact verdict or reaction and its timestamp immediately
 - any push creates a new head, invalidates every prior reaction or verdict, and
   resets the 15-minute fallback clock
 - GitHub Codex silence must not become an infinite wait: the resettable
   15-minute settle is the fallback only when no bot verdict or reaction arrives
-  for the exact current head
-- after review-fix commits, consume automatic artifacts when they arrive and
-  otherwise use the current PR state after the heartbeat inspection
+  for the exact current head and no bot review is pending
+- after every review-fix push, evaluate the new exact head under the same rule:
+  a clean exact-head verdict or exact-head connector `+1` is terminal; if
+  neither arrives and no bot review is pending, heartbeat inspections may
+  observe the wait but must not merge before the resettable 15-minute settle
 - neither a bot verdict nor a reaction waives required CI, mergeability, the
   independent exact-head review, or full comment/review/thread inspection
 
@@ -193,9 +196,8 @@ independent exact-head review is clean, and the full current comment, review,
 inline-comment, and thread payload has no actionable finding. Treat the GitHub
 Codex review signal as clean when either:
 
-- before any review-fix commit, the latest top-level
-  `chatgpt-codex-connector` review/comment explicitly covers the exact current
-  OID and reports no actionable or major issues, or
+- the latest top-level `chatgpt-codex-connector` review/comment explicitly
+  covers the exact current OID and reports no actionable or major issues, or
 - the connector's `+1` (`thumbs-up`) reaction timestamp is after the exact
   current OID became the PR head. That reaction is terminal for the bot wait on
   that head when the required gates above remain clean; do not wait out the
@@ -214,13 +216,13 @@ only when all of these are true:
 - the project/operator has authorized auto-merge for this PR or queue class
 
 Read current review bodies and reactions directly. Do not infer the current
-result from stale inline review-thread objects alone. The watcher must report a
-current-head reaction and its timestamp immediately so the orchestrator can
-verify that it post-dates the exact head; do not keep a heartbeat waiting for a
-comment or fallback timeout after that terminal signal. If review feedback
-lands, fix or respond to it, push the update, rerun the manual branch-diff
-review and required local/CI checks, then evaluate the new exact head from
-scratch before continuing toward merge.
+result from stale inline review-thread objects alone. The watcher must report
+the exact current-head verdict or reaction and its timestamp immediately so the
+orchestrator can verify that it covers or post-dates the exact head; do not keep
+a heartbeat waiting for another artifact or fallback timeout after either
+terminal signal. If review feedback lands, fix or respond to it, push the
+update, rerun the manual branch-diff review and required local/CI checks, then
+evaluate the new exact head from scratch before continuing toward merge.
 
 If the wait cannot self-progress because checks stalled, review state is
 ambiguous, or the implementer has not acknowledged a routed review-fix request,

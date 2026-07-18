@@ -195,11 +195,12 @@ review is clean, and the full current comment/review/thread payload has no
 actionable finding. The GitHub Codex signal is clean when either the latest
 `chatgpt-codex-connector` review/comment explicitly covers that exact OID with
 no actionable issues or the connector's `+1` (`thumbs-up`) reaction was
-established after that OID became the PR head. The latter is terminal for the
-bot wait on that head: report the reaction and its exact timestamp immediately
-and do not wait out the remainder of the 15-minute fallback. If no verdict or
-reaction arrives, the resettable 15-minute settle is the fallback; any push
-invalidates the prior signal and restarts the clock for the new head.
+established after that OID became the PR head. Either signal is terminal for the
+bot wait on that head: report the exact verdict or reaction and its timestamp
+immediately and do not wait out the remainder of the 15-minute fallback. If
+neither arrives and no bot review is pending, the resettable 15-minute settle
+is the fallback; any push invalidates the prior signal and restarts the clock
+for the new head.
 
 If GitHub Codex comments on the PR, fix the pointed issue, rerun the manual
 branch-diff review and required checks, then evaluate the new exact head and its

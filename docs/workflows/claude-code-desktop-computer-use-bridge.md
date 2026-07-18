@@ -59,11 +59,14 @@ Exit 0 with `VERIFIED` confirms a visible conversation turn. Exit 0 with
 it does not prove the pointer landed in the intended thread. Preserve the
 durable mailbox packet, record the unconfirmed state and follow-up, never
 re-ring that pointer, and do not claim exact-thread delivery until later
-`axsend confirm`, inbox consumption, or a recipient handoff supplies evidence.
-A non-zero result requires `axsend confirm`; if the pointer is still absent,
-record the exact AX blocker and enter recovery rather than resending it. NEVER
-use Computer Use/screenshots to verify an AX send. Validated bidirectionally
-2026-06-21: Claude ⇄ Codex ⇄ ZCode ⇄ Antigravity.
+`axsend confirm` or explicit recipient evidence shows the pointer in the native
+thread. Inbox consumption proves only durable packet delivery, not AX-thread
+delivery. Exit 7/not-delivered requires `axsend confirm`; if it confirms the
+pointer is absent on the same proven target, one re-ring is allowed. Never
+re-ring an exit-0 queued/unconfirmed result or an identity-loss/ambiguous
+result. Other non-zero results enter recovery. NEVER use Computer
+Use/screenshots to verify an AX send. Validated bidirectionally 2026-06-21:
+Claude ⇄ Codex ⇄ ZCode ⇄ Antigravity.
 
 ## Managed Codex and native subagent routing
 
@@ -182,9 +185,12 @@ For task-grade work, in order:
 3. Classify exit 0 by output: `VERIFIED` confirms delivery;
    `QUEUED (UNCONFIRMED)` does not. For queued-unconfirmed, keep the mailbox
    packet unresolved, record the blocker/follow-up, never re-ring, and wait for
-   later `axsend confirm`, inbox consumption, or recipient handoff evidence. If
-   `axsend` exits non-zero, run `axsend confirm`; if still absent, record the
-   exact AX blocker and enter recovery rather than resending the pointer.
+   later `axsend confirm` or explicit recipient evidence that the pointer
+   appeared in the native thread. Inbox consumption proves the durable packet
+   was consumed but not that the AX pointer landed. For exit 7/not-delivered,
+   run `axsend confirm`; if it proves absence on the same target, re-ring once.
+   Never re-ring queued/unconfirmed or identity-loss/ambiguous results; route
+   other non-zero results into recovery.
 4. Use screenshot/keyboard Computer Use only as attended fallback or recovery
    for an external collaborator app when `axsend` is unavailable or unsafe. In
    that fallback path, pass the idle input gate before typing.
