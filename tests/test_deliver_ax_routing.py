@@ -283,6 +283,14 @@ class AxRecoveryWordingPinTest(unittest.TestCase):
                     f"{rel}: stale unconditional recovery wording {stale!r} must not return",
                 )
 
+    def test_schema_reference_doorbell_claim_is_conditional(self) -> None:
+        # GH-1547 PR #110 a369 P2: the schema-reference routing note must not
+        # claim unconditionally that ax_app => ax_doorbell_required; flagged
+        # targets emit ax_attended_recovery_required instead.
+        schema = (REPO_ROOT / "docs" / "schema-reference.md").read_text()
+        self.assertIn("ONLY when `ax_attended_only` is not `true`", schema)
+        self.assertIn("ax_attended_recovery_required", schema)
+
     def test_conditional_recovery_wording_present(self) -> None:
         confirm_msg = (self.AXBRIDGE / "axsend.swift").read_text()
         self.assertIn("re-ring ONLY when the target composer is proven readable and empty", confirm_msg)

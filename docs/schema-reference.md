@@ -1211,8 +1211,12 @@ Notes:
 - `human_relay` recipients also receive the onboarding in the printed handoff
   prompt; later deliveries omit it once awareness is tracked locally
 - AX-capable `cli_session` workers configure `activation.ax_app`. For those
-  sends, `deliver.py` reports `ax_doorbell_required` and prints the
-  `bin/axsend-ensure ring --submit --verify` command (from the llm-collab checkout root) the sender should run.
+  sends — ONLY when `ax_attended_only` is not `true` — `deliver.py` reports
+  `ax_doorbell_required` and prints the `bin/axsend-ensure ring --submit
+  --verify` command (from the llm-collab checkout root) the sender should run.
+  An `ax_attended_only: true` target (opaque composer, e.g. ZCode) instead
+  reports `ax_attended_recovery_required` with the Codex-attended recovery
+  instruction (GH-1547); no routine ring command is ever printed for it.
 - `codex -> codex` is the sender-aware exception. `deliver.py` preserves the
   durable packet, reports `thread_coordination_required: true`, and suppresses
   dispatchable-runtime, AX, desktop-bridge, and operator-relay activation so a
