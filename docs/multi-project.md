@@ -135,7 +135,9 @@ provide both values explicitly at task level.
 
 `claude_desktop_bridge` is an opt-in fallback for Claude targets that are not
 configured as CLI sessions. A CLI-session worker uses the project-independent AX
-doorbell only when its agent entry explicitly sets `activation.ax_app`; otherwise
+doorbell only when its agent entry explicitly sets `activation.ax_app` AND
+`ax_attended_only` is not `true` (an opaque-composer target instead reports
+`ax_attended_recovery_required` and routes to Codex-attended recovery); otherwise
 it needs a dispatchable runtime session.
 
 ### Project state root

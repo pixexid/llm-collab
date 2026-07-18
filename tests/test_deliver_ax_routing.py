@@ -291,6 +291,36 @@ class AxRecoveryWordingPinTest(unittest.TestCase):
         self.assertIn("ONLY when `ax_attended_only` is not `true`", schema)
         self.assertIn("ax_attended_recovery_required", schema)
 
+    AUTHORITATIVE_ROUTING_DOCS = (
+        "README.md",
+        "docs/getting-started.md",
+        "docs/multi-project.md",
+        "docs/schema-reference.md",
+        "docs/workflows/task-intake-and-delegation.md",
+        "bin/deliver.py",
+    )
+
+    def test_routing_family_docs_carry_attended_qualification(self) -> None:
+        # GH-1547 final docs-sync amendment: any authoritative current-contract
+        # surface that describes the ax_app -> doorbell routing must also carry
+        # the ax_attended_only qualification, so the unconditional-claim family
+        # cannot drift back in.
+        import re
+
+        for rel in self.AUTHORITATIVE_ROUTING_DOCS:
+            text = (REPO_ROOT / rel).read_text()
+            mentions_family = re.search(r"ax_app", text) and re.search(
+                r"ax_doorbell|AX\s+doorbell|axsend-ensure ring", text
+            )
+            if not mentions_family:
+                continue
+            self.assertIn(
+                "ax_attended",
+                text,
+                f"{rel} describes ax_app doorbell routing without the "
+                "ax_attended_only qualification (GH-1547 family drift)",
+            )
+
     def test_conditional_recovery_wording_present(self) -> None:
         confirm_msg = (self.AXBRIDGE / "axsend.swift").read_text()
         self.assertIn("re-ring ONLY when the target composer is proven readable and empty", confirm_msg)

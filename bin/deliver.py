@@ -15,8 +15,11 @@ deliver.py — Send a message from one agent to another.
 Writes the message to Chats/ (canonical record) and appends
 a pointer to the recipient's agents/{id}/inbox.json.
 
-If a CLI-session recipient explicitly configures activation.ax_app, prints an
-AX doorbell instruction. Codex-to-Codex delivery is a deliberate exception:
+If a CLI-session recipient explicitly configures activation.ax_app (and is not
+ax_attended_only), prints an AX doorbell instruction; an ax_attended_only
+recipient (AXValue-opaque composer) instead gets an ATTENDED RECOVERY REQUIRED
+instruction routing control to Codex (GH-1547). Codex-to-Codex delivery is a
+deliberate exception:
 the durable packet is preserved, but app activation is suppressed in favor of
 Thread Coordination. Projects may opt Claude into a desktop-bridge fallback for
 non-CLI targets. If the recipient has activation.type == "human_relay", prints
