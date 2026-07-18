@@ -179,7 +179,9 @@ Safest task-grade workflow for desktop-app agents:
      requested for this packet
    - for an AX-capable `cli_session` worker, including Claude when configured,
      `ax_doorbell_required` means the
-     sender rings the worker with the printed `axsend-ensure ring` command; it is
+     sender rings the worker with the printed `axsend-ensure ring` command (the
+     printed form is the absolute executable under the llm-collab checkout's
+     `bin/` directory); it is
      not a manual operator relay request
    - `desktop_bridge_required` is the project-configured non-CLI Claude fallback
    - `activation_unavailable` means the durable packet exists but neither a

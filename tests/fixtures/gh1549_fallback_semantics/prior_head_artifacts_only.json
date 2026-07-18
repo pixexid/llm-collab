@@ -1,0 +1,74 @@
+{
+  "variant": "prior_head_artifacts_only",
+  "description": "After a push creates a new head, every prior verdict and reaction lifecycle is invalidated. A prior-head Codex Review body or eyes/+1 reaction is not head-attributable for the current head and is ignored for terminal-signal purposes. The resettable fallback runs its clock on the current head, never on a stale-head artifact. Each project_cases entry is a concrete per-project scenario with its own pr_state, stale artifacts, and expected outcome.",
+  "project_cases": [
+    {
+      "project_id": "amiga",
+      "pr_state": {
+        "head_oid": "amiga-abc301",
+        "pr_open": true,
+        "draft_ready": true,
+        "explicit_review_request": true,
+        "review_visibility_exists": true,
+        "final_push_utc": "2026-07-18T12:30:00Z",
+        "head_reviewable_utc": "2026-07-18T12:30:00Z"
+      },
+      "stale_artifacts_for_prior_head": [
+        {
+          "type": "codex_review_body",
+          "verdict": "clean",
+          "oid": "amiga-abc300",
+          "utc": "2026-07-18T12:10:00Z"
+        },
+        {
+          "type": "reaction",
+          "reaction": "+1",
+          "oid": "amiga-abc300",
+          "utc": "2026-07-18T12:20:00Z"
+        }
+      ],
+      "expected": {
+        "prior_head_verdict_is_head_attributable_for_current_head": false,
+        "prior_head_reaction_is_head_attributable_for_current_head": false,
+        "clock_anchor": "later_of(final_push, head_reviewable)",
+        "clock_start_utc": "2026-07-18T12:30:00Z",
+        "fallback_eligible_after_utc": "2026-07-18T12:45:00Z",
+        "stuck_state_remains_reported_and_escalated": true
+      }
+    },
+    {
+      "project_id": "nuvyr",
+      "pr_state": {
+        "head_oid": "nuvyr-abc301",
+        "pr_open": true,
+        "draft_ready": true,
+        "explicit_review_request": true,
+        "review_visibility_exists": true,
+        "final_push_utc": "2026-07-18T15:30:00Z",
+        "head_reviewable_utc": "2026-07-18T15:30:00Z"
+      },
+      "stale_artifacts_for_prior_head": [
+        {
+          "type": "codex_review_body",
+          "verdict": "clean",
+          "oid": "nuvyr-abc300",
+          "utc": "2026-07-18T15:10:00Z"
+        },
+        {
+          "type": "reaction",
+          "reaction": "+1",
+          "oid": "nuvyr-abc300",
+          "utc": "2026-07-18T15:20:00Z"
+        }
+      ],
+      "expected": {
+        "prior_head_verdict_is_head_attributable_for_current_head": false,
+        "prior_head_reaction_is_head_attributable_for_current_head": false,
+        "clock_anchor": "later_of(final_push, head_reviewable)",
+        "clock_start_utc": "2026-07-18T15:30:00Z",
+        "fallback_eligible_after_utc": "2026-07-18T15:45:00Z",
+        "stuck_state_remains_reported_and_escalated": true
+      }
+    }
+  ]
+}

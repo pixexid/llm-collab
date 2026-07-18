@@ -206,7 +206,13 @@ resettable window is no longer actually pending; report and escalate the stuck
 review, but do not let it extend the fallback indefinitely. Eyes or another
 non-terminal reaction does not block the fallback once review is no longer
 pending. Any push invalidates the prior signal and restarts the clock for the
-new head.
+new head. The same fallback handles three named no-terminal-artifact variants:
+no explicit review request (the reviewability clock still starts at the later of
+the final push and the head becoming reviewable), eyes-only current-head
+artifact (non-blocking once no review is pending, and not itself terminal), and
+prior-head-only artifacts (a stale-head `Codex Review:` body or reaction is not
+head-attributable and is ignored for terminal-signal purposes). See
+`commit-push-prs.md` for the full enumeration.
 
 If GitHub Codex comments on the PR, fix the pointed issue, rerun the manual
 branch-diff review and required checks, then evaluate the new exact head and its

@@ -1,0 +1,60 @@
+{
+  "variant": "eyes_only_current_head",
+  "description": "The only current-head connector artifact is a non-terminal eyes reaction. Once no review is actually pending, eyes does not block the resettable fallback, does not restart or suppress it, and is not itself a terminal signal. Each project_cases entry is a concrete per-project scenario with its own pr_state, artifacts, and expected outcome.",
+  "project_cases": [
+    {
+      "project_id": "amiga",
+      "pr_state": {
+        "head_oid": "amiga-abc200",
+        "pr_open": true,
+        "draft_ready": true,
+        "explicit_review_request": true,
+        "review_visibility_exists": true,
+        "final_push_utc": "2026-07-18T12:00:00Z",
+        "head_reviewable_utc": "2026-07-18T12:00:00Z"
+      },
+      "artifacts_for_current_head": [
+        {
+          "type": "reaction",
+          "reaction": "eyes",
+          "oid": "amiga-abc200",
+          "utc": "2026-07-18T12:05:00Z"
+        }
+      ],
+      "expected": {
+        "eyes_is_terminal": false,
+        "eyes_blocks_fallback_when_no_review_pending": false,
+        "eyes_restarts_or_suppresses_fallback": false,
+        "fallback_eligible_after_utc": "2026-07-18T12:15:00Z",
+        "stuck_state_remains_reported_and_escalated": true
+      }
+    },
+    {
+      "project_id": "nuvyr",
+      "pr_state": {
+        "head_oid": "nuvyr-abc200",
+        "pr_open": true,
+        "draft_ready": true,
+        "explicit_review_request": true,
+        "review_visibility_exists": true,
+        "final_push_utc": "2026-07-18T14:00:00Z",
+        "head_reviewable_utc": "2026-07-18T14:00:00Z"
+      },
+      "artifacts_for_current_head": [
+        {
+          "type": "reaction",
+          "reaction": "eyes",
+          "oid": "nuvyr-abc200",
+          "utc": "2026-07-18T14:03:00Z"
+        }
+      ],
+      "expected": {
+        "eyes_is_terminal": false,
+        "eyes_blocks_fallback_when_no_review_pending": false,
+        "eyes_restarts_or_suppresses_fallback": false,
+        "fallback_eligible_after_utc": "2026-07-18T14:15:00Z",
+        "stuck_state_remains_reported_and_escalated": true
+      }
+    }
+  ]
+}

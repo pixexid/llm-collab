@@ -11,7 +11,7 @@ autonomous.
 Current `deliver.py` gives a matching dispatchable session autobridge precedence
 and suppresses `ax_doorbell_required` for that packet. The primary wake for an
 AX-capable `cli_session` only when no such autobridge resolves is the busy-safe
-**bidirectional AX doorbell** (`axsend-ensure ring --submit --verify`; see
+**bidirectional AX doorbell** (`bin/axsend-ensure ring --submit --verify`, run from the llm-collab checkout root; see
 `claude-code-desktop-computer-use-bridge.md`). First prove through readable
 `AXValue` that the native composer is empty, then ring once even when the
 recipient is busy; busy alone is not a hold after that proof. A non-empty,

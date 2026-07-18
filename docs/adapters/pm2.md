@@ -153,7 +153,7 @@ Current safe ordering:
   autobridge, not AX
 - only when it reports `ax_doorbell_required: true`, first prove through
   readable `AXValue` that the native composer is empty, then use
-  `axsend-ensure ring --submit --verify` once even when the recipient is busy.
+  `bin/axsend-ensure ring --submit --verify` (from the llm-collab checkout root, or the exact absolute command `deliver.py` prints) once even when the recipient is busy.
   Busy alone is not a hold after that proof. A non-empty, unreadable,
   unprovable, or `AXValue`-opaque composer means hold and enter attended
   recovery—never infer empty or blind-ring. `VERIFIED` exit 0 confirms delivery;
