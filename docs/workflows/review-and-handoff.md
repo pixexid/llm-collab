@@ -60,6 +60,10 @@ from implementation (see role model in `task-intake-and-delegation.md`).
   lane is treated as PR-ready/accepted. The review artifact must name reviewer,
   implementer, base ref or merge base, final head SHA, result, mechanism/source,
   and any re-review disposition.
+- **The initial PR-ready head requires one independent cold full-diff review**
+  from a context-isolated reviewer. Identity separation, fresh-context
+  attestation, complete changed-file coverage, and exact-head binding are not
+  relaxed by later amendment handling.
 - Cross-review is symmetric: each agent reviews the other's lanes. The Amiga
   queue-owner default (Codex) still records status transitions and the
   acceptance read, but "reviewer" is a role either agent fills depending on who
@@ -73,6 +77,24 @@ from implementation (see role model in `task-intake-and-delegation.md`).
   MCP/review surface. Record that fallback artifact in the linked chat before
   PR creation. GitHub Codex PR review is a post-PR backstop and PR-wait signal,
   not the pre-PR review of record.
+
+For amended heads, follow the canonical bounded-amendment and convergence rules
+in `commit-push-prs.md`. Batch related findings locally. The same independent
+reviewer may re-review only when the amendment stays inside the accepted
+contract and changed-file set, and must inspect the batched delta, affected
+invariants, and complete base-to-head coherence at the new exact head. Payments,
+auth, permissions, schema/migrations, irreversible writes, a new product flow,
+or any newly touched file require a new cold reviewer.
+
+Count finding rounds by family, where same-family means the same file or the
+same named invariant/mechanism across files. The second round makes the family
+hot; before a third same-family amended head, the queue-owner/release-gate role
+must record one durable disposition:
+`contract-clarified`, `descope`, `split`, `backend-first`, or
+`risk-accepted-followup`. Only `contract-clarified` continues in-lane, after the
+corrected invariant is written into the task/spec. Current-head actionable bot
+findings still block, and the final merge gate remains a full-diff attestation
+bound to the exact current head.
 
 ## Task status guide
 

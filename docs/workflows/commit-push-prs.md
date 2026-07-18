@@ -74,6 +74,53 @@ clear rationale in the notes. The opener rejects self-review notes and rejects
 notes whose `Head SHA:` does not match the current branch head, so a stale clean
 review cannot cover later commits.
 
+### Bounded amendment review and convergence
+
+One independent cold full-diff review by a context-isolated reviewer is
+mandatory before the initial PR-ready head. Implementer/reviewer identity
+separation, fresh-context attestation, full changed-file coverage, and exact
+live-head SHA binding remain mandatory.
+
+Batch related findings locally into one reviewed amendment instead of producing
+one pushed head per micro-fix. When an amendment stays inside both the accepted
+contract and its changed-file set, the same independent reviewer may inspect the
+batched delta, the affected invariants, and the resulting full-diff coherence at
+the new exact head. The resulting attestation must still cover the complete
+base-to-head diff at that exact head; a delta-only review is never sufficient.
+
+Create a new cold context-isolated reviewer for the complete amended diff when
+the amendment touches payments, auth, permissions, schema or migrations,
+irreversible writes, a new product flow, or any file outside the accepted
+contract's changed-file set. These boundaries override the same-reviewer
+allowance.
+
+Apply a convergence circuit breaker per finding family:
+
+- A finding belongs to the same family when it is anchored to the same file or
+  concerns the same named invariant/mechanism across files.
+- When a second finding round lands in one family, the queue-owner/release-gate
+  role names the family and marks it hot. One already-drafted round-two
+  amendment may finish.
+- Before any third same-family amended head, record exactly one durable
+  disposition in the task and, once a PR exists, in a PR comment:
+  `contract-clarified`, `descope`, `split`, `backend-first`, or
+  `risk-accepted-followup`.
+- Only `contract-clarified` permits continued work in the same lane, and it
+  requires updating the task/spec with the corrected invariant before the third
+  head.
+- Round counting remains reviewer/orchestrator judgment. Do not mechanically
+  auto-count finding families.
+
+When a project supports structured review notes, the disposition may be
+recorded as the optional line `Convergence-disposition: <value>` and must use
+exactly one of the five values above.
+
+One final exact-head full-diff gate is mandatory before merge, and actionable
+automated-review findings on the current head remain blocking. After a pushed
+amendment, stale review-attestation CI is an expected transitional state rather
+than evidence that product verification failed. Refresh the PR body only after
+the amended head passes its required review.
+
 Rely on the automatic GitHub Codex review flow for ready PRs. Consume the
 automatic PR review/comment/reaction when it appears. If no automatic artifact
 appears, use the opportunistic policy below.
