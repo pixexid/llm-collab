@@ -167,8 +167,10 @@ policy:
 - any push creates a new head and invalidates every prior verdict and reaction
   lifecycle. Start or reset the 15-minute fallback clock at the later of the
   final push to that head and the time that head becomes reviewable: the PR is
-  open, any draft is marked ready, and review-request visibility exists for
-  that head
+  open, any draft is marked ready, and the PR is visible for review. An explicit
+  review request is NOT required for a head to be reviewable; absence of an
+  explicit request neither pre-expires the fallback nor extends it (see the
+  absent-request variant below)
 - GitHub Codex silence must not become an infinite wait: the resettable
   15-minute settle is the fallback whenever neither terminal exact-head signal
   is present and no bot review is actually pending. A non-terminal reaction such
@@ -185,6 +187,23 @@ policy:
   head becoming reviewable
 - neither a bot verdict nor a reaction waives required CI, mergeability, the
   independent exact-head review, or full comment/review/thread inspection
+
+The resettable fallback above handles three named no-terminal-artifact variants
+explicitly, so none of them silently extends the wait:
+
+- **No explicit review request.** The reviewability clock starts at the later of
+  the final push and the head becoming reviewable even when no explicit review
+  request exists on the PR (the PR is open, any draft is marked ready, and review
+  visibility exists for that head). Absence of an explicit request does not
+  pre-expire the fallback, and it does not extend it indefinitely either.
+- **Eyes-only current-head artifact.** A current-head non-terminal `eyes` reaction
+  is not blocking once no review is actually pending; it does not restart or
+  suppress the resettable fallback, and it is not itself a terminal signal.
+- **Prior-head artifacts only.** Any push creates a new head and invalidates every
+  prior verdict and reaction lifecycle; a prior-head `Codex Review:` body or
+  `eyes`/`+1` reaction is not head-attributable for the current head and is
+  ignored for terminal-signal purposes. The resettable fallback runs its clock on
+  the current head, never on a stale-head artifact.
 
 If the PR is waiting only for remote checks or remote review state, keep it open
 and create or update a Codex heartbeat attached to the current thread with a
@@ -224,7 +243,8 @@ If neither a terminal GitHub Codex verdict nor a head-attributable connector
 `+1` exists for the exact current head, use the fallback only after at least 15
 minutes have elapsed since the later of the final push to that head and the
 reviewability timestamp for that head (PR open, marked ready when applicable,
-and review request visible), with no bot review actually pending under the
+and visible for review — an explicit review request is NOT required, matching
+the absent-request variant above), with no bot review actually pending under the
 ageing rule above. A pending/request state without a connector artifact for
 that full resettable window remains reportable as a stuck review but no longer
 blocks the fallback. Commit age cannot pre-expire the fallback before automatic

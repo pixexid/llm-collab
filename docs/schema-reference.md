@@ -1211,7 +1211,7 @@ Notes:
   prompt; later deliveries omit it once awareness is tracked locally
 - AX-capable `cli_session` workers configure `activation.ax_app`. For those
   sends, `deliver.py` reports `ax_doorbell_required` and prints the
-  `axsend-ensure ring --submit --verify` command the sender should run.
+  `bin/axsend-ensure ring --submit --verify` command (from the llm-collab checkout root) the sender should run.
 - `codex -> codex` is the sender-aware exception. `deliver.py` preserves the
   durable packet, reports `thread_coordination_required: true`, and suppresses
   dispatchable-runtime, AX, desktop-bridge, and operator-relay activation so a

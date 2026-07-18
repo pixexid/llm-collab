@@ -161,7 +161,9 @@ that capability does not make it a Codex-to-Codex transport.
 - **Doorbell = AX (immediate, event-driven nudge).** The moment one participant
   in a distinct-app route finishes
   a task, hits a blocker, needs a clarification, or completes a handoff, it uses
-  `axsend ring --submit --verify` to send one short, sender-tagged pointer to the
+  `bin/axsend-ensure ring --submit --verify` (run from the llm-collab checkout
+  root, or use the exact absolute command `deliver.py` prints)
+  to send one short, sender-tagged pointer to the
   durable packet. Screenshot/keyboard Computer Use is a fallback only when AX is
   unavailable and the target path is explicitly configured for desktop bridging.
 
@@ -192,7 +194,9 @@ For task-grade work, in order:
 2. If sender and recipient are both `codex`, stop app routing and use Thread
    Coordination (`read_thread` / `send_message_to_thread`). Otherwise ring the
    distinct external-app recipient with
-   `axsend ring --submit --verify --text "<pointer>"` only after the native
+   `bin/axsend-ensure ring --submit --verify --text "<pointer>"`
+   (from the checkout root; or the exact absolute command `deliver.py` prints)
+   only after the native
    composer is provably empty. Once proven empty, ring even if the recipient is
    busy. A non-empty draft or unreadable, unprovable, or `AXValue`-opaque
    composer state means hold and recovery—never infer empty. The one-line
