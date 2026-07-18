@@ -1044,13 +1044,15 @@ func cmdConfirm(app: String, text: String, windowIndex: Int?) -> Int32 {
     // composer's own draft/empty state is NOT reliably readable (AXValue is blank
     // and the subtree keeps stale cached static-text nodes that false-positive a
     // "stuck draft"). So report delivered vs not — and recovery for not-delivered
-    // is always the same: re-ring (the ring reliably clears any draft + resends).
+    // is CONDITIONAL (GH-1547): re-ring only for a proven readable+empty
+    // composer; opaque/unreadable/draft states are refused by the routine ring
+    // (exit 11) and go through Codex-attended recovery.
     let proc = isProcessing(win)
     if messageLanded(win, sentText: text, profileFor(app)) {
         print("delivered: text appears as a sent message\(proc ? "; recipient is processing" : "")")
         return 0
     }
-    FileHandle.standardError.write("not delivered: text is not a sent message (it's a draft or was never typed). Recover by re-ringing with the message — the ring reliably clears any stuck draft and resends — then confirm again.\n".data(using: .utf8)!)
+    FileHandle.standardError.write("not delivered: text is not a sent message (it's a draft or was never typed). Recovery is conditional (GH-1547): re-ring ONLY when the target composer is proven readable and empty — a routine ring refuses (exit 11) on an opaque profile, an unreadable AXValue, or a remaining draft, so for those states hold and request Codex-attended recovery instead. Confirm again after any recovery.\n".data(using: .utf8)!)
     return 7
 }
 

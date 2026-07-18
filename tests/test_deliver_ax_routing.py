@@ -79,8 +79,6 @@ class AxDoorbellRoutingTest(unittest.TestCase):
         )
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 class AxAttendedRecoveryRoutingTest(unittest.TestCase):
@@ -261,6 +259,36 @@ class AxRegistryBinaryAgreementTest(unittest.TestCase):
             )
             checked += 1
         self.assertGreaterEqual(checked, 3)  # codex, claude, zcode at minimum
+
+
+class AxRecoveryWordingPinTest(unittest.TestCase):
+    """GH-1547 round-1 P2 pin: after fail-closed draft protection, recovery
+    guidance must be CONDITIONAL (re-ring only for a proven readable+empty
+    composer) — the old unconditional "the ring clears the stuck draft, re-ring"
+    instruction is no longer executable (routine ring refuses with exit 11)."""
+
+    AXBRIDGE = REPO_ROOT / "tools" / "axbridge"
+
+    def test_stale_unconditional_re_ring_wording_is_gone(self) -> None:
+        for rel in ("axsend.swift", "README.md"):
+            text = (self.AXBRIDGE / rel).read_text()
+            for stale in (
+                "reliably clears any stuck draft",
+                "reliably clears any draft",
+                "clears the old draft + retypes + resends",
+                'reliably clears Electron drafts',
+            ):
+                self.assertNotIn(
+                    stale, text,
+                    f"{rel}: stale unconditional recovery wording {stale!r} must not return",
+                )
+
+    def test_conditional_recovery_wording_present(self) -> None:
+        confirm_msg = (self.AXBRIDGE / "axsend.swift").read_text()
+        self.assertIn("re-ring ONLY when the target composer is proven readable and empty", confirm_msg)
+        readme = (self.AXBRIDGE / "README.md").read_text()
+        self.assertIn("ONLY when the", readme)
+        self.assertIn("proven readable and empty", readme)
 
 
 if __name__ == "__main__":  # pragma: no cover

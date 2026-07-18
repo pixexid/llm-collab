@@ -78,11 +78,12 @@ bin/axsend ring  --app Codex --submit --text "[from claude] ..."
 #   exit 0 delivered | exit 7 not-delivered (draft or never typed)
 bin/axsend confirm --app Codex --text "[from claude] ..."
 
-# Only after a non-zero/not-delivered result, retry once — the ring clears the old
-# draft + retypes + resends (verified on Electron). Never re-ring either exit-0 result.
+# Only after a non-zero/not-delivered result, retry once — and ONLY when the
+# target composer is proven readable and empty (GH-1547): a routine ring refuses
+# with exit 11 on an opaque profile, an unreadable AXValue, or a remaining
+# draft. For any refused state, hold and request Codex-attended recovery
+# (`--attended`, supervised) instead of retrying. Never re-ring either exit-0 result.
 bin/axsend ring  --app Codex --submit --verify --text "[from claude] ..."
-# (`ring --text ""` now reliably clears Electron drafts too: it wakes focus then
-#  runs two select-all strategies. One retry is the all-in-one recovery.)
 
 # Post-send / anytime: is the recipient processing, and what are recent messages
 # (including their reply)?
