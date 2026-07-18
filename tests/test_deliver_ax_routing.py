@@ -132,7 +132,11 @@ class AxAttendedRecoveryRoutingTest(unittest.TestCase):
                 )
             )
 
-    def test_human_relay_attended_flag_does_not_create_ax_routing(self) -> None:
+    def test_flagged_human_relay_routes_to_attended_recovery_not_operator(self) -> None:
+        # GH-1547 cold-review P2: Antigravity (human_relay, ax_attended_only,
+        # no ax_app) must route to Codex-attended recovery, NOT the operator
+        # relay — the operator is never the routine relay for an agent Codex
+        # can supervise. It still never gets a routine AX doorbell.
         antigravity = {
             "id": "antigravity",
             "activation": {
@@ -144,9 +148,41 @@ class AxAttendedRecoveryRoutingTest(unittest.TestCase):
         self.assertFalse(
             deliver.is_ax_doorbell_target(antigravity, "antigravity", sender_id="codex")
         )
-        self.assertFalse(
+        self.assertTrue(
             deliver.is_ax_attended_recovery_target(
                 antigravity, "antigravity", sender_id="codex"
+            )
+        )
+
+    def test_unflagged_human_relay_keeps_operator_relay(self) -> None:
+        # An ordinary human_relay agent without the opacity flag (e.g. cdx2)
+        # is untouched: no doorbell, no attended recovery — operator relay.
+        cdx2 = {
+            "id": "cdx2",
+            "activation": {"type": "human_relay", "watcher_enabled": False},
+        }
+        self.assertFalse(
+            deliver.is_ax_doorbell_target(cdx2, "cdx2", sender_id="codex")
+        )
+        self.assertFalse(
+            deliver.is_ax_attended_recovery_target(cdx2, "cdx2", sender_id="codex")
+        )
+
+    def test_live_registry_antigravity_routes_attended_not_relay(self) -> None:
+        import json as _json
+
+        agents = {
+            a["id"]: a
+            for a in _json.loads((REPO_ROOT / "agents.json").read_text())["agents"]
+        }
+        self.assertTrue(
+            deliver.is_ax_attended_recovery_target(
+                agents["antigravity"], "antigravity", sender_id="codex"
+            )
+        )
+        self.assertTrue(
+            deliver.is_ax_attended_recovery_target(
+                agents["zcode"], "zcode", sender_id="codex"
             )
         )
 

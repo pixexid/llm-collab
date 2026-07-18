@@ -201,15 +201,15 @@ def is_ax_attended_recovery_target(
     *,
     sender_id: str,
 ) -> bool:
-    """A cli_session AX target whose composer is opaque: the durable packet is
-    written as usual, but activation must be a Codex-attended recovery, never a
-    routine ring."""
-    activation_type = recipient_agent.get("activation", {}).get("type")
+    """A target whose composer is opaque (activation.ax_attended_only): the
+    durable packet is written as usual, but activation must be a Codex-attended
+    recovery — an `--attended` axsend inside a supervised turn when the target
+    has an ax_app, or an attended Computer-Use intervention when it does not
+    (Antigravity). This supersedes human-relay routing for flagged targets: the
+    operator is never the routine relay for an agent Codex can supervise."""
     return (
         not is_codex_self_target(sender_id, recipient_id)
         and recipient_id != "operator"
-        and activation_type == "cli_session"
-        and ax_doorbell_app(recipient_agent) is not None
         and ax_attended_only(recipient_agent)
     )
 
@@ -520,11 +520,21 @@ def main():
         )
         print()
         if args.sender == "codex":
+            recovery_ax_app = ax_doorbell_app(recipient_agent)
+            if recovery_ax_app:
+                mechanism = (
+                    f"visible UI intervention, or `axsend ring --app "
+                    f"{json.dumps(recovery_ax_app)} --attended ...` inside your "
+                    "supervised turn"
+                )
+            else:
+                mechanism = (
+                    "attended Computer-Use intervention — this target has no "
+                    "ax_app, so axsend cannot address it"
+                )
             print(
                 "You ARE the attended supervisor: perform the Codex-attended recovery "
-                f"for {recipient_display} (visible UI intervention, or `axsend ring "
-                f"--app {json.dumps(ax_doorbell_app(recipient_agent))} --attended ...` "
-                "inside your supervised turn) and verify the composer afterwards."
+                f"for {recipient_display} ({mechanism}) and verify the composer afterwards."
             )
         else:
             print("One-line prompt:")
