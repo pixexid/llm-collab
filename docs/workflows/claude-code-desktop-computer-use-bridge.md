@@ -45,11 +45,13 @@ is busy, the message queues and is processed when its current turn ends.
 Queueing is *insurance* that the receiver gets the message even if it already
 saw it on another channel; it does **not** corrupt the running turn (only a
 forced steer would), and queued messages are cancelable on the receiver side.
-The safety gate is a non-empty or unsafe composer, or the same pointer already
-present as a queued draft—not the busy state itself. Never stack or re-ring the
-same pointer; one queued copy is enough. Receiver discipline: when not running,
-read queued messages and ignore a queued copy already handled from the inbox.
-This policy does not authorize a Codex self-doorbell.
+The only routine AX hold condition is a non-empty unsent draft already in the
+native composer—not the target's busy state. An ambiguous or unsafe target is a
+delivery failure that enters recovery, not a reason to wait for idleness. Never
+stack or re-ring the same pointer; if it is already queued, one copy is enough.
+Receiver discipline: when not running, read queued messages and ignore a queued
+copy already handled from the inbox. This policy does not authorize a Codex
+self-doorbell.
 
 **Verification is enforced, not optional.** `ring --submit` verifies by default.
 Exit 0 with `VERIFIED` confirms a visible conversation turn. Exit 0 with
@@ -58,8 +60,9 @@ it does not prove the pointer landed in the intended thread. Preserve the
 durable mailbox packet, record the unconfirmed state and follow-up, never
 re-ring that pointer, and do not claim exact-thread delivery until later
 `axsend confirm`, inbox consumption, or a recipient handoff supplies evidence.
-A non-zero result is not delivered and permits one bounded retry. NEVER use
-Computer Use/screenshots to verify an AX send. Validated bidirectionally
+A non-zero result requires `axsend confirm`; if the pointer is still absent,
+record the exact AX blocker and enter recovery rather than resending it. NEVER
+use Computer Use/screenshots to verify an AX send. Validated bidirectionally
 2026-06-21: Claude ⇄ Codex ⇄ ZCode ⇄ Antigravity.
 
 ## Managed Codex and native subagent routing
@@ -170,17 +173,18 @@ For task-grade work, in order:
    Coordination (`read_thread` / `send_message_to_thread`). Otherwise ring the
    distinct external-app recipient with
    `axsend ring --submit --verify --text "<pointer>"` even if the recipient is
-   busy. The one-line pointer may queue behind the current turn, but the ring
+   busy. Hold only when the native composer already contains a non-empty unsent
+   draft. The one-line pointer may queue behind the current turn, but the ring
    result must be classified as described below. Use exactly **one short,
    sender-tagged, one-line pointer** to the exact inbox/chat/message path as the
-   `--text` value. Full context stays in the durable packet, never in the visible
-   prompt.
+   `--text` value. Full context stays in the durable packet, never in the
+   visible prompt.
 3. Classify exit 0 by output: `VERIFIED` confirms delivery;
    `QUEUED (UNCONFIRMED)` does not. For queued-unconfirmed, keep the mailbox
    packet unresolved, record the blocker/follow-up, never re-ring, and wait for
    later `axsend confirm`, inbox consumption, or recipient handoff evidence. If
-   `axsend` exits non-zero, run `axsend confirm`; if still absent, retry once or
-   record the exact AX blocker in the mailbox.
+   `axsend` exits non-zero, run `axsend confirm`; if still absent, record the
+   exact AX blocker and enter recovery rather than resending the pointer.
 4. Use screenshot/keyboard Computer Use only as attended fallback or recovery
    for an external collaborator app when `axsend` is unavailable or unsafe. In
    that fallback path, pass the idle input gate before typing.

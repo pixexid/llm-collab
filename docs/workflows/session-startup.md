@@ -189,7 +189,9 @@ Safest task-grade workflow for desktop-app agents:
    turn. `VERIFIED` exit 0 confirms delivery. `QUEUED (UNCONFIRMED)` exit 0 does
    not prove the pointer entered the intended thread: preserve the mailbox
    packet, record the unconfirmed blocker/follow-up, never re-ring it, and do not
-   claim exact-thread delivery without later confirmation or recipient evidence
+   claim exact-thread delivery without a later `axsend confirm`, inbox
+   consumption, or recipient handoff. Hold the AX ring only for a non-empty
+   unsent native-composer draft, not for a running/processing state
 3. the sender sends exactly one short sender-tagged wake prompt that points the
    recipient to the exact `llm-collab` inbox/chat/message path. Do not paste full
    task context, acceptance criteria, or multi-paragraph briefs into the app; the

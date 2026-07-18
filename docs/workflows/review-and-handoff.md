@@ -188,23 +188,24 @@ those changes before starting the next lane or ending the thread.
 
 For PR-review wait heartbeats, follow `commit-push-prs.md`: the repeated review
 loop is the orchestrator's manual branch-diff review before commit/PR and after
-any review-fix patch. When the operator has authorized the merge path and the
-latest head has green checks, clean merge state, and no unresolved current
-review feedback, merge from the current thread when the GitHub Codex review
-signal is clean. A clean signal can be either the latest reviewed-head
-`chatgpt-codex-connector` review/comment with no actionable issues, the
-connector's positive reaction to the PR or reviewed head with no later
-actionable comments, or a resolved narrow review-fix commit whose current PR
-state has no unresolved actionable feedback. Rely on the automatic GitHub Codex
-review flow for ready PRs, and do not wait indefinitely for a comment if
-the connector used a reaction or if no new connector artifact appears after the
-configured heartbeat cycle and local/orchestrator review is clean.
+any review-fix patch. When the operator has authorized the merge path, merge
+from the current thread only after the exact current head has green required
+checks, the PR is mergeable with clean merge state, the independent exact-head
+review is clean, and the full current comment/review/thread payload has no
+actionable finding. The GitHub Codex signal is clean when either the latest
+`chatgpt-codex-connector` review/comment explicitly covers that exact OID with
+no actionable issues or the connector's `+1` (`thumbs-up`) reaction was
+established after that OID became the PR head. The latter is terminal for the
+bot wait on that head: report the reaction and its exact timestamp immediately
+and do not wait out the remainder of the 15-minute fallback. If no verdict or
+reaction arrives, the resettable 15-minute settle is the fallback; any push
+invalidates the prior signal and restarts the clock for the new head.
 
 If GitHub Codex comments on the PR, fix the pointed issue, rerun the manual
-branch-diff review and required checks, treat the resolved review thread plus current PR
-state as the GitHub Codex signal, and consume automatic artifacts when they
-arrive. Do not substitute stale inline review-thread objects for current PR
-state. Delete the heartbeat before post-merge cleanup.
+branch-diff review and required checks, then evaluate the new exact head and its
+automatic artifacts from scratch. Do not substitute a resolved older thread or
+stale inline review-thread object for current-head evidence. Delete the
+heartbeat before post-merge cleanup.
 
 When the PR comment needs implementer action, route it through the mailbox and
 doorbell immediately instead of leaving the PR-wait heartbeat to poll in silence.

@@ -156,13 +156,18 @@ policy:
 
 - the orchestrator's local review and required project gates are mandatory
 - automatic GitHub Codex review/comments are consumed when they appear
-- GitHub Codex review must not become an infinite wait when no new review
-  artifact appears after PR creation
+- a `+1` (`thumbs-up`) reaction by `chatgpt-codex-connector` established after
+  the exact current OID became the PR head is the terminal clean-review signal
+  for that head; report the reaction and its exact timestamp immediately
+- any push creates a new head, invalidates every prior reaction or verdict, and
+  resets the 15-minute fallback clock
+- GitHub Codex silence must not become an infinite wait: the resettable
+  15-minute settle is the fallback only when no bot verdict or reaction arrives
+  for the exact current head
 - after review-fix commits, consume automatic artifacts when they arrive and
   otherwise use the current PR state after the heartbeat inspection
-- if the connector fails, stays silent, or only reacts positively, the
-  orchestrator may proceed after inspecting the full PR comment/review state
-  and confirming there is no current actionable feedback
+- neither a bot verdict nor a reaction waives required CI, mergeability, the
+  independent exact-head review, or full comment/review/thread inspection
 
 If the PR is waiting only for remote checks or remote review state, keep it open
 and create or update a Codex heartbeat attached to the current thread with a
@@ -182,34 +187,40 @@ Computer Use is needed as fallback. Do not silently wait for the next heartbeat
 or depend on the operator to notice the PR comment.
 
 When the operator has authorized the merge path for the PR or PR class, the
-heartbeat may complete the wait after it verifies the latest head has green
-required checks, clean `mergeStateStatus`, local/orchestrator review completed,
-and no unresolved current review feedback. Treat the GitHub Codex review signal
-as clean when either:
+heartbeat may complete the wait after it verifies the exact current head has
+green required checks, the PR is mergeable with clean `mergeStateStatus`, the
+independent exact-head review is clean, and the full current comment, review,
+inline-comment, and thread payload has no actionable finding. Treat the GitHub
+Codex review signal as clean when either:
 
 - before any review-fix commit, the latest top-level
-  `chatgpt-codex-connector` review/comment for the reviewed head reports no
-  actionable or major issues, or
-- the connector reacted positively to the PR or latest reviewed head and no new
-  inline/top-level actionable comments were created after that signal.
+  `chatgpt-codex-connector` review/comment explicitly covers the exact current
+  OID and reports no actionable or major issues, or
+- the connector's `+1` (`thumbs-up`) reaction timestamp is after the exact
+  current OID became the PR head. That reaction is terminal for the bot wait on
+  that head when the required gates above remain clean; do not wait out the
+  remainder of the 15-minute fallback.
 
-If no new GitHub Codex review artifact appears, do not wait forever. After at
-least one heartbeat cycle, proceed when all of these are true:
+If no GitHub Codex verdict or reaction arrives for the exact current head, use
+the fallback only after at least 15 minutes have elapsed since the final push
+to that head with no bot review pending. Any push resets this clock. Proceed
+only when all of these are true:
 
-- local/orchestrator review found no actionable issues
+- the independent exact-head review found no actionable issues
 - required checks are green on the latest head
-- `mergeStateStatus` is clean
+- the PR is mergeable and `mergeStateStatus` is clean
 - full PR comments, review bodies, review threads, and inline comments contain
   no unresolved actionable feedback for the current head
 - the project/operator has authorized auto-merge for this PR or queue class
 
 Read current review bodies and reactions directly. Do not infer the current
-result from stale inline review-thread objects alone, and do not keep a heartbeat
-waiting indefinitely for a comment when the connector signaled clean review via
-reaction. If review feedback lands, fix or respond to it, push the update, rerun
-the manual branch-diff review and required local/CI checks, treat the resolved
-review thread plus current PR state as the GitHub Codex signal, then continue
-toward merge.
+result from stale inline review-thread objects alone. The watcher must report a
+current-head reaction and its timestamp immediately so the orchestrator can
+verify that it post-dates the exact head; do not keep a heartbeat waiting for a
+comment or fallback timeout after that terminal signal. If review feedback
+lands, fix or respond to it, push the update, rerun the manual branch-diff
+review and required local/CI checks, then evaluate the new exact head from
+scratch before continuing toward merge.
 
 If the wait cannot self-progress because checks stalled, review state is
 ambiguous, or the implementer has not acknowledged a routed review-fix request,
