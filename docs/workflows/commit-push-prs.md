@@ -372,6 +372,34 @@ commit/push/open the PR for changes that should persist, and record any
 intentional local remainder. Do not assume future merge cleanup will preserve
 uncommitted workflow edits.
 
+## Release closure does not end at merge (GH-1524)
+
+A merged PR is not a closed release until the **main production deploy for the
+exact merge SHA** — including its post-deploy smoke — reaches terminal success.
+The df55a282 incident proved the gap: a post-deploy smoke failure (run
+29537490993) sat unnoticed for hours because nothing consumed the deploy
+signal, and a later unrelated green deploy looked like cover.
+
+The gate, enforced with `bin/deploy_release_watch.py`:
+
+```bash
+bin/deploy_release_watch.py --repo pixexid/amiga --merge-sha <full-merge-sha> [--wait]
+```
+
+- **Exact-SHA correlation is absolute.** A deploy run for a different or
+  earlier SHA never satisfies this merge's closure, no matter how green.
+- **Success = deploy AND post-deploy smoke terminal success** for that exact
+  SHA (the tool also rejects a "successful" run carrying a failed job).
+- **`FAILURE` / `CANCELLED` / `MISSING` are each actionable**: the watcher
+  sends ONE durable llm-collab packet plus ONE doorbell ring. A missing run is
+  a distinct alarm, never silence and never a pass.
+- **On any non-success the task is NOT done**: closure is blocked until Codex
+  records a terminal disposition. Preserve the run id and logs
+  (`gh run view <id> --log-failed`); **no blind retry or redeploy** as the
+  reflex response.
+- **Ownership:** Claude is the ongoing main-deploy watcher; Codex is the
+  terminal task/release closer.
+
 Do not idle the active thread just to wait for asynchronous deploy automation if local post-merge
 work is already complete. Treat deploy as a later checkpoint unless it has actually failed or a new
 production-impacting merge would stack on top of an unresolved deploy state.
