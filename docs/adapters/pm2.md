@@ -151,9 +151,12 @@ Current safe ordering:
 - write the durable `llm-collab` packet and inspect the delivery result; when it
   reports `autobridge_ready: true`, the current Phase 1 route is session
   autobridge, not AX
-- only when it reports `ax_doorbell_required: true`, use
+- only when it reports `ax_doorbell_required: true`, first prove through
+  readable `AXValue` that the native composer is empty, then use
   `axsend-ensure ring --submit --verify` once even when the recipient is busy.
-  `VERIFIED` exit 0 confirms delivery;
+  Busy alone is not a hold after that proof. A non-empty, unreadable,
+  unprovable, or `AXValue`-opaque composer means hold and enter attended
+  recovery—never infer empty or blind-ring. `VERIFIED` exit 0 confirms delivery;
   `QUEUED (UNCONFIRMED)` exit 0 preserves the mailbox/blocker follow-up but does
   not prove exact-thread delivery and must not be re-rung
 - use attended Computer Use only as fallback/recovery when AX cannot safely
@@ -175,8 +178,11 @@ Watcher policy for desktop-app agents:
 PM2/heartbeat is only the bounded, provisional safety-fuse described in
 `session-autobridge-runbook.md`.
 
-- primary: ring the registered AX app once, even while it is busy, with one short
-  pointer to the durable packet. `VERIFIED` exit 0 confirms delivery;
+- primary: after readable `AXValue` proves the native composer is empty, ring
+  the registered AX app once, even while it is busy, with one short pointer to
+  the durable packet. Busy alone is not a hold. A non-empty, unreadable,
+  unprovable, or `AXValue`-opaque composer means hold and attended recovery,
+  never a blind ring. `VERIFIED` exit 0 confirms delivery;
   `QUEUED (UNCONFIRMED)` remains unresolved, preserves the mailbox/follow-up,
   must not be re-rung, and cannot be reported as exact-thread delivery
 - recovery: if AX targets an embedded preview/web field or cannot verify the
@@ -199,15 +205,20 @@ PM2/heartbeat is only the bounded, provisional safety-fuse described in
 If desktop visibility is needed, the recommended flow is:
 
 1. write the task/message to `Chats/` with `deliver.py`
-2. ring the recipient's registered app via AX once even if it is busy, with one
-   short sender-tagged pointer to the durable packet. Record `VERIFIED` exit 0 as
-   confirmed delivery. Record `QUEUED (UNCONFIRMED)` exit 0 as unresolved,
+2. prove through readable `AXValue` that the native composer is empty, then ring
+   the recipient's registered app via AX once even if it is busy, with one short
+   sender-tagged pointer to the durable packet. Busy alone is not a hold after
+   that proof. A non-empty, unreadable, unprovable, or `AXValue`-opaque composer
+   means hold and attended recovery, never a blind ring. Record `VERIFIED` exit
+   0 as confirmed delivery. Record `QUEUED (UNCONFIRMED)` exit 0 as unresolved,
    preserve the mailbox/blocker follow-up, never re-ring it, and do not claim
    exact-thread delivery
 3. the recipient drains its unread inbox and acts; it rings back on handoff
-4. if AX targets the wrong editable surface or cannot verify delivery, run the
-   attended Computer Use recovery above, then retry AX once the real composer is
-   verified; use Computer Use send only as the bounded fallback
+4. if AX targets the wrong editable surface or cannot verify delivery, identity,
+   or empty state, run the attended Computer Use recovery above. Resume AX only
+   after the real composer's empty state is provable; an `AXValue`-opaque
+   composer stays on the attended path. Use Computer Use send only as the
+   bounded fallback
 5. only if the ring is blocked or a running worker's response is expected, create
    a bounded provisional safety-fuse heartbeat
 6. while the target is running, the heartbeat observes only; delete it when the

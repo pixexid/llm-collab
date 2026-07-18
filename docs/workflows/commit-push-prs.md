@@ -156,13 +156,35 @@ policy:
 
 - the orchestrator's local review and required project gates are mandatory
 - automatic GitHub Codex review/comments are consumed when they appear
-- GitHub Codex review must not become an infinite wait when no new review
-  artifact appears after PR creation
-- after review-fix commits, consume automatic artifacts when they arrive and
-  otherwise use the current PR state after the heartbeat inspection
-- if the connector fails, stays silent, or only reacts positively, the
-  orchestrator may proceed after inspecting the full PR comment/review state
-  and confirming there is no current actionable feedback
+- a clean `chatgpt-codex-connector` review/comment that explicitly covers the
+  exact current OID is terminal for that head
+- a connector `+1` (`thumbs-up`) is terminal only when it postdates the latest
+  head, no subsequent push occurred, and the watcher observed the connector's
+  eyes-to-`+1` lifecycle on that head. Timestamp alone or a `+1` on an older or
+  unrelated artifact is not head-attributable
+- report the exact verdict or the latest-head eyes-to-`+1` transition with its
+  timestamps and confirm that no later push occurred
+- any push creates a new head and invalidates every prior verdict and reaction
+  lifecycle. Start or reset the 15-minute fallback clock at the later of the
+  final push to that head and the time that head becomes reviewable: the PR is
+  open, any draft is marked ready, and review-request visibility exists for
+  that head
+- GitHub Codex silence must not become an infinite wait: the resettable
+  15-minute settle is the fallback whenever neither terminal exact-head signal
+  is present and no bot review is actually pending. A non-terminal reaction such
+  as eyes does not block that fallback once no review remains pending. For
+  fallback purposes, a pending/request state with no connector artifact for
+  that full resettable window is no longer actually pending; report and
+  escalate the stuck review, but do not let it extend the fallback indefinitely
+- after every review-fix push, evaluate the new exact head under the same rule:
+  a clean exact-head verdict or head-attributable connector `+1` is terminal; if
+  neither terminal signal exists and no bot review is actually pending under
+  the ageing rule above,
+  heartbeat inspections may observe the wait but must not merge before the
+  resettable 15-minute settle measured from the later of the final push and that
+  head becoming reviewable
+- neither a bot verdict nor a reaction waives required CI, mergeability, the
+  independent exact-head review, or full comment/review/thread inspection
 
 If the PR is waiting only for remote checks or remote review state, keep it open
 and create or update a Codex heartbeat attached to the current thread with a
@@ -174,7 +196,9 @@ heartbeat or queue owner finds actionable PR feedback that needs the implementer
 to change their branch, it must send a durable mailbox packet and inspect the
 `deliver.py` result. If `autobridge_ready: true`, the current Phase 1 route is
 session autobridge and no AX doorbell was requested. If
-`ax_doorbell_required: true`, ring the implementer once with AX even if busy.
+`ax_doorbell_required: true`, first prove the native composer is empty, then
+ring the implementer once with AX even if busy. A non-empty, unreadable,
+unprovable, or `AXValue`-opaque composer means hold and enter recovery.
 `VERIFIED` exit 0 confirms delivery; `QUEUED (UNCONFIRMED)` exit 0 preserves the
 mailbox/blocker follow-up but is not exact-thread delivery proof and must not be
 re-rung. The idle input gate applies only if attended screenshot/keyboard
@@ -182,34 +206,47 @@ Computer Use is needed as fallback. Do not silently wait for the next heartbeat
 or depend on the operator to notice the PR comment.
 
 When the operator has authorized the merge path for the PR or PR class, the
-heartbeat may complete the wait after it verifies the latest head has green
-required checks, clean `mergeStateStatus`, local/orchestrator review completed,
-and no unresolved current review feedback. Treat the GitHub Codex review signal
-as clean when either:
+heartbeat may complete the wait after it verifies the exact current head has
+green required checks, the PR is mergeable with clean `mergeStateStatus`, the
+independent exact-head review is clean, and the full current comment, review,
+inline-comment, and thread payload has no actionable finding. Treat the GitHub
+Codex review signal as clean when either:
 
-- before any review-fix commit, the latest top-level
-  `chatgpt-codex-connector` review/comment for the reviewed head reports no
-  actionable or major issues, or
-- the connector reacted positively to the PR or latest reviewed head and no new
-  inline/top-level actionable comments were created after that signal.
+- the latest top-level `chatgpt-codex-connector` review/comment explicitly
+  covers the exact current OID and reports no actionable or major issues, or
+- the watcher observed the connector's eyes-to-`+1` (`thumbs-up`) transition on
+  the latest head, the `+1` postdates that head, and no subsequent push occurred.
+  That attributable reaction is terminal for the bot wait on that head when the
+  required gates above remain clean; do not wait out the remainder of the
+  15-minute fallback.
 
-If no new GitHub Codex review artifact appears, do not wait forever. After at
-least one heartbeat cycle, proceed when all of these are true:
+If neither a terminal GitHub Codex verdict nor a head-attributable connector
+`+1` exists for the exact current head, use the fallback only after at least 15
+minutes have elapsed since the later of the final push to that head and the
+reviewability timestamp for that head (PR open, marked ready when applicable,
+and review request visible), with no bot review actually pending under the
+ageing rule above. A pending/request state without a connector artifact for
+that full resettable window remains reportable as a stuck review but no longer
+blocks the fallback. Commit age cannot pre-expire the fallback before automatic
+review can begin. Eyes or another non-terminal reaction does not restart or
+suppress that fallback after review is no longer pending. Any push resets this
+clock. Proceed only when all of these are true:
 
-- local/orchestrator review found no actionable issues
+- the independent exact-head review found no actionable issues
 - required checks are green on the latest head
-- `mergeStateStatus` is clean
+- the PR is mergeable and `mergeStateStatus` is clean
 - full PR comments, review bodies, review threads, and inline comments contain
   no unresolved actionable feedback for the current head
 - the project/operator has authorized auto-merge for this PR or queue class
 
 Read current review bodies and reactions directly. Do not infer the current
-result from stale inline review-thread objects alone, and do not keep a heartbeat
-waiting indefinitely for a comment when the connector signaled clean review via
-reaction. If review feedback lands, fix or respond to it, push the update, rerun
-the manual branch-diff review and required local/CI checks, treat the resolved
-review thread plus current PR state as the GitHub Codex signal, then continue
-toward merge.
+result from stale inline review-thread objects alone. The watcher must report
+the exact current-head verdict or the latest-head eyes-to-`+1` lifecycle with
+its timestamps and confirm that no later push occurred; do not keep a heartbeat
+waiting for another artifact or fallback timeout after either terminal signal.
+If review feedback lands, fix or respond to it, push the update, rerun the
+manual branch-diff review and required local/CI checks, then evaluate the new
+exact head from scratch before continuing toward merge.
 
 If the wait cannot self-progress because checks stalled, review state is
 ambiguous, or the implementer has not acknowledged a routed review-fix request,
