@@ -194,13 +194,19 @@ checks, the PR is mergeable with clean merge state, the independent exact-head
 review is clean, and the full current comment/review/thread payload has no
 actionable finding. The GitHub Codex signal is clean when either the latest
 `chatgpt-codex-connector` review/comment explicitly covers that exact OID with
-no actionable issues or the connector's `+1` (`thumbs-up`) reaction was
-established after that OID became the PR head. Either signal is terminal for the
-bot wait on that head: report the exact verdict or reaction and its timestamp
-immediately and do not wait out the remainder of the 15-minute fallback. If
-neither arrives and no bot review is pending, the resettable 15-minute settle
-is the fallback; any push invalidates the prior signal and restarts the clock
-for the new head.
+no actionable issues or the watcher observed the connector's eyes-to-`+1`
+(`thumbs-up`) transition on the latest head, the `+1` postdates that head, and no
+subsequent push occurred. Either signal is terminal for the bot wait on that
+head: report the exact verdict or attributable reaction lifecycle with its
+timestamps immediately and do not wait out the remainder of the 15-minute
+fallback. If neither terminal signal exists and no bot review is actually
+pending, the resettable 15-minute settle is the fallback. For fallback
+purposes, a pending/request state with no connector artifact for that full
+resettable window is no longer actually pending; report and escalate the stuck
+review, but do not let it extend the fallback indefinitely. Eyes or another
+non-terminal reaction does not block the fallback once review is no longer
+pending. Any push invalidates the prior signal and restarts the clock for the
+new head.
 
 If GitHub Codex comments on the PR, fix the pointed issue, rerun the manual
 branch-diff review and required checks, then evaluate the new exact head and its

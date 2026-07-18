@@ -38,17 +38,20 @@ channel**, not to the operator. The operator decides product, visual/UX, scope,
 and business calls — not technical implementation. Routing eng decisions to the
 operator stalls the work (they can't adjudicate them).
 
-**Queueing to a busy recipient is SAFE and expected.** Do NOT wait/poll for the
-other agent to be idle merely because `Stop`, `Running`, or processing is
-visible. Send one AX doorbell on a supported distinct-app route; if the target
-is busy, the message queues and is processed when its current turn ends.
+**Queueing to a busy recipient is SAFE after composer-safety proof.** A routine
+AX ring requires a provably empty native composer. Once that proof exists, do
+NOT wait/poll for the other agent to be idle merely because `Stop`, `Running`,
+or processing is visible. Send one AX doorbell on a supported distinct-app
+route; if the target is busy, the message queues and is processed when its
+current turn ends.
 Queueing is *insurance* that the receiver gets the message even if it already
 saw it on another channel; it does **not** corrupt the running turn (only a
 forced steer would), and queued messages are cancelable on the receiver side.
-The only routine AX hold condition is a non-empty unsent draft already in the
-native composer—not the target's busy state. An ambiguous or unsafe target is a
-delivery failure that enters recovery, not a reason to wait for idleness. Never
-stack or re-ring the same pointer; if it is already queued, one copy is enough.
+A non-empty draft or unreadable, unprovable, or `AXValue`-opaque composer state
+means hold and enter recovery—never infer empty. The target's busy state alone
+is not a hold condition after the empty-composer proof. An ambiguous or unsafe
+target likewise enters recovery. Never stack or re-ring the same pointer; if it
+is already queued, one copy is enough.
 Receiver discipline: when not running, read queued messages and ignore a queued
 copy already handled from the inbox. This policy does not authorize a Codex
 self-doorbell.
@@ -65,8 +68,12 @@ delivery. Exit 7/not-delivered requires `axsend confirm`; if it confirms the
 pointer is absent on the same proven target, one re-ring is allowed. Never
 re-ring an exit-0 queued/unconfirmed result or an identity-loss/ambiguous
 result. Other non-zero results enter recovery. NEVER use Computer
-Use/screenshots to verify an AX send. Validated bidirectionally 2026-06-21:
-Claude ⇄ Codex ⇄ ZCode ⇄ Antigravity.
+Use/screenshots to verify an AX send. Routine target composers are validated
+for Codex and Claude Desktop. ZCode or Antigravity may originate a ring to a
+supported target, but when either app is the target its `AXValue`-opaque or
+otherwise unprovable composer requires hold and attended recovery; never use a
+blind key-typed AX ring. Busy alone is not a hold after composer safety is
+actually proved.
 
 ## Managed Codex and native subagent routing
 
@@ -108,11 +115,13 @@ $AX state --app Codex                                   # read the reply
 ```
 
 Rules: deliver the durable packet with `deliver.py` FIRST (mailbox = truth);
-ring once even when the recipient is busy. `VERIFIED` exit 0 is confirmed;
+prove the native composer is empty, then ring once even when the recipient is
+busy. An unreadable, unprovable, or `AXValue`-opaque composer enters recovery.
+`VERIFIED` exit 0 is confirmed;
 `QUEUED (UNCONFIRMED)` exit 0 must be recorded and followed up without re-ringing
 or claiming exact-thread delivery. Use `--dry-run` first on any new app and
-`--verify` (non-zero means the text did not land; an empty composer is not proof
-of send). The idle input gate applies only to attended screenshot/keyboard
+`--verify` (non-zero means the text did not land; a post-send empty composer is
+not proof of delivery). The idle input gate applies only to attended screenshot/keyboard
 Computer Use fallback. Any collaborator (Codex, Claude, Gemini, ZCode) can call
 `axsend-ensure` via shell for a distinct-app route, but Codex must not target
 itself or a managed Codex worker. Needs the running process enabled in Privacy &
@@ -120,21 +129,29 @@ Security → Accessibility. Falls back to screenshot Computer Use only if AX
 fails for an external-app target. Full reference:
 `tools/axbridge/README.md` and the Claude Code `ax-doorbell` skill.
 
-**Validated across all four agent apps (2026-06-21):**
+**Per-app routine target safety:**
 
 | App | Composer write | Submit | Status |
 |-----|----------------|--------|--------|
 | Codex | `AXValue` | send-arrow `AXPress` | ✅ proven bidirectional |
 | Claude Desktop | `AXValue` | `key-return` | ✅ proven |
-| ZCode | key-event typing | "Send" button | ✅ proven (replied to a typed ring) |
-| Antigravity (Gemini) | key-event typing | `key-return` | ✅ typed + submitted |
+| ZCode | `AXValue`-opaque | attended recovery only | ⚠️ routine ring holds because emptiness is unprovable |
+| Antigravity (Gemini) | unreadable/unproven | attended recovery only | ⚠️ routine AX target unsupported until composer safety is provable |
 
-`ring` adapts automatically: it writes via `AXValue`, and if the field rejects it
-(ZCode/Antigravity are Electron code-editor composers that silently drop `AXValue`
-writes) it falls back to real **key-event typing** (`CGEventPostToPid` +
-`keyboardSetUnicodeString`, no focus steal). The doorbell works in either
-direction between supported distinct app identities; that capability does not
-make it a Codex-to-Codex transport.
+The active registry and `deliver.py` still generate ZCode AX doorbell
+instructions; they do not yet enforce this target-side hold. Until
+the tracked runtime-enforcement follow-up lands, treat any generated routine
+instruction for an `AXValue`-opaque ZCode or Antigravity composer as HOLD plus
+Codex-attended recovery, never as command authorization.
+
+Routine `ring` requires readable `AXValue` proof that the native composer is
+empty. A rejected write, opaque value, unreadable state, or otherwise unprovable
+composer does not authorize automatic key-event typing: hold and use the
+attended recovery path. Low-level key-event typing may be used only within that
+recovery path after composer safety is established; it is never a blind-send
+escape hatch. Once safety is proved, recipient busy state alone does not require
+an idle wait. The doorbell works between supported distinct app identities;
+that capability does not make it a Codex-to-Codex transport.
 
 ## Two channels: mailbox + doorbell
 
@@ -175,10 +192,12 @@ For task-grade work, in order:
 2. If sender and recipient are both `codex`, stop app routing and use Thread
    Coordination (`read_thread` / `send_message_to_thread`). Otherwise ring the
    distinct external-app recipient with
-   `axsend ring --submit --verify --text "<pointer>"` even if the recipient is
-   busy. Hold only when the native composer already contains a non-empty unsent
-   draft. The one-line pointer may queue behind the current turn, but the ring
-   result must be classified as described below. Use exactly **one short,
+   `axsend ring --submit --verify --text "<pointer>"` only after the native
+   composer is provably empty. Once proven empty, ring even if the recipient is
+   busy. A non-empty draft or unreadable, unprovable, or `AXValue`-opaque
+   composer state means hold and recovery—never infer empty. The one-line
+   pointer may queue behind the current turn, but the ring result must be
+   classified as described below. Use exactly **one short,
    sender-tagged, one-line pointer** to the exact inbox/chat/message path as the
    `--text` value. Full context stays in the durable packet, never in the
    visible prompt.
@@ -363,16 +382,19 @@ the settled UI, then records the meaningful content into the mailbox.
 
 - Recipient idle/awaiting input: safe to read the last answer and decide whether
   an explicit next ring exists.
-- Recipient still generating / shows `Stop` / creating a worktree: one AX ring
-  is allowed and may queue the pointer behind the active turn. If the result is
+- Recipient still generating / shows `Stop` / creating a worktree: after the
+  native composer is provably empty, one AX ring is allowed and may queue the
+  pointer behind the active turn. If composer state is unreadable, unprovable,
+  or `AXValue`-opaque, hold and enter recovery. If the result is
   `QUEUED (UNCONFIRMED)`, preserve the mailbox/follow-up, never re-ring, and do
   not claim exact-thread delivery. Do not use screenshot/keyboard Computer Use
   until the idle input gate passes.
 - Computer Use cannot see the prompt/transcript: the Computer Use fallback is
   paused; record the blocker (for the safety-fuse path,
   `record-computer-use-timeout` applies a cooldown) and retry that fallback
-  after repair. AX may still ring once when it can target and verify the native
-  composer. Do not fall back to CLI.
+  after repair. AX may still ring once only when it can verify the native
+  composer identity and prove its empty state through readable `AXValue`. Do
+  not fall back to CLI.
 - App-visible thread changed: re-read app state and confirm project/title before
   sending anything.
 - Safety-fuse heartbeat times out: record `timed_out`, delete the heartbeat, and

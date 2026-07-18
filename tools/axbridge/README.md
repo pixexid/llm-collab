@@ -36,6 +36,18 @@ bin/axsend check        # -> "AX trusted: YES"
 
 ## Usage
 
+Before any routine `ring`, prove through readable `AXValue` that the native
+composer is empty. A busy recipient alone is not a hold after that proof, so
+one pointer may queue behind the active turn. A non-empty, unreadable,
+unprovable, or `AXValue`-opaque composer means hold and enter attended recovery;
+never infer empty or perform a blind ring.
+
+This proof gate is currently process-level policy, not atomically enforced by
+`cmdRing` or `setComposerText`. Until the tracked runtime-enforcement follow-up
+lands, the sender must perform an immediate readable empty-composer proof before
+sending; an opaque, unprovable, or concurrently changing composer state means
+hold and route to Codex-attended recovery.
+
 ```bash
 # Inspect an app's tree to find the composer + send button
 bin/axsend-ensure tree --app Codex --editable-only
@@ -90,16 +102,16 @@ turn is not yet present in the conversation tree, so immediate post-confirming
 would create a false failure and invite an unsafe duplicate send. The caller
 must record queued-unconfirmed as unresolved and follow up without re-ringing.
 
-**Electron apps (ZCode/Antigravity) — the verification rule:** these composers
-accept key events but do NOT reflect text back through `AXValue`, so you cannot
-read the draft/empty state via AX. NEVER trust a read-back of the composer, and
-NEVER fall back to a screenshot to check — use `axsend confirm`, which checks the
-*conversation* (the sent message appears as a real turn ABOVE the composer) — the
-one signal that IS reliably AX-readable. The composer's own draft/empty state is
-NOT reliable (blank AXValue + stale cached static-text nodes), so confirm reports
-delivered vs not, not a draft state. `VERIFIED` exit 0 confirms delivery;
-`QUEUED (UNCONFIRMED)` exit 0 remains unresolved but must not be re-rung. After a
-non-zero/not-delivered result, retry once; do not repeatedly re-ring.
+**Electron apps (ZCode/Antigravity) — opaque composer rule:** when these
+composers do not reflect draft state through readable `AXValue`, their empty
+state cannot be proved. They are therefore routine hold-and-recovery/attended
+paths by definition: do not infer empty from a blank value, do not key-type a
+blind ring, and do not make an exception because the recipient is busy.
+`axsend confirm` checks the conversation after a ring; it cannot prove the
+composer was empty before one. After attended recovery establishes a safe send,
+`VERIFIED` exit 0 confirms delivery and `QUEUED (UNCONFIRMED)` exit 0 remains
+unresolved and must not be re-rung. Only a non-zero/not-delivered result whose
+absence is confirmed on the same target permits one re-ring.
 
 `--app` matches by localized name or bundle id (substring ok). `--window-index N`
 targets a specific window. It is OPTIONAL: when ABSENT the resolver is in AUTO
@@ -150,16 +162,17 @@ out of range, REJECTED (not clamped). Absent is not the same as `0`.
   `QUEUED (UNCONFIRMED)` and `7` when the message did not land. A busy recipient
   is not an AX ring failure, but queued-unconfirmed is not exact-thread delivery
   proof.
-- **Busy-safe queueing:** `ring` is allowed while a distinct external
-  collaborator is busy. A visible `Stop`, `Running`, or processing state is not
-  an idle-wait requirement. Submit exactly one message; block only when the
-  composer is non-empty/unsafe or the same pointer is already queued, and never
-  stack or re-ring that pointer behind the running turn. `VERIFIED` confirms
-  delivery; `QUEUED (UNCONFIRMED)` preserves the mailbox/follow-up but cannot be
-  reported as exact-thread delivery. `tree`/`state` are optional diagnostics,
-  not AX ring idle gates. The idle input gate applies only to attended
-  screenshot/keyboard Computer Use fallback. This does not permit a
-  Codex-to-Codex AX doorbell.
+- **Busy-safe queueing:** after readable `AXValue` proves the native composer is
+  empty, `ring` is allowed while a distinct external collaborator is busy. A
+  visible `Stop`, `Running`, or processing state alone is not an idle-wait
+  requirement. Submit exactly one message. A non-empty, unreadable, unprovable,
+  or `AXValue`-opaque composer means hold and attended recovery; never infer
+  empty. Also hold when the same pointer is already queued, and never stack or
+  re-ring that pointer behind the running turn. `VERIFIED` confirms delivery;
+  `QUEUED (UNCONFIRMED)` preserves the mailbox/follow-up but cannot be reported
+  as exact-thread delivery. `tree`/`state` are optional diagnostics, not AX ring
+  idle gates. The idle input gate applies only to attended screenshot/keyboard
+  Computer Use fallback. This does not permit a Codex-to-Codex AX doorbell.
 
 ## Per-app support matrix (composer identity revalidated 2026-07-11, PR78 R4/R5)
 
@@ -172,11 +185,13 @@ tries the send button, `AXConfirm`, and a posted Return.
 |-----|-------------------|--------|---------------------|
 | **Codex** | `AXTextArea` "Ask for follow-up changes" or "Do anything" (bundle `com.openai.codex`, localized app name may be `ChatGPT`) | send-arrow `AXPress` (same chat web area) | ✅ resolves + confirmed delivery |
 | **Claude Desktop** | `AXTextArea` "Prompt" | `key-return` fallback | ✅ resolves, no regression |
-| **ZCode** | `AXTextArea` "Ask for follow-up changes" | "Send" button | ✅ resolves; `Send` dry-run target |
+| **ZCode** | `AXTextArea` "Ask for follow-up changes"; draft state is `AXValue`-opaque | "Send" button | ⚠️ identity resolves, but routine ring holds for attended recovery because emptiness is unprovable |
 | **Antigravity / Gemini** | ❌ no profile yet → `.unknown` | — | ⚠️ **FAILS CLOSED** — AX doorbell unsupported pending live composer-identity capture |
 
 ZCode is an Electron code-editor composer that rejects programmatic `AXValue`
-writes — the key-event typing path makes the doorbell work for it.
+writes. The key-event typing path is available only within the attended recovery
+path after composer safety is established; it does not authorize a routine
+blind ring.
 
 **Antigravity/Gemini (PR78 R5/R6):** no explicit composer-identity profile is
 captured, so `profileFor` returns `.unknown` and resolution FAILS CLOSED rather
@@ -222,4 +237,5 @@ driving another agent's desktop UI.
 
 Computer Use is a serialized control and recovery plane, not a replacement
 doorbell. Once Codex has restored a safe target/thread, normal delivery returns
-to one verified AX ring.
+to one verified AX ring only when the native composer is again provably empty;
+an `AXValue`-opaque composer remains on the attended recovery path.

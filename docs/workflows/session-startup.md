@@ -185,15 +185,18 @@ Safest task-grade workflow for desktop-app agents:
    - `activation_unavailable` means the durable packet exists but neither a
      dispatchable runtime nor an explicit wake transport is configured
 2. when `ax_doorbell_required` is true, the sender rings once with the printed AX
-   command; a busy recipient may queue the one-line pointer behind its active
-   turn. `VERIFIED` exit 0 confirms delivery. `QUEUED (UNCONFIRMED)` exit 0 does
+   command only after the native composer is provably empty. Once proven empty,
+   a busy recipient may queue the one-line pointer behind its active turn. A
+   non-empty draft or unreadable, unprovable, or `AXValue`-opaque composer state
+   means hold and recovery—never infer empty. `VERIFIED` exit 0 confirms
+   delivery. `QUEUED (UNCONFIRMED)` exit 0 does
    not prove the pointer entered the intended thread: preserve the mailbox
    packet, record the unconfirmed blocker/follow-up, never re-ring it, and do not
    claim exact-thread delivery without a later `axsend confirm` or explicit
    recipient evidence that the pointer appeared in the native thread. Inbox
-   consumption proves durable packet delivery only, not AX-thread delivery.
-   Hold the AX ring only for a non-empty unsent native-composer draft, not for a
-   running/processing state
+   consumption proves durable packet delivery only, not AX-thread delivery. A
+   running/processing state alone does not block the ring after composer-safety
+   proof
 3. the sender sends exactly one short sender-tagged wake prompt that points the
    recipient to the exact `llm-collab` inbox/chat/message path. Do not paste full
    task context, acceptance criteria, or multi-paragraph briefs into the app; the
@@ -203,10 +206,12 @@ Safest task-grade workflow for desktop-app agents:
 4. if AX resolves an embedded preview/web field or cannot deliver/confirm, stop
    sending but preserve the packet. In an attended Codex turn, use Computer Use
    plus `bin/axsend-ensure tree --app <app> --editable-only` to remove/blank the
-   competing field, select the correct window, clear probes, and verify the
-   native composer; resume AX after repair, or use one idle-gated Computer Use
-   send as the bounded fallback. Never turn one targeting incident into a
-   standing AX-disabled rule.
+   competing field, select the correct window, and clear probes. Resume routine
+   AX only after verifying both the native composer identity and its provably
+   empty state through readable `AXValue`. An unreadable, unprovable, or
+   `AXValue`-opaque composer remains on attended recovery; use one idle-gated
+   Computer Use send as the bounded fallback. Never turn one targeting incident
+   into a standing AX-disabled rule.
 
 After `desktop_bridge_required` or an AX targeting/delivery failure enters the
 attended recovery path, Codex owns the visible Claude Desktop recovery/wake

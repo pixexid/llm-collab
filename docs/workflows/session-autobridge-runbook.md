@@ -12,13 +12,17 @@ Current `deliver.py` gives a matching dispatchable session autobridge precedence
 and suppresses `ax_doorbell_required` for that packet. The primary wake for an
 AX-capable `cli_session` only when no such autobridge resolves is the busy-safe
 **bidirectional AX doorbell** (`axsend-ensure ring --submit --verify`; see
-`claude-code-desktop-computer-use-bridge.md`). Ring once even when the recipient
-is busy. `VERIFIED` exit 0 confirms delivery. `QUEUED (UNCONFIRMED)` exit 0 does
-not prove exact-thread delivery: preserve the durable mailbox packet, record the
-unconfirmed blocker/follow-up, and never re-ring. The idle input gate applies
-only to attended screenshot/keyboard Computer Use fallback, not to AX `ring`.
-Computer Use is the recovery path when AX cannot safely target or verify the
-native composer, and for an explicitly configured non-CLI desktop bridge.
+`claude-code-desktop-computer-use-bridge.md`). First prove through readable
+`AXValue` that the native composer is empty, then ring once even when the
+recipient is busy; busy alone is not a hold after that proof. A non-empty,
+unreadable, unprovable, or `AXValue`-opaque composer means hold and enter
+attended recovery—never infer empty or blind-ring. `VERIFIED` exit 0 confirms
+delivery. `QUEUED (UNCONFIRMED)` exit 0 does not prove exact-thread delivery:
+preserve the durable mailbox packet, record the unconfirmed blocker/follow-up,
+and never re-ring. The idle input gate applies only to attended
+screenshot/keyboard Computer Use fallback, not to AX `ring`. Computer Use is
+the recovery path when AX cannot safely target or verify the native composer or
+its empty state, and for an explicitly configured non-CLI desktop bridge.
 `llm-collab` remains the durable mailbox. Routine/continuous polling is
 **deprecated** as the primary wake — it wastes tokens and a heartbeat set on
 guessed timing can fire into changed context.
@@ -56,19 +60,23 @@ remove it and rely on the doorbell + mailbox-drain self-heal.
   visible in `Chats/`.
 - Do not target an active operator thread for retry tests.
 - Treat Claude desktop as a human-visible UI, not as a
-  `session_autobridge.py` runtime target. Ring an existing verified native
-  composer through AX first. Computer Use owns attended AX recovery/fallback and
-  fresh thread creation: generate a UUID plus short title, click `New session`,
-  send the first prompt beginning with
+  `session_autobridge.py` runtime target. Ring an existing native composer
+  through AX first only after readable `AXValue` proves it is empty. A
+  non-empty, unreadable, unprovable, or `AXValue`-opaque composer means hold and
+  attended recovery. Computer Use owns attended AX recovery/fallback and fresh
+  thread creation: generate a UUID plus short title, click `New session`, send
+  the first prompt beginning with
   `[BRIDGE <8-char-uuid-prefix>] <short title>`, then verify the sidebar title
   and `local_*` URL. Do not claim a PM2 watcher, CLI resume, or filesystem write
   created a desktop-visible thread.
 - If AX resolves an embedded preview/web field or cannot verify the native
-  prompt, stop sending but preserve the durable packet. Use attended Computer
-  Use plus `bin/axsend-ensure tree --app <app> --editable-only` to remove/blank
-  the competing field, select the correct window, clear probes, and verify the
-  real native composer before resuming AX. Do not record a standing mailbox-only
-  or AX-disabled policy from one targeting incident.
+  prompt or its empty state, stop sending but preserve the durable packet. Use
+  attended Computer Use plus
+  `bin/axsend-ensure tree --app <app> --editable-only` to remove/blank the
+  competing field, select the correct window, clear probes, and verify the real
+  native composer. Resume AX only when its empty state is provable; an
+  `AXValue`-opaque composer stays on the attended path. Do not record a standing
+  mailbox-only or AX-disabled policy from one targeting incident.
 - For Claude-owned collaboration lanes, inspect the visible Claude app before
   treating inbox or queue state as final. If Claude is visibly asking a related
   question, waiting for direction, or reporting Read/Agent/tool errors, Codex
@@ -76,14 +84,16 @@ remove it and rely on the doorbell + mailbox-drain self-heal.
   for a final inbox handoff while Claude is blocked in the app.
 - If Claude is stale, idle with no durable progress, or repeatedly erroring,
   first try to wake or repair the same thread with a durable unblock packet plus
-  one short AX bridge; it may queue behind an active turn. Apply the idle input
-  gate only if recovery falls back to screenshot/keyboard Computer Use. Restart
-  or reopen Claude only from an attended Codex recovery turn or after explicit
-  operator instruction; unattended heartbeats must notify with the observed
-  blocker instead of interrupting or restarting Claude. Create a new Claude
-  thread only when the current thread is full, unrecoverably corrupted,
-  repeatedly loses tool access, or still cannot continue after attended
-  recovery; include a full continuity packet for the same task.
+  one short AX bridge only after the native composer is provably empty; it may
+  queue behind an active turn, and busy alone is not a hold. A non-empty,
+  unreadable, unprovable, or `AXValue`-opaque composer means hold and recovery.
+  Apply the idle input gate only if recovery falls back to screenshot/keyboard
+  Computer Use. Restart or reopen Claude only from an attended Codex recovery
+  turn or after explicit operator instruction; unattended heartbeats must notify
+  with the observed blocker instead of interrupting or restarting Claude. Create
+  a new Claude thread only when the current thread is full, unrecoverably
+  corrupted, repeatedly loses tool access, or still cannot continue after
+  attended recovery; include a full continuity packet for the same task.
 
 ## Activate A Session
 
