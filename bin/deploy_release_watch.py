@@ -77,7 +77,7 @@ def fetch_deploy_runs(repo: str, merge_sha: str, workflow: str, runner=run_comma
     """All runs of the deploy workflow for the exact head SHA (API-side filter),
     newest first. The head_sha query is the exact-correlation guarantee: a run
     for any other SHA is never returned, so it can never be misread as covering
-    this merge."""
+    this merge. Event/branch identity is judged in evaluate_release."""
     raw = runner([
         "gh", "api",
         f"repos/{repo}/actions/runs?head_sha={merge_sha}&per_page=50",
@@ -91,30 +91,61 @@ def fetch_run_jobs(repo: str, run_id: int, runner=run_command) -> list[dict]:
     raw = runner([
         "gh", "api",
         f"repos/{repo}/actions/runs/{run_id}/jobs?per_page=50",
-        "--jq", ".jobs",
+        "--jq", "[.jobs[] | {name, conclusion, steps: [.steps[]? | {name, conclusion}]}]",
     ])
     return json.loads(raw or "[]")
 
 
-def evaluate_release(merge_sha: str, runs: list[dict], jobs_for_run) -> Verdict:
+# Required release evidence for the Amiga deploy workflow (POSITIVE list —
+# GH-1524 cold-review P1: an empty/partial jobs payload or a skipped heavy job
+# must fail closed, never read as success). Unknown extra jobs may exist but
+# cannot substitute for these.
+REQUIRED_JOBS = ("detect", "deploy")
+REQUIRED_SMOKE_STEPS = ("Verify production hosts", "Verify production auth")
+
+
+def evaluate_release(
+    merge_sha: str,
+    runs: list[dict],
+    jobs_for_run,
+    *,
+    required_event: str = "push",
+    required_branch: str = "main",
+    required_jobs: tuple[str, ...] = REQUIRED_JOBS,
+    required_smoke_steps: tuple[str, ...] = REQUIRED_SMOKE_STEPS,
+) -> Verdict:
     """Pure verdict logic. `runs` must already be exact-SHA-filtered (the fetch
     guarantees it; the assertion below fails closed if a caller ever passes a
     mismatched run). `jobs_for_run(run_id) -> list[dict]` supplies job detail
-    for the candidate run."""
+    (with steps) for the candidate run."""
     for r in runs:
         if r.get("head_sha") != merge_sha:
             raise ValueError(
                 f"exact-SHA correlation violated: run {r.get('id')} has head_sha "
                 f"{r.get('head_sha')} != merge SHA {merge_sha}"
             )
-    if not runs:
+    # Only the AUTOMATIC main-push deploy counts. A workflow_dispatch (or any
+    # other event/branch) run on the same SHA is a manual intervention and can
+    # never supersede or cover the automatic run's outcome — that would be a
+    # blind-retry laundering channel (GH-1524 cold-review P1).
+    excluded = [r for r in runs
+                if r.get("event") != required_event or r.get("head_branch") != required_branch]
+    candidates = [r for r in runs if r not in excluded]
+    if not candidates:
+        note = ""
+        if excluded:
+            ids = ", ".join(str(r.get("id")) for r in excluded)
+            note = (f" ({len(excluded)} non-qualifying run(s) exist for this SHA — e.g. "
+                    f"workflow_dispatch/off-branch: {ids} — they never satisfy closure)")
         return Verdict(
             state="MISSING", merge_sha=merge_sha,
-            detail="no deploy run exists for the exact merge SHA — actionable, not a pass",
+            detail="no automatic "
+                   f"{required_event}/{required_branch} deploy run exists for the exact "
+                   f"merge SHA — actionable, not a pass{note}",
         )
     # Latest run per rerun semantics: judge the newest attempt, never a stale
     # earlier run (mirrors the latest-per-context CI rule).
-    latest = max(runs, key=lambda r: (r.get("run_attempt") or 0, r.get("id") or 0))
+    latest = max(candidates, key=lambda r: (r.get("run_attempt") or 0, r.get("id") or 0))
     run_id = latest.get("id")
     if latest.get("status") != "completed":
         return Verdict(
@@ -130,16 +161,38 @@ def evaluate_release(merge_sha: str, runs: list[dict], jobs_for_run) -> Verdict:
         return Verdict(state="FAILURE", merge_sha=merge_sha, run_id=run_id,
                        run_conclusion=conclusion,
                        detail=f"run {run_id} concluded {conclusion}")
-    # Run-level success is necessary but not sufficient: every job (detect AND
-    # deploy — the deploy job carries the post-deploy smoke steps) must itself
-    # be success, so a whitewashed/partial run cannot read as a clean release.
+    # Run-level success is necessary but not sufficient. Require POSITIVE
+    # evidence: every required job present with conclusion exactly "success"
+    # (a skipped deploy is a docs-only/no-op run, not a release), and every
+    # required post-deploy smoke step present and successful inside the deploy
+    # job. Missing/partial API data therefore fails closed instead of passing.
     jobs = jobs_for_run(run_id)
-    failed = [j.get("name", "?") for j in jobs
-              if j.get("conclusion") not in ("success", "skipped")]
-    if failed:
+    by_name = {j.get("name", ""): j for j in jobs}
+    problems: list[str] = []
+    for name in required_jobs:
+        job = by_name.get(name)
+        if job is None:
+            problems.append(f"required job '{name}' missing from run evidence")
+        elif job.get("conclusion") != "success":
+            problems.append(f"required job '{name}' concluded {job.get('conclusion')!r}, not success")
+    deploy_job = by_name.get("deploy") or {}
+    steps = {s.get("name", ""): s for s in (deploy_job.get("steps") or [])}
+    for step_name in required_smoke_steps:
+        step = steps.get(step_name)
+        if step is None:
+            problems.append(f"required smoke step '{step_name}' missing from deploy job evidence")
+        elif step.get("conclusion") != "success":
+            problems.append(f"required smoke step '{step_name}' concluded {step.get('conclusion')!r}")
+    extra_failed = [j.get("name", "?") for j in jobs
+                    if j.get("name") not in required_jobs
+                    and j.get("conclusion") not in ("success", "skipped")]
+    if extra_failed:
+        problems.append(f"non-required job(s) failed: {', '.join(extra_failed)}")
+    if problems:
         return Verdict(state="FAILURE", merge_sha=merge_sha, run_id=run_id,
-                       run_conclusion=conclusion, failed_jobs=failed,
-                       detail=f"run {run_id} concluded success but jobs did not: {', '.join(failed)}")
+                       run_conclusion=conclusion, failed_jobs=problems,
+                       detail=f"run {run_id} concluded success but required release "
+                              f"evidence is incomplete: {'; '.join(problems)}")
     return Verdict(state="SUCCESS", merge_sha=merge_sha, run_id=run_id,
                    run_conclusion=conclusion,
                    detail=f"deploy + post-deploy smoke terminal success for run {run_id}")
@@ -179,8 +232,9 @@ def main() -> int:
     parser.add_argument("--json", action="store_true", help="emit the verdict as JSON")
     args = parser.parse_args()
 
-    if len(args.merge_sha) < 40:
-        print("[error] --merge-sha must be the FULL 40-char merge SHA (exact correlation)",
+    import re as _re
+    if not _re.fullmatch(r"[0-9a-fA-F]{40}", args.merge_sha):
+        print("[error] --merge-sha must be exactly 40 hex characters (the full merge SHA)",
               file=sys.stderr)
         return 64
 

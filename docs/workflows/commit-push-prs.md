@@ -374,8 +374,11 @@ uncommitted workflow edits.
 
 ## Release closure does not end at merge (GH-1524)
 
-A merged PR is not a closed release until the **main production deploy for the
-exact merge SHA** — including its post-deploy smoke — reaches terminal success.
+A **production-affecting** merged PR is not a closed release until the **main
+production deploy for the exact merge SHA** — including its post-deploy smoke —
+reaches terminal success. Docs-only merges intentionally skip the heavy deploy
+job in Amiga's `deploy.yml`; a skipped deploy is a no-op run, never
+"deploy+smoke success", and such merges are outside this gate's scope.
 The df55a282 incident proved the gap: a post-deploy smoke failure (run
 29537490993) sat unnoticed for hours because nothing consumed the deploy
 signal, and a later unrelated green deploy looked like cover.
@@ -388,8 +391,14 @@ bin/deploy_release_watch.py --repo pixexid/amiga --merge-sha <full-merge-sha> [-
 
 - **Exact-SHA correlation is absolute.** A deploy run for a different or
   earlier SHA never satisfies this merge's closure, no matter how green.
+- **Only the automatic `push`/`main` deploy run counts.** A same-SHA
+  `workflow_dispatch` (or off-branch) run is a manual intervention and never
+  satisfies — or supersedes — the automatic run's outcome.
 - **Success = deploy AND post-deploy smoke terminal success** for that exact
-  SHA (the tool also rejects a "successful" run carrying a failed job).
+  SHA, proven by POSITIVE evidence: the `detect` and `deploy` jobs present and
+  successful (skipped deploy = not a release) and the required smoke steps
+  (`Verify production hosts`, `Verify production auth`) present and successful.
+  Empty or partial run evidence fails closed.
 - **`FAILURE` / `CANCELLED` / `MISSING` are each actionable**: the watcher
   sends ONE durable llm-collab packet plus ONE doorbell ring. A missing run is
   a distinct alarm, never silence and never a pass.

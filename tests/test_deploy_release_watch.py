@@ -16,15 +16,21 @@ SEVEN_E = "7e677225a8" + "0" * 30          # later unrelated merge SHA
 
 
 def run_fixture(run_id: int, sha: str, *, status: str = "completed",
-                conclusion: str | None = "success", attempt: int = 1) -> dict:
+                conclusion: str | None = "success", attempt: int = 1,
+                event: str = "push", branch: str = "main") -> dict:
     return {"id": run_id, "head_sha": sha, "status": status,
             "conclusion": conclusion, "run_attempt": attempt,
+            "event": event, "head_branch": branch,
             "name": "deploy", "path": ".github/workflows/deploy.yml"}
 
 
+SMOKE_GREEN = [{"name": "Verify production hosts", "conclusion": "success"},
+               {"name": "Verify production auth", "conclusion": "success"}]
+
+
 def jobs_all_green(_run_id: int) -> list[dict]:
-    return [{"name": "detect", "conclusion": "success"},
-            {"name": "deploy", "conclusion": "success"}]
+    return [{"name": "detect", "conclusion": "success", "steps": []},
+            {"name": "deploy", "conclusion": "success", "steps": list(SMOKE_GREEN)}]
 
 
 class DeployReleaseWatchVerdictTest(unittest.TestCase):
@@ -68,7 +74,7 @@ class DeployReleaseWatchVerdictTest(unittest.TestCase):
 
         verdict = watch.evaluate_release(SEVEN_E, runs, jobs)
         self.assertEqual(verdict.state, "FAILURE")
-        self.assertEqual(verdict.failed_jobs, ["deploy"])
+        self.assertIn("required job 'deploy' concluded 'failure'", "; ".join(verdict.failed_jobs))
 
     def test_cancelled_is_its_own_state(self) -> None:
         runs = [run_fixture(2, DF55, conclusion="cancelled")]
@@ -108,6 +114,78 @@ class DeployReleaseWatchVerdictTest(unittest.TestCase):
         text = watch.render(verdict, "pixexid/amiga")
         self.assertIn("ONE durable packet", text)
         self.assertIn("never treat as pass", text)
+
+
+class DeployReleaseWatchFalseGreenTest(unittest.TestCase):
+    """GH-1524 cold-review P1 family: every false-green path must fail closed."""
+
+    def test_same_sha_workflow_dispatch_success_never_satisfies_closure(self) -> None:
+        # A manual dispatch on the same SHA cannot cover the automatic push
+        # run's outcome — that would launder a blind retry into a green release.
+        dispatch = [run_fixture(9, DF55, conclusion="success", event="workflow_dispatch")]
+        verdict = watch.evaluate_release(DF55, dispatch, jobs_all_green)
+        self.assertEqual(verdict.state, "MISSING")
+        self.assertIn("never satisfy closure", verdict.detail)
+
+    def test_dispatch_success_does_not_supersede_automatic_failure(self) -> None:
+        runs = [run_fixture(10, DF55, conclusion="failure", event="push"),
+                run_fixture(11, DF55, conclusion="success", event="workflow_dispatch")]
+        verdict = watch.evaluate_release(DF55, runs, jobs_all_green)
+        self.assertEqual(verdict.state, "FAILURE")
+        self.assertEqual(verdict.run_id, 10)
+
+    def test_off_branch_push_run_does_not_count(self) -> None:
+        runs = [run_fixture(12, DF55, conclusion="success", branch="feature-x")]
+        self.assertEqual(watch.evaluate_release(DF55, runs, jobs_all_green).state, "MISSING")
+
+    def test_empty_jobs_payload_fails_closed(self) -> None:
+        runs = [run_fixture(13, DF55, conclusion="success")]
+        verdict = watch.evaluate_release(DF55, runs, lambda _: [])
+        self.assertEqual(verdict.state, "FAILURE")
+        self.assertIn("required job 'detect' missing", "; ".join(verdict.failed_jobs))
+
+    def test_detect_only_payload_fails_closed(self) -> None:
+        runs = [run_fixture(14, DF55, conclusion="success")]
+        verdict = watch.evaluate_release(
+            DF55, runs, lambda _: [{"name": "detect", "conclusion": "success", "steps": []}])
+        self.assertEqual(verdict.state, "FAILURE")
+        self.assertIn("required job 'deploy' missing", "; ".join(verdict.failed_jobs))
+
+    def test_skipped_deploy_is_not_a_release(self) -> None:
+        runs = [run_fixture(15, DF55, conclusion="success")]
+
+        def jobs(_):
+            return [{"name": "detect", "conclusion": "success", "steps": []},
+                    {"name": "deploy", "conclusion": "skipped", "steps": []}]
+
+        verdict = watch.evaluate_release(DF55, runs, jobs)
+        self.assertEqual(verdict.state, "FAILURE")
+        self.assertIn("'deploy' concluded 'skipped'", "; ".join(verdict.failed_jobs))
+
+    def test_missing_smoke_step_fails_closed(self) -> None:
+        runs = [run_fixture(16, DF55, conclusion="success")]
+
+        def jobs(_):
+            return [{"name": "detect", "conclusion": "success", "steps": []},
+                    {"name": "deploy", "conclusion": "success",
+                     "steps": [{"name": "Verify production hosts", "conclusion": "success"}]}]
+
+        verdict = watch.evaluate_release(DF55, runs, jobs)
+        self.assertEqual(verdict.state, "FAILURE")
+        self.assertIn("Verify production auth' missing", "; ".join(verdict.failed_jobs))
+
+    def test_failed_smoke_step_fails_closed(self) -> None:
+        runs = [run_fixture(17, DF55, conclusion="success")]
+
+        def jobs(_):
+            return [{"name": "detect", "conclusion": "success", "steps": []},
+                    {"name": "deploy", "conclusion": "success",
+                     "steps": [{"name": "Verify production hosts", "conclusion": "success"},
+                               {"name": "Verify production auth", "conclusion": "failure"}]}]
+
+        verdict = watch.evaluate_release(DF55, runs, jobs)
+        self.assertEqual(verdict.state, "FAILURE")
+        self.assertIn("Verify production auth' concluded 'failure'", "; ".join(verdict.failed_jobs))
 
 
 class DeployReleaseWatchFetchTest(unittest.TestCase):
