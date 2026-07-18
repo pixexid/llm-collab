@@ -495,7 +495,11 @@ def main():
         print("If Computer Use is blocked or Claude is not idle, keep the heartbeat active,")
         print("retry through Codex/Computer Use when appropriate, and record exact failed attempts.")
         print(border)
-    elif is_human_relay(recipient_agent) and not autobridge_ready:
+    # GH-1547 (#110 P2 3609336511): the relay print must mirror the computed
+    # operator_relay_required (which excludes attended-recovery targets) — the
+    # raw is_human_relay() check made this branch shadow the attended-recovery
+    # banner for Antigravity.
+    elif operator_relay_required:
         print_handoff_prompt(
             recipient_agent,
             sender_id=args.sender,

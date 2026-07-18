@@ -291,5 +291,36 @@ class AxRecoveryWordingPinTest(unittest.TestCase):
         self.assertIn("proven readable and empty", readme)
 
 
+class AxAttendedRecoveryPrintPriorityTest(unittest.TestCase):
+    """GH-1547 PR #110 P2 3609336511: the human-relay print branch must not
+    shadow the attended-recovery banner. The print chain must branch on the
+    computed operator_relay_required (which excludes attended-recovery targets),
+    never on a raw is_human_relay() check."""
+
+    def test_print_chain_uses_computed_relay_flag(self) -> None:
+        src = (REPO_ROOT / "bin" / "deliver.py").read_text()
+        self.assertIn("elif operator_relay_required:", src)
+        self.assertNotIn("elif is_human_relay(recipient_agent)", src)
+
+    def test_attended_recovery_excludes_relay_for_flagged_target(self) -> None:
+        # The computed pair can never both be true for the same recipient:
+        # a flagged human-relay target resolves attended-recovery, and the
+        # relay flag computation excludes attended-recovery targets.
+        antigravity = {
+            "id": "antigravity",
+            "activation": {
+                "type": "human_relay",
+                "watcher_enabled": False,
+                "ax_attended_only": True,
+            },
+        }
+        self.assertTrue(
+            deliver.is_ax_attended_recovery_target(
+                antigravity, "antigravity", sender_id="claude"
+            )
+        )
+        self.assertTrue(deliver.is_human_relay(antigravity))
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
