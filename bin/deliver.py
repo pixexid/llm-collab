@@ -61,6 +61,12 @@ from _helpers import (
     ensure_agent_enabled,
     write_chat_note,
 )
+from _activation_identity import (
+    activation_body_banner,
+    build_activation_consume_command,
+    build_activation_ring_prompt,
+    canonical_worktree,
+)
 from _session_autobridge import (
     find_dispatchable_target_session,
     load_binding,
@@ -79,6 +85,21 @@ def parse_args():
     p.add_argument("--tags", default="", help="Comma-separated tags (default: empty)")
     p.add_argument("--project", required=True, help="project_id this message relates to")
     p.add_argument("--related-task", default=None, help="TASK-id cross-reference")
+    p.add_argument(
+        "--activation",
+        action="store_true",
+        help="Mark this packet as a writer ACTIVATION. Requires --related-task, --worktree, and --branch together.",
+    )
+    p.add_argument(
+        "--worktree",
+        default=None,
+        help="Assigned absolute worktree path (activation packets only; requires --activation)",
+    )
+    p.add_argument(
+        "--branch",
+        default=None,
+        help="Assigned branch (activation packets only; requires --activation)",
+    )
     p.add_argument("--repo-targets", default="", help="Comma-separated repo IDs in scope")
     p.add_argument("--path-targets", default="", help="Comma-separated file/dir paths in scope")
     p.add_argument("--sender-agent-id", default=None, help="Override sender identity recorded in frontmatter")
@@ -106,7 +127,7 @@ def read_body(body_file: str) -> str:
     return Path(body_file).read_text().strip()
 
 
-def build_message(args, body: str, chat_id: str) -> str:
+def build_message(args, body: str, chat_id: str, packet_name: str | None = None) -> str:
     tags = [t.strip() for t in args.tags.split(",") if t.strip()]
     repo_targets = [r.strip() for r in args.repo_targets.split(",") if r.strip()]
     path_targets = [p.strip() for p in args.path_targets.split(",") if p.strip()]
@@ -129,6 +150,14 @@ def build_message(args, body: str, chat_id: str) -> str:
         "path_targets": path_targets,
         "sent_utc": utc_iso(),
     }
+    if args.activation:
+        fm["activation"] = True
+        fm["worktree"] = args.worktree
+        fm["branch"] = args.branch
+        consume_command = build_activation_consume_command(
+            args.recipient, args.project, packet_name or "<packet>"
+        )
+        body = "\n".join([activation_body_banner(consume_command), "", body or "(no body)"])
     if codex_self_target:
         fm["autobridge_skip"] = True
         fm["autobridge_skip_reason"] = "codex_self_target"
@@ -228,6 +257,39 @@ def build_desktop_bridge_prompt(chat_id: str, recipient_id: str, message_path: P
 
 def main():
     args = parse_args()
+    if args.activation:
+        missing = [
+            flag
+            for flag, value in (
+                ("--related-task", args.related_task),
+                ("--worktree", args.worktree),
+                ("--branch", args.branch),
+            )
+            if not value
+        ]
+        if missing:
+            print(
+                f"[error] --activation requires the full activation identity; missing: {', '.join(missing)}",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        expanded = Path(args.worktree).expanduser()
+        if not expanded.is_absolute():
+            print(
+                "[error] --worktree must be an absolute path: a relative path has no "
+                "CWD-independent meaning, so readers and dispatchers would derive "
+                "different activation identities for the same packet",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        args.worktree = canonical_worktree(args.worktree)
+    elif args.worktree or args.branch:
+        print(
+            "[error] --worktree/--branch are activation identity fields; pass --activation "
+            "(with --related-task, --worktree, --branch) or drop them",
+            file=sys.stderr,
+        )
+        sys.exit(2)
     thread_coordination_required = is_codex_self_target(args.sender, args.recipient)
 
     # Validate agents
@@ -313,12 +375,24 @@ def main():
         )
         body = f"{onboarding}\n\n---\n\n## Work packet\n\n{body or '(no body)'}"
 
-    content = build_message(args, body, chat_id)
     slug = slugify(args.title, max_len=40)
     timestamp = ts()
+    to_filename = f"{timestamp}_to-{args.recipient}_{slug}.md"
+    # Pre-write wake-path classification: the same value later selects the
+    # ring form, resolved before any file exists so downstream policy lanes
+    # can fail closed pre-write.
+    ax_doorbell_required = (
+        args.recipient != "operator"
+        and not autobridge_ready
+        and is_ax_doorbell_target(
+            recipient_agent,
+            args.recipient,
+            sender_id=args.sender,
+        )
+    )
+    content = build_message(args, body, chat_id, packet_name=to_filename)
 
     # Write to-{recipient} file (recipient's copy)
-    to_filename = f"{timestamp}_to-{args.recipient}_{slug}.md"
     to_path = chat_dir / to_filename
     write_file(to_path, content)
 
@@ -368,20 +442,27 @@ def main():
         },
     )
 
-    ax_doorbell_required = (
-        args.recipient != "operator"
-        and not autobridge_ready
-        and is_ax_doorbell_target(
-            recipient_agent,
-            args.recipient,
-            sender_id=args.sender,
-        )
-    )
-    ax_doorbell_prompt = (
-        f"[from {args.sender}] Read latest {args.recipient} packet in {chat_id}: {to_path.name}"
-        if ax_doorbell_required
-        else None
-    )
+    # (ax_doorbell_required was resolved pre-write.)
+    ax_doorbell_prompt = None
+    if ax_doorbell_required:
+        if args.activation:
+            try:
+                ax_doorbell_prompt = build_activation_ring_prompt(
+                    args.sender,
+                    str(args.related_task),
+                    build_activation_consume_command(args.recipient, args.project, to_path.name),
+                )
+            except ValueError:
+                # Foundation fallback: the bounded activation ring cannot fit.
+                # The AX-enforcement policy lane makes this fail closed
+                # pre-write; until then, fall back to the generic ring.
+                ax_doorbell_prompt = (
+                    f"[from {args.sender}] Read latest {args.recipient} packet in {chat_id}: {to_path.name}"
+                )
+        else:
+            ax_doorbell_prompt = (
+                f"[from {args.sender}] Read latest {args.recipient} packet in {chat_id}: {to_path.name}"
+            )
     ax_attended_recovery_required = (
         args.recipient != "operator"
         and not autobridge_ready
