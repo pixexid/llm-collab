@@ -15,11 +15,13 @@ monitors first, and delete or update it as soon as its purpose is served.
 
 PM2 is also the watcher **registry** for activation-lease cleanup: when a fresh
 activation claims its one-writer lease (`session_autobridge.py lease-claim`),
-PM2-managed watchers are recognized by their PM2 environment markers and
-preserved, while unregistered ad-hoc mailbox pollers matching the activation
-identity are terminated with per-identity diagnostics. Run purpose-scoped
-watches under PM2 (or an equivalently registered supervisor) so they survive
-activation cleanup; a bare `while true` shell loop will not.
+the pids reported by `pm2 jlist` are the authoritative preserved set —
+env-marker lookalikes do not count — while unregistered ad-hoc mailbox pollers
+matching the activation identity are terminated with verified exit and
+per-identity diagnostics. If the registry or process listing cannot be
+consulted, or a matched poller cannot be proven gone, the claim fails closed
+and activation is not authorized. Run purpose-scoped watches under PM2 so they
+survive activation cleanup; a bare `while true` shell loop will not.
 
 Manual one-shot watcher runs use the same Codex refresh defaults as PM2:
 

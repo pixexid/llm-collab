@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -17,76 +18,151 @@ sys.path.insert(0, str(REPO_ROOT / "bin"))
 import _activation_lease as lease_lib
 
 
-IDENTITY_ARGS = [
-    "--project", "amiga",
-    "--chat", "CHAT-TEST0001",
-    "--task", "TASK-TEST01",
-    "--worktree", "/tmp/worktrees/claude/t-test",
-    "--branch", "claude/gh-0000-test",
-    "--target-agent", "claude",
-]
-
-IDENTITY = {
-    "project": "amiga",
-    "chat": "CHAT-TEST0001",
-    "task": "TASK-TEST01",
-    "worktree": "/tmp/worktrees/claude/t-test",
-    "branch": "claude/gh-0000-test",
-    "target_agent": "claude",
-}
+def write(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content)
 
 
-class ActivationLeaseCliTest(unittest.TestCase):
+def write_json(path: Path, payload: dict) -> None:
+    write(path, json.dumps(payload, indent=2))
+
+
+def identity_args(worktree: str) -> list[str]:
+    return [
+        "--project", "amiga",
+        "--chat", "CHAT-TEST0001",
+        "--task", "TASK-TEST01",
+        "--worktree", worktree,
+        "--branch", "claude/gh-0000-test",
+        "--target-agent", "claude",
+    ]
+
+
+def identity_dict(worktree: str) -> dict[str, str]:
+    return {
+        "project": "amiga",
+        "chat": "CHAT-TEST0001",
+        "task": "TASK-TEST01",
+        "worktree": worktree,
+        "branch": "claude/gh-0000-test",
+        "target_agent": "claude",
+    }
+
+
+class WorkspaceTestCase(unittest.TestCase):
     def make_workspace(self) -> Path:
         temp_root = Path(tempfile.mkdtemp(prefix="llm-collab-lease-"))
-        (temp_root / "collab.config.json").write_text(
-            json.dumps(
-                {
-                    "workspace_name": "test-collab",
-                    "schema_version": 2,
-                    "projects_root": str(temp_root),
-                    "poll_interval_seconds": 15,
-                    "notifications_enabled": False,
-                }
-            )
+        write_json(
+            temp_root / "collab.config.json",
+            {
+                "workspace_name": "test-collab",
+                "schema_version": 2,
+                "projects_root": str(temp_root),
+                "poll_interval_seconds": 15,
+                "notifications_enabled": False,
+            },
         )
-        (temp_root / "projects.json").write_text(
-            json.dumps({"projects": [{"id": "amiga", "display_name": "Amiga", "repos": {"app": "."}}]})
+        write_json(
+            temp_root / "projects.json",
+            {"projects": [{"id": "amiga", "display_name": "Amiga", "repos": {"app": "."}}]},
         )
-        (temp_root / "agents.json").write_text(json.dumps({"agents": []}))
+        write_json(temp_root / "agents.json", {"agents": []})
+        self.add_agent(
+            temp_root,
+            {
+                "id": "claude",
+                "display_name": "Claude",
+                "activation": {"type": "cli_session", "watcher_enabled": False},
+            },
+        )
+        # Stub pm2 registry: present, healthy, empty.
+        pm2_stub = temp_root / "pm2-stub.sh"
+        write(pm2_stub, "#!/bin/sh\necho '[]'\n")
+        pm2_stub.chmod(pm2_stub.stat().st_mode | stat.S_IEXEC)
+        self.pm2_stub = str(pm2_stub)
+        # Canonical worktree path that actually exists.
+        worktree = temp_root / "worktrees" / "t-test"
+        worktree.mkdir(parents=True)
+        self.worktree = str(worktree.resolve())
         return temp_root
 
-    def run_cli(self, root: Path, *args: str) -> tuple[dict, int]:
+    def add_agent(self, root: Path, agent: dict) -> None:
+        agents_file = root / "agents.json"
+        payload = json.loads(agents_file.read_text()) if agents_file.exists() else {"agents": []}
+        payload["agents"].append(agent)
+        write_json(agents_file, payload)
+        write(root / "agents" / agent["id"] / "identity.md", f"# Identity: {agent['id']}\n")
+        write_json(
+            root / "agents" / agent["id"] / "inbox.json",
+            {"agent": agent["id"], "unread": [], "read": []},
+        )
+
+    def run_cli(self, root: Path, *args: str, env: dict[str, str] | None = None) -> tuple[dict, int]:
         result = subprocess.run(
             [sys.executable, str(SCRIPT_PATH), *args, "--json"],
             cwd=root,
             text=True,
             capture_output=True,
+            env={
+                **os.environ,
+                "LLM_COLLAB_UI_REFRESH": "0",
+                "LLM_COLLAB_PM2_BIN": self.pm2_stub,
+                **(env or {}),
+            },
             check=False,
         )
         self.assertTrue(result.stdout.strip(), f"no stdout; stderr: {result.stderr}")
         return json.loads(result.stdout), result.returncode
 
-    def claim(self, root: Path, session: str, *extra: str) -> tuple[dict, int]:
+    def register_session(self, root: Path, session: str, *, runtime_id: str | None = None) -> None:
+        args = [
+            "register",
+            "--session", session,
+            "--agent", "claude",
+            "--project", "amiga",
+            "--chat", "CHAT-TEST0001",
+            "--mode", "manual",
+            "--status", "parked",
+        ]
+        if runtime_id:
+            args += [
+                "--runtime-family", "claude_app",
+                "--runtime-session-id", runtime_id,
+                "--runtime-session-source", "test_fixture",
+            ]
+        payload, code = self.run_cli(root, *args)
+        self.assertEqual(0, code, payload)
+
+    def claim(self, root: Path, session: str, *extra: str, worktree: str | None = None) -> tuple[dict, int]:
         return self.run_cli(
             root,
             "lease-claim",
-            *IDENTITY_ARGS,
+            *identity_args(worktree or self.worktree),
             "--session",
             session,
             "--skip-poller-cleanup",
             *extra,
         )
 
+
+class ActivationLeaseCliTest(WorkspaceTestCase):
+    def test_claim_requires_registered_live_owner_session(self):
+        root = self.make_workspace()
+        refused, code = self.claim(root, "SESSION-GHOST")
+        self.assertEqual(75, code)
+        self.assertEqual("owner_session_not_registered", refused["reason"])
+
     def test_second_session_fails_closed_and_names_owner(self):
         root = self.make_workspace()
-        first, code = self.claim(root, "SESSION-A", "--owner-pid", str(os.getpid()))
-        self.assertEqual(0, code)
+        self.register_session(root, "SESSION-A")
+        self.register_session(root, "SESSION-B")
+        first, code = self.claim(root, "SESSION-A")
+        self.assertEqual(0, code, first)
         self.assertTrue(first["claimed"])
         self.assertEqual(1, first["lease"]["fence_token"])
 
-        lease_file = Path(root) / "State" / "session_autobridge" / "activation_leases"
-        before = {p.name: p.read_text() for p in lease_file.glob("*.json")}
+        lease_dir = Path(root) / "State" / "session_autobridge" / "activation_leases"
+        before = {p.name: p.read_text() for p in lease_dir.glob("*.json")}
 
         second, code = self.claim(root, "SESSION-B")
         self.assertEqual(75, code)
@@ -94,134 +170,332 @@ class ActivationLeaseCliTest(unittest.TestCase):
         self.assertEqual("lease_held_by_active_owner", second["reason"])
         self.assertEqual("SESSION-A", second["owner"]["owner_session_id"])
 
-        after = {p.name: p.read_text() for p in lease_file.glob("*.json")}
+        after = {p.name: p.read_text() for p in lease_dir.glob("*.json")}
         self.assertEqual(before, after, "refused claim must not mutate the lease record")
+
+    def test_equivalent_worktree_paths_hit_the_same_lease(self):
+        root = self.make_workspace()
+        self.register_session(root, "SESSION-A")
+        self.register_session(root, "SESSION-B")
+        self.claim(root, "SESSION-A")
+
+        sneaky = str(Path(self.worktree).parent / ".." / Path(self.worktree).parent.name / "t-test")
+        refused, code = self.claim(root, "SESSION-B", worktree=sneaky)
+        self.assertEqual(75, code)
+        self.assertEqual("lease_held_by_active_owner", refused["reason"])
 
     def test_reclaim_by_same_owner_is_idempotent(self):
         root = self.make_workspace()
+        self.register_session(root, "SESSION-A")
         self.claim(root, "SESSION-A")
         again, code = self.claim(root, "SESSION-A")
-        self.assertEqual(0, code)
-        self.assertTrue(again["claimed"])
+        self.assertEqual(0, code, again)
         self.assertEqual(1, again["lease"]["fence_token"])
 
-    def test_expired_lease_requires_explicit_takeover(self):
+    def test_same_session_different_process_is_refused_while_owner_live(self):
         root = self.make_workspace()
-        self.claim(root, "SESSION-A", "--ttl-seconds", "0")
+        self.register_session(root, "SESSION-A")
+        first, code = self.claim(root, "SESSION-A", "--owner-pid", str(os.getpid()))
+        self.assertEqual(0, code, first)
+        refused, code = self.claim(root, "SESSION-A", "--owner-pid", "1")
+        self.assertEqual(75, code)
+        self.assertEqual("same_session_different_process", refused["reason"])
+
+    def test_dead_owner_requires_takeover_then_increments_fence(self):
+        root = self.make_workspace()
+        self.register_session(root, "SESSION-A")
+        self.register_session(root, "SESSION-B")
+        self.claim(root, "SESSION-A")
+        # Deactivating the owner session ends its liveness AND auto-releases
+        # its leases (seam integration) — so takeover is not even needed.
+        deactivated, code = self.run_cli(
+            root, "deactivate", "--session", "SESSION-A", "--status", "stopped"
+        )
+        self.assertEqual(0, code)
+        self.assertEqual(1, len(deactivated["released_activation_leases"]))
+
+        reclaimed, code = self.claim(root, "SESSION-B")
+        self.assertEqual(0, code, reclaimed)
+        self.assertEqual(2, reclaimed["lease"]["fence_token"])
+
+    def test_dead_owner_without_release_needs_explicit_takeover(self):
+        root = self.make_workspace()
+        self.register_session(root, "SESSION-A")
+        self.register_session(root, "SESSION-B")
+        self.claim(root, "SESSION-A")
+        # Kill the owner's session record liveness without releasing the lease
+        # (simulates a crashed owner whose deactivate never ran).
+        session_path = (
+            Path(root) / "State" / "session_autobridge" / "sessions" / "SESSION-A.json"
+        )
+        record = json.loads(session_path.read_text())
+        record["status"] = "stopped"
+        session_path.write_text(json.dumps(record))
+
         refused, code = self.claim(root, "SESSION-B")
         self.assertEqual(75, code)
-        self.assertEqual("lease_expired_requires_takeover", refused["reason"])
+        self.assertEqual("dead_owner_requires_takeover", refused["reason"])
 
-    def test_takeover_refused_while_expired_owner_still_alive(self):
-        root = self.make_workspace()
-        self.claim(root, "SESSION-A", "--ttl-seconds", "0", "--owner-pid", str(os.getpid()))
-        refused, code = self.claim(root, "SESSION-B", "--takeover")
-        self.assertEqual(75, code)
-        self.assertEqual("expired_owner_still_active", refused["reason"])
-
-    def test_takeover_of_dead_owner_increments_fence_token(self):
-        root = self.make_workspace()
-        dead = subprocess.Popen([sys.executable, "-c", "pass"])
-        dead.wait()
-        self.claim(root, "SESSION-A", "--ttl-seconds", "0", "--owner-pid", str(dead.pid))
         taken, code = self.claim(root, "SESSION-B", "--takeover")
-        self.assertEqual(0, code)
-        self.assertTrue(taken["claimed"])
+        self.assertEqual(0, code, taken)
         self.assertEqual(2, taken["lease"]["fence_token"])
         self.assertEqual("SESSION-A", taken["lease"]["previous_owner_session_id"])
 
-    def test_release_requires_owner_then_frees_identity(self):
+    def test_release_requires_owner_and_current_fence(self):
         root = self.make_workspace()
-        self.claim(root, "SESSION-A")
+        self.register_session(root, "SESSION-A")
+        self.register_session(root, "SESSION-B")
+        claimed, _ = self.claim(root, "SESSION-A")
+        fence = str(claimed["lease"]["fence_token"])
+
         refused, code = self.run_cli(
-            root, "lease-release", *IDENTITY_ARGS, "--session", "SESSION-B"
+            root, "lease-release", *identity_args(self.worktree),
+            "--session", "SESSION-B", "--fence-token", fence,
         )
         self.assertEqual(75, code)
         self.assertEqual("release_requires_current_owner", refused["reason"])
 
-        released, code = self.run_cli(
-            root, "lease-release", *IDENTITY_ARGS, "--session", "SESSION-A"
+        stale, code = self.run_cli(
+            root, "lease-release", *identity_args(self.worktree),
+            "--session", "SESSION-A", "--fence-token", "99",
         )
-        self.assertEqual(0, code)
+        self.assertEqual(75, code)
+        self.assertEqual("stale_fence_token", stale["reason"])
+
+        released, code = self.run_cli(
+            root, "lease-release", *identity_args(self.worktree),
+            "--session", "SESSION-A", "--fence-token", fence,
+        )
+        self.assertEqual(0, code, released)
         self.assertTrue(released["released"])
 
         reclaimed, code = self.claim(root, "SESSION-B")
         self.assertEqual(0, code)
         self.assertEqual(2, reclaimed["lease"]["fence_token"])
 
+    def test_lease_assert_validates_owner_and_fence(self):
+        root = self.make_workspace()
+        self.register_session(root, "SESSION-A")
+        claimed, _ = self.claim(root, "SESSION-A")
+        fence = str(claimed["lease"]["fence_token"])
+
+        ok, code = self.run_cli(
+            root, "lease-assert", *identity_args(self.worktree),
+            "--session", "SESSION-A", "--fence-token", fence,
+        )
+        self.assertEqual(0, code)
+        self.assertTrue(ok["asserted"])
+
+        stale, code = self.run_cli(
+            root, "lease-assert", *identity_args(self.worktree),
+            "--session", "SESSION-A", "--fence-token", "42",
+        )
+        self.assertEqual(75, code)
+        self.assertEqual("stale_fence_token", stale["reason"])
+
+        other, code = self.run_cli(
+            root, "lease-assert", *identity_args(self.worktree),
+            "--session", "SESSION-X",
+        )
+        self.assertEqual(75, code)
+        self.assertEqual("lease_owned_by_other_session", other["reason"])
+
+    def test_claim_fails_closed_when_registry_unavailable(self):
+        root = self.make_workspace()
+        self.register_session(root, "SESSION-A")
+        refused, code = self.run_cli(
+            root,
+            "lease-claim", *identity_args(self.worktree),
+            "--session", "SESSION-A", "--skip-poller-cleanup",
+            env={"LLM_COLLAB_PM2_BIN": "/usr/bin/false"},
+        )
+        self.assertEqual(75, code)
+        self.assertEqual("poller_audit_unavailable", refused["reason"])
+
     def test_lease_show_reports_owner(self):
         root = self.make_workspace()
-        empty, code = self.run_cli(root, "lease-show", *IDENTITY_ARGS)
+        self.register_session(root, "SESSION-A")
+        empty, code = self.run_cli(root, "lease-show", *identity_args(self.worktree))
         self.assertEqual(0, code)
         self.assertIsNone(empty["lease"])
 
         self.claim(root, "SESSION-A")
-        shown, code = self.run_cli(root, "lease-show", *IDENTITY_ARGS)
+        shown, code = self.run_cli(root, "lease-show", *identity_args(self.worktree))
         self.assertEqual(0, code)
         self.assertEqual("SESSION-A", shown["owner"]["owner_session_id"])
 
 
-class StaleClaimLockTest(unittest.TestCase):
-    def test_concurrent_claim_lock_refuses_second_claim(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            lease_lib.ACTIVATION_LEASES_DIR = Path(tmp)
-            lock_path = lease_lib.lease_path(IDENTITY).with_suffix(".lock")
-            lock_path.parent.mkdir(parents=True, exist_ok=True)
-            lock_path.touch()
-            with self.assertRaises(lease_lib.LeaseRefused) as ctx:
-                lease_lib.claim_lease(IDENTITY, owner_session_id="SESSION-B")
-            self.assertEqual("claim_in_progress", ctx.exception.reason)
+class DispatchActivationGateTest(WorkspaceTestCase):
+    """The mandatory hook: dispatch cannot wake a second writer for one
+    activation packet. Removing acquire_activation_lease_for_dispatch from
+    dispatch_session makes these tests fail."""
+
+    def add_activation_message(self, root: Path, *, path_stem: str) -> str:
+        message_rel = f"Chats/2026-01-01_test__CHAT-TEST0001/{path_stem}.md"
+        write(
+            root / message_rel,
+            "\n".join(
+                [
+                    "---",
+                    "chat_id: CHAT-TEST0001",
+                    "from: codex",
+                    "to: claude",
+                    "title: ACTIVATE test lane",
+                    "project_id: amiga",
+                    "related_task: TASK-TEST01",
+                    f"worktree: {self.worktree}",
+                    "branch: claude/gh-0000-test",
+                    "---",
+                    "",
+                    "ACTIVATE: one writer only.",
+                ]
+            ),
+        )
+        inbox_path = root / "agents" / "claude" / "inbox.json"
+        inbox = json.loads(inbox_path.read_text())
+        inbox["unread"].append(message_rel)
+        write_json(inbox_path, inbox)
+        return message_rel
+
+    def register_runtime_session(self, root: Path, session: str, output_file: Path) -> None:
+        worker_script = root / f"worker-{session}.py"
+        write(
+            worker_script,
+            "\n".join(
+                [
+                    "import sys, json, os",
+                    "from pathlib import Path",
+                    "json.load(sys.stdin)",
+                    f"Path({json.dumps(str(output_file))}).write_text(os.environ['LLM_COLLAB_SESSION_ID'])",
+                ]
+            ),
+        )
+        payload, code = self.run_cli(
+            root,
+            "register",
+            "--session", session,
+            "--agent", "claude",
+            "--project", "amiga",
+            "--chat", "CHAT-TEST0001",
+            "--mode", "auto-read",
+            "--wake-strategy", "runtime_trigger",
+            "--runtime-family", "claude_app",
+            "--runtime-session-id", f"runtime-{session}",
+            "--runtime-session-source", "test_fixture",
+            "--runtime-command",
+            json.dumps([sys.executable, str(worker_script)]),
+        )
+        self.assertEqual(0, code, payload)
+
+    def test_one_packet_cannot_wake_two_writers(self):
+        root = self.make_workspace()
+        out_a = root / "out-a.txt"
+        out_b = root / "out-b.txt"
+        self.register_runtime_session(root, "SESSION-A", out_a)
+        self.register_runtime_session(root, "SESSION-B", out_b)
+        self.add_activation_message(root, path_stem="activate-1")
+
+        result_a, code = self.run_cli(root, "dispatch", "--session", "SESSION-A")
+        self.assertEqual(0, code, result_a)
+        self.assertEqual(1, len(result_a["actions"]))
+        self.assertEqual("message_dispatched", result_a["actions"][0]["event"])
+        self.assertTrue(out_a.exists(), "winner session must be woken")
+
+        result_b, code = self.run_cli(root, "dispatch", "--session", "SESSION-B")
+        self.assertEqual(0, code, result_b)
+        self.assertEqual(1, len(result_b["actions"]))
+        refusal = result_b["actions"][0]
+        self.assertEqual("activation_lease_refused", refusal["event"])
+        self.assertEqual("held_read_only", refusal["effective_action"])
+        self.assertEqual(
+            "SESSION-A", refusal["activation_lease"]["owner"]["owner_session_id"]
+        )
+        self.assertFalse(out_b.exists(), "loser session must never be woken")
+
+        # The refusal is terminal for that session: no retry loop.
+        again, _ = self.run_cli(root, "dispatch", "--session", "SESSION-B")
+        self.assertEqual([], again["actions"])
+
+    def test_non_activation_messages_are_not_gated(self):
+        root = self.make_workspace()
+        out_a = root / "out-plain.txt"
+        self.register_runtime_session(root, "SESSION-A", out_a)
+        message_rel = "Chats/2026-01-01_test__CHAT-TEST0001/plain-note.md"
+        write(
+            root / message_rel,
+            "\n".join(
+                [
+                    "---",
+                    "chat_id: CHAT-TEST0001",
+                    "from: codex",
+                    "to: claude",
+                    "title: plain note",
+                    "project_id: amiga",
+                    "---",
+                    "",
+                    "No activation identity here.",
+                ]
+            ),
+        )
+        inbox_path = root / "agents" / "claude" / "inbox.json"
+        inbox = json.loads(inbox_path.read_text())
+        inbox["unread"].append(message_rel)
+        write_json(inbox_path, inbox)
+
+        result, code = self.run_cli(root, "dispatch", "--session", "SESSION-A")
+        self.assertEqual(0, code, result)
+        self.assertEqual("message_dispatched", result["actions"][0]["event"])
+        self.assertTrue(out_a.exists())
 
 
 class PollerAuditTest(unittest.TestCase):
+    IDENTITY = identity_dict("/tmp/worktrees/claude/t-test")
+
     ROWS = [
-        # Registered PM2 watcher for the same agent: must survive.
-        {
-            "pid": 101,
-            "ppid": 1,
-            "command": "python3 bin/watch_inbox.py --me claude PM2_HOME=/Users/op/.pm2 PATH=/usr/bin",
-        },
+        # PM2-registered watcher pid (authoritative registry): must survive
+        # even though the command carries no PM2 env marker.
+        {"pid": 101, "ppid": 1, "command": "python3 bin/watch_inbox.py --me claude"},
         # Ad-hoc while-true poller referencing the activation chat: cleanup target.
         {
             "pid": 102,
             "ppid": 1,
             "command": "/bin/zsh -c while true; do ls Chats/*CHAT-TEST0001*/*_to-claude_*.md; sleep 60; done",
         },
-        # Ad-hoc manual watch_inbox for the same agent, not PM2: cleanup target.
+        # Ad-hoc manual watch_inbox for the same agent: cleanup target.
         {"pid": 103, "ppid": 1, "command": "python3 bin/watch_inbox.py --me claude --poll-seconds 30"},
-        # Unrelated process: untouched, not even reported.
+        # Unregistered process that merely inherited a PM2-looking env marker:
+        # NOT in the registry, so it is NOT preserved.
+        {
+            "pid": 107,
+            "ppid": 1,
+            "command": "/bin/zsh -c while true; do cat Chats/*CHAT-TEST0001*; done PM2_HOME=/Users/op/.pm2",
+        },
+        # Unrelated agent: untouched, not even reported.
         {"pid": 104, "ppid": 1, "command": "python3 bin/watch_inbox.py --me codex"},
         # Purpose-scoped PR watcher for a different chat: not identity-matched.
         {"pid": 105, "ppid": 1, "command": "/bin/zsh -c while true; do gh pr checks 111; sleep 300; done"},
-        # One-shot command mentioning the chat id (e.g. deliver/lease-claim):
-        # not poller-shaped, never a cleanup target.
-        {
-            "pid": 106,
-            "ppid": 1,
-            "command": "python3 bin/deliver.py --chat CHAT-TEST0001 --from codex --to claude",
-        },
-        # The claiming session's own ancestor shell mentions the chat id inside
-        # a loop-shaped wrapper: excluded via the ancestor chain.
-        {
-            "pid": 200,
-            "ppid": 1,
-            "command": "/bin/zsh -c while true; do run-claim --chat CHAT-TEST0001; done",
-        },
+        # One-shot command mentioning the chat id: not poller-shaped, never a target.
+        {"pid": 106, "ppid": 1, "command": "python3 bin/deliver.py --chat CHAT-TEST0001 --from codex --to claude"},
+        # The claimer's own ancestor chain: excluded.
+        {"pid": 200, "ppid": 1, "command": "/bin/zsh -c while true; do run-claim --chat CHAT-TEST0001; done"},
         {"pid": 99999, "ppid": 200, "command": "python3 bin/session_autobridge.py lease-claim"},
     ]
 
-    def audit(self, *, clean: bool, terminate=None):
-        killed: list[int] = []
+    REGISTERED = {101}
+
+    def audit(self, *, clean: bool, kill=None, wait_for_exit=None):
+        killed: list[tuple[int, int]] = []
 
         def fake_kill(pid: int, sig: int) -> None:
-            assert sig == signal.SIGTERM
-            killed.append(pid)
+            killed.append((pid, sig))
 
         findings = lease_lib.audit_activation_pollers(
-            IDENTITY,
+            self.IDENTITY,
             rows=self.ROWS,
+            registered_pids=self.REGISTERED,
             clean=clean,
-            terminate=terminate or fake_kill,
+            kill=kill or fake_kill,
+            wait_for_exit=wait_for_exit or (lambda pid: True),
             self_pid=99999,
         )
         return findings, killed
@@ -231,38 +505,68 @@ class PollerAuditTest(unittest.TestCase):
         self.assertEqual([], killed)
         actions = {f["pid"]: f["action"] for f in findings}
         self.assertEqual(
-            {101: "preserved_registered_watch", 102: "reported_only", 103: "reported_only"},
+            {
+                101: "preserved_registered_watch",
+                102: "reported_only",
+                103: "reported_only",
+                107: "reported_only",
+            },
             actions,
         )
 
     def test_cleanup_terminates_only_unregistered_identity_matches(self):
         findings, killed = self.audit(clean=True)
-        self.assertEqual([102, 103], sorted(killed))
+        self.assertEqual([102, 103, 107], sorted(pid for pid, _ in killed))
         actions = {f["pid"]: f["action"] for f in findings}
         self.assertEqual("preserved_registered_watch", actions[101])
         self.assertEqual("terminated", actions[102])
-        self.assertEqual("terminated", actions[103])
+        self.assertEqual("terminated", actions[107], "inherited env marker must not protect")
         self.assertNotIn(104, actions)
         self.assertNotIn(105, actions)
         self.assertNotIn(106, actions, "one-shot chat-mentioning command must never match")
         self.assertNotIn(200, actions, "own ancestor chain must never be terminated")
-        self.assertNotIn(99999, actions)
-        for finding in findings:
-            self.assertIn("matched", finding)
-            self.assertIn("command", finding)
+        self.assertTrue(lease_lib.audit_proves_clean(findings))
+
+    def test_unverified_termination_fails_the_audit(self):
+        findings, _ = self.audit(clean=True, wait_for_exit=lambda pid: False)
+        actions = {f["pid"]: f["action"] for f in findings}
+        self.assertEqual("termination_unverified", actions[102])
+        self.assertFalse(lease_lib.audit_proves_clean(findings))
+
+    def test_terminate_denied_fails_the_audit(self):
+        def denied(pid: int, sig: int) -> None:
+            raise PermissionError
+
+        findings, _ = self.audit(clean=True, kill=denied)
+        self.assertFalse(lease_lib.audit_proves_clean(findings))
+
+    def test_sigkill_escalation_counts_as_proven(self):
+        attempts: dict[int, list[int]] = {}
+
+        def stubborn_kill(pid: int, sig: int) -> None:
+            attempts.setdefault(pid, []).append(sig)
+
+        def exits_after_sigkill(pid: int) -> bool:
+            return signal.SIGKILL in attempts.get(pid, [])
+
+        findings, _ = self.audit(clean=True, kill=stubborn_kill, wait_for_exit=exits_after_sigkill)
+        actions = {f["pid"]: f["action"] for f in findings}
+        self.assertEqual("terminated_sigkill", actions[102])
+        self.assertTrue(lease_lib.audit_proves_clean(findings))
 
     def test_already_exited_process_is_reported_not_fatal(self):
         def raising_kill(pid: int, sig: int) -> None:
             raise ProcessLookupError
 
-        findings, _ = self.audit(clean=True, terminate=raising_kill)
+        findings, _ = self.audit(clean=True, kill=raising_kill)
         actions = {f["pid"]: f["action"] for f in findings}
         self.assertEqual("already_exited", actions[102])
+        self.assertTrue(lease_lib.audit_proves_clean(findings))
 
-    def test_ps_output_parsing(self):
-        rows = lease_lib.poller_process_rows(
-            "  201 1 python3 x.py\n\nbadline\n 202 201 /bin/zsh -c loop\n"
-        )
+    def test_ps_failure_raises_audit_unavailable(self):
+        with self.assertRaises(lease_lib.PollerAuditUnavailable):
+            lease_lib.poller_process_rows("")
+        rows = lease_lib.poller_process_rows("  201 1 python3 x.py\n 202 201 /bin/zsh -c loop\n")
         self.assertEqual(
             [
                 {"pid": 201, "ppid": 1, "command": "python3 x.py"},

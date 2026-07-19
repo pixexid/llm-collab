@@ -1609,6 +1609,67 @@ def create_relay_prompt(session: dict, message: dict) -> dict[str, Any]:
     return {"prompt_path": str(prompt_path.relative_to(ROOT)), "prompt": prompt}
 
 
+def activation_identity_from_message(session: dict, message: dict) -> dict[str, str] | None:
+    """Exact activation identity when the packet is activation-shaped
+    (related_task + worktree + branch in frontmatter), else None."""
+    fm = message.get("frontmatter", {})
+    if not (fm.get("related_task") and fm.get("worktree") and fm.get("branch")):
+        return None
+    from _activation_lease import lease_identity
+
+    return lease_identity(
+        {
+            "project": fm.get("project_id") or session.get("project_id"),
+            "chat": fm.get("chat_id") or session.get("chat_id"),
+            "task": fm.get("related_task"),
+            "worktree": fm.get("worktree"),
+            "branch": fm.get("branch"),
+            "target_agent": session.get("agent_id"),
+        }
+    )
+
+
+def acquire_activation_lease_for_dispatch(
+    session: dict, message: dict
+) -> tuple[bool, dict[str, Any] | None]:
+    """Mandatory one-writer gate for activation-shaped packets.
+
+    Returns (allowed, detail). A refusal means another session owns this
+    activation identity, the audit could not prove stale pollers gone, or the
+    identity is malformed — the caller must not wake a writer.
+    """
+    from _activation_lease import (
+        LeaseRefused,
+        PollerAuditUnavailable,
+        audit_activation_pollers,
+        audit_proves_clean,
+        claim_lease,
+        owner_summary,
+    )
+
+    try:
+        identity = activation_identity_from_message(session, message)
+    except ValueError as exc:
+        return False, {"reason": "invalid_activation_identity", "detail": str(exc)}
+    if identity is None:
+        return True, None
+    try:
+        pollers = audit_activation_pollers(identity, clean=True)
+    except PollerAuditUnavailable as exc:
+        return False, {"reason": "poller_audit_unavailable", "detail": str(exc)}
+    if not audit_proves_clean(pollers):
+        return False, {"reason": "stale_poller_not_proven_gone", "poller_audit": pollers}
+    try:
+        lease = claim_lease(identity, owner_session_id=str(session["session_id"]))
+    except LeaseRefused as refusal:
+        return False, {
+            "reason": refusal.reason,
+            "owner": refusal.owner,
+            "poller_audit": pollers,
+        }
+    return True, {"lease": owner_summary(lease), "poller_audit": pollers}
+
+
 def dispatch_session(session_id: str) -> dict[str, Any]:
     session = load_session(session_id)
     dispatchable, reason = session_is_dispatchable(session)
@@ -1673,6 +1734,18 @@ def dispatch_session(session_id: str) -> dict[str, Any]:
             "target_session_id": message["frontmatter"].get("target_session_id"),
         }
         should_mark_processed = True
+
+        if action in {"runtime_trigger", "relay_prompt"}:
+            allowed, lease_detail = acquire_activation_lease_for_dispatch(session, message)
+            if lease_detail is not None:
+                event["activation_lease"] = lease_detail
+            if not allowed:
+                event["event"] = "activation_lease_refused"
+                event["effective_action"] = "held_read_only"
+                append_event(session_id, event)
+                mark_message_processed(session, message["path"])
+                actions.append(event)
+                continue
 
         if action == "runtime_trigger":
             runtime = runtime_metadata(session)

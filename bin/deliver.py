@@ -79,6 +79,16 @@ def parse_args():
     p.add_argument("--tags", default="", help="Comma-separated tags (default: empty)")
     p.add_argument("--project", required=True, help="project_id this message relates to")
     p.add_argument("--related-task", default=None, help="TASK-id cross-reference")
+    p.add_argument(
+        "--worktree",
+        default=None,
+        help="Assigned worktree path for an ACTIVATION packet (with --branch, makes the packet lease-gated)",
+    )
+    p.add_argument(
+        "--branch",
+        default=None,
+        help="Assigned branch for an ACTIVATION packet (with --worktree, makes the packet lease-gated)",
+    )
     p.add_argument("--repo-targets", default="", help="Comma-separated repo IDs in scope")
     p.add_argument("--path-targets", default="", help="Comma-separated file/dir paths in scope")
     p.add_argument("--sender-agent-id", default=None, help="Override sender identity recorded in frontmatter")
@@ -129,6 +139,10 @@ def build_message(args, body: str, chat_id: str) -> str:
         "path_targets": path_targets,
         "sent_utc": utc_iso(),
     }
+    if args.worktree:
+        fm["worktree"] = args.worktree
+    if args.branch:
+        fm["branch"] = args.branch
     if codex_self_target:
         fm["autobridge_skip"] = True
         fm["autobridge_skip_reason"] = "codex_self_target"

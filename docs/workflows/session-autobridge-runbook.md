@@ -52,9 +52,24 @@ chat-context heartbeats.
 ## One-Writer Activation Lease
 
 One durable activation packet must activate at most one writer for the same
-exact `(project, chat, task, worktree, branch, target-agent)` identity. Before
-mutating an assigned worktree, a fresh activation claims the lease; a second
-session observing the same packet fails closed and holds read-only:
+exact `(project, chat, task, worktree, branch, target-agent)` identity (the
+worktree path is canonicalized, so symlinked/relative spellings of the same
+checkout hit the same lease). This is an extension of the existing
+`State/session_autobridge/sessions/` lease seam, not a parallel authority:
+
+- a lease owner IS a registered autobridge session — `lease-claim` refuses an
+  owner that has no live (`active`/`parked`) `sessions/` record;
+- owner liveness derives from that session record (plus the optionally
+  recorded `--owner-pid`);
+- `deactivate` releases the session's activation leases;
+- `dispatch_session` enforces the gate automatically: an activation-shaped
+  packet (frontmatter `related_task` + `worktree` + `branch`, produced by
+  `deliver.py --related-task ... --worktree ... --branch ...`) can only wake
+  a session that holds (or can claim) the lease. A second matching session
+  records `activation_lease_refused`, is held read-only, and is never woken.
+
+Manual claim before mutating an assigned worktree (register the session
+first — see "Activate A Session"):
 
 ```bash
 python3 bin/session_autobridge.py lease-claim \
@@ -65,31 +80,43 @@ python3 bin/session_autobridge.py lease-claim \
   --branch claude/gh-0000-lane \
   --target-agent claude \
   --session SESSION-claude-lane \
-  --owner-pid $$ \
   --json
 ```
 
-- Exit 0 with `"claimed": true` — this session is the writer. The claim also
-  audits activation-shaped pollers for the same identity: registered
-  (PM2-managed) watches are preserved, unregistered ad-hoc mailbox pollers are
-  terminated, and every candidate is listed in `poller_audit` with its pid,
-  command, and exact action. Pass `--skip-poller-cleanup` to audit without
-  terminating.
-- Exit 75 with `"claimed": false` — another session owns the lane. The output
-  names the live owner lease. Do not mutate the worktree; record the refusal
-  and stand down.
-- Claims are fenced: every ownership change increments `fence_token`. An
-  expired lease still refuses new claims until `--takeover` is passed AND the
-  recorded `owner_pid` is provably gone, so a stale owner can never be
-  silently replaced while active, and a replaced owner's old token is
-  detectably stale.
-- Release on handoff/stand-down:
-  `python3 bin/session_autobridge.py lease-release ... --session SESSION-claude-lane`.
-  Only the current owner can release.
+- Exit 0 with `"claimed": true` — this session is the writer. Note the
+  returned `fence_token`; release requires it.
+- Exit 75 with `"claimed": false` — activation is NOT authorized. Reasons
+  include `lease_held_by_active_owner` (another live session owns the lane —
+  hold read-only and stand down), `same_session_different_process` (a second
+  process reused the owner's `--session`), `dead_owner_requires_takeover` /
+  `lease_expired_requires_takeover` (pass `--takeover` only after confirming
+  the owner is truly gone), `owner_liveness_unknown`,
+  `poller_audit_unavailable`, and `stale_poller_not_proven_gone`. The last
+  two are fail-closed audit outcomes: a claim never reports success unless
+  every identity-matched stale poller is provably terminated (SIGTERM,
+  verified exit, SIGKILL escalation) and the registry could be consulted.
+- The claim audits poller-shaped processes for the identity: pids in the PM2
+  registry (`pm2 jlist` — authoritative process identity, not env-marker
+  substrings) are preserved; unregistered identity-matched pollers are
+  terminated with per-identity diagnostics in `poller_audit`.
+  `--skip-poller-cleanup` reports without terminating (the audit itself still
+  must be able to run).
+- Claims are fenced: every ownership change increments `fence_token`, and a
+  takeover records `previous_owner_session_id`. Assert write authority before
+  mutations and consume the fence at release:
+
+```bash
+python3 bin/session_autobridge.py lease-assert ... --session SESSION-claude-lane --fence-token N
+python3 bin/session_autobridge.py lease-release ... --session SESSION-claude-lane --fence-token N
+```
+
+Both refuse (exit 75) for a non-owner, a stale fence token, or a released
+lease — a superseded writer still holding an old token cannot assert or
+release.
 
 Purpose-scoped PR/CI/deploy watches are a separate concern from activation
-wake-pollers: register them (PM2 registry) so activation cleanup can tell them
-apart and preserve them.
+wake-pollers: run them under PM2 (the registry) so activation cleanup can
+prove they are registered and preserve them.
 
 Claims are serialized through a `.lock` sidecar next to the lease record under
 `State/session_autobridge/activation_leases/`. If a claiming process crashes

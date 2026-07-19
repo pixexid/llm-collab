@@ -1,15 +1,21 @@
-"""Fenced one-writer activation leases for the session autobridge seam.
+"""Fenced one-writer activation leases on the session_autobridge seam.
 
 One durable activation packet must never produce two writers for the same
-exact activation identity. A lease record is keyed by
-(project, chat, task, worktree, branch, target_agent); claims are serialized
-through an O_EXCL lock file and fenced with a monotonically increasing token
-so a stale owner can never regain write authority after a takeover.
+exact activation identity. A lease record is keyed by the canonicalized
+(project, chat, task, worktree, branch, target_agent) identity; claims are
+serialized through an O_EXCL lock file and fenced with a monotonically
+increasing token.
 
-Cleanup is registration-based: PM2-managed watchers (the registry) are always
-preserved; only unregistered ad-hoc mailbox pollers matching the activation
-identity are terminated, and every candidate is reported with its identity and
-the exact action taken.
+This is an extension of the EXISTING sessions/ lease seam, not a parallel
+authority: a lease owner IS a registered autobridge session. Owner liveness
+derives from that session record's status (plus an optional recorded owner
+pid), `deactivate` releases the sessions' activation leases, and
+`dispatch_session` refuses to wake a writer for an activation-shaped packet
+without holding the lease.
+
+Cleanup is registry-based and fail closed: PM2's process list (`pm2 jlist`)
+is the authoritative registry of purpose watches to preserve; identity-matched
+unregistered pollers must be provably terminated or the claim is refused.
 """
 
 from __future__ import annotations
@@ -21,19 +27,20 @@ import os
 import re
 import signal
 import subprocess
+import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from _helpers import now_utc, utc_iso
-from _session_autobridge import AUTOBRIDGE_ROOT, parse_iso8601
+from _session_autobridge import AUTOBRIDGE_ROOT, load_session, parse_iso8601
 
 ACTIVATION_LEASES_DIR = AUTOBRIDGE_ROOT / "activation_leases"
 
 IDENTITY_FIELDS = ("project", "chat", "task", "worktree", "branch", "target_agent")
 
-# Env markers PM2 injects into managed processes; their presence in a
-# `ps eww` command row marks the process as registry-owned.
-PM2_ENV_MARKERS = ("PM2_HOME=", "pm2_env=", "PM2_USAGE=")
+LIVE_SESSION_STATUSES = {"active", "parked"}
+
+POLLER_SHAPE_MARKERS = ("while true", "watch_inbox.py", "inbox.py")
 
 
 class LeaseRefused(Exception):
@@ -41,6 +48,14 @@ class LeaseRefused(Exception):
         super().__init__(reason)
         self.reason = reason
         self.owner = owner or {}
+
+
+class PollerAuditUnavailable(Exception):
+    """The stale-poller audit could not run or could not prove cleanup."""
+
+
+def canonical_worktree(value: str) -> str:
+    return str(Path(value).expanduser().resolve())
 
 
 def lease_identity(args_or_mapping: Any) -> dict[str, str]:
@@ -51,9 +66,12 @@ def lease_identity(args_or_mapping: Any) -> dict[str, str]:
             if isinstance(args_or_mapping, dict)
             else getattr(args_or_mapping, field, None)
         )
+        if value is not None:
+            value = str(value).strip()
         if not value:
             raise ValueError(f"activation lease identity requires --{field.replace('_', '-')}")
-        identity[field] = str(value)
+        identity[field] = value
+    identity["worktree"] = canonical_worktree(identity["worktree"])
     return identity
 
 
@@ -73,6 +91,18 @@ def load_lease(identity: dict[str, str]) -> dict[str, Any] | None:
     return json.loads(path.read_text())
 
 
+def iter_leases() -> list[dict[str, Any]]:
+    if not ACTIVATION_LEASES_DIR.exists():
+        return []
+    leases: list[dict[str, Any]] = []
+    for path in sorted(ACTIVATION_LEASES_DIR.glob("*.json")):
+        try:
+            leases.append(json.loads(path.read_text()))
+        except json.JSONDecodeError:
+            continue
+    return leases
+
+
 def save_lease(payload: dict[str, Any]) -> None:
     path = lease_path(payload["identity"])
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -82,7 +112,7 @@ def save_lease(payload: dict[str, Any]) -> None:
     tmp.replace(path)
 
 
-def owner_process_alive(pid: int | None) -> bool | None:
+def process_alive(pid: int | None) -> bool | None:
     """True/False when determinable; None when liveness is unknown."""
     if pid is None:
         return None
@@ -95,6 +125,33 @@ def owner_process_alive(pid: int | None) -> bool | None:
     except (OverflowError, ValueError):
         return None
     return True
+
+
+def owner_session_record(owner_session_id: str) -> dict[str, Any] | None:
+    try:
+        return load_session(owner_session_id)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return None
+
+
+def owner_is_live(lease: dict[str, Any]) -> bool | None:
+    """Owner liveness from the authoritative sessions/ record, with the
+    recorded owner pid as an additional positive proof.
+
+    True  -> provably live (refuse takeover)
+    False -> provably gone (takeover-eligible)
+    None  -> unknown (fail closed: refuse takeover)
+    """
+    pid_alive = process_alive(lease.get("owner_pid"))
+    if pid_alive is True:
+        return True
+
+    record = owner_session_record(str(lease.get("owner_session_id")))
+    if record is None:
+        return None if pid_alive is None else False
+    if record.get("status") in LIVE_SESSION_STATUSES:
+        return True
+    return False
 
 
 def lease_is_expired(lease: dict[str, Any]) -> bool:
@@ -132,12 +189,20 @@ def owner_summary(lease: dict[str, Any]) -> dict[str, Any]:
     return {
         "lease_key": lease.get("lease_key"),
         "owner_session_id": lease.get("owner_session_id"),
+        "owner_runtime_session_id": lease.get("owner_runtime_session_id"),
         "owner_pid": lease.get("owner_pid"),
         "status": lease.get("status"),
         "fence_token": lease.get("fence_token"),
         "lease_expires_utc": lease.get("lease_expires_utc"),
         "claimed_utc": lease.get("claimed_utc"),
     }
+
+
+def _owner_runtime_session_id(record: dict[str, Any]) -> str | None:
+    runtime = record.get("runtime")
+    if isinstance(runtime, dict) and runtime.get("session_id"):
+        return str(runtime["session_id"])
+    return None
 
 
 def claim_lease(
@@ -150,34 +215,68 @@ def claim_lease(
 ) -> dict[str, Any]:
     """Claim the activation lease or raise LeaseRefused naming the live owner.
 
-    Fencing rules, all fail closed:
-    - active + unexpired lease held by another session -> refused
-    - expired lease without --takeover -> refused
-    - expired lease with --takeover but owner process still alive -> refused
-    - released/superseded lease, or takeover of a dead/expired owner ->
-      claimed with an incremented fence token, so any writer still holding the
-      old token can be rejected by downstream consumers.
+    The owner MUST be a registered autobridge session in a live status; lease
+    ownership and liveness are bound to that sessions/ record (plus the
+    optional recorded pid). Fencing rules, all fail closed:
+
+    - owner provably live and different session -> refused
+    - same session but the runtime identity or recorded pid changed while the
+      previous owner process is still live -> refused (a second process reusing
+      --session cannot bypass ownership)
+    - owner liveness unknown -> refused
+    - owner provably gone -> refused without explicit --takeover; with it, the
+      claim succeeds and increments fence_token so the stale owner's token is
+      detectably old.
     """
+    record = owner_session_record(owner_session_id)
+    if record is None:
+        raise LeaseRefused("owner_session_not_registered")
+    if record.get("status") not in LIVE_SESSION_STATUSES:
+        raise LeaseRefused(
+            "owner_session_not_live", {"owner_session_status": record.get("status")}
+        )
+    claim_runtime_id = _owner_runtime_session_id(record)
+
     with _ClaimLock(identity):
         existing = load_lease(identity)
         fence_token = 1
+        previous_owner: str | None = None
         if existing is not None:
             fence_token = int(existing.get("fence_token", 0)) + 1
-            status = existing.get("status")
-            if status == "active":
-                same_owner = existing.get("owner_session_id") == owner_session_id
-                if same_owner:
+            previous_owner = existing.get("previous_owner_session_id")
+            if existing.get("status") == "active":
+                same_session = existing.get("owner_session_id") == owner_session_id
+                same_runtime = (
+                    existing.get("owner_runtime_session_id") == claim_runtime_id
+                )
+                same_pid = (
+                    owner_pid is not None
+                    and existing.get("owner_pid") is not None
+                    and int(existing["owner_pid"]) == int(owner_pid)
+                )
+                if same_session and same_runtime and (
+                    existing.get("owner_pid") is None or same_pid
+                ):
                     fence_token = int(existing.get("fence_token", 1))
-                elif not lease_is_expired(existing):
-                    raise LeaseRefused("lease_held_by_active_owner", owner_summary(existing))
-                elif not takeover:
-                    raise LeaseRefused("lease_expired_requires_takeover", owner_summary(existing))
                 else:
-                    alive = owner_process_alive(existing.get("owner_pid"))
+                    alive = owner_is_live(existing)
                     if alive is True:
-                        raise LeaseRefused("expired_owner_still_active", owner_summary(existing))
-                    if alive is None and existing.get("owner_pid") is not None:
+                        reason = (
+                            "same_session_different_process"
+                            if same_session
+                            else "lease_held_by_active_owner"
+                        )
+                        raise LeaseRefused(reason, owner_summary(existing))
+                    if alive is None:
                         raise LeaseRefused("owner_liveness_unknown", owner_summary(existing))
+                    if not takeover:
+                        reason = (
+                            "lease_expired_requires_takeover"
+                            if lease_is_expired(existing)
+                            else "dead_owner_requires_takeover"
+                        )
+                        raise LeaseRefused(reason, owner_summary(existing))
+                    previous_owner = existing.get("owner_session_id")
 
         now = now_utc()
         expires = __import__("datetime").datetime.fromtimestamp(
@@ -187,23 +286,42 @@ def claim_lease(
             "identity": identity,
             "lease_key": lease_key(identity),
             "owner_session_id": owner_session_id,
+            "owner_runtime_session_id": claim_runtime_id,
             "owner_pid": owner_pid,
             "status": "active",
             "fence_token": fence_token,
             "claimed_utc": utc_iso(),
             "lease_expires_utc": expires,
-            "previous_owner_session_id": (existing or {}).get("owner_session_id")
-            if existing and existing.get("owner_session_id") != owner_session_id
-            else (existing or {}).get("previous_owner_session_id"),
+            "previous_owner_session_id": previous_owner,
         }
         save_lease(payload)
         return payload
+
+
+def assert_lease(
+    identity: dict[str, str],
+    *,
+    owner_session_id: str,
+    fence_token: int | None = None,
+) -> dict[str, Any]:
+    """Verify current write authority; raise LeaseRefused when absent/stale."""
+    lease = load_lease(identity)
+    if lease is None:
+        raise LeaseRefused("no_lease_for_identity")
+    if lease.get("status") != "active":
+        raise LeaseRefused("lease_not_active", owner_summary(lease))
+    if lease.get("owner_session_id") != owner_session_id:
+        raise LeaseRefused("lease_owned_by_other_session", owner_summary(lease))
+    if fence_token is not None and int(lease.get("fence_token", -1)) != int(fence_token):
+        raise LeaseRefused("stale_fence_token", owner_summary(lease))
+    return lease
 
 
 def release_lease(
     identity: dict[str, str],
     *,
     owner_session_id: str,
+    fence_token: int,
     status: str = "released",
 ) -> dict[str, Any]:
     with _ClaimLock(identity):
@@ -212,26 +330,52 @@ def release_lease(
             raise LeaseRefused("no_lease_for_identity")
         if existing.get("owner_session_id") != owner_session_id:
             raise LeaseRefused("release_requires_current_owner", owner_summary(existing))
+        if int(existing.get("fence_token", -1)) != int(fence_token):
+            raise LeaseRefused("stale_fence_token", owner_summary(existing))
         existing["status"] = status
         existing["released_utc"] = utc_iso()
         save_lease(existing)
         return existing
 
 
+def release_session_leases(owner_session_id: str) -> list[dict[str, Any]]:
+    """Release every active lease owned by a session (deactivate integration)."""
+    released: list[dict[str, Any]] = []
+    for lease in iter_leases():
+        if lease.get("owner_session_id") != owner_session_id:
+            continue
+        if lease.get("status") != "active":
+            continue
+        lease["status"] = "released"
+        lease["released_utc"] = utc_iso()
+        save_lease(lease)
+        released.append(owner_summary(lease))
+    return released
+
+
 # ---------------------------------------------------------------------------
-# Stale activation-poller audit/cleanup
+# Stale activation-poller audit/cleanup (fail closed)
 # ---------------------------------------------------------------------------
 
 
 def poller_process_rows(ps_output: str | None = None) -> list[dict[str, Any]]:
     if ps_output is None:
-        result = subprocess.run(
-            ["ps", "eww", "-axo", "pid=,ppid=,command="],
-            text=True,
-            capture_output=True,
-            check=False,
-        )
+        try:
+            result = subprocess.run(
+                ["ps", "eww", "-axo", "pid=,ppid=,command="],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+        except OSError as exc:
+            raise PollerAuditUnavailable(f"ps unavailable: {exc}") from exc
+        if result.returncode != 0 or not result.stdout.strip():
+            raise PollerAuditUnavailable(
+                f"ps failed (rc={result.returncode}): {result.stderr.strip()}"
+            )
         ps_output = result.stdout
+    if not ps_output.strip():
+        raise PollerAuditUnavailable("empty process listing")
     rows: list[dict[str, Any]] = []
     for line in ps_output.splitlines():
         stripped = line.strip()
@@ -244,11 +388,36 @@ def poller_process_rows(ps_output: str | None = None) -> list[dict[str, Any]]:
     return rows
 
 
-def is_registered_watch(command: str) -> bool:
-    return any(marker in command for marker in PM2_ENV_MARKERS)
+def pm2_registered_pids() -> set[int]:
+    """Authoritative preservation registry: pids managed by PM2.
 
+    No PM2 binary on the host means no registry exists (empty set). A present
+    but failing PM2 is indistinguishable from a hidden registry, so it fails
+    the audit closed.
+    """
+    from shutil import which
 
-POLLER_SHAPE_MARKERS = ("while true", "watch_inbox.py", "inbox.py")
+    pm2_bin = os.environ.get("LLM_COLLAB_PM2_BIN") or which("pm2")
+    if not pm2_bin:
+        return set()
+    try:
+        result = subprocess.run(
+            [pm2_bin, "jlist"], text=True, capture_output=True, check=False, timeout=15
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise PollerAuditUnavailable(f"pm2 jlist unavailable: {exc}") from exc
+    if result.returncode != 0:
+        raise PollerAuditUnavailable(f"pm2 jlist failed (rc={result.returncode})")
+    try:
+        processes = json.loads(result.stdout or "[]")
+    except json.JSONDecodeError as exc:
+        raise PollerAuditUnavailable("pm2 jlist emitted invalid JSON") from exc
+    pids: set[int] = set()
+    for proc in processes if isinstance(processes, list) else []:
+        pid = proc.get("pid") if isinstance(proc, dict) else None
+        if isinstance(pid, int) and pid > 0:
+            pids.add(pid)
+    return pids
 
 
 def matches_activation_identity(command: str, identity: dict[str, str]) -> str | None:
@@ -281,22 +450,72 @@ def ancestor_pids(rows: list[dict[str, Any]], start_pid: int) -> set[int]:
     return chain
 
 
+def default_wait_for_exit(pid: int, timeout_seconds: float = 5.0) -> bool:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        if process_alive(pid) is False:
+            return True
+        time.sleep(0.1)
+    return process_alive(pid) is False
+
+
+def terminate_verified(
+    pid: int,
+    *,
+    kill: Callable[[int, int], None] = os.kill,
+    wait_for_exit: Callable[[int], bool] = default_wait_for_exit,
+) -> str:
+    """SIGTERM, verify exit, escalate to SIGKILL, verify again.
+
+    Returns the proven action label; `termination_unverified` means the
+    process is still (or possibly still) alive and the caller must fail
+    closed.
+    """
+    try:
+        kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return "already_exited"
+    except PermissionError:
+        return "terminate_denied"
+    if wait_for_exit(pid):
+        return "terminated"
+    try:
+        kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return "terminated"
+    except PermissionError:
+        return "terminate_denied"
+    if wait_for_exit(pid):
+        return "terminated_sigkill"
+    return "termination_unverified"
+
+
+UNPROVEN_ACTIONS = {"terminate_denied", "termination_unverified"}
+
+
 def audit_activation_pollers(
     identity: dict[str, str],
     *,
     rows: list[dict[str, Any]] | None = None,
+    registered_pids: set[int] | None = None,
     clean: bool = False,
-    terminate=os.kill,
+    kill: Callable[[int, int], None] = os.kill,
+    wait_for_exit: Callable[[int], bool] = default_wait_for_exit,
     self_pid: int | None = None,
 ) -> list[dict[str, Any]]:
     """List every poller-shaped process for this identity with the action taken.
 
-    Registered (PM2-managed) watches are always preserved. Unregistered
-    matches are terminated only when clean=True. Nothing is ever killed by
-    bare process name — only identity-matched, unregistered rows.
+    PM2-registered pids (the authoritative registry) are always preserved.
+    Unregistered matches are terminated (with verified exit) only when
+    clean=True. Nothing is ever killed by bare process name — only
+    identity-matched, unregistered rows outside the caller's own ancestor
+    chain. Raises PollerAuditUnavailable when ps or the registry cannot be
+    consulted.
     """
     if rows is None:
         rows = poller_process_rows()
+    if registered_pids is None:
+        registered_pids = pm2_registered_pids()
     if self_pid is None:
         self_pid = os.getpid()
     excluded = ancestor_pids(rows, self_pid)
@@ -311,19 +530,19 @@ def audit_activation_pollers(
             "pid": row["pid"],
             "command": row["command"],
             "matched": matched,
-            "registered": is_registered_watch(row["command"]),
+            "registered": row["pid"] in registered_pids,
         }
         if finding["registered"]:
             finding["action"] = "preserved_registered_watch"
         elif not clean:
             finding["action"] = "reported_only"
         else:
-            try:
-                terminate(row["pid"], signal.SIGTERM)
-                finding["action"] = "terminated"
-            except ProcessLookupError:
-                finding["action"] = "already_exited"
-            except PermissionError:
-                finding["action"] = "terminate_denied"
+            finding["action"] = terminate_verified(
+                row["pid"], kill=kill, wait_for_exit=wait_for_exit
+            )
         findings.append(finding)
     return findings
+
+
+def audit_proves_clean(findings: list[dict[str, Any]]) -> bool:
+    return not any(f["action"] in UNPROVEN_ACTIONS for f in findings)

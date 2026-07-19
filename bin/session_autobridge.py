@@ -38,12 +38,16 @@ from _session_autobridge import (
 )
 from _activation_lease import (
     LeaseRefused,
+    PollerAuditUnavailable,
+    assert_lease,
     audit_activation_pollers,
+    audit_proves_clean,
     claim_lease,
     lease_identity,
     load_lease,
     owner_summary,
     release_lease,
+    release_session_leases,
 )
 
 
@@ -145,9 +149,20 @@ def parse_args():
     lease_show = subparsers.add_parser("lease-show", help="Show the activation lease for an identity")
     add_identity_arguments(lease_show)
 
+    lease_assert = subparsers.add_parser(
+        "lease-assert",
+        help="Assert current write authority (owner + fence) before mutating",
+    )
+    add_identity_arguments(lease_assert)
+    lease_assert.add_argument("--session", required=True, help="Owning session identifier")
+    lease_assert.add_argument("--fence-token", type=int, default=None)
+
     lease_release = subparsers.add_parser("lease-release", help="Release an activation lease you own")
     add_identity_arguments(lease_release)
     lease_release.add_argument("--session", required=True, help="Owning session identifier")
+    lease_release.add_argument(
+        "--fence-token", type=int, required=True, help="Current fence token from the claim"
+    )
     lease_release.add_argument("--status", default="released", choices=("released", "superseded"))
     return parser.parse_args()
 
@@ -269,11 +284,46 @@ def deactivate_session(args) -> dict:
     if args.status == "superseded":
         payload["superseded_by"] = args.superseded_by
     save_session(payload)
+    payload["released_activation_leases"] = release_session_leases(args.session)
     return payload
+
+
+def _refusal_payload(identity: dict, refusal: LeaseRefused) -> dict:
+    return {
+        "claimed": False,
+        "reason": refusal.reason,
+        "identity": identity,
+        "owner": refusal.owner,
+        "hint": "another session owns this activation; hold read-only, do not mutate the worktree",
+    }
 
 
 def lease_claim_command(args) -> tuple[dict, int]:
     identity = lease_identity(args)
+    try:
+        pollers = audit_activation_pollers(identity, clean=not args.skip_poller_cleanup)
+    except PollerAuditUnavailable as exc:
+        return (
+            {
+                "claimed": False,
+                "reason": "poller_audit_unavailable",
+                "detail": str(exc),
+                "identity": identity,
+                "hint": "cannot prove stale pollers are gone; activation is not authorized",
+            },
+            75,
+        )
+    if not args.skip_poller_cleanup and not audit_proves_clean(pollers):
+        return (
+            {
+                "claimed": False,
+                "reason": "stale_poller_not_proven_gone",
+                "identity": identity,
+                "poller_audit": pollers,
+                "hint": "an identity-matched stale poller survived cleanup; activation is not authorized",
+            },
+            75,
+        )
     try:
         lease = claim_lease(
             identity,
@@ -283,17 +333,9 @@ def lease_claim_command(args) -> tuple[dict, int]:
             takeover=args.takeover,
         )
     except LeaseRefused as refusal:
-        return (
-            {
-                "claimed": False,
-                "reason": refusal.reason,
-                "identity": identity,
-                "owner": refusal.owner,
-                "hint": "another session owns this activation; hold read-only, do not mutate the worktree",
-            },
-            75,
-        )
-    pollers = audit_activation_pollers(identity, clean=not args.skip_poller_cleanup)
+        payload = _refusal_payload(identity, refusal)
+        payload["poller_audit"] = pollers
+        return (payload, 75)
     return ({"claimed": True, "lease": lease, "poller_audit": pollers}, 0)
 
 
@@ -305,10 +347,34 @@ def lease_show_command(args) -> tuple[dict, int]:
     return ({"identity": identity, "lease": lease, "owner": owner_summary(lease)}, 0)
 
 
+def lease_assert_command(args) -> tuple[dict, int]:
+    identity = lease_identity(args)
+    try:
+        lease = assert_lease(
+            identity, owner_session_id=args.session, fence_token=args.fence_token
+        )
+    except LeaseRefused as refusal:
+        return (
+            {
+                "asserted": False,
+                "reason": refusal.reason,
+                "identity": identity,
+                "owner": refusal.owner,
+            },
+            75,
+        )
+    return ({"asserted": True, "lease": lease}, 0)
+
+
 def lease_release_command(args) -> tuple[dict, int]:
     identity = lease_identity(args)
     try:
-        lease = release_lease(identity, owner_session_id=args.session, status=args.status)
+        lease = release_lease(
+            identity,
+            owner_session_id=args.session,
+            fence_token=args.fence_token,
+            status=args.status,
+        )
     except LeaseRefused as refusal:
         return (
             {
@@ -341,6 +407,8 @@ def main():
         result, exit_code = lease_claim_command(args)
     elif args.command == "lease-show":
         result, exit_code = lease_show_command(args)
+    elif args.command == "lease-assert":
+        result, exit_code = lease_assert_command(args)
     elif args.command == "lease-release":
         result, exit_code = lease_release_command(args)
     else:
