@@ -32,12 +32,15 @@ AX_DOORBELL_MAX_CHARS = 240
 
 
 def canonical_worktree(value: str) -> str:
-    """Absolute canonical form: expanduser + resolve (symlinks, `..`).
+    """SENDER-side canonical form: expanduser + strict resolve of an
+    EXISTING directory.
 
-    A RELATIVE path (after ~-expansion) is REFUSED — it has no
-    CWD-independent meaning, so readers and dispatchers would derive
-    different lease keys for the same packet. This invariant lives here, in
-    the shared validator, so no consumer can drift."""
+    A RELATIVE path (after ~-expansion) is refused (no CWD-independent
+    meaning). A nonexistent or non-directory path is refused too: resolving
+    a path that does not exist yet would let post-send filesystem mutation
+    (creation, symlink replacement) give the same serialized packet a
+    different meaning later. Canonicalization happens exactly ONCE, here at
+    the sender; receivers never re-resolve (see lease_identity)."""
     expanded = Path(value).expanduser()
     if not expanded.is_absolute():
         raise ValueError(
@@ -45,7 +48,18 @@ def canonical_worktree(value: str) -> str:
             "CWD-independent meaning, so readers and dispatchers would derive "
             "different activation identities for the same packet"
         )
-    return str(expanded.resolve())
+    try:
+        resolved = expanded.resolve(strict=True)
+    except OSError as exc:
+        raise ValueError(
+            f"--worktree must be an existing directory at delivery time "
+            f"({expanded}: {exc.__class__.__name__}); a not-yet-existing path "
+            "could be created or symlink-swapped after send, changing what "
+            "the serialized identity means"
+        ) from exc
+    if not resolved.is_dir():
+        raise ValueError(f"--worktree is not a directory: {resolved}")
+    return str(resolved)
 
 
 def normalized_identity_field(field: str, value: Any) -> str:
@@ -109,7 +123,11 @@ def lease_identity(args_or_mapping: Any) -> dict[str, str]:
     """Build the exact activation identity — the ONE shared validation path.
 
     ValueError on any missing/blank (whitespace-only) field and on a
-    relative worktree."""
+    non-absolute worktree. The worktree is used BYTE-EXACT: this function
+    performs NO filesystem resolution, so the derived key is invariant under
+    any post-send filesystem mutation (creation, symlink swap). The single
+    canonicalization point is the sender's canonical_worktree() before
+    serialization."""
     identity: dict[str, str] = {}
     for field in IDENTITY_FIELDS:
         value = (
@@ -118,7 +136,12 @@ def lease_identity(args_or_mapping: Any) -> dict[str, str]:
             else getattr(args_or_mapping, field, None)
         )
         identity[field] = normalized_identity_field(field, value)
-    identity["worktree"] = canonical_worktree(identity["worktree"])
+    if not Path(identity["worktree"]).is_absolute():
+        raise ValueError(
+            "--worktree must be an absolute path: a relative path has no "
+            "CWD-independent meaning, so readers and dispatchers would derive "
+            "different activation identities for the same packet"
+        )
     return identity
 
 
@@ -144,13 +167,24 @@ def classify_activation(
     # they must classify malformed, never downgrade to ordinary.
     if not any(field in frontmatter for field in ACTIVATION_MARKER_FIELDS):
         return "none", None
-    # Only `activation: true` marks a writer packet (schema): a PRESENT
-    # activation key with any other value is malformed even when every other
-    # identity field is valid.
-    if "activation" in frontmatter and frontmatter["activation"] is not True:
+    # Only `activation: true` marks a writer packet (schema): the marker must
+    # be PRESENT and exactly boolean true. Activation-shaped packets
+    # (worktree/branch markers) without it — or with any other value — are
+    # malformed even when every other identity field is valid.
+    if frontmatter.get("activation") is not True:
         return "malformed", {
-            "detail": "activation must be exactly true when present; "
-            f"got {frontmatter['activation']!r}"
+            "detail": "activation must be present and exactly true; "
+            f"got {frontmatter.get('activation')!r}"
+        }
+    # Receiver binding: the packet's serialized recipient must be a string
+    # exactly equal to the claiming target agent — a copied or mis-pointed
+    # packet addressed elsewhere (or with no `to` at all) must never grant
+    # this target's identity.
+    to_value = frontmatter.get("to")
+    if not isinstance(to_value, str) or to_value != target_agent:
+        return "malformed", {
+            "detail": f"packet `to` ({to_value!r}) must be a string exactly "
+            f"equal to the claiming target agent ({target_agent!r})"
         }
     # Parsed identity values must arrive as strings. The YAML-lite parser
     # coerces unquoted true/false/null/integers, so a packet whose identity
