@@ -166,6 +166,18 @@ def classify_activation(
                 "detail": f"{source_field} parsed as {type(value).__name__} "
                 f"({value!r}); activation identity fields must round-trip as strings"
             }
+    # Receiver/classification boundary: the legitimate delivery path always
+    # serializes an ALREADY-ABSOLUTE canonical worktree, so a raw packet
+    # value that is not absolute (`~/lane`, `../lane`) was hand-written and
+    # would expand against the CONSUMER's home/CWD — a per-consumer identity.
+    # Fail closed BEFORE any expansion; sender-side expanduser convenience
+    # lives only in the delivery CLI.
+    raw_worktree = frontmatter.get("worktree")
+    if isinstance(raw_worktree, str) and not Path(raw_worktree.strip()).is_absolute():
+        return "malformed", {
+            "detail": "packet worktree must be serialized absolute; got "
+            f"{raw_worktree!r} (home/CWD-relative spellings are consumer-dependent)"
+        }
     try:
         identity = lease_identity(
             {
@@ -182,13 +194,17 @@ def classify_activation(
     return "activation", identity
 
 
-def build_activation_consume_command(recipient: str, project: str, packet_name: str) -> str:
+def build_activation_consume_command(
+    recipient: str, project: str, chat_id: str, packet_name: str
+) -> str:
     """The exact, absolute claim command for one activation packet.
 
     Absolute canonical launcher (a product worktree has no bin/llm-collab),
-    no placeholders, exact-packet scoped via --packet. The --packet consuming
-    behavior ships with the runtime-integration lane; the serialized command
-    is the stable contract."""
+    no placeholders, and EXACT scoping: collision-free allocation is
+    per-chat-dir, so the selector pairs `--chat <id>` with `--packet <name>`
+    — two chats holding the same basename can never make the command
+    ambiguous. The consuming behavior ships with the runtime-integration
+    lane; the serialized command is the stable contract."""
     launcher = ROOT / "bin" / "llm-collab"
     return shlex.join(
         [
@@ -198,6 +214,8 @@ def build_activation_consume_command(recipient: str, project: str, packet_name: 
             recipient,
             "--project",
             project,
+            "--chat",
+            chat_id,
             "--packet",
             packet_name,
         ]

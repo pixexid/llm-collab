@@ -193,7 +193,7 @@ def build_message(args, body: str, chat_id: str, packet_name: str | None = None)
         fm["worktree"] = args.worktree
         fm["branch"] = args.branch
         consume_command = build_activation_consume_command(
-            args.recipient, args.project, packet_name or "<packet>"
+            args.recipient, args.project, chat_id, packet_name or "<packet>"
         )
         body = "\n".join([activation_body_banner(consume_command), "", body or "(no body)"])
     if codex_self_target:
@@ -462,7 +462,9 @@ def main():
             activation_ring_prompt = build_activation_ring_prompt(
                 args.sender,
                 str(args.related_task),
-                build_activation_consume_command(args.recipient, args.project, to_filename),
+                build_activation_consume_command(
+                    args.recipient, args.project, chat_id, to_filename
+                ),
             )
         except ValueError as exc:
             if activation_paths is not None:

@@ -159,6 +159,49 @@ class IdentityUnitTest(unittest.TestCase):
             ident.normalized_identity_field("branch", "naïve-brançh–日本"),
         )
 
+    def test_home_relative_packet_worktree_malformed_under_any_home(self):
+        """PR113 round-2 P2.1: a raw packet worktree of `~/lane` must classify
+        malformed identically regardless of the consumer's HOME — it can
+        never produce a valid (let alone divergent) lease key."""
+        fm = {
+            "project_id": "amiga", "chat_id": "CHAT-TEST0001",
+            "related_task": "TASK-1", "activation": True,
+            "worktree": "~/lane", "branch": "b",
+        }
+        verdicts = []
+        old_home = os.environ.get("HOME")
+        try:
+            for fake_home in ("/tmp/home-a", "/tmp/home-b"):
+                os.environ["HOME"] = fake_home
+                verdicts.append(ident.classify_activation(fm, target_agent="claude"))
+        finally:
+            if old_home is not None:
+                os.environ["HOME"] = old_home
+        for verdict, detail in verdicts:
+            self.assertEqual("malformed", verdict)
+            self.assertIn("absolute", detail["detail"])
+        self.assertEqual(verdicts[0], verdicts[1], "HOME must not influence the verdict")
+
+        dotted = {**fm, "worktree": "../lane"}
+        verdict, detail = ident.classify_activation(dotted, target_agent="claude")
+        self.assertEqual("malformed", verdict)
+        self.assertIn("absolute", detail["detail"])
+
+    def test_sender_cli_still_expands_home_worktree(self):
+        """Sender-side expanduser convenience is preserved: canonical_worktree
+        (the delivery path) expands ~ against the SENDER before serialization."""
+        old_home = os.environ.get("HOME")
+        try:
+            os.environ["HOME"] = "/tmp/sender-home"
+            Path("/tmp/sender-home").mkdir(exist_ok=True)
+            self.assertEqual(
+                str(Path("/tmp/sender-home/lane").resolve()),
+                ident.canonical_worktree("~/lane"),
+            )
+        finally:
+            if old_home is not None:
+                os.environ["HOME"] = old_home
+
     def test_edge_controls_refused_before_trimming(self):
         """Edge-control BLOCK: leading/trailing controls and line breakers
         must fail closed on the ORIGINAL value — never silently stripped —
@@ -194,8 +237,11 @@ class IdentityUnitTest(unittest.TestCase):
 
 class PromptBuilderTest(unittest.TestCase):
     def test_command_is_absolute_exact_and_placeholder_free(self):
-        command = ident.build_activation_consume_command("claude", "amiga", "p.md")
+        command = ident.build_activation_consume_command(
+            "claude", "amiga", "CHAT-TEST0001", "p.md"
+        )
         self.assertTrue(command.startswith("/"), "absolute launcher")
+        self.assertIn("--chat CHAT-TEST0001", command, "chat-qualified exact scope")
         self.assertIn("--packet p.md", command)
         self.assertNotIn("<", command)
         self.assertNotIn("--session", command)
@@ -224,7 +270,9 @@ class PromptBuilderTest(unittest.TestCase):
             spaced_root = Path(tmp) / "collab root"
             spaced_root.mkdir()
             with mock.patch.object(ident, "ROOT", spaced_root):
-                command = ident.build_activation_consume_command("claude", "amiga", "p one.md")
+                command = ident.build_activation_consume_command(
+                    "claude", "amiga", "CHAT-TEST0001", "p one.md"
+                )
         argv = shlex.split(command)
         self.assertEqual(str(spaced_root / "bin" / "llm-collab"), argv[0])
         self.assertEqual("p one.md", argv[argv.index("--packet") + 1])
@@ -569,6 +617,56 @@ class DeliverFoundationTest(unittest.TestCase):
                 if line.startswith("worktree:"):
                     worktrees.add(line.split(":", 1)[1].strip())
         self.assertEqual({self.worktree}, worktrees, "canonical resolved path, symlink gone")
+
+    def test_cross_chat_same_basename_commands_stay_exact(self):
+        """PR113 round-2 P2.2: two chats can allocate the same basename
+        (forced nonce + pinned second), so the claim command must be
+        chat-qualified — each packet's command differs by --chat, stays
+        shell-safe, placeholder-free, and within the AX budget."""
+        import shlex
+
+        root = self.make_workspace()
+        chat2 = root / "Chats" / "2026-01-02_other__CHAT-TEST0002"
+        write_json(chat2 / "meta.json", {"chat_id": "CHAT-TEST0002", "project_id": "amiga"})
+        body = root / "b.md"
+        write(body, "work")
+        extra_patch = (
+            "deliver.ts = lambda: '2026-01-01T00-00-00'; "
+            "import os as _os; _os.urandom = lambda n: b'\\x00' * n; "
+        )
+        for chat in ("CHAT-TEST0001", "CHAT-TEST0002"):
+            result = subprocess.run(
+                [
+                    sys.executable, "-c", self.WRAPPER.format(extra_patch=extra_patch),
+                    str(REPO_ROOT / "bin"),
+                    "--chat", chat, "--from", "codex", "--to", "claude",
+                    "--project", "amiga", "--title", "same title",
+                    "--body-file", str(body),
+                    "--activation", "--related-task", "TASK-TEST01",
+                    "--worktree", self.worktree, "--branch", "b",
+                ],
+                cwd=root, text=True, capture_output=True,
+                env={**os.environ, "LLM_COLLAB_UI_REFRESH": "0"}, check=False,
+            )
+            self.assertEqual(0, result.returncode, result.stderr)
+
+        packet1 = next(self.chat_dir.glob("2026-01-01T00-00-00_to-claude_*.md"))
+        packet2 = next(chat2.glob("2026-01-01T00-00-00_to-claude_*.md"))
+        self.assertEqual(packet1.name, packet2.name, "precondition: identical basenames")
+
+        commands = []
+        for packet, chat in ((packet1, "CHAT-TEST0001"), (packet2, "CHAT-TEST0002")):
+            line = next(l for l in packet.read_text().splitlines() if "inbox.py" in l)
+            command = line.split("`")[1]
+            self.assertIn(f"--chat {chat}", command)
+            self.assertIn(f"--packet {packet.name}", command)
+            self.assertNotIn("<", command)
+            argv = shlex.split(command)
+            self.assertEqual(chat, argv[argv.index("--chat") + 1])
+            prompt = ident.build_activation_ring_prompt("codex", "TASK-TEST01", command)
+            self.assertLessEqual(len(prompt), ident.AX_DOORBELL_MAX_CHARS)
+            commands.append(command)
+        self.assertNotEqual(commands[0], commands[1], "commands differ by chat scope")
 
     def test_activation_packet_carries_banner_with_exact_command(self):
         root = self.make_workspace()
