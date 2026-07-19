@@ -83,17 +83,27 @@ checkout hit the same lease). This is an extension of the existing
   `--packet <filename>` (the emitted claim command includes it) to scope the
   read/claim to exactly one delivered packet, including with `--all` in busy
   inboxes.
-- **readers must present a stable identity**: activation claims refuse with
-  `reader_identity_unbound` unless the reader exports
-  `LLM_COLLAB_READER_RUNTIME_ID=<its own session uuid>` (preferred — constant
-  across a Desktop session's short-lived tool shells, distinct across
-  sessions) or `LLM_COLLAB_READER_PID=<stable pid>`. Never bind the transient
-  tool-shell ppid: a dead transient pid would make the live winner look
-  crashed. Runtime-bound owners are never auto-taken-over while unexpired;
-  crash recovery is the reader-session TTL. Re-claims from the same session
-  and runtime identity are idempotent (same fence), so a review-fix packet
-  for the same identity re-authorizes the same writer only (see
-  `review-and-handoff.md`: review-fix wakes are activation packets).
+- **readers must present a stable identity — auto-discovered**: the reader's
+  runtime identity is taken from its own environment
+  (`CLAUDE_CODE_SESSION_ID` in Claude Desktop/Code shells, `CODEX_SESSION_ID`
+  / `GEMINI_SESSION_ID` where present, `LLM_COLLAB_READER_RUNTIME_ID` as an
+  explicit override, `LLM_COLLAB_READER_PID` for a stable process). The
+  emitted claim command therefore works verbatim in a live session with no
+  hand-authored value. A reader with none of these refuses fail-closed
+  (`reader_identity_unbound`) — and a refused/malformed/held claim NEVER
+  consumes the packet: it stays unread and claimable by the rightful owner.
+  Never bind the transient tool-shell ppid: a dead transient pid would make
+  the live winner look crashed. Runtime-bound owners are never
+  auto-taken-over while unexpired; crash recovery is the reader-session TTL.
+  Re-claims from the same session and runtime identity are idempotent (same
+  fence), so a review-fix packet for the same identity re-authorizes the same
+  writer only (see `review-and-handoff.md`: review-fix wakes are activation
+  packets). A LATE invocation of the same `--packet` command (after the
+  winner consumed the packet) surfaces the read packet and reports
+  held-read-only with the owner (exit 75) — or claims it fresh if the lease
+  was released. A `--packet` basename matching more than one message fails
+  closed (`ambiguous_packet_selector`) before any lease or read-state
+  mutation; pass the full relative path to disambiguate.
 - `dispatch_session` enforces the same gate on the automated wake path: only
   the session that holds (or can claim) the lease is woken; a second matching
   session records `activation_lease_refused` and is never woken. The winner's

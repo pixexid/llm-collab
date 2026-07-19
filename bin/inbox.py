@@ -127,15 +127,27 @@ def activation_reader_pid() -> int | None:
     return None
 
 
+READER_RUNTIME_ENV_VARS = (
+    "LLM_COLLAB_READER_RUNTIME_ID",
+    "CLAUDE_CODE_SESSION_ID",
+    "CODEX_SESSION_ID",
+    "GEMINI_SESSION_ID",
+)
+
+
 def activation_reader_runtime_id() -> str | None:
-    """Stable per-session runtime identity for lease binding. Desktop/CLI
-    sessions export LLM_COLLAB_READER_RUNTIME_ID (e.g. the Claude session
-    UUID) so every command from one session presents the same identity and a
-    different session presents a different one."""
+    """Stable per-session runtime identity for lease binding, mechanically
+    discovered from the runtime's own environment. Claude Desktop/Code shells
+    carry CLAUDE_CODE_SESSION_ID; LLM_COLLAB_READER_RUNTIME_ID overrides for
+    tests or unusual runtimes. Constant across one session's short-lived tool
+    shells, distinct across sessions — no hand-authored value needed."""
     import os
 
-    value = os.environ.get("LLM_COLLAB_READER_RUNTIME_ID")
-    return value.strip() if value and value.strip() else None
+    for var in READER_RUNTIME_ENV_VARS:
+        value = os.environ.get(var)
+        if value and value.strip():
+            return value.strip()
+    return None
 
 
 def activation_reader_session_id(args, identity: dict) -> str:
@@ -326,11 +338,10 @@ def filter_messages(
     if chat:
         messages = [m for m in messages if chat.lower() in m["path"].lower()]
     if packet:
-        messages = [
-            m
-            for m in messages
-            if m["path"] == packet or Path(m["path"]).name == Path(packet).name
-        ]
+        if "/" in packet:
+            messages = [m for m in messages if m["path"] == packet]
+        else:
+            messages = [m for m in messages if Path(m["path"]).name == packet]
     return messages
 
 
@@ -390,6 +401,35 @@ def main():
         messages = get_unread_messages(args.me)
 
     messages = filter_messages(messages, args.project, args.chat, args.packet)
+
+    consume = not args.peek and not args.show_all
+    late_packet_mode = False
+    if args.packet and consume and not messages:
+        # The exact emitted claim command must also serve a LATE invocation:
+        # after the winner consumed the packet it lives under `read`. Surface
+        # it and run the gate (held/refused for a live owner, a fresh claim
+        # after release) instead of a silent empty exit 0.
+        read_matches = [
+            m
+            for m in filter_messages(
+                load_all_messages(args.me), args.project, args.chat, args.packet
+            )
+            if m.get("read")
+        ]
+        if read_matches:
+            messages = read_matches
+            late_packet_mode = True
+
+    if args.packet and len(messages) > 1:
+        payload = {
+            "error": "ambiguous_packet_selector",
+            "packet": args.packet,
+            "matches": [m["path"] for m in messages],
+            "hint": "pass the full relative packet path; nothing was claimed or marked read",
+        }
+        print(json.dumps(payload, indent=2))
+        sys.exit(75)
+
     messages = messages[: args.limit]
 
     if not messages:
@@ -399,9 +439,6 @@ def main():
             print(f"[inbox] No {'messages' if args.show_all else 'unread messages'} for {args.me}.")
         return
 
-    shown_paths = [m["path"] for m in messages]
-
-    consume = not args.peek and not args.show_all
     activation_refused = False
     for msg in messages:
         gate = gate_activation_message(args, msg, consume=consume)
@@ -427,8 +464,15 @@ def main():
         for i, msg in enumerate(messages):
             print(format_message(msg, i))
 
-    if consume:
-        mark_messages_read(args.me, shown_paths)
+    if consume and not late_packet_mode:
+        # A refused/malformed/held activation must NOT consume the shared
+        # packet: it stays unread and claimable by the rightful owner.
+        consumable = [
+            m["path"]
+            for m in messages
+            if m.get("activation_gate") is None or m["activation_gate"].get("authorized")
+        ]
+        mark_messages_read(args.me, consumable)
     if activation_refused:
         sys.exit(75)
 

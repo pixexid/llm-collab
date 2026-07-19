@@ -103,9 +103,21 @@ class WorkspaceTestCase(unittest.TestCase):
             {"agent": agent["id"], "unread": [], "read": []},
         )
 
+    # Reader-identity env the test harness itself may carry (a real Claude
+    # session exports CLAUDE_CODE_SESSION_ID) — stripped so tests control
+    # binding explicitly.
+    READER_ENV_VARS = (
+        "LLM_COLLAB_READER_RUNTIME_ID",
+        "LLM_COLLAB_READER_PID",
+        "CLAUDE_CODE_SESSION_ID",
+        "CODEX_SESSION_ID",
+        "GEMINI_SESSION_ID",
+    )
+
     def cli_env(self, env: dict[str, str] | None = None) -> dict[str, str]:
+        base = {k: v for k, v in os.environ.items() if k not in self.READER_ENV_VARS}
         return {
-            **os.environ,
+            **base,
             "LLM_COLLAB_UI_REFRESH": "0",
             "LLM_COLLAB_PM2_BIN": self.pm2_stub,
             "LLM_COLLAB_PS_FIXTURE": self.ps_fixture,
@@ -826,6 +838,169 @@ class InboxActivationGateTest(WorkspaceTestCase):
 
         remaining = json.loads(inbox_path.read_text())
         self.assertIn(other_rel, remaining["unread"], "--packet must not consume others")
+
+    def unread_paths(self, root: Path) -> list[str]:
+        inbox = json.loads((root / "agents" / "claude" / "inbox.json").read_text())
+        return inbox.get("unread", [])
+
+    def test_refused_claim_preserves_packet_for_rightful_owner(self):
+        """Round-5 P1: a refused/unbound invocation must not consume the
+        shared packet; the rightful writer then claims fence 1."""
+        root = self.make_workspace()
+        rel = self.add_activation_message(root, path_stem="activate-1")
+
+        refused, code = self.run_inbox(
+            root, "--me", "claude", "--packet", "activate-1.md", "--session", "SESSION-X"
+        )
+        self.assertEqual(75, code)
+        self.assertEqual(
+            "reader_identity_unbound", refused["messages"][0]["activation_gate"]["reason"]
+        )
+        self.assertIn(rel, self.unread_paths(root), "refused claim must not consume")
+
+        loser, code = self.run_inbox(
+            root, "--me", "claude", "--packet", "activate-1.md",
+            "--session", "SESSION-L", reader_runtime="uuid-loser",
+        )
+        self.assertEqual(0, code, loser)
+        self.assertTrue(loser["messages"][0]["activation_gate"]["authorized"])
+        # That loser is actually the first bound claimant, so it wins — reset:
+        # release and prove a refusal by a SECOND session also preserves.
+        fence = str(loser["messages"][0]["activation_gate"]["fence_token"])
+        self.add_activation_message(root, path_stem="review-fix-1")
+        rel2 = f"Chats/2026-01-01_test__CHAT-TEST0001/review-fix-1.md"
+        second, code = self.run_inbox(
+            root, "--me", "claude", "--packet", "review-fix-1.md",
+            "--session", "SESSION-M", reader_runtime="uuid-other",
+        )
+        self.assertEqual(75, code)
+        self.assertIn(rel2, self.unread_paths(root), "held packet stays claimable")
+
+        rightful, code = self.run_inbox(
+            root, "--me", "claude", "--packet", "review-fix-1.md",
+            "--session", "SESSION-L", reader_runtime="uuid-loser",
+        )
+        self.assertEqual(0, code, rightful)
+        gate = rightful["messages"][0]["activation_gate"]
+        self.assertTrue(gate["authorized"])
+        self.assertEqual(int(fence), gate["fence_token"], "same writer, same fence")
+        self.assertNotIn(rel2, self.unread_paths(root), "owner's claim consumes")
+
+    def test_emitted_command_reports_late_loser_with_owner(self):
+        """Round-5 P1: after the winner consumed the packet, the EXACT emitted
+        command (--packet, no --all) must return held/refused naming the
+        owner — never a silent empty exit 0."""
+        root = self.make_workspace()
+        self.add_activation_message(root, path_stem="activate-1")
+        self.run_inbox(
+            root, "--me", "claude", "--packet", "activate-1.md",
+            "--session", "SESSION-R1", reader_runtime="uuid-task-one",
+        )
+
+        late, code = self.run_inbox(
+            root, "--me", "claude", "--packet", "activate-1.md",
+            "--session", "SESSION-R2", reader_runtime="uuid-task-two",
+        )
+        self.assertEqual(75, code, late)
+        self.assertEqual(1, len(late["messages"]))
+        gate = late["messages"][0]["activation_gate"]
+        self.assertFalse(gate["authorized"])
+        self.assertEqual("lease_held_by_active_owner", gate["reason"])
+        self.assertEqual("SESSION-R1", gate["owner"]["owner_session_id"])
+
+        released, code = self.run_inbox(
+            root, "--me", "claude", "--all", "--session", "SESSION-R1",
+        )
+        fence = None
+        for msg in released["messages"]:
+            g = msg.get("activation_gate")
+            if g and g.get("gate") == "peek_owner":
+                fence = g["owner"]["fence_token"]
+        self.assertEqual(1, fence)
+        payload, code = self.run_cli(
+            root, "lease-release", *identity_args(self.worktree),
+            "--session", "SESSION-R1", "--fence-token", "1",
+        )
+        self.assertEqual(0, code, payload)
+
+        reclaim, code = self.run_inbox(
+            root, "--me", "claude", "--packet", "activate-1.md",
+            "--session", "SESSION-R2", reader_runtime="uuid-task-two",
+        )
+        self.assertEqual(0, code, reclaim)
+        gate2 = reclaim["messages"][0]["activation_gate"]
+        self.assertTrue(gate2["authorized"])
+        self.assertEqual(2, gate2["fence_token"], "late claim after release takes over")
+
+    def test_duplicate_basename_selector_fails_closed(self):
+        """Round-5 P1: a basename matching multiple packets refuses before any
+        lease or read-state mutation."""
+        root = self.make_workspace()
+        rel1 = self.add_activation_message(root, path_stem="same")
+        other_chat = "Chats/2026-01-02_other__CHAT-TEST0002/same.md"
+        write(
+            root / other_chat,
+            "\n".join(
+                [
+                    "---", "chat_id: CHAT-TEST0002", "from: codex", "to: claude",
+                    "title: other lane", "project_id: amiga", "activation: true",
+                    "related_task: TASK-TEST02",
+                    f"worktree: {self.worktree}", "branch: claude/gh-0001-other",
+                    "---", "", "ACTIVATE other.",
+                ]
+            ),
+        )
+        inbox_path = root / "agents" / "claude" / "inbox.json"
+        inbox = json.loads(inbox_path.read_text())
+        inbox["unread"].append(other_chat)
+        write_json(inbox_path, inbox)
+
+        result = subprocess.run(
+            [
+                sys.executable, str(REPO_ROOT / "bin" / "inbox.py"),
+                "--me", "claude", "--packet", "same.md", "--json",
+            ],
+            cwd=root, text=True, capture_output=True,
+            env=self.cli_env({"LLM_COLLAB_READER_RUNTIME_ID": "uuid-task-one"}),
+            check=False,
+        )
+        self.assertEqual(75, result.returncode)
+        payload = json.loads(result.stdout)
+        self.assertEqual("ambiguous_packet_selector", payload["error"])
+        self.assertEqual(2, len(payload["matches"]))
+
+        self.assertIn(rel1, self.unread_paths(root))
+        self.assertIn(other_chat, self.unread_paths(root))
+        lease_dir = Path(root) / "State" / "session_autobridge" / "activation_leases"
+        self.assertEqual([], list(lease_dir.glob("*.json")), "no lease mutation")
+
+        precise, code = self.run_inbox(
+            root, "--me", "claude", "--packet", rel1,
+            "--session", "SESSION-R1", reader_runtime="uuid-task-one",
+        )
+        self.assertEqual(0, code, precise)
+        self.assertEqual(1, len(precise["messages"]))
+
+    def test_reader_identity_discovered_from_claude_session_env(self):
+        """Round-5 probe blocker: a live Claude task carries
+        CLAUDE_CODE_SESSION_ID; the emitted command must work verbatim with no
+        hand-authored identity."""
+        root = self.make_workspace()
+        self.add_activation_message(root, path_stem="activate-1")
+        result = subprocess.run(
+            [
+                sys.executable, str(REPO_ROOT / "bin" / "inbox.py"),
+                "--me", "claude", "--packet", "activate-1.md", "--json",
+            ],
+            cwd=root, text=True, capture_output=True,
+            env=self.cli_env({"CLAUDE_CODE_SESSION_ID": "aaaa-bbbb-cccc"}),
+            check=False,
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        payload = json.loads(result.stdout)
+        gate = payload["messages"][0]["activation_gate"]
+        self.assertTrue(gate["authorized"])
+        self.assertIn("aaaa-bbbb-cccc"[:12], gate["reader_session_id"])
 
     def test_peek_reports_unclaimed_without_claiming(self):
         root = self.make_workspace()

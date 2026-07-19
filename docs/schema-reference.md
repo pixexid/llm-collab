@@ -1232,13 +1232,18 @@ serialized through a `{lease_key}.lock` sidecar.
 
 Auto-created mailbox reader sessions carry `ephemeral_reader: true` and a
 `lease_expires_utc` TTL in their session record. Readers must present a stable
-identity: `LLM_COLLAB_READER_RUNTIME_ID` (preferred; recorded as the lease's
-`owner_runtime_session_id` and compared on every re-claim) or
-`LLM_COLLAB_READER_PID`; an unbound reader's activation claim is refused
-(`reader_identity_unbound`). A dead bound pid, or TTL expiry for runtime-bound
+identity, auto-discovered from the runtime environment
+(`CLAUDE_CODE_SESSION_ID`, `CODEX_SESSION_ID`, `GEMINI_SESSION_ID`, or the
+explicit overrides `LLM_COLLAB_READER_RUNTIME_ID` / `LLM_COLLAB_READER_PID`);
+it is recorded as the lease's `owner_runtime_session_id` and compared on every
+re-claim. An unbound reader's activation claim is refused
+(`reader_identity_unbound`). A refused/malformed/held activation read never
+consumes the packet (it stays unread for the rightful owner); a late `--packet`
+invocation on a consumed packet reports held-read-only with the owner (exit
+75) or claims fresh after release; an ambiguous `--packet` basename fails
+closed before any mutation. A dead bound pid, or TTL expiry for runtime-bound
 readers, makes the owner takeover-eligible (crash recovery) without weakening
-live-owner fencing. `inbox.py --packet <filename>` scopes a read/claim to
-exactly one delivered packet.
+live-owner fencing.
 
 CLI/exit-code contract: `session_autobridge.py lease-claim | lease-assert |
 lease-release` and activation-consuming `inbox.py` reads exit `75` on any
