@@ -250,6 +250,52 @@ class IdentityUnitTest(unittest.TestCase):
             self.assertIn("control or line-breaking", str(ctx.exception))
         self.assertEqual("b", ident.normalized_identity_field("branch", "  b  "))
 
+    def test_noncanonical_absolute_spellings_cannot_split_keys(self):
+        """PR114 P1: the receiver requires the serialized worktree to be its
+        own lexical normal form (pure string predicate — no filesystem), so
+        dotted/duplicate/trailing spellings of one directory classify
+        malformed instead of deriving a second key."""
+        base = {
+            "project_id": "amiga", "chat_id": "CHAT-TEST0001", "to": "claude",
+            "related_task": "TASK-1", "activation": True, "branch": "b",
+        }
+        canonical = "/work/lane"
+        verdict, identity = ident.classify_activation(
+            {**base, "worktree": canonical}, target_agent="claude"
+        )
+        self.assertEqual("activation", verdict)
+        canonical_key = ident.lease_key(identity)
+
+        for spelling in (
+            "/work/lane/../lane",
+            "/work/./lane",
+            "/work//lane",
+            "//work/lane",
+            "/work/lane/",
+        ):
+            verdict, detail = ident.classify_activation(
+                {**base, "worktree": spelling}, target_agent="claude"
+            )
+            self.assertEqual("malformed", verdict, spelling)
+            self.assertIn("canonical lexical form", detail["detail"])
+        # The invariant the finding demanded: no spelling of the same
+        # directory can ever produce a DIFFERENT valid key — every
+        # noncanonical spelling is malformed, the canonical one has one key.
+        self.assertTrue(canonical_key)
+
+    def test_symlink_loop_worktree_is_controlled_validation_error(self):
+        """PR114 P2: a symlink-loop worktree must land on the same controlled
+        pre-write refusal (ValueError family), whether the platform raises
+        OSError or RuntimeError from strict resolve."""
+        with tempfile.TemporaryDirectory() as tmp:
+            a = Path(tmp) / "a"
+            b = Path(tmp) / "b"
+            a.symlink_to(b)
+            b.symlink_to(a)
+            with self.assertRaises(ValueError) as ctx:
+                ident.canonical_worktree(str(a))
+            self.assertIn("existing directory", str(ctx.exception))
+
     def test_missing_activation_marker_with_full_identity_is_malformed(self):
         """A2 closure 2: worktree/branch markers with a complete identity but
         NO activation field must not classify as a writer grant."""
@@ -625,6 +671,24 @@ class DeliverFoundationTest(unittest.TestCase):
             )
             self.assertEqual(2, result.returncode, f"{bad_branch!r}: {result.stdout}")
             self.assertIn("control or line-breaking", result.stderr)
+        self.assertEqual(before, self.workspace_snapshot(root), "zero mutations")
+
+    def test_symlink_loop_worktree_delivery_refused_without_traceback(self):
+        """PR114 P2 delivery path: a real a->b->a loop refuses pre-write with
+        the documented diagnostic, exit 2, zero mutations, and no traceback."""
+        root = self.make_workspace()
+        loop_a = Path(root) / "loop-a"
+        loop_b = Path(root) / "loop-b"
+        loop_a.symlink_to(loop_b)
+        loop_b.symlink_to(loop_a)
+        before = self.workspace_snapshot(root)
+        result = self.run_deliver(
+            root, "--activation", "--related-task", "TASK-TEST01",
+            "--worktree", str(loop_a), "--branch", "b",
+        )
+        self.assertEqual(2, result.returncode, result.stdout)
+        self.assertIn("existing directory", result.stderr)
+        self.assertNotIn("Traceback", result.stderr, "controlled refusal, not a crash")
         self.assertEqual(before, self.workspace_snapshot(root), "zero mutations")
 
     def test_nonexistent_sender_worktree_refused_with_zero_mutations(self):

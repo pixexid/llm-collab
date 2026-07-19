@@ -14,6 +14,7 @@ state or enforces policy.
 from __future__ import annotations
 
 import hashlib
+import os
 import shlex
 from pathlib import Path
 from typing import Any
@@ -50,12 +51,15 @@ def canonical_worktree(value: str) -> str:
         )
     try:
         resolved = expanded.resolve(strict=True)
-    except OSError as exc:
+    except (OSError, RuntimeError) as exc:
+        # Older Pythons raise RuntimeError (not OSError) for symlink loops
+        # from strict resolve; both must land on the same controlled
+        # pre-write validation failure, never a traceback.
         raise ValueError(
             f"--worktree must be an existing directory at delivery time "
-            f"({expanded}: {exc.__class__.__name__}); a not-yet-existing path "
-            "could be created or symlink-swapped after send, changing what "
-            "the serialized identity means"
+            f"({expanded}: {exc.__class__.__name__}); a not-yet-existing, "
+            "looping, or unresolvable path could mean something different "
+            "after send"
         ) from exc
     if not resolved.is_dir():
         raise ValueError(f"--worktree is not a directory: {resolved}")
@@ -136,11 +140,24 @@ def lease_identity(args_or_mapping: Any) -> dict[str, str]:
             else getattr(args_or_mapping, field, None)
         )
         identity[field] = normalized_identity_field(field, value)
-    if not Path(identity["worktree"]).is_absolute():
+    worktree = identity["worktree"]
+    if not Path(worktree).is_absolute():
         raise ValueError(
             "--worktree must be an absolute path: a relative path has no "
             "CWD-independent meaning, so readers and dispatchers would derive "
             "different activation identities for the same packet"
+        )
+    # Purely LEXICAL canonical-form predicate — no filesystem call, so the
+    # resolution-family closure holds. Two spellings of one directory must
+    # never split into two keys: the serialized value must equal its own
+    # normpath (rejects '.', '..', duplicate and non-root trailing
+    # separators) and the POSIX double-leading-slash exception — which
+    # normpath preserves — is rejected explicitly.
+    if worktree != os.path.normpath(worktree) or worktree.startswith("//"):
+        raise ValueError(
+            "--worktree must be in canonical lexical form (no '.' or '..' "
+            "segments, duplicate or trailing separators, or double-leading "
+            f"slash); got {worktree!r}"
         )
     return identity
 

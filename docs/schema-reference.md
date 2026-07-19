@@ -235,8 +235,12 @@ absolute exact-packet claim command. A packet carrying any activation marker
 MALFORMED and consumers must fail closed — it is never an ordinary message.
 Malformed includes: any activation marker without `activation: true` present
 (the marker is mandatory and exactly boolean), falsy/coerced marker values,
-relative or home-relative worktrees, a `to` field that is not a string exactly
-equal to the claiming target agent, and non-string parsed identity values.
+relative or home-relative worktrees, absolute worktree spellings that are not
+in canonical lexical form (dot/dotdot segments, duplicate separators,
+non-root trailing separators, or a double-leading slash — the receiver
+requires the serialized value to equal its lexical normal form before the
+byte-exact comparison), a `to` field that is not a string exactly equal to
+the claiming target agent, and non-string parsed identity values.
 Verdicts are CWD/HOME/filesystem-time independent: the sender canonicalizes an
 EXISTING directory exactly once before serialization, and receivers never
 re-resolve — the serialized identity is compared byte-exact, so post-send path
