@@ -58,6 +58,11 @@ def parse_args():
     p.add_argument("--peek", action="store_true", help="Do not mark shown messages as read")
     p.add_argument("--project", default=None, help="Filter by project_id")
     p.add_argument("--chat", default=None, help="Filter by chat substring")
+    p.add_argument(
+        "--packet",
+        default=None,
+        help="Exact packet filename (or relative path) — show/claim only that message",
+    )
     p.add_argument("--mark-all-read", action="store_true", help="Mark all unread as read and exit")
     p.add_argument("--publish-session", action="store_true", help="Publish current runtime session identity before showing inbox")
     p.add_argument("--session", default=None, help="Stable llm-collab session id to update when publishing runtime identity")
@@ -108,31 +113,53 @@ def publish_runtime_identity(args) -> dict | None:
     return {"discovered": discovered, "session": payload}
 
 
-def activation_reader_pid() -> int:
-    """The reader's process identity for lease binding. Real path: the parent
-    of this short-lived CLI (the Desktop session's shell/runtime process).
-    LLM_COLLAB_READER_PID overrides for tests and for runtimes whose stable
-    process is not the direct parent."""
+def activation_reader_pid() -> int | None:
+    """Process identity for lease binding. LLM_COLLAB_READER_PID overrides for
+    tests/runtimes with a known stable process. Without an override there is
+    NO reliable pid: os.getppid() is the short-lived tool shell in Desktop
+    runtimes, and binding a transient pid would make the winner look crashed.
+    Prefer the stable runtime identity (activation_reader_runtime_id)."""
     import os
 
     override = os.environ.get("LLM_COLLAB_READER_PID")
     if override and override.isdigit():
         return int(override)
-    return os.getppid()
+    return None
+
+
+def activation_reader_runtime_id() -> str | None:
+    """Stable per-session runtime identity for lease binding. Desktop/CLI
+    sessions export LLM_COLLAB_READER_RUNTIME_ID (e.g. the Claude session
+    UUID) so every command from one session presents the same identity and a
+    different session presents a different one."""
+    import os
+
+    value = os.environ.get("LLM_COLLAB_READER_RUNTIME_ID")
+    return value.strip() if value and value.strip() else None
 
 
 def activation_reader_session_id(args, identity: dict) -> str:
     if args.session:
         return str(args.session)
-    return f"SESSION-act-{lease_key(identity)}-p{activation_reader_pid()}"
+    runtime_id = activation_reader_runtime_id()
+    if runtime_id:
+        return f"SESSION-act-{lease_key(identity)}-r{runtime_id[:12]}"
+    import os
+
+    return f"SESSION-act-{lease_key(identity)}-p{activation_reader_pid() or os.getppid()}"
 
 
 READER_SESSION_TTL_SECONDS = 6 * 3600
 
 
 def ensure_reader_session(session_id: str, agent_id: str, identity: dict) -> None:
+    runtime_id = activation_reader_runtime_id()
+    runtime = {"family": "reader", "session_id": runtime_id} if runtime_id else None
     try:
-        load_session(session_id)
+        existing = load_session(session_id)
+        if runtime is not None and not (existing.get("runtime") or {}).get("session_id"):
+            existing["runtime"] = runtime
+            save_session(existing)
         return
     except FileNotFoundError:
         pass
@@ -155,7 +182,7 @@ def ensure_reader_session(session_id: str, agent_id: str, identity: dict) -> Non
             "lease_owner": agent_id,
             "lease_expires_utc": expires,
             "ephemeral_reader": True,
-            "runtime": None,
+            "runtime": runtime,
             "supersedes_session_id": None,
             "created_utc": utc_iso(),
             "processed_messages": [],
@@ -202,12 +229,26 @@ def gate_activation_message(args, msg: dict, *, consume: bool) -> dict | None:
         if args.session and args.session == owner.get("owner_session_id"):
             return {"gate": "peek_owner", "authorized": True, "owner": owner}
         return {"gate": "held_read_only", "authorized": False, "owner": owner}
+    reader_pid = activation_reader_pid()
+    reader_runtime = activation_reader_runtime_id()
+    if reader_pid is None and reader_runtime is None:
+        return {
+            "gate": "refused",
+            "authorized": False,
+            "reason": "reader_identity_unbound",
+            "hint": (
+                "activation claims require a stable reader identity: export "
+                "LLM_COLLAB_READER_RUNTIME_ID=<your session uuid> (or "
+                "LLM_COLLAB_READER_PID for a stable process) and re-run"
+            ),
+        }
     session_id = activation_reader_session_id(args, identity)
     ensure_reader_session(session_id, args.me, identity)
     authorized, detail = gated_claim(
         identity,
         owner_session_id=session_id,
-        owner_pid=activation_reader_pid(),
+        owner_pid=reader_pid,
+        claimant_runtime_id=reader_runtime,
         takeover=True,
     )
     return {
@@ -246,11 +287,14 @@ def format_activation_banner(gate: dict) -> str:
             "with this fence before any repo mutation and before handoff."
         )
     owner = gate.get("owner") or {}
-    return (
+    banner = (
         f"  !! ACTIVATION REFUSED ({gate['reason']}) — owner: "
         f"{owner.get('owner_session_id', 'unknown')}. HOLD READ-ONLY: do not mutate "
         "the worktree, record the refusal, stand down."
     )
+    if gate.get("hint"):
+        banner += f"\n     hint: {gate['hint']}"
+    return banner
 
 
 def load_all_messages(agent_id: str) -> list[dict]:
@@ -271,11 +315,22 @@ def load_all_messages(agent_id: str) -> list[dict]:
     return messages
 
 
-def filter_messages(messages: list[dict], project: str | None, chat: str | None) -> list[dict]:
+def filter_messages(
+    messages: list[dict],
+    project: str | None,
+    chat: str | None,
+    packet: str | None = None,
+) -> list[dict]:
     if project:
         messages = [m for m in messages if m["frontmatter"].get("project_id") == project]
     if chat:
         messages = [m for m in messages if chat.lower() in m["path"].lower()]
+    if packet:
+        messages = [
+            m
+            for m in messages
+            if m["path"] == packet or Path(m["path"]).name == Path(packet).name
+        ]
     return messages
 
 
@@ -334,7 +389,7 @@ def main():
     else:
         messages = get_unread_messages(args.me)
 
-    messages = filter_messages(messages, args.project, args.chat)
+    messages = filter_messages(messages, args.project, args.chat, args.packet)
     messages = messages[: args.limit]
 
     if not messages:

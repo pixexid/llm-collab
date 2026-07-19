@@ -570,9 +570,17 @@ class InboxActivationGateTest(WorkspaceTestCase):
         return message_rel
 
     def run_inbox(
-        self, root: Path, *args: str, reader_pid: int | None = None
+        self,
+        root: Path,
+        *args: str,
+        reader_pid: int | None = None,
+        reader_runtime: str | None = None,
     ) -> tuple[dict, int]:
-        env = {"LLM_COLLAB_READER_PID": str(reader_pid)} if reader_pid else None
+        env: dict[str, str] = {}
+        if reader_pid:
+            env["LLM_COLLAB_READER_PID"] = str(reader_pid)
+        if reader_runtime:
+            env["LLM_COLLAB_READER_RUNTIME_ID"] = reader_runtime
         result = subprocess.run(
             [sys.executable, str(REPO_ROOT / "bin" / "inbox.py"), *args, "--json"],
             cwd=root,
@@ -698,6 +706,127 @@ class InboxActivationGateTest(WorkspaceTestCase):
         self.assertEqual(0, code)
         self.assertEqual("peek_owner", winner["messages"][0]["activation_gate"]["gate"])
 
+    def test_unbound_reader_is_refused(self):
+        root = self.make_workspace()
+        self.add_activation_message(root, path_stem="activate-1")
+        refused, code = self.run_inbox(root, "--me", "claude", "--session", "SESSION-R1")
+        self.assertEqual(75, code)
+        gate = refused["messages"][0]["activation_gate"]
+        self.assertEqual("reader_identity_unbound", gate["reason"])
+        self.assertIn("LLM_COLLAB_READER_RUNTIME_ID", gate["hint"])
+
+    def test_runtime_bound_same_session_different_runtime_is_refused(self):
+        root = self.make_workspace()
+        self.add_activation_message(root, path_stem="activate-1")
+        first, code = self.run_inbox(
+            root, "--me", "claude", "--session", "SESSION-SAME",
+            reader_runtime="uuid-task-one",
+        )
+        self.assertEqual(0, code, first)
+        self.assertTrue(first["messages"][0]["activation_gate"]["authorized"])
+
+        self.add_activation_message(root, path_stem="review-fix-1")
+        second, code = self.run_inbox(
+            root, "--me", "claude", "--session", "SESSION-SAME",
+            reader_runtime="uuid-task-two",
+        )
+        self.assertEqual(75, code)
+        gate2 = second["messages"][0]["activation_gate"]
+        self.assertEqual("same_session_different_process", gate2["reason"])
+
+    def test_runtime_bound_reclaim_survives_transient_shells(self):
+        """The real Desktop shape: every command runs in a new short-lived
+        shell, but the runtime identity is constant — re-claims stay
+        idempotent and the winner never looks crashed."""
+        root = self.make_workspace()
+        self.add_activation_message(root, path_stem="activate-1")
+        self.run_inbox(
+            root, "--me", "claude", "--session", "SESSION-R1",
+            reader_runtime="uuid-task-one",
+        )
+        self.add_activation_message(root, path_stem="review-fix-1")
+        again, code = self.run_inbox(
+            root, "--me", "claude", "--session", "SESSION-R1",
+            reader_runtime="uuid-task-one",
+        )
+        self.assertEqual(0, code, again)
+        gate = again["messages"][0]["activation_gate"]
+        self.assertTrue(gate["authorized"])
+        self.assertEqual(1, gate["fence_token"])
+
+    def test_runtime_bound_owner_not_taken_over_before_ttl(self):
+        root = self.make_workspace()
+        self.add_activation_message(root, path_stem="activate-1")
+        self.run_inbox(
+            root, "--me", "claude", "--session", "SESSION-R1",
+            reader_runtime="uuid-task-one",
+        )
+        self.add_activation_message(root, path_stem="review-fix-1")
+        second, code = self.run_inbox(
+            root, "--me", "claude", "--session", "SESSION-R2",
+            reader_runtime="uuid-task-two",
+        )
+        self.assertEqual(75, code, "runtime-bound live owner must not be replaced")
+        self.assertEqual(
+            "lease_held_by_active_owner",
+            second["messages"][0]["activation_gate"]["reason"],
+        )
+
+    def test_runtime_bound_owner_taken_over_after_ttl_expiry(self):
+        root = self.make_workspace()
+        self.add_activation_message(root, path_stem="activate-1")
+        first, _ = self.run_inbox(
+            root, "--me", "claude", "--session", "SESSION-R1",
+            reader_runtime="uuid-task-one",
+        )
+        owner_session = first["messages"][0]["activation_gate"]["reader_session_id"]
+        session_path = (
+            Path(root) / "State" / "session_autobridge" / "sessions" / f"{owner_session}.json"
+        )
+        record = json.loads(session_path.read_text())
+        record["lease_expires_utc"] = "2020-01-01T00:00:00+00:00"
+        session_path.write_text(json.dumps(record))
+
+        self.add_activation_message(root, path_stem="review-fix-1")
+        second, code = self.run_inbox(
+            root, "--me", "claude", "--session", "SESSION-R2",
+            reader_runtime="uuid-task-two",
+        )
+        self.assertEqual(0, code, second)
+        gate2 = second["messages"][0]["activation_gate"]
+        self.assertTrue(gate2["authorized"])
+        self.assertEqual(2, gate2["fence_token"])
+
+    def test_packet_selector_targets_exactly_one_message(self):
+        root = self.make_workspace()
+        self.add_activation_message(root, path_stem="activate-lane-a")
+        other_rel = "Chats/2026-01-01_test__CHAT-TEST0001/plain-note.md"
+        write(
+            root / other_rel,
+            "\n".join(
+                [
+                    "---", "chat_id: CHAT-TEST0001", "from: codex", "to: claude",
+                    "title: plain", "project_id: amiga", "---", "", "note",
+                ]
+            ),
+        )
+        inbox_path = root / "agents" / "claude" / "inbox.json"
+        inbox = json.loads(inbox_path.read_text())
+        inbox["unread"].append(other_rel)
+        write_json(inbox_path, inbox)
+
+        result, code = self.run_inbox(
+            root, "--me", "claude", "--packet", "activate-lane-a.md",
+            "--session", "SESSION-R1", reader_runtime="uuid-task-one",
+        )
+        self.assertEqual(0, code, result)
+        self.assertEqual(1, len(result["messages"]))
+        self.assertTrue(result["messages"][0]["path"].endswith("activate-lane-a.md"))
+        self.assertTrue(result["messages"][0]["activation_gate"]["authorized"])
+
+        remaining = json.loads(inbox_path.read_text())
+        self.assertIn(other_rel, remaining["unread"], "--packet must not consume others")
+
     def test_peek_reports_unclaimed_without_claiming(self):
         root = self.make_workspace()
         self.add_activation_message(root)
@@ -776,6 +905,71 @@ class DeliverActivationValidationTest(WorkspaceTestCase):
         result = self.run_deliver(root, *self.BASE, "--worktree", "/tmp/x")
         self.assertEqual(2, result.returncode)
         self.assertIn("--activation", result.stderr)
+
+    def test_generated_activation_command_contract(self):
+        """The claim command written into the packet body must be absolute,
+        placeholder-free, and scoped to exactly this packet; the matching AX
+        ring prompt must fit the doorbell budget."""
+        root = self.make_workspace()
+        self.add_agent(
+            root,
+            {
+                "id": "codex",
+                "display_name": "Codex",
+                "activation": {"type": "cli_session", "watcher_enabled": False},
+            },
+        )
+        chat_dir = root / "Chats" / "2026-01-01_test__CHAT-TEST0001"
+        write_json(chat_dir / "meta.json", {"chat_id": "CHAT-TEST0001", "project_id": "amiga"})
+        body_file = root / "brief.md"
+        write(body_file, "Do the lane work.")
+
+        result = self.run_deliver(
+            root, *self.BASE,
+            "--activation",
+            "--related-task", "TASK-TEST01",
+            "--worktree", self.worktree,
+            "--branch", "claude/gh-0000-test",
+            "--body-file", str(body_file),
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+
+        packets = sorted(chat_dir.glob("*_to-claude_*.md"))
+        self.assertEqual(1, len(packets))
+        packet = packets[0]
+        body = packet.read_text()
+
+        command_lines = [l for l in body.splitlines() if "inbox.py" in l]
+        self.assertTrue(command_lines, "activation body must carry the claim command")
+        command = command_lines[0]
+        self.assertNotIn("<", command, "no placeholders in the claim command")
+        self.assertIn(str(root / "bin" / "llm-collab"), command, "absolute launcher path")
+        self.assertIn(f"--packet {packet.name}", command, "exact-packet scoped")
+        self.assertIn("--me claude", command)
+        self.assertNotIn("--session", command, "reader identity is not sender-invented")
+
+        probe = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import sys, json; sys.path.insert(0, sys.argv[1]); import deliver; "
+                "c = deliver.build_activation_consume_command('claude', 'amiga', sys.argv[2]); "
+                "p = deliver.build_activation_ring_prompt('codex', 'TASK-TEST01', c); "
+                "print(json.dumps({'command': c, 'prompt': p, 'max': deliver.AX_DOORBELL_MAX_CHARS}))",
+                str(REPO_ROOT / "bin"),
+                packet.name,
+            ],
+            cwd=root,
+            text=True,
+            capture_output=True,
+            env=self.cli_env(),
+            check=True,
+        )
+        generated = json.loads(probe.stdout)
+        self.assertLessEqual(len(generated["prompt"]), generated["max"])
+        self.assertIn(packet.name, generated["prompt"])
+        self.assertNotIn("<", generated["prompt"])
+        self.assertIn(generated["command"], body, "body and ring must carry the same command")
 
 
 class TestIsolationGuard(unittest.TestCase):

@@ -1231,9 +1231,14 @@ serialized through a `{lease_key}.lock` sidecar.
 | `previous_owner_session_id` | string or null | Set on takeover of a provably dead owner |
 
 Auto-created mailbox reader sessions carry `ephemeral_reader: true` and a
-`lease_expires_utc` TTL in their session record; a dead bound pid or expired
-record makes the owner takeover-eligible (crash recovery) without weakening
-live-owner fencing.
+`lease_expires_utc` TTL in their session record. Readers must present a stable
+identity: `LLM_COLLAB_READER_RUNTIME_ID` (preferred; recorded as the lease's
+`owner_runtime_session_id` and compared on every re-claim) or
+`LLM_COLLAB_READER_PID`; an unbound reader's activation claim is refused
+(`reader_identity_unbound`). A dead bound pid, or TTL expiry for runtime-bound
+readers, makes the owner takeover-eligible (crash recovery) without weakening
+live-owner fencing. `inbox.py --packet <filename>` scopes a read/claim to
+exactly one delivered packet.
 
 CLI/exit-code contract: `session_autobridge.py lease-claim | lease-assert |
 lease-release` and activation-consuming `inbox.py` reads exit `75` on any

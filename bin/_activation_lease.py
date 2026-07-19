@@ -221,6 +221,7 @@ def claim_lease(
     *,
     owner_session_id: str,
     owner_pid: int | None = None,
+    claimant_runtime_id: str | None = None,
     ttl_seconds: int = 3600,
     takeover: bool = False,
 ) -> dict[str, Any]:
@@ -246,7 +247,10 @@ def claim_lease(
         raise LeaseRefused(
             "owner_session_not_live", {"owner_session_status": record.get("status")}
         )
-    claim_runtime_id = _owner_runtime_session_id(record)
+    # The claimant's own identity wins over the (shared) session record: a
+    # second process reusing the session id must not inherit the recorded
+    # runtime identity.
+    claim_runtime_id = claimant_runtime_id or _owner_runtime_session_id(record)
 
     with _ClaimLock(identity):
         existing = load_lease(identity)
@@ -606,6 +610,7 @@ def gated_claim(
     *,
     owner_session_id: str,
     owner_pid: int | None = None,
+    claimant_runtime_id: str | None = None,
     ttl_seconds: int = 3600,
     takeover: bool = False,
 ) -> tuple[bool, dict[str, Any]]:
@@ -625,6 +630,7 @@ def gated_claim(
             identity,
             owner_session_id=owner_session_id,
             owner_pid=owner_pid,
+            claimant_runtime_id=claimant_runtime_id,
             ttl_seconds=ttl_seconds,
             takeover=takeover,
         )

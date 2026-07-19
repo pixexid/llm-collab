@@ -79,7 +79,21 @@ checkout hit the same lease). This is an extension of the existing
   gets a refusal banner, `activation_gate.authorized: false`, and exit 75 —
   hold read-only, record the refusal, stand down. `--peek` shows the current
   owner without claiming. A malformed/partial activation packet fails closed
-  at read time; it never downgrades to an ordinary message.
+  at read time; it never downgrades to an ordinary message. Use
+  `--packet <filename>` (the emitted claim command includes it) to scope the
+  read/claim to exactly one delivered packet, including with `--all` in busy
+  inboxes.
+- **readers must present a stable identity**: activation claims refuse with
+  `reader_identity_unbound` unless the reader exports
+  `LLM_COLLAB_READER_RUNTIME_ID=<its own session uuid>` (preferred — constant
+  across a Desktop session's short-lived tool shells, distinct across
+  sessions) or `LLM_COLLAB_READER_PID=<stable pid>`. Never bind the transient
+  tool-shell ppid: a dead transient pid would make the live winner look
+  crashed. Runtime-bound owners are never auto-taken-over while unexpired;
+  crash recovery is the reader-session TTL. Re-claims from the same session
+  and runtime identity are idempotent (same fence), so a review-fix packet
+  for the same identity re-authorizes the same writer only (see
+  `review-and-handoff.md`: review-fix wakes are activation packets).
 - `dispatch_session` enforces the same gate on the automated wake path: only
   the session that holds (or can claim) the lease is woken; a second matching
   session records `activation_lease_refused` and is never woken. The winner's

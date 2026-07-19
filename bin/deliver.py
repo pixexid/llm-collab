@@ -121,7 +121,30 @@ def read_body(body_file: str) -> str:
     return Path(body_file).read_text().strip()
 
 
-def build_message(args, body: str, chat_id: str) -> str:
+AX_DOORBELL_MAX_CHARS = 240
+
+
+def build_activation_consume_command(recipient: str, project: str, packet_name: str) -> str:
+    """The exact, absolute, runnable claim command for one activation packet.
+
+    Absolute canonical launcher (a product worktree has no bin/llm-collab),
+    no placeholders (the reader session is auto-derived and bound to the
+    reader's stable identity), and exact-packet scoped via --packet."""
+    launcher = ROOT / "bin" / "llm-collab"
+    return (
+        f"{launcher} inbox.py --me {recipient} --project {project} "
+        f"--packet {packet_name}"
+    )
+
+
+def build_activation_ring_prompt(sender: str, related_task: str, command: str) -> str:
+    prompt = f"[from {sender}] ACTIVATION {related_task}: claim via `{command}` — do not Read the packet file."
+    if len(prompt) > AX_DOORBELL_MAX_CHARS:
+        prompt = f"[from {sender}] ACTIVATION {related_task}: claim via `{command}`"
+    return prompt
+
+
+def build_message(args, body: str, chat_id: str, packet_name: str | None = None) -> str:
     tags = [t.strip() for t in args.tags.split(",") if t.strip()]
     repo_targets = [r.strip() for r in args.repo_targets.split(",") if r.strip()]
     path_targets = [p.strip() for p in args.path_targets.split(",") if p.strip()]
@@ -148,11 +171,14 @@ def build_message(args, body: str, chat_id: str) -> str:
         fm["activation"] = True
         fm["worktree"] = args.worktree
         fm["branch"] = args.branch
+        consume_command = build_activation_consume_command(
+            args.recipient, args.project, packet_name or "<packet>"
+        )
         body = "\n".join(
             [
                 "> LEASE-GATED ACTIVATION — reading this file directly does NOT authorize writing.",
-                f"> Claim it through the mailbox gate first: `bin/llm-collab inbox.py --me {args.recipient}",
-                "> --session SESSION-<your-stable-session-id>` and act only on a CLAIMED banner.",
+                "> Claim it through the mailbox gate first and act only on a CLAIMED banner:",
+                f"> `{consume_command}`",
                 "> A REFUSED banner (exit 75) means another session is the writer: hold read-only.",
                 "",
                 body or "(no body)",
@@ -365,12 +391,12 @@ def main():
         )
         body = f"{onboarding}\n\n---\n\n## Work packet\n\n{body or '(no body)'}"
 
-    content = build_message(args, body, chat_id)
     slug = slugify(args.title, max_len=40)
     timestamp = ts()
+    to_filename = f"{timestamp}_to-{args.recipient}_{slug}.md"
+    content = build_message(args, body, chat_id, packet_name=to_filename)
 
     # Write to-{recipient} file (recipient's copy)
-    to_filename = f"{timestamp}_to-{args.recipient}_{slug}.md"
     to_path = chat_dir / to_filename
     write_file(to_path, content)
 
@@ -430,14 +456,12 @@ def main():
         )
     )
     if args.activation:
-        consume_command = (
-            f"bin/llm-collab inbox.py --me {args.recipient} --project {args.project} "
-            f"--session SESSION-<your-stable-session-id>"
-        )
         ax_doorbell_prompt = (
-            f"[from {args.sender}] ACTIVATION packet in {chat_id} for {args.related_task}. "
-            f"Do NOT open the packet file directly — claim it through the mailbox gate: "
-            f"run `{consume_command}` and act only on a CLAIMED banner."
+            build_activation_ring_prompt(
+                args.sender,
+                str(args.related_task),
+                build_activation_consume_command(args.recipient, args.project, to_path.name),
+            )
             if ax_doorbell_required
             else None
         )

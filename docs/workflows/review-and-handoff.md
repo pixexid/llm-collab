@@ -51,6 +51,17 @@ For `shared-supabase-required` lanes, handoff replies and the linked task contra
 The implementer never solely approves their own lane. Review is a separate role
 from implementation (see role model in `task-intake-and-delegation.md`).
 
+**Review-fix wakes are activation packets.** Every packet that wakes the
+lane's writer to MUTATE the assigned worktree — the initial activation AND
+every later review-fix / re-review-fix round — must be delivered with
+`deliver.py --activation --related-task <task> --worktree <path> --branch
+<branch>` using the SAME identity as the original activation. The writer's
+lease claim is then idempotent (same reader identity → same fence), while a
+second session consuming the review-fix packet is refused — the duplicate-wake
+incident covered both the initial and the review-fix packet, so both are
+gated. Purely informational packets (watcher reports, status notes, verdicts
+that require no worktree mutation) stay ordinary non-activation messages.
+
 - **Planning-phase cross-review is mandatory for non-trivial lanes.** The agent
   that did not author the plan reviews the spec/AC/risk analysis before
   activation. A bad plan is the highest-cost failure, so this is the most
