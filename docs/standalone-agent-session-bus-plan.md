@@ -50,9 +50,19 @@ No phase becomes active merely because it is described here.
   canonical worktree resolution, byte-exact receiver identity, and
   malformed-never-downgrades classification in
   `bin/_activation_identity.py`.
-- Current v2 messages, chats, tasks, queues, inboxes, and project-aware commands
-  require exact project scoping. `workspace_id` does not yet exist as a runtime
-  compatibility wildcard.
+- Current v2 messages, chats, tasks, queues, and project-aware command
+  boundaries require exact project identity. One agent's physical inbox is a
+  cross-project collection of message pointers: reads may use an exact
+  `--project` filter or span the collection, while destructive
+  `--mark-all-read` requires exact `--project` or explicit `--all-projects`.
+  Missing, empty, or `null` message project IDs never belong to a requested
+  project.
+- Current session-autobridge records remain a known legacy scope gap:
+  `project_id` and `chat_id` are optional, and some lookup paths accept
+  unscoped records. Such records are provenance/import evidence only, never an
+  active standalone workspace-scoped record or exact-project `SessionRef`
+  authority; no `workspace_id` compatibility wildcard or scope downgrade is
+  allowed.
 - `projects.json.repos` registers repository IDs and paths but has no typed
   sibling/documentation-companion relationship.
 - Current task/container time and evidence self-reported timestamps cannot

@@ -175,9 +175,20 @@ exact registered project. The Phase 0 schemas MUST represent that distinction
 with a discriminator; they MUST NOT infer workspace scope from a missing or
 `null` `project_id`.
 
-Current v2 messages, chats, tasks, queues, runtime bindings, and project-aware
-commands remain exact-project-scoped. Introducing `workspace_id` does not
-create an unscoped compatibility path.
+**Landed.** Current v2 messages, chats, tasks, queues, and project-aware command
+boundaries require exact project identity. The physical per-agent inbox is a
+cross-project pointer index whose reads and mutations may be exact-project
+filtered or intentionally span projects.
+
+Current session-autobridge records are a known legacy exception: their
+`project_id` and `chat_id` filters are optional, and some lookup paths accept an
+unscoped record as a match.
+
+**Frozen decision.** A missing, `null`, or otherwise unscoped legacy
+session-autobridge record is provenance/import evidence only. It MUST NOT become
+an active standalone workspace-scoped record or authority for an exact-project
+`SessionRef`. Introducing `workspace_id` creates no compatibility wildcard,
+scope downgrade, or inferred project identity.
 
 ### Registered project and repository reference
 
