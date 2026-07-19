@@ -34,7 +34,16 @@ from _helpers import (
 )
 
 REFINEMENT_AGENT = "claude"
+SUMMARY_SECTION = "## Summary"
+ACCEPTANCE_CRITERIA_SECTION = "## Acceptance Criteria"
+VERIFICATION_PLAN_SECTION = "## Verification Plan"
 RISK_SECTION = "## Implementation Risk Analysis"
+CANONICAL_SECTIONS = (
+    SUMMARY_SECTION,
+    ACCEPTANCE_CRITERIA_SECTION,
+    VERIFICATION_PLAN_SECTION,
+    RISK_SECTION,
+)
 RISK_REQUIRED_LABELS = [
     "Current file/topology reviewed:",
     "Scope split decision:",
@@ -43,6 +52,16 @@ RISK_REQUIRED_LABELS = [
     "Open decisions/blockers:",
 ]
 RISK_PLACEHOLDER = "(required before refinement)"
+SECTION_PLACEHOLDERS = {
+    "(describe the task)",
+    "describe the task",
+    RISK_PLACEHOLDER,
+    "(placeholder)",
+    "<placeholder>",
+    "placeholder",
+    "tbd",
+    "todo",
+}
 DESIGN_THINKING_BUDGET_LABEL = "Design thinking in details — polish-pass budget:"
 DESIGN_THINKING_SEEDS_LABEL = "Design thinking in details — polish vectors:"
 
@@ -58,6 +77,66 @@ def parse_args():
         help="Whether Claude authored the task plan or refined an existing task.",
     )
     return p.parse_args()
+
+
+def _section_matches(body: str, heading: str) -> list[re.Match]:
+    return list(
+        re.finditer(
+            rf"^{re.escape(heading)}[ \t]*$",
+            body,
+            flags=re.MULTILINE,
+        )
+    )
+
+
+def _section_body(body: str, heading_match: re.Match) -> str:
+    next_heading = re.search(r"^##(?:[ \t]+.*)?$", body[heading_match.end() :], flags=re.MULTILINE)
+    end = heading_match.end() + next_heading.start() if next_heading else len(body)
+    return body[heading_match.end() : end]
+
+
+def _content_lines(section: str) -> list[str]:
+    without_comments = re.sub(r"<!--.*?-->", "", section, flags=re.DOTALL)
+    content = []
+    for raw_line in without_comments.splitlines():
+        line = raw_line.strip()
+        line = re.sub(r"^(?:[-*+]\s*)?", "", line)
+        line = re.sub(r"^\[(?: |x|X)\]\s*", "", line)
+        line = line.strip().strip("*_`").strip()
+        if line:
+            content.append(line)
+    return content
+
+
+def _is_placeholder_only(value: str) -> bool:
+    normalized = re.sub(r"\s+", " ", value.strip()).casefold()
+    normalized = normalized.strip("*_`").strip()
+    return normalized in {placeholder.casefold() for placeholder in SECTION_PLACEHOLDERS}
+
+
+def _has_substantive_content(section: str) -> bool:
+    content = _content_lines(section)
+    return bool(content) and any(not _is_placeholder_only(line) for line in content)
+
+
+def validate_canonical_task_sections(body: str) -> list[str]:
+    errors = []
+    sections = {}
+    for heading in CANONICAL_SECTIONS:
+        matches = _section_matches(body, heading)
+        if not matches:
+            errors.append(f"missing canonical section: {heading}")
+            continue
+        if len(matches) > 1:
+            errors.append(f"duplicate canonical section: {heading} (found {len(matches)})")
+            continue
+        sections[heading] = _section_body(body, matches[0])
+
+    for heading in (SUMMARY_SECTION, ACCEPTANCE_CRITERIA_SECTION, VERIFICATION_PLAN_SECTION):
+        section = sections.get(heading)
+        if section is not None and not _has_substantive_content(section):
+            errors.append(f"empty or placeholder-only canonical section: {heading}")
+    return errors
 
 
 def validate_implementation_risk_analysis(body):
@@ -77,7 +156,7 @@ def validate_implementation_risk_analysis(body):
             continue
         label_match = re.search(rf"^[^\n]*{re.escape(label)}[ \t]*(?P<value>[^\n]*)$", section, flags=re.MULTILINE)
         value = label_match.group("value").strip() if label_match else ""
-        if not value or RISK_PLACEHOLDER in value:
+        if not value or _is_placeholder_only(value):
             errors.append(f"unresolved risk-analysis value: {label}")
     return errors
 
@@ -154,6 +233,16 @@ def validate_design_thinking_refinement(frontmatter, body):
     return errors
 
 
+def validate_refinement(frontmatter, body):
+    if frontmatter.get("skip_refinement", False):
+        return []
+
+    errors = validate_canonical_task_sections(body)
+    errors.extend(validate_implementation_risk_analysis(body))
+    errors.extend(validate_design_thinking_refinement(frontmatter, body))
+    return errors
+
+
 def main():
     args = parse_args()
 
@@ -176,18 +265,18 @@ def main():
             )
         )
 
-    risk_errors = [] if fm.get("skip_refinement", False) else validate_implementation_risk_analysis(body)
-    risk_errors.extend([] if fm.get("skip_refinement", False) else validate_design_thinking_refinement(fm, body))
-    if risk_errors:
+    refinement_errors = validate_refinement(fm, body)
+    if refinement_errors:
         print(
             json.dumps(
                 {
-                    "error": "implementation risk analysis is incomplete; refusing refinement mark",
+                    "error": "task body is incomplete; refusing refinement mark",
                     "task_id": fm.get("task_id", args.task),
+                    "required_sections": CANONICAL_SECTIONS,
                     "required_section": RISK_SECTION,
                     "required_labels": RISK_REQUIRED_LABELS,
-                    "errors": risk_errors,
-                    "hint": "Patch the task body with real pre-implementation feasibility analysis before running refine_task.py.",
+                    "errors": refinement_errors,
+                    "hint": "Patch the named task section or risk-analysis label with real implementation content before running refine_task.py.",
                 },
                 indent=2,
             ),
