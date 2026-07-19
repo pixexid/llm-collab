@@ -100,6 +100,40 @@ class IdentityUnitTest(unittest.TestCase):
             verdict, _ = ident.classify_activation({**plain, **marker}, target_agent="claude")
             self.assertEqual("malformed", verdict, f"marker {marker} must not downgrade")
 
+    def test_activation_value_must_be_exactly_true_even_with_full_identity(self):
+        """Round-1 P2: activation:false/null alongside a COMPLETE valid
+        identity is still malformed — only true marks a writer packet."""
+        full = {
+            "project_id": "amiga", "chat_id": "CHAT-TEST0001",
+            "related_task": "TASK-1", "worktree": "/tmp/wt", "branch": "b",
+        }
+        for value in (False, None, "true", 1):
+            verdict, detail = ident.classify_activation(
+                {**full, "activation": value}, target_agent="claude"
+            )
+            self.assertEqual("malformed", verdict, f"activation={value!r}")
+            self.assertIn("exactly true", detail["detail"])
+        verdict, _ = ident.classify_activation(
+            {**full, "activation": True}, target_agent="claude"
+        )
+        self.assertEqual("activation", verdict)
+
+    def test_identity_fields_refuse_control_characters(self):
+        base = {
+            "project": "amiga", "chat": "CHAT-TEST0001", "task": "TASK-1",
+            "worktree": "/tmp/wt", "branch": "b", "target_agent": "claude",
+        }
+        for field, bad in (
+            ("branch", "main\nproject_id: other"),
+            ("task", "TASK\r1"),
+            ("project", "am\tiga"),
+            ("chat", "CHAT\x00X"),
+            ("target_agent", "cla\x7fude"),
+        ):
+            with self.assertRaises(ValueError, msg=f"{field}={bad!r}") as ctx:
+                ident.lease_identity({**base, field: bad})
+            self.assertIn("control characters", str(ctx.exception))
+
     def test_classifier_marks_relative_worktree_malformed_cwd_independent(self):
         """BLOCK P1.2: a relative worktree in frontmatter must classify
         malformed identically from any CWD — never resolve against the
@@ -219,25 +253,40 @@ class DeliverFoundationTest(unittest.TestCase):
         "--project", "amiga", "--title", "lane a check",
     ]
 
+    # Internal test seam: flips the module CONSTANT in-process before calling
+    # main(). The production CLI entrypoint (running deliver.py) can never do
+    # this — no env var or flag reaches ACTIVATION_RUNTIME_INTEGRATED.
+    WRAPPER = (
+        "import sys; sys.path.insert(0, sys.argv[1]); "
+        "import deliver; deliver.ACTIVATION_RUNTIME_INTEGRATED = True; "
+        "{extra_patch}"
+        "sys.argv = ['deliver.py'] + sys.argv[2:]; deliver.main()"
+    )
+
     def run_deliver(
         self,
         root: Path,
         *extra: str,
         cwd: Path | None = None,
         runtime_ready: bool = True,
+        fixed_ts: str | None = None,
     ) -> subprocess.CompletedProcess:
         body = root / "b.md"
         write(body, "work")
         env = {**os.environ, "LLM_COLLAB_UI_REFRESH": "0"}
-        env.pop("LLM_COLLAB_ACTIVATION_RUNTIME_READY", None)
         if runtime_ready:
-            # Lane A contract testing: the delivery guard stays fail-closed
-            # in production until GH-1572; tests exercise the serialization
-            # contract behind the explicit readiness override.
-            env["LLM_COLLAB_ACTIVATION_RUNTIME_READY"] = "1"
+            extra_patch = (
+                f"deliver.ts = lambda: {fixed_ts!r}; " if fixed_ts else ""
+            )
+            argv = [
+                sys.executable, "-c", self.WRAPPER.format(extra_patch=extra_patch),
+                str(REPO_ROOT / "bin"),
+                *self.BASE, "--body-file", str(body), *extra,
+            ]
+        else:
+            argv = [sys.executable, str(DELIVER), *self.BASE, "--body-file", str(body), *extra]
         return subprocess.run(
-            [sys.executable, str(DELIVER), *self.BASE, "--body-file", str(body), *extra],
-            cwd=cwd or root, text=True, capture_output=True, env=env, check=False,
+            argv, cwd=cwd or root, text=True, capture_output=True, env=env, check=False,
         )
 
     def workspace_snapshot(self, root: Path) -> dict[str, str]:
@@ -276,6 +325,44 @@ class DeliverFoundationTest(unittest.TestCase):
             self.assertEqual(2, result.returncode, result.stdout)
             self.assertIn("activation identity requires", result.stderr)
         self.assertEqual(before, self.workspace_snapshot(root), "zero mutations on refusal")
+
+    def test_control_characters_refused_with_zero_mutations(self):
+        """Round-1 P1: a newline in --branch is a frontmatter-injection
+        channel (could rewrite project_id in the emitted packet). Refused
+        pre-write; workspace byte-identical."""
+        root = self.make_workspace()
+        before = self.workspace_snapshot(root)
+        result = self.run_deliver(
+            root, "--activation", "--related-task", "TASK-TEST01",
+            "--worktree", self.worktree,
+            "--branch", "main\nproject_id: other-project",
+        )
+        self.assertEqual(2, result.returncode, result.stdout)
+        self.assertIn("control characters", result.stderr)
+        self.assertEqual(before, self.workspace_snapshot(root), "zero mutations")
+        for p in (root / "Chats").rglob("*.md"):
+            self.assertNotIn("other-project", p.read_text())
+
+    def test_same_second_activations_get_distinct_packets(self):
+        """Round-1 P2: two same-title activations in one second must produce
+        two packets, two inbox entries, and per-packet claim commands."""
+        root = self.make_workspace()
+        for _ in range(2):
+            result = self.run_deliver(
+                root, "--activation", "--related-task", "TASK-TEST01",
+                "--worktree", self.worktree, "--branch", "b",
+                fixed_ts="2026-01-01T00-00-00",
+            )
+            self.assertEqual(0, result.returncode, result.stderr)
+        packets = sorted(self.chat_dir.glob("2026-01-01T00-00-00_to-claude_*.md"))
+        self.assertEqual(2, len(packets), "no overwrite on same-second collision")
+        inbox = json.loads((root / "agents" / "claude" / "inbox.json").read_text())
+        self.assertEqual(2, len(inbox["unread"]), "two distinct inbox entries")
+        for p in packets:
+            self.assertIn(
+                f"--packet {p.name}", p.read_text(),
+                "each banner command selects its own immutable packet",
+            )
 
     def test_activation_requires_full_identity(self):
         root = self.make_workspace()
@@ -316,7 +403,8 @@ class DeliverFoundationTest(unittest.TestCase):
         for i, cwd in enumerate((root, root / "worktrees")):
             result = subprocess.run(
                 [
-                    sys.executable, str(DELIVER),
+                    sys.executable, "-c", self.WRAPPER.format(extra_patch=""),
+                    str(REPO_ROOT / "bin"),
                     "--chat", "CHAT-TEST0001", "--from", "codex", "--to", "claude",
                     "--project", "amiga", "--title", f"canon {i}",
                     "--body-file", str(root / "b.md"),
@@ -324,11 +412,7 @@ class DeliverFoundationTest(unittest.TestCase):
                     "--worktree", str(link), "--branch", "b",
                 ],
                 cwd=cwd, text=True, capture_output=True,
-                env={
-                    **os.environ,
-                    "LLM_COLLAB_UI_REFRESH": "0",
-                    "LLM_COLLAB_ACTIVATION_RUNTIME_READY": "1",
-                },
+                env={**os.environ, "LLM_COLLAB_UI_REFRESH": "0"},
                 check=False,
             )
             self.assertEqual(0, result.returncode, result.stderr)

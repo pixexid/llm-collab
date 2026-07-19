@@ -69,6 +69,12 @@ from _activation_identity import (
     canonical_worktree,
     normalized_identity_field,
 )
+
+# Lane C (GH-1572) flips this to True in the same commit that makes the
+# packet's claim command (`inbox.py --packet`) runnable. Deliberately a code
+# constant, NOT an environment variable or flag: the production CLI must have
+# no way to enable activation delivery before the runtime integration exists.
+ACTIVATION_RUNTIME_INTEGRATED = False
 from _session_autobridge import (
     find_dispatchable_target_session,
     load_binding,
@@ -260,26 +266,12 @@ def build_desktop_bridge_prompt(chat_id: str, recipient_id: str, message_path: P
 def main():
     args = parse_args()
     if args.activation:
-        if os.environ.get("LLM_COLLAB_ACTIVATION_RUNTIME_READY") != "1":
-            # Lane A ships the identity/serialization CONTRACT only. The
-            # claim command the packet instructs (`inbox.py --packet`) is not
-            # runnable until the runtime-integration lane (GH-1572) lands, so
-            # delivering an activation packet now would hand a worker an
-            # impossible required step. Fail closed pre-write; Lane C removes
-            # this guard when the exact command is runnable.
-            print(
-                "[error] activation delivery unavailable: runtime integration "
-                "(GH-1572 inbox claim/consumption) has not landed, so the "
-                "packet's required claim command would not be runnable. "
-                "Deliver an ordinary packet instead.",
-                file=sys.stderr,
-            )
-            sys.exit(2)
         try:
             # The SAME validators the shared identity path uses
-            # (bin/_activation_identity.py): missing/whitespace-only fields
-            # and relative worktrees all refuse here, before any file or
-            # inbox mutation.
+            # (bin/_activation_identity.py): missing/whitespace-only fields,
+            # control characters (frontmatter-injection channel), and
+            # relative worktrees all refuse here, before any file or inbox
+            # mutation.
             args.related_task = normalized_identity_field("task", args.related_task)
             args.branch = normalized_identity_field("branch", args.branch)
             args.worktree = canonical_worktree(
@@ -287,6 +279,23 @@ def main():
             )
         except ValueError as exc:
             print(f"[error] {exc}", file=sys.stderr)
+            sys.exit(2)
+        if not ACTIVATION_RUNTIME_INTEGRATED:
+            # Lane A ships the identity/serialization CONTRACT only. The
+            # claim command the packet instructs (`inbox.py --packet`) is not
+            # runnable until the runtime-integration lane (GH-1572) lands, so
+            # delivering an activation packet now would hand a worker an
+            # impossible required step. Fail closed pre-write. This is a
+            # module constant — no environment variable or CLI flag can
+            # enable it; Lane C deletes the guard when the exact command is
+            # runnable.
+            print(
+                "[error] activation delivery unavailable: runtime integration "
+                "(GH-1572 inbox claim/consumption) has not landed, so the "
+                "packet's required claim command would not be runnable. "
+                "Deliver an ordinary packet instead.",
+                file=sys.stderr,
+            )
             sys.exit(2)
     elif args.worktree or args.branch:
         print(
@@ -382,7 +391,16 @@ def main():
 
     slug = slugify(args.title, max_len=40)
     timestamp = ts()
-    to_filename = f"{timestamp}_to-{args.recipient}_{slug}.md"
+    if args.activation:
+        # ts() has second precision: two same-title activations in one second
+        # would collide, overwrite one packet, and dedupe to one inbox
+        # pointer — silently losing an activation whose banner/ring command
+        # must select exactly its own immutable packet. Ordinary-message
+        # naming is unchanged.
+        nonce = os.urandom(3).hex()
+        to_filename = f"{timestamp}_to-{args.recipient}_{slug}-{nonce}.md"
+    else:
+        to_filename = f"{timestamp}_to-{args.recipient}_{slug}.md"
     # Pre-write wake-path classification: the same value later selects the
     # ring form, resolved before any file exists so downstream policy lanes
     # can fail closed pre-write.
@@ -416,7 +434,10 @@ def main():
     write_file(to_path, content)
 
     # Write from-{sender} file (sender's copy / sent record)
-    from_filename = f"{timestamp}_from-{args.sender}_{slug}.md"
+    if args.activation:
+        from_filename = f"{timestamp}_from-{args.sender}_{slug}-{nonce}.md"
+    else:
+        from_filename = f"{timestamp}_from-{args.sender}_{slug}.md"
     from_path = chat_dir / from_filename
     write_file(from_path, content)
 

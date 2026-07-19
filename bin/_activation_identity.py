@@ -49,11 +49,22 @@ def canonical_worktree(value: str) -> str:
 
 
 def normalized_identity_field(field: str, value: Any) -> str:
-    """Shared per-field validator: strip, refuse missing/blank."""
+    """Shared per-field validator: strip, refuse missing/blank, refuse
+    control characters.
+
+    A newline (or any C0/DEL control) inside an identity field would be
+    serialized by dump_frontmatter as ADDITIONAL frontmatter lines — a
+    frontmatter-injection channel that could rewrite project/chat/target in
+    the emitted packet. Refused before any mutation."""
     if value is not None:
         value = str(value).strip()
     if not value:
         raise ValueError(f"activation identity requires --{field.replace('_', '-')}")
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in value):
+        raise ValueError(
+            f"--{field.replace('_', '-')} contains control characters; "
+            "identity fields must be single-line printable text"
+        )
     return value
 
 
@@ -96,6 +107,14 @@ def classify_activation(
     # they must classify malformed, never downgrade to ordinary.
     if not any(field in frontmatter for field in ACTIVATION_MARKER_FIELDS):
         return "none", None
+    # Only `activation: true` marks a writer packet (schema): a PRESENT
+    # activation key with any other value is malformed even when every other
+    # identity field is valid.
+    if "activation" in frontmatter and frontmatter["activation"] is not True:
+        return "malformed", {
+            "detail": "activation must be exactly true when present; "
+            f"got {frontmatter['activation']!r}"
+        }
     try:
         identity = lease_identity(
             {
