@@ -104,6 +104,33 @@ class CanonicalTaskSectionValidationTest(unittest.TestCase):
 
         self.assertIn("empty or placeholder-only canonical section: ## Summary", errors)
 
+    def test_rejects_colon_suffixed_placeholders_in_canonical_sections(self) -> None:
+        sections = (
+            ("summary", "{}", "## Summary"),
+            ("acceptance_criteria", "- [ ] {}", "## Acceptance Criteria"),
+            ("verification_plan", "- {}", "## Verification Plan"),
+        )
+        for placeholder in ("TODO:", "TBD:"):
+            for field, template, heading in sections:
+                with self.subTest(placeholder=placeholder, field=field):
+                    errors = refine_task.validate_refinement(
+                        {},
+                        task_body(**{field: template.format(placeholder)}),
+                    )
+                    self.assertIn(
+                        f"empty or placeholder-only canonical section: {heading}",
+                        errors,
+                    )
+
+    def test_accepts_real_prose_prefixed_by_placeholder_words(self) -> None:
+        body = task_body(
+            summary="TODO: replace the old wording after the exact-head review.",
+            acceptance_criteria="- [ ] TBD: confirm which compatibility fixture remains.",
+            verification_plan="- TODO: run the configured-root corpus scan.",
+        )
+
+        self.assertEqual([], refine_task.validate_refinement({}, body))
+
     def test_rejects_empty_or_placeholder_only_acceptance_criteria(self) -> None:
         for content in (
             "",
@@ -437,6 +464,125 @@ class RiskAnalysisValueValidationTest(unittest.TestCase):
 
         self.assertEqual([], refine_task.validate_refinement({}, task_body(risk_values=values)))
 
+    def test_accepts_multiline_required_value_with_wrapped_ordered_items(self) -> None:
+        risk_lines = "\n".join(
+            f"- {label} {value}"
+            for label, value in RISK_VALUES.items()
+            if label != "Open decisions/blockers:"
+        )
+        body = task_body(risk_values={}).replace(
+            "## Implementation Risk Analysis\n\n",
+            (
+                "## Implementation Risk Analysis\n\n"
+                f"{risk_lines}\n"
+                "- Open decisions/blockers:\n"
+                "  1. Confirm the exact-head reviewer.\n"
+                "     Preserve the corpus fixture while closing the gap.\n"
+                "  2. Record the final compatibility result.\n"
+            ),
+        )
+
+        self.assertEqual([], refine_task.validate_refinement({}, body))
+        visible_body = refine_task._mask_nonrendered_markdown(body)
+        risk_section = refine_task._section_body(
+            visible_body,
+            refine_task._section_matches(visible_body, refine_task.RISK_SECTION)[0],
+        )
+        value = refine_task._risk_label_value(
+            risk_section,
+            "Open decisions/blockers:",
+        )
+        self.assertIn("Preserve the corpus fixture", value)
+
+    def test_accepts_nested_quote_list_multiline_required_value(self) -> None:
+        risk_lines = "\n".join(
+            f"- {label} {value}"
+            for label, value in RISK_VALUES.items()
+            if label != "Open decisions/blockers:"
+        )
+        body = task_body(risk_values={}).replace(
+            "## Implementation Risk Analysis\n\n",
+            (
+                "## Implementation Risk Analysis\n\n"
+                f"{risk_lines}\n"
+                "> - **Open decisions/blockers:**\n"
+                ">   1. Confirm the exact-head reviewer.\n"
+                ">      Preserve the wrapped decision context.\n"
+            ),
+        )
+
+        self.assertEqual([], refine_task.validate_refinement({}, body))
+
+    def test_multiline_required_value_stops_before_next_known_label(self) -> None:
+        risk_lines = "\n".join(
+            f"- {label} {value}"
+            for label, value in RISK_VALUES.items()
+            if label != "Open decisions/blockers:"
+        )
+        body = task_body(risk_values={}).replace(
+            "## Implementation Risk Analysis\n\n",
+            (
+                "## Implementation Risk Analysis\n\n"
+                f"{risk_lines}\n"
+                "- Open decisions/blockers:\n"
+                f"- {refine_task.DESIGN_THINKING_BUDGET_LABEL} 12 LOC\n"
+            ),
+        )
+
+        errors = refine_task.validate_refinement({}, body)
+
+        self.assertIn("unresolved risk-analysis value: Open decisions/blockers:", errors)
+
+    def test_indented_code_cannot_supply_multiline_required_value(self) -> None:
+        risk_lines = "\n".join(
+            f"{label} {value}"
+            for label, value in RISK_VALUES.items()
+            if label != "Open decisions/blockers:"
+        )
+        for indentation in ("    ", "\t"):
+            with self.subTest(indentation=repr(indentation)):
+                body = task_body(risk_values={}).replace(
+                    "## Implementation Risk Analysis\n\n",
+                    (
+                        "## Implementation Risk Analysis\n\n"
+                        f"{risk_lines}\n"
+                        "Open decisions/blockers:\n"
+                        f"{indentation}fake code value\n"
+                    ),
+                )
+
+                errors = refine_task.validate_refinement({}, body)
+
+                self.assertIn(
+                    "unresolved risk-analysis value: Open decisions/blockers:",
+                    errors,
+                )
+
+    def test_empty_artifacts_cannot_supply_multiline_required_value(self) -> None:
+        risk_lines = "\n".join(
+            f"- {label} {value}"
+            for label, value in RISK_VALUES.items()
+            if label != "Open decisions/blockers:"
+        )
+        for artifact in ("  1. [ ]", "  - [x]", "  <br>", "  <!-- hidden -->"):
+            with self.subTest(artifact=artifact):
+                body = task_body(risk_values={}).replace(
+                    "## Implementation Risk Analysis\n\n",
+                    (
+                        "## Implementation Risk Analysis\n\n"
+                        f"{risk_lines}\n"
+                        "- Open decisions/blockers:\n"
+                        f"{artifact}\n"
+                    ),
+                )
+
+                errors = refine_task.validate_refinement({}, body)
+
+                self.assertIn(
+                    "unresolved risk-analysis value: Open decisions/blockers:",
+                    errors,
+                )
+
     def test_accepts_ordered_substantive_acceptance_criterion(self) -> None:
         self.assertEqual(
             [],
@@ -508,6 +654,17 @@ class RiskAnalysisValueValidationTest(unittest.TestCase):
         }
 
         self.assertEqual([], refine_task.validate_refinement({}, task_body(risk_values=values)))
+
+    def test_rejects_colon_suffixed_placeholder_required_values(self) -> None:
+        for placeholder in ("TODO:", "TBD:"):
+            for label in refine_task.RISK_REQUIRED_LABELS:
+                with self.subTest(placeholder=placeholder, label=label):
+                    values = {**RISK_VALUES, label: placeholder}
+                    errors = refine_task.validate_refinement(
+                        {},
+                        task_body(risk_values=values),
+                    )
+                    self.assertIn(f"unresolved risk-analysis value: {label}", errors)
 
 
 class DesignThinkingValueValidationTest(unittest.TestCase):
@@ -586,6 +743,78 @@ class DesignThinkingValueValidationTest(unittest.TestCase):
                 task_body(extra=artifact),
             ),
         )
+
+    def test_accepts_multiline_design_thinking_values(self) -> None:
+        frontmatter = {
+            "ui_ux_lane": True,
+            "ui_ux_mode": "implementation",
+            "design_thinking_polish_budget_loc": 12,
+            "design_thinking_polish_seeds": ["hierarchy", "error states"],
+        }
+        artifact = (
+            f"- {refine_task.DESIGN_THINKING_BUDGET_LABEL}\n"
+            "  12 LOC\n"
+            f"- **{refine_task.DESIGN_THINKING_SEEDS_LABEL}**\n"
+            "  1. Strengthen hierarchy.\n"
+            "     Keep wrapped seed context visible.\n"
+            "  2. Clarify error states."
+        )
+
+        self.assertEqual(
+            [],
+            refine_task.validate_refinement(
+                frontmatter,
+                task_body(extra=artifact),
+            ),
+        )
+
+    def test_design_thinking_multiline_value_stops_before_next_label(self) -> None:
+        frontmatter = {
+            "ui_ux_lane": True,
+            "ui_ux_mode": "implementation",
+            "design_thinking_polish_budget_loc": 12,
+            "design_thinking_polish_seeds": ["hierarchy", "error states"],
+        }
+        artifact = (
+            f"- {refine_task.DESIGN_THINKING_BUDGET_LABEL}\n"
+            f"- {refine_task.DESIGN_THINKING_SEEDS_LABEL} hierarchy and error states"
+        )
+
+        errors = refine_task.validate_refinement(
+            frontmatter,
+            task_body(extra=artifact),
+        )
+
+        self.assertIn(
+            f"unresolved risk-analysis value: {refine_task.DESIGN_THINKING_BUDGET_LABEL}",
+            errors,
+        )
+
+    def test_rejects_colon_suffixed_placeholder_design_thinking_values(self) -> None:
+        frontmatter = {
+            "ui_ux_lane": True,
+            "ui_ux_mode": "implementation",
+            "design_thinking_polish_budget_loc": 12,
+            "design_thinking_polish_seeds": ["hierarchy", "error states"],
+        }
+        for placeholder in ("TODO:", "TBD:"):
+            with self.subTest(placeholder=placeholder):
+                artifact = (
+                    f"- {refine_task.DESIGN_THINKING_BUDGET_LABEL} {placeholder}\n"
+                    f"- {refine_task.DESIGN_THINKING_SEEDS_LABEL} {placeholder}"
+                )
+                errors = refine_task.validate_refinement(
+                    frontmatter,
+                    task_body(extra=artifact),
+                )
+                self.assertIn(
+                    f"unresolved risk-analysis value: {refine_task.DESIGN_THINKING_BUDGET_LABEL}",
+                    errors,
+                )
+                self.assertIn(
+                    f"unresolved risk-analysis value: {refine_task.DESIGN_THINKING_SEEDS_LABEL}",
+                    errors,
+                )
 
     def test_rejects_multiline_empty_html_design_thinking_values(self) -> None:
         frontmatter = {

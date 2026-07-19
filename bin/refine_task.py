@@ -64,6 +64,11 @@ SECTION_PLACEHOLDERS = {
 }
 DESIGN_THINKING_BUDGET_LABEL = "Design thinking in details — polish-pass budget:"
 DESIGN_THINKING_SEEDS_LABEL = "Design thinking in details — polish vectors:"
+ALL_RISK_LABELS = (
+    *RISK_REQUIRED_LABELS,
+    DESIGN_THINKING_BUDGET_LABEL,
+    DESIGN_THINKING_SEEDS_LABEL,
+)
 HTML_TAG_RE = re.compile(
     r"</?[A-Za-z][A-Za-z0-9-]*"
     r"(?:\s+[A-Za-z_:][A-Za-z0-9_.:-]*"
@@ -281,8 +286,12 @@ def _content_lines(section: str) -> list[str]:
 
 def _is_placeholder_only(value: str) -> bool:
     normalized = re.sub(r"\s+", " ", _strip_markdown_artifacts(value)).casefold()
+    normalized = normalized.rstrip(":").rstrip()
     placeholders = {
-        re.sub(r"\s+", " ", _strip_markdown_artifacts(placeholder)).casefold()
+        re.sub(r"\s+", " ", _strip_markdown_artifacts(placeholder))
+        .casefold()
+        .rstrip(":")
+        .rstrip()
         for placeholder in SECTION_PLACEHOLDERS
     }
     return normalized in placeholders
@@ -370,11 +379,35 @@ def _normalize_list(value) -> list[str]:
     return [str(value).strip()]
 
 
-def _live_markdown_row(value: str) -> str | None:
+def _live_markdown_row_details(
+    value: str,
+    *,
+    expected_container: tuple[tuple[str, int], ...] = (),
+) -> tuple[str, tuple[tuple[str, int], ...]] | None:
     cursor = 0
+    container = list(expected_container)
+    for kind, continuation_indent in expected_container:
+        if kind == "quote":
+            quote = re.match(r" {0,3}>[ \t]?", value[cursor:])
+            if not quote:
+                return None
+            cursor += quote.end()
+            continue
+
+        width = 0
+        while cursor < len(value) and value[cursor] in " \t" and width < continuation_indent:
+            character_width = 4 - (width % 4) if value[cursor] == "\t" else 1
+            if width + character_width > continuation_indent:
+                return None
+            width += character_width
+            cursor += 1
+        if width != continuation_indent:
+            return None
+
     while cursor < len(value):
         quote = re.match(r" {0,3}>[ \t]?", value[cursor:])
         if quote:
+            container.append(("quote", 0))
             cursor += quote.end()
             continue
 
@@ -386,6 +419,7 @@ def _live_markdown_row(value: str) -> str | None:
         if list_item:
             if _indent_width(list_item.group("spacing")) > 4:
                 return None
+            container.append(("list", _indent_width(list_item.group(0))))
             cursor += list_item.end()
             continue
         break
@@ -393,22 +427,64 @@ def _live_markdown_row(value: str) -> str | None:
     indentation = re.match(r"[ \t]*", value[cursor:]).group()
     if _indent_width(indentation) > 3:
         return None
-    return value[cursor + len(indentation) :]
+    return value[cursor + len(indentation) :], tuple(container)
 
 
-def _risk_label_value(section: str, label: str) -> str | None:
-    visible_section = HTML_TAG_RE.sub("", section)
-    for raw_line in visible_section.splitlines():
-        row = _live_markdown_row(raw_line)
-        if row is None:
-            continue
+def _live_markdown_row(value: str) -> str | None:
+    details = _live_markdown_row_details(value)
+    return details[0] if details is not None else None
+
+
+def _risk_label_match(row: str) -> tuple[str, str] | None:
+    for candidate in ALL_RISK_LABELS:
         label_match = re.match(
-            rf"^(?:\*\*|__)?{re.escape(label)}(?:\*\*|__)?"
+            rf"^(?:\*\*|__)?{re.escape(candidate)}(?:\*\*|__)?"
             rf"[ \t]*(?P<value>.*)$",
             row,
         )
         if label_match:
-            return label_match.group("value").strip()
+            return candidate, label_match.group("value").strip()
+    return None
+
+
+def _risk_label_value(section: str, label: str) -> str | None:
+    visible_section = HTML_TAG_RE.sub("", section)
+    lines = visible_section.splitlines()
+    for index, raw_line in enumerate(lines):
+        row_details = _live_markdown_row_details(raw_line)
+        if row_details is None:
+            continue
+        row, label_container = row_details
+        label_match = _risk_label_match(row)
+        if label_match is None or label_match[0] != label:
+            continue
+        if label_match[1]:
+            return label_match[1]
+
+        continuation_rows = []
+        previous_container = label_container
+        for continuation_line in lines[index + 1 :]:
+            live_row = _live_markdown_row(continuation_line)
+            live_label = _risk_label_match(live_row) if live_row is not None else None
+            if live_label is not None:
+                break
+            if not continuation_line.strip():
+                continue
+
+            continuation = _live_markdown_row_details(
+                continuation_line,
+                expected_container=previous_container,
+            )
+            if continuation is None and previous_container != label_container:
+                continuation = _live_markdown_row_details(
+                    continuation_line,
+                    expected_container=label_container,
+                )
+            if continuation is None:
+                continue
+            continuation_rows.append(continuation[0])
+            previous_container = continuation[1]
+        return "\n".join(continuation_rows)
     return None
 
 
