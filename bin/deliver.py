@@ -314,6 +314,16 @@ def main():
                 file=sys.stderr,
             )
             sys.exit(2)
+        expanded = Path(args.worktree).expanduser()
+        if not expanded.is_absolute():
+            print(
+                "[error] --worktree must be an absolute path: a relative path has no "
+                "CWD-independent meaning, so readers and dispatchers would derive "
+                "different lease keys for the same packet",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        args.worktree = str(expanded.resolve())
     elif args.worktree or args.branch:
         print(
             "[error] --worktree/--branch are activation identity fields; pass --activation "

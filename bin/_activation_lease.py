@@ -20,7 +20,7 @@ unregistered pollers must be provably terminated or the claim is refused.
 
 from __future__ import annotations
 
-import errno
+import fcntl
 import hashlib
 import json
 import os
@@ -166,6 +166,13 @@ def owner_is_live(lease: dict[str, Any]) -> bool | None:
         if expires_at is not None and expires_at <= now_utc():
             return False
         return True
+    # Regular sessions: the record governs until its own expiry. A provably
+    # live pid already returned True above; without one, an expired
+    # active/parked record must not block takeover forever — dispatch already
+    # refuses to wake it (session_is_dispatchable), so treat it as gone.
+    expires_at = parse_iso8601(record.get("lease_expires_utc"))
+    if expires_at is not None and expires_at <= now_utc():
+        return False
     return True
 
 
@@ -177,27 +184,37 @@ def lease_is_expired(lease: dict[str, Any]) -> bool:
 
 
 class _ClaimLock:
-    """Serialize claims per identity via an O_EXCL lock file."""
+    """Serialize claims per identity via a POSIX advisory lock.
+
+    The lock is `flock(LOCK_EX | LOCK_NB)` on a stable, never-unlinked
+    `.lock` file held for the whole claim critical section. The kernel
+    releases it when the holder's fd closes — including process crash/kill —
+    so a dead claimant can never block the identity and there is no
+    unlink/path-replacement race. Contention maps to
+    LeaseRefused("claim_in_progress")."""
 
     def __init__(self, identity: dict[str, str]):
         self.path = lease_path(identity).with_suffix(".lock")
+        self.fd: int | None = None
 
     def __enter__(self) -> "_ClaimLock":
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(self.path, os.O_CREAT | os.O_RDWR)
         try:
-            fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError as exc:
-            if exc.errno == errno.EEXIST:
-                raise LeaseRefused("claim_in_progress") from exc
-            raise
-        os.close(fd)
+            os.close(fd)
+            raise LeaseRefused("claim_in_progress") from exc
+        self.fd = fd
         return self
 
     def __exit__(self, *_: object) -> None:
-        try:
-            self.path.unlink()
-        except FileNotFoundError:
-            pass
+        if self.fd is not None:
+            try:
+                fcntl.flock(self.fd, fcntl.LOCK_UN)
+            finally:
+                os.close(self.fd)
+            self.fd = None
 
 
 def owner_summary(lease: dict[str, Any]) -> dict[str, Any]:
@@ -544,7 +561,10 @@ def terminate_verified(
     return "termination_unverified"
 
 
-UNPROVEN_ACTIONS = {"terminate_denied", "termination_unverified"}
+# reported_only is unproven by definition: an identity-matched unregistered
+# poller that was observed but not terminated is still a live duplicate-wake
+# source, so a claim must never be granted over it.
+UNPROVEN_ACTIONS = {"terminate_denied", "termination_unverified", "reported_only"}
 
 
 def audit_activation_pollers(

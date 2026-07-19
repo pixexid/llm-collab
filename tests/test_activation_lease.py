@@ -334,6 +334,88 @@ class ActivationLeaseCliTest(WorkspaceTestCase):
         self.assertEqual(75, code)
         self.assertEqual("poller_audit_unavailable", refused["reason"])
 
+    def expire_session(self, root: Path, session: str) -> None:
+        path = Path(root) / "State" / "session_autobridge" / "sessions" / f"{session}.json"
+        record = json.loads(path.read_text())
+        record["lease_expires_utc"] = "2020-01-01T00:00:00+00:00"
+        path.write_text(json.dumps(record))
+
+    def test_expired_regular_owner_is_takeover_eligible(self):
+        """PR112 P1: an expired active/parked non-ephemeral record must not
+        block takeover forever."""
+        root = self.make_workspace()
+        self.register_session(root, "SESSION-A")
+        self.register_session(root, "SESSION-B")
+        self.claim(root, "SESSION-A")
+        self.expire_session(root, "SESSION-A")
+
+        refused, code = self.claim(root, "SESSION-B")
+        self.assertEqual(75, code)
+        self.assertEqual("dead_owner_requires_takeover", refused["reason"])
+
+        taken, code = self.claim(root, "SESSION-B", "--takeover")
+        self.assertEqual(0, code, taken)
+        self.assertEqual(2, taken["lease"]["fence_token"])
+
+    def test_expired_regular_owner_with_live_pid_still_refuses(self):
+        root = self.make_workspace()
+        self.register_session(root, "SESSION-A")
+        self.register_session(root, "SESSION-B")
+        self.claim(root, "SESSION-A", "--owner-pid", str(os.getpid()))
+        self.expire_session(root, "SESSION-A")
+
+        refused, code = self.claim(root, "SESSION-B", "--takeover")
+        self.assertEqual(75, code)
+        self.assertEqual("lease_held_by_active_owner", refused["reason"])
+
+    def test_report_only_claim_refuses_over_unregistered_match(self):
+        """PR112 P1: --skip-poller-cleanup may report without signaling, but a
+        live unregistered identity match still refuses the claim."""
+        root = self.make_workspace()
+        self.register_session(root, "SESSION-A")
+        fixture = Path(root) / "ps-match.txt"
+        write(
+            fixture,
+            "1 0 /sbin/launchd\n"
+            "555 1 /bin/zsh -c while true; do ls Chats/*CHAT-TEST0001*; done\n",
+        )
+        refused, code = self.run_cli(
+            root, "lease-claim", *identity_args(self.worktree),
+            "--session", "SESSION-A", "--skip-poller-cleanup",
+            env={"LLM_COLLAB_PS_FIXTURE": str(fixture)},
+        )
+        self.assertEqual(75, code)
+        self.assertEqual("stale_poller_not_proven_gone", refused["reason"])
+        self.assertEqual("reported_only", refused["poller_audit"][0]["action"])
+        lease_dir = Path(root) / "State" / "session_autobridge" / "activation_leases"
+        self.assertEqual([], list(lease_dir.glob("*.json")), "refused before lease mutation")
+
+    def test_report_only_claim_permits_when_match_is_registered(self):
+        root = self.make_workspace()
+        self.register_session(root, "SESSION-A")
+        fixture = Path(root) / "ps-registered.txt"
+        write(
+            fixture,
+            "1 0 /sbin/launchd\n"
+            "555 1 /bin/zsh -c while true; do ls Chats/*CHAT-TEST0001*; done\n",
+        )
+        pm2_stub = Path(root) / "pm2-with-555.sh"
+        write(pm2_stub, "#!/bin/sh\necho '[{\"pid\": 555}]'\n")
+        pm2_stub.chmod(pm2_stub.stat().st_mode | stat.S_IEXEC)
+        granted, code = self.run_cli(
+            root, "lease-claim", *identity_args(self.worktree),
+            "--session", "SESSION-A", "--skip-poller-cleanup",
+            env={
+                "LLM_COLLAB_PS_FIXTURE": str(fixture),
+                "LLM_COLLAB_PM2_BIN": str(pm2_stub),
+            },
+        )
+        self.assertEqual(0, code, granted)
+        self.assertTrue(granted["claimed"])
+        self.assertEqual(
+            "preserved_registered_watch", granted["poller_audit"][0]["action"]
+        )
+
     def test_stale_fence_cannot_assert_after_takeover(self):
         root = self.make_workspace()
         self.register_session(root, "SESSION-A")
@@ -1165,6 +1247,57 @@ class DeliverActivationValidationTest(WorkspaceTestCase):
         self.assertEqual(2, result.returncode)
         self.assertIn("--activation", result.stderr)
 
+    def test_relative_worktree_is_refused_from_any_cwd(self):
+        root = self.make_workspace()
+        for cwd_name in ("cwd-a", "cwd-b"):
+            (root / cwd_name).mkdir()
+        for cwd_name in ("cwd-a", "cwd-b"):
+            result = subprocess.run(
+                [
+                    sys.executable, str(REPO_ROOT / "bin" / "deliver.py"), *self.BASE,
+                    "--activation", "--related-task", "TASK-TEST01",
+                    "--worktree", "worktrees/rel", "--branch", "b",
+                ],
+                cwd=root / cwd_name, text=True, capture_output=True,
+                env=self.cli_env(), check=False,
+            )
+            self.assertEqual(2, result.returncode)
+            self.assertIn("absolute", result.stderr)
+
+    def test_symlinked_worktree_serializes_one_canonical_identity(self):
+        """PR112 P1: the packet must carry the absolute canonical worktree so
+        every consumer derives the same lease key regardless of CWD."""
+        root = self.make_workspace()
+        self.add_agent(
+            root,
+            {"id": "codex", "display_name": "Codex",
+             "activation": {"type": "cli_session", "watcher_enabled": False}},
+        )
+        chat_dir = root / "Chats" / "2026-01-01_test__CHAT-TEST0001"
+        write_json(chat_dir / "meta.json", {"chat_id": "CHAT-TEST0001", "project_id": "amiga"})
+        link = root / "wt-link"
+        link.symlink_to(self.worktree)
+        bodies = []
+        for i, cwd in enumerate((root, root / "worktrees")):
+            result = subprocess.run(
+                [
+                    sys.executable, str(REPO_ROOT / "bin" / "deliver.py"), *self.BASE,
+                    "--title", f"canon {i}",
+                    "--activation", "--related-task", "TASK-TEST01",
+                    "--worktree", str(link), "--branch", "b",
+                ],
+                cwd=cwd, text=True, capture_output=True, env=self.cli_env(), check=False,
+            )
+            self.assertEqual(0, result.returncode, result.stderr)
+        packets = sorted(chat_dir.glob("*_to-claude_canon-*.md"))
+        self.assertEqual(2, len(packets))
+        worktrees = set()
+        for p in packets:
+            for line in p.read_text().splitlines():
+                if line.startswith("worktree:"):
+                    worktrees.add(line.split(":", 1)[1].strip())
+        self.assertEqual({self.worktree}, worktrees, "canonical resolved path, symlink gone")
+
     def test_generated_activation_command_contract(self):
         """The claim command written into the packet body must be absolute,
         placeholder-free, and scoped to exactly this packet; the matching AX
@@ -1263,6 +1396,69 @@ class DeliverActivationValidationTest(WorkspaceTestCase):
         with self.assertRaises(ValueError) as ctx:
             deliver_lib.build_activation_ring_prompt("codex", "TASK-X", oversized)
         self.assertIn("cannot fit", str(ctx.exception))
+
+
+class ClaimLockTest(unittest.TestCase):
+    IDENTITY = identity_dict("/tmp/worktrees/claude/t-test")
+
+    def with_leases_dir(self, tmp: str):
+        old = lease_lib.ACTIVATION_LEASES_DIR
+        lease_lib.ACTIVATION_LEASES_DIR = Path(tmp)
+        return old
+
+    def test_concurrent_live_holder_refuses_second_claim(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            old = self.with_leases_dir(tmp)
+            try:
+                with lease_lib._ClaimLock(self.IDENTITY):
+                    with self.assertRaises(lease_lib.LeaseRefused) as ctx:
+                        with lease_lib._ClaimLock(self.IDENTITY):
+                            pass
+                    self.assertEqual("claim_in_progress", ctx.exception.reason)
+                # Holder released cleanly: the identity is claimable again.
+                with lease_lib._ClaimLock(self.IDENTITY):
+                    pass
+            finally:
+                lease_lib.ACTIVATION_LEASES_DIR = old
+
+    def test_crashed_holder_releases_lock_without_manual_deletion(self):
+        """PR112 P2: a claimant killed mid-critical-section must not block the
+        identity; the kernel frees the flock when the process exits."""
+        with tempfile.TemporaryDirectory() as tmp:
+            old = self.with_leases_dir(tmp)
+            try:
+                lock_path = lease_lib.lease_path(self.IDENTITY).with_suffix(".lock")
+                lock_path.parent.mkdir(parents=True, exist_ok=True)
+                crasher = subprocess.run(
+                    [
+                        sys.executable,
+                        "-c",
+                        "import fcntl, os, sys\n"
+                        "fd = os.open(sys.argv[1], os.O_CREAT | os.O_RDWR)\n"
+                        "fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+                        "os._exit(1)\n",
+                        str(lock_path),
+                    ],
+                    check=False,
+                )
+                self.assertEqual(1, crasher.returncode)
+                self.assertTrue(lock_path.exists(), "stable path is never unlinked")
+                with lease_lib._ClaimLock(self.IDENTITY):
+                    pass
+            finally:
+                lease_lib.ACTIVATION_LEASES_DIR = old
+
+    def test_stale_lock_file_without_holder_does_not_block(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            old = self.with_leases_dir(tmp)
+            try:
+                lock_path = lease_lib.lease_path(self.IDENTITY).with_suffix(".lock")
+                lock_path.parent.mkdir(parents=True, exist_ok=True)
+                lock_path.touch()
+                with lease_lib._ClaimLock(self.IDENTITY):
+                    pass
+            finally:
+                lease_lib.ACTIVATION_LEASES_DIR = old
 
 
 class TestIsolationGuard(unittest.TestCase):

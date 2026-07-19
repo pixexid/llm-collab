@@ -143,7 +143,11 @@ def parse_args():
     lease_claim.add_argument(
         "--skip-poller-cleanup",
         action="store_true",
-        help="Audit stale activation pollers without terminating them",
+        help=(
+            "Audit stale activation pollers without terminating them. The claim "
+            "still fails closed if any unregistered identity match is found — "
+            "report-only never grants a lease over a live duplicate-wake source."
+        ),
     )
 
     lease_show = subparsers.add_parser("lease-show", help="Show the activation lease for an identity")
@@ -313,14 +317,14 @@ def lease_claim_command(args) -> tuple[dict, int]:
             },
             75,
         )
-    if not args.skip_poller_cleanup and not audit_proves_clean(pollers):
+    if not audit_proves_clean(pollers):
         return (
             {
                 "claimed": False,
                 "reason": "stale_poller_not_proven_gone",
                 "identity": identity,
                 "poller_audit": pollers,
-                "hint": "an identity-matched stale poller survived cleanup; activation is not authorized",
+                "hint": "an identity-matched stale poller is unproven-gone (or report-only); activation is not authorized",
             },
             75,
         )

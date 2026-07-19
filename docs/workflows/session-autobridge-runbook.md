@@ -161,11 +161,12 @@ Purpose-scoped PR/CI/deploy watches are a separate concern from activation
 wake-pollers: run them under PM2 (the registry) so activation cleanup can
 prove they are registered and preserve them.
 
-Claims are serialized through a `.lock` sidecar next to the lease record under
-`State/session_autobridge/activation_leases/`. If a claiming process crashes
-mid-claim, later claims fail closed with `claim_in_progress`; recovery is an
-attended check that no claim is actually running, then removing that exact
-`.lock` file.
+Claims are serialized through a POSIX advisory lock (`flock`) held on a
+stable `.lock` sidecar next to the lease record under
+`State/session_autobridge/activation_leases/`. A concurrent claim fails
+closed with `claim_in_progress`; a claimant that crashes or is killed
+releases the lock automatically when the kernel closes its fd — no manual
+`.lock` removal is ever needed, and the file is deliberately never unlinked.
 
 ## Safety Defaults
 
