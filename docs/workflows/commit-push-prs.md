@@ -132,10 +132,20 @@ Include:
 - linked issue/task
 - verification summary
 - risk notes
-- docs-sync confirmation with the exact sibling-docs commit SHA (and docs PR URL
-  when used) when behavior contracts changed, or an explicit `no docs impact`
-  disposition. For new lanes, snapshot + SHA256 + unified-diff evidence is not a
-  substitute for the sibling repo's normal commit/PR evidence.
+- when project configuration declares a separate sibling-docs repository and
+  behavior contracts changed, docs-sync confirmation must identify that
+  configured repository and include a docs commit URL, a docs PR URL, or
+  `<owner>/<repo>@<sha>` for a commit pushed and reachable from the repository's
+  default branch. When a project has no separate docs repository, documentation
+  changes in the current PR's diff satisfy docs sync. When no docs changed,
+  record an explicit `no docs impact` disposition.
+- snapshot + SHA256 + unified-diff evidence remains valid only for a legacy lane:
+  a task whose `created_utc` predates the merge timestamp of the PR that
+  introduced this rule. Record that legacy classification and cutoff on the task;
+  the lane then completes under the evidence model recorded in its task contract,
+  and its historical evidence remains valid. For tasks created at or after that
+  timestamp, snapshot evidence is not a substitute for the configured
+  repository's normal commit/PR evidence.
 
 ## PR Review Wait Gate
 
