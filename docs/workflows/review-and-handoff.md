@@ -232,6 +232,14 @@ update `autonomous-loop.json` before it waits and again before it resumes. This
 keeps one authoritative loop state instead of several stale heartbeats making
 conflicting decisions.
 
+## Release Closure Gate (GH-1524)
+
+After a production-affecting merge, release closure requires the exact-merge-SHA
+deploy gate in `commit-push-prs.md` ("Release closure does not end at merge"):
+run `bin/deploy_release_watch.py --project <project-id> --merge-sha <sha>`; only terminal
+deploy+smoke success closes the release, and failure/cancelled/missing each get
+one durable packet + one doorbell with Codex holding the terminal disposition.
+
 ## Post-merge Cleanup Gate
 
 After a merge, the orchestrator must run the executable cleanup gate before the

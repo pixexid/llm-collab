@@ -139,6 +139,13 @@ Project registry. Created by `scripts/init.py`. Gitignored.
           "exclude_labels": ["type:epic", "wontfix", "duplicate", "invalid", "question", "status:deferred"],
           "require_any_label": []
         }
+      },
+      "release_closure": {
+        "trigger_event": "push",
+        "workflow": "deploy",
+        "required_jobs": ["detect", "deploy"],
+        "smoke_job": "deploy",
+        "required_smoke_steps": ["Verify production hosts", "Verify production auth"]
       }
     }
   ]
@@ -161,6 +168,15 @@ Project registry. Created by `scripts/init.py`. Gitignored.
 | `github.project_number` | int | GitHub Projects board number |
 | `github.backlog.exclude_labels` | string[] | Open issue labels excluded from the executable backlog. Defaults include `type:epic`, terminal labels, and `status:deferred`. |
 | `github.backlog.require_any_label` | string[] | Optional label or wildcard patterns that an open issue must match to be backlog-eligible. Empty means every non-excluded open issue is eligible. |
+| `release_closure.workflow` | string | Deploy workflow name for the exact-merge-SHA release gate (`bin/deploy_release_watch.py`). Required for the gate; never defaulted. |
+| `release_closure.trigger_event` | string | The automatic event that runs the production deploy (`push` for Amiga; `workflow_run`/`merge_group` for projects triggered that way). Required; never defaulted — only runs with this event on `default_branch_base` count. |
+| `release_closure.required_jobs` | string[] | Job names that must be present and `success` for release closure. Project-specific — no project inherits Amiga's labels. |
+| `release_closure.smoke_job` | string | The required job carrying the post-deploy smoke steps. Must be one of `required_jobs`. |
+| `release_closure.required_smoke_steps` | string[] | Step names inside `smoke_job` that must be present and `success`. Project-specific — no project inherits Amiga's labels. |
+
+A project without a complete `release_closure` (plus `default_branch_base` and
+an enabled `github.repo`) fails the release gate closed with exit 64; the gate
+never guesses a branch, workflow, or evidence labels.
 
 When GitHub integration is enabled, open GitHub issues are the source of truth for whether project work remains. Runtime queues may order and assign work, but `issue-queue.json` is empty only when the eligible GitHub backlog is empty.
 

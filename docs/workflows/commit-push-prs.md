@@ -317,7 +317,16 @@ After merge:
 2. run targeted post-merge smoke only when the merge is browser-relevant
 3. update the project queue artifact when lane ordering/state changes
 4. run the executable branch/worktree cleanup gate
-5. mark local task done
+5. mark local task done — EXCEPT for a production-affecting merge, where
+   done-marking waits for the release-closure gate below ("Release closure
+   does not end at merge"): terminal deploy+smoke success for the exact merge
+   SHA, or an explicit Codex disposition on a non-success. Never mark done
+   with the release outcome unknown or red. For production-affecting merges
+   the queue runner likewise remains in `post_merge` — it does not advance to
+   the next lane — until exact-SHA release SUCCESS or Codex's explicit
+   terminal non-success disposition is recorded. A docs-only or otherwise
+   non-production-impacting merge exits via an explicit scope disposition
+   (recorded as such); a skipped deploy is never called deploy success.
 
 For `llm-collab` itself, the shared local checkout is part of the shipped
 workflow. After a PR that changes workflow docs, scripts, gates, skills, agent
@@ -371,6 +380,52 @@ Run `git status --short --branch --untracked-files=all` in each touched repo,
 commit/push/open the PR for changes that should persist, and record any
 intentional local remainder. Do not assume future merge cleanup will preserve
 uncommitted workflow edits.
+
+## Release closure does not end at merge (GH-1524)
+
+A **production-affecting** merged PR is not a closed release until the **main
+production deploy for the exact merge SHA** — including its post-deploy smoke —
+reaches terminal success. Docs-only merges intentionally skip the heavy deploy
+job in Amiga's `deploy.yml`; a skipped deploy is a no-op run, never
+"deploy+smoke success", and such merges are outside this gate's scope.
+The df55a282 incident proved the gap: a post-deploy smoke failure (run
+29537490993) sat unnoticed for hours because nothing consumed the deploy
+signal, and a later unrelated green deploy looked like cover.
+
+The gate, enforced with `bin/deploy_release_watch.py`:
+
+```bash
+bin/deploy_release_watch.py --project amiga --merge-sha <full-merge-sha> [--wait]
+```
+
+The repo, base branch, workflow, and required job/smoke-step evidence come from
+the project's `release_closure` object in `projects.json` (project boundary:
+job/step names are project-specific and never live in shared `bin/`). A project
+without that config fails closed with exit 64.
+
+- **Exact-SHA correlation is absolute.** A deploy run for a different or
+  earlier SHA never satisfies this merge's closure, no matter how green.
+- **Only the automatic run counts**: the project's configured
+  `release_closure.trigger_event` on its configured `default_branch_base`
+  (Amiga: `push` on `main`). A same-SHA run under any different event or
+  branch is non-authoritative and never satisfies — or supersedes — the
+  configured automatic run's outcome.
+- **Success = deploy AND post-deploy smoke terminal success** for that exact
+  SHA, proven by POSITIVE evidence: every job named in the project's
+  `release_closure.required_jobs` present and successful (a skipped required
+  job = not a release) and every configured `required_smoke_steps` present and
+  successful inside the configured `smoke_job`. All names come from the
+  project's `projects.json` `release_closure` — no project inherits another's
+  labels. Empty or partial run evidence fails closed.
+- **`FAILURE` / `CANCELLED` / `MISSING` are each actionable**: the watcher
+  sends ONE durable llm-collab packet plus ONE doorbell ring. A missing run is
+  a distinct alarm, never silence and never a pass.
+- **On any non-success the task is NOT done**: closure is blocked until Codex
+  records a terminal disposition. Preserve the run id and logs
+  (`gh run view <id> --log-failed`); **no blind retry or redeploy** as the
+  reflex response.
+- **Ownership:** Claude is the ongoing main-deploy watcher; Codex is the
+  terminal task/release closer.
 
 Do not idle the active thread just to wait for asynchronous deploy automation if local post-merge
 work is already complete. Treat deploy as a later checkpoint unless it has actually failed or a new
