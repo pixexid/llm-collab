@@ -386,8 +386,13 @@ signal, and a later unrelated green deploy looked like cover.
 The gate, enforced with `bin/deploy_release_watch.py`:
 
 ```bash
-bin/deploy_release_watch.py --repo pixexid/amiga --merge-sha <full-merge-sha> [--wait]
+bin/deploy_release_watch.py --project amiga --merge-sha <full-merge-sha> [--wait]
 ```
+
+The repo, base branch, workflow, and required job/smoke-step evidence come from
+the project's `release_closure` object in `projects.json` (project boundary:
+job/step names are project-specific and never live in shared `bin/`). A project
+without that config fails closed with exit 64.
 
 - **Exact-SHA correlation is absolute.** A deploy run for a different or
   earlier SHA never satisfies this merge's closure, no matter how green.

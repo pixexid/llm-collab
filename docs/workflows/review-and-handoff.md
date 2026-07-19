@@ -236,7 +236,7 @@ conflicting decisions.
 
 After a production-affecting merge, release closure requires the exact-merge-SHA
 deploy gate in `commit-push-prs.md` ("Release closure does not end at merge"):
-run `bin/deploy_release_watch.py --repo <repo> --merge-sha <sha>`; only terminal
+run `bin/deploy_release_watch.py --project <project-id> --merge-sha <sha>`; only terminal
 deploy+smoke success closes the release, and failure/cancelled/missing each get
 one durable packet + one doorbell with Codex holding the terminal disposition.
 

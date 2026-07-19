@@ -5,9 +5,9 @@ deploy_release_watch.py — exact-merge-SHA post-merge deploy release gate (GH-1
 Release closure does not end at merge. This tool correlates the production
 deploy workflow run to the EXACT merge SHA and produces one of five verdicts:
 
-  SUCCESS    deploy run for the exact SHA completed success AND every job
-             (detect + deploy, which includes the post-deploy smoke steps)
-             concluded success.
+  SUCCESS    deploy run for the exact SHA completed success AND the project's
+             configured required jobs (including the smoke-carrying job and its
+             required post-deploy smoke steps) all concluded success.
   FAILURE    the exact-SHA run (or any of its jobs) concluded failure.
   CANCELLED  the exact-SHA run concluded cancelled.
   MISSING    no deploy run exists for the exact merge SHA — a DISTINCT
@@ -26,9 +26,13 @@ Safety invariants (from the df55a282/29537490993 incident):
   terminal closer (see docs/workflows/commit-push-prs.md).
 
 Usage:
-  bin/deploy_release_watch.py --repo pixexid/amiga --merge-sha <full-sha>
-      [--workflow deploy] [--wait] [--timeout-seconds 900] [--poll-seconds 30]
-      [--json]
+  bin/deploy_release_watch.py --project <id> --merge-sha <full-sha>
+      [--wait] [--timeout-seconds 900] [--poll-seconds 30] [--json]
+
+The repo, base branch, workflow, and required job/smoke-step evidence all come
+from the registered project's `release_closure` config in projects.json —
+job/step names are project-specific and never live in shared bin/ (project
+boundary, AGENTS.md). A project without that config fails closed (exit 64).
 
 Exit codes: 0 SUCCESS | 10 FAILURE | 11 CANCELLED | 12 MISSING | 13 PENDING
             | 64 usage/environment error.
@@ -43,6 +47,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 from _python_runtime import require_python
 
 require_python()
+
+from _helpers import get_project
 
 import argparse
 import json
@@ -67,9 +73,9 @@ class Verdict:
 def run_command(argv: list[str]) -> str:
     try:
         result = subprocess.run(argv, text=True, capture_output=True, check=False)
-    except FileNotFoundError as error:
+    except OSError as error:
         raise RuntimeError(
-            f"executable not found: {argv[0]} — install GitHub CLI (gh) and ensure it is on PATH"
+            f"cannot execute {argv[0]!r} ({error}) — install GitHub CLI (gh) and ensure it is on PATH"
         ) from error
     if result.returncode != 0:
         raise RuntimeError(
@@ -125,20 +131,36 @@ def fetch_run_jobs(repo: str, run_id: int, runner=run_command) -> list[dict]:
             for j in page.get("jobs", [])]
 
 
-# Required release evidence is PER-REPO (POSITIVE lists — an empty/partial
-# jobs payload or a skipped heavy job must fail closed, never read as success;
-# unknown extra jobs may exist but cannot substitute). The job/step names are
-# project-specific: a repo WITHOUT a profile fails closed at the CLI (exit 64)
-# unless the caller supplies --required-jobs/--required-smoke-steps explicitly
-# (GH-1524 PR review P1 — never grade another project against Amiga's labels).
-REQUIRED_JOBS = ("detect", "deploy")
-REQUIRED_SMOKE_STEPS = ("Verify production hosts", "Verify production auth")
-REPO_PROFILES: dict[str, dict[str, tuple[str, ...]]] = {
-    "pixexid/amiga": {
-        "required_jobs": REQUIRED_JOBS,
-        "required_smoke_steps": REQUIRED_SMOKE_STEPS,
-    },
-}
+def resolve_release_config(project_id: str, project: dict | None) -> tuple[dict | None, str | None]:
+    """Release-evidence identity for one registered project: (config, error).
+    Required job/smoke-step names are project-specific and come ONLY from the
+    project's narrow `release_closure` object plus its existing `github.repo`
+    and `default_branch_base` — never from shared-bin constants (GH-1524 PR111
+    P1 / project boundary). Anything unknown or unconfigured fails closed."""
+    if project is None:
+        return None, f"unknown project_id {project_id!r} — not registered in projects.json"
+    github = project.get("github") or {}
+    repo = github.get("repo")
+    if not github.get("enabled") or not repo:
+        return None, f"project {project_id!r} has no enabled github.repo — cannot correlate deploy runs"
+    rc = project.get("release_closure") or {}
+    required_jobs = tuple(rc.get("required_jobs") or ())
+    smoke_job = rc.get("smoke_job")
+    required_smoke_steps = tuple(rc.get("required_smoke_steps") or ())
+    if not (required_jobs and smoke_job and required_smoke_steps):
+        return None, (
+            f"project {project_id!r} has no release_closure config (required_jobs, "
+            "smoke_job, required_smoke_steps) — job/step names are project-specific; "
+            "register them in projects.json before using this gate"
+        )
+    return {
+        "repo": repo,
+        "branch": project.get("default_branch_base") or "main",
+        "workflow": rc.get("workflow") or "deploy",
+        "required_jobs": required_jobs,
+        "smoke_job": smoke_job,
+        "required_smoke_steps": required_smoke_steps,
+    }, None
 
 
 def evaluate_release(
@@ -146,10 +168,11 @@ def evaluate_release(
     runs: list[dict],
     jobs_for_run,
     *,
+    required_jobs: tuple[str, ...],
+    smoke_job: str,
+    required_smoke_steps: tuple[str, ...],
     required_event: str = "push",
     required_branch: str = "main",
-    required_jobs: tuple[str, ...] = REQUIRED_JOBS,
-    required_smoke_steps: tuple[str, ...] = REQUIRED_SMOKE_STEPS,
 ) -> Verdict:
     """Pure verdict logic. `runs` must already be exact-SHA-filtered (the fetch
     guarantees it; the assertion below fails closed if a caller ever passes a
@@ -206,18 +229,24 @@ def evaluate_release(
     jobs = jobs_for_run(run_id)
     by_name = {j.get("name", ""): j for j in jobs}
     problems: list[str] = []
+    # Duplicate required names across (paginated) evidence are ambiguous — a
+    # green duplicate must never whitewash a red one, so ambiguity fails closed.
+    names = [j.get("name") for j in jobs]
+    for name in dict.fromkeys(required_jobs + (smoke_job,)):
+        if names.count(name) > 1:
+            problems.append(f"ambiguous evidence: job name '{name}' appears {names.count(name)} times")
     for name in required_jobs:
         job = by_name.get(name)
         if job is None:
             problems.append(f"required job '{name}' missing from run evidence")
         elif job.get("conclusion") != "success":
             problems.append(f"required job '{name}' concluded {job.get('conclusion')!r}, not success")
-    deploy_job = by_name.get("deploy") or {}
-    steps = {s.get("name", ""): s for s in (deploy_job.get("steps") or [])}
+    smoke_carrier = by_name.get(smoke_job) or {}
+    steps = {s.get("name", ""): s for s in (smoke_carrier.get("steps") or [])}
     for step_name in required_smoke_steps:
         step = steps.get(step_name)
         if step is None:
-            problems.append(f"required smoke step '{step_name}' missing from deploy job evidence")
+            problems.append(f"required smoke step '{step_name}' missing from '{smoke_job}' job evidence")
         elif step.get("conclusion") != "success":
             problems.append(f"required smoke step '{step_name}' concluded {step.get('conclusion')!r}")
     extra_failed = [j.get("name", "?") for j in jobs
@@ -259,18 +288,15 @@ def render(verdict: Verdict, repo: str) -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Exact-merge-SHA deploy release gate (GH-1524).")
-    parser.add_argument("--repo", required=True, help="owner/name, e.g. pixexid/amiga")
+    parser.add_argument("--project", required=True,
+                        help="registered project id; repo/branch/workflow/evidence come from "
+                             "its projects.json release_closure config")
     parser.add_argument("--merge-sha", required=True, help="full merge commit SHA on main")
-    parser.add_argument("--workflow", default="deploy", help="workflow name (default: deploy)")
     parser.add_argument("--wait", action="store_true",
                         help="poll until the run reaches a terminal state or timeout")
     parser.add_argument("--timeout-seconds", type=int, default=900)
     parser.add_argument("--poll-seconds", type=int, default=30)
     parser.add_argument("--json", action="store_true", help="emit the verdict as JSON")
-    parser.add_argument("--required-jobs", default=None,
-                        help="comma-separated required job names (overrides the repo profile)")
-    parser.add_argument("--required-smoke-steps", default=None,
-                        help="comma-separated required smoke step names inside the deploy job")
     args = parser.parse_args()
 
     import re as _re
@@ -279,26 +305,22 @@ def main() -> int:
               file=sys.stderr)
         return 64
 
-    profile = REPO_PROFILES.get(args.repo, {})
-    required_jobs = (tuple(x.strip() for x in args.required_jobs.split(",") if x.strip())
-                     if args.required_jobs else profile.get("required_jobs"))
-    required_smoke = (tuple(x.strip() for x in args.required_smoke_steps.split(",") if x.strip())
-                      if args.required_smoke_steps is not None
-                      else profile.get("required_smoke_steps"))
-    if not required_jobs:
-        print(f"[error] no release-evidence profile for {args.repo!r} — job/step names are "
-              "project-specific; pass --required-jobs (and --required-smoke-steps) explicitly",
-              file=sys.stderr)
+    config, config_error = resolve_release_config(args.project, get_project(args.project))
+    if config is None:
+        print(f"[error] {config_error}", file=sys.stderr)
         return 64
+    repo = config["repo"]
 
     deadline = time.monotonic() + args.timeout_seconds
 
     def once() -> Verdict:
-        runs = fetch_deploy_runs(args.repo, args.merge_sha, args.workflow)
+        runs = fetch_deploy_runs(repo, args.merge_sha, config["workflow"])
         return evaluate_release(args.merge_sha, runs,
-                                lambda run_id: fetch_run_jobs(args.repo, run_id),
-                                required_jobs=required_jobs,
-                                required_smoke_steps=required_smoke or ())
+                                lambda run_id: fetch_run_jobs(repo, run_id),
+                                required_jobs=config["required_jobs"],
+                                smoke_job=config["smoke_job"],
+                                required_smoke_steps=config["required_smoke_steps"],
+                                required_branch=config["branch"])
 
     try:
         verdict = once()
@@ -312,11 +334,12 @@ def main() -> int:
     if args.json:
         print(json.dumps({
             "state": verdict.state, "merge_sha": verdict.merge_sha,
+            "project": args.project, "repo": repo,
             "run_id": verdict.run_id, "run_conclusion": verdict.run_conclusion,
             "failed_jobs": verdict.failed_jobs, "detail": verdict.detail,
         }, indent=2))
     else:
-        print(render(verdict, args.repo))
+        print(render(verdict, repo))
     return TERMINAL_EXIT[verdict.state]
 
 
