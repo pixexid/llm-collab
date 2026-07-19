@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -61,6 +62,49 @@ from _helpers import (
     ensure_agent_enabled,
     write_chat_note,
 )
+from _activation_identity import (
+    activation_body_banner,
+    build_activation_consume_command,
+    build_activation_ring_prompt,
+    canonical_worktree,
+    normalized_identity_field,
+)
+
+# Lane C (GH-1572) flips this to True in the same commit that makes the
+# packet's claim command (`inbox.py --packet`) runnable. Deliberately a code
+# constant, NOT an environment variable or flag: the production CLI must have
+# no way to enable activation delivery before the runtime integration exists.
+ACTIVATION_RUNTIME_INTEGRATED = False
+
+
+def allocate_activation_packet_paths(
+    chat_dir: Path, timestamp: str, recipient: str, sender: str, slug: str
+) -> tuple[Path, Path]:
+    """Atomically reserve collision-free recipient AND sender packet paths.
+
+    O_CREAT|O_EXCL makes each reservation atomic against concurrent writers;
+    the attempt counter makes allocation deterministic even under repeating
+    randomness — an existing packet is NEVER overwritten. Both copies share
+    one suffix so the pair stays correlated."""
+    for attempt in range(1, 200):
+        nonce = os.urandom(3).hex()
+        suffix = f"-{nonce}" if attempt == 1 else f"-{nonce}-{attempt}"
+        to_path = chat_dir / f"{timestamp}_to-{recipient}_{slug}{suffix}.md"
+        from_path = chat_dir / f"{timestamp}_from-{sender}_{slug}{suffix}.md"
+        try:
+            to_fd = os.open(to_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            continue
+        try:
+            from_fd = os.open(from_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            os.close(to_fd)
+            os.unlink(to_path)
+            continue
+        os.close(to_fd)
+        os.close(from_fd)
+        return to_path, from_path
+    raise OSError("exhausted unique activation packet name attempts")
 from _session_autobridge import (
     find_dispatchable_target_session,
     load_binding,
@@ -79,6 +123,21 @@ def parse_args():
     p.add_argument("--tags", default="", help="Comma-separated tags (default: empty)")
     p.add_argument("--project", required=True, help="project_id this message relates to")
     p.add_argument("--related-task", default=None, help="TASK-id cross-reference")
+    p.add_argument(
+        "--activation",
+        action="store_true",
+        help="Mark this packet as a writer ACTIVATION. Requires --related-task, --worktree, and --branch together.",
+    )
+    p.add_argument(
+        "--worktree",
+        default=None,
+        help="Assigned absolute worktree path (activation packets only; requires --activation)",
+    )
+    p.add_argument(
+        "--branch",
+        default=None,
+        help="Assigned branch (activation packets only; requires --activation)",
+    )
     p.add_argument("--repo-targets", default="", help="Comma-separated repo IDs in scope")
     p.add_argument("--path-targets", default="", help="Comma-separated file/dir paths in scope")
     p.add_argument("--sender-agent-id", default=None, help="Override sender identity recorded in frontmatter")
@@ -106,7 +165,7 @@ def read_body(body_file: str) -> str:
     return Path(body_file).read_text().strip()
 
 
-def build_message(args, body: str, chat_id: str) -> str:
+def build_message(args, body: str, chat_id: str, packet_name: str | None = None) -> str:
     tags = [t.strip() for t in args.tags.split(",") if t.strip()]
     repo_targets = [r.strip() for r in args.repo_targets.split(",") if r.strip()]
     path_targets = [p.strip() for p in args.path_targets.split(",") if p.strip()]
@@ -129,6 +188,14 @@ def build_message(args, body: str, chat_id: str) -> str:
         "path_targets": path_targets,
         "sent_utc": utc_iso(),
     }
+    if args.activation:
+        fm["activation"] = True
+        fm["worktree"] = args.worktree
+        fm["branch"] = args.branch
+        consume_command = build_activation_consume_command(
+            args.recipient, args.project, chat_id, packet_name or "<packet>"
+        )
+        body = "\n".join([activation_body_banner(consume_command), "", body or "(no body)"])
     if codex_self_target:
         fm["autobridge_skip"] = True
         fm["autobridge_skip_reason"] = "codex_self_target"
@@ -228,6 +295,45 @@ def build_desktop_bridge_prompt(chat_id: str, recipient_id: str, message_path: P
 
 def main():
     args = parse_args()
+    if args.activation:
+        try:
+            # The SAME validators the shared identity path uses
+            # (bin/_activation_identity.py): missing/whitespace-only fields,
+            # control characters (frontmatter-injection channel), and
+            # relative worktrees all refuse here, before any file or inbox
+            # mutation.
+            args.related_task = normalized_identity_field("task", args.related_task)
+            args.branch = normalized_identity_field("branch", args.branch)
+            args.worktree = canonical_worktree(
+                normalized_identity_field("worktree", args.worktree)
+            )
+        except ValueError as exc:
+            print(f"[error] {exc}", file=sys.stderr)
+            sys.exit(2)
+        if not ACTIVATION_RUNTIME_INTEGRATED:
+            # Lane A ships the identity/serialization CONTRACT only. The
+            # claim command the packet instructs (`inbox.py --packet`) is not
+            # runnable until the runtime-integration lane (GH-1572) lands, so
+            # delivering an activation packet now would hand a worker an
+            # impossible required step. Fail closed pre-write. This is a
+            # module constant — no environment variable or CLI flag can
+            # enable it; Lane C deletes the guard when the exact command is
+            # runnable.
+            print(
+                "[error] activation delivery unavailable: runtime integration "
+                "(GH-1572 inbox claim/consumption) has not landed, so the "
+                "packet's required claim command would not be runnable. "
+                "Deliver an ordinary packet instead.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+    elif args.worktree or args.branch:
+        print(
+            "[error] --worktree/--branch are activation identity fields; pass --activation "
+            "(with --related-task, --worktree, --branch) or drop them",
+            file=sys.stderr,
+        )
+        sys.exit(2)
     thread_coordination_required = is_codex_self_target(args.sender, args.recipient)
 
     # Validate agents
@@ -313,18 +419,75 @@ def main():
         )
         body = f"{onboarding}\n\n---\n\n## Work packet\n\n{body or '(no body)'}"
 
-    content = build_message(args, body, chat_id)
     slug = slugify(args.title, max_len=40)
     timestamp = ts()
+    activation_paths: tuple[Path, Path] | None = None
+    if args.activation:
+        # ts() has second precision: two same-title activations in one second
+        # would collide, overwrite one packet, and dedupe to one inbox
+        # pointer — silently losing an activation whose banner/ring command
+        # must select exactly its own immutable packet. Names are allocated
+        # with O_CREAT|O_EXCL (atomic against concurrent writers) and a
+        # deterministic attempt counter, so even REPEATING randomness cannot
+        # overwrite an existing recipient or sender packet. Ordinary-message
+        # naming is unchanged.
+        try:
+            activation_paths = allocate_activation_packet_paths(
+                chat_dir, timestamp, args.recipient, args.sender, slug
+            )
+        except OSError as exc:
+            print(f"[error] could not allocate activation packet name: {exc}", file=sys.stderr)
+            sys.exit(2)
+        to_filename = activation_paths[0].name
+    else:
+        to_filename = f"{timestamp}_to-{args.recipient}_{slug}.md"
+    # Pre-write wake-path classification: the same value later selects the
+    # ring form, resolved before any file exists so downstream policy lanes
+    # can fail closed pre-write.
+    ax_doorbell_required = (
+        args.recipient != "operator"
+        and not autobridge_ready
+        and is_ax_doorbell_target(
+            recipient_agent,
+            args.recipient,
+            sender_id=args.sender,
+        )
+    )
+    activation_ring_prompt = None
+    if args.activation and ax_doorbell_required:
+        # Built and bounded BEFORE any write: there is no generic/raw-file
+        # ring for an activation packet, so an unfittable prompt fails the
+        # delivery closed instead of degrading after files exist.
+        try:
+            activation_ring_prompt = build_activation_ring_prompt(
+                args.sender,
+                str(args.related_task),
+                build_activation_consume_command(
+                    args.recipient, args.project, chat_id, to_filename
+                ),
+            )
+        except ValueError as exc:
+            if activation_paths is not None:
+                for reserved in activation_paths:
+                    try:
+                        reserved.unlink()
+                    except FileNotFoundError:
+                        pass
+            print(f"[error] {exc}", file=sys.stderr)
+            sys.exit(2)
+    content = build_message(args, body, chat_id, packet_name=to_filename)
 
     # Write to-{recipient} file (recipient's copy)
-    to_filename = f"{timestamp}_to-{args.recipient}_{slug}.md"
     to_path = chat_dir / to_filename
     write_file(to_path, content)
 
     # Write from-{sender} file (sender's copy / sent record)
-    from_filename = f"{timestamp}_from-{args.sender}_{slug}.md"
-    from_path = chat_dir / from_filename
+    if activation_paths is not None:
+        from_path = activation_paths[1]
+        from_filename = from_path.name
+    else:
+        from_filename = f"{timestamp}_from-{args.sender}_{slug}.md"
+        from_path = chat_dir / from_filename
     write_file(from_path, content)
 
     # Update recipient inbox pointer
@@ -368,20 +531,16 @@ def main():
         },
     )
 
-    ax_doorbell_required = (
-        args.recipient != "operator"
-        and not autobridge_ready
-        and is_ax_doorbell_target(
-            recipient_agent,
-            args.recipient,
-            sender_id=args.sender,
-        )
-    )
-    ax_doorbell_prompt = (
-        f"[from {args.sender}] Read latest {args.recipient} packet in {chat_id}: {to_path.name}"
-        if ax_doorbell_required
-        else None
-    )
+    # (ax_doorbell_required and the activation ring were resolved pre-write;
+    # activation packets never get a generic/raw-file ring.)
+    ax_doorbell_prompt = None
+    if ax_doorbell_required:
+        if args.activation:
+            ax_doorbell_prompt = activation_ring_prompt
+        else:
+            ax_doorbell_prompt = (
+                f"[from {args.sender}] Read latest {args.recipient} packet in {chat_id}: {to_path.name}"
+            )
     ax_attended_recovery_required = (
         args.recipient != "operator"
         and not autobridge_ready
