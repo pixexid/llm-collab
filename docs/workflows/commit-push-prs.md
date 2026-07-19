@@ -132,7 +132,10 @@ Include:
 - linked issue/task
 - verification summary
 - risk notes
-- docs-sync confirmation when behavior contracts changed
+- docs-sync confirmation with the exact sibling-docs commit SHA (and docs PR URL
+  when used) when behavior contracts changed, or an explicit `no docs impact`
+  disposition. For new lanes, snapshot + SHA256 + unified-diff evidence is not a
+  substitute for the sibling repo's normal commit/PR evidence.
 
 ## PR Review Wait Gate
 
