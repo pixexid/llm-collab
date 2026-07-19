@@ -64,6 +64,11 @@ SECTION_PLACEHOLDERS = {
 }
 DESIGN_THINKING_BUDGET_LABEL = "Design thinking in details — polish-pass budget:"
 DESIGN_THINKING_SEEDS_LABEL = "Design thinking in details — polish vectors:"
+HTML_TAG_RE = re.compile(
+    r"</?[A-Za-z][A-Za-z0-9-]*"
+    r"(?:[ \t]+(?:[^\"'>\r\n]|\"[^\"\r\n]*\"|'[^'\r\n]*')*)?"
+    r"[ \t]*/?>"
+)
 
 
 def parse_args():
@@ -83,27 +88,86 @@ def _mask_non_newline_characters(value: str) -> str:
     return re.sub(r"[^\r\n]", " ", value)
 
 
+def _indent_width(value: str) -> int:
+    width = 0
+    for character in value:
+        width += 4 - (width % 4) if character == "\t" else 1
+    return width
+
+
+def _container_fence(
+    value: str,
+    *,
+    max_trailing_indent: int = 3,
+) -> tuple[str, int, str] | None:
+    cursor = 0
+    list_content_indent = 0
+    while cursor < len(value):
+        quote = re.match(r" {0,3}>[ \t]?", value[cursor:])
+        if quote:
+            cursor += quote.end()
+            continue
+
+        list_item = re.match(
+            r"(?P<leading> {0,3})(?P<marker>[-+*]|\d{1,9}[.)])"
+            r"(?P<spacing>[ \t]{1,4})",
+            value[cursor:],
+        )
+        if list_item:
+            prefix = (
+                list_item.group("leading")
+                + list_item.group("marker")
+                + list_item.group("spacing")
+            )
+            list_content_indent += _indent_width(prefix)
+            cursor += list_item.end()
+            continue
+        break
+
+    indentation = re.match(r"[ \t]*", value[cursor:]).group()
+    if _indent_width(indentation) > max_trailing_indent:
+        return None
+    cursor += len(indentation)
+
+    fence_match = re.match(r"(?P<fence>`{3,}|~{3,})(?P<suffix>.*)\Z", value[cursor:])
+    if not fence_match:
+        return None
+    fence = fence_match.group("fence")
+    return fence, list_content_indent, fence_match.group("suffix")
+
+
 def _mask_nonrendered_markdown(value: str) -> str:
     lines = []
     fence_character = None
     fence_length = 0
+    fence_container_indent = 0
     in_comment = False
     for line in value.splitlines(keepends=True):
         content = line.rstrip("\r\n")
         if fence_character is not None:
             lines.append(_mask_non_newline_characters(line))
-            if re.fullmatch(
-                rf" {{0,3}}{re.escape(fence_character)}{{{fence_length},}}[ \t]*",
+            closing = _container_fence(
                 content,
+                max_trailing_indent=3 + fence_container_indent,
+            )
+            if (
+                closing is not None
+                and closing[0][0] == fence_character
+                and len(closing[0]) >= fence_length
+                and not closing[2].strip()
             ):
                 fence_character = None
                 fence_length = 0
+                fence_container_indent = 0
             continue
 
         if not in_comment:
-            opening = re.match(r" {0,3}(?P<fence>`{3,}|~{3,})", content)
-            if opening:
-                fence = opening.group("fence")
+            opening = _container_fence(content)
+            if opening is not None:
+                fence, fence_container_indent, suffix = opening
+                if fence[0] == "`" and "`" in suffix:
+                    opening = None
+            if opening is not None:
                 fence_character = fence[0]
                 fence_length = len(fence)
                 lines.append(_mask_non_newline_characters(line))
@@ -165,6 +229,7 @@ def _strip_markdown_artifacts(value: str) -> str:
     line = re.sub(r"^(?:>\s*)+", "", line)
     line = re.sub(r"^(?:[-*+]\s*)?", "", line)
     line = re.sub(r"^\[(?: |x|X)\]\s*", "", line)
+    line = HTML_TAG_RE.sub("", line)
     return line.strip().strip("*_`~#>[](){}|\\-+.!").strip()
 
 
@@ -293,7 +358,7 @@ def validate_design_thinking_refinement(frontmatter, body):
     budget_line = _risk_label_value(section, DESIGN_THINKING_BUDGET_LABEL)
     if budget_line is None:
         errors.append(f"missing risk-analysis label: {DESIGN_THINKING_BUDGET_LABEL}")
-    elif not budget_line or RISK_PLACEHOLDER in budget_line:
+    elif not _has_substantive_content(budget_line) or RISK_PLACEHOLDER in budget_line:
         errors.append(f"unresolved risk-analysis value: {DESIGN_THINKING_BUDGET_LABEL}")
 
     budget = frontmatter.get("design_thinking_polish_budget_loc")
@@ -307,7 +372,7 @@ def validate_design_thinking_refinement(frontmatter, body):
     seeds_line = _risk_label_value(section, DESIGN_THINKING_SEEDS_LABEL)
     if seeds_line is None:
         errors.append(f"missing risk-analysis label: {DESIGN_THINKING_SEEDS_LABEL}")
-    elif not seeds_line or RISK_PLACEHOLDER in seeds_line:
+    elif not _has_substantive_content(seeds_line) or RISK_PLACEHOLDER in seeds_line:
         errors.append(f"unresolved risk-analysis value: {DESIGN_THINKING_SEEDS_LABEL}")
     return errors
 

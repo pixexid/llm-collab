@@ -178,6 +178,98 @@ class CanonicalTaskSectionValidationTest(unittest.TestCase):
 
         self.assertIn("empty or placeholder-only canonical section: ## Summary", errors)
 
+    def test_rejects_blockquote_fenced_only_section_content(self) -> None:
+        body = task_body(summary="> ```text\n> Example only\n> ````")
+
+        errors = refine_task.validate_refinement({}, body)
+
+        self.assertIn("empty or placeholder-only canonical section: ## Summary", errors)
+
+    def test_nested_container_fences_do_not_hide_later_canonical_sections(self) -> None:
+        artifacts = (
+            "- ```markdown\n  ## Summary\n  Example only\n  ```",
+            "> - ~~~markdown\n>   ## Summary\n>   Example only\n>   ~~~~",
+            "- > ```text\n  > ## Summary\n  > Example only\n  > ````",
+        )
+        for artifact in artifacts:
+            with self.subTest(artifact=artifact):
+                body = task_body(summary=f"Real summary remains visible.\n\n{artifact}")
+                self.assertEqual([], refine_task.validate_refinement({}, body))
+
+    def test_nested_container_fences_cannot_supply_canonical_sections(self) -> None:
+        body = """> - ```markdown
+>   ## Summary
+>   Example only
+>   ## Acceptance Criteria
+>   - [ ] Example only
+>   ## Verification Plan
+>   - [ ] Example only
+>   ## Implementation Risk Analysis
+>   Example only
+>   ````
+"""
+
+        errors = refine_task.validate_refinement({}, body)
+
+        for heading in refine_task.CANONICAL_SECTIONS:
+            with self.subTest(heading=heading):
+                self.assertIn(f"missing canonical section: {heading}", errors)
+
+    def test_rejects_html_artifact_only_section_content(self) -> None:
+        for artifact in (
+            "<br>",
+            "<br />",
+            "<span></span>",
+            '<span data-example=">"></span>',
+        ):
+            with self.subTest(artifact=artifact):
+                errors = refine_task.validate_refinement({}, task_body(summary=artifact))
+                self.assertIn(
+                    "empty or placeholder-only canonical section: ## Summary",
+                    errors,
+                )
+
+    def test_accepts_real_section_content_around_html_artifacts(self) -> None:
+        for summary in ("Needs <br> review.", "<span>Needs review.</span>"):
+            with self.subTest(summary=summary):
+                self.assertEqual(
+                    [],
+                    refine_task.validate_refinement({}, task_body(summary=summary)),
+                )
+
+    def test_accepts_visible_blockquote_and_list_prose(self) -> None:
+        for summary in (
+            "> Real quoted task summary.",
+            "- Real listed task summary.",
+            "> - Real nested task summary.",
+        ):
+            with self.subTest(summary=summary):
+                self.assertEqual(
+                    [],
+                    refine_task.validate_refinement({}, task_body(summary=summary)),
+                )
+
+    def test_unterminated_nested_fence_masks_the_remainder_fail_closed(self) -> None:
+        body = task_body(summary="Real summary.\n\n> ```text\n> Unterminated example")
+
+        errors = refine_task.validate_refinement({}, body)
+
+        self.assertIn("missing canonical section: ## Acceptance Criteria", errors)
+        self.assertIn("missing canonical section: ## Verification Plan", errors)
+        self.assertIn("missing canonical section: ## Implementation Risk Analysis", errors)
+
+    def test_markdown_mask_preserves_line_and_character_alignment(self) -> None:
+        body = "> - ```text\r\n>   Example\r\n>   ````\r\n## Summary\r\nReal\r\n"
+
+        masked = refine_task._mask_nonrendered_markdown(body)
+
+        self.assertEqual(len(body), len(masked))
+        self.assertEqual(
+            [index for index, character in enumerate(body) if character in "\r\n"],
+            [index for index, character in enumerate(masked) if character in "\r\n"],
+        )
+        self.assertIn("## Summary", masked)
+
     def test_rejects_structurally_truncated_body(self) -> None:
         body = task_body().split("## Implementation Risk Analysis", 1)[0]
 
@@ -209,6 +301,21 @@ class RiskAnalysisValueValidationTest(unittest.TestCase):
                     )
                     self.assertIn(f"missing risk-analysis label: {label}", errors)
 
+    def test_blockquote_fenced_labels_cannot_supply_risk_analysis(self) -> None:
+        fenced_labels = "\n".join(
+            f"> - {label} none" for label in refine_task.RISK_REQUIRED_LABELS
+        )
+        body = task_body(
+            risk_values={},
+            extra=f"> ```text\n{fenced_labels}\n> ``` ",
+        )
+
+        errors = refine_task.validate_refinement({}, body)
+
+        for label in refine_task.RISK_REQUIRED_LABELS:
+            with self.subTest(label=label):
+                self.assertIn(f"missing risk-analysis label: {label}", errors)
+
     def test_rejects_each_absent_or_placeholder_only_required_value(self) -> None:
         for label in refine_task.RISK_REQUIRED_LABELS:
             for value in ("", "(required before refinement)", "placeholder"):
@@ -231,6 +338,25 @@ class RiskAnalysisValueValidationTest(unittest.TestCase):
 
         self.assertEqual([], refine_task.validate_refinement({}, task_body(risk_values=values)))
 
+    def test_rejects_html_artifact_only_required_value(self) -> None:
+        label = "Open decisions/blockers:"
+        for value in (
+            "<br>",
+            "<br />",
+            "<span></span>",
+            '<span data-example=">"></span>',
+        ):
+            with self.subTest(value=value):
+                values = {**RISK_VALUES, label: value}
+                errors = refine_task.validate_refinement({}, task_body(risk_values=values))
+                self.assertIn(f"unresolved risk-analysis value: {label}", errors)
+
+    def test_accepts_real_required_value_around_html_artifacts(self) -> None:
+        label = "Open decisions/blockers:"
+        values = {**RISK_VALUES, label: "Needs <br> review"}
+
+        self.assertEqual([], refine_task.validate_refinement({}, task_body(risk_values=values)))
+
     def test_does_not_reject_real_value_that_mentions_placeholder(self) -> None:
         values = {
             **RISK_VALUES,
@@ -238,6 +364,36 @@ class RiskAnalysisValueValidationTest(unittest.TestCase):
         }
 
         self.assertEqual([], refine_task.validate_refinement({}, task_body(risk_values=values)))
+
+
+class DesignThinkingValueValidationTest(unittest.TestCase):
+    def test_blockquote_fenced_labels_cannot_supply_design_thinking_values(self) -> None:
+        artifact = (
+            "> ```text\n"
+            f"> - {refine_task.DESIGN_THINKING_BUDGET_LABEL} 12\n"
+            f"> - {refine_task.DESIGN_THINKING_SEEDS_LABEL} hierarchy and error states\n"
+            "> ``` "
+        )
+        frontmatter = {
+            "ui_ux_lane": True,
+            "ui_ux_mode": "implementation",
+            "design_thinking_polish_budget_loc": 12,
+            "design_thinking_polish_seeds": ["hierarchy", "error states"],
+        }
+
+        errors = refine_task.validate_refinement(
+            frontmatter,
+            task_body(extra=artifact),
+        )
+
+        self.assertIn(
+            f"missing risk-analysis label: {refine_task.DESIGN_THINKING_BUDGET_LABEL}",
+            errors,
+        )
+        self.assertIn(
+            f"missing risk-analysis label: {refine_task.DESIGN_THINKING_SEEDS_LABEL}",
+            errors,
+        )
 
 
 if __name__ == "__main__":
