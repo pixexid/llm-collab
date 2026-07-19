@@ -62,6 +62,13 @@ checkout hit the same lease). This is an extension of the existing
 - owner liveness derives from that session record (plus the optionally
   recorded `--owner-pid`);
 - `deactivate` releases the session's activation leases;
+- **raw packet reads are forbidden for activation**: opening an activation
+  packet file directly (a Read tool, `cat`, an editor) does NOT authorize
+  writing and is prohibited as an activation path. Activation doorbell rings
+  point at the `inbox.py` claim command instead of a filename, and every
+  activation packet body opens with a lease-gate banner restating this — a
+  session that arrived via a raw read must still claim before any mutation,
+  and a refusal means read-only hold.
 - **the mailbox boundary is gated**: activation packets are explicit
   (`deliver.py --activation --related-task --worktree --branch`, all four
   atomically or delivery fails; `--worktree`/`--branch` without

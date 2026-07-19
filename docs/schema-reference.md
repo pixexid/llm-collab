@@ -223,6 +223,18 @@ sent_utc: 2026-04-07T10:00:00+00:00
 | `repo_targets` | string[] | Which repos are in scope |
 | `path_targets` | string[] | File/directory scope |
 | `sent_utc` | string | ISO 8601 timestamp |
+| `activation` | bool (optional) | `true` marks a writer ACTIVATION packet. Emitted by `deliver.py --activation`, which atomically requires `related_task`, `worktree`, and `branch` (delivery fails otherwise). |
+| `worktree` | string (activation only) | Assigned worktree path; part of the one-writer lease identity |
+| `branch` | string (activation only) | Assigned branch; part of the one-writer lease identity |
+
+An activation packet is lease-gated at every consuming boundary: `inbox.py`
+claims the one-writer activation lease when the target agent consumes it
+(refusals exit `75`), and autobridge `dispatch_session` refuses to wake a
+second session for the same identity. A packet carrying any activation marker
+(`activation`, `worktree`, `branch`) without the complete identity is
+malformed and fails closed — it is never treated as an ordinary message. See
+`docs/workflows/session-autobridge-runbook.md` ("One-Writer Activation
+Lease").
 
 ### Body
 
@@ -1175,6 +1187,60 @@ Read first by `session_bootstrap.py` so the LLM immediately knows its identity.
   "created_utc": "2026-04-07T10:00:00+00:00"
 }
 ```
+
+---
+
+## State/session_autobridge/activation_leases/{lease_key}.json
+
+One-writer activation lease records (see
+`workflows/session-autobridge-runbook.md`). `lease_key` is the first 16 hex
+chars of the SHA-256 of the canonicalized identity tuple. Claims are
+serialized through a `{lease_key}.lock` sidecar.
+
+```json
+{
+  "identity": {
+    "project": "my-app",
+    "chat": "CHAT-A1B2C3D4",
+    "task": "TASK-ABC123",
+    "worktree": "/path/to/assigned/worktree",
+    "branch": "worker/task-branch",
+    "target_agent": "worker"
+  },
+  "lease_key": "0123456789abcdef",
+  "owner_session_id": "SESSION-worker-lane",
+  "owner_runtime_session_id": null,
+  "owner_pid": 12345,
+  "status": "active",
+  "fence_token": 1,
+  "claimed_utc": "2026-04-07T10:00:00+00:00",
+  "lease_expires_utc": "2026-04-07T11:00:00+00:00",
+  "previous_owner_session_id": null,
+  "updated_utc": "2026-04-07T10:00:00+00:00"
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `identity` | object | Exact activation identity; `worktree` is canonicalized (symlinks/`..` resolved) |
+| `owner_session_id` | string | Owning registered autobridge session (`State/session_autobridge/sessions/`) — the liveness authority |
+| `owner_runtime_session_id` | string or null | Runtime thread id recorded from the owning session at claim time |
+| `owner_pid` | int or null | Bound reader/claimer process id (additional liveness proof; required binding for mailbox readers) |
+| `status` | string | `active`, `released`, `superseded` |
+| `fence_token` | int | Increments on every ownership change; consumed by `lease-assert`/`lease-release` — stale tokens are refused |
+| `previous_owner_session_id` | string or null | Set on takeover of a provably dead owner |
+
+Auto-created mailbox reader sessions carry `ephemeral_reader: true` and a
+`lease_expires_utc` TTL in their session record; a dead bound pid or expired
+record makes the owner takeover-eligible (crash recovery) without weakening
+live-owner fencing.
+
+CLI/exit-code contract: `session_autobridge.py lease-claim | lease-assert |
+lease-release` and activation-consuming `inbox.py` reads exit `75` on any
+refusal (held by another owner, stale fence, unproven poller cleanup,
+unavailable audit/registry, malformed activation). The autobridge runtime
+payload delivered to a woken worker carries a top-level `activation_lease`
+object: `{lease, identity, fence_token, poller_audit}`.
 
 ---
 

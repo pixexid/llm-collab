@@ -149,9 +149,19 @@ def owner_is_live(lease: dict[str, Any]) -> bool | None:
     record = owner_session_record(str(lease.get("owner_session_id")))
     if record is None:
         return None if pid_alive is None else False
-    if record.get("status") in LIVE_SESSION_STATUSES:
+    if record.get("status") not in LIVE_SESSION_STATUSES:
+        return False
+    if record.get("ephemeral_reader"):
+        # An auto-created mailbox reader is only as alive as its bound
+        # process; a crashed reader must not block takeover forever, and its
+        # session record expires as a backstop.
+        if pid_alive is False:
+            return False
+        expires_at = parse_iso8601(record.get("lease_expires_utc"))
+        if expires_at is not None and expires_at <= now_utc():
+            return False
         return True
-    return False
+    return True
 
 
 def lease_is_expired(lease: dict[str, Any]) -> bool:
@@ -195,6 +205,7 @@ def owner_summary(lease: dict[str, Any]) -> dict[str, Any]:
         "fence_token": lease.get("fence_token"),
         "lease_expires_utc": lease.get("lease_expires_utc"),
         "claimed_utc": lease.get("claimed_utc"),
+        "previous_owner_session_id": lease.get("previous_owner_session_id"),
     }
 
 
@@ -594,11 +605,15 @@ def gated_claim(
     identity: dict[str, str],
     *,
     owner_session_id: str,
+    owner_pid: int | None = None,
     ttl_seconds: int = 3600,
     takeover: bool = False,
 ) -> tuple[bool, dict[str, Any]]:
     """Audit-first, fail-closed claim used by every activation boundary
-    (mailbox read, autobridge dispatch). Returns (authorized, detail)."""
+    (mailbox read, autobridge dispatch). Returns (authorized, detail).
+
+    takeover=True here still only ever replaces a PROVABLY dead owner —
+    a live or unknown-liveness owner always refuses."""
     try:
         pollers = audit_activation_pollers(identity, clean=True)
     except PollerAuditUnavailable as exc:
@@ -609,6 +624,7 @@ def gated_claim(
         lease = claim_lease(
             identity,
             owner_session_id=owner_session_id,
+            owner_pid=owner_pid,
             ttl_seconds=ttl_seconds,
             takeover=takeover,
         )

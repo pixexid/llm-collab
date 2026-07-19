@@ -534,11 +534,15 @@ class DispatchActivationGateTest(WorkspaceTestCase):
 
 
 class InboxActivationGateTest(WorkspaceTestCase):
-    """The mailbox boundary: the path every Desktop writer crosses. Two
-    readers of one activation packet get exactly one writer."""
+    """The mailbox boundary: the path every Desktop writer crosses.
 
-    def add_activation_message(self, root: Path) -> str:
-        message_rel = "Chats/2026-01-01_test__CHAT-TEST0001/activate-inbox.md"
+    These tests follow the REAL one-packet lifecycle — a consumed packet
+    stays read; later packets for the same identity (the incident's
+    activation + review-fix pair) and later observers are covered without
+    ever re-enqueueing a consumed path."""
+
+    def add_activation_message(self, root: Path, *, path_stem: str = "activate-inbox") -> str:
+        message_rel = f"Chats/2026-01-01_test__CHAT-TEST0001/{path_stem}.md"
         write(
             root / message_rel,
             "\n".join(
@@ -547,7 +551,7 @@ class InboxActivationGateTest(WorkspaceTestCase):
                     "chat_id: CHAT-TEST0001",
                     "from: codex",
                     "to: claude",
-                    "title: ACTIVATE inbox lane",
+                    f"title: ACTIVATE inbox lane ({path_stem})",
                     "project_id: amiga",
                     "activation: true",
                     "related_task: TASK-TEST01",
@@ -561,45 +565,140 @@ class InboxActivationGateTest(WorkspaceTestCase):
         )
         inbox_path = root / "agents" / "claude" / "inbox.json"
         inbox = json.loads(inbox_path.read_text())
-        if message_rel not in inbox["unread"]:
-            inbox["unread"].append(message_rel)
-        inbox["read"] = [p for p in inbox.get("read", []) if p != message_rel]
+        inbox["unread"].append(message_rel)
         write_json(inbox_path, inbox)
         return message_rel
 
-    def run_inbox(self, root: Path, *args: str) -> tuple[dict, int]:
+    def run_inbox(
+        self, root: Path, *args: str, reader_pid: int | None = None
+    ) -> tuple[dict, int]:
+        env = {"LLM_COLLAB_READER_PID": str(reader_pid)} if reader_pid else None
         result = subprocess.run(
             [sys.executable, str(REPO_ROOT / "bin" / "inbox.py"), *args, "--json"],
             cwd=root,
             text=True,
             capture_output=True,
-            env=self.cli_env(),
+            env=self.cli_env(env),
             check=False,
         )
         self.assertTrue(result.stdout.strip(), f"no stdout; stderr: {result.stderr}")
         return json.loads(result.stdout), result.returncode
 
-    def test_two_readers_one_packet_one_writer(self):
-        root = self.make_workspace()
-        self.add_activation_message(root)
+    def alive_pid(self) -> int:
+        return os.getpid()
 
-        first, code = self.run_inbox(root, "--me", "claude", "--session", "SESSION-R1")
+    def dead_pid(self) -> int:
+        proc = subprocess.Popen([sys.executable, "-c", "pass"])
+        proc.wait()
+        return proc.pid
+
+    def test_second_packet_same_identity_different_session_is_refused(self):
+        """The incident shape: activation packet then review-fix packet for the
+        same lane; a second Desktop session consuming the later packet must
+        not become a second writer."""
+        root = self.make_workspace()
+        self.add_activation_message(root, path_stem="activate-1")
+
+        first, code = self.run_inbox(
+            root, "--me", "claude", "--session", "SESSION-R1", reader_pid=self.alive_pid()
+        )
         self.assertEqual(0, code)
         gate1 = first["messages"][0]["activation_gate"]
         self.assertTrue(gate1["authorized"])
-        self.assertEqual("SESSION-R1", gate1["reader_session_id"])
         self.assertEqual(1, gate1["fence_token"])
 
-        # Second Desktop session observes the same durable packet.
-        self.add_activation_message(root)
-        second, code = self.run_inbox(root, "--me", "claude", "--session", "SESSION-R2")
+        self.add_activation_message(root, path_stem="review-fix-1")
+        second, code = self.run_inbox(
+            root, "--me", "claude", "--session", "SESSION-R2", reader_pid=self.alive_pid()
+        )
         self.assertEqual(75, code, "refused activation read must exit 75")
         gate2 = second["messages"][0]["activation_gate"]
         self.assertFalse(gate2["authorized"])
         self.assertEqual("lease_held_by_active_owner", gate2["reason"])
         self.assertEqual("SESSION-R1", gate2["owner"]["owner_session_id"])
 
-    def test_peek_reports_owner_without_claiming(self):
+    def test_same_session_different_reader_process_is_refused(self):
+        """A second Desktop process reusing the winner's --session id must not
+        inherit its authority (the 2ccfd88 bypass)."""
+        root = self.make_workspace()
+        self.add_activation_message(root, path_stem="activate-1")
+        first, code = self.run_inbox(
+            root, "--me", "claude", "--session", "SESSION-SAME", reader_pid=self.alive_pid()
+        )
+        self.assertEqual(0, code)
+        self.assertTrue(first["messages"][0]["activation_gate"]["authorized"])
+
+        self.add_activation_message(root, path_stem="review-fix-1")
+        second, code = self.run_inbox(
+            root, "--me", "claude", "--session", "SESSION-SAME", reader_pid=1
+        )
+        self.assertEqual(75, code)
+        gate2 = second["messages"][0]["activation_gate"]
+        self.assertFalse(gate2["authorized"])
+        self.assertEqual("same_session_different_process", gate2["reason"])
+
+    def test_same_session_same_reader_process_is_idempotent(self):
+        root = self.make_workspace()
+        pid = self.alive_pid()
+        self.add_activation_message(root, path_stem="activate-1")
+        self.run_inbox(root, "--me", "claude", "--session", "SESSION-R1", reader_pid=pid)
+
+        self.add_activation_message(root, path_stem="review-fix-1")
+        again, code = self.run_inbox(
+            root, "--me", "claude", "--session", "SESSION-R1", reader_pid=pid
+        )
+        self.assertEqual(0, code)
+        gate = again["messages"][0]["activation_gate"]
+        self.assertTrue(gate["authorized"])
+        self.assertEqual(1, gate["fence_token"])
+
+    def test_crashed_reader_allows_takeover_by_next_reader(self):
+        """A crashed ephemeral reader (dead bound pid, no release) must not
+        block the lane forever; the next reader takes over with a new fence."""
+        root = self.make_workspace()
+        self.add_activation_message(root, path_stem="activate-1")
+        first, code = self.run_inbox(
+            root, "--me", "claude", "--session", "SESSION-CRASH", reader_pid=self.dead_pid()
+        )
+        self.assertEqual(0, code)
+        self.assertTrue(first["messages"][0]["activation_gate"]["authorized"])
+
+        self.add_activation_message(root, path_stem="review-fix-1")
+        second, code = self.run_inbox(
+            root, "--me", "claude", "--session", "SESSION-NEXT", reader_pid=self.alive_pid()
+        )
+        self.assertEqual(0, code, second)
+        gate2 = second["messages"][0]["activation_gate"]
+        self.assertTrue(gate2["authorized"])
+        self.assertEqual(2, gate2["fence_token"])
+        self.assertEqual("SESSION-CRASH", gate2["lease"]["previous_owner_session_id"])
+
+    def test_late_observer_sees_held_read_only_without_reenqueue(self):
+        """A later Desktop observer of the already-consumed packet (via --all)
+        gets an explicit read-only refusal, exit 75 — the real lifecycle, no
+        unread mutation."""
+        root = self.make_workspace()
+        self.add_activation_message(root, path_stem="activate-1")
+        self.run_inbox(
+            root, "--me", "claude", "--session", "SESSION-R1", reader_pid=self.alive_pid()
+        )
+
+        observer, code = self.run_inbox(
+            root, "--me", "claude", "--all", "--session", "SESSION-R2"
+        )
+        self.assertEqual(75, code)
+        gate = observer["messages"][0]["activation_gate"]
+        self.assertEqual("held_read_only", gate["gate"])
+        self.assertFalse(gate["authorized"])
+        self.assertEqual("SESSION-R1", gate["owner"]["owner_session_id"])
+
+        winner, code = self.run_inbox(
+            root, "--me", "claude", "--all", "--session", "SESSION-R1"
+        )
+        self.assertEqual(0, code)
+        self.assertEqual("peek_owner", winner["messages"][0]["activation_gate"]["gate"])
+
+    def test_peek_reports_unclaimed_without_claiming(self):
         root = self.make_workspace()
         self.add_activation_message(root)
         peeked, code = self.run_inbox(root, "--me", "claude", "--peek")

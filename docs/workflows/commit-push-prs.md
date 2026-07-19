@@ -304,11 +304,13 @@ Use it to distinguish these states:
 - `post_merge`: merge completed; run cleanup and return to queue recovery
 - `queue_empty`: no remaining lane after validation
 
-There should be one queue-runner heartbeat per project loop. Task-specific
-heartbeats are subordinate: create them only for a concrete wait such as Claude
-Desktop, a worker handoff, or a PR, and delete/update them when the main
-queue-runner state moves. Do not leave a stale task heartbeat competing with the
-persistent queue runner.
+Queue-drain persistence is the active Codex goal plus the recorded loop state
+above — there is no persistent queue-runner heartbeat process. Bounded
+purpose-scoped waits (Claude Desktop, a worker handoff, a PR) are subordinate:
+create one only for a concrete wait, name its task/PR, and delete/update it
+when the loop state moves. Do not leave a stale task wait competing with the
+goal-owned loop, and never install a recurring chat-context poller as a wake
+path (see `session-autobridge-runbook.md`).
 ## Post-merge
 
 After merge:

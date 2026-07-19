@@ -227,10 +227,12 @@ finding, and required fix scope. If the wait cannot progress because the
 implementer has not acknowledged, the next heartbeat escalates by doorbell with
 the blocker rather than waiting for operator discovery.
 
-When a persistent queue-runner heartbeat is active, each task-specific wait must
-update `autonomous-loop.json` before it waits and again before it resumes. This
-keeps one authoritative loop state instead of several stale heartbeats making
-conflicting decisions.
+Queue-drain persistence lives in the active Codex goal and
+`autonomous-loop.json`, not in a persistent heartbeat process. Each bounded
+task-specific wait must update `autonomous-loop.json` before it waits and again
+before it resumes, and delete itself when its purpose is served. This keeps one
+authoritative loop state instead of several stale heartbeats making conflicting
+decisions.
 
 ## Release Closure Gate (GH-1524)
 

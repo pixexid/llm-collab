@@ -108,12 +108,26 @@ def publish_runtime_identity(args) -> dict | None:
     return {"discovered": discovered, "session": payload}
 
 
+def activation_reader_pid() -> int:
+    """The reader's process identity for lease binding. Real path: the parent
+    of this short-lived CLI (the Desktop session's shell/runtime process).
+    LLM_COLLAB_READER_PID overrides for tests and for runtimes whose stable
+    process is not the direct parent."""
+    import os
+
+    override = os.environ.get("LLM_COLLAB_READER_PID")
+    if override and override.isdigit():
+        return int(override)
+    return os.getppid()
+
+
 def activation_reader_session_id(args, identity: dict) -> str:
     if args.session:
         return str(args.session)
-    import os
+    return f"SESSION-act-{lease_key(identity)}-p{activation_reader_pid()}"
 
-    return f"SESSION-act-{lease_key(identity)}-p{os.getppid()}"
+
+READER_SESSION_TTL_SECONDS = 6 * 3600
 
 
 def ensure_reader_session(session_id: str, agent_id: str, identity: dict) -> None:
@@ -122,6 +136,12 @@ def ensure_reader_session(session_id: str, agent_id: str, identity: dict) -> Non
         return
     except FileNotFoundError:
         pass
+    from datetime import datetime, timezone
+
+    expires = datetime.fromtimestamp(
+        datetime.now(timezone.utc).timestamp() + READER_SESSION_TTL_SECONDS,
+        tz=timezone.utc,
+    ).isoformat(timespec="seconds")
     save_session(
         {
             "session_id": session_id,
@@ -133,7 +153,8 @@ def ensure_reader_session(session_id: str, agent_id: str, identity: dict) -> Non
             "wake_strategy": "none",
             "allowed_actions": [],
             "lease_owner": agent_id,
-            "lease_expires_utc": None,
+            "lease_expires_utc": expires,
+            "ephemeral_reader": True,
             "runtime": None,
             "supersedes_session_id": None,
             "created_utc": utc_iso(),
@@ -175,14 +196,20 @@ def gate_activation_message(args, msg: dict, *, consume: bool) -> dict | None:
         }
     if not consume:
         lease = load_lease(identity)
-        return {
-            "gate": "peek",
-            "authorized": False,
-            "owner": owner_summary(lease) if lease else None,
-        }
+        if lease is None or lease.get("status") != "active":
+            return {"gate": "peek", "authorized": False, "owner": None}
+        owner = owner_summary(lease)
+        if args.session and args.session == owner.get("owner_session_id"):
+            return {"gate": "peek_owner", "authorized": True, "owner": owner}
+        return {"gate": "held_read_only", "authorized": False, "owner": owner}
     session_id = activation_reader_session_id(args, identity)
     ensure_reader_session(session_id, args.me, identity)
-    authorized, detail = gated_claim(identity, owner_session_id=session_id)
+    authorized, detail = gated_claim(
+        identity,
+        owner_session_id=session_id,
+        owner_pid=activation_reader_pid(),
+        takeover=True,
+    )
     return {
         "gate": "claimed" if authorized else "refused",
         "authorized": authorized,
@@ -198,13 +225,20 @@ def format_activation_banner(gate: dict) -> str:
             f"activation. ({gate['detail']})"
         )
     if gate["gate"] == "peek":
-        owner = gate.get("owner")
-        if owner:
-            return (
-                f"  [activation] current lease owner: {owner.get('owner_session_id')} "
-                f"(fence {owner.get('fence_token')}) — peek only, not claimed"
-            )
         return "  [activation] lease unclaimed — peek only, not claimed"
+    if gate["gate"] == "peek_owner":
+        owner = gate["owner"]
+        return (
+            f"  [activation] you are the writer ({owner.get('owner_session_id')}, "
+            f"fence {owner.get('fence_token')})"
+        )
+    if gate["gate"] == "held_read_only":
+        owner = gate["owner"]
+        return (
+            f"  !! ACTIVATION HELD by {owner.get('owner_session_id')} "
+            f"(fence {owner.get('fence_token')}). You are NOT the writer — HOLD "
+            "READ-ONLY: do not mutate the worktree."
+        )
     if gate["authorized"]:
         return (
             f"  >> ACTIVATION LEASE CLAIMED as {gate['reader_session_id']} "
@@ -318,7 +352,7 @@ def main():
         gate = gate_activation_message(args, msg, consume=consume)
         if gate is not None:
             msg["activation_gate"] = gate
-            if consume and not gate["authorized"]:
+            if gate["gate"] in {"refused", "malformed_activation", "held_read_only"}:
                 activation_refused = True
 
     if args.json_output:

@@ -148,6 +148,16 @@ def build_message(args, body: str, chat_id: str) -> str:
         fm["activation"] = True
         fm["worktree"] = args.worktree
         fm["branch"] = args.branch
+        body = "\n".join(
+            [
+                "> LEASE-GATED ACTIVATION — reading this file directly does NOT authorize writing.",
+                f"> Claim it through the mailbox gate first: `bin/llm-collab inbox.py --me {args.recipient}",
+                "> --session SESSION-<your-stable-session-id>` and act only on a CLAIMED banner.",
+                "> A REFUSED banner (exit 75) means another session is the writer: hold read-only.",
+                "",
+                body or "(no body)",
+            ]
+        )
     if codex_self_target:
         fm["autobridge_skip"] = True
         fm["autobridge_skip_reason"] = "codex_self_target"
@@ -419,11 +429,24 @@ def main():
             sender_id=args.sender,
         )
     )
-    ax_doorbell_prompt = (
-        f"[from {args.sender}] Read latest {args.recipient} packet in {chat_id}: {to_path.name}"
-        if ax_doorbell_required
-        else None
-    )
+    if args.activation:
+        consume_command = (
+            f"bin/llm-collab inbox.py --me {args.recipient} --project {args.project} "
+            f"--session SESSION-<your-stable-session-id>"
+        )
+        ax_doorbell_prompt = (
+            f"[from {args.sender}] ACTIVATION packet in {chat_id} for {args.related_task}. "
+            f"Do NOT open the packet file directly — claim it through the mailbox gate: "
+            f"run `{consume_command}` and act only on a CLAIMED banner."
+            if ax_doorbell_required
+            else None
+        )
+    else:
+        ax_doorbell_prompt = (
+            f"[from {args.sender}] Read latest {args.recipient} packet in {chat_id}: {to_path.name}"
+            if ax_doorbell_required
+            else None
+        )
     ax_attended_recovery_required = (
         args.recipient != "operator"
         and not autobridge_ready

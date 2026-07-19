@@ -131,11 +131,15 @@ CLI worker needs a dispatchable runtime session. Use Computer Use only when
 fallback. Treat `activation_unavailable` as a configuration blocker, record it
 precisely, and do not misreport it as routine operator relay.
 
-There should be one active queue-runner heartbeat for a project loop. A
-task-specific heartbeat may exist only as a child wait for Claude, a worker
-handoff, or a PR review/check state. Child heartbeats must name the current
-task/PR and update or delete themselves when the loop mode changes, so stale
-heartbeats cannot collide with the queue runner.
+Queue-drain persistence is owned by the ACTIVE Codex goal and the recorded
+queue state (`autonomous-loop.json`), not by a recurring heartbeat process:
+the goal-holding thread decides the next pass from recovered state, and no
+standing chat-context poller is created to "keep the loop alive". Bounded,
+purpose-scoped waits (a Claude Desktop reply, a worker handoff, a PR
+review/check state) are separate: each names its current task/PR, is deleted
+or updated the moment its purpose is served, and never becomes a second wake
+path beside the durable mailbox + doorbell (see the one-writer activation
+lease in `session-autobridge-runbook.md`).
 
 ### Design-first lane precedence
 
