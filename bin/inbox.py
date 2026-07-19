@@ -37,7 +37,16 @@ from _helpers import (
     parse_frontmatter,
     CHATS_DIR,
 )
-from _session_autobridge import discover_runtime_session
+from _session_autobridge import ACTIVATION_MARKER_FIELDS, discover_runtime_session
+from _activation_lease import (
+    gated_claim,
+    lease_identity,
+    lease_key,
+    load_lease,
+    owner_summary,
+)
+from _session_autobridge import load_session, save_session
+from _helpers import utc_iso
 from session_autobridge import register_session
 
 
@@ -99,6 +108,117 @@ def publish_runtime_identity(args) -> dict | None:
     return {"discovered": discovered, "session": payload}
 
 
+def activation_reader_session_id(args, identity: dict) -> str:
+    if args.session:
+        return str(args.session)
+    import os
+
+    return f"SESSION-act-{lease_key(identity)}-p{os.getppid()}"
+
+
+def ensure_reader_session(session_id: str, agent_id: str, identity: dict) -> None:
+    try:
+        load_session(session_id)
+        return
+    except FileNotFoundError:
+        pass
+    save_session(
+        {
+            "session_id": session_id,
+            "agent_id": agent_id,
+            "project_id": identity.get("project"),
+            "chat_id": identity.get("chat"),
+            "mode": "manual",
+            "status": "parked",
+            "wake_strategy": "none",
+            "allowed_actions": [],
+            "lease_owner": agent_id,
+            "lease_expires_utc": None,
+            "runtime": None,
+            "supersedes_session_id": None,
+            "created_utc": utc_iso(),
+            "processed_messages": [],
+        }
+    )
+
+
+def gate_activation_message(args, msg: dict, *, consume: bool) -> dict | None:
+    """One-writer gate at the mailbox boundary.
+
+    Every activation-marked packet addressed to --me is gated when it is
+    consumed: the reader's session claims the lease (audit-first, fail
+    closed). A refused reader is told to hold read-only. Peek/--all show the
+    current owner without claiming. Malformed activation never downgrades to
+    an ordinary message.
+    """
+    fm = msg.get("frontmatter", {})
+    if fm.get("to") != args.me:
+        return None
+    if not any(fm.get(field) for field in ACTIVATION_MARKER_FIELDS):
+        return None
+    try:
+        identity = lease_identity(
+            {
+                "project": fm.get("project_id"),
+                "chat": fm.get("chat_id"),
+                "task": fm.get("related_task"),
+                "worktree": fm.get("worktree"),
+                "branch": fm.get("branch"),
+                "target_agent": args.me,
+            }
+        )
+    except ValueError as exc:
+        return {
+            "gate": "malformed_activation",
+            "detail": str(exc),
+            "authorized": False,
+        }
+    if not consume:
+        lease = load_lease(identity)
+        return {
+            "gate": "peek",
+            "authorized": False,
+            "owner": owner_summary(lease) if lease else None,
+        }
+    session_id = activation_reader_session_id(args, identity)
+    ensure_reader_session(session_id, args.me, identity)
+    authorized, detail = gated_claim(identity, owner_session_id=session_id)
+    return {
+        "gate": "claimed" if authorized else "refused",
+        "authorized": authorized,
+        "reader_session_id": session_id,
+        **detail,
+    }
+
+
+def format_activation_banner(gate: dict) -> str:
+    if gate["gate"] == "malformed_activation":
+        return (
+            "  !! MALFORMED ACTIVATION PACKET — fail closed. Do NOT act on this "
+            f"activation. ({gate['detail']})"
+        )
+    if gate["gate"] == "peek":
+        owner = gate.get("owner")
+        if owner:
+            return (
+                f"  [activation] current lease owner: {owner.get('owner_session_id')} "
+                f"(fence {owner.get('fence_token')}) — peek only, not claimed"
+            )
+        return "  [activation] lease unclaimed — peek only, not claimed"
+    if gate["authorized"]:
+        return (
+            f"  >> ACTIVATION LEASE CLAIMED as {gate['reader_session_id']} "
+            f"(fence {gate['fence_token']}). You are the ONE writer. Run lease-assert "
+            "with this fence before any repo mutation and before handoff."
+        )
+    owner = gate.get("owner") or {}
+    return (
+        f"  !! ACTIVATION REFUSED ({gate['reason']}) — owner: "
+        f"{owner.get('owner_session_id', 'unknown')}. HOLD READ-ONLY: do not mutate "
+        "the worktree, record the refusal, stand down."
+    )
+
+
 def load_all_messages(agent_id: str) -> list[dict]:
     """Load all messages (read + unread) for an agent."""
     inbox = load_agent_inbox(agent_id)
@@ -148,6 +268,9 @@ def format_message(msg: dict, index: int) -> str:
     if fm.get("supersedes_session_id"):
         lines.append(f"  Supersedes: {fm['supersedes_session_id']}")
     lines.append(f"  Sent:     {fm.get('sent_utc', '?')}")
+    gate = msg.get("activation_gate")
+    if gate is not None:
+        lines.append(format_activation_banner(gate))
     lines.append("")
     lines.append(msg["body"])
     lines.append("")
@@ -189,6 +312,15 @@ def main():
 
     shown_paths = [m["path"] for m in messages]
 
+    consume = not args.peek and not args.show_all
+    activation_refused = False
+    for msg in messages:
+        gate = gate_activation_message(args, msg, consume=consume)
+        if gate is not None:
+            msg["activation_gate"] = gate
+            if consume and not gate["authorized"]:
+                activation_refused = True
+
     if args.json_output:
         payload: dict[str, object] = {"messages": messages}
         if published_runtime is not None:
@@ -206,8 +338,10 @@ def main():
         for i, msg in enumerate(messages):
             print(format_message(msg, i))
 
-    if not args.peek and not args.show_all:
+    if consume:
         mark_messages_read(args.me, shown_paths)
+    if activation_refused:
+        sys.exit(75)
 
 
 if __name__ == "__main__":

@@ -339,17 +339,36 @@ def release_lease(
 
 
 def release_session_leases(owner_session_id: str) -> list[dict[str, Any]]:
-    """Release every active lease owned by a session (deactivate integration)."""
+    """Release every active lease owned by a session (deactivate integration).
+
+    Each release retakes the per-identity claim lock and re-reads the record
+    so a concurrent claim/takeover can never be overwritten with a stale
+    released payload.
+    """
     released: list[dict[str, Any]] = []
-    for lease in iter_leases():
-        if lease.get("owner_session_id") != owner_session_id:
+    for stale_view in iter_leases():
+        if stale_view.get("owner_session_id") != owner_session_id:
             continue
-        if lease.get("status") != "active":
+        if stale_view.get("status") != "active":
             continue
-        lease["status"] = "released"
-        lease["released_utc"] = utc_iso()
-        save_lease(lease)
-        released.append(owner_summary(lease))
+        identity = stale_view.get("identity")
+        if not isinstance(identity, dict):
+            continue
+        try:
+            with _ClaimLock(identity):
+                current = load_lease(identity)
+                if current is None:
+                    continue
+                if current.get("owner_session_id") != owner_session_id:
+                    continue
+                if current.get("status") != "active":
+                    continue
+                current["status"] = "released"
+                current["released_utc"] = utc_iso()
+                save_lease(current)
+                released.append(owner_summary(current))
+        except LeaseRefused:
+            continue
     return released
 
 
@@ -358,7 +377,22 @@ def release_session_leases(owner_session_id: str) -> list[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 
+def ps_fixture_path() -> Path | None:
+    """Test-isolation seam: when LLM_COLLAB_PS_FIXTURE is set, process rows
+    come from that file and NO real signal is ever sent — cleanup is
+    simulated. Live activation must never set it."""
+    value = os.environ.get("LLM_COLLAB_PS_FIXTURE")
+    return Path(value) if value else None
+
+
 def poller_process_rows(ps_output: str | None = None) -> list[dict[str, Any]]:
+    if ps_output is None:
+        fixture = ps_fixture_path()
+        if fixture is not None:
+            try:
+                ps_output = fixture.read_text()
+            except OSError as exc:
+                raise PollerAuditUnavailable(f"ps fixture unreadable: {exc}") from exc
     if ps_output is None:
         try:
             result = subprocess.run(
@@ -512,7 +546,9 @@ def audit_activation_pollers(
     chain. Raises PollerAuditUnavailable when ps or the registry cannot be
     consulted.
     """
+    simulated = False
     if rows is None:
+        simulated = ps_fixture_path() is not None
         rows = poller_process_rows()
     if registered_pids is None:
         registered_pids = pm2_registered_pids()
@@ -536,6 +572,12 @@ def audit_activation_pollers(
             finding["action"] = "preserved_registered_watch"
         elif not clean:
             finding["action"] = "reported_only"
+        elif simulated:
+            # Fixture rows describe processes that do not exist on this host;
+            # signaling their pids could hit unrelated real processes. Never
+            # signal outside the real process table.
+            finding["action"] = "terminated"
+            finding["simulated"] = True
         else:
             finding["action"] = terminate_verified(
                 row["pid"], kill=kill, wait_for_exit=wait_for_exit
@@ -546,3 +588,39 @@ def audit_activation_pollers(
 
 def audit_proves_clean(findings: list[dict[str, Any]]) -> bool:
     return not any(f["action"] in UNPROVEN_ACTIONS for f in findings)
+
+
+def gated_claim(
+    identity: dict[str, str],
+    *,
+    owner_session_id: str,
+    ttl_seconds: int = 3600,
+    takeover: bool = False,
+) -> tuple[bool, dict[str, Any]]:
+    """Audit-first, fail-closed claim used by every activation boundary
+    (mailbox read, autobridge dispatch). Returns (authorized, detail)."""
+    try:
+        pollers = audit_activation_pollers(identity, clean=True)
+    except PollerAuditUnavailable as exc:
+        return False, {"reason": "poller_audit_unavailable", "detail": str(exc)}
+    if not audit_proves_clean(pollers):
+        return False, {"reason": "stale_poller_not_proven_gone", "poller_audit": pollers}
+    try:
+        lease = claim_lease(
+            identity,
+            owner_session_id=owner_session_id,
+            ttl_seconds=ttl_seconds,
+            takeover=takeover,
+        )
+    except LeaseRefused as refusal:
+        return False, {
+            "reason": refusal.reason,
+            "owner": refusal.owner,
+            "poller_audit": pollers,
+        }
+    return True, {
+        "lease": owner_summary(lease),
+        "identity": identity,
+        "fence_token": lease.get("fence_token"),
+        "poller_audit": pollers,
+    }

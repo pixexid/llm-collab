@@ -80,14 +80,19 @@ def parse_args():
     p.add_argument("--project", required=True, help="project_id this message relates to")
     p.add_argument("--related-task", default=None, help="TASK-id cross-reference")
     p.add_argument(
+        "--activation",
+        action="store_true",
+        help="Mark this packet as a writer ACTIVATION (lease-gated). Requires --related-task, --worktree, and --branch together.",
+    )
+    p.add_argument(
         "--worktree",
         default=None,
-        help="Assigned worktree path for an ACTIVATION packet (with --branch, makes the packet lease-gated)",
+        help="Assigned worktree path (activation packets only; requires --activation)",
     )
     p.add_argument(
         "--branch",
         default=None,
-        help="Assigned branch for an ACTIVATION packet (with --worktree, makes the packet lease-gated)",
+        help="Assigned branch (activation packets only; requires --activation)",
     )
     p.add_argument("--repo-targets", default="", help="Comma-separated repo IDs in scope")
     p.add_argument("--path-targets", default="", help="Comma-separated file/dir paths in scope")
@@ -139,9 +144,9 @@ def build_message(args, body: str, chat_id: str) -> str:
         "path_targets": path_targets,
         "sent_utc": utc_iso(),
     }
-    if args.worktree:
+    if args.activation:
+        fm["activation"] = True
         fm["worktree"] = args.worktree
-    if args.branch:
         fm["branch"] = args.branch
     if codex_self_target:
         fm["autobridge_skip"] = True
@@ -242,6 +247,29 @@ def build_desktop_bridge_prompt(chat_id: str, recipient_id: str, message_path: P
 
 def main():
     args = parse_args()
+    if args.activation:
+        missing = [
+            flag
+            for flag, value in (
+                ("--related-task", args.related_task),
+                ("--worktree", args.worktree),
+                ("--branch", args.branch),
+            )
+            if not value
+        ]
+        if missing:
+            print(
+                f"[error] --activation requires the full activation identity; missing: {', '.join(missing)}",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+    elif args.worktree or args.branch:
+        print(
+            "[error] --worktree/--branch are activation identity fields; pass --activation "
+            "(with --related-task, --worktree, --branch) or drop them",
+            file=sys.stderr,
+        )
+        sys.exit(2)
     thread_coordination_required = is_codex_self_target(args.sender, args.recipient)
 
     # Validate agents

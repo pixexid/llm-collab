@@ -178,6 +178,29 @@ bin/llm-collab deliver.py \
 activated. The mailbox packet is the source of truth; a doorbell is only a wake
 signal.
 
+A packet that ACTIVATES a writer on an assigned worktree must be explicit and
+carries the full one-writer lease identity atomically (delivery fails if any
+part is missing):
+
+```bash
+bin/llm-collab deliver.py \
+  --chat CHAT-... \
+  --from orchestrator \
+  --to worker \
+  --project my-app \
+  --activation \
+  --related-task TASK-... \
+  --worktree /path/to/assigned/worktree \
+  --branch worker/task-branch \
+  --title "ACTIVATE TASK-..." \
+  --body-file brief.md
+```
+
+Reading an activation packet claims the one-writer lease at the mailbox
+boundary (`inbox.py`); a second session reading the same packet is refused
+(exit 75) and must hold read-only. See
+[Session Autobridge Runbook](docs/workflows/session-autobridge-runbook.md).
+
 ## Project boundaries
 
 | Scope | Source | Examples |

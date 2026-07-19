@@ -80,6 +80,12 @@ class WorkspaceTestCase(unittest.TestCase):
         write(pm2_stub, "#!/bin/sh\necho '[]'\n")
         pm2_stub.chmod(pm2_stub.stat().st_mode | stat.S_IEXEC)
         self.pm2_stub = str(pm2_stub)
+        # Isolated process-table fixture: subprocesses must NEVER audit the
+        # host's real ps output (a stubbed registry would misclassify real
+        # registered watchers and kill them).
+        ps_fixture = temp_root / "ps-fixture.txt"
+        write(ps_fixture, "1 0 /sbin/launchd\n")
+        self.ps_fixture = str(ps_fixture)
         # Canonical worktree path that actually exists.
         worktree = temp_root / "worktrees" / "t-test"
         worktree.mkdir(parents=True)
@@ -97,18 +103,22 @@ class WorkspaceTestCase(unittest.TestCase):
             {"agent": agent["id"], "unread": [], "read": []},
         )
 
+    def cli_env(self, env: dict[str, str] | None = None) -> dict[str, str]:
+        return {
+            **os.environ,
+            "LLM_COLLAB_UI_REFRESH": "0",
+            "LLM_COLLAB_PM2_BIN": self.pm2_stub,
+            "LLM_COLLAB_PS_FIXTURE": self.ps_fixture,
+            **(env or {}),
+        }
+
     def run_cli(self, root: Path, *args: str, env: dict[str, str] | None = None) -> tuple[dict, int]:
         result = subprocess.run(
             [sys.executable, str(SCRIPT_PATH), *args, "--json"],
             cwd=root,
             text=True,
             capture_output=True,
-            env={
-                **os.environ,
-                "LLM_COLLAB_UI_REFRESH": "0",
-                "LLM_COLLAB_PM2_BIN": self.pm2_stub,
-                **(env or {}),
-            },
+            env=self.cli_env(env),
             check=False,
         )
         self.assertTrue(result.stdout.strip(), f"no stdout; stderr: {result.stderr}")
@@ -312,6 +322,29 @@ class ActivationLeaseCliTest(WorkspaceTestCase):
         self.assertEqual(75, code)
         self.assertEqual("poller_audit_unavailable", refused["reason"])
 
+    def test_stale_fence_cannot_assert_after_takeover(self):
+        root = self.make_workspace()
+        self.register_session(root, "SESSION-A")
+        self.register_session(root, "SESSION-B")
+        claimed, _ = self.claim(root, "SESSION-A")
+        old_fence = str(claimed["lease"]["fence_token"])
+
+        session_path = (
+            Path(root) / "State" / "session_autobridge" / "sessions" / "SESSION-A.json"
+        )
+        record = json.loads(session_path.read_text())
+        record["status"] = "stopped"
+        session_path.write_text(json.dumps(record))
+        taken, code = self.claim(root, "SESSION-B", "--takeover")
+        self.assertEqual(0, code, taken)
+
+        stale, code = self.run_cli(
+            root, "lease-assert", *identity_args(self.worktree),
+            "--session", "SESSION-A", "--fence-token", old_fence,
+        )
+        self.assertEqual(75, code)
+        self.assertEqual("lease_owned_by_other_session", stale["reason"])
+
     def test_lease_show_reports_owner(self):
         root = self.make_workspace()
         self.register_session(root, "SESSION-A")
@@ -330,26 +363,25 @@ class DispatchActivationGateTest(WorkspaceTestCase):
     activation packet. Removing acquire_activation_lease_for_dispatch from
     dispatch_session makes these tests fail."""
 
-    def add_activation_message(self, root: Path, *, path_stem: str) -> str:
+    def add_activation_message(
+        self, root: Path, *, path_stem: str, omit: tuple[str, ...] = ()
+    ) -> str:
         message_rel = f"Chats/2026-01-01_test__CHAT-TEST0001/{path_stem}.md"
+        fm_lines = [
+            "chat_id: CHAT-TEST0001",
+            "from: codex",
+            "to: claude",
+            "title: ACTIVATE test lane",
+            "project_id: amiga",
+            "activation: true",
+            "related_task: TASK-TEST01",
+            f"worktree: {self.worktree}",
+            "branch: claude/gh-0000-test",
+        ]
+        fm_lines = [l for l in fm_lines if l.split(":")[0] not in omit]
         write(
             root / message_rel,
-            "\n".join(
-                [
-                    "---",
-                    "chat_id: CHAT-TEST0001",
-                    "from: codex",
-                    "to: claude",
-                    "title: ACTIVATE test lane",
-                    "project_id: amiga",
-                    "related_task: TASK-TEST01",
-                    f"worktree: {self.worktree}",
-                    "branch: claude/gh-0000-test",
-                    "---",
-                    "",
-                    "ACTIVATE: one writer only.",
-                ]
-            ),
+            "\n".join(["---", *fm_lines, "---", "", "ACTIVATE: one writer only."]),
         )
         inbox_path = root / "agents" / "claude" / "inbox.json"
         inbox = json.loads(inbox_path.read_text())
@@ -416,6 +448,59 @@ class DispatchActivationGateTest(WorkspaceTestCase):
         again, _ = self.run_cli(root, "dispatch", "--session", "SESSION-B")
         self.assertEqual([], again["actions"])
 
+    def test_dispatch_refuses_malformed_activation_never_downgrades(self):
+        root = self.make_workspace()
+        out_a = root / "out-malformed.txt"
+        self.register_runtime_session(root, "SESSION-A", out_a)
+        self.add_activation_message(root, path_stem="activate-partial", omit=("branch",))
+
+        result, code = self.run_cli(root, "dispatch", "--session", "SESSION-A")
+        self.assertEqual(0, code, result)
+        refusal = result["actions"][0]
+        self.assertEqual("activation_lease_refused", refusal["event"])
+        self.assertEqual(
+            "malformed_activation_packet", refusal["activation_lease"]["reason"]
+        )
+        self.assertFalse(out_a.exists(), "malformed activation must never wake a writer")
+
+    def test_winner_payload_carries_identity_and_fence(self):
+        root = self.make_workspace()
+        out_a = root / "out-payload.json"
+        worker_script = root / "worker-payload.py"
+        write(
+            worker_script,
+            "\n".join(
+                [
+                    "import sys, json",
+                    "from pathlib import Path",
+                    "payload = json.load(sys.stdin)",
+                    f"Path({json.dumps(str(out_a))}).write_text(json.dumps(payload.get('activation_lease')))",
+                ]
+            ),
+        )
+        payload, code = self.run_cli(
+            root,
+            "register",
+            "--session", "SESSION-A",
+            "--agent", "claude",
+            "--project", "amiga",
+            "--chat", "CHAT-TEST0001",
+            "--mode", "auto-read",
+            "--wake-strategy", "runtime_trigger",
+            "--runtime-family", "claude_app",
+            "--runtime-session-id", "runtime-SESSION-A",
+            "--runtime-session-source", "test_fixture",
+            "--runtime-command", json.dumps([sys.executable, str(worker_script)]),
+        )
+        self.assertEqual(0, code, payload)
+        self.add_activation_message(root, path_stem="activate-payload")
+
+        result, code = self.run_cli(root, "dispatch", "--session", "SESSION-A")
+        self.assertEqual(0, code, result)
+        lease_detail = json.loads(out_a.read_text())
+        self.assertEqual(1, lease_detail["fence_token"])
+        self.assertEqual(self.worktree, lease_detail["identity"]["worktree"])
+
     def test_non_activation_messages_are_not_gated(self):
         root = self.make_workspace()
         out_a = root / "out-plain.txt"
@@ -446,6 +531,185 @@ class DispatchActivationGateTest(WorkspaceTestCase):
         self.assertEqual(0, code, result)
         self.assertEqual("message_dispatched", result["actions"][0]["event"])
         self.assertTrue(out_a.exists())
+
+
+class InboxActivationGateTest(WorkspaceTestCase):
+    """The mailbox boundary: the path every Desktop writer crosses. Two
+    readers of one activation packet get exactly one writer."""
+
+    def add_activation_message(self, root: Path) -> str:
+        message_rel = "Chats/2026-01-01_test__CHAT-TEST0001/activate-inbox.md"
+        write(
+            root / message_rel,
+            "\n".join(
+                [
+                    "---",
+                    "chat_id: CHAT-TEST0001",
+                    "from: codex",
+                    "to: claude",
+                    "title: ACTIVATE inbox lane",
+                    "project_id: amiga",
+                    "activation: true",
+                    "related_task: TASK-TEST01",
+                    f"worktree: {self.worktree}",
+                    "branch: claude/gh-0000-test",
+                    "---",
+                    "",
+                    "ACTIVATE via mailbox.",
+                ]
+            ),
+        )
+        inbox_path = root / "agents" / "claude" / "inbox.json"
+        inbox = json.loads(inbox_path.read_text())
+        if message_rel not in inbox["unread"]:
+            inbox["unread"].append(message_rel)
+        inbox["read"] = [p for p in inbox.get("read", []) if p != message_rel]
+        write_json(inbox_path, inbox)
+        return message_rel
+
+    def run_inbox(self, root: Path, *args: str) -> tuple[dict, int]:
+        result = subprocess.run(
+            [sys.executable, str(REPO_ROOT / "bin" / "inbox.py"), *args, "--json"],
+            cwd=root,
+            text=True,
+            capture_output=True,
+            env=self.cli_env(),
+            check=False,
+        )
+        self.assertTrue(result.stdout.strip(), f"no stdout; stderr: {result.stderr}")
+        return json.loads(result.stdout), result.returncode
+
+    def test_two_readers_one_packet_one_writer(self):
+        root = self.make_workspace()
+        self.add_activation_message(root)
+
+        first, code = self.run_inbox(root, "--me", "claude", "--session", "SESSION-R1")
+        self.assertEqual(0, code)
+        gate1 = first["messages"][0]["activation_gate"]
+        self.assertTrue(gate1["authorized"])
+        self.assertEqual("SESSION-R1", gate1["reader_session_id"])
+        self.assertEqual(1, gate1["fence_token"])
+
+        # Second Desktop session observes the same durable packet.
+        self.add_activation_message(root)
+        second, code = self.run_inbox(root, "--me", "claude", "--session", "SESSION-R2")
+        self.assertEqual(75, code, "refused activation read must exit 75")
+        gate2 = second["messages"][0]["activation_gate"]
+        self.assertFalse(gate2["authorized"])
+        self.assertEqual("lease_held_by_active_owner", gate2["reason"])
+        self.assertEqual("SESSION-R1", gate2["owner"]["owner_session_id"])
+
+    def test_peek_reports_owner_without_claiming(self):
+        root = self.make_workspace()
+        self.add_activation_message(root)
+        peeked, code = self.run_inbox(root, "--me", "claude", "--peek")
+        self.assertEqual(0, code)
+        gate = peeked["messages"][0]["activation_gate"]
+        self.assertEqual("peek", gate["gate"])
+        self.assertIsNone(gate["owner"])
+
+        lease_dir = Path(root) / "State" / "session_autobridge" / "activation_leases"
+        self.assertEqual([], list(lease_dir.glob("*.json")), "peek must not claim")
+
+    def test_malformed_activation_fails_closed_at_inbox(self):
+        root = self.make_workspace()
+        message_rel = "Chats/2026-01-01_test__CHAT-TEST0001/activate-broken.md"
+        write(
+            root / message_rel,
+            "\n".join(
+                [
+                    "---",
+                    "chat_id: CHAT-TEST0001",
+                    "from: codex",
+                    "to: claude",
+                    "title: broken activation",
+                    "project_id: amiga",
+                    "activation: true",
+                    "related_task: TASK-TEST01",
+                    "---",
+                    "",
+                    "Missing worktree/branch.",
+                ]
+            ),
+        )
+        inbox_path = root / "agents" / "claude" / "inbox.json"
+        inbox = json.loads(inbox_path.read_text())
+        inbox["unread"].append(message_rel)
+        write_json(inbox_path, inbox)
+
+        shown, code = self.run_inbox(root, "--me", "claude")
+        self.assertEqual(75, code)
+        gate = shown["messages"][0]["activation_gate"]
+        self.assertEqual("malformed_activation", gate["gate"])
+        self.assertFalse(gate["authorized"])
+
+
+class DeliverActivationValidationTest(WorkspaceTestCase):
+    def run_deliver(self, root: Path, *args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, str(REPO_ROOT / "bin" / "deliver.py"), *args],
+            cwd=root,
+            text=True,
+            capture_output=True,
+            env=self.cli_env(),
+            check=False,
+        )
+
+    BASE = [
+        "--chat", "CHAT-TEST0001",
+        "--from", "codex",
+        "--to", "claude",
+        "--project", "amiga",
+        "--title", "x",
+    ]
+
+    def test_activation_requires_full_identity(self):
+        root = self.make_workspace()
+        result = self.run_deliver(
+            root, *self.BASE, "--activation", "--related-task", "TASK-TEST01"
+        )
+        self.assertEqual(2, result.returncode)
+        self.assertIn("--worktree", result.stderr)
+        self.assertIn("--branch", result.stderr)
+
+    def test_partial_identity_without_activation_flag_is_rejected(self):
+        root = self.make_workspace()
+        result = self.run_deliver(root, *self.BASE, "--worktree", "/tmp/x")
+        self.assertEqual(2, result.returncode)
+        self.assertIn("--activation", result.stderr)
+
+
+class TestIsolationGuard(unittest.TestCase):
+    def test_ps_fixture_mode_never_signals_any_pid(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = Path(tmp) / "ps.txt"
+            fixture.write_text(
+                "1 0 /sbin/launchd\n"
+                "555 1 /bin/zsh -c while true; do ls Chats/*CHAT-TEST0001*; done\n"
+            )
+            old_leases = lease_lib.ACTIVATION_LEASES_DIR
+            lease_lib.ACTIVATION_LEASES_DIR = Path(tmp) / "leases"
+
+            def forbidden_kill(pid: int, sig: int) -> None:
+                raise AssertionError(f"test signaled real pid {pid}")
+
+            old_kill = os.kill
+            os.environ["LLM_COLLAB_PS_FIXTURE"] = str(fixture)
+            os.kill = forbidden_kill  # any signal attempt fails the test
+            try:
+                findings = lease_lib.audit_activation_pollers(
+                    identity_dict("/tmp/worktrees/claude/t-test"),
+                    registered_pids=set(),
+                    clean=True,
+                    self_pid=99998,
+                )
+            finally:
+                os.kill = old_kill
+                del os.environ["LLM_COLLAB_PS_FIXTURE"]
+                lease_lib.ACTIVATION_LEASES_DIR = old_leases
+            actions = {f["pid"]: f for f in findings}
+            self.assertEqual("terminated", actions[555]["action"])
+            self.assertTrue(actions[555]["simulated"])
 
 
 class PollerAuditTest(unittest.TestCase):

@@ -62,11 +62,23 @@ checkout hit the same lease). This is an extension of the existing
 - owner liveness derives from that session record (plus the optionally
   recorded `--owner-pid`);
 - `deactivate` releases the session's activation leases;
-- `dispatch_session` enforces the gate automatically: an activation-shaped
-  packet (frontmatter `related_task` + `worktree` + `branch`, produced by
-  `deliver.py --related-task ... --worktree ... --branch ...`) can only wake
-  a session that holds (or can claim) the lease. A second matching session
-  records `activation_lease_refused`, is held read-only, and is never woken.
+- **the mailbox boundary is gated**: activation packets are explicit
+  (`deliver.py --activation --related-task --worktree --branch`, all four
+  atomically or delivery fails; `--worktree`/`--branch` without
+  `--activation` also fail). When `inbox.py` CONSUMES an activation packet
+  addressed to `--me`, the reader session (pass `--session`, or an ephemeral
+  reader session is registered) claims the lease audit-first. The first
+  reader becomes the one writer and sees its fence token; every later reader
+  gets a refusal banner, `activation_gate.authorized: false`, and exit 75 —
+  hold read-only, record the refusal, stand down. `--peek` shows the current
+  owner without claiming. A malformed/partial activation packet fails closed
+  at read time; it never downgrades to an ordinary message.
+- `dispatch_session` enforces the same gate on the automated wake path: only
+  the session that holds (or can claim) the lease is woken; a second matching
+  session records `activation_lease_refused` and is never woken. The winner's
+  runtime payload and resume prompt carry the activation identity and
+  `fence_token`, and instruct the worker to `lease-assert` before mutations
+  and before handoff.
 
 Manual claim before mutating an assigned worktree (register the session
 first — see "Activate A Session"):

@@ -630,6 +630,7 @@ def build_runtime_payload(session: dict, message: dict) -> dict[str, Any]:
             "supersedes_session_id": fm.get("supersedes_session_id"),
             "body": message.get("body", ""),
         },
+        "activation_lease": message.get("activation_lease"),
     }
 
 
@@ -648,6 +649,23 @@ def build_resume_prompt(session: dict, message: dict) -> str:
         f"chat_id: {fm.get('chat_id', '')}",
         f"project_id: {fm.get('project_id', '')}",
         f"title: {fm.get('title', '')}",
+    ]
+    lease_detail = message.get("activation_lease")
+    if isinstance(lease_detail, dict) and lease_detail.get("fence_token") is not None:
+        identity = lease_detail.get("identity") or {}
+        lines += [
+            "",
+            "ACTIVATION LEASE (you are the one writer for this identity):",
+            f"worktree: {identity.get('worktree', '')}",
+            f"branch: {identity.get('branch', '')}",
+            f"task: {identity.get('task', '')}",
+            f"fence_token: {lease_detail['fence_token']}",
+            "Before ANY repository mutation, and again before handoff, run",
+            "`session_autobridge.py lease-assert` with this identity, your session id,",
+            "and this fence token; a refusal (exit 75) means your authority is stale —",
+            "stop writing immediately.",
+        ]
+    lines += [
         "",
         "Message body:",
         body or "(no body)",
@@ -1609,24 +1627,40 @@ def create_relay_prompt(session: dict, message: dict) -> dict[str, Any]:
     return {"prompt_path": str(prompt_path.relative_to(ROOT)), "prompt": prompt}
 
 
+ACTIVATION_MARKER_FIELDS = ("activation", "worktree", "branch")
+
+
+class MalformedActivation(Exception):
+    pass
+
+
 def activation_identity_from_message(session: dict, message: dict) -> dict[str, str] | None:
-    """Exact activation identity when the packet is activation-shaped
-    (related_task + worktree + branch in frontmatter), else None."""
+    """Exact activation identity for an activation packet.
+
+    Returns None only for an ordinary packet with NO activation markers.
+    A packet carrying any activation marker (`activation`, `worktree`,
+    `branch`) that does not form a complete valid identity raises
+    MalformedActivation — partial activation fails closed, it never
+    downgrades to an ungated ordinary message.
+    """
     fm = message.get("frontmatter", {})
-    if not (fm.get("related_task") and fm.get("worktree") and fm.get("branch")):
+    if not any(fm.get(field) for field in ACTIVATION_MARKER_FIELDS):
         return None
     from _activation_lease import lease_identity
 
-    return lease_identity(
-        {
-            "project": fm.get("project_id") or session.get("project_id"),
-            "chat": fm.get("chat_id") or session.get("chat_id"),
-            "task": fm.get("related_task"),
-            "worktree": fm.get("worktree"),
-            "branch": fm.get("branch"),
-            "target_agent": session.get("agent_id"),
-        }
-    )
+    try:
+        return lease_identity(
+            {
+                "project": fm.get("project_id") or session.get("project_id"),
+                "chat": fm.get("chat_id") or session.get("chat_id"),
+                "task": fm.get("related_task"),
+                "worktree": fm.get("worktree"),
+                "branch": fm.get("branch"),
+                "target_agent": session.get("agent_id"),
+            }
+        )
+    except ValueError as exc:
+        raise MalformedActivation(str(exc)) from exc
 
 
 def acquire_activation_lease_for_dispatch(
@@ -1638,36 +1672,15 @@ def acquire_activation_lease_for_dispatch(
     activation identity, the audit could not prove stale pollers gone, or the
     identity is malformed — the caller must not wake a writer.
     """
-    from _activation_lease import (
-        LeaseRefused,
-        PollerAuditUnavailable,
-        audit_activation_pollers,
-        audit_proves_clean,
-        claim_lease,
-        owner_summary,
-    )
+    from _activation_lease import gated_claim
 
     try:
         identity = activation_identity_from_message(session, message)
-    except ValueError as exc:
-        return False, {"reason": "invalid_activation_identity", "detail": str(exc)}
+    except MalformedActivation as exc:
+        return False, {"reason": "malformed_activation_packet", "detail": str(exc)}
     if identity is None:
         return True, None
-    try:
-        pollers = audit_activation_pollers(identity, clean=True)
-    except PollerAuditUnavailable as exc:
-        return False, {"reason": "poller_audit_unavailable", "detail": str(exc)}
-    if not audit_proves_clean(pollers):
-        return False, {"reason": "stale_poller_not_proven_gone", "poller_audit": pollers}
-    try:
-        lease = claim_lease(identity, owner_session_id=str(session["session_id"]))
-    except LeaseRefused as refusal:
-        return False, {
-            "reason": refusal.reason,
-            "owner": refusal.owner,
-            "poller_audit": pollers,
-        }
-    return True, {"lease": owner_summary(lease), "poller_audit": pollers}
+    return gated_claim(identity, owner_session_id=str(session["session_id"]))
 
 
 def dispatch_session(session_id: str) -> dict[str, Any]:
@@ -1739,6 +1752,7 @@ def dispatch_session(session_id: str) -> dict[str, Any]:
             allowed, lease_detail = acquire_activation_lease_for_dispatch(session, message)
             if lease_detail is not None:
                 event["activation_lease"] = lease_detail
+                message["activation_lease"] = lease_detail
             if not allowed:
                 event["event"] = "activation_lease_refused"
                 event["effective_action"] = "held_read_only"
