@@ -407,9 +407,9 @@ without that config fails closed with exit 64.
   earlier SHA never satisfies this merge's closure, no matter how green.
 - **Only the automatic run counts**: the project's configured
   `release_closure.trigger_event` on its configured `default_branch_base`
-  (Amiga: `push` on `main`). A same-SHA `workflow_dispatch` (or any other
-  event/branch) run is a manual intervention and never satisfies — or
-  supersedes — the automatic run's outcome.
+  (Amiga: `push` on `main`). A same-SHA run under any different event or
+  branch is non-authoritative and never satisfies — or supersedes — the
+  configured automatic run's outcome.
 - **Success = deploy AND post-deploy smoke terminal success** for that exact
   SHA, proven by POSITIVE evidence: every job named in the project's
   `release_closure.required_jobs` present and successful (a skipped required
