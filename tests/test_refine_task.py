@@ -74,10 +74,18 @@ class CanonicalTaskSectionValidationTest(unittest.TestCase):
     def test_plan_task_uses_the_same_validation_entrypoint(self) -> None:
         self.assertIs(plan_task.main, refine_task.main)
 
-    def test_skip_refinement_bypasses_all_body_validation(self) -> None:
-        errors = refine_task.validate_refinement({"skip_refinement": True}, "")
+    def test_skip_refinement_bypasses_only_for_normalized_true(self) -> None:
+        for value in (True, "true"):
+            with self.subTest(value=value):
+                self.assertEqual(
+                    [],
+                    refine_task.validate_refinement({"skip_refinement": value}, ""),
+                )
 
-        self.assertEqual([], errors)
+        for value in (False, "false"):
+            with self.subTest(value=value):
+                errors = refine_task.validate_refinement({"skip_refinement": value}, "")
+                self.assertIn("missing canonical section: ## Summary", errors)
 
     def test_rejects_missing_canonical_sections(self) -> None:
         body = task_body().replace("## Verification Plan", "## Testing")
@@ -122,6 +130,54 @@ class CanonicalTaskSectionValidationTest(unittest.TestCase):
                 errors = refine_task.validate_refinement({}, duplicated)
                 self.assertIn(f"duplicate canonical section: {heading} (found 2)", errors)
 
+    def test_ignores_commented_and_fenced_duplicate_canonical_sections(self) -> None:
+        for heading in refine_task.CANONICAL_SECTIONS:
+            for artifact in (
+                f"<!--\n{heading}\n\nCommented example.\n-->",
+                f"```markdown\n{heading}\n\nFenced example.\n```",
+                f"~~~~\n{heading}\n\nFenced example.\n~~~~",
+            ):
+                with self.subTest(heading=heading, artifact=artifact):
+                    body = task_body(extra=artifact)
+                    self.assertEqual([], refine_task.validate_refinement({}, body))
+
+    def test_commented_and_fenced_headings_cannot_satisfy_missing_sections(self) -> None:
+        for heading in refine_task.CANONICAL_SECTIONS:
+            for replacement in (
+                f"<!-- {heading} -->",
+                f"```markdown\n{heading}\n```",
+            ):
+                with self.subTest(heading=heading, replacement=replacement):
+                    body = task_body().replace(heading, replacement, 1)
+                    errors = refine_task.validate_refinement({}, body)
+                    self.assertIn(f"missing canonical section: {heading}", errors)
+
+    def test_accepts_real_content_with_inline_code_and_comments(self) -> None:
+        values = {
+            **RISK_VALUES,
+            "Current file/topology reviewed:": (
+                "Inspect `bin/refine_task.py` <!-- internal note --> on current main."
+            ),
+        }
+        body = task_body(
+            summary="Treat `## Summary` as inline code <!-- hidden note --> within real prose.",
+            risk_values=values,
+        )
+
+        self.assertEqual([], refine_task.validate_refinement({}, body))
+
+    def test_fence_content_does_not_start_an_html_comment_outside_the_fence(self) -> None:
+        body = task_body(summary="```\n<!--\n```\nReal summary remains visible.")
+
+        self.assertEqual([], refine_task.validate_refinement({}, body))
+
+    def test_rejects_fenced_only_section_content(self) -> None:
+        body = task_body(summary="```markdown\nExample text is not task content.\n```")
+
+        errors = refine_task.validate_refinement({}, body)
+
+        self.assertIn("empty or placeholder-only canonical section: ## Summary", errors)
+
     def test_rejects_structurally_truncated_body(self) -> None:
         body = task_body().split("## Implementation Risk Analysis", 1)[0]
 
@@ -138,6 +194,21 @@ class RiskAnalysisValueValidationTest(unittest.TestCase):
                 errors = refine_task.validate_refinement({}, task_body(risk_values=values))
                 self.assertIn(f"missing risk-analysis label: {label}", errors)
 
+    def test_commented_and_fenced_labels_cannot_satisfy_missing_values(self) -> None:
+        for label in refine_task.RISK_REQUIRED_LABELS:
+            values = {key: value for key, value in RISK_VALUES.items() if key != label}
+            for artifact in (
+                f"<!-- - {label} none -->",
+                f"```\n- {label} none\n```",
+                f"~~~text\n- {label} none\n~~~",
+            ):
+                with self.subTest(label=label, artifact=artifact):
+                    errors = refine_task.validate_refinement(
+                        {},
+                        task_body(risk_values=values, extra=artifact),
+                    )
+                    self.assertIn(f"missing risk-analysis label: {label}", errors)
+
     def test_rejects_each_absent_or_placeholder_only_required_value(self) -> None:
         for label in refine_task.RISK_REQUIRED_LABELS:
             for value in ("", "(required before refinement)", "placeholder"):
@@ -145,6 +216,20 @@ class RiskAnalysisValueValidationTest(unittest.TestCase):
                     values = {**RISK_VALUES, label: value}
                     errors = refine_task.validate_refinement({}, task_body(risk_values=values))
                     self.assertIn(f"unresolved risk-analysis value: {label}", errors)
+
+    def test_rejects_checkbox_and_markdown_artifact_only_required_values(self) -> None:
+        label = "Open decisions/blockers:"
+        for value in ("- [ ]", "- [x]", "-", "**", "_", "` `"):
+            with self.subTest(value=value):
+                values = {**RISK_VALUES, label: value}
+                errors = refine_task.validate_refinement({}, task_body(risk_values=values))
+                self.assertIn(f"unresolved risk-analysis value: {label}", errors)
+
+    def test_accepts_checkbox_prefixed_substantive_required_value(self) -> None:
+        label = "Open decisions/blockers:"
+        values = {**RISK_VALUES, label: "- [ ] Confirm the final reviewer."}
+
+        self.assertEqual([], refine_task.validate_refinement({}, task_body(risk_values=values)))
 
     def test_does_not_reject_real_value_that_mentions_placeholder(self) -> None:
         values = {

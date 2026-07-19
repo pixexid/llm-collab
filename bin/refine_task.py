@@ -79,6 +79,71 @@ def parse_args():
     return p.parse_args()
 
 
+def _mask_non_newline_characters(value: str) -> str:
+    return re.sub(r"[^\r\n]", " ", value)
+
+
+def _mask_nonrendered_markdown(value: str) -> str:
+    lines = []
+    fence_character = None
+    fence_length = 0
+    in_comment = False
+    for line in value.splitlines(keepends=True):
+        content = line.rstrip("\r\n")
+        if fence_character is not None:
+            lines.append(_mask_non_newline_characters(line))
+            if re.fullmatch(
+                rf" {{0,3}}{re.escape(fence_character)}{{{fence_length},}}[ \t]*",
+                content,
+            ):
+                fence_character = None
+                fence_length = 0
+            continue
+
+        if not in_comment:
+            opening = re.match(r" {0,3}(?P<fence>`{3,}|~{3,})", content)
+            if opening:
+                fence = opening.group("fence")
+                fence_character = fence[0]
+                fence_length = len(fence)
+                lines.append(_mask_non_newline_characters(line))
+                continue
+
+        masked_line = list(line)
+        cursor = 0
+        while cursor < len(line):
+            if in_comment:
+                comment_end = line.find("-->", cursor)
+                if comment_end < 0:
+                    for index in range(cursor, len(line)):
+                        if line[index] not in "\r\n":
+                            masked_line[index] = " "
+                    break
+                for index in range(cursor, comment_end + 3):
+                    if line[index] not in "\r\n":
+                        masked_line[index] = " "
+                cursor = comment_end + 3
+                in_comment = False
+                continue
+
+            comment_start = line.find("<!--", cursor)
+            if comment_start < 0:
+                break
+            comment_end = line.find("-->", comment_start + 4)
+            if comment_end < 0:
+                for index in range(comment_start, len(line)):
+                    if line[index] not in "\r\n":
+                        masked_line[index] = " "
+                in_comment = True
+                break
+            for index in range(comment_start, comment_end + 3):
+                if line[index] not in "\r\n":
+                    masked_line[index] = " "
+            cursor = comment_end + 3
+        lines.append("".join(masked_line))
+    return "".join(lines)
+
+
 def _section_matches(body: str, heading: str) -> list[re.Match]:
     return list(
         re.finditer(
@@ -95,23 +160,30 @@ def _section_body(body: str, heading_match: re.Match) -> str:
     return body[heading_match.end() : end]
 
 
+def _strip_markdown_artifacts(value: str) -> str:
+    line = value.strip()
+    line = re.sub(r"^(?:>\s*)+", "", line)
+    line = re.sub(r"^(?:[-*+]\s*)?", "", line)
+    line = re.sub(r"^\[(?: |x|X)\]\s*", "", line)
+    return line.strip().strip("*_`~#>[](){}|\\-+.!").strip()
+
+
 def _content_lines(section: str) -> list[str]:
-    without_comments = re.sub(r"<!--.*?-->", "", section, flags=re.DOTALL)
     content = []
-    for raw_line in without_comments.splitlines():
-        line = raw_line.strip()
-        line = re.sub(r"^(?:[-*+]\s*)?", "", line)
-        line = re.sub(r"^\[(?: |x|X)\]\s*", "", line)
-        line = line.strip().strip("*_`").strip()
+    for raw_line in _mask_nonrendered_markdown(section).splitlines():
+        line = _strip_markdown_artifacts(raw_line)
         if line:
             content.append(line)
     return content
 
 
 def _is_placeholder_only(value: str) -> bool:
-    normalized = re.sub(r"\s+", " ", value.strip()).casefold()
-    normalized = normalized.strip("*_`").strip()
-    return normalized in {placeholder.casefold() for placeholder in SECTION_PLACEHOLDERS}
+    normalized = re.sub(r"\s+", " ", _strip_markdown_artifacts(value)).casefold()
+    placeholders = {
+        re.sub(r"\s+", " ", _strip_markdown_artifacts(placeholder)).casefold()
+        for placeholder in SECTION_PLACEHOLDERS
+    }
+    return normalized in placeholders
 
 
 def _has_substantive_content(section: str) -> bool:
@@ -122,15 +194,16 @@ def _has_substantive_content(section: str) -> bool:
 def validate_canonical_task_sections(body: str) -> list[str]:
     errors = []
     sections = {}
+    visible_body = _mask_nonrendered_markdown(body)
     for heading in CANONICAL_SECTIONS:
-        matches = _section_matches(body, heading)
+        matches = _section_matches(visible_body, heading)
         if not matches:
             errors.append(f"missing canonical section: {heading}")
             continue
         if len(matches) > 1:
             errors.append(f"duplicate canonical section: {heading} (found {len(matches)})")
             continue
-        sections[heading] = _section_body(body, matches[0])
+        sections[heading] = _section_body(visible_body, matches[0])
 
     for heading in (SUMMARY_SECTION, ACCEPTANCE_CRITERIA_SECTION, VERIFICATION_PLAN_SECTION):
         section = sections.get(heading)
@@ -140,9 +213,10 @@ def validate_canonical_task_sections(body: str) -> list[str]:
 
 
 def validate_implementation_risk_analysis(body):
+    visible_body = _mask_nonrendered_markdown(body)
     match = re.search(
         rf"^{re.escape(RISK_SECTION)}\s*(?P<section>.*?)(?=^##\s|\Z)",
-        body,
+        visible_body,
         flags=re.MULTILINE | re.DOTALL,
     )
     if not match:
@@ -156,7 +230,7 @@ def validate_implementation_risk_analysis(body):
             continue
         label_match = re.search(rf"^[^\n]*{re.escape(label)}[ \t]*(?P<value>[^\n]*)$", section, flags=re.MULTILINE)
         value = label_match.group("value").strip() if label_match else ""
-        if not value or _is_placeholder_only(value):
+        if not _has_substantive_content(value):
             errors.append(f"unresolved risk-analysis value: {label}")
     return errors
 
@@ -172,6 +246,10 @@ def _normalize_bool(value):
     if raw in {"false", "no", "0"}:
         return False
     return None
+
+
+def _skip_refinement_enabled(frontmatter) -> bool:
+    return _normalize_bool(frontmatter.get("skip_refinement")) is True
 
 
 def _normalize_text(value) -> str:
@@ -204,9 +282,10 @@ def validate_design_thinking_refinement(frontmatter, body):
     if _normalize_text(frontmatter.get("ui_ux_mode")) != "implementation":
         return []
 
+    visible_body = _mask_nonrendered_markdown(body)
     match = re.search(
         rf"^{re.escape(RISK_SECTION)}\s*(?P<section>.*?)(?=^##\s|\Z)",
-        body,
+        visible_body,
         flags=re.MULTILINE | re.DOTALL,
     )
     section = match.group("section") if match else ""
@@ -234,7 +313,7 @@ def validate_design_thinking_refinement(frontmatter, body):
 
 
 def validate_refinement(frontmatter, body):
-    if frontmatter.get("skip_refinement", False):
+    if _skip_refinement_enabled(frontmatter):
         return []
 
     errors = validate_canonical_task_sections(body)
@@ -254,7 +333,7 @@ def main():
     content = task_file.read_text()
     fm, body = parse_frontmatter(content)
 
-    if fm.get("skip_refinement", False):
+    if _skip_refinement_enabled(fm):
         print(
             json.dumps(
                 {
