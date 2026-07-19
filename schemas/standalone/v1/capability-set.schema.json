@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://llm-collab.dev/schemas/standalone/v1/capability-set.schema.json",
   "title": "CapabilitySetV1",
-  "description": "Capability quality is a ceiling. Duplicate capability identities are invalid even when their remaining fields differ.",
+  "description": "Capability quality is a ceiling. Every best-effort or authoritative capability requires exact adapter-bound attestation evidence; authoritative capabilities additionally require constraints, while unsupported capabilities forbid both. Duplicate capability identities are invalid even when their remaining fields differ.",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "workspace_id", "scope", "capability_set_id", "revision", "capabilities"],
@@ -70,8 +70,12 @@
           "then": {"not": {"anyOf": [{"required": ["constraints"]}, {"required": ["evidence"]}]}}
         },
         {
+          "if": {"properties": {"quality": {"enum": ["best_effort", "authoritative"]}}, "required": ["quality"]},
+          "then": {"required": ["evidence"]}
+        },
+        {
           "if": {"properties": {"quality": {"const": "authoritative"}}, "required": ["quality"]},
-          "then": {"required": ["constraints", "evidence"]}
+          "then": {"required": ["constraints"]}
         }
       ]
     },

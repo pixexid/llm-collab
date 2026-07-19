@@ -35,10 +35,10 @@
     "token": {"type": "string", "pattern": "^(?!.*[\\u0000-\\u001f\\u007f\\u0085\\u2028\\u2029])[A-Za-z][A-Za-z0-9._-]{0,127}$"},
     "workspaceId": {"type": "string", "pattern": "^(?!.*[\\u0000-\\u001f\\u007f\\u0085\\u2028\\u2029])ws_[A-Za-z0-9][A-Za-z0-9_-]{2,127}$"},
     "identityString": {
-      "description": "Serialized current-v2 canonical identity value. It is already trimmed and must round-trip through the current Python YAML-lite frontmatter parser as the same string: case-insensitive true/false/null, bracketed forms, and Python-int lexical forms that the current bounded int conversion actually coerces are invalid; over-limit integer-looking text remains a string and is valid.",
+      "description": "Serialized standalone import of a current-v2 identity value. It is already trimmed and takes the portable fail-closed subset of the current Python YAML-lite frontmatter contract: explicit-case true/false/null, bracketed forms, and every signed or unsigned ASCII integer lexical form with valid single underscores are invalid regardless of digit count or PYTHONINTMAXSTRDIGITS. Catalog-aware semantic validation additionally rejects equivalent Unicode decimal integer lexical forms that JSON Schema cannot express portably. This compatibility import does not change the current runtime helper.",
       "type": "string",
       "minLength": 1,
-      "pattern": "^(?!\\s)(?!.*\\s$)(?!(?i:true|false|null)$)(?![+-]?\\d(?:_?\\d){0,4299}$)(?!\\[.*\\]$)(?!.*[\\u0000-\\u001f\\u007f\\u0085\\u2028\\u2029\\ud800-\\udfff]).+$"
+      "pattern": "^(?!\\s)(?!.*\\s$)(?!(?:[Tt][Rr][Uu][Ee]|[Ff][Aa][Ll][Ss][Ee]|[Nn][Uu][Ll][Ll])$)(?![+-]?[0-9](?:_?[0-9])*$)(?!\\[.*\\]$)(?!.*[\\u0000-\\u001f\\u007f\\u0085\\u2028\\u2029\\ud800-\\udfff]).+$"
     },
     "activationPath": {
       "description": "Current-v2 lease_identity lexical path: absolute POSIX spelling, including root '/', with no double-leading slash, duplicate separator, dot/dotdot segment, or non-root trailing separator.",

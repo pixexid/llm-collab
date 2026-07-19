@@ -594,6 +594,9 @@ def activation_error(
             return "activation_shape"
         if any(not isinstance(packet[field], str) for field in (*ACTIVATION_FIELDS, "to")):
             return "activation_identity_type"
+        for field in (*ACTIVATION_FIELDS, "to"):
+            if field != "worktree" and is_decimal_integer_lexical(packet[field]):
+                return f"activation_noncanonical_serialized:{field}"
         identity = lease_identity(packet)
         for field in ACTIVATION_FIELDS:
             if identity[field] != packet[field]:
@@ -616,6 +619,26 @@ def activation_error(
     except (KeyError, TypeError, ValueError):
         return "activation_malformed"
     return None
+
+
+def is_decimal_integer_lexical(value):
+    """Recognize signed Unicode-decimal integer text with single underscores."""
+    if not isinstance(value, str):
+        return False
+    body = value[1:] if value.startswith(("+", "-")) else value
+    if not body:
+        return False
+    needs_digit = True
+    for character in body:
+        if character == "_":
+            if needs_digit:
+                return False
+            needs_digit = True
+        elif character.isdecimal():
+            needs_digit = False
+        else:
+            return False
+    return not needs_digit
 
 
 FORBIDDEN_PAYLOAD_KEYS = {
@@ -649,9 +672,9 @@ FORBIDDEN_PAYLOAD_KEYS = {
 
 
 def normalize_payload_key(key):
-    normalized = re.sub(r"(?<=[A-Z])(?=[A-Z][a-z])", "_", key)
+    normalized = unicodedata.normalize("NFKC", key)
+    normalized = re.sub(r"(?<=[A-Z])(?=[A-Z][a-z])", "_", normalized)
     normalized = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", normalized)
-    normalized = unicodedata.normalize("NFKC", normalized)
     normalized = normalized.casefold()
     return re.sub(r"[\W_]+", "_", normalized).strip("_")
 
@@ -930,10 +953,17 @@ def capability_set_error(capability_set):
         if len(identities) != len(set(identities)):
             return "duplicate_capability_identity"
         for capability in capability_set["capabilities"]:
-            if capability["quality"] == "unsupported" and (
+            quality = capability["quality"]
+            constraints = capability.get("constraints")
+            evidence = capability.get("evidence")
+            if quality == "unsupported" and (
                 "constraints" in capability or "evidence" in capability
             ):
                 return "unsupported_positive_claim"
+            if quality != "unsupported" and not isinstance(evidence, dict):
+                return "capability_attestation"
+            if quality == "authoritative" and not isinstance(constraints, dict):
+                return "capability_attestation"
     except (KeyError, TypeError):
         return "capability_set_malformed"
     return None
@@ -982,16 +1012,15 @@ def capability_profile_error(
     if constraints is not None and not isinstance(constraints, dict):
         return "capability_constraints"
     evidence = capability.get("evidence")
-    if capability_quality == "authoritative" and (
-        not isinstance(constraints, dict) or not isinstance(evidence, dict)
+    if not isinstance(evidence, dict) or (
+        capability_quality == "authoritative" and not isinstance(constraints, dict)
     ):
         return "capability_attestation"
-    if evidence is not None:
-        if not isinstance(evidence, dict) or (
-            evidence.get("source_id"),
-            evidence.get("source_revision"),
-        ) != adapter_key:
-            return "capability_attestation"
+    if (
+        evidence.get("source_id"),
+        evidence.get("source_revision"),
+    ) != adapter_key:
+        return "capability_attestation"
     return None
 
 
@@ -1660,7 +1689,6 @@ def make_best_effort_graph(record_kind, state, *, workspace_capability=False):
         {
             "capability": "adapter_observation",
             "quality": "best_effort",
-            "constraints": {"access_mode": "observe_only"},
             "evidence": {
                 "evidence_kind": "profile_attestation",
                 "source_id": "native_adapter",
@@ -2081,7 +2109,6 @@ class StandaloneContractSchemaTest(unittest.TestCase):
         parity_values = (
             "ordinary-text",
             "x" * 2049,
-            "9" * 5000,
             "true",
             "FALSE",
             "null",
@@ -2106,6 +2133,59 @@ class StandaloneContractSchemaTest(unittest.TestCase):
                 helper_accepts = helper_accepts_serialized(field, value)
                 with self.subTest(field=field, value=repr(value)):
                     self.assertEqual(schema_accepts, helper_accepts)
+
+        identity_pattern = SCHEMAS["MessageV1"]["$defs"]["identityString"][
+            "pattern"
+        ]
+        self.assertNotIn("(?i", identity_pattern)
+        self.assertIn("[Tt][Rr][Uu][Ee]", identity_pattern)
+        self.assertIn("[Ff][Aa][Ll][Ss][Ee]", identity_pattern)
+        self.assertIn("[Nn][Uu][Ll][Ll]", identity_pattern)
+
+        for digit_count in (3, 4300, 4301, 5000):
+            for digit_kind, digit in (
+                ("ascii", "9"),
+                ("unicode_decimal", "\u0669"),
+            ):
+                digits = digit * digit_count
+                for sign in ("", "+", "-"):
+                    for underscored in (False, True):
+                        body = "_".join(digits) if underscored else digits
+                        value = sign + body
+                        candidate = copy.deepcopy(message)
+                        candidate["activation_import"]["branch"] = value
+                        with self.subTest(
+                            digit_count=digit_count,
+                            digit_kind=digit_kind,
+                            sign=sign or "unsigned",
+                            underscored=underscored,
+                        ):
+                            self.assertTrue(is_decimal_integer_lexical(value))
+                            if digit_kind == "ascii":
+                                self.assert_schema_rejects(
+                                    "MessageV1",
+                                    candidate,
+                                    "ASCII integer lexical identity",
+                                )
+                            else:
+                                self.assertEqual(
+                                    self.errors("MessageV1", candidate),
+                                    [],
+                                    "portable schema intentionally leaves Unicode "
+                                    "decimal classification to the semantic gate",
+                                )
+                            self.assertEqual(
+                                activation_error(candidate, expected, "codex"),
+                                "activation_noncanonical_serialized:branch",
+                            )
+
+        for value in ("1__2", "_12", "12_", "+_12", "-"):
+            candidate = copy.deepcopy(message)
+            candidate["activation_import"]["branch"] = value
+            with self.subTest(non_integer_lexical=value):
+                self.assertFalse(is_decimal_integer_lexical(value))
+                self.assertEqual(self.errors("MessageV1", candidate), [])
+                self.assertTrue(frontmatter_roundtrips(value))
         with self.assertRaises(ValueError):
             normalized_identity_field("task", "   ")
         malformed = load(FIXTURE_DIR / "invalid" / "message.json")
@@ -2253,6 +2333,59 @@ class StandaloneContractSchemaTest(unittest.TestCase):
                         )
 
         for record_kind in ("DeliveryV1", "ReceiptV1"):
+            for workspace_capability in (False, True):
+                (
+                    candidate_workspace,
+                    candidate_records,
+                    candidate_catalog,
+                ) = make_best_effort_graph(
+                    record_kind,
+                    "ambiguous",
+                    workspace_capability=workspace_capability,
+                )
+                graph = by_kind(candidate_records)
+                capability_set = graph["CapabilitySetV1"]
+                capability = next(
+                    item
+                    for item in capability_set["capabilities"]
+                    if item["capability"] == "adapter_observation"
+                )
+                capability.pop("evidence")
+                with self.subTest(
+                    record_kind=record_kind,
+                    missing_attestation=True,
+                    capability_scope=(
+                        "workspace" if workspace_capability else "project"
+                    ),
+                ):
+                    self.assert_schema_rejects(
+                        "CapabilitySetV1",
+                        capability_set,
+                        "unattested best-effort matched capability",
+                    )
+                    self.assertEqual(
+                        capability_set_error(capability_set),
+                        "capability_attestation",
+                    )
+                    self.assertEqual(
+                        capability_profile_error(
+                            capability_set,
+                            ("adapter_observation", "r1"),
+                            ("native_adapter", "r1"),
+                            graph[record_kind]["evidence"]["quality"],
+                        ),
+                        "capability_attestation",
+                    )
+                    self.assertEqual(
+                        reachable_graph_error(
+                            candidate_records,
+                            candidate_workspace,
+                            candidate_catalog,
+                        ),
+                        "graph_schema:CapabilitySetV1",
+                    )
+
+        for record_kind in ("DeliveryV1", "ReceiptV1"):
             graph_error = (
                 "graph_delivery_capability"
                 if record_kind == "DeliveryV1"
@@ -2280,7 +2413,7 @@ class StandaloneContractSchemaTest(unittest.TestCase):
                 if item["capability"] == "adapter_observation"
             )
             capability["quality"] = "unsupported"
-            capability.pop("constraints")
+            capability.pop("constraints", None)
             capability.pop("evidence")
             negative_capability_cases.append(
                 (
@@ -2497,7 +2630,6 @@ class StandaloneContractSchemaTest(unittest.TestCase):
             copy.deepcopy(graph["CapabilitySetV1"]["capabilities"][0])
         )
         graph["CapabilitySetV1"]["capabilities"][-1]["quality"] = "best_effort"
-        graph["CapabilitySetV1"]["capabilities"][-1].pop("evidence")
         cases.append(
             (
                 candidate,
@@ -2885,11 +3017,17 @@ class StandaloneContractSchemaTest(unittest.TestCase):
 
         acronym_aliases = {
             "ADAPTERName": "adapter_name",
+            "ＡＤＡＰＴＥＲName": "adapter_name",
             "CAPABILITYProfileID": "capability_profile_id",
+            "ＣＡＰＡＢＩＬＩＴＹProfileID": "capability_profile_id",
             "NATIVESessionID": "native_session_id",
+            "ＮＡＴＩＶＥSessionID": "native_session_id",
             "REGISTRYRevision": "registry_revision",
+            "ＲＥＧＩＳＴＲＹRevision": "registry_revision",
             "SUBSCRIPTIONRevision": "subscription_revision",
+            "ＳＵＢＳＣＲＩＰＴＩＯＮRevision": "subscription_revision",
             "RECEIVETimeUTC": "receive_time_utc",
+            "ＲＥＣＥＩＶＥTimeUTC": "receive_time_utc",
         }
         for key, normalized in acronym_aliases.items():
             with self.subTest(acronym_alias=key, case="normalization"):
@@ -2935,6 +3073,7 @@ class StandaloneContractSchemaTest(unittest.TestCase):
             "receive_time_note": "benign",
             "content_hash_note": "benign",
             "routing_policy_summary": "benign",
+            "ＡＤＡＰＴＥＲSummary": "benign",
         }
         self.assertEqual(self.errors("EventEnvelopeV1", benign), [])
         self.assertIsNone(envelope_error(benign))
@@ -3602,6 +3741,19 @@ class StandaloneContractSchemaTest(unittest.TestCase):
             "semantic extension",
         )
 
+        best_effort_without_constraints = copy.deepcopy(capability_set)
+        best_effort_capability = next(
+            capability
+            for capability in best_effort_without_constraints["capabilities"]
+            if capability["quality"] == "best_effort"
+        )
+        best_effort_capability.pop("constraints")
+        self.assertEqual(
+            self.errors("CapabilitySetV1", best_effort_without_constraints),
+            [],
+        )
+        self.assertIsNone(capability_set_error(best_effort_without_constraints))
+
         for positive_field in ("constraints", "evidence"):
             unsupported = copy.deepcopy(capability_set)
             unsupported_capability = unsupported["capabilities"][-1]
@@ -3630,7 +3782,6 @@ class StandaloneContractSchemaTest(unittest.TestCase):
             copy.deepcopy(duplicate["capabilities"][0])
         )
         duplicate["capabilities"][-1]["quality"] = "best_effort"
-        duplicate["capabilities"][-1].pop("evidence")
         self.assertEqual(self.errors("CapabilitySetV1", duplicate), [])
         self.assertEqual(
             capability_set_error(duplicate),
