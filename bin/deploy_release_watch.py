@@ -65,12 +65,35 @@ class Verdict:
 
 
 def run_command(argv: list[str]) -> str:
-    result = subprocess.run(argv, text=True, capture_output=True, check=False)
+    try:
+        result = subprocess.run(argv, text=True, capture_output=True, check=False)
+    except FileNotFoundError as error:
+        raise RuntimeError(
+            f"executable not found: {argv[0]} — install GitHub CLI (gh) and ensure it is on PATH"
+        ) from error
     if result.returncode != 0:
         raise RuntimeError(
             f"command failed ({result.returncode}): {' '.join(argv)}\n{result.stderr.strip()}"
         )
     return result.stdout
+
+
+def parse_concatenated_json(raw: str) -> list:
+    """gh api --paginate (without --jq) emits one JSON document per page,
+    concatenated. Decode them all; --slurp is unavailable together with --jq on
+    current gh, so page merging happens here."""
+    docs = []
+    decoder = json.JSONDecoder()
+    idx, n = 0, len(raw)
+    while idx < n:
+        while idx < n and raw[idx].isspace():
+            idx += 1
+        if idx >= n:
+            break
+        doc, end = decoder.raw_decode(raw, idx)
+        docs.append(doc)
+        idx = end
+    return docs
 
 
 def fetch_deploy_runs(repo: str, merge_sha: str, workflow: str, runner=run_command) -> list[dict]:
@@ -79,29 +102,43 @@ def fetch_deploy_runs(repo: str, merge_sha: str, workflow: str, runner=run_comma
     for any other SHA is never returned, so it can never be misread as covering
     this merge. Event/branch identity is judged in evaluate_release."""
     raw = runner([
-        "gh", "api",
-        f"repos/{repo}/actions/runs?head_sha={merge_sha}&per_page=50",
-        "--jq", ".workflow_runs",
+        "gh", "api", "--paginate",
+        f"repos/{repo}/actions/runs?head_sha={merge_sha}&per_page=100",
     ])
-    runs = json.loads(raw or "[]")
+    runs = [r for page in parse_concatenated_json(raw)
+            for r in page.get("workflow_runs", [])]
     return [r for r in runs if r.get("name") == workflow or r.get("path", "").endswith(f"/{workflow}.yml")]
 
 
 def fetch_run_jobs(repo: str, run_id: int, runner=run_command) -> list[dict]:
+    # --paginate: a matrix/deploy workflow can exceed one page of jobs; a later
+    # failed job must not fall outside the evidence (GH-1524 PR review P2).
+    # Page docs are merged in Python (--slurp is incompatible with --jq).
     raw = runner([
-        "gh", "api",
-        f"repos/{repo}/actions/runs/{run_id}/jobs?per_page=50",
-        "--jq", "[.jobs[] | {name, conclusion, steps: [.steps[]? | {name, conclusion}]}]",
+        "gh", "api", "--paginate",
+        f"repos/{repo}/actions/runs/{run_id}/jobs?per_page=100",
     ])
-    return json.loads(raw or "[]")
+    return [{"name": j.get("name"), "conclusion": j.get("conclusion"),
+             "steps": [{"name": st.get("name"), "conclusion": st.get("conclusion")}
+                       for st in (j.get("steps") or [])]}
+            for page in parse_concatenated_json(raw)
+            for j in page.get("jobs", [])]
 
 
-# Required release evidence for the Amiga deploy workflow (POSITIVE list —
-# GH-1524 cold-review P1: an empty/partial jobs payload or a skipped heavy job
-# must fail closed, never read as success). Unknown extra jobs may exist but
-# cannot substitute for these.
+# Required release evidence is PER-REPO (POSITIVE lists — an empty/partial
+# jobs payload or a skipped heavy job must fail closed, never read as success;
+# unknown extra jobs may exist but cannot substitute). The job/step names are
+# project-specific: a repo WITHOUT a profile fails closed at the CLI (exit 64)
+# unless the caller supplies --required-jobs/--required-smoke-steps explicitly
+# (GH-1524 PR review P1 — never grade another project against Amiga's labels).
 REQUIRED_JOBS = ("detect", "deploy")
 REQUIRED_SMOKE_STEPS = ("Verify production hosts", "Verify production auth")
+REPO_PROFILES: dict[str, dict[str, tuple[str, ...]]] = {
+    "pixexid/amiga": {
+        "required_jobs": REQUIRED_JOBS,
+        "required_smoke_steps": REQUIRED_SMOKE_STEPS,
+    },
+}
 
 
 def evaluate_release(
@@ -230,6 +267,10 @@ def main() -> int:
     parser.add_argument("--timeout-seconds", type=int, default=900)
     parser.add_argument("--poll-seconds", type=int, default=30)
     parser.add_argument("--json", action="store_true", help="emit the verdict as JSON")
+    parser.add_argument("--required-jobs", default=None,
+                        help="comma-separated required job names (overrides the repo profile)")
+    parser.add_argument("--required-smoke-steps", default=None,
+                        help="comma-separated required smoke step names inside the deploy job")
     args = parser.parse_args()
 
     import re as _re
@@ -238,12 +279,26 @@ def main() -> int:
               file=sys.stderr)
         return 64
 
+    profile = REPO_PROFILES.get(args.repo, {})
+    required_jobs = (tuple(x.strip() for x in args.required_jobs.split(",") if x.strip())
+                     if args.required_jobs else profile.get("required_jobs"))
+    required_smoke = (tuple(x.strip() for x in args.required_smoke_steps.split(",") if x.strip())
+                      if args.required_smoke_steps is not None
+                      else profile.get("required_smoke_steps"))
+    if not required_jobs:
+        print(f"[error] no release-evidence profile for {args.repo!r} — job/step names are "
+              "project-specific; pass --required-jobs (and --required-smoke-steps) explicitly",
+              file=sys.stderr)
+        return 64
+
     deadline = time.monotonic() + args.timeout_seconds
 
     def once() -> Verdict:
         runs = fetch_deploy_runs(args.repo, args.merge_sha, args.workflow)
         return evaluate_release(args.merge_sha, runs,
-                                lambda run_id: fetch_run_jobs(args.repo, run_id))
+                                lambda run_id: fetch_run_jobs(args.repo, run_id),
+                                required_jobs=required_jobs,
+                                required_smoke_steps=required_smoke or ())
 
     try:
         verdict = once()

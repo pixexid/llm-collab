@@ -188,6 +188,28 @@ class DeployReleaseWatchFalseGreenTest(unittest.TestCase):
         self.assertIn("Verify production auth' concluded 'failure'", "; ".join(verdict.failed_jobs))
 
 
+class DeployReleaseWatchEnvironmentTest(unittest.TestCase):
+    """GH-1524 PR #111 review round: environment and multi-project safety."""
+
+    def test_missing_gh_executable_is_runtime_error_not_traceback(self) -> None:
+        # FileNotFoundError from a missing gh binary must surface as the
+        # documented environment error (exit 64 path), not a raw traceback.
+        with self.assertRaises(RuntimeError) as ctx:
+            watch.run_command(["definitely-not-a-real-binary-1524"])
+        self.assertIn("executable not found", str(ctx.exception))
+
+    def test_amiga_profile_exists_and_matches_module_constants(self) -> None:
+        profile = watch.REPO_PROFILES["pixexid/amiga"]
+        self.assertEqual(profile["required_jobs"], watch.REQUIRED_JOBS)
+        self.assertEqual(profile["required_smoke_steps"], watch.REQUIRED_SMOKE_STEPS)
+
+    def test_unknown_repo_has_no_profile(self) -> None:
+        # main() fails closed (exit 64) for a repo without a profile unless the
+        # caller passes explicit requirements — never grades another project
+        # against Amiga's job/step labels.
+        self.assertNotIn("someone/other-app", watch.REPO_PROFILES)
+
+
 class DeployReleaseWatchFetchTest(unittest.TestCase):
     def test_fetch_filters_to_the_named_workflow(self) -> None:
         payload = [
@@ -197,11 +219,32 @@ class DeployReleaseWatchFetchTest(unittest.TestCase):
         import json as _json
 
         def fake_runner(argv):
-            self.assertIn("head_sha=" + DF55, argv[2])
-            return _json.dumps(payload)
+            self.assertIn("--paginate", argv)
+            self.assertNotIn("--slurp", argv)  # incompatible with --jq on current gh
+            self.assertNotIn("--jq", argv)
+            self.assertTrue(any("head_sha=" + DF55 in a for a in argv))
+            # Two concatenated page documents, as gh api --paginate emits them.
+            return (_json.dumps({"workflow_runs": payload[:1]})
+                    + _json.dumps({"workflow_runs": payload[1:]}))
 
         runs = watch.fetch_deploy_runs("pixexid/amiga", DF55, "deploy", runner=fake_runner)
         self.assertEqual([r["id"] for r in runs], [1])
+
+    def test_jobs_fetch_merges_pages_and_normalizes_steps(self) -> None:
+        import json as _json
+
+        page1 = {"jobs": [{"name": "detect", "conclusion": "success", "steps": []}]}
+        page2 = {"jobs": [{"name": "deploy", "conclusion": "failure",
+                           "steps": [{"name": "Verify production auth",
+                                      "conclusion": "failure", "number": 9}]}]}
+
+        def fake_runner(argv):
+            self.assertIn("--paginate", argv)
+            return _json.dumps(page1) + _json.dumps(page2)
+
+        jobs = watch.fetch_run_jobs("pixexid/amiga", 1, runner=fake_runner)
+        self.assertEqual([j["name"] for j in jobs], ["detect", "deploy"])
+        self.assertEqual(jobs[1]["steps"][0]["conclusion"], "failure")
 
 
 if __name__ == "__main__":  # pragma: no cover
