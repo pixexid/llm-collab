@@ -309,6 +309,18 @@ be an independently managed local record for observing external state. Neither
 surface may silently import, pause, cancel, deduplicate, or take ownership of
 the other.
 
+### Standalone architecture and program
+
+The
+[Standalone Agent Session Bus Architecture](docs/standalone-agent-session-bus-architecture.md)
+freezes the future core, runtime-adapter, transport-adapter, and workflow-pack
+boundaries. The
+[Standalone Implementation Plan](docs/standalone-agent-session-bus-plan.md)
+records the phase-gated GH-88 through GH-104 rollout. Both documents are
+contract and planning authority only: current v2 commands and files remain
+operational, and no standalone daemon, ledger, adapter, transport, feature
+consumer, or new mutation path is enabled by those documents.
+
 ## Command reference
 
 Prefix collaboration commands with `bin/llm-collab`:
@@ -374,6 +386,8 @@ git diff --check
 - [Multi-Project Support](docs/multi-project.md)
 - [Schema Reference](docs/schema-reference.md)
 - [Identity System](docs/identity-system.md)
+- [Standalone Agent Session Bus Architecture](docs/standalone-agent-session-bus-architecture.md)
+- [Standalone Agent Session Bus Implementation Plan](docs/standalone-agent-session-bus-plan.md)
 - [Workflow index](docs/workflows/README.md)
 - [Thread Event Runner RFC](docs/workflows/thread-event-runner-rfc.md)
 - [GitHub adapter](docs/adapters/github.md)
