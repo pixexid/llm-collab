@@ -404,31 +404,30 @@ def main():
 
     consume = not args.peek and not args.show_all
     late_packet_mode = False
-    if args.packet and consume and not messages:
-        # The exact emitted claim command must also serve a LATE invocation:
-        # after the winner consumed the packet it lives under `read`. Surface
-        # it and run the gate (held/refused for a live owner, a fresh claim
-        # after release) instead of a silent empty exit 0.
-        read_matches = [
-            m
-            for m in filter_messages(
-                load_all_messages(args.me), args.project, args.chat, args.packet
-            )
-            if m.get("read")
-        ]
-        if read_matches:
-            messages = read_matches
+    if args.packet:
+        # Selector cardinality is resolved across the FULL read+unread
+        # namespace before any consume/late decision or lease/read-state
+        # mutation: a basename colliding across states must never silently
+        # pick whichever bucket wins first and claim the wrong activation.
+        union = filter_messages(
+            load_all_messages(args.me), args.project, args.chat, args.packet
+        )
+        if len(union) > 1:
+            payload = {
+                "error": "ambiguous_packet_selector",
+                "packet": args.packet,
+                "matches": [m["path"] for m in union],
+                "hint": "pass the full relative packet path; nothing was claimed or marked read",
+            }
+            print(json.dumps(payload, indent=2))
+            sys.exit(75)
+        if consume and len(union) == 1 and union[0].get("read"):
+            # The exact emitted claim command also serves a LATE invocation:
+            # the winner already consumed the packet, so surface it from
+            # `read` and run the gate (held/refused for a live owner, a fresh
+            # claim after release) instead of a silent empty exit 0.
+            messages = union
             late_packet_mode = True
-
-    if args.packet and len(messages) > 1:
-        payload = {
-            "error": "ambiguous_packet_selector",
-            "packet": args.packet,
-            "matches": [m["path"] for m in messages],
-            "hint": "pass the full relative packet path; nothing was claimed or marked read",
-        }
-        print(json.dumps(payload, indent=2))
-        sys.exit(75)
 
     messages = messages[: args.limit]
 

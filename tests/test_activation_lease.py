@@ -888,49 +888,133 @@ class InboxActivationGateTest(WorkspaceTestCase):
 
     def test_emitted_command_reports_late_loser_with_owner(self):
         """Round-5 P1: after the winner consumed the packet, the EXACT emitted
-        command (--packet, no --all) must return held/refused naming the
-        owner — never a silent empty exit 0."""
+        command shape (--me/--project/--packet, NO --session — the reader
+        session auto-derives from the runtime identity) must return
+        held/refused naming the owner — never a silent empty exit 0."""
         root = self.make_workspace()
         self.add_activation_message(root, path_stem="activate-1")
-        self.run_inbox(
-            root, "--me", "claude", "--packet", "activate-1.md",
-            "--session", "SESSION-R1", reader_runtime="uuid-task-one",
+        first, code = self.run_inbox(
+            root, "--me", "claude", "--project", "amiga",
+            "--packet", "activate-1.md", reader_runtime="uuid-task-one",
         )
+        self.assertEqual(0, code, first)
+        winner_gate = first["messages"][0]["activation_gate"]
+        self.assertTrue(winner_gate["authorized"])
+        self.assertEqual(1, winner_gate["fence_token"])
+        winner_session = winner_gate["reader_session_id"]
 
         late, code = self.run_inbox(
-            root, "--me", "claude", "--packet", "activate-1.md",
-            "--session", "SESSION-R2", reader_runtime="uuid-task-two",
+            root, "--me", "claude", "--project", "amiga",
+            "--packet", "activate-1.md", reader_runtime="uuid-task-two",
         )
         self.assertEqual(75, code, late)
         self.assertEqual(1, len(late["messages"]))
         gate = late["messages"][0]["activation_gate"]
         self.assertFalse(gate["authorized"])
         self.assertEqual("lease_held_by_active_owner", gate["reason"])
-        self.assertEqual("SESSION-R1", gate["owner"]["owner_session_id"])
+        self.assertEqual(winner_session, gate["owner"]["owner_session_id"])
 
-        released, code = self.run_inbox(
-            root, "--me", "claude", "--all", "--session", "SESSION-R1",
-        )
-        fence = None
-        for msg in released["messages"]:
-            g = msg.get("activation_gate")
-            if g and g.get("gate") == "peek_owner":
-                fence = g["owner"]["fence_token"]
-        self.assertEqual(1, fence)
         payload, code = self.run_cli(
             root, "lease-release", *identity_args(self.worktree),
-            "--session", "SESSION-R1", "--fence-token", "1",
+            "--session", winner_session, "--fence-token", "1",
         )
         self.assertEqual(0, code, payload)
 
         reclaim, code = self.run_inbox(
-            root, "--me", "claude", "--packet", "activate-1.md",
-            "--session", "SESSION-R2", reader_runtime="uuid-task-two",
+            root, "--me", "claude", "--project", "amiga",
+            "--packet", "activate-1.md", reader_runtime="uuid-task-two",
         )
         self.assertEqual(0, code, reclaim)
         gate2 = reclaim["messages"][0]["activation_gate"]
         self.assertTrue(gate2["authorized"])
         self.assertEqual(2, gate2["fence_token"], "late claim after release takes over")
+
+    def add_second_chat_same_basename(self, root: Path) -> str:
+        other_chat = "Chats/2026-01-02_other__CHAT-TEST0002/same.md"
+        write(
+            root / other_chat,
+            "\n".join(
+                [
+                    "---", "chat_id: CHAT-TEST0002", "from: codex", "to: claude",
+                    "title: other lane", "project_id: amiga", "activation: true",
+                    "related_task: TASK-TEST02",
+                    f"worktree: {self.worktree}-other", "branch: claude/gh-0001-other",
+                    "---", "", "ACTIVATE other.",
+                ]
+            ),
+        )
+        inbox_path = root / "agents" / "claude" / "inbox.json"
+        inbox = json.loads(inbox_path.read_text())
+        inbox["unread"].append(other_chat)
+        write_json(inbox_path, inbox)
+        return other_chat
+
+    def test_mixed_state_basename_collision_read_then_unread_fails_closed(self):
+        """Round-6 P1: intended packet already consumed (read), an unrelated
+        same-basename packet arrives unread — the emitted shape must refuse,
+        not silently claim the wrong activation."""
+        root = self.make_workspace()
+        rel_read = self.add_activation_message(root, path_stem="same")
+        first, code = self.run_inbox(
+            root, "--me", "claude", "--project", "amiga",
+            "--packet", "same.md", reader_runtime="uuid-task-one",
+        )
+        self.assertEqual(0, code, first)
+
+        rel_unread = self.add_second_chat_same_basename(root)
+        lease_dir = Path(root) / "State" / "session_autobridge" / "activation_leases"
+        leases_before = {p.name: p.read_text() for p in lease_dir.glob("*.json")}
+
+        collided, code = self.run_inbox(
+            root, "--me", "claude", "--project", "amiga",
+            "--packet", "same.md", reader_runtime="uuid-task-two",
+        )
+        self.assertEqual(75, code, collided)
+        self.assertEqual("ambiguous_packet_selector", collided["error"])
+        self.assertEqual(
+            sorted([rel_read, rel_unread]), sorted(collided["matches"])
+        )
+        self.assertIn(rel_unread, self.unread_paths(root), "unread packet untouched")
+        leases_after = {p.name: p.read_text() for p in lease_dir.glob("*.json")}
+        self.assertEqual(leases_before, leases_after, "zero lease mutations")
+
+        # Full paths still disambiguate both directions.
+        late, code = self.run_inbox(
+            root, "--me", "claude", "--project", "amiga",
+            "--packet", rel_read, reader_runtime="uuid-task-two",
+        )
+        self.assertEqual(75, code)
+        self.assertEqual(
+            "lease_held_by_active_owner",
+            late["messages"][0]["activation_gate"]["reason"],
+        )
+        fresh, code = self.run_inbox(
+            root, "--me", "claude", "--project", "amiga",
+            "--packet", rel_unread, reader_runtime="uuid-task-two",
+        )
+        self.assertEqual(0, code, fresh)
+        self.assertTrue(fresh["messages"][0]["activation_gate"]["authorized"])
+
+    def test_mixed_state_basename_collision_unread_then_read_fails_closed(self):
+        """Round-6 P1, reverse direction: the ring intends the UNREAD packet
+        while a consumed same-basename packet exists — still fail closed."""
+        root = self.make_workspace()
+        rel_other = self.add_second_chat_same_basename(root)
+        first, code = self.run_inbox(
+            root, "--me", "claude", "--project", "amiga",
+            "--packet", "same.md", reader_runtime="uuid-task-one",
+        )
+        self.assertEqual(0, code, first)
+
+        rel_new = self.add_activation_message(root, path_stem="same")
+        collided, code = self.run_inbox(
+            root, "--me", "claude", "--project", "amiga",
+            "--packet", "same.md", reader_runtime="uuid-task-two",
+        )
+        self.assertEqual(75, code, collided)
+        self.assertEqual("ambiguous_packet_selector", collided["error"])
+        self.assertIn(rel_new, self.unread_paths(root), "new packet stays claimable")
+
 
     def test_duplicate_basename_selector_fails_closed(self):
         """Round-5 P1: a basename matching multiple packets refuses before any
