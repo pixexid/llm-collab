@@ -132,7 +132,42 @@ class IdentityUnitTest(unittest.TestCase):
         ):
             with self.assertRaises(ValueError, msg=f"{field}={bad!r}") as ctx:
                 ident.lease_identity({**base, field: bad})
-            self.assertIn("control characters", str(ctx.exception))
+            self.assertIn("control or line-breaking", str(ctx.exception))
+
+    def test_unicode_line_separators_refused(self):
+        """Addendum: str.splitlines() also breaks on NEL/U+2028/U+2029, so
+        each is an injectable new frontmatter line. Exact repros pinned; the
+        dump+parse proof shows what acceptance WOULD have injected."""
+        sys.path.insert(0, str(REPO_ROOT / "bin"))
+        from _helpers import dump_frontmatter, parse_frontmatter
+
+        for sep in ("\x85", "\u2028", "\u2029"):
+            payload = f"main{sep}project_id: other"
+            with self.assertRaises(ValueError, msg=hex(ord(sep))) as ctx:
+                ident.normalized_identity_field("branch", payload)
+            self.assertIn("line-breaking", str(ctx.exception))
+            # Precondition proof: had the validator accepted it, the parser
+            # WOULD have materialized the injected field.
+            parsed, _ = parse_frontmatter(
+                dump_frontmatter({"activation": True, "branch": payload}, "x")
+            )
+            self.assertEqual("other", parsed.get("project_id"))
+
+    def test_ordinary_non_ascii_printable_text_accepted(self):
+        self.assertEqual(
+            "naïve-brançh–日本",
+            ident.normalized_identity_field("branch", "naïve-brançh–日本"),
+        )
+
+    def test_edge_controls_refused_before_trimming(self):
+        """Edge-control BLOCK: leading/trailing controls and line breakers
+        must fail closed on the ORIGINAL value — never silently stripped —
+        while plain outer spaces still trim."""
+        for bad in ("b\n", "\x85b", "b\u2028", "b\u2029", "\tb", "b\r", "TASK-1\r"):
+            with self.assertRaises(ValueError, msg=repr(bad)) as ctx:
+                ident.normalized_identity_field("branch", bad)
+            self.assertIn("control or line-breaking", str(ctx.exception))
+        self.assertEqual("b", ident.normalized_identity_field("branch", "  b  "))
 
     def test_classifier_marks_relative_worktree_malformed_cwd_independent(self):
         """BLOCK P1.2: a relative worktree in frontmatter must classify
@@ -338,24 +373,41 @@ class DeliverFoundationTest(unittest.TestCase):
             "--branch", "main\nproject_id: other-project",
         )
         self.assertEqual(2, result.returncode, result.stdout)
-        self.assertIn("control characters", result.stderr)
+        self.assertIn("control or line-breaking", result.stderr)
         self.assertEqual(before, self.workspace_snapshot(root), "zero mutations")
         for p in (root / "Chats").rglob("*.md"):
             self.assertNotIn("other-project", p.read_text())
 
-    def test_same_second_activations_get_distinct_packets(self):
-        """Round-1 P2: two same-title activations in one second must produce
-        two packets, two inbox entries, and per-packet claim commands."""
-        root = self.make_workspace()
+    def deliver_same_second(self, root: Path, *, forced_nonce: bool) -> None:
+        extra_patch = "deliver.ts = lambda: '2026-01-01T00-00-00'; "
+        if forced_nonce:
+            # Adversarial randomness: os.urandom always returns the same
+            # bytes, so nonce-only naming WOULD collide — the O_EXCL +
+            # attempt-counter allocation must still produce distinct names.
+            extra_patch += "import os as _os; _os.urandom = lambda n: b'\\x00' * n; "
+        body = root / "b.md"
+        write(body, "work")
         for _ in range(2):
-            result = self.run_deliver(
-                root, "--activation", "--related-task", "TASK-TEST01",
-                "--worktree", self.worktree, "--branch", "b",
-                fixed_ts="2026-01-01T00-00-00",
+            result = subprocess.run(
+                [
+                    sys.executable, "-c", self.WRAPPER.format(extra_patch=extra_patch),
+                    str(REPO_ROOT / "bin"),
+                    *self.BASE, "--body-file", str(body),
+                    "--activation", "--related-task", "TASK-TEST01",
+                    "--worktree", self.worktree, "--branch", "b",
+                ],
+                cwd=root, text=True, capture_output=True,
+                env={**os.environ, "LLM_COLLAB_UI_REFRESH": "0"}, check=False,
             )
             self.assertEqual(0, result.returncode, result.stderr)
+
+    def assert_two_distinct_deliveries(self, root: Path) -> None:
         packets = sorted(self.chat_dir.glob("2026-01-01T00-00-00_to-claude_*.md"))
         self.assertEqual(2, len(packets), "no overwrite on same-second collision")
+        sender_copies = sorted(self.chat_dir.glob("2026-01-01T00-00-00_from-codex_*.md"))
+        self.assertEqual(2, len(sender_copies), "both sender copies survive")
+        contents = {p.read_text() for p in packets}
+        self.assertEqual(2, len(contents), "two distinct immutable packet contents")
         inbox = json.loads((root / "agents" / "claude" / "inbox.json").read_text())
         self.assertEqual(2, len(inbox["unread"]), "two distinct inbox entries")
         for p in packets:
@@ -363,6 +415,101 @@ class DeliverFoundationTest(unittest.TestCase):
                 f"--packet {p.name}", p.read_text(),
                 "each banner command selects its own immutable packet",
             )
+
+    def test_same_second_activations_get_distinct_packets(self):
+        root = self.make_workspace()
+        self.deliver_same_second(root, forced_nonce=False)
+        self.assert_two_distinct_deliveries(root)
+
+    def test_forced_repeating_nonce_still_cannot_overwrite(self):
+        """Round-2 P2: with os.urandom patched to repeat, allocation must
+        still produce two distinct packet pairs — randomness quality is not
+        the collision defense; O_EXCL + the attempt counter is."""
+        root = self.make_workspace()
+        self.deliver_same_second(root, forced_nonce=True)
+        self.assert_two_distinct_deliveries(root)
+
+    def test_coercible_scalar_identity_values_refused_at_delivery(self):
+        """Round-2 P1: values the YAML-lite parser would coerce (true/false/
+        null/integers/brackets) cannot round-trip byte-exact; delivery must
+        refuse them before mutation."""
+        root = self.make_workspace()
+        before = self.workspace_snapshot(root)
+        for field_args in (
+            ("--branch", "true"),
+            ("--branch", "False"),
+            ("--branch", "null"),
+            ("--branch", "123"),
+            ("--branch", "[main]"),
+            ("--related-task", "42"),
+        ):
+            result = self.run_deliver(
+                root, "--activation", "--related-task", "TASK-TEST01",
+                "--worktree", self.worktree, "--branch", "b",
+                *field_args,
+            )
+            self.assertEqual(2, result.returncode, f"{field_args}: {result.stdout}")
+            self.assertIn("coerced", result.stderr)
+        self.assertEqual(before, self.workspace_snapshot(root), "zero mutations")
+
+    def test_lease_key_round_trips_through_serialization(self):
+        """Round-2 P1: sender-side identity and the identity a receiver
+        derives from the PARSED packet must produce the same lease key."""
+        sys.path.insert(0, str(REPO_ROOT / "bin"))
+        from _helpers import dump_frontmatter, parse_frontmatter
+
+        sender_identity = ident.lease_identity(
+            {
+                "project": "amiga", "chat": "CHAT-TEST0001", "task": "TASK-TEST01",
+                "worktree": "/tmp/wt-roundtrip", "branch": "claude/gh-0000-test",
+                "target_agent": "claude",
+            }
+        )
+        fm = {
+            "chat_id": "CHAT-TEST0001", "project_id": "amiga",
+            "related_task": sender_identity["task"], "activation": True,
+            "worktree": sender_identity["worktree"], "branch": sender_identity["branch"],
+        }
+        parsed, _ = parse_frontmatter(dump_frontmatter(fm, "body"))
+        verdict, receiver_identity = ident.classify_activation(parsed, target_agent="claude")
+        self.assertEqual("activation", verdict)
+        self.assertEqual(
+            ident.lease_key(sender_identity), ident.lease_key(receiver_identity)
+        )
+
+    def test_classifier_rejects_coerced_nonstring_identity_values(self):
+        """Round-2 P1 receiver side: a hand-written packet whose identity
+        field parsed into a non-str (e.g. `branch: true`) is malformed."""
+        sys.path.insert(0, str(REPO_ROOT / "bin"))
+        from _helpers import parse_frontmatter
+
+        raw = "\n".join(
+            [
+                "---", "chat_id: CHAT-TEST0001", "project_id: amiga",
+                "related_task: TASK-1", "activation: true",
+                "worktree: /tmp/wt", "branch: true", "---", "", "x",
+            ]
+        )
+        parsed, _ = parse_frontmatter(raw)
+        self.assertIs(True, parsed["branch"], "precondition: parser coerces")
+        verdict, detail = ident.classify_activation(parsed, target_agent="claude")
+        self.assertEqual("malformed", verdict)
+        self.assertIn("round-trip", detail["detail"])
+
+    def test_edge_control_branches_refused_at_delivery_with_zero_mutations(self):
+        """Edge-control BLOCK delivery probes: values with leading/trailing
+        controls or Unicode line breakers must exit 2 and write nothing —
+        never be silently trimmed into an accepted delivery."""
+        root = self.make_workspace()
+        before = self.workspace_snapshot(root)
+        for bad_branch in ("b\n", "\x85b", "b\u2028", "b\u2029", "\tb", "b\u2029x", "\u2028b"):
+            result = self.run_deliver(
+                root, "--activation", "--related-task", "TASK-TEST01",
+                "--worktree", self.worktree, "--branch", bad_branch,
+            )
+            self.assertEqual(2, result.returncode, f"{bad_branch!r}: {result.stdout}")
+            self.assertIn("control or line-breaking", result.stderr)
+        self.assertEqual(before, self.workspace_snapshot(root), "zero mutations")
 
     def test_activation_requires_full_identity(self):
         root = self.make_workspace()

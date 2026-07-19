@@ -75,6 +75,36 @@ from _activation_identity import (
 # constant, NOT an environment variable or flag: the production CLI must have
 # no way to enable activation delivery before the runtime integration exists.
 ACTIVATION_RUNTIME_INTEGRATED = False
+
+
+def allocate_activation_packet_paths(
+    chat_dir: Path, timestamp: str, recipient: str, sender: str, slug: str
+) -> tuple[Path, Path]:
+    """Atomically reserve collision-free recipient AND sender packet paths.
+
+    O_CREAT|O_EXCL makes each reservation atomic against concurrent writers;
+    the attempt counter makes allocation deterministic even under repeating
+    randomness — an existing packet is NEVER overwritten. Both copies share
+    one suffix so the pair stays correlated."""
+    for attempt in range(1, 200):
+        nonce = os.urandom(3).hex()
+        suffix = f"-{nonce}" if attempt == 1 else f"-{nonce}-{attempt}"
+        to_path = chat_dir / f"{timestamp}_to-{recipient}_{slug}{suffix}.md"
+        from_path = chat_dir / f"{timestamp}_from-{sender}_{slug}{suffix}.md"
+        try:
+            to_fd = os.open(to_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            continue
+        try:
+            from_fd = os.open(from_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            os.close(to_fd)
+            os.unlink(to_path)
+            continue
+        os.close(to_fd)
+        os.close(from_fd)
+        return to_path, from_path
+    raise OSError("exhausted unique activation packet name attempts")
 from _session_autobridge import (
     find_dispatchable_target_session,
     load_binding,
@@ -391,14 +421,24 @@ def main():
 
     slug = slugify(args.title, max_len=40)
     timestamp = ts()
+    activation_paths: tuple[Path, Path] | None = None
     if args.activation:
         # ts() has second precision: two same-title activations in one second
         # would collide, overwrite one packet, and dedupe to one inbox
         # pointer — silently losing an activation whose banner/ring command
-        # must select exactly its own immutable packet. Ordinary-message
+        # must select exactly its own immutable packet. Names are allocated
+        # with O_CREAT|O_EXCL (atomic against concurrent writers) and a
+        # deterministic attempt counter, so even REPEATING randomness cannot
+        # overwrite an existing recipient or sender packet. Ordinary-message
         # naming is unchanged.
-        nonce = os.urandom(3).hex()
-        to_filename = f"{timestamp}_to-{args.recipient}_{slug}-{nonce}.md"
+        try:
+            activation_paths = allocate_activation_packet_paths(
+                chat_dir, timestamp, args.recipient, args.sender, slug
+            )
+        except OSError as exc:
+            print(f"[error] could not allocate activation packet name: {exc}", file=sys.stderr)
+            sys.exit(2)
+        to_filename = activation_paths[0].name
     else:
         to_filename = f"{timestamp}_to-{args.recipient}_{slug}.md"
     # Pre-write wake-path classification: the same value later selects the
@@ -425,6 +465,12 @@ def main():
                 build_activation_consume_command(args.recipient, args.project, to_filename),
             )
         except ValueError as exc:
+            if activation_paths is not None:
+                for reserved in activation_paths:
+                    try:
+                        reserved.unlink()
+                    except FileNotFoundError:
+                        pass
             print(f"[error] {exc}", file=sys.stderr)
             sys.exit(2)
     content = build_message(args, body, chat_id, packet_name=to_filename)
@@ -434,11 +480,12 @@ def main():
     write_file(to_path, content)
 
     # Write from-{sender} file (sender's copy / sent record)
-    if args.activation:
-        from_filename = f"{timestamp}_from-{args.sender}_{slug}-{nonce}.md"
+    if activation_paths is not None:
+        from_path = activation_paths[1]
+        from_filename = from_path.name
     else:
         from_filename = f"{timestamp}_from-{args.sender}_{slug}.md"
-    from_path = chat_dir / from_filename
+        from_path = chat_dir / from_filename
     write_file(from_path, content)
 
     # Update recipient inbox pointer

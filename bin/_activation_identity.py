@@ -56,16 +56,53 @@ def normalized_identity_field(field: str, value: Any) -> str:
     serialized by dump_frontmatter as ADDITIONAL frontmatter lines — a
     frontmatter-injection channel that could rewrite project/chat/target in
     the emitted packet. Refused before any mutation."""
-    if value is not None:
-        value = str(value).strip()
+    if value is None:
+        raise ValueError(f"activation identity requires --{field.replace('_', '-')}")
+    raw = str(value)
+    # Controls are checked on the ORIGINAL value, BEFORE any trimming: a
+    # leading/trailing C0, DEL, NEL (U+0085), U+2028, or U+2029 must fail
+    # closed, never be silently normalized away. The parser iterates
+    # frontmatter with str.splitlines(), which breaks on all of these \u2014 an
+    # injectable frontmatter line. Ordinary printable non-ASCII stays valid.
+    if any(
+        ord(ch) < 32 or ord(ch) == 127 or ch in "\x85\u2028\u2029"
+        for ch in raw
+    ):
+        raise ValueError(
+            f"--{field.replace('_', '-')} contains control or line-breaking "
+            "characters; identity fields must be single-line printable text"
+        )
+    # Only after the raw value is proven control-free: trim ordinary outer
+    # whitespace (all line-breaking whitespace was already refused above).
+    value = raw.strip()
     if not value:
         raise ValueError(f"activation identity requires --{field.replace('_', '-')}")
-    if any(ord(ch) < 32 or ord(ch) == 127 for ch in value):
+    if not frontmatter_roundtrips(value):
         raise ValueError(
-            f"--{field.replace('_', '-')} contains control characters; "
-            "identity fields must be single-line printable text"
+            f"--{field.replace('_', '-')} value {value!r} would be coerced by "
+            "frontmatter serialization (true/false/null, integer, or "
+            "bracketed forms do not round-trip as strings); choose a value "
+            "that survives serialization byte-exact"
         )
     return value
+
+
+def frontmatter_roundtrips(value: str) -> bool:
+    """True when the YAML-lite frontmatter parser returns this exact string.
+
+    The parser coerces true/false/null (case-insensitive), integers, and
+    [bracketed] forms; the serializer has no quoting mechanism, so a value in
+    one of those families CANNOT be transported byte-exact — sender and
+    receiver would derive different lease keys. Such values are refused."""
+    if value.lower() in {"true", "false", "null"}:
+        return False
+    if value.startswith("[") and value.endswith("]"):
+        return False
+    try:
+        int(value)
+    except ValueError:
+        return True
+    return False
 
 
 def lease_identity(args_or_mapping: Any) -> dict[str, str]:
@@ -115,6 +152,20 @@ def classify_activation(
             "detail": "activation must be exactly true when present; "
             f"got {frontmatter['activation']!r}"
         }
+    # Parsed identity values must arrive as strings. The YAML-lite parser
+    # coerces unquoted true/false/null/integers, so a packet whose identity
+    # field parsed into a non-str was NOT produced by the validated delivery
+    # path (which refuses coercible scalars) — its identity cannot match the
+    # sender's byte-exact and it is malformed.
+    for source_field in ("project_id", "chat_id", "related_task", "worktree", "branch"):
+        value = frontmatter.get(source_field)
+        if source_field not in frontmatter or value is None:
+            continue
+        if not isinstance(value, str):
+            return "malformed", {
+                "detail": f"{source_field} parsed as {type(value).__name__} "
+                f"({value!r}); activation identity fields must round-trip as strings"
+            }
     try:
         identity = lease_identity(
             {
