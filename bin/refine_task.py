@@ -169,12 +169,50 @@ def _container_fence(
     return fence, tuple(container), fence_match.group("suffix")
 
 
-def _mask_nonrendered_markdown(value: str) -> str:
+def _delimiter_is_protected(
+    protected: list[bool] | tuple[bool, ...],
+    start: int,
+    length: int,
+) -> bool:
+    return bool(protected) and all(protected[start : start + length])
+
+
+def _html_comment_state_after(
+    value: str,
+    *,
+    offset: int,
+    protected: list[bool] | tuple[bool, ...],
+    in_comment: bool,
+) -> bool:
+    cursor = 0
+    while cursor < len(value):
+        delimiter = "-->" if in_comment else "<!--"
+        delimiter_index = value.find(delimiter, cursor)
+        if delimiter_index < 0:
+            break
+        absolute_index = offset + delimiter_index
+        if (
+            not in_comment
+            and _delimiter_is_protected(protected, absolute_index, len(delimiter))
+        ):
+            cursor = delimiter_index + len(delimiter)
+            continue
+        in_comment = not in_comment
+        cursor = delimiter_index + len(delimiter)
+    return in_comment
+
+
+def _mask_fenced_markdown(
+    value: str,
+    *,
+    protected: list[bool] | tuple[bool, ...] = (),
+) -> str:
     lines = []
     fence_character = None
     fence_length = 0
     fence_container = ()
     in_comment = False
+    offset = 0
     for line in value.splitlines(keepends=True):
         content = line.rstrip("\r\n")
         if fence_character is not None:
@@ -192,6 +230,7 @@ def _mask_nonrendered_markdown(value: str) -> str:
                 fence_character = None
                 fence_length = 0
                 fence_container = ()
+            offset += len(line)
             continue
 
         if not in_comment:
@@ -204,47 +243,101 @@ def _mask_nonrendered_markdown(value: str) -> str:
                 fence_character = fence[0]
                 fence_length = len(fence)
                 lines.append(_mask_non_newline_characters(line))
+                offset += len(line)
                 continue
 
-        masked_line = list(line)
-        cursor = 0
-        while cursor < len(line):
-            if in_comment:
-                comment_end = line.find("-->", cursor)
-                if comment_end < 0:
-                    for index in range(cursor, len(line)):
-                        if line[index] not in "\r\n":
-                            masked_line[index] = " "
-                    break
-                for index in range(cursor, comment_end + 3):
-                    if line[index] not in "\r\n":
-                        masked_line[index] = " "
-                cursor = comment_end + 3
-                in_comment = False
-                continue
-
-            comment_start = line.find("<!--", cursor)
-            if comment_start < 0:
-                break
-            comment_end = line.find("-->", comment_start + 4)
-            if comment_end < 0:
-                for index in range(comment_start, len(line)):
-                    if line[index] not in "\r\n":
-                        masked_line[index] = " "
-                in_comment = True
-                break
-            for index in range(comment_start, comment_end + 3):
-                if line[index] not in "\r\n":
-                    masked_line[index] = " "
-            cursor = comment_end + 3
-        lines.append("".join(masked_line))
+        in_comment = _html_comment_state_after(
+            line,
+            offset=offset,
+            protected=protected,
+            in_comment=in_comment,
+        )
+        lines.append(line)
+        offset += len(line)
     return "".join(lines)
+
+
+def _inline_code_protection(value: str) -> list[bool]:
+    protected = [False] * len(value)
+    cursor = 0
+    while cursor < len(value):
+        if value.startswith("<!--", cursor):
+            comment_end = value.find("-->", cursor + 4)
+            if comment_end < 0:
+                break
+            cursor = comment_end + 3
+            continue
+        if value[cursor] != "`":
+            cursor += 1
+            continue
+
+        opening_start = cursor
+        opening_end = opening_start + 1
+        while opening_end < len(value) and value[opening_end] == "`":
+            opening_end += 1
+        opening_length = opening_end - opening_start
+        closing_start = opening_end
+        while closing_start < len(value):
+            closing_start = value.find("`", closing_start)
+            if closing_start < 0:
+                break
+            closing_end = closing_start + 1
+            while closing_end < len(value) and value[closing_end] == "`":
+                closing_end += 1
+            if closing_end - closing_start == opening_length:
+                for index in range(opening_start, closing_end):
+                    protected[index] = True
+                cursor = closing_end
+                break
+            closing_start = closing_end
+        else:
+            closing_start = -1
+        if closing_start < 0:
+            cursor = opening_end
+    return protected
+
+
+def _mask_html_comments(value: str, protected: list[bool]) -> str:
+    masked = list(value)
+    cursor = 0
+    in_comment = False
+    while cursor < len(value):
+        delimiter = "-->" if in_comment else "<!--"
+        if (
+            value.startswith(delimiter, cursor)
+            and (
+                in_comment
+                or not _delimiter_is_protected(protected, cursor, len(delimiter))
+            )
+        ):
+            for index in range(cursor, cursor + len(delimiter)):
+                if value[index] not in "\r\n":
+                    masked[index] = " "
+            cursor += len(delimiter)
+            in_comment = not in_comment
+            continue
+        if in_comment and value[cursor] not in "\r\n":
+            masked[cursor] = " "
+        cursor += 1
+    return "".join(masked)
+
+
+def _mask_nonrendered_markdown(value: str) -> str:
+    fenced = _mask_fenced_markdown(value)
+    for _ in range(2):
+        protected = _inline_code_protection(fenced)
+        stabilized = _mask_fenced_markdown(value, protected=protected)
+        if stabilized == fenced:
+            break
+        fenced = stabilized
+    protected = _inline_code_protection(fenced)
+    return _mask_html_comments(fenced, protected)
 
 
 def _section_matches(body: str, heading: str) -> list[re.Match]:
     return list(
         re.finditer(
-            rf"^{re.escape(heading)}[ \t]*$",
+            rf"^{re.escape(heading)}[ \t]*(?=\r?$)",
             body,
             flags=re.MULTILINE,
         )
@@ -252,7 +345,11 @@ def _section_matches(body: str, heading: str) -> list[re.Match]:
 
 
 def _section_body(body: str, heading_match: re.Match) -> str:
-    next_heading = re.search(r"^##(?:[ \t]+.*)?$", body[heading_match.end() :], flags=re.MULTILINE)
+    next_heading = re.search(
+        r"^##(?:[ \t]+[^\r\n]*)?(?=\r?$)",
+        body[heading_match.end() :],
+        flags=re.MULTILINE,
+    )
     end = heading_match.end() + next_heading.start() if next_heading else len(body)
     return body[heading_match.end() : end]
 
@@ -481,7 +578,7 @@ def _risk_label_value(section: str, label: str) -> str | None:
                     expected_container=label_container,
                 )
             if continuation is None:
-                continue
+                break
             continuation_rows.append(continuation[0])
             previous_container = continuation[1]
         return "\n".join(continuation_rows)

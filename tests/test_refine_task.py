@@ -71,6 +71,49 @@ class CanonicalTaskSectionValidationTest(unittest.TestCase):
 
         self.assertEqual([], refine_task.validate_refinement({}, body))
 
+    def test_accepts_complete_crlf_task(self) -> None:
+        body = task_body().replace("\n", "\r\n")
+
+        self.assertEqual([], refine_task.validate_refinement({}, body))
+
+    def test_crlf_tasks_reject_missing_duplicate_and_placeholder_sections(self) -> None:
+        valid = task_body().replace("\n", "\r\n")
+        cases = (
+            (
+                valid.replace("## Verification Plan\r\n", "## Testing\r\n", 1),
+                "missing canonical section: ## Verification Plan",
+            ),
+            (
+                f"{valid}\r\n## Summary\r\nDuplicate content.\r\n",
+                "duplicate canonical section: ## Summary (found 2)",
+            ),
+            (
+                task_body(summary="TODO").replace("\n", "\r\n"),
+                "empty or placeholder-only canonical section: ## Summary",
+            ),
+        )
+        for body, expected_error in cases:
+            with self.subTest(expected_error=expected_error):
+                self.assertIn(
+                    expected_error,
+                    refine_task.validate_refinement({}, body),
+                )
+
+    def test_crlf_comments_and_fences_remain_nonrendered(self) -> None:
+        artifact = """<!--
+## Summary
+
+Commented duplicate.
+-->
+```markdown
+## Verification Plan
+
+Fenced duplicate.
+```"""
+        body = task_body(extra=artifact).replace("\n", "\r\n")
+
+        self.assertEqual([], refine_task.validate_refinement({}, body))
+
     def test_plan_task_uses_the_same_validation_entrypoint(self) -> None:
         self.assertIs(plan_task.main, refine_task.main)
 
@@ -208,6 +251,71 @@ class CanonicalTaskSectionValidationTest(unittest.TestCase):
             risk_values=values,
         )
 
+        self.assertEqual([], refine_task.validate_refinement({}, body))
+
+    def test_html_comment_literals_inside_inline_code_remain_visible(self) -> None:
+        summaries = (
+            "Keep `<!--` as a literal while retaining the real summary.",
+            "Keep ``<!-- and -->`` as literals in a multi-backtick span.",
+            "Keep `first line\n<!-- second line -->` as a multiline code span.",
+            "Keep `<!--` and ``-->`` as multiple literal spans.",
+        )
+        for summary in summaries:
+            with self.subTest(summary=summary):
+                self.assertEqual(
+                    [],
+                    refine_task.validate_refinement({}, task_body(summary=summary)),
+                )
+
+    def test_real_comments_adjacent_to_inline_code_are_still_masked(self) -> None:
+        body = task_body(
+            summary=(
+                "`<!--`<!-- hidden comment with ## Acceptance Criteria --> "
+                "Real summary remains visible."
+            ),
+        )
+
+        self.assertEqual([], refine_task.validate_refinement({}, body))
+
+    def test_backticks_inside_real_comment_do_not_protect_its_first_closer(self) -> None:
+        body = task_body(
+            summary="Before <!-- literal `-->` tail --> visible summary.",
+        )
+
+        masked = refine_task._mask_nonrendered_markdown(body)
+
+        self.assertNotIn("literal", masked)
+        self.assertIn("tail --> visible summary.", masked)
+        self.assertEqual([], refine_task.validate_refinement({}, body))
+
+    def test_backticks_inside_real_comment_do_not_protect_a_later_comment(self) -> None:
+        body = task_body(
+            summary=(
+                "Before <!-- ignored ` --> middle <!-- real hidden --> "
+                "` after visible."
+            ),
+        )
+
+        masked = refine_task._mask_nonrendered_markdown(body)
+
+        self.assertNotIn("ignored", masked)
+        self.assertNotIn("real hidden", masked)
+        self.assertIn("middle", masked)
+        self.assertIn("after visible", masked)
+        self.assertEqual([], refine_task.validate_refinement({}, body))
+
+    def test_unmatched_backticks_do_not_protect_later_real_comments(self) -> None:
+        body = task_body(
+            summary=(
+                "Unmatched ` marker <!-- real hidden comment --> "
+                "does not hide this visible summary."
+            ),
+        )
+
+        masked = refine_task._mask_nonrendered_markdown(body)
+
+        self.assertNotIn("real hidden comment", masked)
+        self.assertIn("does not hide this visible summary", masked)
         self.assertEqual([], refine_task.validate_refinement({}, body))
 
     def test_fence_content_does_not_start_an_html_comment_outside_the_fence(self) -> None:
@@ -378,6 +486,20 @@ class CanonicalTaskSectionValidationTest(unittest.TestCase):
         )
         self.assertIn("## Summary", masked)
 
+    def test_inline_code_and_comment_mask_preserves_crlf_alignment(self) -> None:
+        body = "`<!--`\r\n<!-- hidden -->\r\n## Summary\r\nReal\r\n"
+
+        masked = refine_task._mask_nonrendered_markdown(body)
+
+        self.assertEqual(len(body), len(masked))
+        self.assertEqual(
+            [index for index, character in enumerate(body) if character in "\r\n"],
+            [index for index, character in enumerate(masked) if character in "\r\n"],
+        )
+        self.assertIn("`<!--`", masked)
+        self.assertNotIn("hidden", masked)
+        self.assertIn("## Summary", masked)
+
     def test_rejects_structurally_truncated_body(self) -> None:
         body = task_body().split("## Implementation Risk Analysis", 1)[0]
 
@@ -532,6 +654,90 @@ class RiskAnalysisValueValidationTest(unittest.TestCase):
         errors = refine_task.validate_refinement({}, body)
 
         self.assertIn("unresolved risk-analysis value: Open decisions/blockers:", errors)
+
+    def test_multiline_required_value_stops_at_unknown_sibling_row(self) -> None:
+        risk_lines = "\n".join(
+            f"- {label} {value}"
+            for label, value in RISK_VALUES.items()
+            if label != "Open decisions/blockers:"
+        )
+        body = task_body(risk_values={}).replace(
+            "## Implementation Risk Analysis\n\n",
+            (
+                "## Implementation Risk Analysis\n\n"
+                f"{risk_lines}\n"
+                "- Open decisions/blockers:\n"
+                "- Other context:\n"
+                "  This belongs to the sibling row, not the required label.\n"
+            ),
+        )
+
+        errors = refine_task.validate_refinement({}, body)
+
+        self.assertIn("unresolved risk-analysis value: Open decisions/blockers:", errors)
+
+    def test_multiline_value_does_not_cross_code_fence_or_comment_to_a_sibling(self) -> None:
+        risk_lines = "\n".join(
+            f"- {label} {value}"
+            for label, value in RISK_VALUES.items()
+            if label != "Open decisions/blockers:"
+        )
+        artifacts = (
+            "      `fake code value`",
+            "  ```text\n  fake fenced value\n  ```",
+            "  <!-- fake comment value -->",
+        )
+        for artifact in artifacts:
+            with self.subTest(artifact=artifact):
+                body = task_body(risk_values={}).replace(
+                    "## Implementation Risk Analysis\n\n",
+                    (
+                        "## Implementation Risk Analysis\n\n"
+                        f"{risk_lines}\n"
+                        "- Open decisions/blockers:\n"
+                        f"{artifact}\n"
+                        "- Other context:\n"
+                        "  This belongs to the sibling row.\n"
+                    ),
+                )
+
+                errors = refine_task.validate_refinement({}, body)
+
+                self.assertIn(
+                    "unresolved risk-analysis value: Open decisions/blockers:",
+                    errors,
+                )
+
+    def test_nested_list_continuations_can_reset_to_the_label_container(self) -> None:
+        risk_lines = "\n".join(
+            f"- {label} {value}"
+            for label, value in RISK_VALUES.items()
+            if label != "Open decisions/blockers:"
+        )
+        body = task_body(risk_values={}).replace(
+            "## Implementation Risk Analysis\n\n",
+            (
+                "## Implementation Risk Analysis\n\n"
+                f"{risk_lines}\n"
+                "- Open decisions/blockers:\n"
+                "  - First decision.\n"
+                "    - Nested detail.\n"
+                "  - Second decision after the nested-list reset.\n"
+            ),
+        )
+
+        self.assertEqual([], refine_task.validate_refinement({}, body))
+
+        visible_body = refine_task._mask_nonrendered_markdown(body)
+        risk_section = refine_task._section_body(
+            visible_body,
+            refine_task._section_matches(visible_body, refine_task.RISK_SECTION)[0],
+        )
+        value = refine_task._risk_label_value(
+            risk_section,
+            "Open decisions/blockers:",
+        )
+        self.assertIn("Second decision after the nested-list reset.", value)
 
     def test_indented_code_cannot_supply_multiline_required_value(self) -> None:
         risk_lines = "\n".join(
@@ -777,6 +983,30 @@ class DesignThinkingValueValidationTest(unittest.TestCase):
         }
         artifact = (
             f"- {refine_task.DESIGN_THINKING_BUDGET_LABEL}\n"
+            f"- {refine_task.DESIGN_THINKING_SEEDS_LABEL} hierarchy and error states"
+        )
+
+        errors = refine_task.validate_refinement(
+            frontmatter,
+            task_body(extra=artifact),
+        )
+
+        self.assertIn(
+            f"unresolved risk-analysis value: {refine_task.DESIGN_THINKING_BUDGET_LABEL}",
+            errors,
+        )
+
+    def test_design_thinking_multiline_value_stops_at_unknown_sibling_row(self) -> None:
+        frontmatter = {
+            "ui_ux_lane": True,
+            "ui_ux_mode": "implementation",
+            "design_thinking_polish_budget_loc": 12,
+            "design_thinking_polish_seeds": ["hierarchy", "error states"],
+        }
+        artifact = (
+            f"- {refine_task.DESIGN_THINKING_BUDGET_LABEL}\n"
+            "- Other context:\n"
+            "  Borrowed sibling prose must not satisfy the budget label.\n"
             f"- {refine_task.DESIGN_THINKING_SEEDS_LABEL} hierarchy and error states"
         )
 
