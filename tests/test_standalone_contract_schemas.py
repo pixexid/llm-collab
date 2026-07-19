@@ -707,6 +707,10 @@ FORBIDDEN_PAYLOAD_KEYS = {
     "receive_time", "receive_time_utc", "content_hash", "envelope_hash",
     "identity", "exact_identity", "revision", "registry_revision",
 }
+FORBIDDEN_PAYLOAD_COMPACT_KEYS = {
+    key.replace("_", ""): key
+    for key in FORBIDDEN_PAYLOAD_KEYS
+}
 
 
 def normalize_payload_key(key):
@@ -715,6 +719,13 @@ def normalize_payload_key(key):
     normalized = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", normalized)
     normalized = normalized.casefold()
     return re.sub(r"[\W_]+", "_", normalized).strip("_")
+
+
+def canonical_payload_authority_key(key):
+    normalized = normalize_payload_key(key)
+    if normalized in FORBIDDEN_PAYLOAD_KEYS:
+        return normalized
+    return FORBIDDEN_PAYLOAD_COMPACT_KEYS.get(normalized.replace("_", ""))
 
 
 def payload_error(value, *, depth=0):
@@ -750,9 +761,9 @@ def payload_error(value, *, depth=0):
                 return "payload_property_name"
             if not key or len(key) > 128:
                 return "payload_property_name"
-            normalized = normalize_payload_key(key)
-            if normalized in FORBIDDEN_PAYLOAD_KEYS:
-                return f"forbidden_payload_key:{normalized}"
+            authority_key = canonical_payload_authority_key(key)
+            if authority_key is not None:
+                return f"forbidden_payload_key:{authority_key}"
             error = payload_error(item, depth=depth + 1)
             if error:
                 return error
@@ -3358,14 +3369,71 @@ class StandaloneContractSchemaTest(unittest.TestCase):
                     "schema-expressible acronym authority alias",
                 )
 
-        for key in (
-            "adapter_summary",
-            "capability_profile_summary",
-            "native_session_note",
-            "registry_revision_note",
-        ):
+        def compact_aliases(canonical):
+            compact = canonical.replace("_", "")
+            uppercase = compact.upper()
+            fullwidth_uppercase = "".join(
+                chr(ord(character) + 0xFEE0)
+                for character in uppercase
+            )
+            return tuple(dict.fromkeys((compact, uppercase, fullwidth_uppercase)))
+
+        for canonical in sorted(FORBIDDEN_PAYLOAD_KEYS):
+            for alias in compact_aliases(canonical):
+                candidate = copy.deepcopy(envelope)
+                candidate["payload"] = {alias: "unsafe"}
+                with self.subTest(
+                    compact_authority=canonical,
+                    alias=alias,
+                ):
+                    self.assertEqual(
+                        envelope_error(candidate),
+                        f"forbidden_payload_key:{canonical}",
+                    )
+                    self.assert_schema_rejects(
+                        "EventEnvelopeV1",
+                        candidate,
+                        "compact authority alias",
+                    )
+
+        recursive_compact_aliases = {
+            "projectid": "project_id",
+            "PROJECTID": "project_id",
+            "PrOjEcTiD": "project_id",
+            "NATIVESESSIONID": "native_session_id",
+            "ＰＲＯＪＥＣＴＩＤ": "project_id",
+            "ＰrＯjＥcＴiＤ": "project_id",
+        }
+        for depth in range(6):
+            for key, canonical in recursive_compact_aliases.items():
+                value = {key: "unsafe"}
+                for level in range(depth):
+                    value = {f"safe_level_{level}": value}
+                candidate = copy.deepcopy(envelope)
+                candidate["payload"] = value
+                with self.subTest(recursive_compact=key, depth=depth):
+                    self.assertEqual(
+                        envelope_error(candidate),
+                        f"forbidden_payload_key:{canonical}",
+                    )
+                    self.assert_schema_rejects(
+                        "EventEnvelopeV1",
+                        candidate,
+                        "recursive compact authority alias",
+                    )
+
+        benign_normalizations = {
+            "adapter_summary": "adapter_summary",
+            "capability_profile_summary": "capability_profile_summary",
+            "native_session_note": "native_session_note",
+            "registry_revision_note": "registry_revision_note",
+            "project_summary": "project_summary",
+            "PROJECTSummary": "project_summary",
+            "ＰＲＯＪＥＣＴSummary": "project_summary",
+        }
+        for key, normalized in benign_normalizations.items():
             with self.subTest(benign_normalization=key):
-                self.assertEqual(normalize_payload_key(key), key)
+                self.assertEqual(normalize_payload_key(key), normalized)
 
         benign = copy.deepcopy(envelope)
         benign["payload"] = {
@@ -3387,6 +3455,8 @@ class StandaloneContractSchemaTest(unittest.TestCase):
             "content_hash_note": "benign",
             "routing_policy_summary": "benign",
             "ＡＤＡＰＴＥＲSummary": "benign",
+            "PROJECTSummary": "benign",
+            "ＰＲＯＪＥＣＴSummary": "benign",
         }
         self.assertEqual(self.errors("EventEnvelopeV1", benign), [])
         self.assertIsNone(envelope_error(benign))
