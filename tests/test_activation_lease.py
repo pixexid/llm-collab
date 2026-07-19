@@ -1230,6 +1230,40 @@ class DeliverActivationValidationTest(WorkspaceTestCase):
         self.assertNotIn("<", generated["prompt"])
         self.assertIn(generated["command"], body, "body and ring must carry the same command")
 
+    def test_ring_prompt_budget_enforced_for_long_paths(self):
+        """Round-7 live blocker: a 267-char first tier (long worktree root +
+        long packet name) must land on a minimal tier that still carries the
+        byte-exact command and selector, <= 240."""
+        sys.path.insert(0, str(REPO_ROOT / "bin"))
+        import deliver as deliver_lib
+
+        packet = "2026-07-19T03-34-03_to-claude_gh-1563-attended-probe-activation-one.md"
+        long_root = "/Users/pixexid/Projects/llm-collab-worktrees/claude/t-6a1eae-gh-1563-activation-lease"
+        command = (
+            f"{long_root}/bin/llm-collab inbox.py --me claude --project amiga "
+            f"--packet {packet}"
+        )
+        self.assertGreater(len(command), 200)
+        first_tier = (
+            f"[from codex] ACTIVATION TASK-PROBE63: claim via `{command}` — do not Read the packet file."
+        )
+        self.assertGreater(len(first_tier), deliver_lib.AX_DOORBELL_MAX_CHARS)
+
+        prompt = deliver_lib.build_activation_ring_prompt("codex", "TASK-PROBE63", command)
+        self.assertLessEqual(len(prompt), deliver_lib.AX_DOORBELL_MAX_CHARS)
+        self.assertIn(f"`{command}`", prompt, "byte-exact command survives every tier")
+        self.assertIn(packet, prompt, "exact packet selector survives every tier")
+
+    def test_ring_prompt_fails_closed_when_command_cannot_fit(self):
+        sys.path.insert(0, str(REPO_ROOT / "bin"))
+        import deliver as deliver_lib
+
+        oversized = "/very/long" * 30 + "/bin/llm-collab inbox.py --packet x.md"
+        self.assertGreater(len(oversized) + len("[from codex] ``"), deliver_lib.AX_DOORBELL_MAX_CHARS)
+        with self.assertRaises(ValueError) as ctx:
+            deliver_lib.build_activation_ring_prompt("codex", "TASK-X", oversized)
+        self.assertIn("cannot fit", str(ctx.exception))
+
 
 class TestIsolationGuard(unittest.TestCase):
     def test_ps_fixture_mode_never_signals_any_pid(self):

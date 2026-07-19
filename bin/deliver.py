@@ -138,10 +138,25 @@ def build_activation_consume_command(recipient: str, project: str, packet_name: 
 
 
 def build_activation_ring_prompt(sender: str, related_task: str, command: str) -> str:
-    prompt = f"[from {sender}] ACTIVATION {related_task}: claim via `{command}` — do not Read the packet file."
-    if len(prompt) > AX_DOORBELL_MAX_CHARS:
-        prompt = f"[from {sender}] ACTIVATION {related_task}: claim via `{command}`"
-    return prompt
+    """AX ring for an activation packet, guaranteed <= AX_DOORBELL_MAX_CHARS.
+
+    Tiers drop prose, never the runnable command or its packet selector. If
+    even the minimal marker + backticked command cannot fit, raise — the
+    caller must fail closed before delivery rather than silently truncate."""
+    tiers = (
+        f"[from {sender}] ACTIVATION {related_task}: claim via `{command}` — do not Read the packet file.",
+        f"[from {sender}] ACTIVATION {related_task}: claim via `{command}`",
+        f"[from {sender}] `{command}`",
+    )
+    for prompt in tiers:
+        if len(prompt) <= AX_DOORBELL_MAX_CHARS:
+            return prompt
+    overhead = len(f"[from {sender}] ``")
+    raise ValueError(
+        f"activation ring cannot fit the {AX_DOORBELL_MAX_CHARS}-char AX budget: "
+        f"the command alone is {len(command)} chars (max {AX_DOORBELL_MAX_CHARS - overhead} "
+        f"with the minimal marker) — shorten the workspace path or packet title"
+    )
 
 
 def build_message(args, body: str, chat_id: str, packet_name: str | None = None) -> str:
@@ -394,6 +409,16 @@ def main():
     slug = slugify(args.title, max_len=40)
     timestamp = ts()
     to_filename = f"{timestamp}_to-{args.recipient}_{slug}.md"
+    if args.activation:
+        try:
+            build_activation_ring_prompt(
+                args.sender,
+                str(args.related_task),
+                build_activation_consume_command(args.recipient, args.project, to_filename),
+            )
+        except ValueError as exc:
+            print(f"[error] {exc}", file=sys.stderr)
+            sys.exit(2)
     content = build_message(args, body, chat_id, packet_name=to_filename)
 
     # Write to-{recipient} file (recipient's copy)
