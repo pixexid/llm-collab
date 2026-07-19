@@ -50,13 +50,21 @@
       }
     },
     {
-      "if": {"anyOf": [{"required": ["legacy_manifest"]}, {"required": ["legacy_import"]}]},
+      "if": {"properties": {"evidence_kind": {"const": "compatibility_import"}}, "required": ["evidence_kind"]},
       "then": {
         "required": ["legacy_manifest", "legacy_import"],
         "properties": {
-          "evidence_kind": {"const": "compatibility_import"},
           "quality": {"const": "best_effort"},
-          "authority": {"properties": {"authority_kind": {"const": "trusted_importer"}}}
+          "authority": {"properties": {"authority_kind": {"const": "trusted_importer"}}},
+          "subject": {"required": ["legacy_locator"]}
+        }
+      },
+      "else": {
+        "not": {
+          "anyOf": [
+            {"required": ["legacy_manifest"]},
+            {"required": ["legacy_import"]}
+          ]
         }
       }
     }

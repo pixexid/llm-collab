@@ -21,6 +21,12 @@
     "extensions": {"$ref": "#/$defs/extensions"}
   },
   "allOf": [
+    {"if": {"properties": {"state": {"const": "persisted"}}, "required": ["state"]}, "then": {"properties": {"evidence": {"properties": {"state": {"const": "persisted"}}}}}},
+    {"if": {"properties": {"state": {"const": "routed"}}, "required": ["state"]}, "then": {"properties": {"evidence": {"properties": {"state": {"const": "routed"}}}}}},
+    {"if": {"properties": {"state": {"const": "injected"}}, "required": ["state"]}, "then": {"properties": {"evidence": {"properties": {"state": {"const": "injected"}}}}}},
+    {"if": {"properties": {"state": {"const": "visible"}}, "required": ["state"]}, "then": {"properties": {"evidence": {"properties": {"state": {"const": "visible"}}}}}},
+    {"if": {"properties": {"state": {"const": "processing"}}, "required": ["state"]}, "then": {"properties": {"evidence": {"properties": {"state": {"const": "processing"}}}}}},
+    {"if": {"properties": {"state": {"const": "acknowledged"}}, "required": ["state"]}, "then": {"properties": {"evidence": {"properties": {"state": {"const": "acknowledged"}}}}}},
     {"if": {"properties": {"state": {"const": "deferred_busy"}}, "required": ["state"]}, "then": {"properties": {"evidence": {"properties": {"state": {"const": "deferred_busy"}}}}}},
     {"if": {"properties": {"state": {"const": "rejected_before_acceptance"}}, "required": ["state"]}, "then": {"properties": {"evidence": {"properties": {"state": {"const": "rejected_before_acceptance"}}}}}},
     {"if": {"properties": {"state": {"const": "pull_pending"}}, "required": ["state"]}, "then": {"properties": {"evidence": {"properties": {"state": {"const": "pull_pending"}}}}}},

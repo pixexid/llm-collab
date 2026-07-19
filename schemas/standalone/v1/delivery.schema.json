@@ -20,6 +20,18 @@
     "extensions": {"$ref": "#/$defs/extensions"}
   },
   "allOf": [
+    {
+      "if": {"properties": {"outcome": {"const": "pending"}}, "required": ["outcome"]},
+      "then": {
+        "properties": {
+          "evidence": {
+            "properties": {
+              "state": {"enum": ["persisted", "routed", "injected", "visible", "processing", "acknowledged"]}
+            }
+          }
+        }
+      }
+    },
     {"if": {"properties": {"outcome": {"const": "deferred_busy"}}, "required": ["outcome"]}, "then": {"properties": {"evidence": {"properties": {"state": {"const": "deferred_busy"}}}}}},
     {"if": {"properties": {"outcome": {"const": "rejected_before_acceptance"}}, "required": ["outcome"]}, "then": {"properties": {"evidence": {"properties": {"state": {"const": "rejected_before_acceptance"}}}}}},
     {"if": {"properties": {"outcome": {"const": "pull_pending"}}, "required": ["outcome"]}, "then": {"properties": {"evidence": {"properties": {"state": {"const": "pull_pending"}}}}}},

@@ -130,6 +130,29 @@ TRUSTED_GRAPH_CATALOG = {
             ("native_delivery", "r1"),
         }
     },
+    "compatibility_policy": TRUSTED_COMPATIBILITY_POLICY,
+}
+STATE_EVIDENCE_STATES = (
+    "persisted",
+    "routed",
+    "injected",
+    "visible",
+    "accepted",
+    "processing",
+    "acknowledged",
+    "completed",
+    "rejected_before_acceptance",
+    "ambiguous",
+    "pull_pending",
+    "deferred_busy",
+)
+PENDING_DELIVERY_STATES = {
+    "persisted",
+    "routed",
+    "injected",
+    "visible",
+    "processing",
+    "acknowledged",
 }
 
 
@@ -346,6 +369,21 @@ def state_evidence_error(evidence):
             return "evidence_type"
         if evidence.get("integrity") != f"sha256:{digest_without(evidence)}":
             return "evidence_integrity"
+        legacy_fields = {"legacy_manifest", "legacy_import"}
+        present_legacy_fields = legacy_fields.intersection(evidence)
+        if evidence.get("evidence_kind") == "compatibility_import":
+            if present_legacy_fields != legacy_fields:
+                return "compatibility_legacy_fields"
+            if "legacy_locator" not in evidence.get("subject", {}):
+                return "compatibility_legacy_locator"
+            if (
+                evidence.get("quality") != "best_effort"
+                or evidence.get("authority", {}).get("authority_kind")
+                != "trusted_importer"
+            ):
+                return "legacy_quality_escalation"
+        elif present_legacy_fields:
+            return "unexpected_legacy_fields"
         if evidence.get("quality") == "best_effort" and evidence.get("state") in {
             "accepted",
             "completed",
@@ -1098,15 +1136,17 @@ def outcome_error(record, trusted_authority=TRUSTED_NATIVE_AUTHORITY):
         evidence_error = state_evidence_error(evidence)
         if evidence_error:
             return evidence_error
-        state = record.get("outcome", record.get("state"))
-        if state in {
-            "ambiguous",
-            "deferred_busy",
-            "rejected_before_acceptance",
-            "pull_pending",
-            "accepted",
-            "completed",
-        } and evidence["state"] != state:
+        if "outcome" in record:
+            state = record["outcome"]
+            state_matches = (
+                evidence["state"] in PENDING_DELIVERY_STATES
+                if state == "pending"
+                else evidence["state"] == state
+            )
+        else:
+            state = record["state"]
+            state_matches = evidence["state"] == state
+        if not state_matches:
             return "outcome_evidence_state"
         if (
             evidence["workspace_id"] != record["workspace_id"]
@@ -1362,6 +1402,7 @@ def reachable_graph_error(
                 return f"graph_capability_set:{capability_error}"
 
         referenced_capability_sets = set()
+        capability_set_adapters = {}
         for endpoint_id, endpoint in endpoints.items():
             registration = trusted_catalog["endpoint_registrations"].get(
                 endpoint_id
@@ -1396,6 +1437,24 @@ def reachable_graph_error(
             }
             if actual_registration != registration:
                 return "graph_endpoint_registration_mismatch"
+            capability_set_id = endpoint["capability_set_id"]
+            adapter_key = (
+                endpoint["adapter_name"],
+                endpoint["adapter_revision"],
+            )
+            bound_adapter = capability_set_adapters.get(capability_set_id)
+            if bound_adapter is not None and bound_adapter != adapter_key:
+                return "graph_capability_set_adapter_conflict"
+            capability_set_adapters[capability_set_id] = adapter_key
+            for capability in capability_sets[capability_set_id]["capabilities"]:
+                if capability["quality"] == "unsupported":
+                    continue
+                attestation = capability.get("evidence")
+                if not isinstance(attestation, dict) or (
+                    attestation.get("source_id"),
+                    attestation.get("source_revision"),
+                ) != adapter_key:
+                    return "graph_capability_set_attestation"
         for capability_set_id, capability_set in capability_sets.items():
             if (
                 capability_set["scope"] == {"kind": "workspace"}
@@ -1439,6 +1498,22 @@ def reachable_graph_error(
             )
             if reference_error:
                 return f"graph_evidence_reference:{reference_error}"
+            if evidence["evidence_kind"] == "compatibility_import":
+                compatibility_policy = trusted_catalog.get(
+                    "compatibility_policy"
+                )
+                if not isinstance(compatibility_policy, dict):
+                    return "graph_compatibility_policy_missing"
+                compatibility_error = manifest_error(
+                    evidence,
+                    workspace,
+                    compatibility_policy,
+                )
+                if compatibility_error:
+                    return (
+                        "graph_compatibility_manifest:"
+                        f"{compatibility_error}"
+                    )
 
         for session in sessions.values():
             endpoint = endpoints.get(session["endpoint_id"])
@@ -1585,7 +1660,7 @@ def replace_project_identity(value, project_id, source_project_id="proj"):
         return {
             key: (
                 project_id
-                if (key == "project_id" or key == "project")
+                if key in {"project_id", "project", "source_project_id"}
                 and item == source_project_id
                 else replace_project_identity(item, project_id, source_project_id)
             )
@@ -1620,27 +1695,31 @@ def make_reachable_graph(project_id="proj"):
     ]
     for record in records:
         if graph_record_kind(record) == "StateEvidenceV1":
-            seal_state_evidence(record)
+            if record["evidence_kind"] == "compatibility_import":
+                recalculate_legacy_integrity(record)
+            else:
+                seal_state_evidence(record)
         elif "evidence" in record:
             seal_state_evidence(record["evidence"])
     return workspace, records
 
 
-def make_delivery_outcome(outcome):
+def make_delivery_outcome(outcome, evidence_state=None):
     delivery = load(FIXTURE_DIR / "valid" / "delivery.json")
+    evidence_state = (
+        "persisted"
+        if outcome == "pending" and evidence_state is None
+        else evidence_state or outcome
+    )
     delivery["outcome"] = outcome
-    delivery["evidence"]["state"] = outcome
-    if outcome in {
-        "ambiguous",
-        "deferred_busy",
-        "rejected_before_acceptance",
-        "pull_pending",
+    delivery["evidence"]["state"] = evidence_state
+    if outcome not in {"accepted", "completed"} and evidence_state not in {
+        "accepted",
+        "completed",
     }:
         delivery["evidence"]["quality"] = "best_effort"
         delivery["evidence"]["evidence_kind"] = "adapter_observation"
         delivery["evidence"]["authority"]["authority_kind"] = "trusted_adapter"
-        delivery.pop("session_ref_id", None)
-        delivery["evidence"]["subject"].pop("session_ref_id", None)
     else:
         delivery["evidence"]["quality"] = "authoritative"
         delivery["evidence"]["evidence_kind"] = "native_delivery_state"
@@ -1648,21 +1727,18 @@ def make_delivery_outcome(outcome):
     return delivery
 
 
-def make_receipt_state(state):
+def make_receipt_state(state, evidence_state=None):
     receipt = load(FIXTURE_DIR / "valid" / "receipt.json")
+    evidence_state = evidence_state or state
     receipt["state"] = state
-    receipt["evidence"]["state"] = state
-    if state in {
-        "ambiguous",
-        "deferred_busy",
-        "rejected_before_acceptance",
-        "pull_pending",
+    receipt["evidence"]["state"] = evidence_state
+    if state not in {"accepted", "completed"} and evidence_state not in {
+        "accepted",
+        "completed",
     }:
         receipt["evidence"]["quality"] = "best_effort"
         receipt["evidence"]["evidence_kind"] = "adapter_observation"
         receipt["evidence"]["authority"]["authority_kind"] = "trusted_adapter"
-        receipt.pop("session_ref_id", None)
-        receipt["evidence"]["subject"].pop("session_ref_id", None)
     else:
         receipt["evidence"]["quality"] = "authoritative"
         receipt["evidence"]["evidence_kind"] = "exact_session_acknowledgment"
@@ -2305,6 +2381,231 @@ class StandaloneContractSchemaTest(unittest.TestCase):
         def by_kind(items):
             return {graph_record_kind(item): item for item in items}
 
+        for capability_scope in ("project", "workspace"):
+            for attestation_field, wrong_value in (
+                ("source_id", "other_adapter"),
+                ("source_revision", "r2"),
+            ):
+                candidate_records = copy.deepcopy(records)
+                capability_set = by_kind(candidate_records)["CapabilitySetV1"]
+                if capability_scope == "workspace":
+                    capability_set["scope"] = {"kind": "workspace"}
+                unused_capability = next(
+                    capability
+                    for capability in capability_set["capabilities"]
+                    if capability["capability"] == "ui_visibility"
+                )
+                unused_capability["evidence"][attestation_field] = wrong_value
+                with self.subTest(
+                    unused_capability_attestation=attestation_field,
+                    capability_scope=capability_scope,
+                ):
+                    self.assertEqual(
+                        self.errors("CapabilitySetV1", capability_set),
+                        [],
+                    )
+                    self.assertEqual(
+                        reachable_graph_error(
+                            candidate_records,
+                            workspace,
+                            TRUSTED_GRAPH_CATALOG,
+                        ),
+                        "graph_capability_set_attestation",
+                    )
+
+        for capability_scope in ("project", "workspace"):
+            candidate_records = copy.deepcopy(records)
+            graph = by_kind(candidate_records)
+            if capability_scope == "workspace":
+                graph["CapabilitySetV1"]["scope"] = {"kind": "workspace"}
+            second_endpoint = copy.deepcopy(graph["EndpointV1"])
+            second_endpoint.update(
+                {
+                    "endpoint_id": "endpoint_two",
+                    "adapter_name": "other_adapter",
+                    "adapter_revision": "r2",
+                }
+            )
+            second_endpoint["configuration_ref"]["reference"] = (
+                "endpoint_two_config"
+            )
+            candidate_records.append(second_endpoint)
+            candidate_catalog = copy.deepcopy(TRUSTED_GRAPH_CATALOG)
+            candidate_catalog["endpoint_registrations"]["endpoint_two"] = {
+                "agent_id": second_endpoint["agent_id"],
+                "capability_set_id": second_endpoint["capability_set_id"],
+                "adapter": ("other_adapter", "r2"),
+                "configuration_ref": (
+                    second_endpoint["configuration_ref"]["registry_id"],
+                    second_endpoint["configuration_ref"]["revision"],
+                    second_endpoint["configuration_ref"]["reference"],
+                ),
+            }
+            with self.subTest(
+                incompatible_endpoint_adapters=capability_scope
+            ):
+                self.assertEqual(
+                    reachable_graph_error(
+                        candidate_records,
+                        workspace,
+                        candidate_catalog,
+                    ),
+                    "graph_capability_set_adapter_conflict",
+                )
+
+        for omitted_field in ("legacy_manifest", "legacy_import"):
+            candidate_records = copy.deepcopy(records)
+            compatibility_evidence = by_kind(candidate_records)[
+                "StateEvidenceV1"
+            ]
+            compatibility_evidence.pop(omitted_field)
+            seal_state_evidence(compatibility_evidence)
+            with self.subTest(
+                compatibility_omitted_record=omitted_field
+            ):
+                self.assertEqual(
+                    reachable_graph_error(
+                        candidate_records,
+                        workspace,
+                        TRUSTED_GRAPH_CATALOG,
+                    ),
+                    "graph_schema:StateEvidenceV1",
+                )
+
+        candidate_records = copy.deepcopy(records)
+        compatibility_evidence = by_kind(candidate_records)["StateEvidenceV1"]
+        compatibility_evidence["subject"].pop("legacy_locator")
+        seal_state_evidence(compatibility_evidence)
+        self.assertEqual(
+            reachable_graph_error(
+                candidate_records,
+                workspace,
+                TRUSTED_GRAPH_CATALOG,
+            ),
+            "graph_schema:StateEvidenceV1",
+        )
+
+        candidate_records = copy.deepcopy(records)
+        compatibility_evidence = by_kind(candidate_records)["StateEvidenceV1"]
+        compatibility_evidence["legacy_manifest"]["seal"]["value"] = "f" * 64
+        seal_state_evidence(compatibility_evidence)
+        self.assertEqual(
+            reachable_graph_error(
+                candidate_records,
+                workspace,
+                TRUSTED_GRAPH_CATALOG,
+            ),
+            "graph_compatibility_manifest:manifest_seal",
+        )
+
+        candidate_records = copy.deepcopy(records)
+        compatibility_evidence = by_kind(candidate_records)["StateEvidenceV1"]
+        compatibility_evidence["legacy_manifest"]["entries"][1][
+            "transaction_id"
+        ] = "forged_tx"
+        compatibility_evidence["legacy_manifest"]["entries"][1][
+            "provenance_id"
+        ] = "forged_provenance"
+        recalculate_legacy_integrity(compatibility_evidence)
+        self.assertEqual(
+            reachable_graph_error(
+                candidate_records,
+                workspace,
+                TRUSTED_GRAPH_CATALOG,
+            ),
+            "graph_compatibility_manifest:untrusted_manifest_seal",
+        )
+
+        missing_policy_catalog = copy.deepcopy(TRUSTED_GRAPH_CATALOG)
+        missing_policy_catalog.pop("compatibility_policy")
+        self.assertEqual(
+            reachable_graph_error(records, workspace, missing_policy_catalog),
+            "graph_compatibility_policy_missing",
+        )
+        for policy_field, wrong_value, expected_error in (
+            (
+                "manifest_seal",
+                "f" * 64,
+                "untrusted_manifest_seal",
+            ),
+            (
+                "cutoff_policy_revision",
+                "p2",
+                "untrusted_manifest_policy",
+            ),
+            (
+                "registry_revision",
+                "r2",
+                "publication_registry_mismatch",
+            ),
+        ):
+            wrong_policy_catalog = copy.deepcopy(TRUSTED_GRAPH_CATALOG)
+            wrong_policy_catalog["compatibility_policy"][
+                policy_field
+            ] = wrong_value
+            with self.subTest(wrong_compatibility_policy=policy_field):
+                self.assertEqual(
+                    reachable_graph_error(
+                        records,
+                        workspace,
+                        wrong_policy_catalog,
+                    ),
+                    f"graph_compatibility_manifest:{expected_error}",
+                )
+
+        embedded_records = copy.deepcopy(records)
+        embedded_graph = by_kind(embedded_records)
+        embedded_delivery = embedded_graph["DeliveryV1"]
+        embedded_receipt = embedded_graph["ReceiptV1"]
+        embedded_evidence = copy.deepcopy(
+            embedded_graph["StateEvidenceV1"]
+        )
+        embedded_evidence["evidence_id"] = "evidence_embedded_legacy"
+        embedded_evidence["legacy_import"]["import_transaction_id"] = (
+            "attempt_legacy"
+        )
+        embedded_evidence["correlation_id"] = "attempt_legacy"
+        recalculate_legacy_integrity(embedded_evidence)
+        embedded_evidence["subject"].update(
+            {
+                "message_id": embedded_delivery["message_id"],
+                "delivery_id": embedded_delivery["delivery_id"],
+                "attempt_id": "attempt_legacy",
+                "endpoint_id": embedded_delivery["endpoint_id"],
+                "session_ref_id": embedded_delivery["session_ref_id"],
+            }
+        )
+        seal_state_evidence(embedded_evidence)
+        embedded_delivery["outcome"] = "pending"
+        embedded_delivery["attempt_id"] = "attempt_legacy"
+        embedded_delivery["evidence"] = embedded_evidence
+        embedded_receipt["attempt_id"] = "attempt_legacy"
+        embedded_receipt["evidence"]["subject"]["attempt_id"] = (
+            "attempt_legacy"
+        )
+        embedded_receipt["evidence"]["correlation_id"] = "attempt_legacy"
+        seal_state_evidence(embedded_receipt["evidence"])
+        self.assertEqual(
+            reachable_graph_error(
+                embedded_records,
+                workspace,
+                TRUSTED_GRAPH_CATALOG,
+            ),
+            "graph_delivery_adapter_authority",
+        )
+        embedded_delivery["evidence"]["legacy_manifest"]["seal"][
+            "value"
+        ] = "f" * 64
+        seal_state_evidence(embedded_delivery["evidence"])
+        self.assertEqual(
+            reachable_graph_error(
+                embedded_records,
+                workspace,
+                TRUSTED_GRAPH_CATALOG,
+            ),
+            "graph_compatibility_manifest:manifest_seal",
+        )
+
         for record_kind in ("DeliveryV1", "ReceiptV1"):
             for state in NONTERMINAL_OUTCOMES:
                 for workspace_capability in (False, True):
@@ -2517,7 +2818,7 @@ class StandaloneContractSchemaTest(unittest.TestCase):
                     candidate_workspace,
                     candidate_records,
                     candidate_catalog,
-                    graph_error,
+                    "graph_capability_set_attestation",
                 )
             )
 
@@ -2766,12 +3067,24 @@ class StandaloneContractSchemaTest(unittest.TestCase):
 
         for project_id in ("amiga", "nuvyr"):
             project_workspace, project_records = make_reachable_graph(project_id)
+            project_catalog = replace_project_identity(
+                copy.deepcopy(TRUSTED_GRAPH_CATALOG),
+                project_id,
+            )
+            project_evidence = next(
+                record
+                for record in project_records
+                if graph_record_kind(record) == "StateEvidenceV1"
+            )
+            project_catalog["compatibility_policy"]["manifest_seal"] = (
+                project_evidence["legacy_manifest"]["seal"]["value"]
+            )
             with self.subTest(project_id=project_id):
                 self.assertIsNone(
                     reachable_graph_error(
                         project_records,
                         project_workspace,
-                        TRUSTED_GRAPH_CATALOG,
+                        project_catalog,
                     )
                 )
 
@@ -3159,6 +3472,92 @@ class StandaloneContractSchemaTest(unittest.TestCase):
         self.assertIsNone(
             manifest_error(evidence, workspace, TRUSTED_COMPATIBILITY_POLICY)
         )
+        self.assertIsNone(state_evidence_error(evidence))
+
+        for omitted_field in ("legacy_manifest", "legacy_import"):
+            candidate = copy.deepcopy(evidence)
+            candidate.pop(omitted_field)
+            seal_state_evidence(candidate)
+            with self.subTest(omitted_legacy_record=omitted_field):
+                self.assert_schema_rejects(
+                    "StateEvidenceV1",
+                    candidate,
+                    f"compatibility import without {omitted_field}",
+                )
+                self.assertEqual(
+                    state_evidence_error(candidate),
+                    "compatibility_legacy_fields",
+                )
+
+        missing_locator = copy.deepcopy(evidence)
+        missing_locator["subject"].pop("legacy_locator")
+        seal_state_evidence(missing_locator)
+        self.assert_schema_rejects(
+            "StateEvidenceV1",
+            missing_locator,
+            "compatibility import without legacy locator",
+        )
+        self.assertEqual(
+            state_evidence_error(missing_locator),
+            "compatibility_legacy_locator",
+        )
+
+        wrong_importer_authority = copy.deepcopy(evidence)
+        wrong_importer_authority["authority"]["authority_kind"] = (
+            "trusted_adapter"
+        )
+        seal_state_evidence(wrong_importer_authority)
+        self.assert_schema_rejects(
+            "StateEvidenceV1",
+            wrong_importer_authority,
+            "compatibility import without trusted importer authority",
+        )
+        self.assertEqual(
+            state_evidence_error(wrong_importer_authority),
+            "legacy_quality_escalation",
+        )
+
+        for evidence_kind in (
+            "adapter_observation",
+            "native_delivery_state",
+            "exact_session_acknowledgment",
+            "exact_session_binding",
+        ):
+            if evidence_kind == "exact_session_binding":
+                non_compatibility = load(
+                    FIXTURE_DIR / "valid" / "session-ref.json"
+                )["evidence"]
+            else:
+                non_compatibility = load(
+                    FIXTURE_DIR / "valid" / "delivery.json"
+                )["evidence"]
+                non_compatibility["state"] = "persisted"
+                non_compatibility["evidence_kind"] = evidence_kind
+                seal_state_evidence(non_compatibility)
+            self.assertEqual(
+                self.errors("StateEvidenceV1", non_compatibility),
+                [],
+            )
+            for forbidden_field in ("legacy_manifest", "legacy_import"):
+                candidate = copy.deepcopy(non_compatibility)
+                candidate[forbidden_field] = copy.deepcopy(
+                    evidence[forbidden_field]
+                )
+                seal_state_evidence(candidate)
+                with self.subTest(
+                    non_compatibility_kind=evidence_kind,
+                    forbidden_legacy_field=forbidden_field,
+                ):
+                    self.assert_schema_rejects(
+                        "StateEvidenceV1",
+                        candidate,
+                        "legacy authority on non-compatibility evidence",
+                    )
+                    self.assertEqual(
+                        state_evidence_error(candidate),
+                        "unexpected_legacy_fields",
+                    )
+
         cases = []
 
         candidate = copy.deepcopy(evidence)
@@ -3447,86 +3846,146 @@ class StandaloneContractSchemaTest(unittest.TestCase):
         )
 
     def test_delivery_outcomes_are_materially_valid_and_state_bound(self):
-        for outcome in (
+        delivery_outcomes = (
+            "pending",
             "ambiguous",
             "deferred_busy",
             "rejected_before_acceptance",
             "pull_pending",
             "accepted",
             "completed",
-        ):
-            delivery = make_delivery_outcome(outcome)
-            with self.subTest(outcome=outcome, case="valid"):
-                self.assertEqual(self.errors("DeliveryV1", delivery), [])
-                self.assertIsNone(outcome_error(delivery))
-            mismatch = copy.deepcopy(delivery)
-            mismatch["evidence"]["state"] = (
-                (
-                    "ambiguous"
-                    if outcome != "ambiguous"
-                    else "deferred_busy"
+        )
+        for outcome in delivery_outcomes:
+            for evidence_state in STATE_EVIDENCE_STATES:
+                delivery = make_delivery_outcome(outcome, evidence_state)
+                allowed = (
+                    evidence_state in PENDING_DELIVERY_STATES
+                    if outcome == "pending"
+                    else evidence_state == outcome
                 )
-                if outcome
-                in {
-                    "ambiguous",
-                    "deferred_busy",
-                    "rejected_before_acceptance",
-                    "pull_pending",
-                }
-                else ("completed" if outcome == "accepted" else "accepted")
-            )
-            seal_state_evidence(mismatch["evidence"])
-            with self.subTest(outcome=outcome, case="state_mismatch"):
-                self.assert_schema_rejects(
-                    "DeliveryV1",
-                    mismatch,
-                    "outcome/evidence state mismatch",
-                )
-                self.assertEqual(
-                    outcome_error(mismatch),
-                    "outcome_evidence_state",
-                )
+                with self.subTest(
+                    outcome=outcome,
+                    evidence_state=evidence_state,
+                    surface="schema_and_semantic",
+                ):
+                    if allowed:
+                        self.assertEqual(
+                            self.errors("DeliveryV1", delivery),
+                            [],
+                        )
+                        self.assertIsNone(outcome_error(delivery))
+                    else:
+                        self.assert_schema_rejects(
+                            "DeliveryV1",
+                            delivery,
+                            "outcome/evidence state mismatch",
+                        )
+                        self.assertEqual(
+                            outcome_error(delivery),
+                            "outcome_evidence_state",
+                        )
+
+                graph_workspace, graph_records = make_reachable_graph()
+                for index, record in enumerate(graph_records):
+                    kind = graph_record_kind(record)
+                    if kind == "DeliveryV1":
+                        graph_records[index] = copy.deepcopy(delivery)
+                    elif kind == "ReceiptV1":
+                        graph_records[index] = make_receipt_state(
+                            evidence_state
+                        )
+                with self.subTest(
+                    outcome=outcome,
+                    evidence_state=evidence_state,
+                    surface="reachable_graph",
+                ):
+                    self.assertEqual(
+                        reachable_graph_error(
+                            graph_records,
+                            graph_workspace,
+                            TRUSTED_GRAPH_CATALOG,
+                        ),
+                        None if allowed else "graph_schema:DeliveryV1",
+                    )
+
+        invalid_pending_state = make_delivery_outcome(
+            "pending",
+            "not_a_state",
+        )
+        self.assert_schema_rejects(
+            "DeliveryV1",
+            invalid_pending_state,
+            "pending with state outside the closed evidence vocabulary",
+        )
+        self.assertEqual(
+            outcome_error(invalid_pending_state),
+            "outcome_evidence_state",
+        )
+        graph_workspace, graph_records = make_reachable_graph()
+        for index, record in enumerate(graph_records):
+            if graph_record_kind(record) == "DeliveryV1":
+                graph_records[index] = invalid_pending_state
+        self.assertEqual(
+            reachable_graph_error(
+                graph_records,
+                graph_workspace,
+                TRUSTED_GRAPH_CATALOG,
+            ),
+            "graph_schema:DeliveryV1",
+        )
 
     def test_receipt_outcomes_are_materially_valid_and_state_bound(self):
-        for state in (
-            "ambiguous",
-            "deferred_busy",
-            "rejected_before_acceptance",
-            "pull_pending",
-            "accepted",
-            "completed",
-        ):
-            receipt = make_receipt_state(state)
-            with self.subTest(state=state, case="valid"):
-                self.assertEqual(self.errors("ReceiptV1", receipt), [])
-                self.assertIsNone(outcome_error(receipt))
-            mismatch = copy.deepcopy(receipt)
-            mismatch["evidence"]["state"] = (
-                (
-                    "ambiguous"
-                    if state != "ambiguous"
-                    else "deferred_busy"
+        for state in STATE_EVIDENCE_STATES:
+            for evidence_state in STATE_EVIDENCE_STATES:
+                receipt = make_receipt_state(state, evidence_state)
+                allowed = evidence_state == state
+                with self.subTest(
+                    state=state,
+                    evidence_state=evidence_state,
+                    surface="schema_and_semantic",
+                ):
+                    if allowed:
+                        self.assertEqual(
+                            self.errors("ReceiptV1", receipt),
+                            [],
+                        )
+                        self.assertIsNone(outcome_error(receipt))
+                    else:
+                        self.assert_schema_rejects(
+                            "ReceiptV1",
+                            receipt,
+                            "receipt/evidence state mismatch",
+                        )
+                        self.assertEqual(
+                            outcome_error(receipt),
+                            "outcome_evidence_state",
+                        )
+
+                delivery = (
+                    make_delivery_outcome("pending", evidence_state)
+                    if evidence_state in PENDING_DELIVERY_STATES
+                    else make_delivery_outcome(evidence_state)
                 )
-                if state
-                in {
-                    "ambiguous",
-                    "deferred_busy",
-                    "rejected_before_acceptance",
-                    "pull_pending",
-                }
-                else ("completed" if state == "accepted" else "accepted")
-            )
-            seal_state_evidence(mismatch["evidence"])
-            with self.subTest(state=state, case="state_mismatch"):
-                self.assert_schema_rejects(
-                    "ReceiptV1",
-                    mismatch,
-                    "receipt/evidence state mismatch",
-                )
-                self.assertEqual(
-                    outcome_error(mismatch),
-                    "outcome_evidence_state",
-                )
+                graph_workspace, graph_records = make_reachable_graph()
+                for index, record in enumerate(graph_records):
+                    kind = graph_record_kind(record)
+                    if kind == "DeliveryV1":
+                        graph_records[index] = delivery
+                    elif kind == "ReceiptV1":
+                        graph_records[index] = copy.deepcopy(receipt)
+                with self.subTest(
+                    state=state,
+                    evidence_state=evidence_state,
+                    surface="reachable_graph",
+                ):
+                    self.assertEqual(
+                        reachable_graph_error(
+                            graph_records,
+                            graph_workspace,
+                            TRUSTED_GRAPH_CATALOG,
+                        ),
+                        None if allowed else "graph_schema:ReceiptV1",
+                    )
 
     def test_positive_delivery_and_receipt_require_exact_authoritative_binding(self):
         delivery = load(FIXTURE_DIR / "valid" / "delivery.json")
