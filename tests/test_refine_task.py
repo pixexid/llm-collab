@@ -105,7 +105,16 @@ class CanonicalTaskSectionValidationTest(unittest.TestCase):
         self.assertIn("empty or placeholder-only canonical section: ## Summary", errors)
 
     def test_rejects_empty_or_placeholder_only_acceptance_criteria(self) -> None:
-        for content in ("", "- [ ]", "- [x]", "- placeholder"):
+        for content in (
+            "",
+            "- [ ]",
+            "- [x]",
+            "1. [ ]",
+            "1) [x]",
+            "> 1. [ ]",
+            "1. > [x]",
+            "- placeholder",
+        ):
             with self.subTest(content=content):
                 errors = refine_task.validate_refinement({}, task_body(acceptance_criteria=content))
                 self.assertIn(
@@ -114,7 +123,15 @@ class CanonicalTaskSectionValidationTest(unittest.TestCase):
                 )
 
     def test_rejects_empty_or_placeholder_only_verification_plan(self) -> None:
-        for content in ("", "- [ ]", "- [x]", "- TBD"):
+        for content in (
+            "",
+            "- [ ]",
+            "- [x]",
+            "1. [ ]",
+            "> 1) [x]",
+            "1. > [ ]",
+            "- TBD",
+        ):
             with self.subTest(content=content):
                 errors = refine_task.validate_refinement({}, task_body(verification_plan=content))
                 self.assertIn(
@@ -215,6 +232,53 @@ class CanonicalTaskSectionValidationTest(unittest.TestCase):
             with self.subTest(heading=heading):
                 self.assertIn(f"missing canonical section: {heading}", errors)
 
+    def test_unrelated_container_fence_text_cannot_close_top_level_fence(self) -> None:
+        fake_task = task_body()
+        for false_closer in ("> ```", "- ```", "1. ````"):
+            with self.subTest(false_closer=false_closer):
+                body = f"```markdown\n{false_closer}\n{fake_task}\n````"
+                errors = refine_task.validate_refinement({}, body)
+                for heading in refine_task.CANONICAL_SECTIONS:
+                    self.assertIn(f"missing canonical section: {heading}", errors)
+
+    def test_nested_fence_closer_must_match_quote_depth_and_list_continuation(self) -> None:
+        artifacts = (
+            "> ```text\n> > ````\n## Summary\nFake\n> ````",
+            "- ```text\n ```\n## Summary\nFake\n  ````",
+            "- > ```text\n> ````\n## Summary\nFake\n  > ````",
+        )
+        for artifact in artifacts:
+            with self.subTest(artifact=artifact):
+                body = f"{artifact}\n\n{task_body()}"
+                self.assertEqual([], refine_task.validate_refinement({}, body))
+
+    def test_shorter_and_different_fences_remain_content_until_matching_closer(self) -> None:
+        artifacts = (
+            "````text\n```\n## Summary\nFake\n````",
+            "```text\n~~~\n## Summary\nFake\n```",
+        )
+        for artifact in artifacts:
+            with self.subTest(artifact=artifact):
+                self.assertEqual(
+                    [],
+                    refine_task.validate_refinement({}, f"{artifact}\n\n{task_body()}"),
+                )
+
+    def test_valid_matching_container_accepts_longer_closer_and_reveals_later_sections(self) -> None:
+        artifacts = (
+            "```text\n> ```\n- ````\n~~~~\n`````",
+            "> ```text\n> > ````\n> `````",
+            "- ```text\n - ````\n  `````",
+            "> - ~~~text\n>  ~~~~\n>   ~~~~~",
+            "- > ```text\n  > > ````\n  > `````",
+        )
+        for artifact in artifacts:
+            with self.subTest(artifact=artifact):
+                self.assertEqual(
+                    [],
+                    refine_task.validate_refinement({}, f"{artifact}\n\n{task_body()}"),
+                )
+
     def test_rejects_html_artifact_only_section_content(self) -> None:
         for artifact in (
             "<br>",
@@ -229,8 +293,25 @@ class CanonicalTaskSectionValidationTest(unittest.TestCase):
                     errors,
                 )
 
+    def test_rejects_multiline_html_artifact_only_section_content(self) -> None:
+        for artifact in (
+            '<span\n  data-example="empty">\n</span>',
+            '<div\n  class="outer"><span\n  data-empty>\n</span></div>',
+        ):
+            with self.subTest(artifact=artifact):
+                errors = refine_task.validate_refinement({}, task_body(summary=artifact))
+                self.assertIn(
+                    "empty or placeholder-only canonical section: ## Summary",
+                    errors,
+                )
+
     def test_accepts_real_section_content_around_html_artifacts(self) -> None:
-        for summary in ("Needs <br> review.", "<span>Needs review.</span>"):
+        for summary in (
+            "Needs <br> review.",
+            "<span>Needs review.</span>",
+            '<span\n  class="visible">Needs review.</span>',
+            "Treat &lt;placeholder&gt; as escaped visible prose.",
+        ):
             with self.subTest(summary=summary):
                 self.assertEqual(
                     [],
@@ -326,7 +407,19 @@ class RiskAnalysisValueValidationTest(unittest.TestCase):
 
     def test_rejects_checkbox_and_markdown_artifact_only_required_values(self) -> None:
         label = "Open decisions/blockers:"
-        for value in ("- [ ]", "- [x]", "-", "**", "_", "` `"):
+        for value in (
+            "- [ ]",
+            "- [x]",
+            "1. [ ]",
+            "1) [x]",
+            "> 1. [ ]",
+            "1. > [ ]",
+            "> 1) > - [x]",
+            "-",
+            "**",
+            "_",
+            "` `",
+        ):
             with self.subTest(value=value):
                 values = {**RISK_VALUES, label: value}
                 errors = refine_task.validate_refinement({}, task_body(risk_values=values))
@@ -337,6 +430,46 @@ class RiskAnalysisValueValidationTest(unittest.TestCase):
         values = {**RISK_VALUES, label: "- [ ] Confirm the final reviewer."}
 
         self.assertEqual([], refine_task.validate_refinement({}, task_body(risk_values=values)))
+
+    def test_accepts_ordered_substantive_required_value(self) -> None:
+        label = "Open decisions/blockers:"
+        values = {**RISK_VALUES, label: "1. Confirm the final reviewer."}
+
+        self.assertEqual([], refine_task.validate_refinement({}, task_body(risk_values=values)))
+
+    def test_accepts_ordered_substantive_acceptance_criterion(self) -> None:
+        self.assertEqual(
+            [],
+            refine_task.validate_refinement(
+                {},
+                task_body(acceptance_criteria="1. [ ] Run the real regression."),
+            ),
+        )
+
+    def test_indented_code_cannot_supply_required_labels(self) -> None:
+        for indentation in ("    ", "\t"):
+            with self.subTest(indentation=repr(indentation)):
+                fake_labels = "\n".join(
+                    f"{indentation}{label} fake value"
+                    for label in refine_task.RISK_REQUIRED_LABELS
+                )
+                errors = refine_task.validate_refinement(
+                    {},
+                    task_body(risk_values={}, extra=fake_labels),
+                )
+                for label in refine_task.RISK_REQUIRED_LABELS:
+                    self.assertIn(f"missing risk-analysis label: {label}", errors)
+
+    def test_visible_plain_bulleted_and_emphasized_labels_remain_valid(self) -> None:
+        risk_lines = "\n".join(
+            f"- **{label}** {value}" for label, value in RISK_VALUES.items()
+        )
+        body = task_body(risk_values={}).replace(
+            "## Implementation Risk Analysis\n\n",
+            f"## Implementation Risk Analysis\n\n{risk_lines}\n",
+        )
+
+        self.assertEqual([], refine_task.validate_refinement({}, body))
 
     def test_rejects_html_artifact_only_required_value(self) -> None:
         label = "Open decisions/blockers:"
@@ -350,6 +483,17 @@ class RiskAnalysisValueValidationTest(unittest.TestCase):
                 values = {**RISK_VALUES, label: value}
                 errors = refine_task.validate_refinement({}, task_body(risk_values=values))
                 self.assertIn(f"unresolved risk-analysis value: {label}", errors)
+
+    def test_rejects_multiline_html_artifact_only_required_value(self) -> None:
+        label = "Open decisions/blockers:"
+        values = {
+            **RISK_VALUES,
+            label: '<span\n  data-example="empty">\n</span>',
+        }
+
+        errors = refine_task.validate_refinement({}, task_body(risk_values=values))
+
+        self.assertIn(f"unresolved risk-analysis value: {label}", errors)
 
     def test_accepts_real_required_value_around_html_artifacts(self) -> None:
         label = "Open decisions/blockers:"
@@ -392,6 +536,81 @@ class DesignThinkingValueValidationTest(unittest.TestCase):
         )
         self.assertIn(
             f"missing risk-analysis label: {refine_task.DESIGN_THINKING_SEEDS_LABEL}",
+            errors,
+        )
+
+    def test_indented_code_cannot_supply_design_thinking_values(self) -> None:
+        frontmatter = {
+            "ui_ux_lane": True,
+            "ui_ux_mode": "implementation",
+            "design_thinking_polish_budget_loc": 12,
+            "design_thinking_polish_seeds": ["hierarchy", "error states"],
+        }
+        for indentation in ("    ", "\t"):
+            with self.subTest(indentation=repr(indentation)):
+                artifact = (
+                    f"{indentation}{refine_task.DESIGN_THINKING_BUDGET_LABEL} 12\n"
+                    f"{indentation}{refine_task.DESIGN_THINKING_SEEDS_LABEL} "
+                    "hierarchy and error states"
+                )
+                errors = refine_task.validate_refinement(
+                    frontmatter,
+                    task_body(extra=artifact),
+                )
+                self.assertIn(
+                    f"missing risk-analysis label: {refine_task.DESIGN_THINKING_BUDGET_LABEL}",
+                    errors,
+                )
+                self.assertIn(
+                    f"missing risk-analysis label: {refine_task.DESIGN_THINKING_SEEDS_LABEL}",
+                    errors,
+                )
+
+    def test_visible_design_thinking_values_remain_valid(self) -> None:
+        frontmatter = {
+            "ui_ux_lane": True,
+            "ui_ux_mode": "implementation",
+            "design_thinking_polish_budget_loc": 12,
+            "design_thinking_polish_seeds": ["hierarchy", "error states"],
+        }
+        artifact = (
+            f"- {refine_task.DESIGN_THINKING_BUDGET_LABEL} 12 LOC\n"
+            f"- {refine_task.DESIGN_THINKING_SEEDS_LABEL} "
+            "hierarchy and error states"
+        )
+
+        self.assertEqual(
+            [],
+            refine_task.validate_refinement(
+                frontmatter,
+                task_body(extra=artifact),
+            ),
+        )
+
+    def test_rejects_multiline_empty_html_design_thinking_values(self) -> None:
+        frontmatter = {
+            "ui_ux_lane": True,
+            "ui_ux_mode": "implementation",
+            "design_thinking_polish_budget_loc": 12,
+            "design_thinking_polish_seeds": ["hierarchy", "error states"],
+        }
+        empty_tag = '<span\n  data-example="empty">\n</span>'
+        artifact = (
+            f"- {refine_task.DESIGN_THINKING_BUDGET_LABEL} {empty_tag}\n"
+            f"- {refine_task.DESIGN_THINKING_SEEDS_LABEL} {empty_tag}"
+        )
+
+        errors = refine_task.validate_refinement(
+            frontmatter,
+            task_body(extra=artifact),
+        )
+
+        self.assertIn(
+            f"unresolved risk-analysis value: {refine_task.DESIGN_THINKING_BUDGET_LABEL}",
+            errors,
+        )
+        self.assertIn(
+            f"unresolved risk-analysis value: {refine_task.DESIGN_THINKING_SEEDS_LABEL}",
             errors,
         )
 

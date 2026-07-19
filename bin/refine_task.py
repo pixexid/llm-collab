@@ -66,8 +66,10 @@ DESIGN_THINKING_BUDGET_LABEL = "Design thinking in details — polish-pass budge
 DESIGN_THINKING_SEEDS_LABEL = "Design thinking in details — polish vectors:"
 HTML_TAG_RE = re.compile(
     r"</?[A-Za-z][A-Za-z0-9-]*"
-    r"(?:[ \t]+(?:[^\"'>\r\n]|\"[^\"\r\n]*\"|'[^'\r\n]*')*)?"
-    r"[ \t]*/?>"
+    r"(?:\s+[A-Za-z_:][A-Za-z0-9_.:-]*"
+    r"(?:\s*=\s*(?:\"[^\"]*\"|'[^']*'|[^\s\"'=<>`]+))?)*"
+    r"\s*/?>",
+    flags=re.DOTALL,
 )
 
 
@@ -98,34 +100,60 @@ def _indent_width(value: str) -> int:
 def _container_fence(
     value: str,
     *,
-    max_trailing_indent: int = 3,
-) -> tuple[str, int, str] | None:
+    expected_container: tuple[tuple[str, int], ...] | None = None,
+) -> tuple[str, tuple[tuple[str, int], ...], str] | None:
     cursor = 0
-    list_content_indent = 0
-    while cursor < len(value):
-        quote = re.match(r" {0,3}>[ \t]?", value[cursor:])
-        if quote:
-            cursor += quote.end()
-            continue
+    container = []
+    if expected_container is None:
+        while cursor < len(value):
+            quote = re.match(r" {0,3}>[ \t]?", value[cursor:])
+            if quote:
+                container.append(("quote", 0))
+                cursor += quote.end()
+                continue
 
-        list_item = re.match(
-            r"(?P<leading> {0,3})(?P<marker>[-+*]|\d{1,9}[.)])"
-            r"(?P<spacing>[ \t]{1,4})",
-            value[cursor:],
-        )
-        if list_item:
-            prefix = (
-                list_item.group("leading")
-                + list_item.group("marker")
-                + list_item.group("spacing")
+            list_item = re.match(
+                r"(?P<leading> {0,3})(?P<marker>[-+*]|\d{1,9}[.)])"
+                r"(?P<spacing>[ \t]{1,4})",
+                value[cursor:],
             )
-            list_content_indent += _indent_width(prefix)
-            cursor += list_item.end()
-            continue
-        break
+            if list_item:
+                prefix = (
+                    list_item.group("leading")
+                    + list_item.group("marker")
+                    + list_item.group("spacing")
+                )
+                container.append(("list", _indent_width(prefix)))
+                cursor += list_item.end()
+                continue
+            break
+    else:
+        container = list(expected_container)
+        for kind, continuation_indent in expected_container:
+            if kind == "quote":
+                quote = re.match(r" {0,3}>[ \t]?", value[cursor:])
+                if not quote:
+                    return None
+                cursor += quote.end()
+                continue
+
+            start = cursor
+            width = 0
+            while cursor < len(value) and value[cursor] in " \t" and width < continuation_indent:
+                character_width = (
+                    4 - (width % 4)
+                    if value[cursor] == "\t"
+                    else 1
+                )
+                if width + character_width > continuation_indent:
+                    return None
+                width += character_width
+                cursor += 1
+            if width != continuation_indent or cursor == start:
+                return None
 
     indentation = re.match(r"[ \t]*", value[cursor:]).group()
-    if _indent_width(indentation) > max_trailing_indent:
+    if _indent_width(indentation) > 3:
         return None
     cursor += len(indentation)
 
@@ -133,14 +161,14 @@ def _container_fence(
     if not fence_match:
         return None
     fence = fence_match.group("fence")
-    return fence, list_content_indent, fence_match.group("suffix")
+    return fence, tuple(container), fence_match.group("suffix")
 
 
 def _mask_nonrendered_markdown(value: str) -> str:
     lines = []
     fence_character = None
     fence_length = 0
-    fence_container_indent = 0
+    fence_container = ()
     in_comment = False
     for line in value.splitlines(keepends=True):
         content = line.rstrip("\r\n")
@@ -148,7 +176,7 @@ def _mask_nonrendered_markdown(value: str) -> str:
             lines.append(_mask_non_newline_characters(line))
             closing = _container_fence(
                 content,
-                max_trailing_indent=3 + fence_container_indent,
+                expected_container=fence_container,
             )
             if (
                 closing is not None
@@ -158,13 +186,13 @@ def _mask_nonrendered_markdown(value: str) -> str:
             ):
                 fence_character = None
                 fence_length = 0
-                fence_container_indent = 0
+                fence_container = ()
             continue
 
         if not in_comment:
             opening = _container_fence(content)
             if opening is not None:
-                fence, fence_container_indent, suffix = opening
+                fence, fence_container, suffix = opening
                 if fence[0] == "`" and "`" in suffix:
                     opening = None
             if opening is not None:
@@ -226,8 +254,16 @@ def _section_body(body: str, heading_match: re.Match) -> str:
 
 def _strip_markdown_artifacts(value: str) -> str:
     line = value.strip()
-    line = re.sub(r"^(?:>\s*)+", "", line)
-    line = re.sub(r"^(?:[-*+]\s*)?", "", line)
+    while True:
+        quote = re.match(r"^>\s*", line)
+        if quote:
+            line = line[quote.end() :]
+            continue
+        list_item = re.match(r"^(?:[-*+]|\d{1,9}[.)])(?:[ \t]+|$)", line)
+        if list_item:
+            line = line[list_item.end() :]
+            continue
+        break
     line = re.sub(r"^\[(?: |x|X)\]\s*", "", line)
     line = HTML_TAG_RE.sub("", line)
     return line.strip().strip("*_`~#>[](){}|\\-+.!").strip()
@@ -235,7 +271,8 @@ def _strip_markdown_artifacts(value: str) -> str:
 
 def _content_lines(section: str) -> list[str]:
     content = []
-    for raw_line in _mask_nonrendered_markdown(section).splitlines():
+    visible_section = HTML_TAG_RE.sub("", _mask_nonrendered_markdown(section))
+    for raw_line in visible_section.splitlines():
         line = _strip_markdown_artifacts(raw_line)
         if line:
             content.append(line)
@@ -280,7 +317,8 @@ def validate_canonical_task_sections(body: str) -> list[str]:
 def validate_implementation_risk_analysis(body):
     visible_body = _mask_nonrendered_markdown(body)
     match = re.search(
-        rf"^{re.escape(RISK_SECTION)}\s*(?P<section>.*?)(?=^##\s|\Z)",
+        rf"^{re.escape(RISK_SECTION)}[ \t]*(?:\r?\n|\Z)"
+        rf"(?P<section>.*?)(?=^##\s|\Z)",
         visible_body,
         flags=re.MULTILINE | re.DOTALL,
     )
@@ -290,11 +328,10 @@ def validate_implementation_risk_analysis(body):
     section = match.group("section")
     errors = []
     for label in RISK_REQUIRED_LABELS:
-        if label not in section:
+        value = _risk_label_value(section, label)
+        if value is None:
             errors.append(f"missing risk-analysis label: {label}")
             continue
-        label_match = re.search(rf"^[^\n]*{re.escape(label)}[ \t]*(?P<value>[^\n]*)$", section, flags=re.MULTILINE)
-        value = label_match.group("value").strip() if label_match else ""
         if not _has_substantive_content(value):
             errors.append(f"unresolved risk-analysis value: {label}")
     return errors
@@ -333,12 +370,46 @@ def _normalize_list(value) -> list[str]:
     return [str(value).strip()]
 
 
-def _risk_label_value(section: str, label: str) -> str | None:
-    if label not in section:
+def _live_markdown_row(value: str) -> str | None:
+    cursor = 0
+    while cursor < len(value):
+        quote = re.match(r" {0,3}>[ \t]?", value[cursor:])
+        if quote:
+            cursor += quote.end()
+            continue
+
+        list_item = re.match(
+            r"(?P<leading> {0,3})(?:[-+*]|\d{1,9}[.)])"
+            r"(?P<spacing>[ \t]+)",
+            value[cursor:],
+        )
+        if list_item:
+            if _indent_width(list_item.group("spacing")) > 4:
+                return None
+            cursor += list_item.end()
+            continue
+        break
+
+    indentation = re.match(r"[ \t]*", value[cursor:]).group()
+    if _indent_width(indentation) > 3:
         return None
-    post_label = section.split(label, 1)[1]
-    first_line = post_label.splitlines()[0] if post_label.splitlines() else ""
-    return first_line.strip()
+    return value[cursor + len(indentation) :]
+
+
+def _risk_label_value(section: str, label: str) -> str | None:
+    visible_section = HTML_TAG_RE.sub("", section)
+    for raw_line in visible_section.splitlines():
+        row = _live_markdown_row(raw_line)
+        if row is None:
+            continue
+        label_match = re.match(
+            rf"^(?:\*\*|__)?{re.escape(label)}(?:\*\*|__)?"
+            rf"[ \t]*(?P<value>.*)$",
+            row,
+        )
+        if label_match:
+            return label_match.group("value").strip()
+    return None
 
 
 def validate_design_thinking_refinement(frontmatter, body):
@@ -349,7 +420,8 @@ def validate_design_thinking_refinement(frontmatter, body):
 
     visible_body = _mask_nonrendered_markdown(body)
     match = re.search(
-        rf"^{re.escape(RISK_SECTION)}\s*(?P<section>.*?)(?=^##\s|\Z)",
+        rf"^{re.escape(RISK_SECTION)}[ \t]*(?:\r?\n|\Z)"
+        rf"(?P<section>.*?)(?=^##\s|\Z)",
         visible_body,
         flags=re.MULTILINE | re.DOTALL,
     )
