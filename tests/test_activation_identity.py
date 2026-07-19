@@ -35,7 +35,9 @@ class IdentityUnitTest(unittest.TestCase):
             "target_agent": "claude",
         }
 
-    def test_canonicalization_resolves_symlinks_and_dotdot(self):
+    def test_sender_canonicalization_resolves_symlinks_and_dotdot(self):
+        """Canonicalization is a SENDER-only, once-only step: every existing
+        spelling of one directory resolves to one canonical path."""
         with tempfile.TemporaryDirectory() as tmp:
             real = Path(tmp) / "real-worktree"
             real.mkdir()
@@ -44,11 +46,47 @@ class IdentityUnitTest(unittest.TestCase):
             dotted = str(Path(tmp) / "sub" / ".." / "real-worktree")
             Path(tmp, "sub").mkdir()
 
-            keys = {
-                ident.lease_key(ident.lease_identity(self.base_identity(spelling)))
+            canon = {
+                ident.canonical_worktree(spelling)
                 for spelling in (str(real), str(link), dotted)
             }
-            self.assertEqual(1, len(keys), "every spelling must derive one identity")
+            self.assertEqual(1, len(canon), "one canonical sender path")
+
+    def test_sender_refuses_nonexistent_or_nondirectory_worktree(self):
+        """A2 closure 1 (sender): a worktree that does not exist (or is a
+        file) is refused BEFORE serialization — a not-yet-existing path could
+        be created or symlink-swapped after send."""
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = str(Path(tmp) / "never-created")
+            with self.assertRaises(ValueError) as ctx:
+                ident.canonical_worktree(missing)
+            self.assertIn("existing directory", str(ctx.exception))
+            a_file = Path(tmp) / "a-file"
+            a_file.write_text("x")
+            with self.assertRaises(ValueError) as ctx:
+                ident.canonical_worktree(str(a_file))
+            self.assertIn("not a directory", str(ctx.exception))
+
+    def test_receiver_identity_is_filesystem_invariant(self):
+        """A2 closure 1 (receiver): lease_identity performs NO resolution —
+        the key derives from the serialized bytes only, so post-send
+        creation or symlink-swap of the path cannot change it."""
+        with tempfile.TemporaryDirectory() as tmp:
+            target = str(Path(tmp) / "lane-target")
+            identity = self.base_identity(target)
+
+            key_before = ident.lease_key(ident.lease_identity(identity))
+            Path(target).mkdir()
+            key_created = ident.lease_key(ident.lease_identity(identity))
+            Path(target).rmdir()
+            elsewhere = Path(tmp) / "elsewhere"
+            elsewhere.mkdir()
+            Path(target).symlink_to(elsewhere)
+            key_symlinked = ident.lease_key(ident.lease_identity(identity))
+
+            self.assertEqual(key_before, key_created)
+            self.assertEqual(key_before, key_symlinked,
+                             "symlink swap must not move the identity")
 
     def test_missing_field_raises_with_flag_name(self):
         broken = self.base_identity("/tmp/wt")
@@ -65,7 +103,7 @@ class IdentityUnitTest(unittest.TestCase):
         self.assertNotEqual(ident.lease_key(a), ident.lease_key(b))
 
     def test_classifier_none_activation_malformed(self):
-        plain = {"project_id": "amiga", "chat_id": "CHAT-TEST0001", "related_task": "TASK-1"}
+        plain = {"project_id": "amiga", "chat_id": "CHAT-TEST0001", "related_task": "TASK-1", "to": "claude"}
         self.assertEqual(("none", None), ident.classify_activation(plain, target_agent="claude"))
 
         complete = {
@@ -90,7 +128,7 @@ class IdentityUnitTest(unittest.TestCase):
     def test_classifier_uses_marker_presence_not_truthiness(self):
         """BLOCK P1.1: falsy marker VALUES are activation-shaped packets with
         a broken identity — malformed, never (none)."""
-        plain = {"project_id": "amiga", "chat_id": "CHAT-TEST0001", "related_task": "TASK-1"}
+        plain = {"project_id": "amiga", "chat_id": "CHAT-TEST0001", "related_task": "TASK-1", "to": "claude"}
         for marker in (
             {"activation": False},
             {"activation": None},
@@ -104,7 +142,7 @@ class IdentityUnitTest(unittest.TestCase):
         """Round-1 P2: activation:false/null alongside a COMPLETE valid
         identity is still malformed — only true marks a writer packet."""
         full = {
-            "project_id": "amiga", "chat_id": "CHAT-TEST0001",
+            "project_id": "amiga", "chat_id": "CHAT-TEST0001", "to": "claude",
             "related_task": "TASK-1", "worktree": "/tmp/wt", "branch": "b",
         }
         for value in (False, None, "true", 1):
@@ -164,7 +202,7 @@ class IdentityUnitTest(unittest.TestCase):
         malformed identically regardless of the consumer's HOME — it can
         never produce a valid (let alone divergent) lease key."""
         fm = {
-            "project_id": "amiga", "chat_id": "CHAT-TEST0001",
+            "project_id": "amiga", "chat_id": "CHAT-TEST0001", "to": "claude",
             "related_task": "TASK-1", "activation": True,
             "worktree": "~/lane", "branch": "b",
         }
@@ -193,7 +231,7 @@ class IdentityUnitTest(unittest.TestCase):
         old_home = os.environ.get("HOME")
         try:
             os.environ["HOME"] = "/tmp/sender-home"
-            Path("/tmp/sender-home").mkdir(exist_ok=True)
+            Path("/tmp/sender-home/lane").mkdir(parents=True, exist_ok=True)
             self.assertEqual(
                 str(Path("/tmp/sender-home/lane").resolve()),
                 ident.canonical_worktree("~/lane"),
@@ -212,12 +250,88 @@ class IdentityUnitTest(unittest.TestCase):
             self.assertIn("control or line-breaking", str(ctx.exception))
         self.assertEqual("b", ident.normalized_identity_field("branch", "  b  "))
 
+    def test_noncanonical_absolute_spellings_cannot_split_keys(self):
+        """PR114 P1: the receiver requires the serialized worktree to be its
+        own lexical normal form (pure string predicate — no filesystem), so
+        dotted/duplicate/trailing spellings of one directory classify
+        malformed instead of deriving a second key."""
+        base = {
+            "project_id": "amiga", "chat_id": "CHAT-TEST0001", "to": "claude",
+            "related_task": "TASK-1", "activation": True, "branch": "b",
+        }
+        canonical = "/work/lane"
+        verdict, identity = ident.classify_activation(
+            {**base, "worktree": canonical}, target_agent="claude"
+        )
+        self.assertEqual("activation", verdict)
+        canonical_key = ident.lease_key(identity)
+
+        for spelling in (
+            "/work/lane/../lane",
+            "/work/./lane",
+            "/work//lane",
+            "//work/lane",
+            "/work/lane/",
+        ):
+            verdict, detail = ident.classify_activation(
+                {**base, "worktree": spelling}, target_agent="claude"
+            )
+            self.assertEqual("malformed", verdict, spelling)
+            self.assertIn("canonical lexical form", detail["detail"])
+        # The invariant the finding demanded: no spelling of the same
+        # directory can ever produce a DIFFERENT valid key — every
+        # noncanonical spelling is malformed, the canonical one has one key.
+        self.assertTrue(canonical_key)
+
+    def test_symlink_loop_worktree_is_controlled_validation_error(self):
+        """PR114 P2: a symlink-loop worktree must land on the same controlled
+        pre-write refusal (ValueError family), whether the platform raises
+        OSError or RuntimeError from strict resolve."""
+        with tempfile.TemporaryDirectory() as tmp:
+            a = Path(tmp) / "a"
+            b = Path(tmp) / "b"
+            a.symlink_to(b)
+            b.symlink_to(a)
+            with self.assertRaises(ValueError) as ctx:
+                ident.canonical_worktree(str(a))
+            self.assertIn("existing directory", str(ctx.exception))
+
+    def test_missing_activation_marker_with_full_identity_is_malformed(self):
+        """A2 closure 2: worktree/branch markers with a complete identity but
+        NO activation field must not classify as a writer grant."""
+        fm = {
+            "project_id": "amiga", "chat_id": "CHAT-TEST0001", "to": "claude",
+            "related_task": "TASK-1", "worktree": "/tmp/wt", "branch": "b",
+        }
+        verdict, detail = ident.classify_activation(fm, target_agent="claude")
+        self.assertEqual("malformed", verdict)
+        self.assertIn("present and exactly true", detail["detail"])
+
+    def test_recipient_binding_matrix(self):
+        """A2 closure 3: serialized `to` must be a string exactly equal to
+        the claiming target agent."""
+        base = {
+            "project_id": "amiga", "chat_id": "CHAT-TEST0001",
+            "related_task": "TASK-1", "activation": True,
+            "worktree": "/tmp/wt", "branch": "b",
+        }
+        for to_case in ({}, {"to": "codex"}, {"to": True}, {"to": None}, {"to": 7}):
+            fm = {**base, **to_case}
+            verdict, detail = ident.classify_activation(fm, target_agent="claude")
+            self.assertEqual("malformed", verdict, f"to case {to_case!r}")
+            self.assertIn("target agent", detail["detail"])
+        verdict, identity = ident.classify_activation(
+            {**base, "to": "claude"}, target_agent="claude"
+        )
+        self.assertEqual("activation", verdict)
+        self.assertEqual("claude", identity["target_agent"])
+
     def test_classifier_marks_relative_worktree_malformed_cwd_independent(self):
         """BLOCK P1.2: a relative worktree in frontmatter must classify
         malformed identically from any CWD — never resolve against the
         consumer's CWD."""
         fm = {
-            "project_id": "amiga", "chat_id": "CHAT-TEST0001",
+            "project_id": "amiga", "chat_id": "CHAT-TEST0001", "to": "claude",
             "related_task": "TASK-1", "activation": True,
             "worktree": "rel/path", "branch": "b",
         }
@@ -514,7 +628,7 @@ class DeliverFoundationTest(unittest.TestCase):
             }
         )
         fm = {
-            "chat_id": "CHAT-TEST0001", "project_id": "amiga",
+            "chat_id": "CHAT-TEST0001", "project_id": "amiga", "to": "claude",
             "related_task": sender_identity["task"], "activation": True,
             "worktree": sender_identity["worktree"], "branch": sender_identity["branch"],
         }
@@ -533,7 +647,7 @@ class DeliverFoundationTest(unittest.TestCase):
 
         raw = "\n".join(
             [
-                "---", "chat_id: CHAT-TEST0001", "project_id: amiga",
+                "---", "chat_id: CHAT-TEST0001", "project_id: amiga", "to: claude",
                 "related_task: TASK-1", "activation: true",
                 "worktree: /tmp/wt", "branch: true", "---", "", "x",
             ]
@@ -557,6 +671,37 @@ class DeliverFoundationTest(unittest.TestCase):
             )
             self.assertEqual(2, result.returncode, f"{bad_branch!r}: {result.stdout}")
             self.assertIn("control or line-breaking", result.stderr)
+        self.assertEqual(before, self.workspace_snapshot(root), "zero mutations")
+
+    def test_symlink_loop_worktree_delivery_refused_without_traceback(self):
+        """PR114 P2 delivery path: a real a->b->a loop refuses pre-write with
+        the documented diagnostic, exit 2, zero mutations, and no traceback."""
+        root = self.make_workspace()
+        loop_a = Path(root) / "loop-a"
+        loop_b = Path(root) / "loop-b"
+        loop_a.symlink_to(loop_b)
+        loop_b.symlink_to(loop_a)
+        before = self.workspace_snapshot(root)
+        result = self.run_deliver(
+            root, "--activation", "--related-task", "TASK-TEST01",
+            "--worktree", str(loop_a), "--branch", "b",
+        )
+        self.assertEqual(2, result.returncode, result.stdout)
+        self.assertIn("existing directory", result.stderr)
+        self.assertNotIn("Traceback", result.stderr, "controlled refusal, not a crash")
+        self.assertEqual(before, self.workspace_snapshot(root), "zero mutations")
+
+    def test_nonexistent_sender_worktree_refused_with_zero_mutations(self):
+        """A2 closure 1 delivery path: a worktree that does not exist at
+        delivery time refuses pre-write."""
+        root = self.make_workspace()
+        before = self.workspace_snapshot(root)
+        result = self.run_deliver(
+            root, "--activation", "--related-task", "TASK-TEST01",
+            "--worktree", str(Path(root) / "never-created"), "--branch", "b",
+        )
+        self.assertEqual(2, result.returncode, result.stdout)
+        self.assertIn("existing directory", result.stderr)
         self.assertEqual(before, self.workspace_snapshot(root), "zero mutations")
 
     def test_activation_requires_full_identity(self):

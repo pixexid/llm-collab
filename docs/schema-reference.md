@@ -232,9 +232,19 @@ An activation packet's identity is the exact canonical tuple
 (`bin/_activation_identity.py`); its body opens with a banner carrying the
 absolute exact-packet claim command. A packet carrying any activation marker
 (`activation`, `worktree`, `branch`) without the complete identity is
-MALFORMED and consumers must fail closed — it is never an ordinary message
-(malformed includes falsy marker values and relative worktrees; the verdict is
-CWD-independent). Consumption gating, lease authority, and wake-path
+MALFORMED and consumers must fail closed — it is never an ordinary message.
+Malformed includes: any activation marker without `activation: true` present
+(the marker is mandatory and exactly boolean), falsy/coerced marker values,
+relative or home-relative worktrees, absolute worktree spellings that are not
+in canonical lexical form (dot/dotdot segments, duplicate separators,
+non-root trailing separators, or a double-leading slash — the receiver
+requires the serialized value to equal its lexical normal form before the
+byte-exact comparison), a `to` field that is not a string exactly equal to
+the claiming target agent, and non-string parsed identity values.
+Verdicts are CWD/HOME/filesystem-time independent: the sender canonicalizes an
+EXISTING directory exactly once before serialization, and receivers never
+re-resolve — the serialized identity is compared byte-exact, so post-send path
+creation or symlink replacement cannot move an identity. Consumption gating, lease authority, and wake-path
 enforcement ship in the follow-on lanes (GH-1571 / GH-1572). Until GH-1572
 lands, `deliver.py --activation` FAILS CLOSED pre-write (the packet's required
 claim command is not yet runnable); this schema documents the stable contract,
