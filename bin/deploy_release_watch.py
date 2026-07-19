@@ -201,7 +201,7 @@ def evaluate_release(
     smoke_job: str,
     required_smoke_steps: tuple[str, ...],
     required_event: str,
-    required_branch: str = "main",
+    required_branch: str,
 ) -> Verdict:
     """Pure verdict logic. `runs` must already be exact-SHA-filtered (the fetch
     guarantees it; the assertion below fails closed if a caller ever passes a
@@ -213,10 +213,11 @@ def evaluate_release(
                 f"exact-SHA correlation violated: run {r.get('id')} has head_sha "
                 f"{r.get('head_sha')} != merge SHA {merge_sha}"
             )
-    # Only the AUTOMATIC main-push deploy counts. A workflow_dispatch (or any
-    # other event/branch) run on the same SHA is a manual intervention and can
-    # never supersede or cover the automatic run's outcome — that would be a
-    # blind-retry laundering channel (GH-1524 cold-review P1).
+    # Only the project's CONFIGURED automatic release identity counts: the
+    # trigger_event on the configured default branch. A same-SHA run under any
+    # other event or branch is a manual intervention and can never supersede
+    # or cover the authoritative run's outcome — that would be a blind-retry
+    # laundering channel (GH-1524 cold-review P1).
     excluded = [r for r in runs
                 if r.get("event") != required_event or r.get("head_branch") != required_branch]
     candidates = [r for r in runs if r not in excluded]
@@ -224,8 +225,9 @@ def evaluate_release(
         note = ""
         if excluded:
             ids = ", ".join(str(r.get("id")) for r in excluded)
-            note = (f" ({len(excluded)} non-qualifying run(s) exist for this SHA — e.g. "
-                    f"workflow_dispatch/off-branch: {ids} — they never satisfy closure)")
+            note = (f" ({len(excluded)} run(s) exist for this SHA under a different "
+                    f"event/branch than the configured release identity: {ids} — "
+                    "they never satisfy closure)")
         return Verdict(
             state="MISSING", merge_sha=merge_sha,
             detail="no automatic "
@@ -326,7 +328,8 @@ def main() -> int:
     parser.add_argument("--project", required=True,
                         help="registered project id; repo/branch/workflow/evidence come from "
                              "its projects.json release_closure config")
-    parser.add_argument("--merge-sha", required=True, help="full merge commit SHA on main")
+    parser.add_argument("--merge-sha", required=True,
+                        help="full merge commit SHA on the project's configured default branch")
     parser.add_argument("--wait", action="store_true",
                         help="poll until the run reaches a terminal state or timeout")
     parser.add_argument("--timeout-seconds", type=int, default=900)
@@ -339,8 +342,8 @@ def main() -> int:
         print("[error] --merge-sha must be exactly 40 hex characters (the full merge SHA)",
               file=sys.stderr)
         return 64
-    if args.poll_seconds <= 0 or args.timeout_seconds < 0:
-        print("[error] --poll-seconds must be > 0 and --timeout-seconds must be >= 0",
+    if args.poll_seconds <= 0 or args.timeout_seconds <= 0:
+        print("[error] --poll-seconds and --timeout-seconds must both be > 0",
               file=sys.stderr)
         return 64
 

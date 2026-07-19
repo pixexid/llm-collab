@@ -360,12 +360,15 @@ class DeployReleaseWatchTriggerEventTest(unittest.TestCase):
 
 
 class DeployReleaseWatchCliValidationTest(unittest.TestCase):
-    def test_non_positive_poll_or_negative_timeout_exit_64(self) -> None:
+    def test_non_positive_poll_or_timeout_exit_64(self) -> None:
+        # Zero is as invalid as negative for BOTH intervals (a zero timeout
+        # would still reach the API; a zero poll would spin it) — exit 64
+        # before any API access.
         from unittest.mock import patch
 
         sha = "0" * 40
         for extra in (["--poll-seconds", "-1"], ["--poll-seconds", "0"],
-                      ["--timeout-seconds", "-5"]):
+                      ["--timeout-seconds", "-5"], ["--timeout-seconds", "0"]):
             argv = ["deploy_release_watch.py", "--project", "amiga",
                     "--merge-sha", sha, *extra]
             with patch.object(sys, "argv", argv):

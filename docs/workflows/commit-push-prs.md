@@ -321,7 +321,12 @@ After merge:
    done-marking waits for the release-closure gate below ("Release closure
    does not end at merge"): terminal deploy+smoke success for the exact merge
    SHA, or an explicit Codex disposition on a non-success. Never mark done
-   with the release outcome unknown or red.
+   with the release outcome unknown or red. For production-affecting merges
+   the queue runner likewise remains in `post_merge` — it does not advance to
+   the next lane — until exact-SHA release SUCCESS or Codex's explicit
+   terminal non-success disposition is recorded. A docs-only or otherwise
+   non-production-impacting merge exits via an explicit scope disposition
+   (recorded as such); a skipped deploy is never called deploy success.
 
 For `llm-collab` itself, the shared local checkout is part of the shipped
 workflow. After a PR that changes workflow docs, scripts, gates, skills, agent
