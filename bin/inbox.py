@@ -11,7 +11,8 @@ Usage:
   python bin/inbox.py --me orchestrator --project my-app
   python bin/inbox.py --me orchestrator --all
   python bin/inbox.py --me orchestrator --peek
-  python bin/inbox.py --me orchestrator --mark-all-read
+  python bin/inbox.py --me orchestrator --project my-app --mark-all-read
+  python bin/inbox.py --me orchestrator --all-projects --mark-all-read
 """
 
 from __future__ import annotations
@@ -44,18 +45,66 @@ from session_autobridge import register_session
 def parse_args():
     p = argparse.ArgumentParser(description="List unread messages for an agent.")
     p.add_argument("--me", required=True, help="Your agent ID")
-    p.add_argument("--limit", type=int, default=10, help="Max messages to show (default: 10)")
+    p.add_argument("--limit", type=int, default=None, help="Max messages to show (default: 10)")
     p.add_argument("--all", dest="show_all", action="store_true", help="Show all messages including read")
     p.add_argument("--peek", action="store_true", help="Do not mark shown messages as read")
-    p.add_argument("--project", default=None, help="Filter by project_id")
+    scope = p.add_mutually_exclusive_group()
+    scope.add_argument("--project", default=None, help="Filter by exact project_id")
+    scope.add_argument(
+        "--all-projects",
+        action="store_true",
+        help="Explicitly target every project (only valid with --mark-all-read)",
+    )
     p.add_argument("--chat", default=None, help="Filter by chat substring")
-    p.add_argument("--mark-all-read", action="store_true", help="Mark all unread as read and exit")
+    p.add_argument(
+        "--mark-all-read",
+        action="store_true",
+        help="Mark unread messages in the selected project scope as read and exit",
+    )
     p.add_argument("--publish-session", action="store_true", help="Publish current runtime session identity before showing inbox")
     p.add_argument("--session", default=None, help="Stable llm-collab session id to update when publishing runtime identity")
     p.add_argument("--runtime-family", default=None, choices=("codex_app", "claude_app", "gemini_cli"), help="Runtime family for session discovery")
     p.add_argument("--project-path", default=None, help="Optional runtime project path hint for session discovery")
-    p.add_argument("--json", dest="json_output", action="store_true", help="Emit JSON array")
-    return p.parse_args()
+    p.add_argument("--json", dest="json_output", action="store_true", help="Emit JSON output")
+    args = p.parse_args()
+
+    if args.project is not None and not args.project.strip():
+        p.error("--project requires a non-empty project id")
+
+    if args.all_projects and not args.mark_all_read:
+        p.error("--all-projects is only valid with --mark-all-read")
+
+    if args.mark_all_read:
+        if args.project is None and not args.all_projects:
+            p.error("--mark-all-read requires --project <id> or explicit --all-projects")
+
+        incompatible = []
+        if args.chat is not None:
+            incompatible.append("--chat")
+        if args.show_all:
+            incompatible.append("--all")
+        if args.peek:
+            incompatible.append("--peek")
+        if args.limit is not None:
+            incompatible.append("--limit")
+        if args.publish_session:
+            incompatible.append("--publish-session")
+        if args.session is not None:
+            incompatible.append("--session")
+        if args.runtime_family is not None:
+            incompatible.append("--runtime-family")
+        if args.project_path is not None:
+            incompatible.append("--project-path")
+        if incompatible:
+            p.error(
+                "--mark-all-read does not support "
+                + ", ".join(incompatible)
+                + "; narrow by --project or opt in with --all-projects"
+            )
+
+    if args.limit is None:
+        args.limit = 10
+    return args
 
 
 def publish_runtime_identity(args) -> dict | None:
@@ -125,6 +174,66 @@ def filter_messages(messages: list[dict], project: str | None, chat: str | None)
     return messages
 
 
+UNSCOPED_PROJECT_BUCKET = "<unscoped-or-missing-project>"
+MISSING_MESSAGE_BUCKET = "<missing-message>"
+
+
+def project_bucket(frontmatter: dict) -> str:
+    project_id = frontmatter.get("project_id")
+    if isinstance(project_id, str) and project_id:
+        return project_id
+    return UNSCOPED_PROJECT_BUCKET
+
+
+def unread_messages_with_missing_files(agent_id: str) -> list[dict]:
+    """Load unread pointers for an explicit all-project mutation."""
+    inbox = load_agent_inbox(agent_id)
+    messages = []
+    for rel_path in inbox.get("unread", []):
+        abs_path = ROOT / rel_path
+        if abs_path.exists():
+            frontmatter, body = parse_frontmatter(abs_path.read_text())
+            messages.append(
+                {
+                    "path": rel_path,
+                    "frontmatter": frontmatter,
+                    "body": body,
+                }
+            )
+        else:
+            messages.append(
+                {
+                    "path": rel_path,
+                    "frontmatter": {},
+                    "body": "",
+                    "missing_message": True,
+                }
+            )
+    return messages
+
+
+def mark_all_read(args) -> dict:
+    if args.all_projects:
+        messages = unread_messages_with_missing_files(args.me)
+    else:
+        messages = filter_messages(get_unread_messages(args.me), args.project, None)
+
+    marked_by_project: dict[str, int] = {}
+    for message in messages:
+        if message.get("missing_message"):
+            bucket = MISSING_MESSAGE_BUCKET
+        else:
+            bucket = project_bucket(message["frontmatter"])
+        marked_by_project[bucket] = marked_by_project.get(bucket, 0) + 1
+
+    paths = [message["path"] for message in messages]
+    mark_messages_read(args.me, paths)
+    return {
+        "marked_read": len(paths),
+        "marked_read_by_project": dict(sorted(marked_by_project.items())),
+    }
+
+
 def format_message(msg: dict, index: int) -> str:
     fm = msg["frontmatter"]
     lines = [
@@ -164,10 +273,7 @@ def main():
         sys.exit(1)
 
     if args.mark_all_read:
-        inbox = load_agent_inbox(args.me)
-        unread = inbox.get("unread", [])
-        mark_messages_read(args.me, unread)
-        print(json.dumps({"marked_read": len(unread)}))
+        print(json.dumps(mark_all_read(args), sort_keys=True))
         return
 
     published_runtime = publish_runtime_identity(args)
