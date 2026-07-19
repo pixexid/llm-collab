@@ -229,7 +229,7 @@ autobridge.
 If a message is intentionally abandoned, clear it explicitly by marking it read:
 
 ```bash
-python3 bin/inbox.py --me codex --mark-all-read
+python3 bin/inbox.py --me codex --all-projects --mark-all-read
 ```
 
 Use this only when the unread set is known to be stale. For a single stale
