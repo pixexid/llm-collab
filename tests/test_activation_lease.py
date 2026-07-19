@@ -64,7 +64,12 @@ class WorkspaceTestCase(unittest.TestCase):
         )
         write_json(
             temp_root / "projects.json",
-            {"projects": [{"id": "amiga", "display_name": "Amiga", "repos": {"app": "."}}]},
+            {
+                "projects": [
+                    {"id": "amiga", "display_name": "Amiga", "repos": {"app": "."}},
+                    {"id": "nuvyr", "display_name": "Nuvyr", "repos": {"app": "."}},
+                ]
+            },
         )
         write_json(temp_root / "agents.json", {"agents": []})
         self.add_agent(
@@ -416,6 +421,104 @@ class ActivationLeaseCliTest(WorkspaceTestCase):
             "preserved_registered_watch", granted["poller_audit"][0]["action"]
         )
 
+    def test_assert_refuses_expired_lease_until_reclaim(self):
+        """PR112 cycle-2 P1: expired authority must fail the pre-mutation
+        assertion; the owner re-claims (TTL refresh) to continue."""
+        root = self.make_workspace()
+        self.register_session(root, "SESSION-A")
+        self.claim(root, "SESSION-A", "--ttl-seconds", "0")
+
+        stale, code = self.run_cli(
+            root, "lease-assert", *identity_args(self.worktree),
+            "--session", "SESSION-A", "--fence-token", "1",
+        )
+        self.assertEqual(75, code)
+        self.assertEqual("lease_expired", stale["reason"])
+
+        reclaimed, code = self.claim(root, "SESSION-A")
+        self.assertEqual(0, code, reclaimed)
+        self.assertEqual(1, reclaimed["lease"]["fence_token"], "idempotent refresh")
+        ok, code = self.run_cli(
+            root, "lease-assert", *identity_args(self.worktree),
+            "--session", "SESSION-A", "--fence-token", "1",
+        )
+        self.assertEqual(0, code, ok)
+
+    def test_dead_predecessor_process_reclaims_idempotently(self):
+        """PR112 cycle-2 P1 complement: a successor process of the SAME
+        session/runtime whose predecessor pid is provably dead reclaims
+        idempotently — watcher restarts are not lane-blocking — while two
+        LIVE processes still exclude (covered by
+        test_same_session_different_process_is_refused)."""
+        root = self.make_workspace()
+        self.register_session(root, "SESSION-A")
+        dead = subprocess.Popen([sys.executable, "-c", "pass"])
+        dead.wait()
+        self.claim(root, "SESSION-A", "--owner-pid", str(dead.pid))
+
+        successor, code = self.claim(root, "SESSION-A", "--owner-pid", str(os.getpid()))
+        self.assertEqual(0, code, successor)
+        self.assertEqual(1, successor["lease"]["fence_token"], "same authority, no takeover")
+
+    def test_claimant_session_must_match_identity(self):
+        """PR112 cycle-2 P1: a live session of another agent or project must
+        not acquire (and block) this lane."""
+        root = self.make_workspace()
+        self.add_agent(
+            root,
+            {"id": "codex", "display_name": "Codex",
+             "activation": {"type": "cli_session", "watcher_enabled": False}},
+        )
+        payload, code = self.run_cli(
+            root, "register", "--session", "SESSION-CODEX", "--agent", "codex",
+            "--project", "amiga", "--chat", "CHAT-TEST0001",
+            "--mode", "manual", "--status", "parked",
+        )
+        self.assertEqual(0, code, payload)
+        refused, code = self.claim(root, "SESSION-CODEX")
+        self.assertEqual(75, code)
+        self.assertEqual("owner_session_identity_mismatch", refused["reason"])
+        self.assertEqual("agent_id", refused["owner"]["field"])
+
+        payload, code = self.run_cli(
+            root, "register", "--session", "SESSION-OTHERPROJ", "--agent", "claude",
+            "--project", "nuvyr", "--chat", "CHAT-TEST0001",
+            "--mode", "manual", "--status", "parked",
+        )
+        self.assertEqual(0, code, payload)
+        refused, code = self.claim(root, "SESSION-OTHERPROJ")
+        self.assertEqual(75, code)
+        self.assertEqual("owner_session_identity_mismatch", refused["reason"])
+        self.assertEqual("project_id", refused["owner"]["field"])
+
+        # Null bindings are UNBOUND, not wildcards: they refuse too.
+        payload, code = self.run_cli(
+            root, "register", "--session", "SESSION-NULLPROJ", "--agent", "claude",
+            "--chat", "CHAT-TEST0001", "--mode", "manual", "--status", "parked",
+        )
+        self.assertEqual(0, code, payload)
+        refused, code = self.claim(root, "SESSION-NULLPROJ")
+        self.assertEqual(75, code)
+        self.assertEqual("owner_session_identity_mismatch", refused["reason"])
+        self.assertEqual("project_id", refused["owner"]["field"])
+
+        payload, code = self.run_cli(
+            root, "register", "--session", "SESSION-NULLCHAT", "--agent", "claude",
+            "--project", "amiga", "--mode", "manual", "--status", "parked",
+        )
+        self.assertEqual(0, code, payload)
+        refused, code = self.claim(root, "SESSION-NULLCHAT")
+        self.assertEqual(75, code)
+        self.assertEqual("owner_session_identity_mismatch", refused["reason"])
+        self.assertEqual("chat_id", refused["owner"]["field"])
+
+        # An exactly-bound record still qualifies (the standard helper binds
+        # agent=claude, project=amiga, chat=CHAT-TEST0001).
+        self.register_session(root, "SESSION-BOUND")
+        granted, code = self.claim(root, "SESSION-BOUND")
+        self.assertEqual(0, code, granted)
+        self.assertTrue(granted["claimed"])
+
     def test_stale_fence_cannot_assert_after_takeover(self):
         root = self.make_workspace()
         self.register_session(root, "SESSION-A")
@@ -594,6 +697,34 @@ class DispatchActivationGateTest(WorkspaceTestCase):
         lease_detail = json.loads(out_a.read_text())
         self.assertEqual(1, lease_detail["fence_token"])
         self.assertEqual(self.worktree, lease_detail["identity"]["worktree"])
+
+    def test_successor_dispatcher_generation_is_not_blocked(self):
+        """PR112 cycle-2 P1 complement at the dispatch level: the dispatcher
+        process that claimed packet 1 has exited by the time packet 2 (same
+        identity) arrives; the next dispatcher generation must reclaim
+        idempotently and wake the writer — a watcher restart is not
+        lane-blocking. (Two LIVE concurrent dispatchers excluding each other
+        is pinned at the claim layer by
+        test_same_session_different_process_is_refused.)"""
+        root = self.make_workspace()
+        out_a = root / "out-gen1.txt"
+        self.register_runtime_session(root, "SESSION-A", out_a)
+        self.add_activation_message(root, path_stem="activate-1")
+        first, code = self.run_cli(root, "dispatch", "--session", "SESSION-A")
+        self.assertEqual(0, code, first)
+        self.assertEqual("message_dispatched", first["actions"][0]["event"])
+        self.assertTrue(out_a.exists())
+
+        out_a.unlink()
+        self.add_activation_message(root, path_stem="review-fix-1")
+        second, code = self.run_cli(root, "dispatch", "--session", "SESSION-A")
+        self.assertEqual(0, code, second)
+        self.assertEqual("message_dispatched", second["actions"][0]["event"])
+        self.assertEqual(
+            1, second["actions"][0]["activation_lease"]["fence_token"],
+            "idempotent successor reclaim, no takeover",
+        )
+        self.assertTrue(out_a.exists(), "successor generation must wake the writer")
 
     def test_non_activation_messages_are_not_gated(self):
         root = self.make_workspace()
@@ -1168,6 +1299,44 @@ class InboxActivationGateTest(WorkspaceTestCase):
         self.assertTrue(gate["authorized"])
         self.assertIn("aaaa-bbbb-cccc"[:12], gate["reader_session_id"])
 
+    def test_mark_all_read_holds_activation_packets(self):
+        """PR112 cycle-2 P2: bulk cleanup must not consume an unclaimed
+        activation packet."""
+        root = self.make_workspace()
+        act_rel = self.add_activation_message(root, path_stem="activate-1")
+        plain_rel = "Chats/2026-01-01_test__CHAT-TEST0001/plain.md"
+        write(
+            root / plain_rel,
+            "\n".join(
+                ["---", "chat_id: CHAT-TEST0001", "from: codex", "to: claude",
+                 "title: plain", "project_id: amiga", "---", "", "note"]
+            ),
+        )
+        inbox_path = root / "agents" / "claude" / "inbox.json"
+        inbox = json.loads(inbox_path.read_text())
+        inbox["unread"].append(plain_rel)
+        write_json(inbox_path, inbox)
+
+        # Hold 2: a stale pointer whose file no longer exists must still be
+        # cleaned up (the historical raw-pointer behavior).
+        missing_rel = "Chats/2026-01-01_test__CHAT-TEST0001/deleted-note.md"
+        inbox = json.loads(inbox_path.read_text())
+        inbox["unread"].append(missing_rel)
+        write_json(inbox_path, inbox)
+
+        result = subprocess.run(
+            [sys.executable, str(REPO_ROOT / "bin" / "inbox.py"),
+             "--me", "claude", "--mark-all-read"],
+            cwd=root, text=True, capture_output=True, env=self.cli_env(), check=False,
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(2, payload["marked_read"], "plain + missing pointer consumed")
+        self.assertEqual([act_rel], payload["held_activation"])
+        self.assertIn(act_rel, self.unread_paths(root), "activation stays claimable")
+        self.assertNotIn(plain_rel, self.unread_paths(root))
+        self.assertNotIn(missing_rel, self.unread_paths(root), "stale pointer cleaned")
+
     def test_peek_reports_unclaimed_without_claiming(self):
         root = self.make_workspace()
         self.add_activation_message(root)
@@ -1483,6 +1652,187 @@ class ClaimLockTest(unittest.TestCase):
                     pass
             finally:
                 lease_lib.ACTIVATION_LEASES_DIR = old
+
+
+class DeliverAxBudgetScopingTest(WorkspaceTestCase):
+    """PR112 cycle-2 P2: the 240-char AX budget binds only when an AX ring is
+    the selected wake path."""
+
+    def make_long_root_workspace(self) -> Path:
+        shallow = self.make_workspace()
+        deep = shallow / ("x" * 60) / ("y" * 60) / ("z" * 60)
+        deep.mkdir(parents=True)
+        for name in ("collab.config.json", "projects.json", "agents.json"):
+            (deep / name).write_text((shallow / name).read_text())
+        for agent_dir in (shallow / "agents").iterdir():
+            target = deep / "agents" / agent_dir.name
+            target.mkdir(parents=True)
+            for f in agent_dir.iterdir():
+                (target / f.name).write_text(f.read_text())
+        chat_dir = deep / "Chats" / "2026-01-01_test__CHAT-TEST0001"
+        write_json(chat_dir / "meta.json", {"chat_id": "CHAT-TEST0001", "project_id": "amiga"})
+        self.long_chat_dir = chat_dir
+        return deep
+
+    def deliver_activation(self, root: Path, recipient: str) -> subprocess.CompletedProcess:
+        body = root / "b.md"
+        write(body, "work")
+        return subprocess.run(
+            [
+                sys.executable, str(REPO_ROOT / "bin" / "deliver.py"),
+                "--chat", "CHAT-TEST0001", "--from", "codex", "--to", recipient,
+                "--project", "amiga", "--title", "long root lane",
+                "--activation", "--related-task", "TASK-TEST01",
+                "--worktree", self.worktree, "--branch", "b",
+                "--body-file", str(body),
+            ],
+            cwd=root, text=True, capture_output=True, env=self.cli_env(), check=False,
+        )
+
+    def test_long_root_delivers_to_autobridge_target_without_ax_budget(self):
+        root = self.make_long_root_workspace()
+        self.add_agent(
+            root,
+            {"id": "codex", "display_name": "Codex",
+             "activation": {"type": "cli_session", "watcher_enabled": False}},
+        )
+        self.add_agent(
+            root,
+            {"id": "worker", "display_name": "Worker",
+             "activation": {"type": "cli_session", "watcher_enabled": False, "ax_app": "TestApp"}},
+        )
+        payload, code = self.run_cli(
+            root, "register", "--session", "SESSION-W", "--agent", "worker",
+            "--project", "amiga", "--chat", "CHAT-TEST0001",
+            "--mode", "notify", "--status", "parked",
+        )
+        self.assertEqual(0, code, payload)
+
+        result = self.deliver_activation(root, "worker")
+        self.assertEqual(0, result.returncode, result.stderr)
+        packets = list(self.long_chat_dir.glob("*_to-worker_*.md"))
+        self.assertEqual(1, len(packets), "mailbox delivery must succeed without a ring")
+
+    def register_worker_session(self, root: Path, *, chat: str | None) -> None:
+        args = [
+            "register", "--session", "SESSION-W", "--agent", "worker",
+            "--project", "amiga", "--mode", "notify", "--status", "parked",
+        ]
+        if chat:
+            args += ["--chat", chat]
+        payload, code = self.run_cli(root, *args)
+        self.assertEqual(0, code, payload)
+
+    def add_worker_and_codex(self, root: Path) -> None:
+        self.add_agent(
+            root,
+            {"id": "codex", "display_name": "Codex",
+             "activation": {"type": "cli_session", "watcher_enabled": False}},
+        )
+        self.add_agent(
+            root,
+            {"id": "worker", "display_name": "Worker",
+             "activation": {"type": "cli_session", "watcher_enabled": False, "ax_app": "TestApp"}},
+        )
+
+    def make_short_workspace_with_chat(self) -> Path:
+        root = self.make_workspace()
+        self.add_worker_and_codex(root)
+        chat_dir = root / "Chats" / "2026-01-01_test__CHAT-TEST0001"
+        write_json(chat_dir / "meta.json", {"chat_id": "CHAT-TEST0001", "project_id": "amiga"})
+        self.short_chat_dir = chat_dir
+        return root
+
+    def deliver_message(self, root: Path, *, activation: bool) -> subprocess.CompletedProcess:
+        body = root / "b2.md"
+        write(body, "work")
+        base = [
+            sys.executable, str(REPO_ROOT / "bin" / "deliver.py"),
+            "--chat", "CHAT-TEST0001", "--from", "codex", "--to", "worker",
+            "--project", "amiga", "--title", f"bind check {activation}",
+            "--body-file", str(body),
+        ]
+        if activation:
+            base += [
+                "--activation", "--related-task", "TASK-TEST01",
+                "--worktree", self.worktree, "--branch", "b",
+            ]
+        return subprocess.run(
+            base, cwd=root, text=True, capture_output=True, env=self.cli_env(), check=False
+        )
+
+    def test_unbound_session_does_not_suppress_ax_for_activation(self):
+        """Cold-review hold: a null-chat session cannot consume an activation
+        (claim_lease refuses it), so it must not be selected as the
+        autobridge-ready wake target — the AX ring must still be required."""
+        root = self.make_short_workspace_with_chat()
+        self.register_worker_session(root, chat=None)
+        result = self.deliver_message(root, activation=True)
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("axsend-ensure ring", result.stdout, "AX doorbell must not be suppressed")
+
+    def test_exactly_bound_session_still_suppresses_ax_for_activation(self):
+        root = self.make_short_workspace_with_chat()
+        self.register_worker_session(root, chat="CHAT-TEST0001")
+        result = self.deliver_message(root, activation=True)
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertNotIn("axsend-ensure ring", result.stdout, "bound autobridge target suppresses AX")
+
+    def test_exact_session_selected_even_when_unbound_sorts_first(self):
+        """Hold 2: an earlier-sorting unbound session must not shadow a later
+        exact-bound one — exactness filters DURING the search, so the
+        activation still resolves an autobridge target and suppresses AX."""
+        root = self.make_short_workspace_with_chat()
+        # 'SESSION-A...' sorts before 'SESSION-B...' in iter_sessions.
+        payload, code = self.run_cli(
+            root, "register", "--session", "SESSION-A-unbound", "--agent", "worker",
+            "--project", "amiga", "--mode", "notify", "--status", "parked",
+        )
+        self.assertEqual(0, code, payload)
+        payload, code = self.run_cli(
+            root, "register", "--session", "SESSION-B-exact", "--agent", "worker",
+            "--project", "amiga", "--chat", "CHAT-TEST0001",
+            "--mode", "notify", "--status", "parked",
+        )
+        self.assertEqual(0, code, payload)
+
+        result = self.deliver_message(root, activation=True)
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertNotIn(
+            "axsend-ensure ring", result.stdout,
+            "the exact session must be found past the unbound one",
+        )
+
+    def test_ordinary_messages_keep_wildcard_selection(self):
+        root = self.make_short_workspace_with_chat()
+        self.register_worker_session(root, chat=None)
+        result = self.deliver_message(root, activation=False)
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertNotIn(
+            "axsend-ensure ring", result.stdout,
+            "non-activation delivery keeps the wildcard autobridge selection",
+        )
+
+    def test_long_root_fails_closed_for_ax_wake_path(self):
+        root = self.make_long_root_workspace()
+        self.add_agent(
+            root,
+            {"id": "codex", "display_name": "Codex",
+             "activation": {"type": "cli_session", "watcher_enabled": False}},
+        )
+        self.add_agent(
+            root,
+            {"id": "worker", "display_name": "Worker",
+             "activation": {"type": "cli_session", "watcher_enabled": False, "ax_app": "TestApp"}},
+        )
+        # No dispatchable autobridge session: AX is the wake path.
+        result = self.deliver_activation(root, "worker")
+        self.assertEqual(2, result.returncode)
+        self.assertIn("cannot fit", result.stderr)
+        self.assertEqual(
+            [], list(self.long_chat_dir.glob("*_to-worker_*.md")),
+            "fail closed BEFORE any packet is written",
+        )
 
 
 class TestIsolationGuard(unittest.TestCase):

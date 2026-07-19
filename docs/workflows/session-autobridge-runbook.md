@@ -358,7 +358,9 @@ If a message is intentionally abandoned, clear it explicitly by marking it read:
 python3 bin/inbox.py --me codex --mark-all-read
 ```
 
-Use this only when the unread set is known to be stale. For a single stale
+Use this only when the unread set is known to be stale. Unclaimed activation
+packets are exempt from bulk cleanup: they are reported as `held_activation`
+and stay unread until claimed (or explicitly resolved) through the gate. For a single stale
 message, edit `agents/<agent>/inbox.json` carefully or write a small local
 maintenance script that moves that exact path from `unread` to `read`.
 

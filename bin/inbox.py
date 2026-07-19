@@ -387,10 +387,27 @@ def main():
         sys.exit(1)
 
     if args.mark_all_read:
+        # Bulk cleanup walks the RAW unread pointer list: a pointer whose
+        # file is missing is stale and gets consumed (the historical cleanup
+        # behavior), while an EXISTING activation packet addressed to --me is
+        # held — hiding an unclaimed lane wake would strand the lane.
+        held: list[str] = []
+        consumable: list[str] = []
         inbox = load_agent_inbox(args.me)
-        unread = inbox.get("unread", [])
-        mark_messages_read(args.me, unread)
-        print(json.dumps({"marked_read": len(unread)}))
+        for rel_path in inbox.get("unread", []):
+            abs_path = ROOT / rel_path
+            if not abs_path.exists():
+                consumable.append(rel_path)
+                continue
+            fm, _ = parse_frontmatter(abs_path.read_text())
+            if fm.get("to") == args.me and any(
+                fm.get(field) for field in ACTIVATION_MARKER_FIELDS
+            ):
+                held.append(rel_path)
+            else:
+                consumable.append(rel_path)
+        mark_messages_read(args.me, consumable)
+        print(json.dumps({"marked_read": len(consumable), "held_activation": held}))
         return
 
     published_runtime = publish_runtime_identity(args)

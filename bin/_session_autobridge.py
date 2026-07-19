@@ -497,12 +497,23 @@ def find_dispatchable_target_session(
     project_id: str | None,
     chat_id: str | None,
     target_session_id: str | None,
+    require_exact_scope: bool = False,
 ) -> dict[str, Any] | None:
+    """Find a dispatchable session for the target.
+
+    require_exact_scope (activation wake targets): only sessions whose
+    project_id/chat_id EXACTLY equal the requested scope qualify — filtered
+    during the search, so an earlier-sorting unbound session can never shadow
+    a later exact one. Ordinary messages keep null-wildcard selection."""
     for session in iter_sessions(agent_id=agent_id):
-        if project_id and session.get("project_id") not in {None, project_id}:
-            continue
-        if chat_id and session.get("chat_id") not in {None, chat_id}:
-            continue
+        if require_exact_scope:
+            if session.get("project_id") != project_id or session.get("chat_id") != chat_id:
+                continue
+        else:
+            if project_id and session.get("project_id") not in {None, project_id}:
+                continue
+            if chat_id and session.get("chat_id") not in {None, chat_id}:
+                continue
         if target_session_id and str(target_session_id) not in session_target_ids(session):
             continue
         dispatchable, _ = session_is_dispatchable(session)
@@ -1680,7 +1691,14 @@ def acquire_activation_lease_for_dispatch(
         return False, {"reason": "malformed_activation_packet", "detail": str(exc)}
     if identity is None:
         return True, None
-    return gated_claim(identity, owner_session_id=str(session["session_id"]))
+    # Bind the dispatcher PROCESS: two concurrent dispatchers sharing this
+    # registered session must not both pass the idempotent-reclaim path and
+    # double-wake the writer. A dead predecessor pid stays reclaim-eligible.
+    return gated_claim(
+        identity,
+        owner_session_id=str(session["session_id"]),
+        owner_pid=os.getpid(),
+    )
 
 
 def dispatch_session(session_id: str) -> dict[str, Any]:
@@ -1757,7 +1775,11 @@ def dispatch_session(session_id: str) -> dict[str, Any]:
                 event["event"] = "activation_lease_refused"
                 event["effective_action"] = "held_read_only"
                 append_event(session_id, event)
-                mark_message_processed(session, message["path"])
+                if (lease_detail or {}).get("reason") != "same_session_different_process":
+                    # A concurrent-dispatcher loss is transient: leave the
+                    # message unprocessed so a later pass (after the winning
+                    # dispatcher's outcome resolves) can still dispatch once.
+                    mark_message_processed(session, message["path"])
                 actions.append(event)
                 continue
 

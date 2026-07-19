@@ -1247,8 +1247,13 @@ live-owner fencing.
 
 CLI/exit-code contract: `session_autobridge.py lease-claim | lease-assert |
 lease-release` and activation-consuming `inbox.py` reads exit `75` on any
-refusal (held by another owner, stale fence, unproven poller cleanup,
-unavailable audit/registry, malformed activation). The autobridge runtime
+refusal (held by another owner, stale fence, expired lease at assert,
+claimant session not bound to the identity's agent/project/chat, a second
+live process reusing the owner's session, unproven poller cleanup,
+unavailable audit/registry, malformed activation). `inbox.py
+--mark-all-read` never consumes unclaimed activation packets (reported as
+`held_activation`). The delivery-time 240-char AX prompt budget applies only
+when an AX ring is the selected wake path. The autobridge runtime
 payload delivered to a woken worker carries a top-level `activation_lease`
 object: `{lease, identity, fence_token, poller_audit}`.
 

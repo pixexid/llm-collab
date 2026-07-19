@@ -394,11 +394,18 @@ def main():
             )
     autobridge_target = None
     if not thread_coordination_required:
+        # An activation wake target must be EXACTLY bound to the packet's
+        # project/chat (claim_lease refuses null-bound sessions, so selecting
+        # one would suppress the AX doorbell with nobody able to consume the
+        # packet); the exactness is applied DURING the search so an unbound
+        # session cannot shadow an exact one. Ordinary messages keep the
+        # wildcard selection.
         autobridge_target = find_dispatchable_target_session(
             agent_id=args.recipient,
             project_id=args.project,
             chat_id=chat_id,
             target_session_id=args.target_session_id,
+            require_exact_scope=args.activation,
         )
     autobridge_ready = autobridge_target is not None
 
@@ -419,7 +426,19 @@ def main():
     slug = slugify(args.title, max_len=40)
     timestamp = ts()
     to_filename = f"{timestamp}_to-{args.recipient}_{slug}.md"
-    if args.activation:
+    ax_doorbell_required = (
+        args.recipient != "operator"
+        and not autobridge_ready
+        and is_ax_doorbell_target(
+            recipient_agent,
+            args.recipient,
+            sender_id=args.sender,
+        )
+    )
+    if args.activation and ax_doorbell_required:
+        # The AX budget binds only when an AX ring is the selected wake path;
+        # an autobridge-dispatchable target never receives a ring, so a long
+        # workspace path must not block its mailbox delivery.
         try:
             build_activation_ring_prompt(
                 args.sender,
@@ -481,15 +500,8 @@ def main():
         },
     )
 
-    ax_doorbell_required = (
-        args.recipient != "operator"
-        and not autobridge_ready
-        and is_ax_doorbell_target(
-            recipient_agent,
-            args.recipient,
-            sender_id=args.sender,
-        )
-    )
+    # ax_doorbell_required was resolved pre-write, before the packet filename
+    # validation; the same value gates both the budget check and the ring.
     if args.activation:
         ax_doorbell_prompt = (
             build_activation_ring_prompt(

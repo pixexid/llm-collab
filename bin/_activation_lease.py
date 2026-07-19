@@ -277,6 +277,22 @@ def claim_lease(
         raise LeaseRefused(
             "owner_session_not_live", {"owner_session_status": record.get("status")}
         )
+    # The claimant session must be BOUND to the requested activation identity:
+    # exact agent, project, and chat. Activation identities carry concrete
+    # values, so a null session field is unbound — not a wildcard — and
+    # refuses like any other mismatch.
+    for record_field, identity_field in (
+        ("agent_id", "target_agent"),
+        ("project_id", "project"),
+        ("chat_id", "chat"),
+    ):
+        session_value = record.get(record_field)
+        if session_value != identity[identity_field]:
+            raise LeaseRefused(
+                "owner_session_identity_mismatch",
+                {"field": record_field, "session_value": session_value,
+                 "identity_value": identity[identity_field]},
+            )
     # The claimant's own identity wins over the (shared) session record: a
     # second process reusing the session id must not inherit the recorded
     # runtime identity.
@@ -294,13 +310,21 @@ def claim_lease(
                 same_runtime = (
                     existing.get("owner_runtime_session_id") == claim_runtime_id
                 )
+                recorded_pid = existing.get("owner_pid")
                 same_pid = (
                     owner_pid is not None
-                    and existing.get("owner_pid") is not None
-                    and int(existing["owner_pid"]) == int(owner_pid)
+                    and recorded_pid is not None
+                    and int(recorded_pid) == int(owner_pid)
                 )
+                # Idempotent reclaim requires the same session AND runtime
+                # identity, and — when a process was bound — the SAME live
+                # process or a provably dead predecessor. Two concurrent live
+                # dispatcher processes sharing one session must never both
+                # hold the claim.
                 if same_session and same_runtime and (
-                    existing.get("owner_pid") is None or same_pid
+                    recorded_pid is None
+                    or same_pid
+                    or process_alive(recorded_pid) is False
                 ):
                     fence_token = int(existing.get("fence_token", 1))
                 else:
@@ -359,6 +383,11 @@ def assert_lease(
         raise LeaseRefused("lease_owned_by_other_session", owner_summary(lease))
     if fence_token is not None and int(lease.get("fence_token", -1)) != int(fence_token):
         raise LeaseRefused("stale_fence_token", owner_summary(lease))
+    if lease_is_expired(lease):
+        # Expired authority must not keep passing the pre-mutation assertion
+        # while a replacement can take over: the owner re-claims (idempotent,
+        # TTL refreshed) before continuing to write.
+        raise LeaseRefused("lease_expired", owner_summary(lease))
     return lease
 
 
