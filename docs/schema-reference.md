@@ -232,9 +232,13 @@ An activation packet's identity is the exact canonical tuple
 (`bin/_activation_identity.py`); its body opens with a banner carrying the
 absolute exact-packet claim command. A packet carrying any activation marker
 (`activation`, `worktree`, `branch`) without the complete identity is
-MALFORMED and consumers must fail closed — it is never an ordinary message.
-Consumption gating, lease authority, and wake-path enforcement ship in the
-follow-on lanes (GH-1571 / GH-1572); this schema is the stable foundation.
+MALFORMED and consumers must fail closed — it is never an ordinary message
+(malformed includes falsy marker values and relative worktrees; the verdict is
+CWD-independent). Consumption gating, lease authority, and wake-path
+enforcement ship in the follow-on lanes (GH-1571 / GH-1572). Until GH-1572
+lands, `deliver.py --activation` FAILS CLOSED pre-write (the packet's required
+claim command is not yet runnable); this schema documents the stable contract,
+not a live delivery path.
 
 ### Body
 

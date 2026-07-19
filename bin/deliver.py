@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -66,6 +67,7 @@ from _activation_identity import (
     build_activation_consume_command,
     build_activation_ring_prompt,
     canonical_worktree,
+    normalized_identity_field,
 )
 from _session_autobridge import (
     find_dispatchable_target_session,
@@ -258,31 +260,34 @@ def build_desktop_bridge_prompt(chat_id: str, recipient_id: str, message_path: P
 def main():
     args = parse_args()
     if args.activation:
-        missing = [
-            flag
-            for flag, value in (
-                ("--related-task", args.related_task),
-                ("--worktree", args.worktree),
-                ("--branch", args.branch),
-            )
-            if not value
-        ]
-        if missing:
+        if os.environ.get("LLM_COLLAB_ACTIVATION_RUNTIME_READY") != "1":
+            # Lane A ships the identity/serialization CONTRACT only. The
+            # claim command the packet instructs (`inbox.py --packet`) is not
+            # runnable until the runtime-integration lane (GH-1572) lands, so
+            # delivering an activation packet now would hand a worker an
+            # impossible required step. Fail closed pre-write; Lane C removes
+            # this guard when the exact command is runnable.
             print(
-                f"[error] --activation requires the full activation identity; missing: {', '.join(missing)}",
+                "[error] activation delivery unavailable: runtime integration "
+                "(GH-1572 inbox claim/consumption) has not landed, so the "
+                "packet's required claim command would not be runnable. "
+                "Deliver an ordinary packet instead.",
                 file=sys.stderr,
             )
             sys.exit(2)
-        expanded = Path(args.worktree).expanduser()
-        if not expanded.is_absolute():
-            print(
-                "[error] --worktree must be an absolute path: a relative path has no "
-                "CWD-independent meaning, so readers and dispatchers would derive "
-                "different activation identities for the same packet",
-                file=sys.stderr,
+        try:
+            # The SAME validators the shared identity path uses
+            # (bin/_activation_identity.py): missing/whitespace-only fields
+            # and relative worktrees all refuse here, before any file or
+            # inbox mutation.
+            args.related_task = normalized_identity_field("task", args.related_task)
+            args.branch = normalized_identity_field("branch", args.branch)
+            args.worktree = canonical_worktree(
+                normalized_identity_field("worktree", args.worktree)
             )
+        except ValueError as exc:
+            print(f"[error] {exc}", file=sys.stderr)
             sys.exit(2)
-        args.worktree = canonical_worktree(args.worktree)
     elif args.worktree or args.branch:
         print(
             "[error] --worktree/--branch are activation identity fields; pass --activation "
@@ -390,6 +395,20 @@ def main():
             sender_id=args.sender,
         )
     )
+    activation_ring_prompt = None
+    if args.activation and ax_doorbell_required:
+        # Built and bounded BEFORE any write: there is no generic/raw-file
+        # ring for an activation packet, so an unfittable prompt fails the
+        # delivery closed instead of degrading after files exist.
+        try:
+            activation_ring_prompt = build_activation_ring_prompt(
+                args.sender,
+                str(args.related_task),
+                build_activation_consume_command(args.recipient, args.project, to_filename),
+            )
+        except ValueError as exc:
+            print(f"[error] {exc}", file=sys.stderr)
+            sys.exit(2)
     content = build_message(args, body, chat_id, packet_name=to_filename)
 
     # Write to-{recipient} file (recipient's copy)
@@ -442,23 +461,12 @@ def main():
         },
     )
 
-    # (ax_doorbell_required was resolved pre-write.)
+    # (ax_doorbell_required and the activation ring were resolved pre-write;
+    # activation packets never get a generic/raw-file ring.)
     ax_doorbell_prompt = None
     if ax_doorbell_required:
         if args.activation:
-            try:
-                ax_doorbell_prompt = build_activation_ring_prompt(
-                    args.sender,
-                    str(args.related_task),
-                    build_activation_consume_command(args.recipient, args.project, to_path.name),
-                )
-            except ValueError:
-                # Foundation fallback: the bounded activation ring cannot fit.
-                # The AX-enforcement policy lane makes this fail closed
-                # pre-write; until then, fall back to the generic ring.
-                ax_doorbell_prompt = (
-                    f"[from {args.sender}] Read latest {args.recipient} packet in {chat_id}: {to_path.name}"
-                )
+            ax_doorbell_prompt = activation_ring_prompt
         else:
             ax_doorbell_prompt = (
                 f"[from {args.sender}] Read latest {args.recipient} packet in {chat_id}: {to_path.name}"

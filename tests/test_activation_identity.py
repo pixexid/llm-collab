@@ -87,6 +87,41 @@ class IdentityUnitTest(unittest.TestCase):
         verdict, _ = ident.classify_activation(marker_only, target_agent="claude")
         self.assertEqual("malformed", verdict, "any marker without full identity is malformed")
 
+    def test_classifier_uses_marker_presence_not_truthiness(self):
+        """BLOCK P1.1: falsy marker VALUES are activation-shaped packets with
+        a broken identity — malformed, never (none)."""
+        plain = {"project_id": "amiga", "chat_id": "CHAT-TEST0001", "related_task": "TASK-1"}
+        for marker in (
+            {"activation": False},
+            {"activation": None},
+            {"worktree": ""},
+            {"branch": None},
+        ):
+            verdict, _ = ident.classify_activation({**plain, **marker}, target_agent="claude")
+            self.assertEqual("malformed", verdict, f"marker {marker} must not downgrade")
+
+    def test_classifier_marks_relative_worktree_malformed_cwd_independent(self):
+        """BLOCK P1.2: a relative worktree in frontmatter must classify
+        malformed identically from any CWD — never resolve against the
+        consumer's CWD."""
+        fm = {
+            "project_id": "amiga", "chat_id": "CHAT-TEST0001",
+            "related_task": "TASK-1", "activation": True,
+            "worktree": "rel/path", "branch": "b",
+        }
+        verdicts = []
+        old_cwd = os.getcwd()
+        try:
+            for cwd in ("/tmp", "/"):
+                os.chdir(cwd)
+                verdicts.append(ident.classify_activation(fm, target_agent="claude"))
+        finally:
+            os.chdir(old_cwd)
+        for verdict, detail in verdicts:
+            self.assertEqual("malformed", verdict)
+            self.assertIn("absolute", detail["detail"])
+        self.assertEqual(verdicts[0], verdicts[1], "CWD must not influence the verdict")
+
 
 class PromptBuilderTest(unittest.TestCase):
     def test_command_is_absolute_exact_and_placeholder_free(self):
@@ -109,6 +144,24 @@ class PromptBuilderTest(unittest.TestCase):
         self.assertLessEqual(len(prompt), ident.AX_DOORBELL_MAX_CHARS)
         self.assertIn(f"`{command}`", prompt)
         self.assertIn(packet, prompt)
+
+    def test_command_is_shell_safe_for_spaced_workspace_roots(self):
+        """BLOCK P2: a workspace root containing spaces must serialize to a
+        runnable, shell-safe command with the exact packet selector intact."""
+        import shlex
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as tmp:
+            spaced_root = Path(tmp) / "collab root"
+            spaced_root.mkdir()
+            with mock.patch.object(ident, "ROOT", spaced_root):
+                command = ident.build_activation_consume_command("claude", "amiga", "p one.md")
+        argv = shlex.split(command)
+        self.assertEqual(str(spaced_root / "bin" / "llm-collab"), argv[0])
+        self.assertEqual("p one.md", argv[argv.index("--packet") + 1])
+        prompt = ident.build_activation_ring_prompt("codex", "TASK-X", command)
+        self.assertLessEqual(len(prompt), ident.AX_DOORBELL_MAX_CHARS)
+        self.assertIn(f"`{command}`", prompt)
 
     def test_ring_prompt_raises_when_command_cannot_fit(self):
         oversized = "/very/long" * 30 + "/bin/llm-collab inbox.py --packet x.md"
@@ -166,20 +219,75 @@ class DeliverFoundationTest(unittest.TestCase):
         "--project", "amiga", "--title", "lane a check",
     ]
 
-    def run_deliver(self, root: Path, *extra: str, cwd: Path | None = None) -> subprocess.CompletedProcess:
+    def run_deliver(
+        self,
+        root: Path,
+        *extra: str,
+        cwd: Path | None = None,
+        runtime_ready: bool = True,
+    ) -> subprocess.CompletedProcess:
         body = root / "b.md"
         write(body, "work")
+        env = {**os.environ, "LLM_COLLAB_UI_REFRESH": "0"}
+        env.pop("LLM_COLLAB_ACTIVATION_RUNTIME_READY", None)
+        if runtime_ready:
+            # Lane A contract testing: the delivery guard stays fail-closed
+            # in production until GH-1572; tests exercise the serialization
+            # contract behind the explicit readiness override.
+            env["LLM_COLLAB_ACTIVATION_RUNTIME_READY"] = "1"
         return subprocess.run(
             [sys.executable, str(DELIVER), *self.BASE, "--body-file", str(body), *extra],
-            cwd=cwd or root, text=True, capture_output=True,
-            env={**os.environ, "LLM_COLLAB_UI_REFRESH": "0"}, check=False,
+            cwd=cwd or root, text=True, capture_output=True, env=env, check=False,
         )
+
+    def workspace_snapshot(self, root: Path) -> dict[str, str]:
+        state = {}
+        for p in sorted((root / "Chats").rglob("*")):
+            if p.is_file():
+                state[str(p)] = p.read_text()
+        state["inbox"] = (root / "agents" / "claude" / "inbox.json").read_text()
+        return state
+
+    def test_activation_delivery_fails_closed_until_runtime_integration(self):
+        """BLOCK P2: the required claim command is not runnable until GH-1572;
+        the public path must refuse pre-write with an explicit diagnostic."""
+        root = self.make_workspace()
+        before = self.workspace_snapshot(root)
+        result = self.run_deliver(
+            root, "--activation", "--related-task", "TASK-TEST01",
+            "--worktree", self.worktree, "--branch", "b",
+            runtime_ready=False,
+        )
+        self.assertEqual(2, result.returncode)
+        self.assertIn("runtime integration", result.stderr)
+        self.assertIn("GH-1572", result.stderr)
+        self.assertEqual(before, self.workspace_snapshot(root), "zero mutations on refusal")
+
+    def test_whitespace_only_fields_refused_with_zero_mutations(self):
+        """BLOCK P1.3: whitespace-only task/branch must exit 2 and leave the
+        chat dir and inbox byte-identical."""
+        root = self.make_workspace()
+        before = self.workspace_snapshot(root)
+        for extra in (
+            ("--related-task", "   ", "--worktree", self.worktree, "--branch", "b"),
+            ("--related-task", "TASK-TEST01", "--worktree", self.worktree, "--branch", "   "),
+        ):
+            result = self.run_deliver(root, "--activation", *extra)
+            self.assertEqual(2, result.returncode, result.stdout)
+            self.assertIn("activation identity requires", result.stderr)
+        self.assertEqual(before, self.workspace_snapshot(root), "zero mutations on refusal")
 
     def test_activation_requires_full_identity(self):
         root = self.make_workspace()
         result = self.run_deliver(root, "--activation", "--related-task", "TASK-TEST01")
         self.assertEqual(2, result.returncode)
-        self.assertIn("--worktree", result.stderr)
+        self.assertIn("activation identity requires", result.stderr)
+
+        result = self.run_deliver(
+            root, "--activation", "--related-task", "TASK-TEST01",
+            "--worktree", self.worktree,
+        )
+        self.assertEqual(2, result.returncode)
         self.assertIn("--branch", result.stderr)
 
     def test_partial_identity_without_activation_flag_is_rejected(self):
@@ -216,7 +324,12 @@ class DeliverFoundationTest(unittest.TestCase):
                     "--worktree", str(link), "--branch", "b",
                 ],
                 cwd=cwd, text=True, capture_output=True,
-                env={**os.environ, "LLM_COLLAB_UI_REFRESH": "0"}, check=False,
+                env={
+                    **os.environ,
+                    "LLM_COLLAB_UI_REFRESH": "0",
+                    "LLM_COLLAB_ACTIVATION_RUNTIME_READY": "1",
+                },
+                check=False,
             )
             self.assertEqual(0, result.returncode, result.stderr)
         worktrees = set()

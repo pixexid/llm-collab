@@ -14,6 +14,7 @@ state or enforces policy.
 from __future__ import annotations
 
 import hashlib
+import shlex
 from pathlib import Path
 from typing import Any
 
@@ -33,14 +34,34 @@ AX_DOORBELL_MAX_CHARS = 240
 def canonical_worktree(value: str) -> str:
     """Absolute canonical form: expanduser + resolve (symlinks, `..`).
 
-    A RELATIVE path is refused by callers before reaching here — it has no
+    A RELATIVE path (after ~-expansion) is REFUSED — it has no
     CWD-independent meaning, so readers and dispatchers would derive
-    different lease keys for the same packet."""
-    return str(Path(value).expanduser().resolve())
+    different lease keys for the same packet. This invariant lives here, in
+    the shared validator, so no consumer can drift."""
+    expanded = Path(value).expanduser()
+    if not expanded.is_absolute():
+        raise ValueError(
+            "--worktree must be an absolute path: a relative path has no "
+            "CWD-independent meaning, so readers and dispatchers would derive "
+            "different activation identities for the same packet"
+        )
+    return str(expanded.resolve())
+
+
+def normalized_identity_field(field: str, value: Any) -> str:
+    """Shared per-field validator: strip, refuse missing/blank."""
+    if value is not None:
+        value = str(value).strip()
+    if not value:
+        raise ValueError(f"activation identity requires --{field.replace('_', '-')}")
+    return value
 
 
 def lease_identity(args_or_mapping: Any) -> dict[str, str]:
-    """Build the exact activation identity; ValueError on any missing field."""
+    """Build the exact activation identity — the ONE shared validation path.
+
+    ValueError on any missing/blank (whitespace-only) field and on a
+    relative worktree."""
     identity: dict[str, str] = {}
     for field in IDENTITY_FIELDS:
         value = (
@@ -48,11 +69,7 @@ def lease_identity(args_or_mapping: Any) -> dict[str, str]:
             if isinstance(args_or_mapping, dict)
             else getattr(args_or_mapping, field, None)
         )
-        if value is not None:
-            value = str(value).strip()
-        if not value:
-            raise ValueError(f"activation identity requires --{field.replace('_', '-')}")
-        identity[field] = value
+        identity[field] = normalized_identity_field(field, value)
     identity["worktree"] = canonical_worktree(identity["worktree"])
     return identity
 
@@ -74,7 +91,10 @@ def classify_activation(
       identity is incomplete/invalid — consumers must fail closed, never
       downgrade.
     """
-    if not any(frontmatter.get(field) for field in ACTIVATION_MARKER_FIELDS):
+    # Marker PRESENCE, not truthiness: `activation: false`, empty worktree,
+    # or a null branch are activation-SHAPED packets with a broken identity —
+    # they must classify malformed, never downgrade to ordinary.
+    if not any(field in frontmatter for field in ACTIVATION_MARKER_FIELDS):
         return "none", None
     try:
         identity = lease_identity(
@@ -100,9 +120,17 @@ def build_activation_consume_command(recipient: str, project: str, packet_name: 
     behavior ships with the runtime-integration lane; the serialized command
     is the stable contract."""
     launcher = ROOT / "bin" / "llm-collab"
-    return (
-        f"{launcher} inbox.py --me {recipient} --project {project} "
-        f"--packet {packet_name}"
+    return shlex.join(
+        [
+            str(launcher),
+            "inbox.py",
+            "--me",
+            recipient,
+            "--project",
+            project,
+            "--packet",
+            packet_name,
+        ]
     )
 
 
