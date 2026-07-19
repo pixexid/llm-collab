@@ -1,0 +1,1 @@
+{"schema_version":1,"workspace_id":"ws_alpha","scope":{"kind":"project","project_id":"proj"},"endpoint_id":"endpoint_one","agent_id":"agent_codex","adapter_name":"local","adapter_revision":"r1","trust_class":"managed","capability_set_id":"caps_one"}

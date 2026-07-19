@@ -1,0 +1,8 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://llm-collab.dev/schemas/standalone/v1/endpoint.schema.json",
+  "title": "EndpointV1", "type": "object", "additionalProperties": false,
+  "required": ["schema_version", "workspace_id", "scope", "endpoint_id", "agent_id", "adapter_name", "adapter_revision", "trust_class", "capability_set_id"],
+  "properties": {"schema_version": {"const": 1}, "workspace_id": {"$ref": "#/$defs/workspaceId"}, "scope": {"$ref": "#/$defs/scope"}, "endpoint_id": {"type": "string", "pattern": "^endpoint_[A-Za-z0-9][A-Za-z0-9_-]{2,127}$"}, "agent_id": {"type": "string", "pattern": "^agent_[A-Za-z0-9][A-Za-z0-9_-]{2,127}$"}, "adapter_name": {"$ref": "#/$defs/token"}, "adapter_revision": {"$ref": "#/$defs/token"}, "trust_class": {"enum": ["managed", "native_attached", "ui_attached", "pull_only", "human"]}, "capability_set_id": {"type": "string", "pattern": "^caps_[A-Za-z0-9][A-Za-z0-9_-]{2,127}$"}, "extensions": {"$ref": "#/$defs/extensions"}},
+  "$defs": {"token": {"type": "string", "pattern": "^[A-Za-z][A-Za-z0-9._-]{0,127}$"}, "workspaceId": {"type": "string", "pattern": "^ws_[A-Za-z0-9][A-Za-z0-9_-]{2,127}$"}, "scope": {"type": "object", "additionalProperties": false, "required": ["kind"], "properties": {"kind": {"enum": ["workspace", "project"]}, "project_id": {"$ref": "#/$defs/token"}}, "allOf": [{"if": {"properties": {"kind": {"const": "project"}}}, "then": {"required": ["project_id"]}, "else": {"not": {"required": ["project_id"]}}}]}, "extensions": {"type": "object", "maxProperties": 16, "propertyNames": {"pattern": "^x_[A-Za-z][A-Za-z0-9_-]{0,63}$"}, "additionalProperties": {"type": ["string", "number", "boolean", "null"], "maxLength": 512}}}
+}
