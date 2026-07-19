@@ -267,6 +267,46 @@ Fenced duplicate.
                     refine_task.validate_refinement({}, task_body(summary=summary)),
                 )
 
+    def test_escaped_backtick_runs_cannot_protect_comment_only_summaries(self) -> None:
+        for length in (1, 2, 3):
+            ticks = "`" * length
+            for backslash_count in (1, 3):
+                escape = "\\" * backslash_count
+                summaries = (
+                    f"{escape}{ticks}<!-- hidden -->{ticks}",
+                    f"{escape}{ticks}<!-- hidden -->{escape}{ticks}",
+                )
+                for summary in summaries:
+                    with self.subTest(
+                        length=length,
+                        backslash_count=backslash_count,
+                        summary=summary,
+                    ):
+                        errors = refine_task.validate_refinement(
+                            {},
+                            task_body(summary=summary),
+                        )
+                        self.assertIn(
+                            "empty or placeholder-only canonical section: ## Summary",
+                            errors,
+                        )
+
+    def test_even_backslashes_leave_inline_code_opener_eligible(self) -> None:
+        summary = "\\\\`<!-- visible literal -->`"
+
+        self.assertEqual(
+            [],
+            refine_task.validate_refinement({}, task_body(summary=summary)),
+        )
+
+    def test_backslash_inside_inline_code_does_not_escape_closer(self) -> None:
+        summary = "`<!-- visible literal -->\\`"
+
+        self.assertEqual(
+            [],
+            refine_task.validate_refinement({}, task_body(summary=summary)),
+        )
+
     def test_real_comments_adjacent_to_inline_code_are_still_masked(self) -> None:
         body = task_body(
             summary=(

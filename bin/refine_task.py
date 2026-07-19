@@ -177,6 +177,15 @@ def _delimiter_is_protected(
     return bool(protected) and all(protected[start : start + length])
 
 
+def _backtick_run_is_escaped(value: str, start: int) -> bool:
+    backslash_count = 0
+    cursor = start - 1
+    while cursor >= 0 and value[cursor] == "\\":
+        backslash_count += 1
+        cursor -= 1
+    return backslash_count % 2 == 1
+
+
 def _html_comment_state_after(
     value: str,
     *,
@@ -275,6 +284,9 @@ def _inline_code_protection(value: str) -> list[bool]:
         opening_end = opening_start + 1
         while opening_end < len(value) and value[opening_end] == "`":
             opening_end += 1
+        if _backtick_run_is_escaped(value, opening_start):
+            cursor = opening_end
+            continue
         opening_length = opening_end - opening_start
         closing_start = opening_end
         while closing_start < len(value):
