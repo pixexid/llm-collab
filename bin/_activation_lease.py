@@ -40,7 +40,12 @@ IDENTITY_FIELDS = ("project", "chat", "task", "worktree", "branch", "target_agen
 
 LIVE_SESSION_STATUSES = {"active", "parked"}
 
-POLLER_SHAPE_MARKERS = ("while true", "watch_inbox.py", "inbox.py")
+# Bare inbox.py is deliberately NOT a marker: a one-shot reader (the emitted
+# activation claim command itself mentions the chat id via its --packet path)
+# must never be a cleanup target. Recurring shape means an explicit loop or
+# the persistent watcher; a `while true; do inbox.py ...` wrapper still
+# matches via its loop marker.
+POLLER_SHAPE_MARKERS = ("while true", "watch_inbox.py")
 
 
 class LeaseRefused(Exception):

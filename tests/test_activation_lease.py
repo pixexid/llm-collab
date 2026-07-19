@@ -1324,8 +1324,22 @@ class PollerAuditTest(unittest.TestCase):
         {"pid": 104, "ppid": 1, "command": "python3 bin/watch_inbox.py --me codex"},
         # Purpose-scoped PR watcher for a different chat: not identity-matched.
         {"pid": 105, "ppid": 1, "command": "/bin/zsh -c while true; do gh pr checks 111; sleep 300; done"},
-        # One-shot command mentioning the chat id: not poller-shaped, never a target.
+        # One-shot commands mentioning the chat id: not poller-shaped, never targets.
         {"pid": 106, "ppid": 1, "command": "python3 bin/deliver.py --chat CHAT-TEST0001 --from codex --to claude"},
+        # Round-8 P1: legitimate one-shot inbox.py readers — a --chat filter
+        # and the emitted --packet claim command itself — must never match.
+        {"pid": 108, "ppid": 1, "command": "python3 bin/inbox.py --me claude --chat CHAT-TEST0001 --json"},
+        {
+            "pid": 109,
+            "ppid": 1,
+            "command": "python3 bin/inbox.py --me claude --project amiga --packet Chats/2026-01-01_test__CHAT-TEST0001/a.md --json",
+        },
+        # A recurring wrapper around inbox.py IS still a cleanup target.
+        {
+            "pid": 110,
+            "ppid": 1,
+            "command": "/bin/zsh -c while true; do python3 bin/inbox.py --me claude --chat CHAT-TEST0001; sleep 60; done",
+        },
         # The claimer's own ancestor chain: excluded.
         {"pid": 200, "ppid": 1, "command": "/bin/zsh -c while true; do run-claim --chat CHAT-TEST0001; done"},
         {"pid": 99999, "ppid": 200, "command": "python3 bin/session_autobridge.py lease-claim"},
@@ -1360,20 +1374,24 @@ class PollerAuditTest(unittest.TestCase):
                 102: "reported_only",
                 103: "reported_only",
                 107: "reported_only",
+                110: "reported_only",
             },
             actions,
         )
 
     def test_cleanup_terminates_only_unregistered_identity_matches(self):
         findings, killed = self.audit(clean=True)
-        self.assertEqual([102, 103, 107], sorted(pid for pid, _ in killed))
+        self.assertEqual([102, 103, 107, 110], sorted(pid for pid, _ in killed))
         actions = {f["pid"]: f["action"] for f in findings}
         self.assertEqual("preserved_registered_watch", actions[101])
         self.assertEqual("terminated", actions[102])
         self.assertEqual("terminated", actions[107], "inherited env marker must not protect")
+        self.assertEqual("terminated", actions[110], "while-true inbox wrapper is a target")
         self.assertNotIn(104, actions)
         self.assertNotIn(105, actions)
         self.assertNotIn(106, actions, "one-shot chat-mentioning command must never match")
+        self.assertNotIn(108, actions, "one-shot inbox.py --chat reader must never match")
+        self.assertNotIn(109, actions, "the emitted --packet claim command must never match")
         self.assertNotIn(200, actions, "own ancestor chain must never be terminated")
         self.assertTrue(lease_lib.audit_proves_clean(findings))
 
