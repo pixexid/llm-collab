@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://llm-collab.dev/schemas/standalone/v1/state-evidence.schema.json",
   "title": "StateEvidenceV1",
-  "description": "Structured state proof. Canonical JSON bytes are UTF-8 for JSON with object keys sorted by Unicode code-point order, array order preserved, ',' and ':' separators with no insignificant whitespace, exact unnormalized Unicode scalar strings using JSON escapes only for quote and backslash, lowercase true/false/null, and only integers in [-9007199254740991,9007199254740991]; surrogates, C0/DEL/NEL/U+2028/U+2029, floats, exponents, NaN, Infinity, and duplicate keys are invalid. The evidence integrity projection omits exactly the top-level integrity field. A source label or process exit is never acceptance authority.",
+  "description": "Structured state proof. Canonical JSON bytes are UTF-8 for JSON with object keys sorted by Unicode code-point order, array order preserved, ',' and ':' separators with no insignificant whitespace, exact unnormalized Unicode scalar strings using JSON escapes only for quote and backslash, lowercase true/false/null, and only integers in [-9007199254740991,9007199254740991]; integer lexical -0 is normalized to JSON integer 0 before hashing; surrogates, C0/DEL/NEL/U+2028/U+2029, floats, exponents, NaN, Infinity, and duplicate keys are invalid. The evidence integrity projection omits exactly the top-level integrity field. A source label or process exit is never acceptance authority.",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "workspace_id", "scope", "evidence_id", "evidence_kind", "quality", "state", "authority", "subject", "correlation_id", "observed_at_utc", "integrity"],
@@ -45,7 +45,7 @@
         "properties": {
           "quality": {"const": "authoritative"},
           "authority": {"properties": {"authority_kind": {"enum": ["native_runtime", "trusted_adapter"]}}},
-          "subject": {"required": ["endpoint_id", "session_ref_id", "native_session_id", "repository_binding"]}
+          "subject": {"required": ["endpoint_id", "session_ref_id", "native_session_id"]}
         }
       }
     },

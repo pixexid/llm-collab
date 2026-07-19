@@ -77,6 +77,7 @@ CANONICAL_JSON_ALGORITHM = (
     "exact unnormalized Unicode scalar strings with JSON escapes only for "
     "quote and backslash; lowercase true/false/null; "
     "integers only in [-9007199254740991,9007199254740991]; duplicate keys, "
+    "integer lexical -0 normalized to JSON integer 0 before hashing; "
     "surrogates, C0/DEL/NEL/U+2028/U+2029, floats, exponents, NaN, and "
     "Infinity rejected"
 )
@@ -500,16 +501,40 @@ def repository_root(workspace, repo_ref, workspace_root=WORKSPACE_ROOT):
 
 def binding_error(binding, outer_project, workspace, workspace_root=WORKSPACE_ROOT):
     try:
+        if not isinstance(outer_project, str):
+            return "repository_binding_requires_project_scope"
         if binding["project_id"] != outer_project:
             return "nested_project_mismatch"
         root = repository_root(workspace, binding, workspace_root)
         if root is None:
             return "repository_not_registered"
+        other_project_roots = {
+            repository_root(
+                workspace,
+                {
+                    "project_id": repository["project_id"],
+                    "repo_id": repository["repo_id"],
+                },
+                workspace_root,
+            )
+            for repository in workspace["repositories"]
+            if repository["project_id"] != outer_project
+        }
         cwd = binding["canonical_cwd"]
         if not canonical_absolute_path(cwd):
             return "canonical_cwd_malformed"
         if cwd != root and not cwd.startswith(f"{root}/"):
             return "canonical_cwd_outside_repository"
+        if any(
+            other_root is not None
+            and (
+                other_root == root
+                or cwd == other_root
+                or cwd.startswith(f"{other_root}/")
+            )
+            for other_root in other_project_roots
+        ):
+            return "repository_binding_cross_project_alias"
     except (KeyError, TypeError):
         return "repository_binding_malformed"
     return None
@@ -561,9 +586,6 @@ def activation_error(
     message,
     expected_identity,
     claiming_target,
-    workspace,
-    repository_ref,
-    workspace_root=WORKSPACE_ROOT,
 ):
     try:
         packet = message["activation_import"]
@@ -585,19 +607,12 @@ def activation_error(
         if packet["to"] != claiming_target or packet["target_agent"] != claiming_target:
             return "activation_claiming_target_mismatch"
         if (
-            message["workspace_id"] != workspace["workspace_id"]
-            or message["scope"] != {
+            message["scope"] != {
                 "kind": "project",
                 "project_id": packet["project"],
             }
         ):
             return "activation_outer_scope_mismatch"
-        if workspace_registry_error(workspace):
-            return "activation_registry_invalid"
-        if repository_ref.get("project_id") != packet["project"]:
-            return "activation_repository_project_mismatch"
-        if repository_root(workspace, repository_ref, workspace_root) != packet["worktree"]:
-            return "activation_worktree_registry_mismatch"
     except (KeyError, TypeError, ValueError):
         return "activation_malformed"
     return None
@@ -612,26 +627,32 @@ FORBIDDEN_PAYLOAD_KEYS = {
     "session_ref_id", "chat", "chats", "chat_id", "task", "tasks", "task_id",
     "agent", "agents", "agent_id", "endpoint", "endpoints", "endpoint_id",
     "route", "routes", "routing", "target", "target_id", "target_agent",
-    "recipient", "recipients", "handler", "handler_name",
-    "handler_implementation", "adapter_implementation", "implementation",
-    "capability_profile", "capability_profiles", "capability_profile_id",
+    "recipient", "recipients", "adapter", "adapter_name", "adapter_revision",
+    "adapter_version", "handler", "handler_name", "handler_version",
+    "handler_revision", "handler_implementation", "adapter_implementation",
+    "implementation", "capability_profile", "capability_profiles",
+    "capability_profile_id", "capability_profile_revision", "profile_id",
+    "profile_revision",
     "command", "commands", "executable", "executables", "module", "modules",
     "tool", "tools", "url", "urls", "uri", "uris", "network", "environment",
     "env", "cwd", "path", "paths", "filesystem_root", "filesystem_roots",
     "file_root", "file_roots", "lease", "leases", "fence", "fencing",
     "fence_token", "retry", "retries", "retry_policy", "reconciliation",
     "reconcile", "reconciliation_policy", "retention", "retention_policy",
-    "feature_flag", "feature_flags", "delivery", "deliveries", "delivery_state",
+    "feature_flag", "feature_flags", "policy", "policies", "routing_policy",
+    "delivery_policy", "lease_policy", "fencing_policy", "capability_policy",
+    "feature_policy", "delivery", "deliveries", "delivery_state",
     "subscription_id", "subscription_revision", "received_at_utc",
-    "receive_time", "content_hash", "identity", "revision",
+    "receive_time", "receive_time_utc", "content_hash", "envelope_hash",
+    "identity", "exact_identity", "revision", "registry_revision",
 }
 
 
 def normalize_payload_key(key):
     normalized = unicodedata.normalize("NFKC", key)
     normalized = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", normalized)
-    normalized = normalized.casefold().replace("-", "_").replace(".", "_")
-    return re.sub(r"_+", "_", normalized).strip("_")
+    normalized = normalized.casefold()
+    return re.sub(r"[\W_]+", "_", normalized).strip("_")
 
 
 def payload_error(value, *, depth=0):
@@ -917,6 +938,35 @@ def capability_set_error(capability_set):
     return None
 
 
+def authoritative_capability_error(capability_set, profile_key, adapter_key):
+    capability_error = capability_set_error(capability_set)
+    if capability_error:
+        return capability_error
+    if capability_set.get("revision") != profile_key[1]:
+        return "capability_set_revision"
+    matches = [
+        capability
+        for capability in capability_set["capabilities"]
+        if capability["capability"] == profile_key[0]
+    ]
+    if len(matches) != 1:
+        return "capability_profile_missing"
+    capability = matches[0]
+    if capability.get("quality") != "authoritative":
+        return "capability_quality"
+    if not isinstance(capability.get("constraints"), dict):
+        return "capability_constraints"
+    evidence = capability.get("evidence")
+    if not isinstance(evidence, dict):
+        return "capability_attestation"
+    if (
+        evidence.get("source_id"),
+        evidence.get("source_revision"),
+    ) != adapter_key:
+        return "capability_attestation"
+    return None
+
+
 def session_ref_error(
     session_ref,
     workspace,
@@ -928,9 +978,27 @@ def session_ref_error(
     ),
 ):
     try:
-        if scope_bundle_error([session_ref], workspace):
+        if workspace_registry_error(workspace):
+            return "session_workspace_registry"
+        if session_ref["workspace_id"] != workspace["workspace_id"]:
+            return "session_workspace_mismatch"
+        scope = session_ref["scope"]
+        if scope["kind"] == "project":
+            outer_project = scope["project_id"]
+            if outer_project not in {
+                project["project_id"] for project in workspace["projects"]
+            }:
+                return "session_project_unregistered"
+        elif scope == {"kind": "workspace"}:
+            outer_project = None
+        else:
             return "session_scope_binding"
         evidence = session_ref["evidence"]
+        if (
+            evidence.get("workspace_id") != session_ref["workspace_id"]
+            or evidence.get("scope") != scope
+        ):
+            return "session_evidence_scope"
         evidence_error = state_evidence_error(evidence)
         if evidence_error:
             return evidence_error
@@ -944,8 +1012,13 @@ def session_ref_error(
             "endpoint_id": session_ref["endpoint_id"],
             "session_ref_id": session_ref["session_ref_id"],
             "native_session_id": session_ref["native_session_id"],
-            "repository_binding": session_ref["repository_binding"],
         }
+        binding = session_ref.get("repository_binding")
+        if binding is not None:
+            binding_result = binding_error(binding, outer_project, workspace)
+            if binding_result:
+                return binding_result
+            expected["repository_binding"] = binding
         if subject != expected:
             return "session_subject_mismatch"
         authority = evidence["authority"]
@@ -987,11 +1060,13 @@ def outcome_error(record, trusted_authority=TRUSTED_NATIVE_AUTHORITY):
         for field in ("message_id", "delivery_id", "attempt_id", "endpoint_id"):
             if subject.get(field) != record[field]:
                 return f"outcome_subject_mismatch:{field}"
+        if (
+            "session_ref_id" in subject or "session_ref_id" in record
+        ) and subject.get("session_ref_id") != record.get("session_ref_id"):
+            return "outcome_subject_mismatch:session_ref_id"
         if evidence["correlation_id"] != record["attempt_id"]:
             return "outcome_attempt_correlation"
-        if state in {"accepted", "completed"}:
-            if subject.get("session_ref_id") != record.get("session_ref_id"):
-                return "outcome_subject_mismatch:session_ref_id"
+        if state in {"accepted", "completed"} and trusted_authority is not None:
             authority = evidence["authority"]
             actual_authority = (
                 authority["identity"],
@@ -1014,10 +1089,13 @@ GRAPH_KIND_IDS = {
     "DeliveryV1": "delivery_id",
     "ReceiptV1": "receipt_id",
     "CapabilitySetV1": "capability_set_id",
+    "StateEvidenceV1": "evidence_id",
 }
 
 
 def graph_record_kind(record):
+    if "evidence_id" in record and "evidence_kind" in record:
+        return "StateEvidenceV1"
     if "receipt_id" in record:
         return "ReceiptV1"
     if "delivery_id" in record:
@@ -1035,6 +1113,110 @@ def graph_record_kind(record):
     return None
 
 
+def evidence_reference_error(
+    evidence,
+    indices,
+    attempts,
+    workspace,
+    graph_project,
+):
+    """Resolve every supplied StateEvidence subject reference exactly."""
+    try:
+        evidence_result = state_evidence_error(evidence)
+        if evidence_result:
+            return evidence_result
+        if (
+            evidence["workspace_id"] != workspace["workspace_id"]
+            or evidence["scope"]
+            != {"kind": "project", "project_id": graph_project}
+        ):
+            return "evidence_scope"
+        subject = evidence["subject"]
+        message = None
+        if "message_id" in subject:
+            message = indices["MessageV1"].get(subject["message_id"])
+            if message is None:
+                return "message_missing"
+        delivery = None
+        if "delivery_id" in subject:
+            delivery = indices["DeliveryV1"].get(subject["delivery_id"])
+            if delivery is None:
+                return "delivery_missing"
+        attempt_delivery = None
+        if "attempt_id" in subject:
+            attempt_delivery = attempts.get(subject["attempt_id"])
+            if attempt_delivery is None:
+                return "attempt_missing"
+            if evidence["correlation_id"] != subject["attempt_id"]:
+                return "attempt_correlation"
+        endpoint = None
+        if "endpoint_id" in subject:
+            endpoint = indices["EndpointV1"].get(subject["endpoint_id"])
+            if endpoint is None:
+                return "endpoint_missing"
+        session = None
+        if "session_ref_id" in subject:
+            session = indices["SessionRefV1"].get(subject["session_ref_id"])
+            if session is None:
+                return "session_missing"
+        if delivery is not None:
+            for field in (
+                "message_id",
+                "attempt_id",
+                "endpoint_id",
+                "session_ref_id",
+            ):
+                if field in subject and subject[field] != delivery.get(field):
+                    return f"delivery_mismatch:{field}"
+        if attempt_delivery is not None and (
+            delivery is not None and attempt_delivery is not delivery
+        ):
+            return "attempt_delivery_mismatch"
+        if session is not None:
+            if endpoint is not None and session["endpoint_id"] != endpoint["endpoint_id"]:
+                return "session_endpoint_mismatch"
+            if "native_session_id" in subject and (
+                subject["native_session_id"] != session["native_session_id"]
+            ):
+                return "native_session_mismatch"
+            if "repository_binding" in subject and (
+                subject["repository_binding"] != session.get("repository_binding")
+            ):
+                return "session_repository_mismatch"
+        elif "native_session_id" in subject:
+            return "native_session_without_session_ref"
+        binding = subject.get("repository_binding")
+        if binding is not None:
+            binding_result = binding_error(
+                binding,
+                graph_project,
+                workspace,
+            )
+            if binding_result:
+                return binding_result
+        if evidence["evidence_kind"] == "exact_session_binding":
+            if session is None:
+                return "exact_session_missing"
+            expected_subject = {
+                "endpoint_id": session["endpoint_id"],
+                "session_ref_id": session["session_ref_id"],
+                "native_session_id": session["native_session_id"],
+            }
+            if "repository_binding" in session:
+                expected_subject["repository_binding"] = session[
+                    "repository_binding"
+                ]
+            if subject != expected_subject:
+                return "exact_session_subject_mismatch"
+        if message is not None and delivery is not None and (
+            delivery["message_id"] != message["message_id"]
+        ):
+            return "message_delivery_mismatch"
+    except (KeyError, TypeError):
+        return "evidence_reference_malformed"
+    return None
+
+
 def reachable_graph_error(
     records,
     workspace,
@@ -1043,7 +1225,7 @@ def reachable_graph_error(
     schema_catalog=SCHEMAS,
     registry=REGISTRY,
 ):
-    """Validate one offline reachable catalog graph; all exceptions fail closed."""
+    """Validate one project-scoped offline authority graph; fail closed."""
     try:
         if catalog_error(CATALOG, schema_catalog) or not references_resolve(
             registry, schema_catalog
@@ -1052,7 +1234,6 @@ def reachable_graph_error(
         if workspace_registry_error(workspace):
             return "graph_workspace_registry"
         indices = {kind: {} for kind in GRAPH_KIND_IDS}
-        evidence_ids = set()
         graph_projects = set()
         for record in records:
             kind = graph_record_kind(record)
@@ -1079,6 +1260,7 @@ def reachable_graph_error(
                 "MessageV1",
                 "DeliveryV1",
                 "ReceiptV1",
+                "StateEvidenceV1",
             }:
                 if scope["kind"] != "project":
                     return f"graph_project_scope_required:{kind}"
@@ -1087,17 +1269,6 @@ def reachable_graph_error(
                 graph_projects.add(scope["project_id"])
             elif scope != {"kind": "workspace"}:
                 return f"graph_scope:{kind}"
-            evidence = record.get("evidence")
-            if evidence is not None:
-                if evidence["evidence_id"] in evidence_ids:
-                    return "graph_duplicate_id:evidence_id"
-                evidence_ids.add(evidence["evidence_id"])
-                if (
-                    evidence["workspace_id"] != record["workspace_id"]
-                    or evidence["scope"] != record["scope"]
-                ):
-                    return "graph_evidence_scope"
-                graph_projects.add(evidence["scope"]["project_id"])
         if len(graph_projects) != 1:
             return "graph_project_identity_count"
         graph_project = next(iter(graph_projects))
@@ -1113,11 +1284,27 @@ def reachable_graph_error(
         messages = indices["MessageV1"]
         deliveries = indices["DeliveryV1"]
         receipts = indices["ReceiptV1"]
+        standalone_evidence = indices["StateEvidenceV1"]
         if not all(
-            (endpoints, agents, capability_sets, sessions, messages, deliveries, receipts)
+            (
+                endpoints,
+                agents,
+                capability_sets,
+                sessions,
+                messages,
+                deliveries,
+                receipts,
+                standalone_evidence,
+            )
         ):
             return "graph_required_kind_missing"
 
+        for capability_set in capability_sets.values():
+            capability_error = capability_set_error(capability_set)
+            if capability_error:
+                return f"graph_capability_set:{capability_error}"
+
+        referenced_capability_sets = set()
         for endpoint_id, endpoint in endpoints.items():
             registration = trusted_catalog["endpoint_registrations"].get(
                 endpoint_id
@@ -1128,6 +1315,15 @@ def reachable_graph_error(
                 return "graph_agent_missing"
             if endpoint["capability_set_id"] not in capability_sets:
                 return "graph_capability_set_missing"
+            referenced_capability_sets.add(endpoint["capability_set_id"])
+            capability_scope = capability_sets[endpoint["capability_set_id"]][
+                "scope"
+            ]
+            if capability_scope not in (
+                {"kind": "workspace"},
+                {"kind": "project", "project_id": graph_project},
+            ):
+                return "graph_capability_scope"
             actual_registration = {
                 "agent_id": endpoint["agent_id"],
                 "capability_set_id": endpoint["capability_set_id"],
@@ -1143,15 +1339,54 @@ def reachable_graph_error(
             }
             if actual_registration != registration:
                 return "graph_endpoint_registration_mismatch"
+        for capability_set_id, capability_set in capability_sets.items():
+            if (
+                capability_set["scope"] == {"kind": "workspace"}
+                and capability_set_id not in referenced_capability_sets
+            ):
+                return "graph_workspace_capability_unbound"
+
+        attempts = {}
+        for delivery in deliveries.values():
+            attempt_id = delivery["attempt_id"]
+            if attempt_id in attempts:
+                return "graph_duplicate_id:attempt_id"
+            attempts[attempt_id] = delivery
+
+        evidence_index = {}
+        for evidence_id, evidence in standalone_evidence.items():
+            evidence_index[evidence_id] = evidence
+        for kind, kind_records in indices.items():
+            if kind == "StateEvidenceV1":
+                continue
+            for record in kind_records.values():
+                evidence = record.get("evidence")
+                if evidence is None:
+                    continue
+                evidence_id = evidence["evidence_id"]
+                if evidence_id in evidence_index:
+                    return "graph_duplicate_id:evidence_id"
+                evidence_index[evidence_id] = evidence
+                if (
+                    evidence["workspace_id"] != record["workspace_id"]
+                    or evidence["scope"] != record["scope"]
+                ):
+                    return "graph_evidence_scope"
+        for evidence in evidence_index.values():
+            reference_error = evidence_reference_error(
+                evidence,
+                indices,
+                attempts,
+                workspace,
+                graph_project,
+            )
+            if reference_error:
+                return f"graph_evidence_reference:{reference_error}"
 
         for session in sessions.values():
             endpoint = endpoints.get(session["endpoint_id"])
             if endpoint is None:
                 return "graph_session_endpoint_missing"
-            if binding_error(
-                session["repository_binding"], graph_project, workspace
-            ):
-                return "graph_session_repository"
             evidence = session["evidence"]
             if session_ref_error(
                 session,
@@ -1177,6 +1412,13 @@ def reachable_graph_error(
                 adapter_key, set()
             ):
                 return "graph_session_profile"
+            capability_set = capability_sets[endpoint["capability_set_id"]]
+            if authoritative_capability_error(
+                capability_set,
+                profile_key,
+                adapter_key,
+            ):
+                return "graph_session_capability"
 
         for delivery in deliveries.values():
             message = messages.get(delivery["message_id"])
@@ -1187,7 +1429,7 @@ def reachable_graph_error(
                 return "graph_delivery_endpoint_missing"
             if endpoint["agent_id"] not in message["recipients"]:
                 return "graph_recipient_endpoint_agent"
-            error = outcome_error(delivery)
+            error = outcome_error(delivery, trusted_authority=None)
             if error:
                 return f"graph_delivery_evidence:{error}"
             session_id = delivery.get("session_ref_id")
@@ -1196,42 +1438,33 @@ def reachable_graph_error(
                 return "graph_delivery_session_missing"
             if session is not None and session["endpoint_id"] != endpoint["endpoint_id"]:
                 return "graph_delivery_session_endpoint"
-            if delivery["outcome"] in {"accepted", "completed"}:
-                if session is None:
-                    return "graph_positive_session_missing"
-                capability_set = capability_sets[endpoint["capability_set_id"]]
-                authority = delivery["evidence"]["authority"]
-                adapter_key = (
-                    endpoint["adapter_name"],
-                    endpoint["adapter_revision"],
-                )
-                profile_key = (
-                    authority["capability_profile_id"],
-                    authority["capability_profile_revision"],
-                )
-                if (
-                    authority["identity"],
-                    authority["implementation_revision"],
-                ) != adapter_key:
-                    return "graph_delivery_adapter_authority"
-                if profile_key not in trusted_catalog["adapter_profiles"].get(
-                    adapter_key, set()
-                ):
-                    return "graph_delivery_profile"
-                capabilities = {
-                    item["capability"]: item
-                    for item in capability_set["capabilities"]
-                }
-                capability = capabilities.get(profile_key[0])
-                if (
-                    capability is None
-                    or capability_set["revision"] != profile_key[1]
-                    or capability["quality"] != "authoritative"
-                    or capability["evidence"]["source_id"] != adapter_key[0]
-                    or capability["evidence"]["source_revision"]
-                    != adapter_key[1]
-                ):
-                    return "graph_delivery_capability"
+            if delivery["outcome"] in {"accepted", "completed"} and session is None:
+                return "graph_positive_session_missing"
+            capability_set = capability_sets[endpoint["capability_set_id"]]
+            authority = delivery["evidence"]["authority"]
+            adapter_key = (
+                endpoint["adapter_name"],
+                endpoint["adapter_revision"],
+            )
+            profile_key = (
+                authority["capability_profile_id"],
+                authority["capability_profile_revision"],
+            )
+            if (
+                authority["identity"],
+                authority["implementation_revision"],
+            ) != adapter_key:
+                return "graph_delivery_adapter_authority"
+            if profile_key not in trusted_catalog["adapter_profiles"].get(
+                adapter_key, set()
+            ):
+                return "graph_delivery_profile"
+            if authoritative_capability_error(
+                capability_set,
+                profile_key,
+                adapter_key,
+            ):
+                return "graph_delivery_capability"
 
         for receipt in receipts.values():
             delivery = deliveries.get(receipt["delivery_id"])
@@ -1245,38 +1478,38 @@ def reachable_graph_error(
                     return f"graph_receipt_delivery_mismatch:{field}"
             if receipt.get("session_ref_id") != delivery.get("session_ref_id"):
                 return "graph_receipt_delivery_mismatch:session_ref_id"
-            error = outcome_error(receipt)
+            error = outcome_error(receipt, trusted_authority=None)
             if error:
                 return f"graph_receipt_evidence:{error}"
             if receipt["state"] in {"accepted", "completed"}:
                 session = sessions.get(receipt.get("session_ref_id"))
                 if session is None or session["endpoint_id"] != endpoint["endpoint_id"]:
                     return "graph_receipt_session"
-                authority = receipt["evidence"]["authority"]
-                adapter_key = (
-                    endpoint["adapter_name"],
-                    endpoint["adapter_revision"],
-                )
-                profile_key = (
-                    authority["capability_profile_id"],
-                    authority["capability_profile_revision"],
-                )
-                capability_set = capability_sets[endpoint["capability_set_id"]]
-                capabilities = {
-                    item["capability"]: item
-                    for item in capability_set["capabilities"]
-                }
-                capability = capabilities.get(profile_key[0])
-                if (
-                    (authority["identity"], authority["implementation_revision"])
-                    != adapter_key
-                    or profile_key
-                    not in trusted_catalog["adapter_profiles"].get(adapter_key, set())
-                    or capability is None
-                    or capability_set["revision"] != profile_key[1]
-                    or capability["quality"] != "authoritative"
-                ):
-                    return "graph_receipt_capability"
+            authority = receipt["evidence"]["authority"]
+            adapter_key = (
+                endpoint["adapter_name"],
+                endpoint["adapter_revision"],
+            )
+            profile_key = (
+                authority["capability_profile_id"],
+                authority["capability_profile_revision"],
+            )
+            if (
+                authority["identity"],
+                authority["implementation_revision"],
+            ) != adapter_key:
+                return "graph_receipt_adapter_authority"
+            if profile_key not in trusted_catalog["adapter_profiles"].get(
+                adapter_key, set()
+            ):
+                return "graph_receipt_profile"
+            capability_set = capability_sets[endpoint["capability_set_id"]]
+            if authoritative_capability_error(
+                capability_set,
+                profile_key,
+                adapter_key,
+            ):
+                return "graph_receipt_capability"
     except Exception:
         return "graph_malformed"
     return None
@@ -1317,10 +1550,13 @@ def make_reachable_graph(project_id="proj"):
             "message",
             "delivery",
             "receipt",
+            "state-evidence",
         )
     ]
     for record in records:
-        if "evidence" in record:
+        if graph_record_kind(record) == "StateEvidenceV1":
+            seal_state_evidence(record)
+        elif "evidence" in record:
             seal_state_evidence(record["evidence"])
     return workspace, records
 
@@ -1451,11 +1687,14 @@ class StandaloneContractSchemaTest(unittest.TestCase):
             "duplicate keys",
             "NaN",
             "Infinity",
+            "integer lexical -0",
         ):
             self.assertIn(required_text, state_description)
         self.assertIn("same frozen UTF-8", event_description)
         self.assertIn("safe-integer-only", event_description)
+        self.assertIn("integer lexical -0", event_description)
         self.assertIn("UTF-8", CANONICAL_JSON_ALGORITHM)
+        self.assertIn("integer lexical -0", CANONICAL_JSON_ALGORITHM)
         self.assertEqual(
             canonical_bytes({"é": "雪", "a": [2, 1]}),
             '{"a":[2,1],"é":"雪"}'.encode("utf-8"),
@@ -1463,6 +1702,18 @@ class StandaloneContractSchemaTest(unittest.TestCase):
         self.assertNotEqual(
             canonical_bytes({"text": "é"}),
             canonical_bytes({"text": "e\u0301"}),
+        )
+        parsed_negative_zero = strict_json_loads('{"value":-0}')
+        self.assertEqual(parsed_negative_zero, {"value": 0})
+        self.assertIs(type(parsed_negative_zero["value"]), int)
+        self.assertEqual(canonical_bytes(parsed_negative_zero), b'{"value":0}')
+        self.assertEqual(
+            canonical_bytes(parsed_negative_zero),
+            canonical_bytes(strict_json_loads('{"value":0}')),
+        )
+        self.assertEqual(
+            digest(parsed_negative_zero),
+            "23d7b286bd429460b92a2a1c21b6afc34110446c5034c17363fda363aa0a7c5d",
         )
         for value in (
             {"value": 1.0},
@@ -1632,86 +1883,65 @@ class StandaloneContractSchemaTest(unittest.TestCase):
 
     def test_activation_exact_tuple_scope_registry_and_lexical_matrix(self):
         message = load(FIXTURE_DIR / "valid" / "message.json")
-        workspace = load(FIXTURE_DIR / "valid" / "workspace.json")
         expected = copy.deepcopy(message["activation_import"])
         expected.pop("activation")
         expected.pop("to")
-        repository = {"project_id": "proj", "repo_id": "app"}
-        self.assertIsNone(
-            activation_error(
-                message,
-                expected,
-                "codex",
-                workspace,
-                repository,
-            )
-        )
+        self.assertIsNone(activation_error(message, expected, "codex"))
         self.assertEqual(message["activation_import"]["branch"], "feature/native-proof")
 
         for field in ACTIVATION_FIELDS:
             candidate = copy.deepcopy(message)
-            candidate["activation_import"][field] = f"different-{field}"
-            expected_error = (
-                "activation_malformed"
+            candidate["activation_import"][field] = (
+                "/different-worktree"
                 if field == "worktree"
-                else f"activation_tuple_mismatch:{field}"
+                else f"different-{field}"
             )
             with self.subTest(field=field):
                 self.assertEqual(
-                    activation_error(
-                        candidate,
-                        expected,
-                        "codex",
-                        workspace,
-                        repository,
-                    ),
-                    expected_error,
+                    activation_error(candidate, expected, "codex"),
+                    f"activation_tuple_mismatch:{field}",
                 )
 
         wrong_receiver = copy.deepcopy(message)
         wrong_receiver["activation_import"]["to"] = "Codex"
         self.assertEqual(
-            activation_error(
-                wrong_receiver,
-                expected,
-                "codex",
-                workspace,
-                repository,
-            ),
+            activation_error(wrong_receiver, expected, "codex"),
             "activation_claiming_target_mismatch",
         )
         wrong_scope = copy.deepcopy(message)
         wrong_scope["scope"]["project_id"] = "other"
         self.assertEqual(
-            activation_error(
-                wrong_scope,
-                expected,
-                "codex",
-                workspace,
-                repository,
-            ),
+            activation_error(wrong_scope, expected, "codex"),
             "activation_outer_scope_mismatch",
         )
-        wrong_repo = {"project_id": "proj", "repo_id": "docs"}
+        workspace_scope = copy.deepcopy(message)
+        workspace_scope["scope"] = {"kind": "workspace"}
+        self.assert_schema_rejects(
+            "MessageV1", workspace_scope, "activation workspace scope"
+        )
         self.assertEqual(
-            activation_error(
-                message,
-                expected,
-                "codex",
-                workspace,
-                wrong_repo,
-            ),
-            "activation_worktree_registry_mismatch",
+            activation_error(workspace_scope, expected, "codex"),
+            "activation_outer_scope_mismatch",
         )
 
-        root_path = copy.deepcopy(message)
-        root_path["activation_import"]["worktree"] = "/"
-        self.assertEqual(self.errors("MessageV1", root_path), [])
-        root_identity = {
-            field: root_path["activation_import"][field]
-            for field in ACTIVATION_FIELDS
-        }
-        self.assertEqual(lease_identity(root_identity), root_identity)
+        for path in (
+            "/",
+            "/Users/pixexid/Projects/llm-collab-worktrees/codex/isolated-lane",
+        ):
+            candidate = copy.deepcopy(message)
+            candidate["activation_import"]["worktree"] = path
+            candidate_expected = copy.deepcopy(expected)
+            candidate_expected["worktree"] = path
+            identity = {
+                field: candidate["activation_import"][field]
+                for field in ACTIVATION_FIELDS
+            }
+            with self.subTest(path=path, boundary="valid_current_helper"):
+                self.assertEqual(self.errors("MessageV1", candidate), [])
+                self.assertEqual(lease_identity(identity), identity)
+                self.assertIsNone(
+                    activation_error(candidate, candidate_expected, "codex")
+                )
 
         for path in (
             "relative/lane",
@@ -1734,27 +1964,13 @@ class StandaloneContractSchemaTest(unittest.TestCase):
                 bad_identity["worktree"] = path
                 with self.assertRaises(ValueError):
                     lease_identity(bad_identity)
-        for field, value in (
-            ("branch", "release\ninjected"),
-            ("chat", 4),
-            ("target_agent", None),
-            ("task", "   "),
-        ):
-            candidate = copy.deepcopy(message)
-            candidate["activation_import"][field] = value
-            with self.subTest(field=field):
-                self.assert_schema_rejects(
-                    "MessageV1",
-                    candidate,
-                    "activation identity type/control",
-                )
-
         for branch in (
             "main",
             "feature/native-proof",
             "claude/native-proof",
             "codex/native-proof",
             "feature branch",
+            "x" * 2049,
         ):
             candidate = copy.deepcopy(message)
             candidate["activation_import"]["branch"] = branch
@@ -1762,55 +1978,50 @@ class StandaloneContractSchemaTest(unittest.TestCase):
             self.assertEqual(normalized_identity_field("branch", branch), branch)
             self.assertTrue(frontmatter_roundtrips(branch))
 
-        for field in ACTIVATION_FIELDS:
+        def helper_accepts_serialized(field, value):
+            if not isinstance(value, str):
+                return False
+            if field == "worktree":
+                identity = copy.deepcopy(expected)
+                identity[field] = value
+                try:
+                    return lease_identity(identity)[field] == value
+                except ValueError:
+                    return False
+            helper_field = "target_agent" if field == "to" else field
+            try:
+                return normalized_identity_field(helper_field, value) == value
+            except ValueError:
+                return False
+
+        parity_values = (
+            "ordinary-text",
+            "x" * 2049,
+            "9" * 5000,
+            "true",
+            "FALSE",
+            "null",
+            "0",
+            "+12",
+            "-7",
+            "[x]",
+            "  canonical-after-trim",
+            "canonical-before-trim  ",
+            "control\x00value",
+            "line\u2028break",
+            7,
+            None,
+        )
+        for field in (*ACTIVATION_FIELDS, "to"):
             if field == "worktree":
                 continue
-            for value, helper_raises in (
-                ("true", True),
-                ("FALSE", True),
-                ("null", True),
-                ("0", True),
-                ("+12", True),
-                ("-7", True),
-                ("[x]", True),
-                ("  canonical-after-trim", False),
-                ("canonical-before-trim  ", False),
-                ("control\x00value", True),
-                ("line\u2028break", True),
-            ):
+            for value in parity_values:
                 candidate = copy.deepcopy(message)
                 candidate["activation_import"][field] = value
+                schema_accepts = not self.errors("MessageV1", candidate)
+                helper_accepts = helper_accepts_serialized(field, value)
                 with self.subTest(field=field, value=repr(value)):
-                    self.assert_schema_rejects(
-                        "MessageV1",
-                        candidate,
-                        "current-v2 non-roundtripping identity",
-                    )
-                    self.assertNotEqual(
-                        activation_error(
-                            candidate,
-                            expected,
-                            "codex",
-                            workspace,
-                            repository,
-                        ),
-                        None,
-                    )
-                    if helper_raises:
-                        with self.assertRaises(ValueError):
-                            normalized_identity_field(field, value)
-                    else:
-                        self.assertNotEqual(
-                            normalized_identity_field(field, value), value
-                        )
-
-        for field in (*ACTIVATION_FIELDS, "to"):
-            candidate = copy.deepcopy(message)
-            candidate["activation_import"][field] = 7
-            with self.subTest(field=field, boundary="non_string"):
-                self.assert_schema_rejects(
-                    "MessageV1", candidate, "non-string activation identity"
-                )
+                    self.assertEqual(schema_accepts, helper_accepts)
         with self.assertRaises(ValueError):
             normalized_identity_field("task", "   ")
         malformed = load(FIXTURE_DIR / "invalid" / "message.json")
@@ -1891,6 +2102,27 @@ class StandaloneContractSchemaTest(unittest.TestCase):
             "graph_malformed",
         )
 
+        resolved_standalone = copy.deepcopy(
+            next(
+                record
+                for record in records
+                if graph_record_kind(record) == "DeliveryV1"
+            )["evidence"]
+        )
+        resolved_standalone["evidence_id"] = "evidence_standalone_delivery"
+        seal_state_evidence(resolved_standalone)
+        records_with_resolved_standalone = [
+            *copy.deepcopy(records),
+            resolved_standalone,
+        ]
+        self.assertIsNone(
+            reachable_graph_error(
+                records_with_resolved_standalone,
+                workspace,
+                TRUSTED_GRAPH_CATALOG,
+            )
+        )
+
         workspace_capability_records = copy.deepcopy(records)
         workspace_capability = next(
             record
@@ -1910,6 +2142,22 @@ class StandaloneContractSchemaTest(unittest.TestCase):
             return {graph_record_kind(item): item for item in items}
 
         cases = []
+        candidate = [
+            record
+            for record in copy.deepcopy(records)
+            if graph_record_kind(record) != "StateEvidenceV1"
+        ]
+        cases.append((candidate, workspace, "graph_required_kind_missing"))
+
+        candidate = copy.deepcopy(records)
+        duplicate_evidence = copy.deepcopy(by_kind(candidate)["DeliveryV1"]["evidence"])
+        candidate.append(duplicate_evidence)
+        cases.append((candidate, workspace, "graph_duplicate_id:evidence_id"))
+
+        candidate = copy.deepcopy(records)
+        by_kind(candidate)["StateEvidenceV1"]["quality"] = "untrusted"
+        cases.append((candidate, workspace, "graph_schema:StateEvidenceV1"))
+
         candidate = copy.deepcopy(records)
         candidate.append(copy.deepcopy(by_kind(candidate)["EndpointV1"]))
         cases.append((candidate, workspace, "graph_duplicate_id:endpoint_id"))
@@ -1929,7 +2177,9 @@ class StandaloneContractSchemaTest(unittest.TestCase):
             graph[kind]["session_ref_id"] = "session_fake"
             graph[kind]["evidence"]["subject"]["session_ref_id"] = "session_fake"
             seal_state_evidence(graph[kind]["evidence"])
-        cases.append((candidate, workspace, "graph_delivery_session_missing"))
+        cases.append(
+            (candidate, workspace, "graph_evidence_reference:session_missing")
+        )
 
         candidate = copy.deepcopy(records)
         graph = by_kind(candidate)
@@ -1938,12 +2188,51 @@ class StandaloneContractSchemaTest(unittest.TestCase):
             "delivery_fake"
         )
         seal_state_evidence(graph["ReceiptV1"]["evidence"])
-        cases.append((candidate, workspace, "graph_receipt_delivery_missing"))
+        cases.append(
+            (candidate, workspace, "graph_evidence_reference:delivery_missing")
+        )
 
         candidate = copy.deepcopy(records)
         graph = by_kind(candidate)
-        graph["CapabilitySetV1"]["capabilities"][0]["quality"] = "best_effort"
+        native_delivery = next(
+            capability
+            for capability in graph["CapabilitySetV1"]["capabilities"]
+            if capability["capability"] == "native_delivery"
+        )
+        native_delivery["quality"] = "best_effort"
         cases.append((candidate, workspace, "graph_delivery_capability"))
+
+        candidate = copy.deepcopy(records)
+        graph = by_kind(candidate)
+        graph["CapabilitySetV1"]["capabilities"] = [
+            capability
+            for capability in graph["CapabilitySetV1"]["capabilities"]
+            if capability["capability"] != "native_session_binding"
+        ]
+        cases.append((candidate, workspace, "graph_session_capability"))
+
+        candidate = copy.deepcopy(records)
+        graph = by_kind(candidate)
+        graph["CapabilitySetV1"]["capabilities"].append(
+            copy.deepcopy(graph["CapabilitySetV1"]["capabilities"][0])
+        )
+        graph["CapabilitySetV1"]["capabilities"][-1]["quality"] = "best_effort"
+        graph["CapabilitySetV1"]["capabilities"][-1].pop("evidence")
+        cases.append(
+            (
+                candidate,
+                workspace,
+                "graph_capability_set:duplicate_capability_identity",
+            )
+        )
+
+        candidate = copy.deepcopy(records)
+        graph = by_kind(candidate)
+        graph["ReceiptV1"]["evidence"]["authority"]["identity"] = (
+            "attacker_adapter"
+        )
+        seal_state_evidence(graph["ReceiptV1"]["evidence"])
+        cases.append((candidate, workspace, "graph_receipt_adapter_authority"))
 
         candidate = copy.deepcopy(records)
         graph = by_kind(candidate)
@@ -1955,7 +2244,7 @@ class StandaloneContractSchemaTest(unittest.TestCase):
             (
                 candidate,
                 workspace,
-                "graph_delivery_evidence:outcome_authority_revision",
+                "graph_delivery_profile",
             )
         )
 
@@ -1981,6 +2270,14 @@ class StandaloneContractSchemaTest(unittest.TestCase):
             seal_state_evidence(graph[kind]["evidence"])
         cases.append((candidate, workspace, "graph_endpoint_unregistered"))
 
+        candidate = copy.deepcopy(records)
+        graph = by_kind(candidate)
+        orphan = copy.deepcopy(graph["CapabilitySetV1"])
+        orphan["capability_set_id"] = "caps_orphan"
+        orphan["scope"] = {"kind": "workspace"}
+        candidate.append(orphan)
+        cases.append((candidate, workspace, "graph_workspace_capability_unbound"))
+
         for candidate, candidate_workspace, expected_error in cases:
             with self.subTest(expected_error=expected_error):
                 self.assertEqual(
@@ -1991,6 +2288,69 @@ class StandaloneContractSchemaTest(unittest.TestCase):
                     ),
                     expected_error,
                 )
+
+        reference_cases = {
+            "message_id": ("msg_renamed", "message_missing"),
+            "delivery_id": ("delivery_renamed", "delivery_missing"),
+            "attempt_id": ("attempt_renamed", "attempt_missing"),
+            "endpoint_id": ("endpoint_renamed", "endpoint_missing"),
+            "session_ref_id": ("session_renamed", "session_missing"),
+        }
+        for field, (value, expected_reference_error) in reference_cases.items():
+            candidate = copy.deepcopy(records_with_resolved_standalone)
+            standalone = candidate[-1]
+            standalone["subject"][field] = value
+            if field == "attempt_id":
+                standalone["correlation_id"] = value
+            seal_state_evidence(standalone)
+            with self.subTest(standalone_reference=field):
+                self.assertEqual(
+                    reachable_graph_error(
+                        candidate,
+                        workspace,
+                        TRUSTED_GRAPH_CATALOG,
+                    ),
+                    f"graph_evidence_reference:{expected_reference_error}",
+                )
+
+        candidate = copy.deepcopy(records_with_resolved_standalone)
+        candidate[-1]["correlation_id"] = "attempt_other"
+        seal_state_evidence(candidate[-1])
+        self.assertEqual(
+            reachable_graph_error(
+                candidate,
+                workspace,
+                TRUSTED_GRAPH_CATALOG,
+            ),
+            "graph_evidence_reference:attempt_correlation",
+        )
+
+        ambiguous = make_delivery_outcome("ambiguous")
+        ambiguous["evidence"]["subject"]["session_ref_id"] = "session_missing"
+        seal_state_evidence(ambiguous["evidence"])
+        candidate = copy.deepcopy(records)
+        delivery_index = next(
+            index
+            for index, record in enumerate(candidate)
+            if graph_record_kind(record) == "DeliveryV1"
+        )
+        candidate[delivery_index] = ambiguous
+        receipt = by_kind(candidate)["ReceiptV1"]
+        receipt["state"] = "ambiguous"
+        receipt["evidence"]["state"] = "ambiguous"
+        receipt["evidence"]["quality"] = "best_effort"
+        receipt["evidence"]["evidence_kind"] = "adapter_observation"
+        receipt.pop("session_ref_id", None)
+        receipt["evidence"]["subject"].pop("session_ref_id", None)
+        seal_state_evidence(receipt["evidence"])
+        self.assertEqual(
+            reachable_graph_error(
+                candidate,
+                workspace,
+                TRUSTED_GRAPH_CATALOG,
+            ),
+            "graph_evidence_reference:session_missing",
+        )
 
         for project_id in ("amiga", "nuvyr"):
             project_workspace, project_records = make_reachable_graph(project_id)
@@ -2164,26 +2524,53 @@ class StandaloneContractSchemaTest(unittest.TestCase):
         with_time["source_time_utc"] = "2026-07-19T00:00:00Z"
         self.assertEqual(self.errors("EventEnvelopeV1", with_time), [])
 
-        aliases = {
-            "commands": "commands",
-            "cwd": "cwd",
+        for required_adapter_field in ("adapter_name", "adapter_version"):
+            missing = copy.deepcopy(envelope)
+            missing.pop(required_adapter_field)
+            self.assert_schema_rejects(
+                "EventEnvelopeV1",
+                missing,
+                f"missing frozen {required_adapter_field}",
+            )
+
+        exact_aliases = {
+            "adapter_name": "adapter_name",
+            "adapter_revision": "adapter_revision",
+            "adapter_version": "adapter_version",
             "handler_name": "handler_name",
-            "AdapterImplementation": "adapter_implementation",
-            "implementation": "implementation",
-            "retry-policy": "retry_policy",
-            "delivery.state": "delivery_state",
-            "filesystem-roots": "filesystem_roots",
-            "NativeSessionID": "native_session_id",
-            "subscription-id": "subscription_id",
+            "handler_version": "handler_version",
+            "handler_revision": "handler_revision",
+            "capability_profile": "capability_profile",
+            "capability_profile_id": "capability_profile_id",
+            "capability_profile_revision": "capability_profile_revision",
+            "profile_id": "profile_id",
+            "profile_revision": "profile_revision",
             "identity": "identity",
-            "Identity": "identity",
+            "exact_identity": "exact_identity",
+            "subscription_id": "subscription_id",
+            "subscription_revision": "subscription_revision",
             "revision": "revision",
-            "Revision": "revision",
+            "registry_revision": "registry_revision",
+            "received_at_utc": "received_at_utc",
+            "receive_time": "receive_time",
+            "receive_time_utc": "receive_time_utc",
+            "content_hash": "content_hash",
+            "envelope_hash": "envelope_hash",
+            "command": "command",
+            "path": "path",
+            "routing": "routing",
+            "retry_policy": "retry_policy",
+            "reconciliation_policy": "reconciliation_policy",
+            "retention_policy": "retention_policy",
+            "feature_flag": "feature_flag",
+            "delivery_state": "delivery_state",
+            "filesystem_roots": "filesystem_roots",
+            "native_session_id": "native_session_id",
         }
-        for key, normalized in aliases.items():
+        for key, normalized in exact_aliases.items():
             candidate = copy.deepcopy(envelope)
             candidate["payload"] = {"nested": [{"safe": {key: "unsafe"}}]}
-            with self.subTest(key=key):
+            with self.subTest(exact_alias=key):
                 self.assertEqual(
                     envelope_error(candidate),
                     f"forbidden_payload_key:{normalized}",
@@ -2194,14 +2581,23 @@ class StandaloneContractSchemaTest(unittest.TestCase):
                     "forbidden authority key",
                 )
 
-        for key, normalized in (
-            ("Ｉｄｅｎｔｉｔｙ", "identity"),
-            ("Ｒｅｖｉｓｉｏｎ", "revision"),
-        ):
+        normalized_aliases = {
+            "ＡＤＡＰＴＥＲ－ＮＡＭＥ": "adapter_name",
+            "Handler.Version": "handler_version",
+            "Capability Profile Revision": "capability_profile_revision",
+            "PROFILE/ID": "profile_id",
+            "ExactIdentity": "exact_identity",
+            "Subscription--Revision": "subscription_revision",
+            "Registry Revision": "registry_revision",
+            "Receive.Time.UTC": "receive_time_utc",
+            "CONTENT-HASH": "content_hash",
+            "Envelope Hash": "envelope_hash",
+            "Routing Policy": "routing_policy",
+        }
+        for key, normalized in normalized_aliases.items():
             candidate = copy.deepcopy(envelope)
-            candidate["payload"] = {"nested": {key: "unsafe"}}
+            candidate["payload"] = {"nested": [{"deeper": {key: "unsafe"}}]}
             with self.subTest(normalized_alias=key):
-                self.assertEqual(self.errors("EventEnvelopeV1", candidate), [])
                 self.assertEqual(
                     envelope_error(candidate),
                     f"forbidden_payload_key:{normalized}",
@@ -2216,6 +2612,14 @@ class StandaloneContractSchemaTest(unittest.TestCase):
             "pathology": "benign",
             "identity_summary": "benign",
             "revision_note": "benign",
+            "adapter_summary": "benign",
+            "handler_version_note": "benign",
+            "capability_profile_summary": "benign",
+            "exact_identity_note": "benign",
+            "subscription_revision_note": "benign",
+            "receive_time_note": "benign",
+            "content_hash_note": "benign",
+            "routing_policy_summary": "benign",
         }
         self.assertEqual(self.errors("EventEnvelopeV1", benign), [])
         self.assertIsNone(envelope_error(benign))
@@ -2751,6 +3155,38 @@ class StandaloneContractSchemaTest(unittest.TestCase):
         session_ref = load(FIXTURE_DIR / "valid" / "session-ref.json")
         workspace = load(FIXTURE_DIR / "valid" / "workspace.json")
         self.assertIsNone(session_ref_error(session_ref, workspace))
+
+        project_unbound = copy.deepcopy(session_ref)
+        project_unbound.pop("repository_binding")
+        project_unbound["evidence"]["subject"].pop("repository_binding")
+        seal_state_evidence(project_unbound["evidence"])
+        self.assertEqual(self.errors("SessionRefV1", project_unbound), [])
+        self.assertIsNone(session_ref_error(project_unbound, workspace))
+
+        workspace_unbound = copy.deepcopy(project_unbound)
+        workspace_unbound["scope"] = {"kind": "workspace"}
+        workspace_unbound["evidence"]["scope"] = {"kind": "workspace"}
+        seal_state_evidence(workspace_unbound["evidence"])
+        self.assertEqual(self.errors("SessionRefV1", workspace_unbound), [])
+        self.assertIsNone(session_ref_error(workspace_unbound, workspace))
+
+        graph_workspace, graph_records = make_reachable_graph()
+        graph_session = next(
+            record
+            for record in graph_records
+            if graph_record_kind(record) == "SessionRefV1"
+        )
+        graph_session.pop("repository_binding")
+        graph_session["evidence"]["subject"].pop("repository_binding")
+        seal_state_evidence(graph_session["evidence"])
+        self.assertIsNone(
+            reachable_graph_error(
+                graph_records,
+                graph_workspace,
+                TRUSTED_GRAPH_CATALOG,
+            )
+        )
+
         for field in ("endpoint_id", "session_ref_id", "native_session_id"):
             candidate = copy.deepcopy(session_ref)
             candidate["evidence"]["subject"][field] = f"different_{field}"
@@ -2768,6 +3204,40 @@ class StandaloneContractSchemaTest(unittest.TestCase):
         self.assertEqual(
             session_ref_error(candidate, workspace),
             "session_subject_mismatch",
+        )
+        candidate = copy.deepcopy(project_unbound)
+        candidate["evidence"]["subject"]["repository_binding"] = copy.deepcopy(
+            session_ref["repository_binding"]
+        )
+        seal_state_evidence(candidate["evidence"])
+        self.assertEqual(
+            session_ref_error(candidate, workspace),
+            "session_subject_mismatch",
+        )
+        candidate = copy.deepcopy(session_ref)
+        candidate["evidence"]["subject"].pop("repository_binding")
+        seal_state_evidence(candidate["evidence"])
+        self.assertEqual(
+            session_ref_error(candidate, workspace),
+            "session_subject_mismatch",
+        )
+
+        aliased_workspace = copy.deepcopy(workspace)
+        aliased_workspace["projects"].append({"project_id": "other"})
+        aliased_workspace["repositories"].append(
+            {
+                "project_id": "other",
+                "repo_id": "app_alias",
+                "relative_path": "repos/app",
+            }
+        )
+        self.assertIsNone(workspace_registry_error(aliased_workspace))
+        self.assertEqual(
+            session_ref_error(session_ref, aliased_workspace),
+            "repository_binding_cross_project_alias",
+        )
+        self.assertIsNone(
+            session_ref_error(project_unbound, aliased_workspace)
         )
         candidate = copy.deepcopy(session_ref)
         candidate["evidence"]["authority"]["implementation_revision"] = "r2"

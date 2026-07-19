@@ -5,7 +5,7 @@
   "description": "An exact native session binding. Display text, path inference, activation packets, leases, and writer claims confer no SessionRef authority.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "workspace_id", "scope", "session_ref_id", "endpoint_id", "native_session_id", "repository_binding", "evidence"],
+  "required": ["schema_version", "workspace_id", "scope", "session_ref_id", "endpoint_id", "native_session_id", "evidence"],
   "properties": {
     "schema_version": {"const": 1},
     "workspace_id": {"$ref": "#/$defs/workspaceId"},
