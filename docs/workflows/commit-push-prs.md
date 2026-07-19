@@ -396,7 +396,8 @@ without that config fails closed with exit 64.
 
 - **Exact-SHA correlation is absolute.** A deploy run for a different or
   earlier SHA never satisfies this merge's closure, no matter how green.
-- **Only the automatic `push`/`main` deploy run counts.** A same-SHA
+- **Only the automatic `push` run on the project's configured
+  `default_branch_base` counts** (`main` for Amiga). A same-SHA
   `workflow_dispatch` (or off-branch) run is a manual intervention and never
   satisfies — or supersedes — the automatic run's outcome.
 - **Success = deploy AND post-deploy smoke terminal success** for that exact

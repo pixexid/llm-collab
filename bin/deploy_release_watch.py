@@ -143,20 +143,43 @@ def resolve_release_config(project_id: str, project: dict | None) -> tuple[dict 
     repo = github.get("repo")
     if not github.get("enabled") or not repo:
         return None, f"project {project_id!r} has no enabled github.repo — cannot correlate deploy runs"
+    branch = project.get("default_branch_base")
+    if not (isinstance(branch, str) and branch.strip()):
+        return None, (f"project {project_id!r} has no configured default_branch_base — "
+                      "refusing to guess the release branch")
     rc = project.get("release_closure") or {}
-    required_jobs = tuple(rc.get("required_jobs") or ())
-    smoke_job = rc.get("smoke_job")
-    required_smoke_steps = tuple(rc.get("required_smoke_steps") or ())
-    if not (required_jobs and smoke_job and required_smoke_steps):
+    if not rc:
         return None, (
-            f"project {project_id!r} has no release_closure config (required_jobs, "
+            f"project {project_id!r} has no release_closure config (workflow, required_jobs, "
             "smoke_job, required_smoke_steps) — job/step names are project-specific; "
             "register them in projects.json before using this gate"
         )
+    workflow = rc.get("workflow")
+    if not (isinstance(workflow, str) and workflow.strip()):
+        return None, (f"project {project_id!r} release_closure has no configured workflow — "
+                      "refusing to default")
+
+    def string_list(value) -> tuple[str, ...] | None:
+        if (isinstance(value, (list, tuple)) and value
+                and all(isinstance(x, str) and x.strip() for x in value)):
+            return tuple(value)
+        return None
+
+    required_jobs = string_list(rc.get("required_jobs"))
+    required_smoke_steps = string_list(rc.get("required_smoke_steps"))
+    smoke_job = rc.get("smoke_job")
+    if required_jobs is None or required_smoke_steps is None:
+        return None, (f"project {project_id!r} release_closure is malformed — required_jobs and "
+                      "required_smoke_steps must be non-empty lists of non-empty strings")
+    if not (isinstance(smoke_job, str) and smoke_job.strip()):
+        return None, f"project {project_id!r} release_closure has no configured smoke_job"
+    if smoke_job not in required_jobs:
+        return None, (f"project {project_id!r} release_closure smoke_job {smoke_job!r} is not one "
+                      "of its required_jobs — smoke evidence would never be enforced")
     return {
         "repo": repo,
-        "branch": project.get("default_branch_base") or "main",
-        "workflow": rc.get("workflow") or "deploy",
+        "branch": branch,
+        "workflow": workflow,
         "required_jobs": required_jobs,
         "smoke_job": smoke_job,
         "required_smoke_steps": required_smoke_steps,
@@ -242,7 +265,13 @@ def evaluate_release(
         elif job.get("conclusion") != "success":
             problems.append(f"required job '{name}' concluded {job.get('conclusion')!r}, not success")
     smoke_carrier = by_name.get(smoke_job) or {}
-    steps = {s.get("name", ""): s for s in (smoke_carrier.get("steps") or [])}
+    carrier_steps = smoke_carrier.get("steps") or []
+    step_names = [s.get("name") for s in carrier_steps]
+    for step_name in dict.fromkeys(required_smoke_steps):
+        if step_names.count(step_name) > 1:
+            problems.append(f"ambiguous evidence: smoke step '{step_name}' appears "
+                            f"{step_names.count(step_name)} times in '{smoke_job}'")
+    steps = {s.get("name", ""): s for s in carrier_steps}
     for step_name in required_smoke_steps:
         step = steps.get(step_name)
         if step is None:

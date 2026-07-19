@@ -238,6 +238,23 @@ class DeployReleaseWatchEnvironmentTest(unittest.TestCase):
         self.assertEqual(verdict.state, "FAILURE")
         self.assertIn("ambiguous evidence: job name 'deploy'", "; ".join(verdict.failed_jobs))
 
+    def test_duplicate_smoke_step_names_fail_closed(self) -> None:
+        # Red-then-green duplicate of a required smoke step: last-write-wins
+        # through the steps dict would read green; ambiguity must fail closed.
+        runs = [run_fixture(20, DF55, conclusion="success")]
+
+        def jobs(_):
+            return [{"name": "detect", "conclusion": "success", "steps": []},
+                    {"name": "deploy", "conclusion": "success",
+                     "steps": [{"name": "Verify production hosts", "conclusion": "success"},
+                               {"name": "Verify production auth", "conclusion": "failure"},
+                               {"name": "Verify production auth", "conclusion": "success"}]}]
+
+        verdict = evaluate(DF55, runs, jobs)
+        self.assertEqual(verdict.state, "FAILURE")
+        self.assertIn("ambiguous evidence: smoke step 'Verify production auth'",
+                      "; ".join(verdict.failed_jobs))
+
 
 class ReleaseConfigResolutionTest(unittest.TestCase):
     """PR #111 round-1 P1: evidence identity comes from the registered project
@@ -270,7 +287,35 @@ class ReleaseConfigResolutionTest(unittest.TestCase):
         project = project_fixture(release_closure={"required_jobs": ["detect", "deploy"]})
         config, error = watch.resolve_release_config("amiga", project)
         self.assertIsNone(config)
-        self.assertIn("no release_closure config", error)
+        self.assertIn("no configured workflow", error)
+
+    def test_missing_default_branch_base_fails_closed(self) -> None:
+        project = project_fixture()
+        del project["default_branch_base"]
+        config, error = watch.resolve_release_config("amiga", project)
+        self.assertIsNone(config)
+        self.assertIn("no configured default_branch_base", error)
+
+    def test_missing_workflow_fails_closed_not_defaulted(self) -> None:
+        project = project_fixture()
+        del project["release_closure"]["workflow"]
+        config, error = watch.resolve_release_config("amiga", project)
+        self.assertIsNone(config)
+        self.assertIn("no configured workflow", error)
+
+    def test_string_required_jobs_is_malformed_not_character_split(self) -> None:
+        project = project_fixture()
+        project["release_closure"]["required_jobs"] = "deploy"
+        config, error = watch.resolve_release_config("amiga", project)
+        self.assertIsNone(config)
+        self.assertIn("malformed", error)
+
+    def test_smoke_job_must_be_a_required_job(self) -> None:
+        project = project_fixture()
+        project["release_closure"]["smoke_job"] = "smoke"
+        config, error = watch.resolve_release_config("amiga", project)
+        self.assertIsNone(config)
+        self.assertIn("not one of its required_jobs", error)
 
     def test_project_without_enabled_github_repo_fails_closed(self) -> None:
         project = project_fixture(github={"enabled": False, "repo": "pixexid/amiga"})
