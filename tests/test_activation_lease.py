@@ -1448,6 +1448,30 @@ class ClaimLockTest(unittest.TestCase):
             finally:
                 lease_lib.ACTIVATION_LEASES_DIR = old
 
+    def test_non_contention_oserror_propagates_unchanged(self):
+        """PR112 follow-up P2: only contention errnos map to
+        claim_in_progress; a real I/O failure must surface as itself."""
+        import errno as errno_mod
+        import fcntl as fcntl_mod
+
+        with tempfile.TemporaryDirectory() as tmp:
+            old = self.with_leases_dir(tmp)
+            real_flock = fcntl_mod.flock
+
+            def io_error_flock(fd, op):
+                raise OSError(errno_mod.EIO, "synthetic I/O failure")
+
+            fcntl_mod.flock = io_error_flock
+            try:
+                with self.assertRaises(OSError) as ctx:
+                    with lease_lib._ClaimLock(self.IDENTITY):
+                        pass
+                self.assertEqual(errno_mod.EIO, ctx.exception.errno)
+                self.assertNotIsInstance(ctx.exception, lease_lib.LeaseRefused)
+            finally:
+                fcntl_mod.flock = real_flock
+                lease_lib.ACTIVATION_LEASES_DIR = old
+
     def test_stale_lock_file_without_holder_does_not_block(self):
         with tempfile.TemporaryDirectory() as tmp:
             old = self.with_leases_dir(tmp)

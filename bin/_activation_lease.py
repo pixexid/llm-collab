@@ -3,7 +3,9 @@
 One durable activation packet must never produce two writers for the same
 exact activation identity. A lease record is keyed by the canonicalized
 (project, chat, task, worktree, branch, target_agent) identity; claims are
-serialized through an O_EXCL lock file and fenced with a monotonically
+serialized through a POSIX advisory flock held on a stable, never-unlinked
+lock file (crash of the holder releases it via kernel fd close) and fenced
+with a monotonically
 increasing token.
 
 This is an extension of the EXISTING sessions/ lease seam, not a parallel
@@ -20,6 +22,7 @@ unregistered pollers must be provably terminated or the claim is refused.
 
 from __future__ import annotations
 
+import errno
 import fcntl
 import hashlib
 import json
@@ -204,7 +207,12 @@ class _ClaimLock:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError as exc:
             os.close(fd)
-            raise LeaseRefused("claim_in_progress") from exc
+            if exc.errno in (errno.EAGAIN, errno.EWOULDBLOCK, errno.EACCES):
+                # Platform contention errnos only: another live claimant
+                # holds the lock. Permission/filesystem/I/O failures are NOT
+                # contention and must surface as themselves.
+                raise LeaseRefused("claim_in_progress") from exc
+            raise
         self.fd = fd
         return self
 
