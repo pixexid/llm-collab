@@ -5,10 +5,11 @@
   "description": "A trusted workspace registry. Duplicate identities, duplicate directed tuples, endpoint resolution, and registry-revision freshness are semantic invariants enforced by catalog conformance.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "workspace_id", "registry_revision", "projects", "repositories", "relationships"],
+  "required": ["schema_version", "workspace_id", "scope", "registry_revision", "projects", "repositories", "relationships"],
   "properties": {
     "schema_version": {"const": 1},
     "workspace_id": {"$ref": "#/$defs/workspaceId"},
+    "scope": {"$ref": "#/$defs/workspaceScope"},
     "registry_revision": {"$ref": "#/$defs/token"},
     "projects": {
       "type": "array",
@@ -48,6 +49,13 @@
   "$defs": {
     "token": {"type": "string", "pattern": "^(?!.*[\\u0000-\\u001f\\u007f\\u0085\\u2028\\u2029])[A-Za-z][A-Za-z0-9._-]{0,127}$"},
     "workspaceId": {"type": "string", "pattern": "^(?!.*[\\u0000-\\u001f\\u007f\\u0085\\u2028\\u2029])ws_[A-Za-z0-9][A-Za-z0-9_-]{2,127}$"},
+    "workspaceScope": {
+      "description": "WorkspaceV1 is itself an explicit workspace-scoped standalone record; project_id is forbidden.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {"kind": {"const": "workspace"}}
+    },
     "relativePath": {
       "type": "string",
       "minLength": 1,
@@ -59,7 +67,14 @@
       "type": "object",
       "maxProperties": 8,
       "propertyNames": {"pattern": "^x_note_[A-Za-z][A-Za-z0-9_-]{0,55}$"},
-      "additionalProperties": {"type": ["string", "number", "boolean", "null"], "maxLength": 512}
+      "additionalProperties": {
+        "anyOf": [
+          {"type": "string", "maxLength": 512, "pattern": "^(?!.*[\\u0000-\\u001f\\u007f\\u0085\\u2028\\u2029\\ud800-\\udfff]).*$"},
+          {"type": "integer", "minimum": -9007199254740991, "maximum": 9007199254740991},
+          {"type": "boolean"},
+          {"type": "null"}
+        ]
+      }
     },
     "repoRef": {
       "type": "object",

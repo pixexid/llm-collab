@@ -6,9 +6,9 @@ import base64
 import copy
 import hashlib
 import json
-import math
 import posixpath
 import re
+import sys
 import unicodedata
 from pathlib import Path
 import unittest
@@ -25,6 +25,15 @@ except ImportError as exc:  # canonical acceptance must fail, never skip
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "bin"))
+
+from _activation_identity import (  # noqa: E402 - import current v2 authority
+    frontmatter_roundtrips,
+    lease_identity,
+    normalized_identity_field,
+)
+
+
 SCHEMA_DIR = ROOT / "schemas" / "standalone" / "v1"
 FIXTURE_DIR = ROOT / "tests" / "fixtures" / "standalone" / "v1"
 CATALOG_ID = "https://llm-collab.dev/schemas/standalone/v1/index.json"
@@ -61,10 +70,74 @@ TRUSTED_NATIVE_AUTHORITY = (
     "native_delivery",
     "r1",
 )
+SAFE_INTEGER_MAX = 9007199254740991
+CANONICAL_JSON_ALGORITHM = (
+    "UTF-8; object keys sorted by Unicode code-point order; array order "
+    "preserved; comma/colon separators and no insignificant whitespace; "
+    "exact unnormalized Unicode scalar strings with JSON escapes only for "
+    "quote and backslash; lowercase true/false/null; "
+    "integers only in [-9007199254740991,9007199254740991]; duplicate keys, "
+    "surrogates, C0/DEL/NEL/U+2028/U+2029, floats, exponents, NaN, and "
+    "Infinity rejected"
+)
+TRUSTED_COMPATIBILITY_POLICY = {
+    "manifest_id": "manifest_one",
+    "cutoff_policy_revision": "p1",
+    "workspace_id": "ws_alpha",
+    "project_id": "proj",
+    "registry_revision": "rev1",
+    "source_boundary": {
+        "kind": "source_snapshot",
+        "identity": "snapshot1",
+        "immutable": True,
+    },
+    "publisher": ("publisher", "r1"),
+    "importer": ("importer", "r1"),
+    "authority_profile": ("compatibility_reader", "p1"),
+    "entry_keys": (
+        (
+            "/sealed/evidence.json",
+            "984845d2117bd645aba91ea1c0fc3993bf0f5086570d162f1a970655bba5a1fb",
+            "v1",
+            "p1",
+        ),
+        (
+            "/sealed/non-selected.json",
+            "924224abc36c26736e79bf6feefbd842b00db9e618116b21e4637ac2c8c8d01f",
+            "v1",
+            "p1",
+        ),
+    ),
+    "manifest_seal": "aa7c1413b87f3b726af230611646153f9e06e7b4f1b9593711450f63d2dfbabf",
+}
+TRUSTED_GRAPH_CATALOG = {
+    "endpoint_registrations": {
+        "endpoint_one": {
+            "agent_id": "agent_codex",
+            "capability_set_id": "caps_one",
+            "adapter": ("native_adapter", "r1"),
+            "configuration_ref": (
+                "endpoint_registry",
+                "r1",
+                "endpoint_one_config",
+            ),
+        }
+    },
+    "adapter_profiles": {
+        ("native_adapter", "r1"): {
+            ("native_session_binding", "r1"),
+            ("native_delivery", "r1"),
+        }
+    },
+}
 
 
 def reject_constant(value: str):
     raise ValueError(f"non-JSON numeric constant {value}")
+
+
+def reject_float(value: str):
+    raise ValueError(f"non-canonical JSON number {value}")
 
 
 def reject_duplicate_pairs(pairs):
@@ -80,6 +153,7 @@ def strict_json_loads(text: str):
     return json.loads(
         text,
         parse_constant=reject_constant,
+        parse_float=reject_float,
         object_pairs_hook=reject_duplicate_pairs,
     )
 
@@ -166,17 +240,26 @@ def has_surrogate(value: str) -> bool:
     return any(0xD800 <= ord(character) <= 0xDFFF for character in value)
 
 
+def has_forbidden_json_character(value: str) -> bool:
+    return has_surrogate(value) or any(
+        ord(character) < 32
+        or ord(character) == 127
+        or character in "\x85\u2028\u2029"
+        for character in value
+    )
+
+
 def strict_json_value(value, *, depth=0, max_depth=64) -> bool:
     if depth > max_depth:
         return False
     if value is None or isinstance(value, bool):
         return True
     if isinstance(value, int):
-        return True
+        return -SAFE_INTEGER_MAX <= value <= SAFE_INTEGER_MAX
     if isinstance(value, float):
-        return math.isfinite(value)
+        return False
     if isinstance(value, str):
-        return not has_surrogate(value)
+        return not has_forbidden_json_character(value)
     if isinstance(value, list):
         return all(
             strict_json_value(item, depth=depth + 1, max_depth=max_depth)
@@ -185,11 +268,48 @@ def strict_json_value(value, *, depth=0, max_depth=64) -> bool:
     if isinstance(value, dict):
         return all(
             isinstance(key, str)
-            and not has_surrogate(key)
+            and not has_forbidden_json_character(key)
             and strict_json_value(item, depth=depth + 1, max_depth=max_depth)
             for key, item in value.items()
         )
     return False
+
+
+def extension_error(value):
+    try:
+        if isinstance(value, list):
+            for item in value:
+                error = extension_error(item)
+                if error:
+                    return error
+            return None
+        if not isinstance(value, dict):
+            return None
+        if "extensions" in value:
+            extensions = value["extensions"]
+            if not isinstance(extensions, dict) or len(extensions) > 8:
+                return "extension_shape"
+            for key, item in extensions.items():
+                if not re.fullmatch(r"x_note_[A-Za-z][A-Za-z0-9_-]{0,55}", key):
+                    return "extension_name"
+                if item is None or isinstance(item, bool):
+                    continue
+                if type(item) is int:
+                    if -SAFE_INTEGER_MAX <= item <= SAFE_INTEGER_MAX:
+                        continue
+                    return "extension_integer_range"
+                if isinstance(item, str):
+                    if len(item) <= 512 and not has_forbidden_json_character(item):
+                        continue
+                    return "extension_string"
+                return "extension_scalar"
+        for item in value.values():
+            error = extension_error(item)
+            if error:
+                return error
+    except Exception:
+        return "extension_malformed"
+    return None
 
 
 def canonical_bytes(value):
@@ -250,7 +370,6 @@ def state_evidence_error(evidence):
 def canonical_absolute_path(value):
     return (
         isinstance(value, str)
-        and value != "/"
         and value.startswith("/")
         and not value.startswith("//")
         and "//" not in value
@@ -282,6 +401,8 @@ def canonical_relative_path(value):
 
 def workspace_registry_error(workspace):
     try:
+        if workspace["scope"] != {"kind": "workspace"}:
+            return "workspace_scope"
         projects = [item["project_id"] for item in workspace["projects"]]
         if len(projects) != len(set(projects)):
             return "duplicate_project_id"
@@ -398,6 +519,7 @@ def scope_bundle_error(objects, workspace, workspace_root=WORKSPACE_ROOT):
     if workspace_registry_error(workspace):
         return "workspace_registry_invalid"
     project_set = {item["project_id"] for item in workspace["projects"]}
+    graph_projects = set()
     for item in objects:
         try:
             if item["workspace_id"] != workspace["workspace_id"]:
@@ -407,6 +529,7 @@ def scope_bundle_error(objects, workspace, workspace_root=WORKSPACE_ROOT):
             if scope["kind"] == "project":
                 if project_id not in project_set:
                     return "outer_project_unregistered"
+                graph_projects.add(project_id)
             elif scope["kind"] == "workspace":
                 if project_id is not None:
                     return "workspace_scope_has_project"
@@ -429,6 +552,8 @@ def scope_bundle_error(objects, workspace, workspace_root=WORKSPACE_ROOT):
                     return error
         except (KeyError, TypeError):
             return "scope_bundle_malformed"
+    if len(graph_projects) != 1:
+        return "project_identity_count"
     return None
 
 
@@ -447,8 +572,13 @@ def activation_error(
             return "activation_shape"
         if any(not isinstance(packet[field], str) for field in (*ACTIVATION_FIELDS, "to")):
             return "activation_identity_type"
-        if not canonical_absolute_path(packet["worktree"]):
-            return "activation_worktree_not_canonical"
+        identity = lease_identity(packet)
+        for field in ACTIVATION_FIELDS:
+            if identity[field] != packet[field]:
+                return f"activation_noncanonical_serialized:{field}"
+        canonical_to = normalized_identity_field("target_agent", packet["to"])
+        if canonical_to != packet["to"]:
+            return "activation_noncanonical_serialized:to"
         for field in ACTIVATION_FIELDS:
             if packet[field] != expected_identity[field]:
                 return f"activation_tuple_mismatch:{field}"
@@ -468,7 +598,7 @@ def activation_error(
             return "activation_repository_project_mismatch"
         if repository_root(workspace, repository_ref, workspace_root) != packet["worktree"]:
             return "activation_worktree_registry_mismatch"
-    except (KeyError, TypeError):
+    except (KeyError, TypeError, ValueError):
         return "activation_malformed"
     return None
 
@@ -493,7 +623,7 @@ FORBIDDEN_PAYLOAD_KEYS = {
     "reconcile", "reconciliation_policy", "retention", "retention_policy",
     "feature_flag", "feature_flags", "delivery", "deliveries", "delivery_state",
     "subscription_id", "subscription_revision", "received_at_utc",
-    "receive_time", "content_hash",
+    "receive_time", "content_hash", "identity", "revision",
 }
 
 
@@ -507,13 +637,19 @@ def normalize_payload_key(key):
 def payload_error(value, *, depth=0):
     if depth > 6:
         return "payload_depth"
-    if value is None or isinstance(value, bool) or isinstance(value, int):
+    if value is None or isinstance(value, bool):
         return None
+    if isinstance(value, int):
+        return (
+            None
+            if -SAFE_INTEGER_MAX <= value <= SAFE_INTEGER_MAX
+            else "payload_integer_range"
+        )
     if isinstance(value, float):
-        return None if math.isfinite(value) else "payload_non_json_number"
+        return "payload_non_canonical_number"
     if isinstance(value, str):
-        if has_surrogate(value):
-            return "payload_invalid_unicode"
+        if has_forbidden_json_character(value):
+            return "payload_invalid_unicode_or_control"
         return None if len(value) <= 4096 else "payload_string_size"
     if isinstance(value, list):
         if len(value) > 32:
@@ -527,7 +663,7 @@ def payload_error(value, *, depth=0):
         if len(value) > 32:
             return "payload_collection_size"
         for key, item in value.items():
-            if not isinstance(key, str) or has_surrogate(key):
+            if not isinstance(key, str) or has_forbidden_json_character(key):
                 return "payload_property_name"
             if not key or len(key) > 128:
                 return "payload_property_name"
@@ -543,6 +679,9 @@ def payload_error(value, *, depth=0):
 
 def envelope_error(envelope):
     try:
+        payload_result = payload_error(envelope["payload"])
+        if payload_result:
+            return payload_result
         encoded = canonical_bytes(envelope)
         if len(encoded) > 64 * 1024:
             return "envelope_size"
@@ -550,7 +689,7 @@ def envelope_error(envelope):
             return "subject_utf8_size"
         if len(envelope["coalescing_key"].encode("utf-8")) > 256:
             return "coalescing_key_utf8_size"
-        return payload_error(envelope["payload"])
+        return None
     except (KeyError, TypeError, ValueError, UnicodeError):
         return "envelope_malformed"
 
@@ -587,7 +726,7 @@ def recalculate_legacy_integrity(evidence):
     return evidence
 
 
-def manifest_error(evidence, workspace):
+def manifest_error(evidence, workspace, trusted_policy):
     try:
         evidence_error = state_evidence_error(evidence)
         if evidence_error:
@@ -595,20 +734,28 @@ def manifest_error(evidence, workspace):
         manifest = evidence["legacy_manifest"]
         imported = evidence["legacy_import"]
         publication = manifest["publication"]
+        authority = evidence["authority"]
         outer_project = evidence["scope"]["project_id"]
         if (
             evidence["evidence_kind"] != "compatibility_import"
             or evidence["quality"] != "best_effort"
-            or evidence["authority"]["authority_kind"] != "trusted_importer"
+            or authority["authority_kind"] != "trusted_importer"
         ):
             return "legacy_quality_escalation"
         if (
-            evidence["workspace_id"] != workspace["workspace_id"]
-            or outer_project not in {
-                project["project_id"] for project in workspace["projects"]
-            }
+            evidence["workspace_id"] != trusted_policy["workspace_id"]
+            or evidence["workspace_id"] != workspace["workspace_id"]
+            or outer_project != trusted_policy["project_id"]
+            or outer_project
+            not in {project["project_id"] for project in workspace["projects"]}
         ):
             return "legacy_outer_scope"
+        if (
+            manifest["manifest_id"] != trusted_policy["manifest_id"]
+            or manifest["cutoff_policy_revision"]
+            != trusted_policy["cutoff_policy_revision"]
+        ):
+            return "untrusted_manifest_policy"
         if manifest["sealed"] is not True or manifest["seal"]["algorithm"] != "sha256":
             return "manifest_not_sealed"
         if imported["manifest_id"] != manifest["manifest_id"]:
@@ -620,32 +767,65 @@ def manifest_error(evidence, workspace):
             != manifest["cutoff_policy_revision"]
         ):
             return "cutoff_revision_mismatch"
-        if publication["workspace_id"] != evidence["workspace_id"]:
+        if publication["workspace_id"] != trusted_policy["workspace_id"]:
             return "publication_workspace_mismatch"
-        if publication["project_id"] != outer_project:
+        if publication["project_id"] != trusted_policy["project_id"]:
             return "publication_project_mismatch"
-        if publication["registry_revision"] != workspace["registry_revision"]:
+        if (
+            publication["registry_revision"]
+            != trusted_policy["registry_revision"]
+            or publication["registry_revision"] != workspace["registry_revision"]
+        ):
             return "publication_registry_mismatch"
         if (
             publication["cutoff_policy_revision"]
             != manifest["cutoff_policy_revision"]
         ):
             return "publication_cutoff_mismatch"
-        boundaries = [
-            publication["source_boundary"],
-            imported["source_boundary"],
-            *[
-                entry["source_boundary"]
-                for entry in manifest["entries"]
-            ],
-        ]
-        if any(boundary.get("immutable") is not True for boundary in boundaries):
-            return "source_boundary_not_immutable"
+        if publication["source_boundary"] != trusted_policy["source_boundary"]:
+            return "publication_boundary_authority"
+        publisher = publication["publisher"]
+        if (
+            publisher["identity"],
+            publisher["revision"],
+        ) != trusted_policy["publisher"]:
+            return "untrusted_manifest_publisher"
         if publication["integrity"] != digest_without(publication):
             return "publication_integrity"
-        keys = [entry_key(entry) for entry in manifest["entries"]]
+        keys = []
+        entry_transactions = set()
+        entry_provenances = set()
+        for entry in manifest["entries"]:
+            key = entry_key(entry)
+            keys.append(key)
+            if (
+                key[3] != trusted_policy["cutoff_policy_revision"]
+                or not canonical_absolute_path(key[0])
+            ):
+                return "manifest_entry_key"
+            if (
+                entry["source_workspace_id"] != trusted_policy["workspace_id"]
+                or entry["source_project_id"] != trusted_policy["project_id"]
+                or entry["source_registry_revision"]
+                != trusted_policy["registry_revision"]
+            ):
+                return "entry_source_scope_mismatch"
+            if entry["source_boundary"] != trusted_policy["source_boundary"]:
+                return "entry_publication_boundary_mismatch"
+            importer_authority = entry["trusted_importer"]
+            if (
+                importer_authority["identity"],
+                importer_authority["revision"],
+            ) != trusted_policy["importer"]:
+                return "entry_untrusted_importer"
+            if entry["integrity"] != digest_without(entry):
+                return "entry_integrity"
+            entry_transactions.add(entry["transaction_id"])
+            entry_provenances.add(entry["provenance_id"])
         if len(keys) != len(set(keys)):
             return "duplicate_manifest_entry_key"
+        if tuple(keys) != trusted_policy["entry_keys"]:
+            return "manifest_entry_set"
         imported_key = entry_key(imported["entry_key"])
         matches = [
             entry
@@ -655,18 +835,6 @@ def manifest_error(evidence, workspace):
         if len(matches) != 1:
             return "manifest_entry_lookup"
         entry = matches[0]
-        if not canonical_absolute_path(entry["canonical_locator"]):
-            return "legacy_locator_not_canonical"
-        if (
-            entry["source_workspace_id"] != evidence["workspace_id"]
-            or entry["source_project_id"] != outer_project
-            or entry["source_registry_revision"] != workspace["registry_revision"]
-        ):
-            return "entry_source_scope_mismatch"
-        if entry["source_boundary"] != publication["source_boundary"]:
-            return "entry_publication_boundary_mismatch"
-        if entry["integrity"] != digest_without(entry):
-            return "entry_integrity"
         projection = {
             key: manifest[key]
             for key in (
@@ -676,33 +844,43 @@ def manifest_error(evidence, workspace):
                 "publication",
             )
         }
-        if manifest["seal"]["value"] != digest(projection):
+        calculated_seal = digest(projection)
+        if manifest["seal"]["value"] != calculated_seal:
             return "manifest_seal"
+        if manifest["seal"]["value"] != trusted_policy["manifest_seal"]:
+            return "untrusted_manifest_seal"
         if imported["entry_key"]["canonical_locator"] != evidence["subject"]["legacy_locator"]:
             return "enclosing_locator_mismatch"
-        if imported["source_boundary"] != entry["source_boundary"]:
+        if imported["source_boundary"] != trusted_policy["source_boundary"]:
             return "import_source_boundary_mismatch"
         if imported["source_transaction_id"] != entry["transaction_id"]:
             return "source_transaction_mismatch"
         if imported["source_provenance_id"] != entry["provenance_id"]:
             return "source_provenance_mismatch"
-        if imported["importer"] != entry["trusted_importer"]:
-            return "trusted_importer_mismatch"
-        authority = evidence["authority"]
+        importer = imported["importer"]
         if (
-            imported["importer"]["identity"] != authority["identity"]
-            or imported["importer"]["revision"]
-            != authority["implementation_revision"]
+            importer["identity"],
+            importer["revision"],
+        ) != trusted_policy["importer"]:
+            return "trusted_importer_mismatch"
+        if (
+            (authority["identity"], authority["implementation_revision"])
+            != trusted_policy["importer"]
+            or (
+                authority["capability_profile_id"],
+                authority["capability_profile_revision"],
+            )
+            != trusted_policy["authority_profile"]
         ):
             return "enclosing_importer_mismatch"
-        if imported["import_transaction_id"] in {
-            entry["transaction_id"],
-            publication["publication_transaction_id"],
+        if evidence["correlation_id"] != imported["import_transaction_id"]:
+            return "import_transaction_correlation"
+        if imported["import_transaction_id"] in entry_transactions | {
+            publication["publication_transaction_id"]
         }:
             return "import_transaction_not_distinct"
-        if imported["import_provenance_id"] in {
-            entry["provenance_id"],
-            publication["provenance_id"],
+        if imported["import_provenance_id"] in entry_provenances | {
+            publication["provenance_id"]
         }:
             return "import_provenance_not_distinct"
         if imported["integrity"] != digest_without(imported):
@@ -828,6 +1006,325 @@ def outcome_error(record, trusted_authority=TRUSTED_NATIVE_AUTHORITY):
     return None
 
 
+GRAPH_KIND_IDS = {
+    "AgentV1": "agent_id",
+    "EndpointV1": "endpoint_id",
+    "SessionRefV1": "session_ref_id",
+    "MessageV1": "message_id",
+    "DeliveryV1": "delivery_id",
+    "ReceiptV1": "receipt_id",
+    "CapabilitySetV1": "capability_set_id",
+}
+
+
+def graph_record_kind(record):
+    if "receipt_id" in record:
+        return "ReceiptV1"
+    if "delivery_id" in record:
+        return "DeliveryV1"
+    if "message_id" in record:
+        return "MessageV1"
+    if "native_session_id" in record and "session_ref_id" in record:
+        return "SessionRefV1"
+    if "adapter_name" in record and "endpoint_id" in record:
+        return "EndpointV1"
+    if "roles" in record and "agent_id" in record:
+        return "AgentV1"
+    if "capabilities" in record and "capability_set_id" in record:
+        return "CapabilitySetV1"
+    return None
+
+
+def reachable_graph_error(
+    records,
+    workspace,
+    trusted_catalog,
+    *,
+    schema_catalog=SCHEMAS,
+    registry=REGISTRY,
+):
+    """Validate one offline reachable catalog graph; all exceptions fail closed."""
+    try:
+        if catalog_error(CATALOG, schema_catalog) or not references_resolve(
+            registry, schema_catalog
+        ):
+            return "graph_schema_catalog"
+        if workspace_registry_error(workspace):
+            return "graph_workspace_registry"
+        indices = {kind: {} for kind in GRAPH_KIND_IDS}
+        evidence_ids = set()
+        graph_projects = set()
+        for record in records:
+            kind = graph_record_kind(record)
+            if kind is None:
+                return "graph_record_kind"
+            validator = Draft202012Validator(
+                schema_catalog[kind],
+                registry=registry,
+                format_checker=FormatChecker(),
+            )
+            if next(validator.iter_errors(record), None) is not None:
+                return f"graph_schema:{kind}"
+            id_field = GRAPH_KIND_IDS[kind]
+            record_id = record[id_field]
+            if record_id in indices[kind]:
+                return f"graph_duplicate_id:{id_field}"
+            indices[kind][record_id] = record
+            if record["workspace_id"] != workspace["workspace_id"]:
+                return "graph_workspace_mismatch"
+            scope = record["scope"]
+            if kind in {
+                "EndpointV1",
+                "SessionRefV1",
+                "MessageV1",
+                "DeliveryV1",
+                "ReceiptV1",
+            }:
+                if scope["kind"] != "project":
+                    return f"graph_project_scope_required:{kind}"
+                graph_projects.add(scope["project_id"])
+            elif scope["kind"] == "project":
+                graph_projects.add(scope["project_id"])
+            elif scope != {"kind": "workspace"}:
+                return f"graph_scope:{kind}"
+            evidence = record.get("evidence")
+            if evidence is not None:
+                if evidence["evidence_id"] in evidence_ids:
+                    return "graph_duplicate_id:evidence_id"
+                evidence_ids.add(evidence["evidence_id"])
+                if (
+                    evidence["workspace_id"] != record["workspace_id"]
+                    or evidence["scope"] != record["scope"]
+                ):
+                    return "graph_evidence_scope"
+                graph_projects.add(evidence["scope"]["project_id"])
+        if len(graph_projects) != 1:
+            return "graph_project_identity_count"
+        graph_project = next(iter(graph_projects))
+        if graph_project not in {
+            project["project_id"] for project in workspace["projects"]
+        }:
+            return "graph_project_unregistered"
+
+        endpoints = indices["EndpointV1"]
+        agents = indices["AgentV1"]
+        capability_sets = indices["CapabilitySetV1"]
+        sessions = indices["SessionRefV1"]
+        messages = indices["MessageV1"]
+        deliveries = indices["DeliveryV1"]
+        receipts = indices["ReceiptV1"]
+        if not all(
+            (endpoints, agents, capability_sets, sessions, messages, deliveries, receipts)
+        ):
+            return "graph_required_kind_missing"
+
+        for endpoint_id, endpoint in endpoints.items():
+            registration = trusted_catalog["endpoint_registrations"].get(
+                endpoint_id
+            )
+            if registration is None:
+                return "graph_endpoint_unregistered"
+            if endpoint["agent_id"] not in agents:
+                return "graph_agent_missing"
+            if endpoint["capability_set_id"] not in capability_sets:
+                return "graph_capability_set_missing"
+            actual_registration = {
+                "agent_id": endpoint["agent_id"],
+                "capability_set_id": endpoint["capability_set_id"],
+                "adapter": (
+                    endpoint["adapter_name"],
+                    endpoint["adapter_revision"],
+                ),
+                "configuration_ref": (
+                    endpoint["configuration_ref"]["registry_id"],
+                    endpoint["configuration_ref"]["revision"],
+                    endpoint["configuration_ref"]["reference"],
+                ),
+            }
+            if actual_registration != registration:
+                return "graph_endpoint_registration_mismatch"
+
+        for session in sessions.values():
+            endpoint = endpoints.get(session["endpoint_id"])
+            if endpoint is None:
+                return "graph_session_endpoint_missing"
+            if binding_error(
+                session["repository_binding"], graph_project, workspace
+            ):
+                return "graph_session_repository"
+            evidence = session["evidence"]
+            if session_ref_error(
+                session,
+                workspace,
+                trusted_authority=(
+                    endpoint["adapter_name"],
+                    endpoint["adapter_revision"],
+                    "native_session_binding",
+                    capability_sets[endpoint["capability_set_id"]]["revision"],
+                ),
+            ):
+                return "graph_session_evidence"
+            authority = evidence["authority"]
+            adapter_key = (
+                endpoint["adapter_name"],
+                endpoint["adapter_revision"],
+            )
+            profile_key = (
+                authority["capability_profile_id"],
+                authority["capability_profile_revision"],
+            )
+            if profile_key not in trusted_catalog["adapter_profiles"].get(
+                adapter_key, set()
+            ):
+                return "graph_session_profile"
+
+        for delivery in deliveries.values():
+            message = messages.get(delivery["message_id"])
+            endpoint = endpoints.get(delivery["endpoint_id"])
+            if message is None:
+                return "graph_message_missing"
+            if endpoint is None:
+                return "graph_delivery_endpoint_missing"
+            if endpoint["agent_id"] not in message["recipients"]:
+                return "graph_recipient_endpoint_agent"
+            error = outcome_error(delivery)
+            if error:
+                return f"graph_delivery_evidence:{error}"
+            session_id = delivery.get("session_ref_id")
+            session = sessions.get(session_id) if session_id is not None else None
+            if session_id is not None and session is None:
+                return "graph_delivery_session_missing"
+            if session is not None and session["endpoint_id"] != endpoint["endpoint_id"]:
+                return "graph_delivery_session_endpoint"
+            if delivery["outcome"] in {"accepted", "completed"}:
+                if session is None:
+                    return "graph_positive_session_missing"
+                capability_set = capability_sets[endpoint["capability_set_id"]]
+                authority = delivery["evidence"]["authority"]
+                adapter_key = (
+                    endpoint["adapter_name"],
+                    endpoint["adapter_revision"],
+                )
+                profile_key = (
+                    authority["capability_profile_id"],
+                    authority["capability_profile_revision"],
+                )
+                if (
+                    authority["identity"],
+                    authority["implementation_revision"],
+                ) != adapter_key:
+                    return "graph_delivery_adapter_authority"
+                if profile_key not in trusted_catalog["adapter_profiles"].get(
+                    adapter_key, set()
+                ):
+                    return "graph_delivery_profile"
+                capabilities = {
+                    item["capability"]: item
+                    for item in capability_set["capabilities"]
+                }
+                capability = capabilities.get(profile_key[0])
+                if (
+                    capability is None
+                    or capability_set["revision"] != profile_key[1]
+                    or capability["quality"] != "authoritative"
+                    or capability["evidence"]["source_id"] != adapter_key[0]
+                    or capability["evidence"]["source_revision"]
+                    != adapter_key[1]
+                ):
+                    return "graph_delivery_capability"
+
+        for receipt in receipts.values():
+            delivery = deliveries.get(receipt["delivery_id"])
+            endpoint = endpoints.get(receipt["endpoint_id"])
+            if delivery is None:
+                return "graph_receipt_delivery_missing"
+            if endpoint is None:
+                return "graph_receipt_endpoint_missing"
+            for field in ("message_id", "attempt_id", "endpoint_id"):
+                if receipt[field] != delivery[field]:
+                    return f"graph_receipt_delivery_mismatch:{field}"
+            if receipt.get("session_ref_id") != delivery.get("session_ref_id"):
+                return "graph_receipt_delivery_mismatch:session_ref_id"
+            error = outcome_error(receipt)
+            if error:
+                return f"graph_receipt_evidence:{error}"
+            if receipt["state"] in {"accepted", "completed"}:
+                session = sessions.get(receipt.get("session_ref_id"))
+                if session is None or session["endpoint_id"] != endpoint["endpoint_id"]:
+                    return "graph_receipt_session"
+                authority = receipt["evidence"]["authority"]
+                adapter_key = (
+                    endpoint["adapter_name"],
+                    endpoint["adapter_revision"],
+                )
+                profile_key = (
+                    authority["capability_profile_id"],
+                    authority["capability_profile_revision"],
+                )
+                capability_set = capability_sets[endpoint["capability_set_id"]]
+                capabilities = {
+                    item["capability"]: item
+                    for item in capability_set["capabilities"]
+                }
+                capability = capabilities.get(profile_key[0])
+                if (
+                    (authority["identity"], authority["implementation_revision"])
+                    != adapter_key
+                    or profile_key
+                    not in trusted_catalog["adapter_profiles"].get(adapter_key, set())
+                    or capability is None
+                    or capability_set["revision"] != profile_key[1]
+                    or capability["quality"] != "authoritative"
+                ):
+                    return "graph_receipt_capability"
+    except Exception:
+        return "graph_malformed"
+    return None
+
+
+def replace_project_identity(value, project_id, source_project_id="proj"):
+    if isinstance(value, dict):
+        return {
+            key: (
+                project_id
+                if (key == "project_id" or key == "project")
+                and item == source_project_id
+                else replace_project_identity(item, project_id, source_project_id)
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [
+            replace_project_identity(item, project_id, source_project_id)
+            for item in value
+        ]
+    return value
+
+
+def make_reachable_graph(project_id="proj"):
+    workspace = replace_project_identity(
+        load(FIXTURE_DIR / "valid" / "workspace.json"), project_id
+    )
+    records = [
+        replace_project_identity(
+            load(FIXTURE_DIR / "valid" / f"{stem}.json"), project_id
+        )
+        for stem in (
+            "agent",
+            "capability-set",
+            "endpoint",
+            "session-ref",
+            "message",
+            "delivery",
+            "receipt",
+        )
+    ]
+    for record in records:
+        if "evidence" in record:
+            seal_state_evidence(record["evidence"])
+    return workspace, records
+
+
 def make_delivery_outcome(outcome):
     delivery = load(FIXTURE_DIR / "valid" / "delivery.json")
     delivery["outcome"] = outcome
@@ -941,6 +1438,51 @@ class StandaloneContractSchemaTest(unittest.TestCase):
             references_resolve(make_registry(missing_resource), missing_resource)
         )
 
+    def test_canonical_json_bytes_are_cross_language_frozen_and_fail_closed(self):
+        state_description = SCHEMAS["StateEvidenceV1"]["description"]
+        event_description = SCHEMAS["EventEnvelopeV1"]["description"]
+        for required_text in (
+            "UTF-8",
+            "Unicode code-point order",
+            "array order",
+            "no insignificant whitespace",
+            "unnormalized Unicode scalar",
+            "integers",
+            "duplicate keys",
+            "NaN",
+            "Infinity",
+        ):
+            self.assertIn(required_text, state_description)
+        self.assertIn("same frozen UTF-8", event_description)
+        self.assertIn("safe-integer-only", event_description)
+        self.assertIn("UTF-8", CANONICAL_JSON_ALGORITHM)
+        self.assertEqual(
+            canonical_bytes({"é": "雪", "a": [2, 1]}),
+            '{"a":[2,1],"é":"雪"}'.encode("utf-8"),
+        )
+        self.assertNotEqual(
+            canonical_bytes({"text": "é"}),
+            canonical_bytes({"text": "e\u0301"}),
+        )
+        for value in (
+            {"value": 1.0},
+            {"value": float("nan")},
+            {"value": SAFE_INTEGER_MAX + 1},
+            {"value": "nul\x00text"},
+            {"value": "line\u2028text"},
+            {"\ud800": "key"},
+        ):
+            with self.subTest(value=repr(value)):
+                with self.assertRaises(ValueError):
+                    canonical_bytes(value)
+        with self.assertRaises(ValueError):
+            strict_json_loads('{"duplicate":1,"duplicate":2}')
+        with self.assertRaises(ValueError):
+            strict_json_loads('{"value":NaN}')
+        for noncanonical_number in ('{"value":1.0}', '{"value":1e0}'):
+            with self.assertRaises(ValueError):
+                strict_json_loads(noncanonical_number)
+
     def test_every_kind_has_valid_invalid_required_and_unknown_coverage(self):
         for name, filename in EXPECTED.items():
             stem = filename.removesuffix(".schema.json")
@@ -959,6 +1501,82 @@ class StandaloneContractSchemaTest(unittest.TestCase):
             unknown["unknown_semantic_field"] = True
             with self.subTest(name=name, case="unknown"):
                 self.assert_schema_rejects(name, unknown, "unknown field")
+
+    def test_extensions_and_payload_scalars_are_bounded_for_all_ten_schemas(self):
+        huge_integer = 10**10000
+        for name, filename in EXPECTED.items():
+            stem = filename.removesuffix(".schema.json")
+            valid = load(FIXTURE_DIR / "valid" / f"{stem}.json")
+            if name == "EventEnvelopeV1":
+                boundary = copy.deepcopy(valid)
+                boundary["payload"] = {"value": SAFE_INTEGER_MAX}
+                self.assertEqual(self.errors(name, boundary), [])
+                for value in (SAFE_INTEGER_MAX + 1, 1.5, float("nan")):
+                    candidate = copy.deepcopy(valid)
+                    candidate["payload"] = {"value": value}
+                    with self.subTest(name=name, value=type(value).__name__):
+                        self.assert_schema_rejects(
+                            name, candidate, "bounded payload number"
+                        )
+                huge = copy.deepcopy(valid)
+                huge["payload"] = {"value": huge_integer}
+                self.assertEqual(envelope_error(huge), "payload_integer_range")
+                continue
+            boundary = copy.deepcopy(valid)
+            boundary["extensions"] = {
+                "x_note_integer": SAFE_INTEGER_MAX,
+                "x_note_text": "é" * 512,
+                "x_note_boolean": True,
+                "x_note_null": None,
+            }
+            self.assertEqual(self.errors(name, boundary), [])
+            self.assertIsNone(extension_error(boundary))
+            self.assertLess(len(canonical_bytes(boundary["extensions"])), 8192)
+            for value in (
+                SAFE_INTEGER_MAX + 1,
+                1.5,
+                float("nan"),
+                float("inf"),
+                "x" * 513,
+                "nul\x00value",
+            ):
+                candidate = copy.deepcopy(valid)
+                candidate["extensions"] = {"x_note_bad": value}
+                with self.subTest(name=name, value=type(value).__name__):
+                    self.assert_schema_rejects(
+                        name, candidate, "bounded extension scalar"
+                    )
+            for value, expected_error in (
+                (huge_integer, "extension_integer_range"),
+                (1.0, "extension_scalar"),
+            ):
+                candidate = copy.deepcopy(valid)
+                candidate["extensions"] = {"x_note_bad": value}
+                self.assertEqual(extension_error(candidate), expected_error)
+                with self.assertRaises(ValueError):
+                    canonical_bytes(candidate["extensions"])
+
+        capability_set = load(FIXTURE_DIR / "valid" / "capability-set.json")
+        capability_set["capabilities"][0]["extensions"] = {
+            "x_note_nested": SAFE_INTEGER_MAX + 1
+        }
+        self.assert_schema_rejects(
+            "CapabilitySetV1", capability_set, "nested capability extension"
+        )
+        self.assertEqual(
+            extension_error(capability_set), "extension_integer_range"
+        )
+        workspace = load(FIXTURE_DIR / "valid" / "workspace.json")
+        for container in (
+            workspace["projects"][0],
+            workspace["repositories"][0],
+            workspace["relationships"][0],
+        ):
+            container["extensions"] = {"x_note_nested": "x" * 513}
+        self.assert_schema_rejects(
+            "WorkspaceV1", workspace, "nested registry extensions"
+        )
+        self.assertEqual(extension_error(workspace), "extension_string")
 
     def test_ids_and_scope_discriminator_fail_closed(self):
         id_fields = {
@@ -995,6 +1613,23 @@ class StandaloneContractSchemaTest(unittest.TestCase):
             with self.subTest(scope=scope):
                 self.assert_schema_rejects("AgentV1", candidate, "scope")
 
+        workspace = load(FIXTURE_DIR / "valid" / "workspace.json")
+        self.assertEqual(workspace["scope"], {"kind": "workspace"})
+        for scope in (
+            None,
+            {"kind": "project", "project_id": "proj"},
+            {"kind": "workspace", "project_id": "proj"},
+        ):
+            candidate = copy.deepcopy(workspace)
+            if scope is None:
+                candidate.pop("scope")
+            else:
+                candidate["scope"] = scope
+            with self.subTest(workspace_scope=scope):
+                self.assert_schema_rejects(
+                    "WorkspaceV1", candidate, "workspace discriminator"
+                )
+
     def test_activation_exact_tuple_scope_registry_and_lexical_matrix(self):
         message = load(FIXTURE_DIR / "valid" / "message.json")
         workspace = load(FIXTURE_DIR / "valid" / "workspace.json")
@@ -1017,7 +1652,7 @@ class StandaloneContractSchemaTest(unittest.TestCase):
             candidate = copy.deepcopy(message)
             candidate["activation_import"][field] = f"different-{field}"
             expected_error = (
-                "activation_worktree_not_canonical"
+                "activation_malformed"
                 if field == "worktree"
                 else f"activation_tuple_mismatch:{field}"
             )
@@ -1069,8 +1704,17 @@ class StandaloneContractSchemaTest(unittest.TestCase):
             "activation_worktree_registry_mismatch",
         )
 
+        root_path = copy.deepcopy(message)
+        root_path["activation_import"]["worktree"] = "/"
+        self.assertEqual(self.errors("MessageV1", root_path), [])
+        root_identity = {
+            field: root_path["activation_import"][field]
+            for field in ACTIVATION_FIELDS
+        }
+        self.assertEqual(lease_identity(root_identity), root_identity)
+
         for path in (
-            "/",
+            "relative/lane",
             "/srv/./app",
             "/srv/../app",
             "/srv//app",
@@ -1085,6 +1729,11 @@ class StandaloneContractSchemaTest(unittest.TestCase):
                     candidate,
                     "non-canonical worktree",
                 )
+            with self.subTest(path=path, boundary="current_helper"):
+                bad_identity = copy.deepcopy(expected)
+                bad_identity["worktree"] = path
+                with self.assertRaises(ValueError):
+                    lease_identity(bad_identity)
         for field, value in (
             ("branch", "release\ninjected"),
             ("chat", 4),
@@ -1099,6 +1748,71 @@ class StandaloneContractSchemaTest(unittest.TestCase):
                     candidate,
                     "activation identity type/control",
                 )
+
+        for branch in (
+            "main",
+            "feature/native-proof",
+            "claude/native-proof",
+            "codex/native-proof",
+            "feature branch",
+        ):
+            candidate = copy.deepcopy(message)
+            candidate["activation_import"]["branch"] = branch
+            self.assertEqual(self.errors("MessageV1", candidate), [])
+            self.assertEqual(normalized_identity_field("branch", branch), branch)
+            self.assertTrue(frontmatter_roundtrips(branch))
+
+        for field in ACTIVATION_FIELDS:
+            if field == "worktree":
+                continue
+            for value, helper_raises in (
+                ("true", True),
+                ("FALSE", True),
+                ("null", True),
+                ("0", True),
+                ("+12", True),
+                ("-7", True),
+                ("[x]", True),
+                ("  canonical-after-trim", False),
+                ("canonical-before-trim  ", False),
+                ("control\x00value", True),
+                ("line\u2028break", True),
+            ):
+                candidate = copy.deepcopy(message)
+                candidate["activation_import"][field] = value
+                with self.subTest(field=field, value=repr(value)):
+                    self.assert_schema_rejects(
+                        "MessageV1",
+                        candidate,
+                        "current-v2 non-roundtripping identity",
+                    )
+                    self.assertNotEqual(
+                        activation_error(
+                            candidate,
+                            expected,
+                            "codex",
+                            workspace,
+                            repository,
+                        ),
+                        None,
+                    )
+                    if helper_raises:
+                        with self.assertRaises(ValueError):
+                            normalized_identity_field(field, value)
+                    else:
+                        self.assertNotEqual(
+                            normalized_identity_field(field, value), value
+                        )
+
+        for field in (*ACTIVATION_FIELDS, "to"):
+            candidate = copy.deepcopy(message)
+            candidate["activation_import"][field] = 7
+            with self.subTest(field=field, boundary="non_string"):
+                self.assert_schema_rejects(
+                    "MessageV1", candidate, "non-string activation identity"
+                )
+        with self.assertRaises(ValueError):
+            normalized_identity_field("task", "   ")
         malformed = load(FIXTURE_DIR / "invalid" / "message.json")
         self.assert_schema_rejects(
             "MessageV1",
@@ -1148,6 +1862,180 @@ class StandaloneContractSchemaTest(unittest.TestCase):
                     scope_bundle_error(candidate, workspace),
                     expected_error,
                 )
+
+        multi_project_workspace = copy.deepcopy(workspace)
+        multi_project_workspace["projects"].append({"project_id": "other"})
+        mixed = copy.deepcopy(objects)
+        mixed[0]["scope"]["project_id"] = "other"
+        self.assertEqual(
+            scope_bundle_error(mixed, multi_project_workspace),
+            "project_identity_count",
+        )
+
+    def test_reachable_graph_resolves_exact_catalog_authority_and_project(self):
+        workspace, records = make_reachable_graph()
+        self.assertIsNone(
+            reachable_graph_error(records, workspace, TRUSTED_GRAPH_CATALOG)
+        )
+        self.assertEqual(
+            reachable_graph_error(
+                records,
+                workspace,
+                TRUSTED_GRAPH_CATALOG,
+                schema_catalog={},
+            ),
+            "graph_schema_catalog",
+        )
+        self.assertEqual(
+            reachable_graph_error(records, workspace, {}),
+            "graph_malformed",
+        )
+
+        workspace_capability_records = copy.deepcopy(records)
+        workspace_capability = next(
+            record
+            for record in workspace_capability_records
+            if graph_record_kind(record) == "CapabilitySetV1"
+        )
+        workspace_capability["scope"] = {"kind": "workspace"}
+        self.assertIsNone(
+            reachable_graph_error(
+                workspace_capability_records,
+                workspace,
+                TRUSTED_GRAPH_CATALOG,
+            )
+        )
+
+        def by_kind(items):
+            return {graph_record_kind(item): item for item in items}
+
+        cases = []
+        candidate = copy.deepcopy(records)
+        candidate.append(copy.deepcopy(by_kind(candidate)["EndpointV1"]))
+        cases.append((candidate, workspace, "graph_duplicate_id:endpoint_id"))
+
+        candidate = copy.deepcopy(records)
+        by_kind(candidate)["EndpointV1"]["capability_set_id"] = "caps_missing"
+        cases.append((candidate, workspace, "graph_capability_set_missing"))
+
+        candidate = copy.deepcopy(records)
+        graph = by_kind(candidate)
+        graph["EndpointV1"]["agent_id"] = "agent_missing"
+        cases.append((candidate, workspace, "graph_agent_missing"))
+
+        candidate = copy.deepcopy(records)
+        graph = by_kind(candidate)
+        for kind in ("DeliveryV1", "ReceiptV1"):
+            graph[kind]["session_ref_id"] = "session_fake"
+            graph[kind]["evidence"]["subject"]["session_ref_id"] = "session_fake"
+            seal_state_evidence(graph[kind]["evidence"])
+        cases.append((candidate, workspace, "graph_delivery_session_missing"))
+
+        candidate = copy.deepcopy(records)
+        graph = by_kind(candidate)
+        graph["ReceiptV1"]["delivery_id"] = "delivery_fake"
+        graph["ReceiptV1"]["evidence"]["subject"]["delivery_id"] = (
+            "delivery_fake"
+        )
+        seal_state_evidence(graph["ReceiptV1"]["evidence"])
+        cases.append((candidate, workspace, "graph_receipt_delivery_missing"))
+
+        candidate = copy.deepcopy(records)
+        graph = by_kind(candidate)
+        graph["CapabilitySetV1"]["capabilities"][0]["quality"] = "best_effort"
+        cases.append((candidate, workspace, "graph_delivery_capability"))
+
+        candidate = copy.deepcopy(records)
+        graph = by_kind(candidate)
+        graph["DeliveryV1"]["evidence"]["authority"][
+            "capability_profile_revision"
+        ] = "r2"
+        seal_state_evidence(graph["DeliveryV1"]["evidence"])
+        cases.append(
+            (
+                candidate,
+                workspace,
+                "graph_delivery_evidence:outcome_authority_revision",
+            )
+        )
+
+        candidate = copy.deepcopy(records)
+        graph = by_kind(candidate)
+        graph["EndpointV1"]["adapter_revision"] = "r2"
+        graph["CapabilitySetV1"]["capabilities"][0]["evidence"][
+            "source_revision"
+        ] = "r2"
+        for kind in ("SessionRefV1", "DeliveryV1", "ReceiptV1"):
+            graph[kind]["evidence"]["authority"]["implementation_revision"] = (
+                "r2"
+            )
+            seal_state_evidence(graph[kind]["evidence"])
+        cases.append((candidate, workspace, "graph_endpoint_registration_mismatch"))
+
+        candidate = copy.deepcopy(records)
+        graph = by_kind(candidate)
+        graph["EndpointV1"]["endpoint_id"] = "endpoint_fake"
+        for kind in ("SessionRefV1", "DeliveryV1", "ReceiptV1"):
+            graph[kind]["endpoint_id"] = "endpoint_fake"
+            graph[kind]["evidence"]["subject"]["endpoint_id"] = "endpoint_fake"
+            seal_state_evidence(graph[kind]["evidence"])
+        cases.append((candidate, workspace, "graph_endpoint_unregistered"))
+
+        for candidate, candidate_workspace, expected_error in cases:
+            with self.subTest(expected_error=expected_error):
+                self.assertEqual(
+                    reachable_graph_error(
+                        candidate,
+                        candidate_workspace,
+                        TRUSTED_GRAPH_CATALOG,
+                    ),
+                    expected_error,
+                )
+
+        for project_id in ("amiga", "nuvyr"):
+            project_workspace, project_records = make_reachable_graph(project_id)
+            with self.subTest(project_id=project_id):
+                self.assertIsNone(
+                    reachable_graph_error(
+                        project_records,
+                        project_workspace,
+                        TRUSTED_GRAPH_CATALOG,
+                    )
+                )
+
+        mixed_workspace, mixed_records = make_reachable_graph("amiga")
+        mixed_workspace["projects"].append({"project_id": "nuvyr"})
+        mixed_workspace["repositories"].extend(
+            [
+                {
+                    "project_id": "nuvyr",
+                    "repo_id": "app",
+                    "relative_path": "nuvyr/repos/app",
+                },
+                {
+                    "project_id": "nuvyr",
+                    "repo_id": "docs",
+                    "relative_path": "nuvyr/repos/docs",
+                },
+            ]
+        )
+        receipt_index = next(
+            index
+            for index, record in enumerate(mixed_records)
+            if graph_record_kind(record) == "ReceiptV1"
+        )
+        mixed_records[receipt_index] = replace_project_identity(
+            mixed_records[receipt_index], "nuvyr", "amiga"
+        )
+        seal_state_evidence(mixed_records[receipt_index]["evidence"])
+        self.assertEqual(
+            reachable_graph_error(
+                mixed_records,
+                mixed_workspace,
+                TRUSTED_GRAPH_CATALOG,
+            ),
+            "graph_project_identity_count",
+        )
 
     def test_workspace_registry_uniqueness_resolution_revision_and_lookup(self):
         workspace = load(FIXTURE_DIR / "valid" / "workspace.json")
@@ -1287,6 +2175,10 @@ class StandaloneContractSchemaTest(unittest.TestCase):
             "filesystem-roots": "filesystem_roots",
             "NativeSessionID": "native_session_id",
             "subscription-id": "subscription_id",
+            "identity": "identity",
+            "Identity": "identity",
+            "revision": "revision",
+            "Revision": "revision",
         }
         for key, normalized in aliases.items():
             candidate = copy.deepcopy(envelope)
@@ -1302,6 +2194,19 @@ class StandaloneContractSchemaTest(unittest.TestCase):
                     "forbidden authority key",
                 )
 
+        for key, normalized in (
+            ("Ｉｄｅｎｔｉｔｙ", "identity"),
+            ("Ｒｅｖｉｓｉｏｎ", "revision"),
+        ):
+            candidate = copy.deepcopy(envelope)
+            candidate["payload"] = {"nested": {key: "unsafe"}}
+            with self.subTest(normalized_alias=key):
+                self.assertEqual(self.errors("EventEnvelopeV1", candidate), [])
+                self.assertEqual(
+                    envelope_error(candidate),
+                    f"forbidden_payload_key:{normalized}",
+                )
+
         benign = copy.deepcopy(envelope)
         benign["payload"] = {
             "project_summary": "benign",
@@ -1309,6 +2214,8 @@ class StandaloneContractSchemaTest(unittest.TestCase):
             "implementation_notes": "benign",
             "tooling_note": "benign",
             "pathology": "benign",
+            "identity_summary": "benign",
+            "revision_note": "benign",
         }
         self.assertEqual(self.errors("EventEnvelopeV1", benign), [])
         self.assertIsNone(envelope_error(benign))
@@ -1355,28 +2262,45 @@ class StandaloneContractSchemaTest(unittest.TestCase):
             "property-name cap",
         )
         self.assertEqual(envelope_error(long_name), "payload_property_name")
-        invalid_unicode = copy.deepcopy(envelope)
-        invalid_unicode["payload"] = {"text": "\ud800"}
-        self.assert_schema_rejects(
-            "EventEnvelopeV1",
-            invalid_unicode,
-            "invalid Unicode",
-        )
+        for payload, label, semantic_error in (
+            ({"text": "\ud800"}, "surrogate value", "payload_invalid_unicode_or_control"),
+            ({"text": "nul\x00value"}, "NUL value", "payload_invalid_unicode_or_control"),
+            ({"nul\x00key": "value"}, "NUL key", "payload_property_name"),
+            ({"text": "del\x7fvalue"}, "DEL value", "payload_invalid_unicode_or_control"),
+            ({"text": "nel\x85value"}, "NEL value", "payload_invalid_unicode_or_control"),
+            ({"text": "line\u2028value"}, "U+2028 value", "payload_invalid_unicode_or_control"),
+            ({"text": "line\u2029value"}, "U+2029 value", "payload_invalid_unicode_or_control"),
+            ({"nested": [{"revision": "r2"}]}, "nested revision", "forbidden_payload_key:revision"),
+            ({"nested": [{"identity": "fake"}]}, "nested identity", "forbidden_payload_key:identity"),
+            ({"\ud800": "value"}, "surrogate key", "payload_property_name"),
+        ):
+            candidate = copy.deepcopy(envelope)
+            candidate["payload"] = payload
+            with self.subTest(label=label):
+                self.assert_schema_rejects("EventEnvelopeV1", candidate, label)
+                self.assertEqual(envelope_error(candidate), semantic_error)
+        for number in (float("nan"), float("inf"), 1.5):
+            candidate = copy.deepcopy(envelope)
+            candidate["payload"] = {"value": number}
+            with self.subTest(number=repr(number)):
+                self.assert_schema_rejects(
+                    "EventEnvelopeV1", candidate, "non-canonical number"
+                )
+                self.assertEqual(
+                    envelope_error(candidate), "payload_non_canonical_number"
+                )
+        huge_integer = copy.deepcopy(envelope)
+        huge_integer["payload"] = {"value": 10**10000}
         self.assertEqual(
-            envelope_error(invalid_unicode),
-            "envelope_malformed",
-        )
-        non_finite = copy.deepcopy(envelope)
-        non_finite["payload"] = {"value": float("nan")}
-        self.assertEqual(
-            envelope_error(non_finite),
-            "envelope_malformed",
+            envelope_error(huge_integer), "payload_integer_range"
         )
 
     def test_manifest_seal_bytes_scope_provenance_and_malformed_fail_closed(self):
         evidence = load(FIXTURE_DIR / "valid" / "state-evidence.json")
         workspace = load(FIXTURE_DIR / "valid" / "workspace.json")
-        self.assertIsNone(manifest_error(evidence, workspace))
+        self.assertIsNone(
+            manifest_error(evidence, workspace, TRUSTED_COMPATIBILITY_POLICY)
+        )
         cases = []
 
         candidate = copy.deepcopy(evidence)
@@ -1433,6 +2357,7 @@ class StandaloneContractSchemaTest(unittest.TestCase):
 
         candidate = copy.deepcopy(evidence)
         candidate["legacy_import"]["import_transaction_id"] = "source_tx1"
+        candidate["correlation_id"] = "source_tx1"
         recalculate_legacy_integrity(candidate)
         cases.append((candidate, "import_transaction_not_distinct"))
 
@@ -1457,12 +2382,12 @@ class StandaloneContractSchemaTest(unittest.TestCase):
         ] = "/sealed/../evidence.json"
         candidate["subject"]["legacy_locator"] = "/sealed/../evidence.json"
         recalculate_legacy_integrity(candidate)
-        cases.append((candidate, "legacy_locator_not_canonical"))
+        cases.append((candidate, "manifest_entry_key"))
 
         candidate = copy.deepcopy(evidence)
         candidate["legacy_import"]["source_boundary"]["immutable"] = False
         recalculate_legacy_integrity(candidate)
-        cases.append((candidate, "source_boundary_not_immutable"))
+        cases.append((candidate, "import_source_boundary_mismatch"))
 
         candidate = copy.deepcopy(evidence)
         candidate["legacy_manifest"]["entries"][0]["integrity"] = "f" * 64
@@ -1486,7 +2411,127 @@ class StandaloneContractSchemaTest(unittest.TestCase):
         for candidate, expected_error in cases:
             with self.subTest(expected_error=expected_error):
                 self.assertEqual(
-                    manifest_error(candidate, workspace),
+                    manifest_error(
+                        candidate,
+                        workspace,
+                        TRUSTED_COMPATIBILITY_POLICY,
+                    ),
+                    expected_error,
+                )
+
+        correlated_attacker_cases = []
+        candidate = copy.deepcopy(evidence)
+        candidate["legacy_manifest"]["manifest_id"] = "manifest_attacker"
+        candidate["legacy_import"]["manifest_id"] = "manifest_attacker"
+        recalculate_legacy_integrity(candidate)
+        correlated_attacker_cases.append(
+            (candidate, "untrusted_manifest_policy")
+        )
+
+        candidate = copy.deepcopy(evidence)
+        candidate["legacy_manifest"]["cutoff_policy_revision"] = "p2"
+        candidate["legacy_manifest"]["publication"][
+            "cutoff_policy_revision"
+        ] = "p2"
+        for entry in candidate["legacy_manifest"]["entries"]:
+            entry["cutoff_policy_revision"] = "p2"
+        candidate["legacy_import"]["cutoff_policy_revision"] = "p2"
+        candidate["legacy_import"]["entry_key"][
+            "cutoff_policy_revision"
+        ] = "p2"
+        candidate["authority"]["capability_profile_revision"] = "p2"
+        recalculate_legacy_integrity(candidate)
+        correlated_attacker_cases.append(
+            (candidate, "untrusted_manifest_policy")
+        )
+
+        candidate = copy.deepcopy(evidence)
+        candidate["legacy_manifest"]["publication"]["publisher"] = {
+            "identity": "attacker_publisher",
+            "revision": "r9",
+        }
+        recalculate_legacy_integrity(candidate)
+        correlated_attacker_cases.append(
+            (candidate, "untrusted_manifest_publisher")
+        )
+
+        candidate = copy.deepcopy(evidence)
+        for entry in candidate["legacy_manifest"]["entries"]:
+            entry["trusted_importer"] = {
+                "identity": "attacker_importer",
+                "revision": "r9",
+            }
+        candidate["legacy_import"]["importer"] = {
+            "identity": "attacker_importer",
+            "revision": "r9",
+        }
+        candidate["authority"]["identity"] = "attacker_importer"
+        candidate["authority"]["implementation_revision"] = "r9"
+        recalculate_legacy_integrity(candidate)
+        correlated_attacker_cases.append(
+            (candidate, "entry_untrusted_importer")
+        )
+
+        candidate = copy.deepcopy(evidence)
+        attacker_boundary = {
+            "kind": "source_snapshot",
+            "identity": "attacker_snapshot",
+            "immutable": True,
+        }
+        candidate["legacy_manifest"]["publication"][
+            "source_boundary"
+        ] = attacker_boundary
+        for entry in candidate["legacy_manifest"]["entries"]:
+            entry["source_boundary"] = copy.deepcopy(attacker_boundary)
+        candidate["legacy_import"]["source_boundary"] = copy.deepcopy(
+            attacker_boundary
+        )
+        recalculate_legacy_integrity(candidate)
+        correlated_attacker_cases.append(
+            (candidate, "publication_boundary_authority")
+        )
+
+        candidate = copy.deepcopy(evidence)
+        candidate["legacy_manifest"]["entries"].pop()
+        recalculate_legacy_integrity(candidate)
+        correlated_attacker_cases.append((candidate, "manifest_entry_set"))
+
+        candidate = copy.deepcopy(evidence)
+        candidate["legacy_manifest"]["entries"][1][
+            "transaction_id"
+        ] = "attacker_non_selected_tx"
+        candidate["legacy_manifest"]["entries"][1][
+            "provenance_id"
+        ] = "attacker_non_selected_prov"
+        recalculate_legacy_integrity(candidate)
+        correlated_attacker_cases.append(
+            (candidate, "untrusted_manifest_seal")
+        )
+
+        candidate = copy.deepcopy(evidence)
+        candidate["legacy_manifest"]["entries"][1][
+            "source_registry_revision"
+        ] = "attacker_registry"
+        recalculate_legacy_integrity(candidate)
+        correlated_attacker_cases.append(
+            (candidate, "entry_source_scope_mismatch")
+        )
+
+        candidate = copy.deepcopy(evidence)
+        candidate["correlation_id"] = "attacker_import_tx"
+        seal_state_evidence(candidate)
+        correlated_attacker_cases.append(
+            (candidate, "import_transaction_correlation")
+        )
+
+        for candidate, expected_error in correlated_attacker_cases:
+            with self.subTest(attacker_reseal=expected_error):
+                self.assertEqual(
+                    manifest_error(
+                        candidate,
+                        workspace,
+                        TRUSTED_COMPATIBILITY_POLICY,
+                    ),
                     expected_error,
                 )
 
@@ -1505,7 +2550,11 @@ class StandaloneContractSchemaTest(unittest.TestCase):
         malformed_cases.append(candidate)
         for candidate in malformed_cases:
             self.assertEqual(
-                manifest_error(candidate, workspace),
+                manifest_error(
+                    candidate,
+                    workspace,
+                    TRUSTED_COMPATIBILITY_POLICY,
+                ),
                 "legacy_manifest_malformed",
             )
         for excluded_time_field in (
@@ -1531,7 +2580,11 @@ class StandaloneContractSchemaTest(unittest.TestCase):
             "retired evidence quality escalation",
         )
         self.assertEqual(
-            manifest_error(escalated, workspace),
+            manifest_error(
+                escalated,
+                workspace,
+                TRUSTED_COMPATIBILITY_POLICY,
+            ),
             "legacy_quality_escalation",
         )
 

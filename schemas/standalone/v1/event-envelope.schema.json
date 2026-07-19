@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://llm-collab.dev/schemas/standalone/v1/event-envelope.schema.json",
   "title": "EventEnvelopeV1",
-  "description": "Bounded adapter input only. Runner identity, subscription, receive time, content hash, routing, delivery, retry, registry implementation, and execution authority are deliberately absent. The semantic gate canonicalizes payload keys before enforcing the complete forbidden-authority family.",
+  "description": "Bounded adapter input only. Runner identity, subscription revision, receive time, content hash, routing, delivery, retry, registry implementation, and execution authority are deliberately absent. Canonical envelope bytes use the same frozen UTF-8, Unicode-code-point key ordering, array-order, compact-separator, exact-Unicode-scalar, safe-integer-only JSON algorithm described by StateEvidenceV1. The semantic gate normalizes payload keys before enforcing the complete forbidden-authority family.",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "adapter_name", "adapter_version", "event_type", "source_event_id", "source_cursor", "observed_at_utc", "subject", "coalescing_key", "observed_state", "expected_outcome", "why_not_done", "next_unlock_action", "severity", "payload"],
@@ -27,13 +27,20 @@
   "$defs": {
     "token": {"type": "string", "pattern": "^(?!.*[\\u0000-\\u001f\\u007f\\u0085\\u2028\\u2029])[A-Za-z][A-Za-z0-9._-]{0,127}$"},
     "shortText": {"type": "string", "minLength": 1, "maxLength": 512, "pattern": "^(?!.*[\\u0000-\\u001f\\u007f\\u0085\\u2028\\u2029]).+$"},
-    "dataString": {"type": "string", "maxLength": 4096, "pattern": "^(?!.*[\\ud800-\\udfff])"},
-    "dataScalar": {"type": ["string", "number", "boolean", "null"], "maxLength": 4096, "pattern": "^(?!.*[\\ud800-\\udfff])"},
+    "dataString": {"type": "string", "maxLength": 4096, "pattern": "^(?!.*[\\u0000-\\u001f\\u007f\\u0085\\u2028\\u2029\\ud800-\\udfff]).*$"},
+    "dataScalar": {
+      "anyOf": [
+        {"$ref": "#/$defs/dataString"},
+        {"type": "integer", "minimum": -9007199254740991, "maximum": 9007199254740991},
+        {"type": "boolean"},
+        {"type": "null"}
+      ]
+    },
     "safePropertyName": {
       "type": "string",
       "minLength": 1,
       "maxLength": 128,
-      "pattern": "^(?!.*[\\u0000-\\u001f\\u007f\\ud800-\\udfff]).+$",
+      "pattern": "^(?!.*[\\u0000-\\u001f\\u007f\\u0085\\u2028\\u2029\\ud800-\\udfff]).+$",
       "not": {
         "enum": [
           "project", "projects", "project_id", "project_home",
@@ -45,6 +52,7 @@
           "endpoint", "endpoints", "endpoint_id", "route", "routes", "routing", "target", "target_id", "target_agent", "recipient", "recipients",
           "handler", "handler_name", "handler_implementation", "adapter_implementation", "implementation",
           "AdapterImplementation", "NativeSessionID",
+          "identity", "Identity", "revision", "Revision",
           "capability_profile", "capability_profiles", "capability_profile_id",
           "command", "commands", "executable", "executables", "module", "modules", "tool", "tools",
           "url", "urls", "uri", "uris", "network", "environment", "env",

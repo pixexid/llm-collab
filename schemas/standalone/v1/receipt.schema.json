@@ -71,7 +71,14 @@
       "type": "object",
       "maxProperties": 8,
       "propertyNames": {"pattern": "^x_note_[A-Za-z][A-Za-z0-9_-]{0,55}$"},
-      "additionalProperties": {"type": ["string", "number", "boolean", "null"], "maxLength": 512}
+      "additionalProperties": {
+        "anyOf": [
+          {"type": "string", "maxLength": 512, "pattern": "^(?!.*[\\u0000-\\u001f\\u007f\\u0085\\u2028\\u2029\\ud800-\\udfff]).*$"},
+          {"type": "integer", "minimum": -9007199254740991, "maximum": 9007199254740991},
+          {"type": "boolean"},
+          {"type": "null"}
+        ]
+      }
     }
   }
 }
