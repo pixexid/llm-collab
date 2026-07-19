@@ -158,6 +158,11 @@ def resolve_release_config(project_id: str, project: dict | None) -> tuple[dict 
     if not (isinstance(workflow, str) and workflow.strip()):
         return None, (f"project {project_id!r} release_closure has no configured workflow — "
                       "refusing to default")
+    trigger_event = rc.get("trigger_event")
+    if not (isinstance(trigger_event, str) and trigger_event.strip()):
+        return None, (f"project {project_id!r} release_closure has no configured trigger_event "
+                      "(the automatic event that runs the production deploy, e.g. 'push', "
+                      "'workflow_run', 'merge_group') — refusing to default")
 
     def string_list(value) -> tuple[str, ...] | None:
         if (isinstance(value, (list, tuple)) and value
@@ -180,6 +185,7 @@ def resolve_release_config(project_id: str, project: dict | None) -> tuple[dict 
         "repo": repo,
         "branch": branch,
         "workflow": workflow,
+        "trigger_event": trigger_event,
         "required_jobs": required_jobs,
         "smoke_job": smoke_job,
         "required_smoke_steps": required_smoke_steps,
@@ -194,7 +200,7 @@ def evaluate_release(
     required_jobs: tuple[str, ...],
     smoke_job: str,
     required_smoke_steps: tuple[str, ...],
-    required_event: str = "push",
+    required_event: str,
     required_branch: str = "main",
 ) -> Verdict:
     """Pure verdict logic. `runs` must already be exact-SHA-filtered (the fetch
@@ -333,6 +339,10 @@ def main() -> int:
         print("[error] --merge-sha must be exactly 40 hex characters (the full merge SHA)",
               file=sys.stderr)
         return 64
+    if args.poll_seconds <= 0 or args.timeout_seconds < 0:
+        print("[error] --poll-seconds must be > 0 and --timeout-seconds must be >= 0",
+              file=sys.stderr)
+        return 64
 
     config, config_error = resolve_release_config(args.project, get_project(args.project))
     if config is None:
@@ -349,6 +359,7 @@ def main() -> int:
                                 required_jobs=config["required_jobs"],
                                 smoke_job=config["smoke_job"],
                                 required_smoke_steps=config["required_smoke_steps"],
+                                required_event=config["trigger_event"],
                                 required_branch=config["branch"])
 
     try:

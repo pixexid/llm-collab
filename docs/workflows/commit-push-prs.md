@@ -317,7 +317,11 @@ After merge:
 2. run targeted post-merge smoke only when the merge is browser-relevant
 3. update the project queue artifact when lane ordering/state changes
 4. run the executable branch/worktree cleanup gate
-5. mark local task done
+5. mark local task done — EXCEPT for a production-affecting merge, where
+   done-marking waits for the release-closure gate below ("Release closure
+   does not end at merge"): terminal deploy+smoke success for the exact merge
+   SHA, or an explicit Codex disposition on a non-success. Never mark done
+   with the release outcome unknown or red.
 
 For `llm-collab` itself, the shared local checkout is part of the shipped
 workflow. After a PR that changes workflow docs, scripts, gates, skills, agent
@@ -396,15 +400,18 @@ without that config fails closed with exit 64.
 
 - **Exact-SHA correlation is absolute.** A deploy run for a different or
   earlier SHA never satisfies this merge's closure, no matter how green.
-- **Only the automatic `push` run on the project's configured
-  `default_branch_base` counts** (`main` for Amiga). A same-SHA
-  `workflow_dispatch` (or off-branch) run is a manual intervention and never
-  satisfies — or supersedes — the automatic run's outcome.
+- **Only the automatic run counts**: the project's configured
+  `release_closure.trigger_event` on its configured `default_branch_base`
+  (Amiga: `push` on `main`). A same-SHA `workflow_dispatch` (or any other
+  event/branch) run is a manual intervention and never satisfies — or
+  supersedes — the automatic run's outcome.
 - **Success = deploy AND post-deploy smoke terminal success** for that exact
-  SHA, proven by POSITIVE evidence: the `detect` and `deploy` jobs present and
-  successful (skipped deploy = not a release) and the required smoke steps
-  (`Verify production hosts`, `Verify production auth`) present and successful.
-  Empty or partial run evidence fails closed.
+  SHA, proven by POSITIVE evidence: every job named in the project's
+  `release_closure.required_jobs` present and successful (a skipped required
+  job = not a release) and every configured `required_smoke_steps` present and
+  successful inside the configured `smoke_job`. All names come from the
+  project's `projects.json` `release_closure` — no project inherits another's
+  labels. Empty or partial run evidence fails closed.
 - **`FAILURE` / `CANCELLED` / `MISSING` are each actionable**: the watcher
   sends ONE durable llm-collab packet plus ONE doorbell ring. A missing run is
   a distinct alarm, never silence and never a pass.

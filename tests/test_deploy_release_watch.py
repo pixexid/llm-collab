@@ -36,7 +36,8 @@ def jobs_all_green(_run_id: int) -> list[dict]:
 # Amiga-shaped evidence identity, injected the way main() injects the resolved
 # projects.json release_closure config (shared bin/ carries no such constants).
 EVIDENCE = {"required_jobs": ("detect", "deploy"), "smoke_job": "deploy",
-            "required_smoke_steps": ("Verify production hosts", "Verify production auth")}
+            "required_smoke_steps": ("Verify production hosts", "Verify production auth"),
+            "required_event": "push", "required_branch": "main"}
 
 
 def evaluate(merge_sha, runs, jobs_for_run, **overrides):
@@ -50,6 +51,7 @@ def project_fixture(**overrides) -> dict:
         "github": {"enabled": True, "repo": "pixexid/amiga"},
         "release_closure": {
             "workflow": "deploy",
+            "trigger_event": "push",
             "required_jobs": ["detect", "deploy"],
             "smoke_job": "deploy",
             "required_smoke_steps": ["Verify production hosts", "Verify production auth"],
@@ -327,6 +329,47 @@ class ReleaseConfigResolutionTest(unittest.TestCase):
         for name in ("REPO_PROFILES", "REQUIRED_JOBS", "REQUIRED_SMOKE_STEPS"):
             self.assertFalse(hasattr(watch, name),
                              f"{name} must not exist — project values in shared bin/")
+
+
+class DeployReleaseWatchTriggerEventTest(unittest.TestCase):
+    """GH-1524 PR #111 round 2: the automatic trigger event is project
+    authority, never a default."""
+
+    def test_missing_trigger_event_fails_closed(self) -> None:
+        project = project_fixture()
+        del project["release_closure"]["trigger_event"]
+        config, error = watch.resolve_release_config("amiga", project)
+        self.assertIsNone(config)
+        self.assertIn("trigger_event", error)
+
+    def test_workflow_run_trigger_project_is_graded_on_its_own_event(self) -> None:
+        # A project whose deploy is triggered by workflow_run must accept its
+        # exact-SHA workflow_run runs and exclude push runs — the inverse of
+        # Amiga — using the same configured-identity mechanics.
+        runs = [run_fixture(30, DF55, conclusion="success", event="workflow_run")]
+        verdict = evaluate(DF55, runs, jobs_all_green, required_event="workflow_run")
+        self.assertEqual(verdict.state, "SUCCESS")
+        push_only = [run_fixture(31, DF55, conclusion="success", event="push")]
+        verdict2 = evaluate(DF55, push_only, jobs_all_green, required_event="workflow_run")
+        self.assertEqual(verdict2.state, "MISSING")
+
+    def test_resolved_config_carries_trigger_event(self) -> None:
+        config, error = watch.resolve_release_config("amiga", project_fixture())
+        self.assertIsNone(error)
+        self.assertEqual(config["trigger_event"], "push")
+
+
+class DeployReleaseWatchCliValidationTest(unittest.TestCase):
+    def test_non_positive_poll_or_negative_timeout_exit_64(self) -> None:
+        from unittest.mock import patch
+
+        sha = "0" * 40
+        for extra in (["--poll-seconds", "-1"], ["--poll-seconds", "0"],
+                      ["--timeout-seconds", "-5"]):
+            argv = ["deploy_release_watch.py", "--project", "amiga",
+                    "--merge-sha", sha, *extra]
+            with patch.object(sys, "argv", argv):
+                self.assertEqual(watch.main(), 64, extra)
 
 
 class DeployReleaseWatchFetchTest(unittest.TestCase):
