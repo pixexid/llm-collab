@@ -286,6 +286,11 @@ provisional **safety-fuse**, on trial, with hard constraints:
 - **Auto-deletes** on handoff/ack/blocker; must not outlive its task/chat.
 - **Never the primary path**, never a standing always-on watcher.
 - Must be fixed or removed if it misbehaves on real tasks.
+- Never an ad-hoc per-session `while true` inbox loop: those caused the
+  2026-07-18 duplicate-wake incident and are cleaned up by activation-lease
+  claims (see `session-autobridge-runbook.md`, "One-Writer Activation Lease").
+  Queue draining is orchestrator goal/queue state, not a recurring
+  chat-context heartbeat.
 
 When a safety-fuse heartbeat is active, the Codex-side tooling below is the
 reference implementation; the same discipline applies symmetrically to any agent

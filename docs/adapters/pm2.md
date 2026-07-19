@@ -13,6 +13,14 @@ continuing watches to Claude instead of keeping a Codex thread heartbeat alive.
 If Codex must create a monitor, use one monitor per purpose, clear stale prior
 monitors first, and delete or update it as soon as its purpose is served.
 
+PM2 is also the watcher **registry** for activation-lease cleanup: when a fresh
+activation claims its one-writer lease (`session_autobridge.py lease-claim`),
+PM2-managed watchers are recognized by their PM2 environment markers and
+preserved, while unregistered ad-hoc mailbox pollers matching the activation
+identity are terminated with per-identity diagnostics. Run purpose-scoped
+watches under PM2 (or an equivalently registered supervisor) so they survive
+activation cleanup; a bare `while true` shell loop will not.
+
 Manual one-shot watcher runs use the same Codex refresh defaults as PM2:
 
 ```bash

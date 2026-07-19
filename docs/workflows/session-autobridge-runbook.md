@@ -42,7 +42,60 @@ Session autobridge and PM2/heartbeat polling survive only as a bounded,
 - must be fixed or removed if it misbehaves on real tasks
 
 If the safety-fuse causes stale-context or duplicate-wake issues in practice,
-remove it and rely on the doorbell + mailbox-drain self-heal.
+remove it and rely on the doorbell + mailbox-drain self-heal. The 2026-07-18
+GH-1524 duplicate-wake incident met that removal condition: ad-hoc per-session
+`while true` mailbox loops are NOT a normal no-idle mechanism and must not be
+installed as a second wake path beside the durable mailbox + one verified AX
+doorbell. Queue draining is orchestrator goal/queue state, not recurring
+chat-context heartbeats.
+
+## One-Writer Activation Lease
+
+One durable activation packet must activate at most one writer for the same
+exact `(project, chat, task, worktree, branch, target-agent)` identity. Before
+mutating an assigned worktree, a fresh activation claims the lease; a second
+session observing the same packet fails closed and holds read-only:
+
+```bash
+python3 bin/session_autobridge.py lease-claim \
+  --project amiga \
+  --chat CHAT-xxxx \
+  --task TASK-xxxxxx \
+  --worktree /path/to/assigned/worktree \
+  --branch claude/gh-0000-lane \
+  --target-agent claude \
+  --session SESSION-claude-lane \
+  --owner-pid $$ \
+  --json
+```
+
+- Exit 0 with `"claimed": true` — this session is the writer. The claim also
+  audits activation-shaped pollers for the same identity: registered
+  (PM2-managed) watches are preserved, unregistered ad-hoc mailbox pollers are
+  terminated, and every candidate is listed in `poller_audit` with its pid,
+  command, and exact action. Pass `--skip-poller-cleanup` to audit without
+  terminating.
+- Exit 75 with `"claimed": false` — another session owns the lane. The output
+  names the live owner lease. Do not mutate the worktree; record the refusal
+  and stand down.
+- Claims are fenced: every ownership change increments `fence_token`. An
+  expired lease still refuses new claims until `--takeover` is passed AND the
+  recorded `owner_pid` is provably gone, so a stale owner can never be
+  silently replaced while active, and a replaced owner's old token is
+  detectably stale.
+- Release on handoff/stand-down:
+  `python3 bin/session_autobridge.py lease-release ... --session SESSION-claude-lane`.
+  Only the current owner can release.
+
+Purpose-scoped PR/CI/deploy watches are a separate concern from activation
+wake-pollers: register them (PM2 registry) so activation cleanup can tell them
+apart and preserve them.
+
+Claims are serialized through a `.lock` sidecar next to the lease record under
+`State/session_autobridge/activation_leases/`. If a claiming process crashes
+mid-claim, later claims fail closed with `claim_in_progress`; recovery is an
+attended check that no claim is actually running, then removing that exact
+`.lock` file.
 
 ## Safety Defaults
 
@@ -222,9 +275,11 @@ The implemented behavior is narrower:
 Because a transport failure may occur after runtime acceptance, an automatic
 retry is not a proven exactly-once contract. Use disposable sessions for tests
 and do not target an active operator thread. Transactional busy deferral,
-coalescing, leases/fencing, and ambiguous-delivery reconciliation belong to the
-planned [Thread Event Runner](thread-event-runner-rfc.md), not this provisional
-autobridge.
+coalescing, and ambiguous-delivery reconciliation belong to the planned
+[Thread Event Runner](thread-event-runner-rfc.md), not this provisional
+autobridge. Activation-identity leases/fencing are implemented here (see
+"One-Writer Activation Lease" above); the Thread Event Runner may later absorb
+them but is not a prerequisite.
 
 If a message is intentionally abandoned, clear it explicitly by marking it read:
 

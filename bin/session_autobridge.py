@@ -36,6 +36,15 @@ from _session_autobridge import (
     save_session,
     update_binding_from_session,
 )
+from _activation_lease import (
+    LeaseRefused,
+    audit_activation_pollers,
+    claim_lease,
+    lease_identity,
+    load_lease,
+    owner_summary,
+    release_lease,
+)
 
 
 def parse_args():
@@ -104,6 +113,42 @@ def parse_args():
     deactivate.add_argument("--status", default="stopped", choices=("stopped", "superseded"))
     deactivate.add_argument("--superseded-by", default=None)
     deactivate.add_argument("--json", dest="json_output", action="store_true")
+
+    def add_identity_arguments(sub) -> None:
+        sub.add_argument("--project", required=True)
+        sub.add_argument("--chat", required=True)
+        sub.add_argument("--task", required=True)
+        sub.add_argument("--worktree", required=True)
+        sub.add_argument("--branch", required=True)
+        sub.add_argument("--target-agent", dest="target_agent", required=True)
+        sub.add_argument("--json", dest="json_output", action="store_true")
+
+    lease_claim = subparsers.add_parser(
+        "lease-claim",
+        help="Claim the one-writer activation lease for an exact activation identity",
+    )
+    add_identity_arguments(lease_claim)
+    lease_claim.add_argument("--session", required=True, help="Claiming session identifier")
+    lease_claim.add_argument("--owner-pid", type=int, default=None, help="Owner process id for liveness fencing")
+    lease_claim.add_argument("--ttl-seconds", type=int, default=3600)
+    lease_claim.add_argument(
+        "--takeover",
+        action="store_true",
+        help="Allow claiming an EXPIRED lease whose owner process is provably gone",
+    )
+    lease_claim.add_argument(
+        "--skip-poller-cleanup",
+        action="store_true",
+        help="Audit stale activation pollers without terminating them",
+    )
+
+    lease_show = subparsers.add_parser("lease-show", help="Show the activation lease for an identity")
+    add_identity_arguments(lease_show)
+
+    lease_release = subparsers.add_parser("lease-release", help="Release an activation lease you own")
+    add_identity_arguments(lease_release)
+    lease_release.add_argument("--session", required=True, help="Owning session identifier")
+    lease_release.add_argument("--status", default="released", choices=("released", "superseded"))
     return parser.parse_args()
 
 
@@ -227,8 +272,59 @@ def deactivate_session(args) -> dict:
     return payload
 
 
+def lease_claim_command(args) -> tuple[dict, int]:
+    identity = lease_identity(args)
+    try:
+        lease = claim_lease(
+            identity,
+            owner_session_id=args.session,
+            owner_pid=args.owner_pid,
+            ttl_seconds=args.ttl_seconds,
+            takeover=args.takeover,
+        )
+    except LeaseRefused as refusal:
+        return (
+            {
+                "claimed": False,
+                "reason": refusal.reason,
+                "identity": identity,
+                "owner": refusal.owner,
+                "hint": "another session owns this activation; hold read-only, do not mutate the worktree",
+            },
+            75,
+        )
+    pollers = audit_activation_pollers(identity, clean=not args.skip_poller_cleanup)
+    return ({"claimed": True, "lease": lease, "poller_audit": pollers}, 0)
+
+
+def lease_show_command(args) -> tuple[dict, int]:
+    identity = lease_identity(args)
+    lease = load_lease(identity)
+    if lease is None:
+        return ({"identity": identity, "lease": None}, 0)
+    return ({"identity": identity, "lease": lease, "owner": owner_summary(lease)}, 0)
+
+
+def lease_release_command(args) -> tuple[dict, int]:
+    identity = lease_identity(args)
+    try:
+        lease = release_lease(identity, owner_session_id=args.session, status=args.status)
+    except LeaseRefused as refusal:
+        return (
+            {
+                "released": False,
+                "reason": refusal.reason,
+                "identity": identity,
+                "owner": refusal.owner,
+            },
+            75,
+        )
+    return ({"released": True, "lease": lease}, 0)
+
+
 def main():
     args = parse_args()
+    exit_code = 0
     if args.command == "register":
         result = register_session(args)
     elif args.command == "discover-runtime":
@@ -241,9 +337,17 @@ def main():
         result = show_binding(args)
     elif args.command == "dispatch":
         result = dispatch_session(args.session)
+    elif args.command == "lease-claim":
+        result, exit_code = lease_claim_command(args)
+    elif args.command == "lease-show":
+        result, exit_code = lease_show_command(args)
+    elif args.command == "lease-release":
+        result, exit_code = lease_release_command(args)
     else:
         result = deactivate_session(args)
     emit(result, getattr(args, "json_output", False))
+    if exit_code:
+        sys.exit(exit_code)
 
 
 if __name__ == "__main__":
