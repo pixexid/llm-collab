@@ -1,8 +1,66 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://llm-collab.dev/schemas/standalone/v1/session-ref.schema.json",
-  "title": "SessionRefV1", "type": "object", "additionalProperties": false,
-  "required": ["schema_version", "workspace_id", "scope", "session_ref_id", "endpoint_id", "native_session_id", "evidence"],
-  "properties": {"schema_version": {"const": 1}, "workspace_id": {"$ref": "#/$defs/workspaceId"}, "scope": {"$ref": "#/$defs/scope"}, "session_ref_id": {"type": "string", "pattern": "^session_[A-Za-z0-9][A-Za-z0-9_-]{2,127}$"}, "endpoint_id": {"type": "string", "pattern": "^endpoint_[A-Za-z0-9][A-Za-z0-9_-]{2,127}$"}, "native_session_id": {"type": "string", "pattern": "^native_[A-Za-z0-9][A-Za-z0-9._:-]{2,255}$"}, "repository_binding": {"type": "object", "additionalProperties": false, "required": ["project_id", "repo_id", "canonical_cwd"], "properties": {"project_id": {"$ref": "#/$defs/token"}, "repo_id": {"$ref": "#/$defs/token"}, "canonical_cwd": {"$ref": "#/$defs/canonicalPath"}}}, "evidence": {"$ref": "#/$defs/evidence"}, "extensions": {"$ref": "#/$defs/extensions"}},
-  "$defs": {"token": {"type": "string", "pattern": "^[A-Za-z][A-Za-z0-9._-]{0,127}$"}, "workspaceId": {"type": "string", "pattern": "^ws_[A-Za-z0-9][A-Za-z0-9_-]{2,127}$"}, "canonicalPath": {"type": "string", "pattern": "^/(?!/)(?!.*(?:^|/)\\.{1,2}(?:/|$)).+[^/]$"}, "scope": {"type": "object", "additionalProperties": false, "required": ["kind"], "properties": {"kind": {"enum": ["workspace", "project"]}, "project_id": {"$ref": "#/$defs/token"}}, "allOf": [{"if": {"properties": {"kind": {"const": "project"}}}, "then": {"required": ["project_id"]}, "else": {"not": {"required": ["project_id"]}}}]}, "evidence": {"type": "object", "additionalProperties": false, "required": ["source", "quality", "adapter_revision", "correlation_id", "observed_at_utc", "integrity"], "properties": {"source": {"$ref": "#/$defs/token"}, "quality": {"enum": ["best_effort", "authoritative"]}, "adapter_revision": {"$ref": "#/$defs/token"}, "correlation_id": {"$ref": "#/$defs/token"}, "observed_at_utc": {"type": "string", "format": "date-time"}, "integrity": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}}}, "extensions": {"type": "object", "maxProperties": 16, "propertyNames": {"pattern": "^x_[A-Za-z][A-Za-z0-9_-]{0,63}$"}, "additionalProperties": {"type": ["string", "number", "boolean", "null"], "maxLength": 512}}}
+  "title": "SessionRefV1",
+  "description": "An exact native session binding. Display text, path inference, activation packets, leases, and writer claims confer no SessionRef authority.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "workspace_id", "scope", "session_ref_id", "endpoint_id", "native_session_id", "repository_binding", "evidence"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "workspace_id": {"$ref": "#/$defs/workspaceId"},
+    "scope": {"$ref": "#/$defs/scope"},
+    "session_ref_id": {"type": "string", "pattern": "^(?!.*[\\u0000-\\u001f\\u007f\\u0085\\u2028\\u2029])session_[A-Za-z0-9][A-Za-z0-9_-]{2,127}$"},
+    "endpoint_id": {"type": "string", "pattern": "^(?!.*[\\u0000-\\u001f\\u007f\\u0085\\u2028\\u2029])endpoint_[A-Za-z0-9][A-Za-z0-9_-]{2,127}$"},
+    "native_session_id": {"type": "string", "minLength": 1, "maxLength": 512, "pattern": "^(?!.*[\\u0000-\\u001f\\u007f\\u0085\\u2028\\u2029]).+$"},
+    "repository_binding": {"$ref": "#/$defs/repositoryBinding"},
+    "evidence": {"$ref": "https://llm-collab.dev/schemas/standalone/v1/state-evidence.schema.json"},
+    "extensions": {"$ref": "#/$defs/extensions"}
+  },
+  "allOf": [
+    {
+      "properties": {
+        "evidence": {
+          "properties": {
+            "evidence_kind": {"const": "exact_session_binding"},
+            "quality": {"const": "authoritative"}
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "token": {"type": "string", "pattern": "^(?!.*[\\u0000-\\u001f\\u007f\\u0085\\u2028\\u2029])[A-Za-z][A-Za-z0-9._-]{0,127}$"},
+    "workspaceId": {"type": "string", "pattern": "^(?!.*[\\u0000-\\u001f\\u007f\\u0085\\u2028\\u2029])ws_[A-Za-z0-9][A-Za-z0-9_-]{2,127}$"},
+    "canonicalPath": {
+      "type": "string",
+      "minLength": 2,
+      "maxLength": 4096,
+      "pattern": "^/(?!/)(?!.*//)(?!.*(?:/\\.{1,2})(?:/|$))(?!.*[\\u0000-\\u001f\\u007f\\u0085\\u2028\\u2029])[^/](?:.*[^/])?$"
+    },
+    "repositoryBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["project_id", "repo_id", "canonical_cwd"],
+      "properties": {
+        "project_id": {"$ref": "#/$defs/token"},
+        "repo_id": {"$ref": "#/$defs/token"},
+        "canonical_cwd": {"$ref": "#/$defs/canonicalPath"}
+      }
+    },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {"kind": {"enum": ["workspace", "project"]}, "project_id": {"$ref": "#/$defs/token"}},
+      "allOf": [{"if": {"properties": {"kind": {"const": "project"}}, "required": ["kind"]}, "then": {"required": ["project_id"]}, "else": {"not": {"required": ["project_id"]}}}]
+    },
+    "extensions": {
+      "description": "Bounded non-authoritative annotations. Consumers must ignore these values for routing, trust, and execution.",
+      "type": "object",
+      "maxProperties": 8,
+      "propertyNames": {"pattern": "^x_note_[A-Za-z][A-Za-z0-9_-]{0,55}$"},
+      "additionalProperties": {"type": ["string", "number", "boolean", "null"], "maxLength": 512}
+    }
+  }
 }
