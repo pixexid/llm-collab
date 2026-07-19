@@ -649,8 +649,9 @@ FORBIDDEN_PAYLOAD_KEYS = {
 
 
 def normalize_payload_key(key):
-    normalized = unicodedata.normalize("NFKC", key)
+    normalized = re.sub(r"(?<=[A-Z])(?=[A-Z][a-z])", "_", key)
     normalized = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", normalized)
+    normalized = unicodedata.normalize("NFKC", normalized)
     normalized = normalized.casefold()
     return re.sub(r"[\W_]+", "_", normalized).strip("_")
 
@@ -938,7 +939,21 @@ def capability_set_error(capability_set):
     return None
 
 
-def authoritative_capability_error(capability_set, profile_key, adapter_key):
+CAPABILITY_QUALITY_RANK = {
+    "unsupported": 0,
+    "best_effort": 1,
+    "authoritative": 2,
+}
+
+
+def capability_profile_error(
+    capability_set,
+    profile_key,
+    adapter_key,
+    evidence_quality,
+    *,
+    require_authoritative=False,
+):
     capability_error = capability_set_error(capability_set)
     if capability_error:
         return capability_error
@@ -952,18 +967,31 @@ def authoritative_capability_error(capability_set, profile_key, adapter_key):
     if len(matches) != 1:
         return "capability_profile_missing"
     capability = matches[0]
-    if capability.get("quality") != "authoritative":
+    capability_quality = capability.get("quality")
+    if capability_quality == "unsupported":
         return "capability_quality"
-    if not isinstance(capability.get("constraints"), dict):
+    if (
+        capability_quality not in CAPABILITY_QUALITY_RANK
+        or evidence_quality not in CAPABILITY_QUALITY_RANK
+        or CAPABILITY_QUALITY_RANK[evidence_quality]
+        > CAPABILITY_QUALITY_RANK[capability_quality]
+        or (require_authoritative and capability_quality != "authoritative")
+    ):
+        return "capability_quality"
+    constraints = capability.get("constraints")
+    if constraints is not None and not isinstance(constraints, dict):
         return "capability_constraints"
     evidence = capability.get("evidence")
-    if not isinstance(evidence, dict):
+    if capability_quality == "authoritative" and (
+        not isinstance(constraints, dict) or not isinstance(evidence, dict)
+    ):
         return "capability_attestation"
-    if (
-        evidence.get("source_id"),
-        evidence.get("source_revision"),
-    ) != adapter_key:
-        return "capability_attestation"
+    if evidence is not None:
+        if not isinstance(evidence, dict) or (
+            evidence.get("source_id"),
+            evidence.get("source_revision"),
+        ) != adapter_key:
+            return "capability_attestation"
     return None
 
 
@@ -1413,10 +1441,12 @@ def reachable_graph_error(
             ):
                 return "graph_session_profile"
             capability_set = capability_sets[endpoint["capability_set_id"]]
-            if authoritative_capability_error(
+            if capability_profile_error(
                 capability_set,
                 profile_key,
                 adapter_key,
+                evidence["quality"],
+                require_authoritative=True,
             ):
                 return "graph_session_capability"
 
@@ -1459,10 +1489,13 @@ def reachable_graph_error(
                 adapter_key, set()
             ):
                 return "graph_delivery_profile"
-            if authoritative_capability_error(
+            if capability_profile_error(
                 capability_set,
                 profile_key,
                 adapter_key,
+                delivery["evidence"]["quality"],
+                require_authoritative=delivery["outcome"]
+                in {"accepted", "completed"},
             ):
                 return "graph_delivery_capability"
 
@@ -1504,10 +1537,13 @@ def reachable_graph_error(
             ):
                 return "graph_receipt_profile"
             capability_set = capability_sets[endpoint["capability_set_id"]]
-            if authoritative_capability_error(
+            if capability_profile_error(
                 capability_set,
                 profile_key,
                 adapter_key,
+                receipt["evidence"]["quality"],
+                require_authoritative=receipt["state"]
+                in {"accepted", "completed"},
             ):
                 return "graph_receipt_capability"
     except Exception:
@@ -1603,6 +1639,54 @@ def make_receipt_state(state):
         receipt["evidence"]["evidence_kind"] = "exact_session_acknowledgment"
     seal_state_evidence(receipt["evidence"])
     return receipt
+
+
+NONTERMINAL_OUTCOMES = (
+    "ambiguous",
+    "deferred_busy",
+    "rejected_before_acceptance",
+    "pull_pending",
+)
+
+
+def make_best_effort_graph(record_kind, state, *, workspace_capability=False):
+    workspace, records = make_reachable_graph()
+    catalog = copy.deepcopy(TRUSTED_GRAPH_CATALOG)
+    graph = {graph_record_kind(record): record for record in records}
+    capability_set = graph["CapabilitySetV1"]
+    if workspace_capability:
+        capability_set["scope"] = {"kind": "workspace"}
+    capability_set["capabilities"].append(
+        {
+            "capability": "adapter_observation",
+            "quality": "best_effort",
+            "constraints": {"access_mode": "observe_only"},
+            "evidence": {
+                "evidence_kind": "profile_attestation",
+                "source_id": "native_adapter",
+                "source_revision": "r1",
+                "integrity": "sha256:" + "c" * 64,
+            },
+        }
+    )
+    catalog["adapter_profiles"][("native_adapter", "r1")].add(
+        ("adapter_observation", "r1")
+    )
+    record = graph[record_kind]
+    record["outcome" if record_kind == "DeliveryV1" else "state"] = state
+    evidence = record["evidence"]
+    evidence["state"] = state
+    evidence["quality"] = "best_effort"
+    evidence["evidence_kind"] = "adapter_observation"
+    evidence["authority"].update(
+        {
+            "authority_kind": "trusted_adapter",
+            "capability_profile_id": "adapter_observation",
+            "capability_profile_revision": "r1",
+        }
+    )
+    seal_state_evidence(evidence)
+    return workspace, records, catalog
 
 
 class StandaloneContractSchemaTest(unittest.TestCase):
@@ -2141,6 +2225,202 @@ class StandaloneContractSchemaTest(unittest.TestCase):
         def by_kind(items):
             return {graph_record_kind(item): item for item in items}
 
+        for record_kind in ("DeliveryV1", "ReceiptV1"):
+            for state in NONTERMINAL_OUTCOMES:
+                for workspace_capability in (False, True):
+                    (
+                        candidate_workspace,
+                        candidate_records,
+                        candidate_catalog,
+                    ) = make_best_effort_graph(
+                        record_kind,
+                        state,
+                        workspace_capability=workspace_capability,
+                    )
+                    with self.subTest(
+                        record_kind=record_kind,
+                        state=state,
+                        capability_scope=(
+                            "workspace" if workspace_capability else "project"
+                        ),
+                    ):
+                        self.assertIsNone(
+                            reachable_graph_error(
+                                candidate_records,
+                                candidate_workspace,
+                                candidate_catalog,
+                            )
+                        )
+
+        for record_kind in ("DeliveryV1", "ReceiptV1"):
+            graph_error = (
+                "graph_delivery_capability"
+                if record_kind == "DeliveryV1"
+                else "graph_receipt_capability"
+            )
+            authority_error = (
+                "graph_delivery_adapter_authority"
+                if record_kind == "DeliveryV1"
+                else "graph_receipt_adapter_authority"
+            )
+            profile_error = (
+                "graph_delivery_profile"
+                if record_kind == "DeliveryV1"
+                else "graph_receipt_profile"
+            )
+            negative_capability_cases = []
+
+            candidate_workspace, candidate_records, candidate_catalog = (
+                make_best_effort_graph(record_kind, "ambiguous")
+            )
+            graph = by_kind(candidate_records)
+            capability = next(
+                item
+                for item in graph["CapabilitySetV1"]["capabilities"]
+                if item["capability"] == "adapter_observation"
+            )
+            capability["quality"] = "unsupported"
+            capability.pop("constraints")
+            capability.pop("evidence")
+            negative_capability_cases.append(
+                (
+                    "unsupported",
+                    candidate_workspace,
+                    candidate_records,
+                    candidate_catalog,
+                    graph_error,
+                )
+            )
+
+            candidate_workspace, candidate_records, candidate_catalog = (
+                make_best_effort_graph(record_kind, "ambiguous")
+            )
+            graph = by_kind(candidate_records)
+            graph["CapabilitySetV1"]["capabilities"] = [
+                item
+                for item in graph["CapabilitySetV1"]["capabilities"]
+                if item["capability"] != "adapter_observation"
+            ]
+            negative_capability_cases.append(
+                (
+                    "missing",
+                    candidate_workspace,
+                    candidate_records,
+                    candidate_catalog,
+                    graph_error,
+                )
+            )
+
+            candidate_workspace, candidate_records, candidate_catalog = (
+                make_best_effort_graph(record_kind, "ambiguous")
+            )
+            graph = by_kind(candidate_records)
+            graph[record_kind]["evidence"]["authority"]["identity"] = (
+                "attacker_adapter"
+            )
+            seal_state_evidence(graph[record_kind]["evidence"])
+            negative_capability_cases.append(
+                (
+                    "wrong_adapter",
+                    candidate_workspace,
+                    candidate_records,
+                    candidate_catalog,
+                    authority_error,
+                )
+            )
+
+            candidate_workspace, candidate_records, candidate_catalog = (
+                make_best_effort_graph(record_kind, "ambiguous")
+            )
+            graph = by_kind(candidate_records)
+            graph[record_kind]["evidence"]["authority"][
+                "capability_profile_id"
+            ] = "unregistered_observation"
+            seal_state_evidence(graph[record_kind]["evidence"])
+            negative_capability_cases.append(
+                (
+                    "wrong_profile",
+                    candidate_workspace,
+                    candidate_records,
+                    candidate_catalog,
+                    profile_error,
+                )
+            )
+
+            candidate_workspace, candidate_records, candidate_catalog = (
+                make_best_effort_graph(record_kind, "ambiguous")
+            )
+            graph = by_kind(candidate_records)
+            graph[record_kind]["evidence"]["authority"][
+                "capability_profile_revision"
+            ] = "r2"
+            candidate_catalog["adapter_profiles"][("native_adapter", "r1")].add(
+                ("adapter_observation", "r2")
+            )
+            seal_state_evidence(graph[record_kind]["evidence"])
+            negative_capability_cases.append(
+                (
+                    "wrong_profile_revision",
+                    candidate_workspace,
+                    candidate_records,
+                    candidate_catalog,
+                    graph_error,
+                )
+            )
+
+            candidate_workspace, candidate_records, candidate_catalog = (
+                make_best_effort_graph(record_kind, "ambiguous")
+            )
+            graph = by_kind(candidate_records)
+            capability = next(
+                item
+                for item in graph["CapabilitySetV1"]["capabilities"]
+                if item["capability"] == "adapter_observation"
+            )
+            capability["evidence"]["source_revision"] = "r2"
+            negative_capability_cases.append(
+                (
+                    "wrong_attestation_revision",
+                    candidate_workspace,
+                    candidate_records,
+                    candidate_catalog,
+                    graph_error,
+                )
+            )
+
+            candidate_workspace, candidate_records, candidate_catalog = (
+                make_best_effort_graph(record_kind, "ambiguous")
+            )
+            graph = by_kind(candidate_records)
+            graph[record_kind]["evidence"]["quality"] = "authoritative"
+            seal_state_evidence(graph[record_kind]["evidence"])
+            negative_capability_cases.append(
+                (
+                    "evidence_above_ceiling",
+                    candidate_workspace,
+                    candidate_records,
+                    candidate_catalog,
+                    graph_error,
+                )
+            )
+
+            for (
+                label,
+                candidate_workspace,
+                candidate_records,
+                candidate_catalog,
+                expected_error,
+            ) in negative_capability_cases:
+                with self.subTest(record_kind=record_kind, negative=label):
+                    self.assertEqual(
+                        reachable_graph_error(
+                            candidate_records,
+                            candidate_workspace,
+                            candidate_catalog,
+                        ),
+                        expected_error,
+                    )
+
         cases = []
         candidate = [
             record
@@ -2603,6 +2883,39 @@ class StandaloneContractSchemaTest(unittest.TestCase):
                     f"forbidden_payload_key:{normalized}",
                 )
 
+        acronym_aliases = {
+            "ADAPTERName": "adapter_name",
+            "CAPABILITYProfileID": "capability_profile_id",
+            "NATIVESessionID": "native_session_id",
+            "REGISTRYRevision": "registry_revision",
+            "SUBSCRIPTIONRevision": "subscription_revision",
+            "RECEIVETimeUTC": "receive_time_utc",
+        }
+        for key, normalized in acronym_aliases.items():
+            with self.subTest(acronym_alias=key, case="normalization"):
+                self.assertEqual(normalize_payload_key(key), normalized)
+            candidate = copy.deepcopy(envelope)
+            candidate["payload"] = {"nested": [{"safe": {key: "unsafe"}}]}
+            with self.subTest(acronym_alias=key, case="nested_rejection"):
+                self.assertEqual(
+                    envelope_error(candidate),
+                    f"forbidden_payload_key:{normalized}",
+                )
+                self.assert_schema_rejects(
+                    "EventEnvelopeV1",
+                    candidate,
+                    "schema-expressible acronym authority alias",
+                )
+
+        for key in (
+            "adapter_summary",
+            "capability_profile_summary",
+            "native_session_note",
+            "registry_revision_note",
+        ):
+            with self.subTest(benign_normalization=key):
+                self.assertEqual(normalize_payload_key(key), key)
+
         benign = copy.deepcopy(envelope)
         benign["payload"] = {
             "project_summary": "benign",
@@ -2615,6 +2928,8 @@ class StandaloneContractSchemaTest(unittest.TestCase):
             "adapter_summary": "benign",
             "handler_version_note": "benign",
             "capability_profile_summary": "benign",
+            "native_session_note": "benign",
+            "registry_revision_note": "benign",
             "exact_identity_note": "benign",
             "subscription_revision_note": "benign",
             "receive_time_note": "benign",
