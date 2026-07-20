@@ -116,19 +116,27 @@ Apply a convergence circuit breaker per finding family:
 
 Hard cycle cap, independent of family counting:
 
-- After the initial cold review, at most 2 review-fix cycles (review +
-  amendment) are permitted per PR; 3 when the contract scope includes payments,
-  auth, permissions, schema/migrations, or irreversible writes.
-- Docs-only PRs whose no-consumer scan proves zero runtime consumers always
+- A review-fix cycle is one finding round plus its amendment, regardless of
+  reviewer freshness: same-reviewer re-reviews under the bounded amendment
+  allowance consume cycles exactly like fresh cold reviews.
+- The cycle counter is per task/lane, not per PR: it starts at the initial
+  cold review — including the pre-PR collab/doorbell review loop — and carries
+  into the PR once one exists. Opening the PR never resets the count.
+- After the initial cold review, at most 2 review-fix cycles are permitted per
+  lane; 3 when the contract scope includes payments, auth, permissions,
+  schema/migrations, or irreversible writes.
+- Docs-only lanes whose no-consumer scan proves zero runtime consumers always
   cap at 2 cycles: residual prose ambiguity in an unconsumed document is a
   follow-up issue, never another cycle.
 - Reaching the cap forces exactly one terminal action before any further push:
   merge at the current head with `risk-accepted-followup` (open findings move
   to a new issue), `descope`, `split`, or a durable operator escalation packet.
   Starting another review cycle past the cap is a process violation.
-- Any task that exceeds 3 total review-fix cycles or 2 hours of wall-clock time
-  in the review-fix state must send an operator-visible escalation message
-  before starting another cycle.
+- Reaching the applicable cap, or spending more than 2 hours of wall-clock
+  time in the review-fix state, requires an operator-visible escalation
+  message recorded alongside the terminal disposition (or before the next
+  cycle for the wall-clock trigger); a lane found past its cap is a process
+  violation that must also be escalated.
 
 When a project supports structured review notes, the disposition may be
 recorded as the optional line `Convergence-disposition: <value>` and must use
