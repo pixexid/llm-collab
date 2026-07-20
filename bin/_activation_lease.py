@@ -20,6 +20,7 @@ from _helpers import utc_iso, write_file
 from _session_autobridge import AUTOBRIDGE_ROOT, load_session, parse_iso8601
 
 ACTIVATION_LEASES_DIR = AUTOBRIDGE_ROOT / "activation_leases"
+ACTIVATION_GRANT_LOCK = ACTIVATION_LEASES_DIR / ".claim-grant.lock"
 LIVE_SESSION_STATUSES = {"active", "parked"}
 CONTENTION_ERRNOS = {errno.EAGAIN, errno.EWOULDBLOCK, errno.EACCES}
 
@@ -106,6 +107,38 @@ class _ClaimLock:
             self.fd = None
 
 
+class _BlockingLock:
+    """Stable never-unlinked flock for cross-identity grant serialization."""
+
+    def __init__(self, path: Path):
+        self.path = path
+        self.fd: int | None = None
+
+    def __enter__(self) -> "_BlockingLock":
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(self.path, os.O_CREAT | os.O_RDWR)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        except Exception:
+            os.close(fd)
+            raise
+        self.fd = fd
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        if self.fd is None:
+            return
+        try:
+            fcntl.flock(self.fd, fcntl.LOCK_UN)
+        finally:
+            os.close(self.fd)
+            self.fd = None
+
+
+def _claim_grant_lock() -> _BlockingLock:
+    return _BlockingLock(ACTIVATION_GRANT_LOCK)
+
+
 def _runtime_id_from_record(record: dict[str, Any]) -> str | None:
     runtime = record.get("runtime")
     if isinstance(runtime, dict) and runtime.get("session_id"):
@@ -136,8 +169,14 @@ def pid_from_env() -> int | None:
         return None
 
 
+def valid_process_pid(pid: int | None) -> bool:
+    return pid is not None and int(pid) > 0
+
+
 def process_alive(pid: int | None) -> bool | None:
     if pid is None:
+        return None
+    if int(pid) <= 0:
         return None
     try:
         os.kill(int(pid), 0)
@@ -206,6 +245,11 @@ def _resolve_claimant(
 ) -> tuple[str | None, int | None]:
     runtime_id = claimant_runtime_id or runtime_id_from_env() or _runtime_id_from_record(record)
     pid = owner_pid if owner_pid is not None else pid_from_env()
+    if pid is not None and not valid_process_pid(pid):
+        raise LeaseRefused(
+            "invalid_owner_pid",
+            {"detail": "--owner-pid must be a positive process id"},
+        )
     pid_live = process_alive(pid)
     if runtime_id:
         return runtime_id, pid
@@ -228,6 +272,11 @@ def _assert_claimant_matches(
 ) -> None:
     runtime_id = claimant_runtime_id or runtime_id_from_env() or _runtime_id_from_record(record)
     pid = owner_pid if owner_pid is not None else pid_from_env()
+    if pid is not None and not valid_process_pid(pid):
+        raise LeaseRefused(
+            "invalid_owner_pid",
+            {"detail": "--owner-pid must be a positive process id"},
+        )
     lease_runtime = lease.get("owner_runtime_session_id")
     lease_pid = lease.get("owner_pid")
 
@@ -314,7 +363,7 @@ def claim_lease(
         record, claimant_runtime_id=claimant_runtime_id, owner_pid=owner_pid
     )
 
-    with _ClaimLock(identity):
+    with _claim_grant_lock(), _ClaimLock(identity):
         worktree_realpath = _claim_realpath(identity)
         collision = _active_alias_collision(identity, worktree_realpath)
         if collision is not None:
@@ -338,7 +387,10 @@ def claim_lease(
                 predecessor_dead = (
                     existing_pid is not None and process_alive(int(existing_pid)) is False
                 )
-                if same_session and same_runtime and (same_pid or predecessor_dead):
+                runtime_only_reclaim = existing_pid is None and pid is None
+                if same_session and same_runtime and (
+                    runtime_only_reclaim or same_pid or predecessor_dead
+                ):
                     fence_token = int(existing.get("fence_token", 1))
                     previous_owner = existing.get("previous_owner_session_id")
                 else:
