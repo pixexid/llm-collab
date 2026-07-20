@@ -277,8 +277,13 @@ not a live delivery path.
 Activation lease authority stores one JSON record per exact activation identity
 under `State/session_autobridge/activation_leases/{lease_key}.json`, with a
 stable never-unlinked sibling `.lock` file used for `flock(LOCK_EX|LOCK_NB)`
-claim serialization. The record is written only by `session_autobridge.py
-lease-claim`/`lease-release`; `lease-assert` is read-only.
+per-identity claim contention and a stable never-unlinked global
+`.claim-grant.lock` used to serialize the authority-granting instant across
+distinct identity keys. The global grant lock covers worktree realpath
+resolution, active lease alias scan, and lease write so symlink aliases cannot
+race into two active records. The record is written only by
+`session_autobridge.py lease-claim`/`lease-release`; `lease-assert` is
+read-only.
 
 ```json
 {
@@ -308,18 +313,22 @@ lease-claim`/`lease-release`; `lease-assert` is read-only.
 `agent_id`, `project_id`, and `chat_id` exactly match the activation identity;
 missing/null session bindings are unbound and refuse. A claim also requires a
 bound claimant identity: `--claimant-runtime-id`, a registered
-`runtime.session_id`, or a live `--owner-pid`. Claims with no runtime identity
-and no live pid refuse with `claimant_identity_required`; an identity-less
-lease record is never valid.
+`runtime.session_id`, or a live positive `--owner-pid`. PID `0` and negative
+PIDs are process-group selectors rather than process identities and refuse with
+`invalid_owner_pid`. Claims with no runtime identity and no live pid refuse
+with `claimant_identity_required`; an identity-less lease record is never
+valid.
 
 Every ownership change increments `fence_token`. Refused claims are evaluated
 before record writes and must leave the existing lease file byte-identical.
 `lease-assert` requires `--fence-token` and verifies the owner session plus the
 runtime/pid binding recorded at claim time; same-session assertions from a
 different runtime or process refuse. Expired leases do not assert; the owner
-must reclaim to refresh TTL before mutating. Expired or provably dead owners are
-takeover-eligible only with explicit `--takeover`; live-pid owners are never
-replaced, and unknown liveness fails closed.
+must reclaim to refresh TTL before mutating. Same-session/same-runtime
+runtime-only reclaim refreshes TTL with the same fence. Expired or provably
+dead owners are takeover-eligible only with explicit `--takeover`; live-pid
+owners are never replaced, and unknown liveness fails closed. Non-active or
+expired same-realpath lease records do not block a new identity claim.
 
 ### Body
 

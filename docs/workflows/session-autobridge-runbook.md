@@ -187,10 +187,12 @@ python3 bin/session_autobridge.py lease-release \
 Refusals return exit 75 with JSON naming the reason and current owner where
 known. Do not mutate the worktree after a refused claim/assert. Takeover is
 explicit: use `--takeover` only when replacing an expired or provably dead
-owner. A live pid owner is never replaced, and unknown liveness fails closed.
-Claims resolve the requested worktree once under the lease lock to refuse
+owner. A live positive-pid owner is never replaced, PID `0` and negative PIDs
+are invalid claimant identities, and unknown liveness fails closed. Claims
+resolve the requested worktree once under a global grant lock and refuse
 symlink aliases of an already-active real worktree, while identity
-classification remains byte-exact and filesystem-independent.
+classification remains byte-exact and filesystem-independent. Released and
+expired same-realpath lease records do not block a new identity claim.
 
 ## Inspect Bindings
 
