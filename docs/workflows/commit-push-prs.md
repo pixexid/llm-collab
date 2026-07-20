@@ -212,11 +212,6 @@ policy:
   same-head clean artifacts for the clean-verdict path. Only the explicit
   re-review verdict can satisfy that path, and it receives the same
   approximately five-minute post-clean settle and full re-read
-- if no head-named review and no eyes reaction appears within roughly 30–35
-  minutes after the latest push, treat the request as silently dropped and
-  re-trigger it with an `@codex review` comment instead of waiting
-  indefinitely. The existing PR-wait heartbeat observes this timer; the
-  re-trigger is not a new terminal signal or watcher mechanism
 - report the exact verdict or the latest-head eyes-to-`+1` transition with its
   timestamps and confirm that no later push occurred
 - any push creates a new head and invalidates every prior verdict and reaction
@@ -227,12 +222,10 @@ policy:
   explicit request neither pre-expires the fallback nor extends it (see the
   absent-request variant below)
 - GitHub Codex silence must not become an infinite wait: the resettable
-  15-minute settle is the fallback whenever neither terminal exact-head signal
-  is present and no bot review is actually pending. A non-terminal reaction such
-  as eyes does not block that fallback once no review remains pending. For
-  fallback purposes, a pending/request state with no connector artifact for
-  that full resettable window is no longer actually pending; report and
-  escalate the stuck review, but do not let it extend the fallback indefinitely
+  15-minute settle is the fallback only for the three named
+  no-terminal-artifact variants enumerated below, when no bot review is
+  actually pending. An explicitly requested review does not enter this ageing
+  rule; follow the canonical requested-review precedence below
 - after every review-fix push, evaluate the new exact head under the same rule:
   a clean exact-head verdict or head-attributable connector `+1` is terminal; if
   neither terminal signal exists and no bot review is actually pending under
@@ -259,6 +252,18 @@ explicitly, so none of them silently extends the wait:
   `eyes`/`+1` reaction is not head-attributable for the current head and is
   ignored for terminal-signal purposes. The resettable fallback runs its clock on
   the current head, never on a stale-head artifact.
+
+#### Explicit requested-review precedence
+
+An explicitly requested review that produces neither a head-named review nor
+an eyes reaction remains pending until the roughly 30–35-minute re-trigger; it
+never ages into the 15-minute fallback. At that point, treat the request as
+silently dropped and re-trigger it with an `@codex review` comment instead of
+waiting indefinitely. Report and escalate the stuck review when re-triggering.
+The existing PR-wait heartbeat observes this timer; the re-trigger is neither
+a new terminal signal nor a new watcher mechanism. This longer timer exists
+because a dropped request is indistinguishable from a review that is still
+processing, unlike the absent-request variant, where there is nothing to drop.
 
 If the PR is waiting only for remote checks or remote review state, keep it open
 and create or update a Codex heartbeat attached to the current thread with a
@@ -302,17 +307,16 @@ clean artifacts for this path and apply the same settle and re-read to the
 explicit re-review verdict.
 
 If neither a terminal GitHub Codex verdict nor a head-attributable connector
-`+1` exists for the exact current head, use the fallback only after at least 15
-minutes have elapsed since the later of the final push to that head and the
+`+1` exists for the exact current head, use the fallback only for the three
+named no-terminal-artifact variants above and only after at least 15 minutes
+have elapsed since the later of the final push to that head and the
 reviewability timestamp for that head (PR open, marked ready when applicable,
-and visible for review — an explicit review request is NOT required, matching
-the absent-request variant above), with no bot review actually pending under the
-ageing rule above. A pending/request state without a connector artifact for
-that full resettable window remains reportable as a stuck review but no longer
-blocks the fallback. Commit age cannot pre-expire the fallback before automatic
-review can begin. Eyes or another non-terminal reaction does not restart or
-suppress that fallback after review is no longer pending. Any push resets this
-clock. Proceed only when all of these are true:
+and visible for review). Commit age cannot pre-expire the fallback before
+automatic review can begin. Eyes or another non-terminal reaction does not
+restart or suppress that fallback after review is no longer pending. Any push
+resets this clock. Explicit requested-review silence follows
+[Explicit requested-review precedence](#explicit-requested-review-precedence)
+instead of this fallback. Proceed only when all of these are true:
 
 - the independent exact-head review found no actionable issues
 - required checks are green on the latest head
@@ -324,11 +328,14 @@ clock. Proceed only when all of these are true:
 Read current review bodies and reactions directly. Do not infer the current
 result from stale inline review-thread objects alone. The watcher must report
 the exact current-head verdict or the latest-head eyes-to-`+1` lifecycle with
-its timestamps and confirm that no later push occurred; do not keep a heartbeat
-waiting for another artifact or fallback timeout after either terminal signal.
-If review feedback lands, fix or respond to it, push the update, rerun the
-manual branch-diff review and required local/CI checks, then evaluate the new
-exact head from scratch before continuing toward merge.
+its timestamps and confirm that no later push occurred. Either terminal signal
+stops the heartbeat from waiting for further artifacts or a fallback timeout;
+it does not waive post-signal handling. For a head-named clean verdict, the
+approximately five-minute post-clean settle and full review/thread/reaction
+re-read remain mandatory before merge. If review feedback lands, fix or respond
+to it, push the update, rerun the manual branch-diff review and required
+local/CI checks, then evaluate the new exact head from scratch before
+continuing toward merge.
 
 If the wait cannot self-progress because checks stalled, review state is
 ambiguous, or the implementer has not acknowledged a routed review-fix request,

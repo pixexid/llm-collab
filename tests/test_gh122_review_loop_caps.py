@@ -76,6 +76,16 @@ PROJECT_CASES = (
         "scenario": "compact_wait_gate",
         "expected_outcome": "synced_compact_wait",
     },
+    {
+        "project_id": "amiga",
+        "scenario": "wait_gate_precedence",
+        "expected_outcome": "adjudicated_wait_precedence",
+    },
+    {
+        "project_id": "nuvyr",
+        "scenario": "wait_gate_precedence",
+        "expected_outcome": "adjudicated_wait_precedence",
+    },
 )
 
 
@@ -83,6 +93,7 @@ class ReviewLoopCapContractTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         workflow_text = WORKFLOW_DOC.read_text(encoding="utf-8")
+        cls.workflow_text = workflow_text
         cls.workflow = normalized(workflow_text)
         cls.cap = contract_section(
             workflow_text,
@@ -102,7 +113,7 @@ class ReviewLoopCapContractTest(unittest.TestCase):
         cls.canonical_rereview = contract_section(
             workflow_text,
             "- when a re-review was explicitly requested",
-            "- if no head-named review and no eyes reaction appears",
+            "- report the exact verdict",
         )
         plan_text = PLAN_DOC.read_text(encoding="utf-8")
         cls.plan = contract_section(
@@ -120,6 +131,7 @@ class ReviewLoopCapContractTest(unittest.TestCase):
             + plan_text.split(phase_completion_start, 1)[1]
         )
         handoff_text = HANDOFF_DOC.read_text(encoding="utf-8")
+        cls.handoff_text = handoff_text
         cls.handoff_wait = contract_section(
             handoff_text,
             "For PR-review wait heartbeats",
@@ -146,6 +158,14 @@ class ReviewLoopCapContractTest(unittest.TestCase):
                 "handoff_wait": cls.handoff_wait,
                 "universal_contract": cls.handoff_wait,
             },
+            "adjudicated_wait_precedence": {
+                "workflow_text": cls.workflow_text,
+                "handoff_text": cls.handoff_text,
+                "handoff_wait": cls.handoff_wait,
+                "universal_contract": " ".join(
+                    (cls.review_policy, cls.handoff_wait)
+                ),
+            },
         }
 
     def assert_scenario_cases(self, scenario, check):
@@ -164,6 +184,79 @@ class ReviewLoopCapContractTest(unittest.TestCase):
                     f"unknown expected_outcome for concrete case: {case}",
                 )
                 check(case, self.sources_by_outcome[outcome])
+
+    def assert_wait_gate_residual_contract(self, workflow_text, handoff_text):
+        """Assert both GH-133 precedence residuals against supplied doc text."""
+        review_policy = contract_section(
+            workflow_text,
+            "### GitHub Codex review policy",
+            "## Autonomous Queue Runner State",
+        )
+        fallback = contract_section(
+            workflow_text,
+            "The resettable fallback above handles three named "
+            "no-terminal-artifact variants",
+            "#### Explicit requested-review precedence",
+        )
+        precedence = contract_section(
+            workflow_text,
+            "#### Explicit requested-review precedence",
+            "If the PR is waiting only for remote checks or remote review state",
+        )
+        handoff_wait = contract_section(
+            handoff_text,
+            "For PR-review wait heartbeats",
+            "If GitHub Codex comments on the PR",
+        )
+
+        required_phrases = (
+            (
+                precedence,
+                (
+                    "remains pending until the roughly 30–35-minute re-trigger",
+                    "never ages into the 15-minute fallback",
+                    "a dropped request is indistinguishable from a review that "
+                    "is still processing",
+                    "unlike the absent-request variant, where there is nothing "
+                    "to drop",
+                ),
+            ),
+            (
+                review_policy,
+                (
+                    "the approximately five-minute post-clean settle and full "
+                    "review/thread/reaction re-read remain mandatory before merge",
+                    "these are the only two exact-head terminal signal models",
+                ),
+            ),
+            (
+                handoff_wait,
+                (
+                    "[Explicit requested-review precedence]"
+                    "(commit-push-prs.md#explicit-requested-review-precedence)",
+                    "Do not apply the 15-minute fallback to an explicitly "
+                    "requested review",
+                    "A terminal signal stops waiting for further artifacts or "
+                    "the fallback timeout only; it does not waive the handling "
+                    "below",
+                    "approximately five-minute mandatory post-clean settle",
+                    "these remain the only two exact-head terminal signal sources",
+                ),
+            ),
+        )
+        for source, phrases in required_phrases:
+            for phrase in phrases:
+                self.assertIn(phrase, source)
+
+        fallback_variants = re.findall(r"- \*\*([^*]+)\.\*\*", fallback)
+        self.assertEqual(
+            fallback_variants,
+            [
+                "No explicit review request",
+                "Eyes-only current-head artifact",
+                "Prior-head artifacts only",
+            ],
+        )
 
     def test_project_cases_are_concrete(self):
         required_keys = {"project_id", "scenario", "expected_outcome"}
@@ -380,8 +473,7 @@ class ReviewLoopCapContractTest(unittest.TestCase):
     def test_silently_dropped_review_is_retriggered(self):
         def check(case, sources):
             self.assertIn(
-                "no head-named review and no eyes reaction appears within roughly "
-                "30–35 minutes after the latest push",
+                "remains pending until the roughly 30–35-minute re-trigger",
                 sources["review_policy"],
             )
             self.assertIn(
@@ -502,7 +594,7 @@ class ReviewLoopCapContractTest(unittest.TestCase):
         def check(case, sources):
             handoff = sources["handoff_wait"]
             self.assertIn(
-                "approximately five-minute post-clean settle", handoff
+                "approximately five-minute mandatory post-clean settle", handoff
             )
             self.assertIn(
                 "full re-read of reviews, review threads, and reactions", handoff
@@ -533,16 +625,92 @@ class ReviewLoopCapContractTest(unittest.TestCase):
         def check(case, sources):
             handoff = sources["handoff_wait"]
             self.assertIn(
-                "no head-named review and no eyes reaction appears within roughly "
-                "30–35 minutes after the latest push",
+                "[Explicit requested-review precedence]"
+                "(commit-push-prs.md#explicit-requested-review-precedence)",
                 handoff,
             )
-            self.assertIn("treat the request as silently dropped", handoff)
             self.assertIn(
-                "re-trigger it with an `@codex review` comment", handoff
+                "Do not apply the 15-minute fallback to an explicitly requested "
+                "review",
+                handoff,
             )
 
         self.assert_scenario_cases("compact_wait_gate", check)
+
+    def test_wait_gate_precedence_is_adjudicated_and_synced(self):
+        def check(case, sources):
+            self.assertEqual(
+                case["expected_outcome"],
+                "adjudicated_wait_precedence",
+            )
+            self.assert_wait_gate_residual_contract(
+                sources["workflow_text"],
+                sources["handoff_text"],
+            )
+
+        self.assert_scenario_cases("wait_gate_precedence", check)
+
+    def test_wait_gate_guards_reject_five_frozen_mutations(self):
+        self.assert_wait_gate_residual_contract(
+            self.workflow_text,
+            self.handoff_text,
+        )
+        mutations = (
+            (
+                "requested-review silence re-aged to 15 minutes",
+                "workflow",
+                "never ages into the 15-minute fallback",
+                "ages into the 15-minute fallback",
+            ),
+            (
+                "fallback broadened beyond the three named variants",
+                "workflow",
+                "- **Prior-head artifacts only.**",
+                "- **Explicit requested-review silence.** Broadened case.\n"
+                "- **Prior-head artifacts only.**",
+            ),
+            (
+                "post-clean settle made waivable",
+                "workflow",
+                "re-read remain mandatory before merge",
+                "re-read may be skipped after a terminal signal",
+            ),
+            (
+                "terminal signal source altered",
+                "workflow",
+                "these are the only two exact-head terminal signal models",
+                "these are two common exact-head terminal signal models",
+            ),
+            (
+                "only the canonical document updated",
+                "handoff",
+                "[Explicit requested-review precedence]"
+                "(commit-push-prs.md#explicit-requested-review-precedence)",
+                "Explicit requested-review precedence",
+            ),
+        )
+        for name, target, old, new in mutations:
+            with self.subTest(mutation=name):
+                original = (
+                    self.workflow_text if target == "workflow" else self.handoff_text
+                )
+                self.assertEqual(original.count(old), 1)
+                mutated = original.replace(old, new, 1)
+                workflow_text = (
+                    mutated if target == "workflow" else self.workflow_text
+                )
+                handoff_text = (
+                    mutated if target == "handoff" else self.handoff_text
+                )
+                with self.assertRaises(AssertionError):
+                    self.assert_wait_gate_residual_contract(
+                        workflow_text,
+                        handoff_text,
+                    )
+
+    def test_guard_has_no_live_project_registry_dependency(self):
+        test_source = Path(__file__).read_text(encoding="utf-8")
+        self.assertNotIn("projects" + ".json", test_source)
 
 
 if __name__ == "__main__":
