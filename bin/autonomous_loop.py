@@ -141,7 +141,10 @@ def normalize_state(payload: dict[str, Any], project_id: str) -> dict[str, Any]:
         state["stop_conditions"] = DEFAULT_STOP_CONDITIONS.copy()
     if not isinstance(state.get("notes"), list):
         state["notes"] = []
-    if stored_schema_version != STATE_SCHEMA_VERSION:
+    if (
+        type(stored_schema_version) is not int
+        or stored_schema_version != STATE_SCHEMA_VERSION
+    ):
         stored_condition = (
             f"schema_version={stored_schema_version!r}"
             if "schema_version" in payload

@@ -66,10 +66,25 @@ class AutonomousLoopStateRecoveryTest(unittest.TestCase):
         self.assertIn("schema_version=2", state["notes"][-1]["text"])
         self.assertIn("normalized to schema_version=1", state["notes"][-1]["text"])
 
+    def test_boolean_version_recovers_with_stored_condition_note(self) -> None:
+        state = self.read({"schema_version": True})
+
+        self.assertIs(type(state["schema_version"]), int)
+        self.assertEqual(state["schema_version"], 1)
+        self.assertIn("schema_version=True", state["notes"][-1]["text"])
+
+    def test_float_version_recovers_with_stored_condition_note(self) -> None:
+        state = self.read({"schema_version": 1.0})
+
+        self.assertIs(type(state["schema_version"]), int)
+        self.assertEqual(state["schema_version"], 1)
+        self.assertIn("schema_version=1.0", state["notes"][-1]["text"])
+
     def test_valid_v1_state_has_no_false_version_recovery_note(self) -> None:
         existing_note = {"at": "earlier", "text": "Existing operational note."}
         state = self.read({"schema_version": 1, "notes": [existing_note]})
 
+        self.assertIs(type(state["schema_version"]), int)
         self.assertEqual(state["notes"], [existing_note])
 
     def test_invalid_json_recovery_remains_intact(self) -> None:
