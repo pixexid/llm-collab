@@ -102,7 +102,8 @@ bound to the exact current head.
 - `in_progress`: actively owned
 - `blocked`: cannot progress without external input
 - `review`: ready for orchestrator review
-- `done`: reviewed and accepted
+- `done`: reviewed, accepted, and closed by the configured release gate with a
+  persisted terminal disposition
 
 In an autonomous queue loop, `blocked` is not a default stop state. First decide
 whether the blocker is actionable:
@@ -131,7 +132,9 @@ whether the blocker is actionable:
 6. if the worktree is still dirty, orchestrator blocks acceptance unless the worker adds the missing checkpoint commit, explains why specific files must remain dirty, or the orchestrator records an explicit waiver with the reason
 7. orchestrator either blocks, reassigns, or accepts
 8. if the project maintains a canonical queue artifact, orchestrator updates queue state/order before selecting the next lane
-9. accepted tasks move to `Tasks/done`
+9. after release closure, the configured release-gate agent performs the
+   evidence-gated `review -> done` transition; only then does the task move to
+   `Tasks/done`
 
 ## Parallel queue operation
 
@@ -236,9 +239,34 @@ conflicting decisions.
 
 After a production-affecting merge, release closure requires the exact-merge-SHA
 deploy gate in `commit-push-prs.md` ("Release closure does not end at merge"):
-run `bin/deploy_release_watch.py --project <project-id> --merge-sha <sha>`; only terminal
-deploy+smoke success closes the release, and failure/cancelled/missing each get
-one durable packet + one doorbell with Codex holding the terminal disposition.
+run `bin/deploy_release_watch.py --project <project-id> --merge-sha <sha>`;
+only terminal deploy+smoke success for that exact SHA closes a production
+release, and failure/cancelled/missing each get one durable packet + one
+doorbell with the configured release-gate agent holding the terminal
+disposition.
+
+The final task transition is mechanically restricted to `review -> done` and
+requires `--released-by` equal to the enabled project `release_gate_agent` plus
+one strict JSON `--release-evidence` object. Actor identity is workflow
+deterrence, not authentication. For `verdict=success`, `claim_task.py`
+re-evaluates the supplied SHA at transition time through the same
+`deploy_release_watch.py` project config and requires both terminal `SUCCESS`
+and exact equality with its selected run ID. Caller claims, watcher artifacts,
+green different-SHA runs, stale runs, pending/failing/cancelled runs, missing
+jobs/smoke steps, and missing configuration all refuse before task write/move
+or queue mutation.
+
+Projects without `release_closure` cannot claim `success`; use an explicit
+structured `non-production` or `risk-accepted-followup` disposition when
+truthful. Those honest non-success dispositions also remain available when
+GitHub is disabled: the record persists `repository: null`, no evaluator runs,
+and no caller-provided run ID is treated as authoritative. The normalized
+record persists project/task/repository/SHA identity,
+configured workflow, authoritative run ID when present, production-impact
+disposition, terminal verdict, actor, evaluation time, and optional note.
+Historical `done` tasks remain grandfathered. Rollback means reverting the
+gate/config change, never hand-editing around a refusal or treating saved
+evidence as a shortcut.
 
 ## Post-merge Cleanup Gate
 

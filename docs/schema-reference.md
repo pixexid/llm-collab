@@ -140,6 +140,7 @@ Project registry. Created by `scripts/init.py`. Gitignored.
           "require_any_label": []
         }
       },
+      "release_gate_agent": "orchestrator",
       "release_closure": {
         "trigger_event": "push",
         "workflow": "deploy",
@@ -168,6 +169,7 @@ Project registry. Created by `scripts/init.py`. Gitignored.
 | `github.project_number` | int | GitHub Projects board number |
 | `github.backlog.exclude_labels` | string[] | Open issue labels excluded from the executable backlog. Defaults include `type:epic`, terminal labels, and `status:deferred`. |
 | `github.backlog.require_any_label` | string[] | Optional label or wildcard patterns that an open issue must match to be backlog-eligible. Empty means every non-excluded open issue is eligible. |
+| `release_gate_agent` | string | Required, never-defaulted enabled agent ID that must equal `claim_task.py --released-by` for every new `review -> done` transition. `scripts/init.py` requires an explicit selection from collected enabled agents for new projects; existing registries require a manual local rollout. Missing or empty fails closed and must be repaired in that task project's `projects.json` entry. This is workflow deterrence and attribution, not authentication. |
 | `release_closure.workflow` | string | Deploy workflow name for the exact-merge-SHA release gate (`bin/deploy_release_watch.py`). Required for the gate; never defaulted. |
 | `release_closure.trigger_event` | string | The automatic event that runs the production deploy (`push` for Amiga; `workflow_run`/`merge_group` for projects triggered that way). Required; never defaulted — only runs with this event on `default_branch_base` count. |
 | `release_closure.required_jobs` | string[] | Job names that must be present and `success` for release closure. Project-specific — no project inherits Amiga's labels. |
@@ -177,6 +179,19 @@ Project registry. Created by `scripts/init.py`. Gitignored.
 A project without a complete `release_closure` (plus `default_branch_base` and
 an enabled `github.repo`) fails the release gate closed with exit 64; the gate
 never guesses a branch, workflow, or evidence labels.
+
+`release_gate_agent` and `release_closure` serve different purposes. The former
+prevents accidental closure by the wrong workflow actor; only transition-time
+`deploy_release_watch.py` evaluation supplies objective success authority.
+Caller assertions, watcher packets, saved JSON artifacts, and green runs for a
+different SHA are never evidence shortcuts. A project without
+`release_closure` may record an explicit structured `non-production` or
+`risk-accepted-followup` disposition, but cannot record `success`.
+Likewise, `success` requires an enabled exact `github.repo`, while an honest
+`non-production` or `risk-accepted-followup` disposition remains reachable for
+a project with GitHub disabled. Such a record persists `repository: null` and
+does not persist a caller-supplied `run_id`; a run ID becomes authoritative and
+persistable only after successful transition-time evaluation.
 
 When GitHub integration is enabled, open GitHub issues are the source of truth for whether project work remains. Runtime queues may order and assign work, but `issue-queue.json` is empty only when the eligible GitHub backlog is empty.
 
@@ -323,6 +338,7 @@ browser_validation_desktop: null
 browser_validation_mobile: null
 operator_visual_feedback_requested: false
 design_doc_update_decision: null
+release_evidence: null
 ---
 ```
 
@@ -365,6 +381,7 @@ design_doc_update_decision: null
 | `browser_validation_mobile` | string or null | Worker-owned mobile browser validation evidence |
 | `operator_visual_feedback_requested` | bool | Whether the operator was explicitly asked for visual review feedback |
 | `design_doc_update_decision` | string or null | Same-session DESIGN.md or linked UI-doc review/update decision |
+| `release_evidence` | object or null | Normalized closure record written only by a successful new `review -> done` transition. See below. |
 
 `design_thinking_pass_items` entries use:
 
@@ -389,6 +406,37 @@ When Claude both creates and plans a task (`created_by: claude` and
 `accepted_at` before `claim_task.py --status in_progress` succeeds. That
 acceptance is Codex's independent read of the task/issue, source evidence,
 queue order, blockers, and task contract.
+
+### Done transition and release evidence
+
+Only a task whose current status is exactly `review` may newly transition to
+`done`. The caller must supply:
+
+```text
+--released-by <project release_gate_agent>
+--release-evidence '{"merge_sha":"<40-hex>","verdict":"success|risk-accepted-followup|non-production","run_id":123,"note":"optional"}'
+```
+
+The evidence must be exactly one JSON object containing only `merge_sha`,
+`verdict`, optional `run_id`, and optional non-empty `note`. `run_id` is
+required for `success` and, whenever present, is a positive strict integer
+(booleans and floats are invalid). For `success`, `claim_task.py` evaluates the
+exact SHA live through the same configured workflow/event/branch/job/smoke
+authority as `deploy_release_watch.py`, requires terminal `SUCCESS`, and
+requires the supplied run ID to equal the evaluator-selected run ID.
+
+The persisted `release_evidence` object contains `project_id`, `task_id`,
+`repository` (explicitly `null` when GitHub is disabled), `merge_sha`,
+configured `workflow` when present, authoritative `run_id` only after a
+successful objective evaluation, `production_impact`, `terminal_verdict`,
+`released_by`, `evaluated_at`, and optional `note`. Refusals occur before any task write,
+file move, or queue transition. Existing files already in `Tasks/done` are
+grandfathered and are not retroactively revalidated.
+
+Rollback is an ordinary code/config revert: revert the done-gate implementation
+and remove or revert the registry key if necessary. Do not hand-edit a task
+around a refusal; repair the missing project configuration or release evidence
+and rerun the transition.
 
 ### Body
 

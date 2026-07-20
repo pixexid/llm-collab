@@ -223,7 +223,48 @@ def collect_agents() -> list[dict]:
     return agents
 
 
-def collect_projects() -> list[dict]:
+def enabled_agent_ids(agents: list[dict]) -> list[str]:
+    """Known agent IDs eligible to hold a generated project release gate."""
+    result = []
+    for agent in agents:
+        agent_id = agent.get("id")
+        activation = agent.get("activation")
+        role = str(agent.get("role", ""))
+        if not isinstance(agent_id, str) or not agent_id:
+            continue
+        if agent.get("disabled") is True or role.startswith("legacy_disabled"):
+            continue
+        if isinstance(activation, dict) and activation.get("enabled") is False:
+            continue
+        result.append(agent_id)
+    return result
+
+
+def select_release_gate_agent(project_id: str, known_enabled_agent_ids: list[str]) -> str:
+    """Require an explicit, exact selection; never choose a universal default."""
+    if not known_enabled_agent_ids:
+        raise ValueError(
+            f"project {project_id!r} needs release_gate_agent, but no enabled agents were collected"
+        )
+    print(
+        "  Enabled release-gate agents: "
+        + ", ".join(known_enabled_agent_ids)
+    )
+    while True:
+        selected = prompt("  Release gate agent ID (required; exact enabled agent ID)")
+        if not selected:
+            print("[error] release_gate_agent is required; select an enabled agent ID.")
+            continue
+        if selected not in known_enabled_agent_ids:
+            print(
+                f"[error] Unknown or disabled release_gate_agent {selected!r}. "
+                f"Choose one of: {', '.join(known_enabled_agent_ids)}"
+            )
+            continue
+        return selected
+
+
+def collect_projects(known_enabled_agent_ids: list[str]) -> list[dict]:
     print("\n[Projects]\n")
     print("Register the code projects this workspace will coordinate work on.")
     print("Paths can be relative to projects_root or absolute.")
@@ -281,13 +322,19 @@ def collect_projects() -> list[dict]:
                 "require_any_label": [],
             }
 
+        default_branch_base = prompt("  Default branch base", default="main")
+        release_gate_agent = select_release_gate_agent(
+            pid,
+            known_enabled_agent_ids,
+        )
         projects.append({
             "id": pid,
             "display_name": display,
             "repos": repos,
-            "default_branch_base": prompt("  Default branch base", default="main"),
+            "default_branch_base": default_branch_base,
             "preflight_command": preflight,
             "github": github,
+            "release_gate_agent": release_gate_agent,
         })
         print(f"  [added] {pid}")
 
@@ -356,8 +403,9 @@ def main():
 
     agents = collect_agents()
     all_agent_ids = [a["id"] for a in agents]
+    all_enabled_agent_ids = enabled_agent_ids(agents)
 
-    projects = collect_projects()
+    projects = collect_projects(all_enabled_agent_ids)
 
     divider()
     print("\n[Writing files]\n")

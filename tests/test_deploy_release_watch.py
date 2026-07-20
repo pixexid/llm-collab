@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import sys
 import unittest
+from contextlib import redirect_stderr
+from io import StringIO
 from pathlib import Path
 
 
@@ -291,6 +293,22 @@ class ReleaseConfigResolutionTest(unittest.TestCase):
         self.assertIsNone(config)
         self.assertIn("no configured workflow", error)
 
+    def test_truthy_non_object_release_closure_has_actionable_controlled_error(self) -> None:
+        project = project_fixture(release_closure="deploy")
+        config, error = watch.resolve_release_config("amiga", project)
+        self.assertIsNone(config)
+        self.assertIn("project 'amiga'", error)
+        self.assertIn("projects.json key 'release_closure'", error)
+        self.assertIn("repair this task project's 'amiga' entry in projects.json", error)
+
+    def test_truthy_non_object_github_has_actionable_controlled_error(self) -> None:
+        project = project_fixture(github="pixexid/amiga")
+        config, error = watch.resolve_release_config("amiga", project)
+        self.assertIsNone(config)
+        self.assertIn("project 'amiga'", error)
+        self.assertIn("projects.json key 'github'", error)
+        self.assertIn("repair this task project's 'amiga' entry in projects.json", error)
+
     def test_missing_default_branch_base_fails_closed(self) -> None:
         project = project_fixture()
         del project["default_branch_base"]
@@ -374,6 +392,35 @@ class DeployReleaseWatchCliValidationTest(unittest.TestCase):
             with patch.object(sys, "argv", argv):
                 self.assertEqual(watch.main(), 64, extra)
 
+    def test_truthy_non_object_project_mappings_exit_64_without_traceback(self) -> None:
+        from unittest.mock import patch
+
+        for key, malformed in (
+            ("github", "pixexid/amiga"),
+            ("release_closure", "deploy"),
+        ):
+            project = project_fixture()
+            project[key] = malformed
+            stderr = StringIO()
+            argv = [
+                "deploy_release_watch.py",
+                "--project", "amiga",
+                "--merge-sha", DF55,
+            ]
+            with self.subTest(key=key):
+                with patch.object(sys, "argv", argv):
+                    with patch.object(watch, "get_project", return_value=project):
+                        with redirect_stderr(stderr):
+                            self.assertEqual(watch.main(), 64)
+                message = stderr.getvalue()
+                self.assertIn("project 'amiga'", message)
+                self.assertIn(f"projects.json key '{key}'", message)
+                self.assertIn(
+                    "repair this task project's 'amiga' entry in projects.json",
+                    message,
+                )
+                self.assertNotIn("Traceback", message)
+
 
 class DeployReleaseWatchFetchTest(unittest.TestCase):
     def test_fetch_filters_to_the_named_workflow(self) -> None:
@@ -432,6 +479,56 @@ class DeployReleaseWatchFetchTest(unittest.TestCase):
         jobs_red = lambda run_id: watch.fetch_run_jobs("pixexid/amiga", run_id,
                                                        runner=paged_runner(red))
         self.assertEqual(evaluate(DF55, runs, jobs_red).state, "FAILURE")
+
+
+class TransitionTimeEvaluationTest(unittest.TestCase):
+    def test_project_evaluator_reuses_config_fetch_jobs_and_verdict_authority(self) -> None:
+        calls = []
+
+        def runner(argv):
+            calls.append(argv)
+            if "/jobs?" in argv[-1]:
+                import json as _json
+                return _json.dumps({"jobs": jobs_all_green(41)})
+            import json as _json
+            return _json.dumps({
+                "workflow_runs": [run_fixture(41, DF55, conclusion="success")]
+            })
+
+        result = watch.evaluate_project_release(
+            "amiga",
+            DF55,
+            project=project_fixture(),
+            runner=runner,
+        )
+
+        self.assertEqual(result.project_id, "amiga")
+        self.assertEqual(result.repository, "pixexid/amiga")
+        self.assertEqual(result.workflow, "deploy")
+        self.assertEqual(result.verdict.state, "SUCCESS")
+        self.assertEqual(result.verdict.run_id, 41)
+        self.assertEqual(len(calls), 2)
+        self.assertIn(f"head_sha={DF55}", calls[0][-1])
+        self.assertIn("/actions/runs/41/jobs?", calls[1][-1])
+
+    def test_project_evaluator_fails_before_runner_without_release_config(self) -> None:
+        project = project_fixture()
+        del project["release_closure"]
+        called = False
+
+        def runner(_argv):
+            nonlocal called
+            called = True
+            return ""
+
+        with self.assertRaisesRegex(ValueError, "no release_closure config"):
+            watch.evaluate_project_release(
+                "nuvyr",
+                DF55,
+                project=project,
+                runner=runner,
+            )
+        self.assertFalse(called)
 
 
 if __name__ == "__main__":  # pragma: no cover
