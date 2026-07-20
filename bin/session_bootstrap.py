@@ -25,6 +25,7 @@ import subprocess
 
 sys.path.insert(0, str(Path(__file__).parent))
 import project_issue_queue as issue_queue
+from _ax_trust import format_ax_status, probe_ax_trust
 from _helpers import (
     ROOT,
     agent_ids,
@@ -132,6 +133,9 @@ def main():
             print(f"       Run: python scripts/init.py to generate identity files.\n", file=sys.stderr)
         identity_content = None
 
+    # Keep the potentially five-second optional probe behind identity output.
+    ax_result = probe_ax_trust(agent)
+
     # ── 2. Inbox ──
     messages = get_unread_messages(args.agent)[: args.limit]
     inbox_summary = {
@@ -208,6 +212,9 @@ def main():
                 print(f"  - {item['project_id']}: queue has no ready lane ({item['queue_path']})")
         print("")
 
+    if not args.json_output:
+        print(format_ax_status(ax_result))
+
     # ── 3. Watcher ──
     watcher_result = {"status": "skipped"}
     activation = agent.get("activation", {})
@@ -231,6 +238,7 @@ def main():
             "inbox": inbox_summary,
             "queues": queue_info,
             "watcher": watcher_result,
+            "ax": ax_result.as_dict(),
         }, indent=2))
 
 
