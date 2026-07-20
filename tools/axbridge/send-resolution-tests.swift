@@ -308,6 +308,21 @@ check(routineRingDecision(profile: .zcode, attended: false, axValue: nil) == .re
       "1547: zcode refuses routine ring on unreadable AXValue")
 check(routineRingDecision(profile: .unknown, attended: false, axValue: "") == .refuseOpaqueProfile,
       "1547: unknown profile refuses routine ring")
+// Placeholder-leak / whitespace-debris values are effectively empty, not drafts.
+check(routineRingDecision(profile: .codex, attended: false, axValue: "\nDo anything") == .proceed,
+      "placeholder-leak: codex newline+placeholder AXValue proceeds (live 2026-07-20 stuck-ring case)")
+check(routineRingDecision(profile: .codex, attended: false, axValue: "  \n ") == .proceed,
+      "placeholder-leak: whitespace-only AXValue proceeds")
+check(routineRingDecision(profile: .claude, attended: false, axValue: "Type / for commands") == .proceed,
+      "placeholder-leak: claude placeholder AXValue proceeds")
+check(routineRingDecision(profile: .codex, attended: false, axValue: "Do Anything") == .refuseNonEmptyDraft,
+      "placeholder-leak: mixed-case codex placeholder variant still refuses")
+check(routineRingDecision(profile: .codex, attended: false, axValue: "DO ANYTHING") == .refuseNonEmptyDraft,
+      "placeholder-leak: uppercase codex placeholder variant still refuses")
+check(routineRingDecision(profile: .codex, attended: false, axValue: "Do anything now") == .refuseNonEmptyDraft,
+      "placeholder-leak: placeholder plus real content still refuses")
+check(routineRingDecision(profile: .codex, attended: false, axValue: "\nreal draft") == .refuseNonEmptyDraft,
+      "placeholder-leak: whitespace around a real draft still refuses")
 // Attended recovery (explicit, Codex-supervised) unlocks every state.
 check(routineRingDecision(profile: .zcode, attended: true, axValue: nil) == .proceed,
       "1547: attended mode proceeds on an opaque profile")

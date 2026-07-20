@@ -268,15 +268,35 @@ enum RoutineRingDecision: Equatable {
     case refuseNonEmptyDraft   // readable AXValue holds a draft — hold, never clobber
 }
 
+// A composer AXValue that holds only whitespace, or whitespace around the
+// profile's own placeholder identity, is NOT an operator draft. Codex Desktop
+// leaks the field placeholder into AXValue on a visually empty composer (live
+// AX evidence 2026-07-20: value "\nDo anything" refused rings for 30+ minutes
+// while the composer held only a stray newline). The accepted strings are
+// exactly, including case, the placeholder identities editableIsNativeComposer
+// already trusts for the same profile; any other content still refuses.
+func composerValueIsEffectivelyEmpty(_ profile: ComposerProfile, _ v: String) -> Bool {
+    let trimmed = v.trimmingCharacters(in: .whitespacesAndNewlines)
+    if trimmed.isEmpty { return true }
+    switch profile {
+    case .codex:
+        return trimmed == "Do anything" || trimmed == "Ask for follow-up changes"
+    case .claude:
+        return trimmed == "Type / for commands"
+    case .zcode, .unknown:
+        return false
+    }
+}
+
 // The single authority for whether a `ring` may mutate the composer. Attended
 // mode (explicit --attended, Codex-supervised) bypasses the proof; every other
-// path requires a trustworthy readable AXValue that is exactly empty. All
+// path requires a trustworthy readable AXValue that is effectively empty. All
 // refusals are decided here, before the caller performs ANY clear/select-all/
 // delete/type/submit — the mutation-free-refusal invariant of GH-1547.
 func routineRingDecision(profile: ComposerProfile, attended: Bool, axValue: String?) -> RoutineRingDecision {
     if attended { return .proceed }
     if !composerAXValueReadable(profile) { return .refuseOpaqueProfile }
     guard let v = axValue else { return .refuseUnreadableValue }
-    if !v.isEmpty { return .refuseNonEmptyDraft }
+    if !composerValueIsEffectivelyEmpty(profile, v) { return .refuseNonEmptyDraft }
     return .proceed
 }
