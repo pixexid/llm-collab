@@ -193,6 +193,42 @@ class InitReleaseGateAgentTest(unittest.TestCase):
 
 
 class ReleaseLifecycleGuidanceTest(unittest.TestCase):
+    def test_production_schema_guard_is_documented_across_contract_workflows(self) -> None:
+        paths = (
+            REPO_ROOT / "docs" / "schema-reference.md",
+            REPO_ROOT / "docs" / "multi-project.md",
+            REPO_ROOT / "docs" / "workflows" / "task-intake-and-delegation.md",
+            REPO_ROOT / "docs" / "workflows" / "review-and-handoff.md",
+            REPO_ROOT / "docs" / "workflows" / "commit-push-prs.md",
+        )
+        for path in paths:
+            with self.subTest(path=path.name):
+                guidance = path.read_text()
+                self.assertIn("db.production_schema_guard", guidance)
+                self.assertIn("local-schema-only", guidance)
+                self.assertIn("shared-supabase-required", guidance)
+
+        schema = paths[0].read_text()
+        self.assertIn("db_local_schema_only_exception: dev-only-non-production", schema)
+        self.assertIn("db_local_schema_only_exception_approved_by: operator", schema)
+        self.assertIn("db/migrations/**", schema)
+        self.assertIn("db/schema.sql", schema)
+
+    def test_done_contract_validation_precedes_release_evaluator_and_cleanup_has_no_authority(self) -> None:
+        claim_source = (REPO_ROOT / "bin" / "claim_task.py").read_text()
+        build = claim_source.split("def build_release_evidence_record", 1)[1].split(
+            "def parse_args", 1
+        )[0]
+        contract = build.index("validate_task_contract(")
+        evidence_parse = build.index("parse_release_evidence(")
+        evaluator = build.index("release_evaluator(")
+        self.assertLess(contract, evidence_parse)
+        self.assertLess(contract, evaluator)
+
+        cleanup_source = (REPO_ROOT / "bin" / "post_merge_cleanup.py").read_text()
+        self.assertNotIn("claim_task", cleanup_source)
+        self.assertNotIn("validate_task_contract", cleanup_source)
+
     def test_commit_push_guidance_orders_evaluation_done_queue_and_cleanup(self) -> None:
         guidance = (
             REPO_ROOT / "docs" / "workflows" / "commit-push-prs.md"

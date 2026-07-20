@@ -129,6 +129,7 @@ Project registry. Created by `scripts/init.py`. Gitignored.
         "required_design_docs": ["/absolute/path/to/project/DESIGN.md"]
       },
       "db": {
+        "production_schema_guard": false,
         "shared_supabase_project_ref": "project-ref",
         "required_surfaces": ["supabase_my_app.execute_sql", "supabase CLI"]
       },
@@ -164,6 +165,7 @@ Project registry. Created by `scripts/init.py`. Gitignored.
 | `claude_desktop_bridge` | bool | Optional Claude Desktop fallback for a non-CLI Claude target. CLI-session workers use AX first. |
 | `ui_ux.direct_app_only` | bool | Optional, default-off direct-app gate. When `true`, every non-`done` task must avoid design/sandbox/spec/handoff/parity, bare-template, and template-design-only lane types, repository-root `design/**` targets, and dependency materialization of newly authored `design/**` artifacts. Explicit implementation lanes such as `template-implementation`, `src/design/**`, and read-only `required_design_docs` remain valid. Absolute related/dependency paths require a complete resolvable project `repos` mapping so repository-root scope can be evaluated. A present non-boolean value is a configuration error. |
 | `ui_ux.required_design_docs` | string[] | Optional project-specific design sources prepended to every UI/UX task contract. Non-Amiga projects must configure these or provide explicit task-level design docs. |
+| `db.production_schema_guard` | bool | Optional strict boolean, default `false`. When `true` for the task's exact project, assignment/review/PR/done validation rejects schema-changing tasks classified as `none`, restricts `local-schema-only` to the exact operator-approved dev-only exception, and treats concrete `db/migrations/**` or `db/schema.sql` paths as schema changes even after `manual_false`. A present non-boolean fails closed; projects never inherit another project's value. |
 | `db.shared_supabase_project_ref` | string | Optional shared Supabase project ref required by database-impact task contracts. Non-Amiga projects do not inherit Amiga's ref. |
 | `db.required_surfaces` | string[] | Optional project-specific CLI or MCP surfaces required by shared-database task contracts. |
 | `github.enabled` | bool | Whether GitHub integration is active |
@@ -386,6 +388,12 @@ release_evidence: null
 | `direct_app_legacy_maintenance` | bool | For a project with `ui_ux.direct_app_only: true`, the first of three mandatory fields for an explicitly approved active legacy-design maintenance exception. Must be strict `true`; incomplete overrides fail closed. |
 | `direct_app_legacy_maintenance_approved_by` | string or null | Second mandatory legacy-maintenance field. Must equal `operator`. |
 | `direct_app_legacy_maintenance_reason` | string or null | Third mandatory legacy-maintenance field. Must be a non-empty reason. |
+| `db_impact` | string | `none`, `local-schema-only`, or `shared-supabase-required`. `local-schema-only` means disposable development/test schema that will never be applied to a shared or production database. |
+| `db_schema_change_detected` | bool | Whether the task changes schema. With the project production-schema guard enabled, concrete `db/migrations/**` and exact `db/schema.sql` paths force this to `true`. |
+| `db_schema_change_detection` | string | `auto`, `manual_true`, or `manual_false`. Guarded concrete schema paths cannot be hidden by `manual_false`; body-only documentation matches can. |
+| `db_local_schema_only_exception` | string or null | For a guarded schema change classified `local-schema-only`, must equal `dev-only-non-production`. |
+| `db_local_schema_only_exception_approved_by` | string or null | For the guarded local-only exception, must equal `operator`. |
+| `db_local_schema_only_exception_reason` | string or null | For the guarded local-only exception, must be a non-empty, non-whitespace reason. |
 | `release_evidence` | object or null | Normalized closure record written only by a successful new `review -> done` transition. See below. |
 
 `design_thinking_pass_items` entries use:
@@ -412,6 +420,33 @@ When Claude both creates and plans a task (`created_by: claude` and
 acceptance is Codex's independent read of the task/issue, source evidence,
 queue order, blockers, and task contract.
 
+### Production schema classification guard
+
+Projects that ship database schema to a shared or production environment may
+opt in with strict boolean `db.production_schema_guard: true`. Missing or
+`false` preserves existing behavior. A configured non-boolean refuses
+assignment, review, PR, and new done transitions and names the exact project
+registry key to repair.
+
+When enabled, a detected schema change cannot use `db_impact: none`.
+`local-schema-only` is narrowly reserved for disposable development/test schema
+that will never reach a shared or production database, and requires all three
+exact task fields:
+
+```yaml
+db_local_schema_only_exception: dev-only-non-production
+db_local_schema_only_exception_approved_by: operator
+db_local_schema_only_exception_reason: "Why this schema is disposable and non-production"
+```
+
+The exception does not waive the `shared-supabase-required` contract. A shared
+schema lane still needs the exact project ref/surfaces and, at review, PR, and
+done, non-empty migration files, apply result, schema assertion, advisors
+result, and runtime validation. Concrete `db/migrations/**` paths and the exact
+`db/schema.sql` path force schema-change detection even when a task carries
+`db_schema_change_detection: manual_false`; a body-only documentation keyword
+match may still be manually overridden.
+
 ### Done transition and release evidence
 
 Only a task whose current status is exactly `review` may newly transition to
@@ -430,7 +465,11 @@ exact SHA live through the same configured workflow/event/branch/job/smoke
 authority as `deploy_release_watch.py`, requires terminal `SUCCESS`, and
 requires the supplied run ID to equal the evaluator-selected run ID.
 
-The persisted `release_evidence` object contains `project_id`, `task_id`,
+Before any release-evidence evaluator runs, `claim_task.py` validates a copy of
+the task in its target `done` state at the done contract stage. A classification
+or shared-database evidence refusal therefore happens before evaluator work,
+activity append, task write/unlink/move, queue advancement, or cleanup, for all
+three release dispositions. The persisted `release_evidence` object contains `project_id`, `task_id`,
 `repository` (explicitly `null` when GitHub is disabled), `merge_sha`,
 configured `workflow` when present, authoritative `run_id` only after a
 successful objective evaluation, `production_impact`, `terminal_verdict`,

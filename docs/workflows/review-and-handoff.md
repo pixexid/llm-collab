@@ -165,6 +165,15 @@ Hard rule for shared-Supabase lanes:
 - `claim_task.py --status review` should fail if the task contract is missing the required DB evidence
 - migration files in git do not count as acceptance without shared-project apply + assertion
 
+For a project with strict boolean `db.production_schema_guard: true`, review and
+PR validation also reject detected schema work classified as `none`.
+`local-schema-only` means disposable development/test schema that will never
+reach shared or production and requires the exact operator-approved
+`dev-only-non-production` exception plus a non-empty reason. Concrete
+`db/migrations/**` and exact `db/schema.sql` paths force detection despite
+`manual_false`; prose-only documentation matches may still be overridden. The
+exception never waives the existing shared-database evidence above.
+
 When the last queued lane moves to `done`, archive the final queue snapshot and keep the canonical
 queue path in an explicit empty state instead of deleting it.
 
@@ -289,6 +298,12 @@ Historical `done` tasks remain grandfathered. Rollback means reverting the
 gate/config change, never hand-editing around a refusal or treating saved
 evidence as a shortcut.
 
+For every new done transition, `claim_task.py` validates the target-state task
+contract at stage `done` before invoking the release evaluator. All three
+dispositions (`success`, `non-production`, and `risk-accepted-followup`) refuse
+missing shared-database evidence before task write/move, activity append, queue
+mutation, or cleanup.
+
 ## Post-merge Cleanup Gate
 
 After a merge, the orchestrator must run the executable cleanup gate before the
@@ -308,3 +323,7 @@ project worktree root, registered git worktrees, stale branch refs, done-task
 mirrors, disposable generated dirt, and plain leftover directories. If it
 reports blockers, the active thread must either fix them or record why they are
 intentionally deferred before moving to the next lane.
+
+Cleanup is verification/application after authoritative closure only.
+`post_merge_cleanup.py` does not validate or perform a `review -> done`
+transition and cannot substitute for `claim_task.py` contract and release gates.

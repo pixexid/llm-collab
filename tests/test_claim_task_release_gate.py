@@ -14,6 +14,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "bin"))
 
 import claim_task
+import task_contract
 from _helpers import dump_frontmatter, parse_frontmatter, parse_release_evidence
 from deploy_release_watch import ReleaseEvaluation, Verdict
 
@@ -103,7 +104,10 @@ class ReleaseEvidenceRecordTest(unittest.TestCase):
     def test_matching_success_persists_authoritative_bound_record(self) -> None:
         project = project_fixture()
         evaluator = Mock(return_value=success_evaluation())
-        with patch.object(claim_task, "get_project", return_value=project):
+        with (
+            patch.object(claim_task, "get_project", return_value=project),
+            patch.object(task_contract, "get_project", return_value=project),
+        ):
             record = claim_task.build_release_evidence_record(
                 {"task_id": TASK_ID, "project_id": "amiga"},
                 "review",
@@ -139,7 +143,11 @@ class ReleaseEvidenceRecordTest(unittest.TestCase):
             "merge_sha": SHA,
             "verdict": "non-production",
         })
-        with patch.object(claim_task, "get_project", return_value=project_fixture()):
+        project = project_fixture()
+        with (
+            patch.object(claim_task, "get_project", return_value=project),
+            patch.object(task_contract, "get_project", return_value=project),
+        ):
             with self.assertRaisesRegex(claim_task.ReleaseGateError, "release_gate_agent 'codex'"):
                 claim_task.build_release_evidence_record(
                     frontmatter, "review", "claude", evidence
@@ -147,7 +155,10 @@ class ReleaseEvidenceRecordTest(unittest.TestCase):
 
         project = project_fixture()
         del project["release_gate_agent"]
-        with patch.object(claim_task, "get_project", return_value=project):
+        with (
+            patch.object(claim_task, "get_project", return_value=project),
+            patch.object(task_contract, "get_project", return_value=project),
+        ):
             with self.assertRaisesRegex(
                 claim_task.ReleaseGateError,
                 "release_gate_agent.*task project's projects.json entry",
@@ -158,10 +169,10 @@ class ReleaseEvidenceRecordTest(unittest.TestCase):
 
     def test_nuvyr_non_success_disposition_is_honest_and_does_not_evaluate(self) -> None:
         evaluator = Mock()
-        with patch.object(
-            claim_task,
-            "get_project",
-            return_value=project_fixture("nuvyr", release_closure=False),
+        project = project_fixture("nuvyr", release_closure=False)
+        with (
+            patch.object(claim_task, "get_project", return_value=project),
+            patch.object(task_contract, "get_project", return_value=project),
         ):
             record = claim_task.build_release_evidence_record(
                 {"task_id": TASK_ID, "project_id": "nuvyr"},
@@ -187,7 +198,10 @@ class ReleaseEvidenceRecordTest(unittest.TestCase):
         for project_id in ("amiga", "nuvyr"):
             project = project_fixture(project_id)
             project["github"] = {"enabled": False}
-            with patch.object(claim_task, "get_project", return_value=project):
+            with (
+                patch.object(claim_task, "get_project", return_value=project),
+                patch.object(task_contract, "get_project", return_value=project),
+            ):
                 for verdict in ("non-production", "risk-accepted-followup"):
                     with self.subTest(project_id=project_id, verdict=verdict):
                         record = claim_task.build_release_evidence_record(
@@ -222,7 +236,10 @@ class ReleaseEvidenceRecordTest(unittest.TestCase):
                         release_closure=release_closure,
                     )
                     evaluator = Mock()
-                    with patch.object(claim_task, "get_project", return_value=project):
+                    with (
+                        patch.object(claim_task, "get_project", return_value=project),
+                        patch.object(task_contract, "get_project", return_value=project),
+                    ):
                         for verdict in (
                             "non-production",
                             "risk-accepted-followup",
@@ -276,7 +293,10 @@ class ReleaseEvidenceRecordTest(unittest.TestCase):
             ("MISSING", SHA),
             ("SUCCESS", "b" * 40),
         )
-        with patch.object(claim_task, "get_project", return_value=project):
+        with (
+            patch.object(claim_task, "get_project", return_value=project),
+            patch.object(task_contract, "get_project", return_value=project),
+        ):
             for state, evaluated_sha in refused:
                 with self.subTest(state=state, evaluated_sha=evaluated_sha):
                     evaluation = success_evaluation(merge_sha=evaluated_sha)
@@ -318,6 +338,35 @@ class ClaimTaskMutationSafetyTest(unittest.TestCase):
             "# Release gate fixture\n",
         ))
 
+    def write_shared_db_task(self, *, missing_field: str | None = None) -> None:
+        migration_files = [
+            "db/migrations/20260712_gh_1453_acceptance_event_atomic.sql",
+            "db/migrations/20260712_gh_1453_series_snapshot_atomic.sql",
+        ]
+        frontmatter = {
+            "task_id": TASK_ID,
+            "title": "GH-1453 release gate fixture",
+            "status": "review",
+            "owner": "worker",
+            "project_id": "amiga",
+            "related_paths": migration_files,
+            "db_impact": "shared-supabase-required",
+            "db_schema_change_detected": True,
+            "db_schema_change_detection": "auto",
+            "db_project_ref": "amiga-project-ref",
+            "db_required_surfaces": ["amiga_db.execute_sql", "amiga db CLI"],
+            "db_migration_files": migration_files,
+            "db_apply_result": "pass: applied",
+            "db_schema_assertion": "pass: asserted",
+            "db_advisors_result": "pass: advisors",
+            "db_runtime_validation": "pass: runtime",
+        }
+        if missing_field is not None:
+            frontmatter[missing_field] = [] if missing_field == "db_migration_files" else ""
+        self.task_path.write_text(
+            dump_frontmatter(frontmatter, "# GH-1453 release gate fixture\n")
+        )
+
     def invoke_done(
         self,
         *,
@@ -344,6 +393,7 @@ class ClaimTaskMutationSafetyTest(unittest.TestCase):
             patch.object(claim_task, "find_task_by_id", return_value=self.task_path),
             patch.object(claim_task, "target_task_path", return_value=self.done_path),
             patch.object(claim_task, "get_project", return_value=project),
+            patch.object(task_contract, "get_project", return_value=project),
             patch.object(claim_task, "agent_ids", return_value=["codex", "worker"]),
             patch.object(claim_task, "ensure_agent_enabled", return_value={}),
             patch.object(claim_task, "sync_task_contract", side_effect=lambda fm, body: (fm, {})),
@@ -535,6 +585,64 @@ class ClaimTaskMutationSafetyTest(unittest.TestCase):
         self.assertIn("only review -> done is allowed", stderr)
         evaluator.assert_not_called()
         self.assert_refusal_did_not_mutate(before)
+
+    def test_every_release_disposition_validates_done_db_contract_before_evaluator_or_mutation(self) -> None:
+        project = project_fixture()
+        project["db"] = {
+            "production_schema_guard": True,
+            "shared_supabase_project_ref": "amiga-project-ref",
+            "required_surfaces": ["amiga_db.execute_sql", "amiga db CLI"],
+        }
+        for verdict, missing_field in (
+            ("success", "db_migration_files"),
+            ("non-production", "db_apply_result"),
+            ("risk-accepted-followup", "db_runtime_validation"),
+        ):
+            with self.subTest(verdict=verdict, missing_field=missing_field):
+                self.write_shared_db_task(missing_field=missing_field)
+                before = self.task_path.read_text()
+                evaluator = Mock(return_value=success_evaluation())
+                evidence = {"merge_sha": SHA, "verdict": verdict}
+                if verdict == "success":
+                    evidence["run_id"] = 41
+
+                code, _stdout, stderr = self.invoke_done(
+                    project=project,
+                    evidence=evidence,
+                    evaluator=evaluator,
+                )
+
+                self.assertEqual(code, 1)
+                self.assertIn("done target-state task contract is incomplete", stderr)
+                self.assertIn(missing_field, stderr)
+                evaluator.assert_not_called()
+                self.task_writer.assert_not_called()
+                self.queue_mutator.assert_not_called()
+                self.assert_refusal_did_not_mutate(before)
+
+    def test_complete_guarded_db_contract_reaches_evaluator_then_moves_once(self) -> None:
+        self.write_shared_db_task()
+        project = project_fixture()
+        project["db"] = {
+            "production_schema_guard": True,
+            "shared_supabase_project_ref": "amiga-project-ref",
+            "required_surfaces": ["amiga_db.execute_sql", "amiga db CLI"],
+        }
+        evaluator = Mock(return_value=success_evaluation())
+
+        code, stdout, stderr = self.invoke_done(
+            project=project,
+            evidence={"merge_sha": SHA, "verdict": "success", "run_id": 41},
+            evaluator=evaluator,
+        )
+
+        self.assertEqual(code, 0, stderr)
+        evaluator.assert_called_once()
+        self.task_writer.assert_called_once()
+        self.queue_mutator.assert_called_once()
+        self.assertFalse(self.task_path.exists())
+        self.assertTrue(self.done_path.exists())
+        self.assertEqual(json.loads(stdout)["new_status"], "done")
 
     def test_exact_authoritative_success_moves_once_and_round_trips_record(self) -> None:
         code, stdout, stderr = self.invoke_done(
