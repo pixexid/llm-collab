@@ -22,10 +22,18 @@ require_python()
 import argparse
 import ast
 import json
+import posixpath
 import re
 
 sys.path.insert(0, str(Path(__file__).parent))
-from _helpers import dump_frontmatter, find_task_by_id, get_project, parse_frontmatter, write_file
+from _helpers import (
+    dump_frontmatter,
+    find_task_by_id,
+    get_project,
+    parse_frontmatter,
+    resolve_project_repo_path,
+    write_file,
+)
 
 AMIGA_DESIGN_DOC = "/Users/pixexid/Projects/amiga/docs/ui_ux/DESIGN.md"
 AMIGA_SHARED_SUPABASE_PROJECT_REF = "wbqjeasgxakubqcutgjt"
@@ -43,6 +51,18 @@ AMIGA_PROJECT_SPECIFIC_SUPABASE_SURFACES = {
 DB_IMPACT_VALUES = {"none", "local-schema-only", "shared-supabase-required"}
 DEFAULT_DESIGN_SKILLS = ["impeccable"]
 DESIGN_THINKING_DISPOSITIONS = {"shipped", "deferred", "out_of_scope"}
+DIRECT_APP_ONLY_LANE_TOKENS = {
+    "design",
+    "handoff",
+    "parity",
+    "sandbox",
+    "spec",
+}
+DIRECT_APP_LEGACY_OVERRIDE_FIELDS = (
+    "direct_app_legacy_maintenance",
+    "direct_app_legacy_maintenance_approved_by",
+    "direct_app_legacy_maintenance_reason",
+)
 IMPECCABLE_SETUP_COMMAND = "/impeccable teach"
 IMPECCABLE_SETUP_COMMANDS = [
     "/impeccable",
@@ -275,6 +295,204 @@ def _normalize_text(value) -> str:
     if value is None:
         return ""
     return str(value).strip()
+
+
+def _direct_app_lane_type_is_forbidden(value) -> bool:
+    normalized = re.sub(r"[^a-z0-9]+", "-", _normalize_text(value).lower()).strip("-")
+    if not normalized:
+        return False
+    if normalized == "template":
+        return True
+    tokens = set(normalized.split("-"))
+    return bool(tokens & DIRECT_APP_ONLY_LANE_TOKENS)
+
+
+def _project_repo_roots(project: dict) -> tuple[list[Path], str | None]:
+    project_id = _normalize_text(project.get("id"))
+    repos = project.get("repos")
+    if not project_id:
+        return [], "the registered project entry has no non-empty `id`"
+    if not isinstance(repos, dict):
+        return [], "the registered project entry has no `repos` object"
+    if not repos:
+        return [], "the registered project entry has an empty `repos` object"
+
+    roots: list[Path] = []
+    for repo_key, raw_path in repos.items():
+        if not isinstance(repo_key, str) or not repo_key.strip():
+            return [], "the `repos` object contains a non-string or empty repository key"
+        if not isinstance(raw_path, str) or not raw_path.strip():
+            return [], f"`repos.{repo_key}` must be a non-empty path string"
+        try:
+            raw_candidate = Path(raw_path).expanduser()
+            root = (
+                raw_candidate.resolve()
+                if raw_candidate.is_absolute()
+                else resolve_project_repo_path(project_id, repo_key)
+            )
+            root = root.resolve() if root is not None else None
+        except (OSError, RuntimeError, ValueError) as error:
+            return [], f"`repos.{repo_key}` cannot be resolved: {error}"
+        if root is None:
+            return [], f"`repos.{repo_key}` cannot be resolved"
+        if root is not None and root not in roots:
+            roots.append(root)
+    if not roots:
+        return [], "the registered project entry has no resolvable repository roots"
+    return roots, None
+
+
+def _path_is_absolute(value) -> bool:
+    try:
+        return Path(_normalize_text(value)).expanduser().is_absolute()
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
+def _is_repo_root_design_path(value, repo_roots: list[Path]) -> tuple[bool, str | None]:
+    raw = _normalize_text(value)
+    if not raw:
+        return False, None
+
+    try:
+        candidate = Path(raw).expanduser()
+    except (OSError, RuntimeError, ValueError) as error:
+        return False, str(error)
+    if candidate.is_absolute():
+        try:
+            resolved = candidate.resolve()
+        except (OSError, RuntimeError, ValueError) as error:
+            return False, str(error)
+        for repo_root in repo_roots:
+            try:
+                relative = resolved.relative_to(repo_root)
+            except ValueError:
+                continue
+            return bool(relative.parts) and relative.parts[0].lower() == "design", None
+        return False, None
+
+    normalized = posixpath.normpath(raw.replace("\\", "/"))
+    parts = [part for part in normalized.split("/") if part not in {"", "."}]
+    return bool(parts) and parts[0].lower() == "design", None
+
+
+def validate_direct_app_policy(frontmatter: dict) -> tuple[list[str], dict]:
+    """Validate one task against its exact project's direct-app-only UI policy."""
+    project_id = _normalize_text(frontmatter.get("project_id"))
+    project = get_project(project_id) if project_id else None
+    ui_ux_config = project.get("ui_ux") if isinstance(project, dict) else None
+    configured = isinstance(ui_ux_config, dict) and "direct_app_only" in ui_ux_config
+    raw_policy = ui_ux_config.get("direct_app_only") if configured else None
+    summary = {
+        "project_id": project_id or None,
+        "configured": configured,
+        "enabled": raw_policy is True,
+        "legacy_maintenance_override": False,
+        "violations": [],
+    }
+
+    if _normalize_text(frontmatter.get("status")) == "done":
+        return [], summary
+    if configured and not isinstance(raw_policy, bool):
+        error = (
+            f"Project {project_id!r} has malformed `ui_ux.direct_app_only`: "
+            f"expected boolean true or false, found {raw_policy!r}."
+        )
+        summary["violations"] = [error]
+        return [error], summary
+    if raw_policy is not True:
+        return [], summary
+
+    override_present = any(field in frontmatter for field in DIRECT_APP_LEGACY_OVERRIDE_FIELDS)
+    if override_present:
+        override_errors = []
+        if frontmatter.get("direct_app_legacy_maintenance") is not True:
+            override_errors.append(
+                "Direct-app legacy maintenance override requires "
+                "`direct_app_legacy_maintenance: true`."
+            )
+        if _normalize_text(frontmatter.get("direct_app_legacy_maintenance_approved_by")) != "operator":
+            override_errors.append(
+                "Direct-app legacy maintenance override requires "
+                "`direct_app_legacy_maintenance_approved_by: operator`."
+            )
+        reason = frontmatter.get("direct_app_legacy_maintenance_reason")
+        if not isinstance(reason, str) or not reason.strip():
+            override_errors.append(
+                "Direct-app legacy maintenance override requires a non-empty "
+                "`direct_app_legacy_maintenance_reason`."
+            )
+        if override_errors:
+            summary["violations"] = override_errors
+            return override_errors, summary
+        summary["legacy_maintenance_override"] = True
+        return [], summary
+
+    violations: list[str] = []
+    lane_type = _normalize_text(frontmatter.get("lane_type"))
+    if _direct_app_lane_type_is_forbidden(lane_type):
+        violations.append(
+            f"Project {project_id!r} enables `ui_ux.direct_app_only: true`; "
+            f"`lane_type` {lane_type!r} denotes a non-direct-app design lane."
+        )
+
+    related_paths = _normalize_list(frontmatter.get("related_paths"))
+    dependency_paths = _normalize_list(frontmatter.get("required_dependency_artifacts"))
+    absolute_paths = [
+        (field, path)
+        for field, paths in (
+            ("related_paths", related_paths),
+            ("required_dependency_artifacts", dependency_paths),
+        )
+        for path in paths
+        if _path_is_absolute(path)
+    ]
+    repo_roots: list[Path] = []
+    if absolute_paths:
+        repo_roots, repo_error = _project_repo_roots(project)
+        if repo_error:
+            fields = ", ".join(f"`{field}`" for field in dict.fromkeys(field for field, _ in absolute_paths))
+            violations.append(
+                f"Project {project_id!r} enables `ui_ux.direct_app_only: true` but cannot "
+                f"evaluate absolute paths in {fields}: projects.json `repos` is missing, "
+                f"empty, malformed, or unresolvable ({repo_error})."
+            )
+
+    for path in related_paths:
+        is_root_design, resolution_error = _is_repo_root_design_path(path, repo_roots)
+        if resolution_error:
+            violations.append(
+                f"Project {project_id!r} enables `ui_ux.direct_app_only: true` but "
+                f"cannot resolve `related_paths` path {path!r}: {resolution_error}."
+            )
+        elif is_root_design:
+            violations.append(
+                f"Project {project_id!r} enables `ui_ux.direct_app_only: true`; "
+                f"`related_paths` targets repository-root `design/**`: {path!r}."
+            )
+
+    for path in dependency_paths:
+        is_root_design, resolution_error = _is_repo_root_design_path(path, repo_roots)
+        if resolution_error:
+            violations.append(
+                f"Project {project_id!r} enables `ui_ux.direct_app_only: true` but "
+                f"cannot resolve `required_dependency_artifacts` path {path!r}: "
+                f"{resolution_error}."
+            )
+        elif is_root_design:
+            gate_detail = (
+                " with `dependency_materialization_gate: true`"
+                if frontmatter.get("dependency_materialization_gate") is True
+                else ""
+            )
+            violations.append(
+                f"Project {project_id!r} enables `ui_ux.direct_app_only: true`; "
+                f"`required_dependency_artifacts`{gate_detail} requires newly authored "
+                f"repository-root `design/**` output: {path!r}."
+            )
+
+    summary["violations"] = violations
+    return violations, summary
 
 
 def _has_any_marker(text: str, markers: tuple[str, ...]) -> bool:
@@ -770,10 +988,12 @@ def validate_task_contract(frontmatter: dict, body: str, *, stage: str) -> tuple
         project_errors.append("Task must set a registered `project_id`.")
     elif get_project(project_id) is None:
         project_errors.append(f"Task references unknown `project_id: {project_id}`.")
+    direct_app_errors, direct_app_summary = validate_direct_app_policy(frontmatter)
     ui_errors, ui_summary = validate_ui_ux_contract(frontmatter, body, stage=stage)
     db_errors, db_summary = validate_db_contract(frontmatter, body, stage=stage)
-    return project_errors + ui_errors + db_errors, {
+    return project_errors + direct_app_errors + ui_errors + db_errors, {
         "project": {"project_id": project_id or None, "registered": bool(project_id and not project_errors)},
+        "direct_app": direct_app_summary,
         "ui_ux": ui_summary,
         "db": db_summary,
     }

@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import io
+import tempfile
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -10,6 +14,7 @@ sys.path.insert(0, str(REPO_ROOT / "bin"))
 
 import plan_task
 import refine_task
+import task_contract
 
 
 RISK_VALUES = {
@@ -116,6 +121,37 @@ Fenced duplicate.
 
     def test_plan_task_uses_the_same_validation_entrypoint(self) -> None:
         self.assertIs(plan_task.main, refine_task.main)
+
+    def test_direct_app_refusal_leaves_task_without_refinement_stamp(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            task_path = Path(tmp) / "task.md"
+            original = (
+                "---\n"
+                "task_id: TASK-DIRECT\n"
+                "project_id: amiga\n"
+                "status: open\n"
+                "lane_type: design-spec\n"
+                "ui_ux_lane: false\n"
+                "---\n"
+                + task_body()
+            )
+            task_path.write_text(original)
+            args = SimpleNamespace(
+                task="TASK-DIRECT",
+                planning_mode=None,
+                note=None,
+            )
+            project = {"id": "amiga", "ui_ux": {"direct_app_only": True}}
+
+            with patch.object(refine_task, "parse_args", return_value=args):
+                with patch.object(refine_task, "find_task_by_id", return_value=task_path):
+                    with patch.object(task_contract, "get_project", return_value=project):
+                        with patch("sys.stderr", io.StringIO()):
+                            with self.assertRaises(SystemExit):
+                                refine_task.main()
+
+            self.assertEqual(task_path.read_text(), original)
+            self.assertNotIn("refined_by:", task_path.read_text())
 
     def test_skip_refinement_bypasses_only_for_normalized_true(self) -> None:
         for value in (True, "true"):

@@ -32,6 +32,7 @@ from _helpers import (
     utc_iso,
     write_file,
 )
+from task_contract import validate_direct_app_policy
 
 REFINEMENT_AGENT = "claude"
 SUMMARY_SECTION = "## Summary"
@@ -635,10 +636,12 @@ def validate_design_thinking_refinement(frontmatter, body):
 
 
 def validate_refinement(frontmatter, body):
+    direct_app_errors, _ = validate_direct_app_policy(frontmatter)
     if _skip_refinement_enabled(frontmatter):
-        return []
+        return direct_app_errors
 
-    errors = validate_canonical_task_sections(body)
+    errors = list(direct_app_errors)
+    errors.extend(validate_canonical_task_sections(body))
     errors.extend(validate_implementation_risk_analysis(body))
     errors.extend(validate_design_thinking_refinement(frontmatter, body))
     return errors

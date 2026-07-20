@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import io
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 
@@ -11,6 +14,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "bin"))
 
 import task_contract
+import claim_task
+import new_task
 
 
 class TaskContractDbDetectionTest(unittest.TestCase):
@@ -396,6 +401,300 @@ class TaskContractProjectIdentityTest(unittest.TestCase):
         self.assertEqual(summary["project"], {"project_id": "unknown", "registered": False})
 
 
+class TaskContractDirectAppPolicyTest(unittest.TestCase):
+    def enabled_project(self, **updates) -> dict:
+        project = {"id": "amiga", "ui_ux": {"direct_app_only": True}}
+        project.update(updates)
+        return project
+
+    def validate(self, frontmatter: dict, project: dict | None = None):
+        configured_project = self.enabled_project() if project is None else project
+        with patch.object(task_contract, "get_project", return_value=configured_project):
+            return task_contract.validate_direct_app_policy(frontmatter)
+
+    def test_missing_and_false_config_are_default_off(self) -> None:
+        frontmatter = {
+            "project_id": "other",
+            "status": "open",
+            "lane_type": "design-spec",
+            "related_paths": ["design/surface.md"],
+        }
+        for project in (
+            {"id": "other"},
+            {"id": "other", "ui_ux": {}},
+            {"id": "other", "ui_ux": {"direct_app_only": False}},
+        ):
+            with self.subTest(project=project):
+                errors, summary = self.validate(frontmatter, project)
+                self.assertEqual(errors, [])
+                self.assertFalse(summary["enabled"])
+
+    def test_present_non_boolean_config_fails_instead_of_disabling(self) -> None:
+        frontmatter = {"project_id": "amiga", "status": "open"}
+
+        errors, summary = self.validate(
+            frontmatter,
+            {"id": "amiga", "ui_ux": {"direct_app_only": "true"}},
+        )
+
+        self.assertEqual(len(errors), 1)
+        self.assertIn("malformed `ui_ux.direct_app_only`", errors[0])
+        self.assertFalse(summary["enabled"])
+
+    def test_policy_resolves_only_the_task_exact_project_id(self) -> None:
+        projects = {
+            "amiga": self.enabled_project(),
+            "other": {"id": "other", "ui_ux": {"direct_app_only": False}},
+        }
+        with patch.object(task_contract, "get_project", side_effect=projects.get) as get_project:
+            errors, _ = task_contract.validate_direct_app_policy(
+                {
+                    "project_id": "other",
+                    "status": "open",
+                    "lane_type": "design-spec",
+                }
+            )
+
+        self.assertEqual(errors, [])
+        get_project.assert_called_once_with("other")
+
+    def test_forbidden_lane_types_are_normalized(self) -> None:
+        for lane_type in (
+            "design",
+            "UI_SANDBOX",
+            "surface-spec",
+            "design handoff",
+            "route-parity",
+            "design-layout-plus-template-spec",
+        ):
+            with self.subTest(lane_type=lane_type):
+                errors, _ = self.validate(
+                    {
+                        "project_id": "amiga",
+                        "status": "open",
+                        "lane_type": lane_type,
+                    }
+                )
+                self.assertTrue(any("`lane_type`" in error for error in errors))
+
+    def test_bare_template_is_rejected_but_template_implementation_is_allowed(self) -> None:
+        rejected, _ = self.validate(
+            {
+                "project_id": "amiga",
+                "status": "open",
+                "lane_type": " TEMPLATE ",
+            }
+        )
+        accepted, _ = self.validate(
+            {
+                "project_id": "amiga",
+                "status": "open",
+                "lane_type": "template-implementation",
+            }
+        )
+
+        self.assertTrue(any("`lane_type`" in error for error in rejected))
+        self.assertEqual(accepted, [])
+
+    def test_named_path_pair_rejects_root_design_and_accepts_src_design(self) -> None:
+        rejected, _ = self.validate(
+            {
+                "project_id": "amiga",
+                "status": "open",
+                "related_paths": ["design/surfaces/app.md"],
+            }
+        )
+        accepted, _ = self.validate(
+            {
+                "project_id": "amiga",
+                "status": "open",
+                "related_paths": ["src/design/theme.ts"],
+            }
+        )
+
+        self.assertTrue(any("repository-root `design/**`" in error for error in rejected))
+        self.assertEqual(accepted, [])
+
+    def test_absolute_paths_resolve_against_every_configured_repo_root(self) -> None:
+        project = self.enabled_project(
+            repos={
+                "app": "/projects/amiga",
+                "api": "/projects/amiga-api",
+            }
+        )
+        for field in ("related_paths", "required_dependency_artifacts"):
+            with self.subTest(field=field):
+                rejected, _ = self.validate(
+                    {
+                        "project_id": "amiga",
+                        "status": "open",
+                        field: ["/projects/amiga-api/design/contracts/jobs.md"],
+                    },
+                    project,
+                )
+                accepted, _ = self.validate(
+                    {
+                        "project_id": "amiga",
+                        "status": "open",
+                        field: ["/projects/amiga/src/design/theme.ts"],
+                    },
+                    project,
+                )
+                foreign, _ = self.validate(
+                    {
+                        "project_id": "amiga",
+                        "status": "open",
+                        field: ["/projects/foreign/design/reference.md"],
+                    },
+                    project,
+                )
+
+                self.assertTrue(
+                    any("/projects/amiga-api/design/contracts/jobs.md" in error for error in rejected)
+                )
+                self.assertEqual(accepted, [])
+                self.assertEqual(foreign, [])
+
+    def test_absolute_path_resolution_exceptions_name_field_and_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first = root / "loop-a"
+            second = root / "loop-b"
+            first.symlink_to(second)
+            second.symlink_to(first)
+            offending_path = str(first / "design" / "surface.md")
+            project = self.enabled_project(repos={"app": str(root)})
+
+            for field in ("related_paths", "required_dependency_artifacts"):
+                with self.subTest(field=field):
+                    errors, _ = self.validate(
+                        {
+                            "project_id": "amiga",
+                            "status": "open",
+                            field: [offending_path],
+                        },
+                        project,
+                    )
+
+                    self.assertTrue(
+                        any(
+                            f"cannot resolve `{field}` path {offending_path!r}" in error
+                            for error in errors
+                        ),
+                        errors,
+                    )
+
+    def test_absolute_paths_fail_when_repo_mapping_cannot_be_resolved(self) -> None:
+        repo_cases = (
+            ("missing", {}),
+            ("malformed-object", {"repos": []}),
+            ("empty", {"repos": {}}),
+            ("malformed-path", {"repos": {"app": 7}}),
+            ("unresolvable", {"repos": {"app": "amiga"}}),
+        )
+        with patch.object(task_contract, "resolve_project_repo_path", return_value=None):
+            for field in ("related_paths", "required_dependency_artifacts"):
+                for label, update in repo_cases:
+                    with self.subTest(field=field, repo_case=label):
+                        project = self.enabled_project(**update)
+                        errors, _ = self.validate(
+                            {
+                                "project_id": "amiga",
+                                "status": "open",
+                                field: ["/projects/amiga/design/surface.md"],
+                            },
+                            project,
+                        )
+
+                        self.assertTrue(
+                            any(
+                                field in error
+                                and "projects.json `repos` is missing, empty, malformed, or unresolvable"
+                                in error
+                                for error in errors
+                            ),
+                            errors,
+                        )
+
+    def test_dependency_design_output_is_rejected_but_read_only_docs_are_not(self) -> None:
+        frontmatter = {
+            "project_id": "amiga",
+            "status": "open",
+            "dependency_materialization_gate": True,
+            "required_dependency_artifacts": ["design/handoff/app.md"],
+            "required_design_docs": ["/projects/amiga/design/reference.md"],
+        }
+
+        errors, _ = self.validate(frontmatter)
+
+        self.assertEqual(len(errors), 1)
+        self.assertIn("`required_dependency_artifacts`", errors[0])
+        self.assertIn("`dependency_materialization_gate: true`", errors[0])
+        self.assertNotIn("required_design_docs", errors[0])
+
+    def test_complete_operator_legacy_maintenance_override_allows_violation(self) -> None:
+        frontmatter = {
+            "project_id": "amiga",
+            "status": "in_progress",
+            "lane_type": "design-spec",
+            "related_paths": ["design/surface.md"],
+            "direct_app_legacy_maintenance": True,
+            "direct_app_legacy_maintenance_approved_by": "operator",
+            "direct_app_legacy_maintenance_reason": "Maintain the accepted historical spec.",
+        }
+
+        errors, summary = self.validate(frontmatter)
+
+        self.assertEqual(errors, [])
+        self.assertTrue(summary["legacy_maintenance_override"])
+
+    def test_each_incomplete_legacy_maintenance_override_fails_actionably(self) -> None:
+        complete = {
+            "project_id": "amiga",
+            "status": "open",
+            "lane_type": "design-spec",
+            "direct_app_legacy_maintenance": True,
+            "direct_app_legacy_maintenance_approved_by": "operator",
+            "direct_app_legacy_maintenance_reason": "Maintain accepted history.",
+        }
+        cases = (
+            ("direct_app_legacy_maintenance", False),
+            ("direct_app_legacy_maintenance_approved_by", None),
+            ("direct_app_legacy_maintenance_reason", ""),
+        )
+        for field, replacement in cases:
+            with self.subTest(field=field):
+                errors, _ = self.validate({**complete, field: replacement})
+                self.assertTrue(any(f"`{field}" in error for error in errors))
+
+    def test_done_history_is_grandfathered_without_override(self) -> None:
+        errors, _ = self.validate(
+            {
+                "project_id": "amiga",
+                "status": "done",
+                "lane_type": "design-spec",
+                "related_paths": ["design/surface.md"],
+            }
+        )
+
+        self.assertEqual(errors, [])
+
+    def test_done_history_is_grandfathered_even_when_policy_value_is_malformed(self) -> None:
+        errors, summary = self.validate(
+            {
+                "project_id": "amiga",
+                "status": "done",
+                "lane_type": "design-spec",
+                "related_paths": ["design/surface.md"],
+            },
+            {"id": "amiga", "ui_ux": {"direct_app_only": "true"}},
+        )
+
+        self.assertEqual(errors, [])
+        self.assertTrue(summary["configured"])
+        self.assertFalse(summary["enabled"])
+
+
 class TaskCreationProjectTest(unittest.TestCase):
     def test_new_task_requires_project_argument(self) -> None:
         # #given
@@ -414,6 +713,175 @@ class TaskCreationProjectTest(unittest.TestCase):
         # #then
         self.assertEqual(result.returncode, 2)
         self.assertIn("--project", result.stderr)
+
+    def test_new_task_direct_app_refusal_happens_before_write(self) -> None:
+        args = SimpleNamespace(
+            title="Create design sandbox",
+            created_by="codex",
+            requested_by="operator",
+            owner="unassigned",
+            priority="normal",
+            status="open",
+            project="amiga",
+            repo_targets="app",
+            path_targets="design/sandbox.md",
+            related_chat=None,
+            depends_on="",
+            ui_ux_lane="false",
+            skip_refinement=False,
+        )
+        stderr = io.StringIO()
+        project = {"id": "amiga", "ui_ux": {"direct_app_only": True}}
+
+        with patch.object(new_task, "parse_args", return_value=args):
+            with patch.object(new_task, "agent_ids", return_value=["codex"]):
+                with patch.object(new_task, "ensure_agent_enabled"):
+                    with patch.object(new_task, "ensure_project"):
+                        with patch.object(new_task, "task_id", return_value="TASK-DIRECT"):
+                            with patch.object(task_contract, "get_project", return_value=project):
+                                with patch.object(new_task, "write_file") as write_file:
+                                    with patch("sys.stderr", stderr):
+                                        with self.assertRaises(SystemExit):
+                                            new_task.main()
+
+        write_file.assert_not_called()
+        self.assertIn("rejected task creation before write", stderr.getvalue())
+        self.assertIn("design/sandbox.md", stderr.getvalue())
+
+    def test_claim_direct_app_refusal_leaves_task_and_queue_unchanged(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            task_path = Path(tmp) / "task.md"
+            original = (
+                "---\n"
+                "task_id: TASK-DIRECT\n"
+                "title: Direct app claim\n"
+                "project_id: amiga\n"
+                "status: open\n"
+                "owner: unassigned\n"
+                "created_by: codex\n"
+                "skip_refinement: true\n"
+                "lane_type: design-spec\n"
+                "ui_ux_lane: false\n"
+                "db_impact: none\n"
+                "---\n"
+                "# Direct app claim\n"
+            )
+            task_path.write_text(original)
+            args = SimpleNamespace(
+                task="TASK-DIRECT",
+                owner="codex",
+                status="in_progress",
+                branch=None,
+                note=None,
+                skip_preflight=True,
+                allow_queue_override=False,
+                accepted_by=None,
+                accepted_note=None,
+                allow_self_plan=False,
+                released_by=None,
+                release_evidence=None,
+            )
+            project = {"id": "amiga", "ui_ux": {"direct_app_only": True}}
+            stderr = io.StringIO()
+
+            with patch.object(claim_task, "parse_args", return_value=args):
+                with patch.object(claim_task, "agent_ids", return_value=["codex"]):
+                    with patch.object(claim_task, "ensure_agent_enabled"):
+                        with patch.object(claim_task, "find_task_by_id", return_value=task_path):
+                            with patch.object(claim_task.issue_queue, "queue_exists", return_value=False):
+                                with patch.object(task_contract, "get_project", return_value=project):
+                                    with patch.object(claim_task, "write_file") as write_file:
+                                        with patch.object(
+                                            claim_task.issue_queue,
+                                            "mark_lane_transition",
+                                        ) as mark_lane_transition:
+                                            with patch("sys.stderr", stderr):
+                                                with self.assertRaises(SystemExit):
+                                                    claim_task.main()
+
+            self.assertEqual(task_path.read_text(), original)
+            write_file.assert_not_called()
+            mark_lane_transition.assert_not_called()
+            self.assertIn("task contract is incomplete", stderr.getvalue())
+            self.assertIn("`lane_type` 'design-spec'", stderr.getvalue())
+
+    def test_claim_done_design_history_uses_target_status_before_any_mutation(self) -> None:
+        for target_status in ("in_progress", "review"):
+            with self.subTest(target_status=target_status):
+                with tempfile.TemporaryDirectory() as tmp:
+                    task_path = Path(tmp) / "task.md"
+                    original = (
+                        "---\n"
+                        "task_id: TASK-DONE-DESIGN\n"
+                        "title: Historical design task\n"
+                        "project_id: amiga\n"
+                        "status: done\n"
+                        "owner: unassigned\n"
+                        "created_by: codex\n"
+                        "skip_refinement: true\n"
+                        "lane_type: design-spec\n"
+                        "ui_ux_lane: false\n"
+                        "db_impact: none\n"
+                        "---\n"
+                        "# Historical design task\n"
+                    )
+                    task_path.write_text(original)
+                    args = SimpleNamespace(
+                        task="TASK-DONE-DESIGN",
+                        owner="codex",
+                        status=target_status,
+                        branch=None,
+                        note=None,
+                        skip_preflight=True,
+                        allow_queue_override=False,
+                        accepted_by=None,
+                        accepted_note=None,
+                        allow_self_plan=False,
+                        released_by=None,
+                        release_evidence=None,
+                    )
+                    project = {"id": "amiga", "ui_ux": {"direct_app_only": True}}
+                    queue_payload = {
+                        "project_id": "amiga",
+                        "lanes": [
+                            {
+                                "order": 1,
+                                "issue": 75,
+                                "task_id": "TASK-DONE-DESIGN",
+                                "queue_state": "ready",
+                            }
+                        ],
+                    }
+                    stderr = io.StringIO()
+
+                    with patch.object(claim_task, "parse_args", return_value=args):
+                        with patch.object(claim_task, "agent_ids", return_value=["codex"]):
+                            with patch.object(claim_task, "ensure_agent_enabled"):
+                                with patch.object(claim_task, "find_task_by_id", return_value=task_path):
+                                    with patch.object(
+                                        claim_task.issue_queue,
+                                        "queue_exists",
+                                        return_value=True,
+                                    ):
+                                        with patch.object(
+                                            claim_task.issue_queue,
+                                            "load_queue",
+                                            return_value=queue_payload,
+                                        ):
+                                            with patch.object(task_contract, "get_project", return_value=project):
+                                                with patch.object(claim_task, "write_file") as write_file:
+                                                    with patch.object(
+                                                        claim_task.issue_queue,
+                                                        "mark_lane_transition",
+                                                    ) as mark_lane_transition:
+                                                        with patch("sys.stderr", stderr):
+                                                            with self.assertRaises(SystemExit):
+                                                                claim_task.main()
+
+                    self.assertEqual(task_path.read_text(), original)
+                    write_file.assert_not_called()
+                    mark_lane_transition.assert_not_called()
+                    self.assertIn("`lane_type` 'design-spec'", stderr.getvalue())
 
 
 if __name__ == "__main__":

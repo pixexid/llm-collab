@@ -503,7 +503,9 @@ def main():
             )
             sys.exit(1)
 
-        errors, summary = validate_task_contract(fm, body, stage="assignment")
+        validation_fm = dict(fm)
+        validation_fm["status"] = args.status
+        errors, summary = validate_task_contract(validation_fm, body, stage="assignment")
         if errors:
             print(
                 json.dumps(
@@ -521,7 +523,9 @@ def main():
             sys.exit(1)
 
     if args.status == "review":
-        errors, summary = validate_task_contract(fm, body, stage="review")
+        validation_fm = dict(fm)
+        validation_fm["status"] = args.status
+        errors, summary = validate_task_contract(validation_fm, body, stage="review")
         if errors:
             print(
                 json.dumps(

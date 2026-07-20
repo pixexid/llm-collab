@@ -125,6 +125,7 @@ Project registry. Created by `scripts/init.py`. Gitignored.
       "preflight_command": ["pnpm", "preflight", "--json"],
       "claude_desktop_bridge": false,
       "ui_ux": {
+        "direct_app_only": false,
         "required_design_docs": ["/absolute/path/to/project/DESIGN.md"]
       },
       "db": {
@@ -161,6 +162,7 @@ Project registry. Created by `scripts/init.py`. Gitignored.
 | `default_branch_base` | string | Default git ref for worktree creation |
 | `preflight_command` | string[] or null | Command to validate before task integration |
 | `claude_desktop_bridge` | bool | Optional Claude Desktop fallback for a non-CLI Claude target. CLI-session workers use AX first. |
+| `ui_ux.direct_app_only` | bool | Optional, default-off direct-app gate. When `true`, every non-`done` task must avoid design/sandbox/spec/handoff/parity, bare-template, and template-design-only lane types, repository-root `design/**` targets, and dependency materialization of newly authored `design/**` artifacts. Explicit implementation lanes such as `template-implementation`, `src/design/**`, and read-only `required_design_docs` remain valid. Absolute related/dependency paths require a complete resolvable project `repos` mapping so repository-root scope can be evaluated. A present non-boolean value is a configuration error. |
 | `ui_ux.required_design_docs` | string[] | Optional project-specific design sources prepended to every UI/UX task contract. Non-Amiga projects must configure these or provide explicit task-level design docs. |
 | `db.shared_supabase_project_ref` | string | Optional shared Supabase project ref required by database-impact task contracts. Non-Amiga projects do not inherit Amiga's ref. |
 | `db.required_surfaces` | string[] | Optional project-specific CLI or MCP surfaces required by shared-database task contracts. |
@@ -381,6 +383,9 @@ release_evidence: null
 | `browser_validation_mobile` | string or null | Worker-owned mobile browser validation evidence |
 | `operator_visual_feedback_requested` | bool | Whether the operator was explicitly asked for visual review feedback |
 | `design_doc_update_decision` | string or null | Same-session DESIGN.md or linked UI-doc review/update decision |
+| `direct_app_legacy_maintenance` | bool | For a project with `ui_ux.direct_app_only: true`, the first of three mandatory fields for an explicitly approved active legacy-design maintenance exception. Must be strict `true`; incomplete overrides fail closed. |
+| `direct_app_legacy_maintenance_approved_by` | string or null | Second mandatory legacy-maintenance field. Must equal `operator`. |
+| `direct_app_legacy_maintenance_reason` | string or null | Third mandatory legacy-maintenance field. Must be a non-empty reason. |
 | `release_evidence` | object or null | Normalized closure record written only by a successful new `review -> done` transition. See below. |
 
 `design_thinking_pass_items` entries use:
@@ -1078,11 +1083,12 @@ chat/session turnover.
 |-------|------|-------------|
 | `schema_version` | int | Queue schema version |
 | `artifact_type` | string | `ordered_issue_queue` |
-| `project_id` | string | Project identifier |
+| `project_id` | string | Exact non-empty project identifier. Queue transition mutators refuse a missing, empty, null, or foreign value before changing lane, completion, archive, or synced state. |
 | `last_updated_utc` | string | ISO 8601 timestamp |
 | `source_issue` | int | Workflow issue tracking this queue contract |
 | `source_task` | string | Local task mirror tracking this queue contract |
-| `completed_recently` | object[] | Optional recently-finished reference lanes |
+| `invalid_lanes` | object[] | Reconcile diagnostics for task mirrors rejected by project policy. A `ui_ux.direct_app_only` violation keeps the result non-OK and the lane blocked instead of ready. |
+| `completed_recently` | object[] | Optional recently-finished reference lanes. Dependency reconciliation trusts only `status: done` entries from a queue whose exact `project_id` matches the requested project. |
 | `lanes` | object[] | Ordered remaining issue-sized lanes |
 
 ### Lane fields
@@ -1097,7 +1103,7 @@ chat/session turnover.
 | `task_status` | string | Mirror task status (`pending`, `in_progress`, `review`, etc.) |
 | `queue_state` | string | Queue position state such as `ready`, `queued`, or `blocked` |
 | `tier` | int | Optional rollout tier |
-| `depends_on` | string[] | Task-level dependencies |
+| `depends_on` | string[] | Task-level dependencies. A dependency is satisfied only by exact-project `status: done` task evidence or exact-project persisted done history; global same-ID foreign/projectless mirrors are not authority. |
 | `blocked_by` | string[] | Explicit blocker references |
 | `notes` | string | Short operator/orchestrator note |
 
