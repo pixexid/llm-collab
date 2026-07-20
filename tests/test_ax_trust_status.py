@@ -26,6 +26,18 @@ CLI_AX_ACTIVATION = {
     "ax_app": "Codex",
     "ax_attended_only": False,
 }
+TRUSTED = {"status": "trusted", "reason": None, "remediation": None}
+DOWN = {
+    "status": "DOWN",
+    "reason": "durable mailbox remains authoritative; the AX doorbell is degraded",
+    "remediation": (
+        "Grant Accessibility access to the controlling process in System Settings, "
+        "then rerun tools/axbridge/axsend check."
+    ),
+}
+DIAGNOSE_REMEDIATION = (
+    "Run tools/axbridge/axsend check directly to diagnose the optional doorbell."
+)
 
 
 class AxTrustProbeTest(unittest.TestCase):
@@ -66,18 +78,20 @@ class AxTrustProbeTest(unittest.TestCase):
     def paired_cases(
         self,
         *,
+        scenario: str,
         activation: dict = CLI_AX_ACTIVATION,
         platform_name: str = "Darwin",
         probe_outcome: int | BaseException = 0,
-        expected_status: str,
+        expected: dict,
     ) -> list[dict]:
         return [
             {
+                "scenario": scenario,
                 "project_id": project_id,
                 "activation": dict(activation),
                 "platform": platform_name,
                 "probe_outcome": probe_outcome,
-                "expected_serialized_status": json.dumps({"status": expected_status}),
+                "expected_serialized_status": json.dumps(expected, sort_keys=True),
             }
             for project_id in PROJECTS
         ]
@@ -86,25 +100,40 @@ class AxTrustProbeTest(unittest.TestCase):
         self.assertEqual({case["project_id"] for case in cases}, set(PROJECTS))
         serialized: dict[str, str] = {}
         for case in cases:
-            with self.subTest(project_id=case["project_id"]):
+            with self.subTest(
+                scenario=case["scenario"], project_id=case["project_id"]
+            ):
                 result, _ = self.run_case(case)
                 expected = json.loads(case["expected_serialized_status"])
-                self.assertEqual(result["status"], expected["status"])
                 serialized[case["project_id"]] = json.dumps(result, sort_keys=True)
-        self.assertEqual(
-            json.loads(serialized["amiga"])["status"],
-            json.loads(serialized["nuvyr"])["status"],
-        )
+                self.assertEqual(result, expected)
+        self.assertEqual(serialized["amiga"], serialized["nuvyr"])
 
     def test_paired_amiga_nuvyr_exit_mapping_is_project_independent(self) -> None:
-        for returncode, expected in ((0, "trusted"), (2, "DOWN"), (7, "unavailable")):
+        outcomes = (
+            (0, TRUSTED),
+            (2, DOWN),
+            (
+                7,
+                {
+                    "status": "unavailable",
+                    "reason": "AX trust probe exited with unexpected status 7",
+                    "remediation": DIAGNOSE_REMEDIATION,
+                },
+            ),
+        )
+        for returncode, expected in outcomes:
             with self.subTest(returncode=returncode):
                 self.assert_paired_status(
-                    self.paired_cases(probe_outcome=returncode, expected_status=expected)
+                    self.paired_cases(
+                        scenario=f"exit_{returncode}",
+                        probe_outcome=returncode,
+                        expected=expected,
+                    )
                 )
 
     def test_probe_uses_prebuilt_binary_and_hard_timeout(self) -> None:
-        case = self.paired_cases(expected_status="trusted")[0]
+        case = self.paired_cases(scenario="trusted", expected=TRUSTED)[0]
         result, calls = self.run_case(case)
         self.assertEqual(result["status"], "trusted")
         self.assertEqual(len(calls), 1)
@@ -117,62 +146,124 @@ class AxTrustProbeTest(unittest.TestCase):
         missing = Path(self.temp_dir.name) / "missing"
         nonexec = Path(self.temp_dir.name) / "nonexec"
         nonexec.write_text("stub", encoding="utf-8")
-        cases = [
-            {
-                **self.paired_cases(expected_status="unavailable")[0],
-                "binary_path": missing,
-            },
-            {
-                **self.paired_cases(expected_status="unavailable")[1],
-                "binary_path": nonexec,
-            },
-            {
-                **self.paired_cases(
-                    probe_outcome=subprocess.TimeoutExpired(["axsend", "check"], 5),
-                    expected_status="unavailable",
-                )[0],
-            },
-            {
-                **self.paired_cases(
-                    probe_outcome=OSError("exec failed"),
-                    expected_status="unavailable",
-                )[1],
-            },
-        ]
-        for case in cases:
-            with self.subTest(project_id=case["project_id"], outcome=case["probe_outcome"]):
-                result, _ = self.run_case(case)
-                self.assertEqual(result["status"], "unavailable")
+        not_built = {
+            "status": "unavailable",
+            "reason": "prebuilt tools/axbridge/axsend is missing or not executable",
+            "remediation": (
+                "Build the optional bridge with tools/axbridge/build.sh, "
+                "then rerun status."
+            ),
+        }
+        scenarios = (
+            ("missing", missing, 0, not_built),
+            ("non_executable", nonexec, 0, not_built),
+            (
+                "timeout",
+                self.binary,
+                subprocess.TimeoutExpired(["axsend", "check"], 5),
+                {
+                    "status": "unavailable",
+                    "reason": "AX trust probe timed out after 5s",
+                    "remediation": DIAGNOSE_REMEDIATION,
+                },
+            ),
+            (
+                "oserror",
+                self.binary,
+                OSError("exec failed"),
+                {
+                    "status": "unavailable",
+                    "reason": "AX trust probe failed with OSError",
+                    "remediation": DIAGNOSE_REMEDIATION,
+                },
+            ),
+        )
+        for scenario, binary_path, outcome, expected in scenarios:
+            cases = self.paired_cases(
+                scenario=scenario,
+                probe_outcome=outcome,
+                expected=expected,
+            )
+            for case in cases:
+                case["binary_path"] = binary_path
+            self.assert_paired_status(cases)
 
     def test_exact_capability_allowlist_reports_na_without_probing(self) -> None:
         variants = (
-            ("Linux", CLI_AX_ACTIVATION),
-            ("Darwin", {"type": "api_trigger", "ax_app": "Codex"}),
-            ("Darwin", {"type": "human_relay", "ax_app": "Codex"}),
-            ("Darwin", {"type": "cli_session", "ax_app": ""}),
             (
+                "non_darwin",
+                "Linux",
+                CLI_AX_ACTIVATION,
+                {"status": "n/a", "reason": "host platform is not Darwin", "remediation": None},
+            ),
+            (
+                "api_trigger",
+                "Darwin",
+                {"type": "api_trigger", "ax_app": "Codex"},
+                {
+                    "status": "n/a",
+                    "reason": "agent has no routine AX doorbell capability",
+                    "remediation": None,
+                },
+            ),
+            (
+                "human_relay",
+                "Darwin",
+                {"type": "human_relay", "ax_app": "Codex"},
+                {
+                    "status": "n/a",
+                    "reason": "agent has no routine AX doorbell capability",
+                    "remediation": None,
+                },
+            ),
+            (
+                "empty_ax_app",
+                "Darwin",
+                {"type": "cli_session", "ax_app": ""},
+                {
+                    "status": "n/a",
+                    "reason": "agent has no routine AX doorbell capability",
+                    "remediation": None,
+                },
+            ),
+            (
+                "attended_only",
                 "Darwin",
                 {"type": "cli_session", "ax_app": "Codex", "ax_attended_only": True},
+                {
+                    "status": "n/a",
+                    "reason": "agent has no routine AX doorbell capability",
+                    "remediation": None,
+                },
             ),
         )
-        for platform_name, activation in variants:
+        for scenario, platform_name, activation, expected in variants:
             cases = self.paired_cases(
+                scenario=scenario,
                 activation=activation,
                 platform_name=platform_name,
-                expected_status="n/a",
+                expected=expected,
             )
+            serialized: dict[str, str] = {}
             for case in cases:
                 with self.subTest(
+                    scenario=scenario,
                     project_id=case["project_id"],
                     platform=platform_name,
                     activation_type=activation["type"],
                 ):
                     result, calls = self.run_case(case)
-                    self.assertEqual(result["status"], "n/a")
+                    serialized[case["project_id"]] = json.dumps(result, sort_keys=True)
+                    self.assertEqual(
+                        result, json.loads(case["expected_serialized_status"])
+                    )
                     self.assertEqual(calls, [])
+            self.assertEqual(serialized["amiga"], serialized["nuvyr"])
 
     def test_down_human_line_is_honest_and_portable(self) -> None:
-        case = self.paired_cases(probe_outcome=2, expected_status="DOWN")[0]
+        case = self.paired_cases(
+            scenario="down", probe_outcome=2, expected=DOWN
+        )[0]
         result_dict, _ = self.run_case(case)
         line = _ax_trust.format_ax_status(_ax_trust.AxTrustStatus(**result_dict))
         self.assertTrue(line.startswith("[ax] DOWN"))
@@ -206,12 +297,27 @@ class AxTrustCallerTest(unittest.TestCase):
         status: _ax_trust.AxTrustStatus,
         json_output: bool,
         watcher_result: dict | None = None,
+        identity_content: str | None = None,
+        probe_side_effect=None,
     ):
         activation = dict(CLI_AX_ACTIVATION)
         activation["watcher_enabled"] = watcher_result is not None
         agent = {"id": "codex", "activation": activation}
         with tempfile.TemporaryDirectory() as temp_dir:
-            missing_identity = Path(temp_dir) / "identity.md"
+            identity_path = Path(temp_dir) / "identity.md"
+            if identity_content is not None:
+                identity_path.write_text(identity_content, encoding="utf-8")
+            probe_patch = (
+                mock.patch.object(
+                    session_bootstrap,
+                    "probe_ax_trust",
+                    side_effect=probe_side_effect,
+                )
+                if probe_side_effect is not None
+                else mock.patch.object(
+                    session_bootstrap, "probe_ax_trust", return_value=status
+                )
+            )
             patches = (
                 mock.patch.object(
                     session_bootstrap,
@@ -224,11 +330,11 @@ class AxTrustCallerTest(unittest.TestCase):
                 mock.patch.object(session_bootstrap, "agent_ids", return_value=["codex"]),
                 mock.patch.object(session_bootstrap, "get_agent", return_value=agent),
                 mock.patch.object(
-                    session_bootstrap, "agent_identity_path", return_value=missing_identity
+                    session_bootstrap, "agent_identity_path", return_value=identity_path
                 ),
                 mock.patch.object(session_bootstrap, "get_unread_messages", return_value=[]),
                 mock.patch.object(session_bootstrap, "queue_summaries", return_value=[]),
-                mock.patch.object(session_bootstrap, "probe_ax_trust", return_value=status),
+                probe_patch,
                 mock.patch.object(
                     session_bootstrap,
                     "start_watcher",
@@ -240,6 +346,36 @@ class AxTrustCallerTest(unittest.TestCase):
                 for patcher in patches:
                     stack.enter_context(patcher)
                 yield
+
+    def test_human_identity_is_printed_before_probe_invocation(self) -> None:
+        output = io.StringIO()
+        output_seen_by_probe: list[str] = []
+
+        def timeout_probe(_agent: dict) -> _ax_trust.AxTrustStatus:
+            output_seen_by_probe.append(output.getvalue())
+            return _ax_trust.AxTrustStatus(
+                "unavailable",
+                "AX trust probe timed out after 5s",
+                DIAGNOSE_REMEDIATION,
+            )
+
+        with self.patched_bootstrap(
+            status=_ax_trust.AxTrustStatus("unavailable"),
+            json_output=False,
+            watcher_result={"status": "error", "reason": "pm2 failed"},
+            identity_content="# Codex test identity",
+            probe_side_effect=timeout_probe,
+        ):
+            with contextlib.redirect_stdout(output):
+                session_bootstrap.main()
+
+        self.assertEqual(len(output_seen_by_probe), 1)
+        self.assertIn("IDENTITY", output_seen_by_probe[0])
+        self.assertIn("# Codex test identity", output_seen_by_probe[0])
+        text = output.getvalue()
+        self.assertLess(text.index("IDENTITY"), text.index("[ax] unavailable"))
+        self.assertLess(text.index("[ax] unavailable"), text.index("[watcher] error"))
+        self.assertEqual(text.count("[ax] unavailable"), 1)
 
     def test_human_bootstrap_prints_exactly_one_ax_line_when_watcher_skips(self) -> None:
         output = io.StringIO()

@@ -116,7 +116,6 @@ def main():
         sys.exit(1)
 
     agent = get_agent(args.agent)
-    ax_result = probe_ax_trust(agent)
 
     # ── 1. Identity (FIRST — the LLM must read this before anything else) ──
     identity_file = agent_identity_path(args.agent)
@@ -133,6 +132,9 @@ def main():
             print(f"[warn] No identity file at {identity_file}", file=sys.stderr)
             print(f"       Run: python scripts/init.py to generate identity files.\n", file=sys.stderr)
         identity_content = None
+
+    # Keep the potentially five-second optional probe behind identity output.
+    ax_result = probe_ax_trust(agent)
 
     # ── 2. Inbox ──
     messages = get_unread_messages(args.agent)[: args.limit]
