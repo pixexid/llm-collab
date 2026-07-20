@@ -86,6 +86,16 @@ PROJECT_CASES = (
         "scenario": "wait_gate_precedence",
         "expected_outcome": "adjudicated_wait_precedence",
     },
+    {
+        "project_id": "amiga",
+        "scenario": "operator_head_authorization",
+        "expected_outcome": "adjudicated_wait_precedence",
+    },
+    {
+        "project_id": "nuvyr",
+        "scenario": "operator_head_authorization",
+        "expected_outcome": "adjudicated_wait_precedence",
+    },
 )
 
 
@@ -186,7 +196,7 @@ class ReviewLoopCapContractTest(unittest.TestCase):
                 check(case, self.sources_by_outcome[outcome])
 
     def assert_wait_gate_residual_contract(self, workflow_text, handoff_text):
-        """Assert both GH-133 precedence residuals against supplied doc text."""
+        """Assert the GH-133/GH-140 wait residuals against supplied doc text."""
         review_policy = contract_section(
             workflow_text,
             "### GitHub Codex review policy",
@@ -208,6 +218,11 @@ class ReviewLoopCapContractTest(unittest.TestCase):
             "For PR-review wait heartbeats",
             "If GitHub Codex comments on the PR",
         )
+        compact_precedence = contract_section(
+            handoff_text,
+            "For requested-review silence versus the fallback",
+            "If GitHub Codex comments on the PR",
+        ).strip()
 
         required_phrases = (
             (
@@ -222,9 +237,26 @@ class ReviewLoopCapContractTest(unittest.TestCase):
                     "does not exit requested-review precedence",
                     "issue exactly one `@codex review` re-trigger",
                     "The re-trigger is the sole automatic retry",
-                    "do not re-trigger again: require a terminal human/operator "
-                    "disposition, and keep the PR unmergeable until that "
-                    "disposition is recorded",
+                    "do not re-trigger again",
+                    "explicit disposition bound to the exact current head",
+                    "The disposition must state exactly one of these outcomes",
+                    "merge of that exact head is authorized despite the absent "
+                    "connector terminal signal",
+                    "that exact head must not merge and remains blocked or is "
+                    "closed",
+                    "An ambiguous note, a disposition not bound to the current "
+                    "head, or an older-head disposition does not lift the merge "
+                    "block",
+                    "Any later push invalidates the disposition and restarts "
+                    "exact-head evaluation",
+                    "lifts only the missing connector-signal subgate",
+                    "is not a third automated terminal-signal model",
+                    "It does not waive independent exact-head review, green "
+                    "required checks, mergeability, the full comment/review/"
+                    "thread/reaction reread, unresolved-feedback handling, or "
+                    "project/operator auto-merge authority",
+                    "the operator authorization does not masquerade as that "
+                    "signal or inherit its handling",
                     "a dropped request is indistinguishable from a review that "
                     "is still processing",
                     "unlike the absent-request variant, where there is nothing "
@@ -257,15 +289,13 @@ class ReviewLoopCapContractTest(unittest.TestCase):
                     "(commit-push-prs.md#explicit-requested-review-precedence)",
                     "Do not apply the 15-minute fallback to an explicitly "
                     "requested review",
-                    "anchors each 30–35-minute clock to the corresponding "
-                    "explicit request's GitHub `created_at`, not to the latest "
-                    "push or head-reviewability time",
-                    "A current-head `eyes` reaction alone does not exit "
-                    "requested-review precedence",
-                    "Automation may issue exactly one re-trigger",
-                    "no further automatic retry is allowed and the PR remains "
-                    "unmergeable until a terminal human/operator disposition is "
-                    "recorded",
+                    "Automation may issue exactly one re-trigger, and no further "
+                    "automatic retry is allowed",
+                    "The canonical section is the sole authority for both "
+                    "request-anchored clocks, current-head invalidation, the "
+                    "post-timeout disposition choices, and every effect of an "
+                    "exact-head operator authorization; this compact guidance "
+                    "defines no separate disposition effect",
                     "eyes-only current-head artifact (which applies only when no "
                     "explicit review request is outstanding",
                     "it does not reset an explicit request's request-anchored "
@@ -281,6 +311,39 @@ class ReviewLoopCapContractTest(unittest.TestCase):
         for source, phrases in required_phrases:
             for phrase in phrases:
                 self.assertIn(phrase, source)
+        self.assertNotIn(
+            "remains unmergeable until a terminal human/operator disposition "
+            "is recorded",
+            handoff_wait,
+        )
+        self.assertEqual(
+            compact_precedence,
+            normalized(
+                "For requested-review silence versus the fallback, follow the "
+                "canonical [Explicit requested-review precedence]"
+                "(commit-push-prs.md#explicit-requested-review-precedence). "
+                "Do not apply the 15-minute fallback to an explicitly requested "
+                "review. Automation may issue exactly one re-trigger, and no "
+                "further automatic retry is allowed. The canonical section is "
+                "the sole authority for both request-anchored clocks, "
+                "current-head invalidation, the post-timeout disposition "
+                "choices, and every effect of an exact-head operator "
+                "authorization; this compact guidance defines no separate "
+                "disposition effect. The fallback is limited to exactly three "
+                "named no-terminal-artifact variants: no explicit review "
+                "request (the reviewability clock starts at the later of the "
+                "final push and the head becoming reviewable), eyes-only "
+                "current-head artifact (which applies only when no explicit "
+                "review request is outstanding and is non-blocking once no "
+                "review is pending), and prior-head artifacts only (a stale-head "
+                "`Codex Review:` body or reaction is not head-attributable and "
+                "is ignored for terminal-signal purposes). For those fallback "
+                "variants, any push invalidates the prior signal and restarts "
+                "the fallback clock for the new head; it does not reset an "
+                "explicit request's request-anchored clock. This compact handoff "
+                "rule must not define a competing timer or disposition rule."
+            ),
+        )
 
         fallback_variants = re.findall(r"- \*\*([^*]+)\.\*\*", fallback)
         self.assertEqual(
@@ -523,6 +586,19 @@ class ReviewLoopCapContractTest(unittest.TestCase):
 
         self.assert_scenario_cases("canonical_wait_gate", check)
 
+    def test_operator_authorization_is_exact_head_and_narrow(self):
+        def check(case, sources):
+            self.assertEqual(
+                case["expected_outcome"],
+                "adjudicated_wait_precedence",
+            )
+            self.assert_wait_gate_residual_contract(
+                sources["workflow_text"],
+                sources["handoff_text"],
+            )
+
+        self.assert_scenario_cases("operator_head_authorization", check)
+
     def test_plan_doc_reuses_reviewer_for_in_contract_amendments(self):
         def check(case, sources):
             self.assertIn(
@@ -687,7 +763,7 @@ class ReviewLoopCapContractTest(unittest.TestCase):
 
         self.assert_scenario_cases("wait_gate_precedence", check)
 
-    def test_wait_gate_guards_reject_ten_frozen_mutations(self):
+    def test_wait_gate_guards_reject_frozen_mutations(self):
         self.assert_wait_gate_residual_contract(
             self.workflow_text,
             self.handoff_text,
@@ -754,6 +830,66 @@ class ReviewLoopCapContractTest(unittest.TestCase):
                 "workflow",
                 "does not exit requested-review precedence",
                 "exits requested-review precedence",
+            ),
+            (
+                "any recorded note lifts the block",
+                "workflow",
+                "An ambiguous note,\na disposition not bound to the current "
+                "head, or an older-head disposition does\nnot lift the merge "
+                "block",
+                "Any recorded note lifts the merge block",
+            ),
+            (
+                "older-head authorization survives a push",
+                "workflow",
+                "Any later push invalidates the disposition and\nrestarts "
+                "exact-head evaluation",
+                "A later push preserves the disposition",
+            ),
+            (
+                "authorization becomes a third connector signal",
+                "workflow",
+                "is not a third automated terminal-signal\nmodel",
+                "is a third automated terminal-signal model",
+            ),
+            (
+                "authorization waives independent gates",
+                "workflow",
+                "It does not waive independent exact-head\nreview, green "
+                "required checks, mergeability, the full\ncomment/review/thread/"
+                "reaction reread, unresolved-feedback handling, or\nproject/"
+                "operator auto-merge authority",
+                "It waives independent review, checks, and reread",
+            ),
+            (
+                "compact guidance defines a divergent disposition effect",
+                "handoff",
+                "this compact guidance\ndefines no separate disposition effect",
+                "this compact guidance says any disposition ends the wait",
+            ),
+            (
+                "canonical outcomes permit either or both",
+                "workflow",
+                "must state exactly one",
+                "may state either or both",
+            ),
+            (
+                "compact guidance adds a contradictory disposition effect",
+                "handoff",
+                "timer or disposition rule.\n\nIf GitHub Codex comments",
+                "timer or disposition rule.\n"
+                "Nevertheless, any recorded disposition ends the "
+                "requested-review wait.\n\n"
+                "If GitHub Codex comments",
+            ),
+            (
+                "compact guidance adds a synonymous human-decision effect",
+                "handoff",
+                "timer or disposition rule.\n\nIf GitHub Codex comments",
+                "timer or disposition rule.\n"
+                "Nevertheless, any recorded human decision ends the "
+                "requested-review wait.\n\n"
+                "If GitHub Codex comments",
             ),
         )
         for name, target, old, new in mutations:

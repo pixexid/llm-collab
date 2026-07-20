@@ -19,9 +19,11 @@ the docs or a runtime implementation that consumes these scenarios is caught.
 
 from __future__ import annotations
 
+import inspect
 import json
 import re
 import unittest
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
@@ -337,12 +339,40 @@ class Gh1549FallbackFixturesTest(unittest.TestCase):
         )
         return cases
 
+    def _assert_fixture_registry_complete(
+        self,
+        discovered_filenames: set[str],
+    ) -> None:
+        registered_filenames = list(self.VARIANT_FILES.values())
+        self.assertEqual(
+            len(registered_filenames),
+            len(set(registered_filenames)),
+            "VARIANT_FILES must register each fixture basename exactly once",
+        )
+        self.assertEqual(
+            set(registered_filenames),
+            discovered_filenames,
+            "VARIANT_FILES must exactly cover every top-level JSON fixture",
+        )
+
     def test_all_three_variant_fixtures_exist(self) -> None:
         for variant, filename in self.VARIANT_FILES.items():
             path = FIXTURES_DIR / filename
             self.assertTrue(
                 path.exists(),
                 f"fixture for variant {variant!r} missing at {path}",
+            )
+
+    def test_fixture_registry_covers_complete_json_directory(self) -> None:
+        self._assert_fixture_registry_complete(
+            {path.name for path in FIXTURES_DIR.glob("*.json")}
+        )
+
+    def test_fixture_registry_rejects_adversarial_future_file(self) -> None:
+        discovered = {path.name for path in FIXTURES_DIR.glob("*.json")}
+        with self.assertRaises(AssertionError):
+            self._assert_fixture_registry_complete(
+                discovered | {"future_variant.json"}
             )
 
     def test_each_fixture_has_paired_amiga_and_nuvyr_cases(self) -> None:
@@ -357,6 +387,68 @@ class Gh1549FallbackFixturesTest(unittest.TestCase):
                 f"{filename} project_cases missing required projects: "
                 f"{sorted(missing)} (must include both amiga and nuvyr)",
             )
+
+    def test_fallback_fixture_coherence_for_every_case(self) -> None:
+        for variant in self.VARIANT_FILES:
+            for case in self._project_cases(variant):
+                fallback_utc = case["expected"].get(
+                    "fallback_eligible_after_utc"
+                )
+                if fallback_utc is None:
+                    continue
+                with self.subTest(
+                    project_id=case["project_id"],
+                    variant=variant,
+                ):
+                    self._assert_fallback_case_coherent(case)
+
+    def _assert_fallback_case_coherent(self, case: dict) -> None:
+        pr = case["pr_state"]
+        fallback_utc = case["expected"]["fallback_eligible_after_utc"]
+        self.assertFalse(
+            pr["explicit_review_request"],
+            "fallback eligibility and an explicit current-head review request "
+            "are mutually exclusive",
+        )
+        clock_start = max(
+            datetime.fromisoformat(pr["final_push_utc"]),
+            datetime.fromisoformat(pr["head_reviewable_utc"]),
+        )
+        self.assertEqual(
+            datetime.fromisoformat(fallback_utc),
+            clock_start + timedelta(minutes=15),
+            "fallback eligibility must be exactly 15 minutes after "
+            "later_of(final_push, head_reviewable)",
+        )
+
+    def test_generic_fixture_coherence_guard_is_registered(self) -> None:
+        self.assertTrue(
+            callable(
+                getattr(
+                    type(self),
+                    "test_fallback_fixture_coherence_for_every_case",
+                    None,
+                )
+            )
+        )
+        source = inspect.getsource(
+            type(self).test_fallback_fixture_coherence_for_every_case
+        )
+        self.assertIn("self._assert_fallback_case_coherent(case)", source)
+
+    def test_fixture_coherence_guard_rejects_named_mutations(self) -> None:
+        case = self._project_cases("eyes_only_current_head")[0]
+        explicit_request = json.loads(json.dumps(case))
+        explicit_request["pr_state"]["explicit_review_request"] = True
+        with self.assertRaises(AssertionError):
+            self._assert_fallback_case_coherent(explicit_request)
+
+        shifted_timestamp = json.loads(json.dumps(case))
+        shifted_timestamp["expected"]["fallback_eligible_after_utc"] = (
+            "2026-07-18T12:16:00Z"
+        )
+        with self.assertRaises(AssertionError):
+            self._assert_fallback_case_coherent(shifted_timestamp)
 
     def test_absent_request_variant_per_project(self) -> None:
         # Absent explicit review request: the reviewability clock still starts

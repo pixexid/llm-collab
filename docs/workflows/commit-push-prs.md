@@ -269,13 +269,30 @@ When the initial request's clock expires without a terminal signal, treat that
 request as silently dropped and issue exactly one `@codex review` re-trigger.
 The re-trigger is the sole automatic retry and starts its own 30–35-minute clock
 at its GitHub `created_at`. If that clock also expires without a terminal
-signal, do not re-trigger again: require a terminal human/operator disposition,
-and keep the PR unmergeable until that disposition is recorded. Report and
-escalate the stuck review at each expiry. The existing PR-wait heartbeat
-observes these clocks; neither the re-trigger nor the disposition is a new
-terminal signal or watcher mechanism. The longer request-anchored timer exists
-because a dropped request is indistinguishable from a review that is still
-processing, unlike the absent-request variant, where there is nothing to drop.
+signal, do not re-trigger again. The PR remains unmergeable until a
+human/operator records an explicit disposition bound to the exact current
+head. The disposition must state exactly one of these outcomes: merge of that
+exact head is authorized despite the absent connector terminal signal; or that
+exact head must not merge and remains blocked or is closed. An ambiguous note,
+a disposition not bound to the current head, or an older-head disposition does
+not lift the merge block. Any later push invalidates the disposition and
+restarts exact-head evaluation.
+
+An exact-current-head merge authorization lifts only the missing
+connector-signal subgate caused by the silently dropped requested review. It is
+not a connector terminal signal, is not a third automated terminal-signal
+model, and creates no fallback path. It does not waive independent exact-head
+review, green required checks, mergeability, the full
+comment/review/thread/reaction reread, unresolved-feedback handling, or
+project/operator auto-merge authority. If a connector clean signal later
+arrives, its signal-specific settle and reread still apply normally; the
+operator authorization does not masquerade as that signal or inherit its
+handling. Report and escalate the stuck review at each expiry. The existing
+PR-wait heartbeat observes these clocks; neither the re-trigger nor the
+operator authorization is a new terminal signal or watcher mechanism. The
+longer request-anchored timer exists because a dropped request is
+indistinguishable from a review that is still processing, unlike the
+absent-request variant, where there is nothing to drop.
 
 If the PR is waiting only for remote checks or remote review state, keep it open
 and create or update a Codex heartbeat attached to the current thread with a

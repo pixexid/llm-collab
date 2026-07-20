@@ -97,24 +97,31 @@ def contract_invariants(text: str) -> dict[str, bool]:
         )
         in compact,
         "health_anchor": (
-            "after the previous health request completes or after that "
-            "request's `HEALTH_DEADLINE_MS` expires, never from dispatch"
+            "after the previous health request completes, never from dispatch. "
+            "A request that reaches its deadline instead ends that connection's "
+            "cadence epoch; no successor is scheduled from its expiry"
         )
         in compact,
         "health_no_overlap": (
-            "make an overlapping health request structurally impossible for "
-            "a conforming host"
+            "This completion-anchored cadence on a live initialized connection, "
+            "the timeout-ended cadence epoch, replacement-initialization re-anchor, "
+            "and the one-request bound make an overlapping health request "
+            "structurally impossible for a conforming host"
         )
         in compact,
+        "health_no_stale_overlap_rationale": (
+            "completion- or deadline-expiry-anchored cadence" not in compact
+        ),
         "health_no_forced_miss": (
             "A forced miss from overlap therefore cannot occur and is not a "
             "health-failure category"
         )
         in compact,
         "health_expiry_teardown": (
-            "the host MUST close that connection, terminate the old adapter "
-            "process, and confirm its exit before initializing any replacement "
-            "permitted by the current adapter-state gate"
+            "the host MUST record exactly one health failure at expiry, close "
+            "that connection, terminate the old adapter process, and confirm "
+            "its exit before initializing any replacement permitted by the "
+            "current adapter-state gate"
         )
         in compact,
         "health_replacement_admission": (
@@ -124,15 +131,33 @@ def contract_invariants(text: str) -> dict[str, bool]:
         )
         in compact,
         "health_fresh_replacement": (
-            "An expiry-anchored successor may be dispatched only after a "
-            "permitted replacement process completes the exact `initialize` "
-            "exchange, "
-            "never on the expired request's connection or process"
+            "the new initialized connection begins a fresh cadence epoch: its "
+            "first `runtime.health` is dispatched exactly `HEALTH_INTERVAL_MS` "
+            "after that successful replacement initialization"
+        )
+        in compact,
+        "health_no_expiry_catch_up": (
+            "The expired connection has no successor or expiry-anchored slot "
+            "to catch up, and no immediate catch-up dispatch occurs after a "
+            "slow initialization"
+        )
+        in compact,
+        "health_latency_is_neutral": (
+            "Teardown duration, replacement-initialization duration, and the "
+            "absence of a health call while no initialized connection exists "
+            "are not additional health failures and do not create a missed or "
+            "overlapping health request"
         )
         in compact,
         "health_failure_continuity": (
             "The endpoint's consecutive health-failure count survives that "
             "connection and process replacement"
+        )
+        in compact,
+        "health_recovery_reanchor": (
+            "The same re-anchored first-health rule applies when Clause 12 "
+            "admits and successfully initializes a recovery connection after "
+            "the threshold failure"
         )
         in compact,
         "health_threshold": (
@@ -161,8 +186,11 @@ def evaluate_case(text: str, case: dict[str, object]) -> object:
         return "cancelled" if requested == recorded else "refused_invalid_delivery"
     if scenario == "health_boundaries":
         interval = int(case["interval_ms"])
-        anchors = tuple(case["completion_or_expiry_anchors_ms"])
+        anchors = tuple(case["completion_anchors_ms"])
         return tuple(anchor + interval for anchor in anchors)
+    if scenario == "health_timeout_replacement":
+        initialization = int(case["replacement_initialization_ms"])
+        return initialization + int(case["interval_ms"])
     raise AssertionError(f"unknown scenario: {scenario}")
 
 
@@ -219,8 +247,15 @@ def paired_cases() -> tuple[dict[str, object], ...]:
         {
             "scenario": "health_boundaries",
             "interval_ms": 10_000,
-            "completion_or_expiry_anchors_ms": (0, 10_000, 20_000),
+            "completion_anchors_ms": (0, 10_000, 20_000),
             "expected": (10_000, 20_000, 30_000),
+        },
+        {
+            "scenario": "health_timeout_replacement",
+            "expired_at_ms": 5_000,
+            "replacement_initialization_ms": 23_000,
+            "interval_ms": 10_000,
+            "expected": 33_000,
         },
     )
     return tuple(
@@ -318,8 +353,12 @@ class RuntimeAdapterJsonRpcV1Tests(unittest.TestCase):
                 ),
             ),
             (
-                "cadence reanchored",
-                self.text.replace("never from dispatch", "from dispatch", 1),
+                "ordinary cadence reanchored",
+                self.text.replace(
+                    "never\n    from dispatch",
+                    "from dispatch",
+                    1,
+                ),
             ),
             (
                 "forced miss counted",
@@ -380,28 +419,49 @@ class RuntimeAdapterJsonRpcV1Tests(unittest.TestCase):
             (
                 "expired health process left active",
                 self.text.replace(
-                    "the host MUST close that connection, terminate the old\n"
-                    "    adapter process, and confirm its exit before "
-                    "initializing any replacement\n"
-                    "    permitted by the current adapter-state gate",
+                    "the host MUST record exactly one health failure at expiry,\n"
+                    "    close that connection, terminate the old adapter "
+                    "process, and confirm its\n"
+                    "    exit before initializing any replacement permitted by "
+                    "the current\n"
+                    "    adapter-state gate",
                     "the host MAY leave the old adapter process active",
                     1,
                 ),
             ),
             (
-                "successor dispatched on expired process",
+                "replacement reanchored to old expiry",
                 self.text.replace(
-                    "never on the expired request's connection or\n"
-                    "    process",
-                    "even on the expired request's connection or process",
+                    "after that\n"
+                    "    successful replacement initialization",
+                    "after the expired request's deadline",
+                    1,
+                ),
+            ),
+            (
+                "immediate catch-up allowed",
+                self.text.replace(
+                    "no immediate catch-up\n"
+                    "    dispatch occurs after a slow initialization",
+                    "an immediate catch-up dispatch occurs after initialization",
+                    1,
+                ),
+            ),
+            (
+                "teardown latency counted as another failure",
+                self.text.replace(
+                    "are not additional health failures and do\n"
+                    "    not create a missed or overlapping health request",
+                    "count as additional health failures",
                     1,
                 ),
             ),
             (
                 "failure count reset on replacement",
                 self.text.replace(
-                    "health-failure count survives that\n"
-                    "    connection and process replacement",
+                    "consecutive health-failure count survives that connection "
+                    "and process\n"
+                    "    replacement",
                     "health-failure count resets after connection replacement",
                     1,
                 ),
@@ -412,6 +472,19 @@ class RuntimeAdapterJsonRpcV1Tests(unittest.TestCase):
                     "only Clause 12's explicitly authorized recovery\n"
                     "    route can admit a replacement",
                     "an automatic replacement remains allowed",
+                    1,
+                ),
+            ),
+            (
+                "stale no-overlap rationale restored",
+                self.text.replace(
+                    "This completion-anchored cadence on a live initialized "
+                    "connection, the\n"
+                    "    timeout-ended cadence epoch, replacement-initialization "
+                    "re-anchor, and the\n"
+                    "    one-request",
+                    "This mandatory expiry teardown, completion- or "
+                    "deadline-expiry-anchored cadence, and the one-request bound",
                     1,
                 ),
             ),
