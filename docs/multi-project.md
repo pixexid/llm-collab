@@ -92,6 +92,7 @@ Edit `projects.json` (or regenerate with `python scripts/init.py`):
         "required_design_docs": ["/absolute/path/to/my-app/DESIGN.md"]
       },
       "db": {
+        "production_schema_guard": false,
         "shared_supabase_project_ref": "project-ref",
         "required_surfaces": ["supabase_my_app.execute_sql", "supabase CLI"]
       },
@@ -132,6 +133,18 @@ Set `db.shared_supabase_project_ref` and `db.required_surfaces` only for project
 that use the shared-Supabase task contract. Non-Amiga projects never inherit
 Amiga's project ref or MCP surface names; an unconfigured database lane must
 provide both values explicitly at task level.
+
+Projects that can ship DDL to a shared or production database may opt into the
+generic strict boolean `db.production_schema_guard`. Missing or `false` is
+default-off compatibility behavior; a present non-boolean fails closed. When
+enabled, schema changes cannot be classified as `none`, and
+`local-schema-only` means disposable development/test schema that will never be
+applied to a shared or production database. That exception requires the exact
+`dev-only-non-production` value, `operator` approver, and a non-empty reason.
+It never replaces the existing `shared-supabase-required` evidence. Resolution
+uses only the task's exact registered `project_id`; missing, empty, null,
+unknown, or foreign IDs never inherit another project's guard, ref, or tool
+surfaces.
 
 `claude_desktop_bridge` is an opt-in fallback for Claude targets that are not
 configured as CLI sessions. A CLI-session worker uses the project-independent AX

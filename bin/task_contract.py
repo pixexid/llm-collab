@@ -49,6 +49,9 @@ AMIGA_PROJECT_SPECIFIC_SUPABASE_SURFACES = {
     "supabase_amiga.get_advisors",
 }
 DB_IMPACT_VALUES = {"none", "local-schema-only", "shared-supabase-required"}
+PRODUCTION_SCHEMA_GUARD_STAGES = {"assignment", "review", "pr", "done"}
+DB_LOCAL_SCHEMA_ONLY_EXCEPTION = "dev-only-non-production"
+DB_LOCAL_SCHEMA_ONLY_APPROVER = "operator"
 DEFAULT_DESIGN_SKILLS = ["impeccable"]
 DESIGN_THINKING_DISPOSITIONS = {"shipped", "deferred", "out_of_scope"}
 DIRECT_APP_ONLY_LANE_TOKENS = {
@@ -138,11 +141,26 @@ IMPECCABLE_COMMAND_ALIASES = {
     "prompts:onboard": "/onboard",
     "prompts:live": "/live",
 }
+_PROJECT_UNSET = object()
 
 
-def _project_required_design_docs(frontmatter: dict) -> list[str]:
-    project_id = _normalize_text(frontmatter.get("project_id"))
-    project = get_project(project_id) if project_id else None
+def _exact_task_project(frontmatter: dict, project_override=_PROJECT_UNSET) -> dict | None:
+    project_id = frontmatter.get("project_id")
+    if not isinstance(project_id, str) or not project_id:
+        return None
+    project = get_project(project_id) if project_override is _PROJECT_UNSET else project_override
+    if (
+        not isinstance(project, dict)
+        or not isinstance(project.get("id"), str)
+        or project.get("id") != project_id
+    ):
+        return None
+    return project
+
+
+def _project_required_design_docs(frontmatter: dict, *, project_override=_PROJECT_UNSET) -> list[str]:
+    project_id = frontmatter.get("project_id")
+    project = _exact_task_project(frontmatter, project_override)
     ui_ux_config = project.get("ui_ux") if isinstance(project, dict) else None
     if isinstance(ui_ux_config, dict):
         configured = _normalize_list(ui_ux_config.get("required_design_docs"))
@@ -156,9 +174,9 @@ def _project_required_design_docs(frontmatter: dict) -> list[str]:
     return []
 
 
-def _project_db_contract(frontmatter: dict) -> tuple[str, list[str]]:
-    project_id = _normalize_text(frontmatter.get("project_id"))
-    project = get_project(project_id) if project_id else None
+def _project_db_contract(frontmatter: dict, *, project_override=_PROJECT_UNSET) -> tuple[str, list[str]]:
+    project_id = frontmatter.get("project_id")
+    project = _exact_task_project(frontmatter, project_override)
     db_config = project.get("db") if isinstance(project, dict) else None
     if isinstance(db_config, dict):
         project_ref = _normalize_text(db_config.get("shared_supabase_project_ref"))
@@ -233,6 +251,38 @@ DDL_PATH_MARKERS = (
     "/db/migrations/",
     "schema.sql",
 )
+
+
+def _production_schema_guard(
+    frontmatter: dict,
+    *,
+    project_override=_PROJECT_UNSET,
+) -> tuple[bool, bool, object, str]:
+    """Resolve the strict guard only from the task's exact registered project."""
+    project_id = _normalize_text(frontmatter.get("project_id"))
+    project = _exact_task_project(frontmatter, project_override)
+    if project is None:
+        return False, False, None, project_id
+    db_config = project.get("db")
+    configured = isinstance(db_config, dict) and "production_schema_guard" in db_config
+    raw_guard = db_config.get("production_schema_guard") if configured else None
+    return configured, raw_guard is True, raw_guard, project_id
+
+
+def _concrete_schema_paths(frontmatter: dict) -> list[str]:
+    hits: list[str] = []
+    for path in _normalize_list(frontmatter.get("related_paths")):
+        normalized = posixpath.normpath(path.replace("\\", "/")).lower()
+        if (
+            normalized == "db/schema.sql"
+            or normalized.endswith("/db/schema.sql")
+            or normalized == "db/migrations"
+            or normalized.endswith("/db/migrations")
+            or normalized.startswith("db/migrations/")
+            or "/db/migrations/" in normalized
+        ):
+            hits.append(path)
+    return hits
 
 
 def _normalize_list(value) -> list[str]:
@@ -406,10 +456,14 @@ def _is_repo_root_design_path(value, repo_roots: list[Path]) -> tuple[bool, str 
     return bool(parts) and parts[0].lower() == "design", None
 
 
-def validate_direct_app_policy(frontmatter: dict) -> tuple[list[str], dict]:
+def validate_direct_app_policy(
+    frontmatter: dict,
+    *,
+    project_override=_PROJECT_UNSET,
+) -> tuple[list[str], dict]:
     """Validate one task against its exact project's direct-app-only UI policy."""
     project_id = _normalize_text(frontmatter.get("project_id"))
-    project = get_project(project_id) if project_id else None
+    project = _exact_task_project(frontmatter, project_override)
     ui_ux_config = project.get("ui_ux") if isinstance(project, dict) else None
     configured = isinstance(ui_ux_config, dict) and "direct_app_only" in ui_ux_config
     raw_policy = ui_ux_config.get("direct_app_only") if configured else None
@@ -615,7 +669,12 @@ def detect_ui_ux_lane(frontmatter: dict, body: str = "") -> tuple[bool, str, lis
     return auto_ui, "auto", reasons, auto_mode
 
 
-def detect_db_contract(frontmatter: dict, body: str = "") -> tuple[str, str, list[str], bool]:
+def detect_db_contract(
+    frontmatter: dict,
+    body: str = "",
+    *,
+    project_override=_PROJECT_UNSET,
+) -> tuple[str, str, list[str], bool]:
     explicit_impact = _normalize_text(frontmatter.get("db_impact"))
     explicit_schema_change = frontmatter.get("db_schema_change_detected")
     schema_change_detection = _normalize_text(frontmatter.get("db_schema_change_detection"))
@@ -639,6 +698,12 @@ def detect_db_contract(frontmatter: dict, body: str = "") -> tuple[str, str, lis
     schema_change_detected = bool(schema_path_hits) or _has_any_marker(body_lower, DDL_BODY_MARKERS)
     if schema_change_detection in {"manual_true", "manual_false"} and isinstance(explicit_schema_change, bool):
         schema_change_detected = explicit_schema_change
+    _configured, production_guard_enabled, _raw_guard, _project_id = _production_schema_guard(
+        frontmatter,
+        project_override=project_override,
+    )
+    if production_guard_enabled and _concrete_schema_paths(frontmatter):
+        schema_change_detected = True
 
     if explicit_impact in DB_IMPACT_VALUES:
         return explicit_impact, "manual", reasons or ["manual override"], schema_change_detected
@@ -647,9 +712,15 @@ def detect_db_contract(frontmatter: dict, body: str = "") -> tuple[str, str, lis
     return auto_impact, "auto", reasons, schema_change_detected
 
 
-def sync_ui_ux_contract(frontmatter: dict, body: str) -> tuple[dict, list[str]]:
+def sync_ui_ux_contract(
+    frontmatter: dict,
+    body: str,
+    *,
+    project_override=_PROJECT_UNSET,
+) -> tuple[dict, list[str]]:
     updated = dict(frontmatter)
     changed: list[str] = []
+    project = _exact_task_project(frontmatter, project_override)
 
     ui_lane, detection_mode, reasons, auto_mode = detect_ui_ux_lane(updated, body)
     if updated.get("ui_ux_lane") != ui_lane:
@@ -671,8 +742,11 @@ def sync_ui_ux_contract(frontmatter: dict, body: str) -> tuple[dict, list[str]]:
             updated["ui_ux_mode"] = next_mode
             changed.append("ui_ux_mode")
 
-        project_id = _normalize_text(updated.get("project_id"))
-        project_required_docs = _project_required_design_docs(updated)
+        project_id = updated.get("project_id")
+        project_required_docs = _project_required_design_docs(
+            updated,
+            project_override=project,
+        )
         required_docs = _normalize_list(updated.get("required_design_docs"))
         if project_id != "amiga":
             required_docs = [doc for doc in required_docs if doc != AMIGA_DESIGN_DOC]
@@ -743,11 +817,21 @@ def sync_ui_ux_contract(frontmatter: dict, body: str) -> tuple[dict, list[str]]:
     return updated, changed
 
 
-def sync_db_contract(frontmatter: dict, body: str) -> tuple[dict, list[str]]:
+def sync_db_contract(
+    frontmatter: dict,
+    body: str,
+    *,
+    project_override=_PROJECT_UNSET,
+) -> tuple[dict, list[str]]:
     updated = dict(frontmatter)
     changed: list[str] = []
+    project = _exact_task_project(frontmatter, project_override)
 
-    db_impact, detection_mode, reasons, schema_change_detected = detect_db_contract(updated, body)
+    db_impact, detection_mode, reasons, schema_change_detected = detect_db_contract(
+        updated,
+        body,
+        project_override=project,
+    )
     if updated.get("db_impact") != db_impact:
         updated["db_impact"] = db_impact
         changed.append("db_impact")
@@ -767,10 +851,13 @@ def sync_db_contract(frontmatter: dict, body: str) -> tuple[dict, list[str]]:
             changed.append("db_schema_change_detection")
 
     if db_impact == "shared-supabase-required":
-        project_ref, project_required_surfaces = _project_db_contract(updated)
+        project_ref, project_required_surfaces = _project_db_contract(
+            updated,
+            project_override=project,
+        )
         existing_project_ref = _normalize_text(updated.get("db_project_ref"))
         existing_required_surfaces = _normalize_list(updated.get("db_required_surfaces"))
-        project_id = _normalize_text(updated.get("project_id"))
+        project_id = updated.get("project_id")
         if project_id != "amiga" and existing_project_ref == AMIGA_SHARED_SUPABASE_PROJECT_REF:
             existing_project_ref = ""
         if project_id != "amiga":
@@ -812,14 +899,34 @@ def sync_db_contract(frontmatter: dict, body: str) -> tuple[dict, list[str]]:
 
 
 def sync_task_contract(frontmatter: dict, body: str) -> tuple[dict, list[str]]:
-    synced_ui, ui_changed = sync_ui_ux_contract(frontmatter, body)
-    synced_db, db_changed = sync_db_contract(synced_ui, body)
+    project = _exact_task_project(frontmatter)
+    synced_ui, ui_changed = sync_ui_ux_contract(
+        frontmatter,
+        body,
+        project_override=project,
+    )
+    synced_db, db_changed = sync_db_contract(
+        synced_ui,
+        body,
+        project_override=project,
+    )
     return synced_db, ui_changed + db_changed
 
 
-def validate_ui_ux_contract(frontmatter: dict, body: str, *, stage: str) -> tuple[list[str], dict]:
+def validate_ui_ux_contract(
+    frontmatter: dict,
+    body: str,
+    *,
+    stage: str,
+    project_override=_PROJECT_UNSET,
+) -> tuple[list[str], dict]:
     errors: list[str] = []
-    fm, _ = sync_ui_ux_contract(frontmatter, body)
+    project = _exact_task_project(frontmatter, project_override)
+    fm, _ = sync_ui_ux_contract(
+        frontmatter,
+        body,
+        project_override=project,
+    )
     ui_lane = bool(fm.get("ui_ux_lane"))
     summary = {
         "ui_ux_lane": ui_lane,
@@ -952,9 +1059,21 @@ def validate_ui_ux_contract(frontmatter: dict, body: str, *, stage: str) -> tupl
     return errors, summary
 
 
-def validate_db_contract(frontmatter: dict, body: str, *, stage: str) -> tuple[list[str], dict]:
+def validate_db_contract(
+    frontmatter: dict,
+    body: str,
+    *,
+    stage: str,
+    transition: bool = False,
+    project_override=_PROJECT_UNSET,
+) -> tuple[list[str], dict]:
     errors: list[str] = []
-    fm, _ = sync_db_contract(frontmatter, body)
+    project = _exact_task_project(frontmatter, project_override)
+    fm, _ = sync_db_contract(
+        frontmatter,
+        body,
+        project_override=project,
+    )
     db_impact = _normalize_text(fm.get("db_impact"))
     raw_project_ref = _normalize_text(frontmatter.get("db_project_ref"))
     summary = {
@@ -965,6 +1084,63 @@ def validate_db_contract(frontmatter: dict, body: str, *, stage: str) -> tuple[l
         "db_schema_change_detected": _normalize_bool(fm.get("db_schema_change_detected")) is True,
     }
 
+    configured, production_guard_enabled, raw_guard, project_id = _production_schema_guard(
+        frontmatter,
+        project_override=project,
+    )
+    concrete_schema_paths = _concrete_schema_paths(frontmatter)
+    summary["production_schema_guard"] = {
+        "project_id": project_id or None,
+        "configured": configured,
+        "enabled": production_guard_enabled,
+        "concrete_schema_paths": concrete_schema_paths,
+    }
+
+    historical_done = (
+        stage == "done"
+        and _normalize_text(frontmatter.get("status")) == "done"
+        and not transition
+    )
+    enforce_production_guard = stage in PRODUCTION_SCHEMA_GUARD_STAGES and not historical_done
+    if enforce_production_guard and configured and not isinstance(raw_guard, bool):
+        errors.append(
+            f"Project {project_id!r} has malformed `db.production_schema_guard`: expected "
+            f"boolean true or false, found {raw_guard!r}; repair this task project's "
+            f"{project_id!r} entry in projects.json at key `db.production_schema_guard`."
+        )
+
+    schema_change_detected = _normalize_bool(fm.get("db_schema_change_detected")) is True
+    if production_guard_enabled and concrete_schema_paths:
+        schema_change_detected = True
+        summary["db_schema_change_detected"] = True
+
+    if enforce_production_guard and production_guard_enabled and schema_change_detected:
+        if db_impact == "none":
+            errors.append(
+                f"Project {project_id!r} enables `db.production_schema_guard: true`; "
+                "a schema-changing task cannot set `db_impact: none`."
+            )
+        elif db_impact == "local-schema-only":
+            if frontmatter.get("db_local_schema_only_exception") != DB_LOCAL_SCHEMA_ONLY_EXCEPTION:
+                errors.append(
+                    "Production local-schema-only exception requires "
+                    "`db_local_schema_only_exception: dev-only-non-production`."
+                )
+            if (
+                frontmatter.get("db_local_schema_only_exception_approved_by")
+                != DB_LOCAL_SCHEMA_ONLY_APPROVER
+            ):
+                errors.append(
+                    "Production local-schema-only exception requires "
+                    "`db_local_schema_only_exception_approved_by: operator`."
+                )
+            exception_reason = frontmatter.get("db_local_schema_only_exception_reason")
+            if not isinstance(exception_reason, str) or not exception_reason.strip():
+                errors.append(
+                    "Production local-schema-only exception requires a non-empty "
+                    "`db_local_schema_only_exception_reason`."
+                )
+
     if db_impact not in DB_IMPACT_VALUES:
         errors.append("Task must classify `db_impact` as none, local-schema-only, or shared-supabase-required.")
         return errors, summary
@@ -972,7 +1148,10 @@ def validate_db_contract(frontmatter: dict, body: str, *, stage: str) -> tuple[l
     if db_impact != "shared-supabase-required":
         return errors, summary
 
-    project_ref, project_required_surfaces = _project_db_contract(fm)
+    project_ref, project_required_surfaces = _project_db_contract(
+        fm,
+        project_override=project,
+    )
     if project_ref and raw_project_ref != project_ref:
         errors.append(f"Shared Supabase lane must set project-configured `db_project_ref: {project_ref}`.")
     elif not project_ref and not raw_project_ref:
@@ -994,7 +1173,7 @@ def validate_db_contract(frontmatter: dict, body: str, *, stage: str) -> tuple[l
             "explicit task-level `db_required_surfaces`."
         )
 
-    if stage in {"review", "pr"}:
+    if stage in {"review", "pr"} or (stage == "done" and not historical_done):
         if _normalize_bool(fm.get("db_schema_change_detected")) is True and not _normalize_list(
             fm.get("db_migration_files")
         ):
@@ -1013,16 +1192,39 @@ def validate_db_contract(frontmatter: dict, body: str, *, stage: str) -> tuple[l
     return errors, summary
 
 
-def validate_task_contract(frontmatter: dict, body: str, *, stage: str) -> tuple[list[str], dict]:
+def validate_task_contract(
+    frontmatter: dict,
+    body: str,
+    *,
+    stage: str,
+    transition: bool = False,
+    project_override=_PROJECT_UNSET,
+) -> tuple[list[str], dict]:
     project_id = _normalize_text(frontmatter.get("project_id"))
+    project = _exact_task_project(frontmatter, project_override)
     project_errors: list[str] = []
     if not project_id:
         project_errors.append("Task must set a registered `project_id`.")
-    elif get_project(project_id) is None:
-        project_errors.append(f"Task references unknown `project_id: {project_id}`.")
-    direct_app_errors, direct_app_summary = validate_direct_app_policy(frontmatter)
-    ui_errors, ui_summary = validate_ui_ux_contract(frontmatter, body, stage=stage)
-    db_errors, db_summary = validate_db_contract(frontmatter, body, stage=stage)
+    else:
+        if project is None:
+            project_errors.append(f"Task references unknown `project_id: {project_id}`.")
+    direct_app_errors, direct_app_summary = validate_direct_app_policy(
+        frontmatter,
+        project_override=project,
+    )
+    ui_errors, ui_summary = validate_ui_ux_contract(
+        frontmatter,
+        body,
+        stage=stage,
+        project_override=project,
+    )
+    db_errors, db_summary = validate_db_contract(
+        frontmatter,
+        body,
+        stage=stage,
+        transition=transition,
+        project_override=project,
+    )
     return project_errors + direct_app_errors + ui_errors + db_errors, {
         "project": {"project_id": project_id or None, "registered": bool(project_id and not project_errors)},
         "direct_app": direct_app_summary,
@@ -1171,7 +1373,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     validate = sub.add_parser("validate", help="Validate task contract/evidence.")
     validate.add_argument("--task", required=True, help="TASK-id")
-    validate.add_argument("--stage", required=True, choices=["assignment", "review", "pr"])
+    validate.add_argument(
+        "--stage",
+        required=True,
+        choices=["assignment", "review", "pr", "done"],
+    )
     validate.add_argument("--json", action="store_true", help="Emit JSON result.")
     validate.set_defaults(func=command_validate)
 

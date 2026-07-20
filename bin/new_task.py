@@ -35,7 +35,7 @@ from _helpers import (
     utc_iso,
     write_file,
 )
-from task_contract import sync_task_contract, validate_direct_app_policy
+from task_contract import sync_task_contract, validate_direct_app_policy, validate_task_contract
 
 
 def parse_args():
@@ -152,15 +152,24 @@ def main():
 """
 
     fm, _ = sync_task_contract(fm, body)
-    direct_app_errors, direct_app_summary = validate_direct_app_policy(fm)
-    if direct_app_errors:
+    if args.status == "in_progress":
+        contract_errors, contract_summary = validate_task_contract(
+            fm,
+            body,
+            stage="assignment",
+        )
+        rejection = "assignment contract rejected direct in_progress task creation before write"
+    else:
+        contract_errors, contract_summary = validate_direct_app_policy(fm)
+        rejection = "project direct-app policy rejected task creation before write"
+    if contract_errors:
         print(
             json.dumps(
                 {
-                    "error": "project direct-app policy rejected task creation before write",
+                    "error": rejection,
                     "task_id": tid,
-                    "contract": direct_app_summary,
-                    "problems": direct_app_errors,
+                    "contract": contract_summary,
+                    "problems": contract_errors,
                 },
                 indent=2,
             ),

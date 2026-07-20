@@ -99,6 +99,7 @@ def build_release_evidence_record(
     released_by: str | None,
     raw_evidence: str | None,
     *,
+    body: str = "",
     evaluator=None,
     evaluated_at: str | None = None,
 ) -> dict:
@@ -118,6 +119,20 @@ def build_release_evidence_record(
     if project is None:
         raise ReleaseGateError(
             f"task project_id {project_id!r} is not registered in projects.json"
+        )
+
+    target_frontmatter = dict(frontmatter)
+    target_frontmatter["status"] = "done"
+    contract_errors, _contract_summary = validate_task_contract(
+        target_frontmatter,
+        body,
+        stage="done",
+        transition=True,
+        project_override=project,
+    )
+    if contract_errors:
+        raise ReleaseGateError(
+            "done target-state task contract is incomplete: " + "; ".join(contract_errors)
         )
 
     if "release_gate_agent" not in project:
@@ -400,6 +415,7 @@ def main():
                 old_status,
                 args.released_by,
                 args.release_evidence,
+                body=body,
             )
         except ReleaseGateError as error:
             print(

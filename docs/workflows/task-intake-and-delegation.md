@@ -369,6 +369,12 @@ tasks already marked `done` are grandfathered because the gate applies only to
 new transitions. If the gate itself must be rolled back, revert its code/config
 change; never bypass a refusal by moving or editing the task manually.
 
+Inside step 2, `claim_task.py` first validates the target-state task contract at
+stage `done`, before its release evaluator or any task/activity/queue mutation.
+`success`, `non-production`, and `risk-accepted-followup` cannot bypass missing
+shared-database evidence. `post_merge_cleanup.py` verifies already-closed task
+state; it is not an alternate done-transition authority.
+
 For UI/UX lanes, also require:
 - `ui_ux_lane: true`
 - `ui_ux_mode: implementation | docs_only`
@@ -386,6 +392,17 @@ For DB lanes, also require:
 - `db_impact_detection_reasons`
 - for `shared-supabase-required`: `db_project_ref` and `db_required_surfaces`
 
+If the task's exact project enables strict boolean
+`db.production_schema_guard: true`, assignment/review/PR/done validation also
+refuses schema work classified as `none`. `local-schema-only` is limited to
+disposable development/test schema that will never reach shared or production
+and requires `db_local_schema_only_exception: dev-only-non-production`,
+`db_local_schema_only_exception_approved_by: operator`, and a non-empty
+`db_local_schema_only_exception_reason`. Concrete `db/migrations/**` and exact
+`db/schema.sql` paths cannot be hidden by `manual_false`; documentation-only
+body matches can. Missing/false guard values preserve existing behavior, while
+a present non-boolean fails closed at the exact project registry entry.
+
 Use the contract helper instead of hand-editing guesses:
 
 ```bash
@@ -399,6 +416,10 @@ If a lane should be forced on/off instead of auto-detected:
 ```
 
 DB clarification:
+- the dev-only `local-schema-only` exception is a classification exception, not
+  an evidence bypass; if the lane is `shared-supabase-required`, all existing
+  ref, surface, migration, apply, assertion, advisor, and runtime evidence still
+  applies
 - if a lane touches the Amiga shared Supabase schema or depends on shared DB state, do not treat a separate “local DB” as the acceptance database
 - the acceptance database is the shared/live Amiga Supabase project
 - workers must use the CLI + `supabase_amiga` MCP workflow instead of guessing from migration files alone

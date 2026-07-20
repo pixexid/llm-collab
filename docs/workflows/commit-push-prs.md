@@ -433,6 +433,15 @@ docs-only or otherwise non-production-impacting merge exits via an explicit
 scope disposition (recorded as such); a skipped deploy is never called deploy
 success.
 
+Within the `review → done` command, the target-state task contract is validated
+at stage `done` before the release evaluator and before activity/task/queue
+mutation. For projects with `db.production_schema_guard: true` this blocks `none` or
+unapproved `local-schema-only` classification and preserves every required
+`shared-supabase-required` evidence field across `success`, `non-production`,
+and `risk-accepted-followup` dispositions. Existing done history remains
+grandfathered. Post-merge cleanup is verification/application only, never an
+alternate transition path.
+
 For `llm-collab` itself, the shared local checkout is part of the shipped
 workflow. After a PR that changes workflow docs, scripts, gates, skills, agent
 routing, or queue behavior merges, fast-forward the canonical local checkout
