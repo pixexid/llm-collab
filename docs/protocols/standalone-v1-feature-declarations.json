@@ -1,0 +1,11 @@
+{
+  "declaration_version": 1,
+  "declaration_id": "https://llm-collab.dev/declarations/standalone/v1/feature-declarations.json",
+  "features": {
+    "daemon_observation": false,
+    "canonical_writes": false,
+    "runtime_dispatch": false,
+    "ax_v2": false,
+    "remote_transport": false
+  }
+}
