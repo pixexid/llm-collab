@@ -224,6 +224,9 @@ class ReviewLoopCapContractTest(unittest.TestCase):
             (
                 review_policy,
                 (
+                    "An explicitly requested review does not enter this ageing "
+                    "rule",
+                    "it does not waive post-signal handling",
                     "the approximately five-minute post-clean settle and full "
                     "review/thread/reaction re-read remain mandatory before merge",
                     "these are the only two exact-head terminal signal models",
@@ -650,7 +653,7 @@ class ReviewLoopCapContractTest(unittest.TestCase):
 
         self.assert_scenario_cases("wait_gate_precedence", check)
 
-    def test_wait_gate_guards_reject_five_frozen_mutations(self):
+    def test_wait_gate_guards_reject_seven_frozen_mutations(self):
         self.assert_wait_gate_residual_contract(
             self.workflow_text,
             self.handoff_text,
@@ -687,6 +690,18 @@ class ReviewLoopCapContractTest(unittest.TestCase):
                 "[Explicit requested-review precedence]"
                 "(commit-push-prs.md#explicit-requested-review-precedence)",
                 "Explicit requested-review precedence",
+            ),
+            (
+                "explicit request also enters 15-minute ageing",
+                "workflow",
+                "does not enter this ageing",
+                "also enters this ageing",
+            ),
+            (
+                "generic terminal signal waives post-signal handling",
+                "workflow",
+                "it does not waive post-signal handling",
+                "it waives post-signal handling",
             ),
         )
         for name, target, old, new in mutations:
