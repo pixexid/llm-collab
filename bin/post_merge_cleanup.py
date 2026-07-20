@@ -310,8 +310,6 @@ def classify(args: argparse.Namespace) -> dict[str, Any]:
         lines = status_lines(record.path)
         task = task_from_branch(record.branch or "", by_id, by_branch) if record.branch else None
         is_done_task = bool(task and task.status == "done")
-        is_review_branch = bool(record.branch and record.branch.startswith("codex/review/"))
-        is_detached = record.branch is None
         is_clean = not lines
         disposable_dirty = bool(lines and only_disposable_status(lines))
         merged = bool(record.branch and branch_merged(repo, record.branch, args.base))
@@ -319,10 +317,6 @@ def classify(args: argparse.Namespace) -> dict[str, Any]:
         reason = None
         if is_done_task and (is_clean or (args.discard_disposable_dirty and disposable_dirty)):
             reason = "done-task-clean" if is_clean else "done-task-disposable-dirty"
-        elif is_review_branch and merged and (is_clean or (args.discard_disposable_dirty and disposable_dirty)):
-            reason = "merged-review-branch"
-        elif is_detached and is_clean:
-            reason = "clean-detached-worktree"
 
         payload = {
             "path": str(record.path),
@@ -349,10 +343,6 @@ def classify(args: argparse.Namespace) -> dict[str, Any]:
         reason = None
         if task and task.status == "done":
             reason = "done-task-branch"
-        elif branch.startswith("codex/review/") and merged:
-            reason = "merged-review-branch"
-        elif merged and (branch.startswith("codex/") or branch.startswith("claude/") or branch.startswith("gemini/")):
-            reason = "merged-worker-branch"
         payload = {
             "branch": branch,
             "task_id": task.task_id if task else None,
@@ -362,8 +352,8 @@ def classify(args: argparse.Namespace) -> dict[str, Any]:
         }
         if reason:
             remove_branches.append(payload)
-        elif branch.startswith(("codex/", "claude/", "gemini/")):
-            payload["defer_reason"] = "no done task or merged-review signal"
+        else:
+            payload["defer_reason"] = branch_defer_reason(task, merged)
             deferred_branches.append(payload)
 
     plain_dirs = collect_plain_dirs(worktree_root, registered_paths) if args.remove_plain_dirs else []
@@ -394,15 +384,7 @@ def classify(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def is_blocking_deferred(item: dict[str, Any]) -> bool:
-    task_status = item.get("task_status")
-    branch = item.get("branch")
-    if task_status == "done":
-        return True
-    if isinstance(branch, str) and branch.startswith("codex/review/") and item.get("merged_to_base"):
-        return True
-    if branch is None and item.get("dirty"):
-        return True
-    return False
+    return item.get("task_status") == "done" or (item.get("branch") is None and bool(item.get("dirty")))
 
 
 def defer_reason(record: WorktreeRecord, task: TaskRecord | None, lines: list[str], merged: bool) -> str:
@@ -412,11 +394,19 @@ def defer_reason(record: WorktreeRecord, task: TaskRecord | None, lines: list[st
         return "dirty-disposable-but-discard-not-enabled"
     if task and task.status != "done":
         return f"task-status-{task.status}"
-    if record.branch and not merged and not task:
-        return "branch-not-merged-and-no-task-match"
+    if record.branch and not task:
+        return "no-task-match-merged" if merged else "no-task-match-not-merged"
     if record.branch:
-        return "no cleanup signal"
-    return "detached-dirty-or-unknown"
+        return "no-done-task"
+    return "no-task-detached-worktree"
+
+
+def branch_defer_reason(task: TaskRecord | None, merged: bool) -> str:
+    if task and task.status != "done":
+        return f"task-status-{task.status}"
+    if not task:
+        return "no-task-match-merged" if merged else "no-task-match-not-merged"
+    return "no-done-task"
 
 
 def restore_disposable(path: Path, lines: list[str]) -> None:
