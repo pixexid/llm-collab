@@ -19,23 +19,50 @@ def normalized(text: str) -> str:
 
 def contract_invariants(text: str) -> dict[str, bool]:
     compact = normalized(text)
-    deadline_match = re.search(
-        r"`HEALTH_DEADLINE_MS`, fixed at ([\d,]+) milliseconds", compact
+    cancel_shape = normalized(
+        text.split("- `runtime.cancel` params", 1)[1].split(
+            "- `runtime.reconcile` params",
+            1,
+        )[0]
     )
-    interval_match = re.search(
-        r"`HEALTH_INTERVAL_MS`, fixed at ([\d,]+) milliseconds", compact
+    deadline_values = tuple(
+        int(value.replace(",", ""))
+        for value in re.findall(
+            r"`HEALTH_DEADLINE_MS`, fixed at ([\d,]+) milliseconds",
+            compact,
+        )
     )
-    deadline = int(deadline_match.group(1).replace(",", "")) if deadline_match else 0
-    interval = int(interval_match.group(1).replace(",", "")) if interval_match else 0
+    interval_values = tuple(
+        int(value.replace(",", ""))
+        for value in re.findall(
+            r"`HEALTH_INTERVAL_MS`, fixed at ([\d,]+) milliseconds",
+            compact,
+        )
+    )
     return {
         "cancel_params": (
             "`runtime.cancel` params contain exactly `session_ref`, "
             "`original_request_id`, `delivery_id`, and `attempt_id`"
         )
         in compact,
+        "cancel_s2_scalars": (
+            "the last two values use the exact S2 `DeliveryV1.delivery_id` and "
+            "`DeliveryV1.attempt_id` scalar definitions"
+        )
+        in cancel_shape,
         "cancel_result": (
             "Its success result contains exactly `original_request_id`, "
             "`delivery_id`, `attempt_id`, and `status`"
+        )
+        in compact,
+        "cancel_result_shape_equality": (
+            "The first three members equal their params members in JSON type "
+            "and value"
+        )
+        in cancel_shape,
+        "cancel_normative_result_equality": (
+            "all three identity members MUST equal their params members in "
+            "JSON type and value"
         )
         in compact,
         "cancel_match": (
@@ -54,7 +81,13 @@ def contract_invariants(text: str) -> dict[str, bool]:
             "`(original_request_id, delivery_id, attempt_id)` triple"
         )
         in compact,
-        "health_deadline": 0 < deadline < interval,
+        "health_deadline_values": deadline_values == (5_000, 5_000),
+        "health_interval_value": interval_values == (10_000,),
+        "health_deadline_below_interval": (
+            bool(deadline_values)
+            and bool(interval_values)
+            and max(deadline_values) < interval_values[0]
+        ),
         "health_scope": (
             "`runtime.health` alone uses `HEALTH_DEADLINE_MS`, fixed at 5,000 "
             "milliseconds"
@@ -191,35 +224,89 @@ class RuntimeAdapterJsonRpcV1Tests(unittest.TestCase):
 
     def test_frozen_mutations_fail(self) -> None:
         mutations = (
-            self.text.replace(
-                "`runtime.cancel` params contain exactly `session_ref`,\n"
-                "  `original_request_id`, `delivery_id`, and `attempt_id`",
-                "`runtime.cancel` params contain exactly `session_ref` and\n"
-                "  `original_request_id`",
-                1,
+            (
+                "cancel params reverted",
+                self.text.replace(
+                    "`runtime.cancel` params contain exactly `session_ref`,\n"
+                    "  `original_request_id`, `delivery_id`, and `attempt_id`",
+                    "`runtime.cancel` params contain exactly `session_ref` and\n"
+                    "  `original_request_id`",
+                    1,
+                ),
             ),
-            self.text.replace(
-                "adapter MUST refuse cancellation unless the complete",
-                "adapter MAY accept cancellation without checking the complete",
-                1,
+            (
+                "triple match removed",
+                self.text.replace(
+                    "adapter MUST refuse cancellation unless the complete",
+                    "adapter MAY accept cancellation without checking the complete",
+                    1,
+                ),
             ),
-            self.text.replace(
-                "`HEALTH_DEADLINE_MS`, fixed at 5,000\n"
-                "   milliseconds from receipt",
-                "`HEALTH_DEADLINE_MS`, fixed at 10,000\n"
-                "   milliseconds from receipt",
-                1,
+            (
+                "clause 3 deadline raised",
+                self.text.replace(
+                    "`HEALTH_DEADLINE_MS`, fixed at 5,000\n"
+                    "   milliseconds from receipt",
+                    "`HEALTH_DEADLINE_MS`, fixed at 10,000\n"
+                    "   milliseconds from receipt",
+                    1,
+                ),
             ),
-            self.text.replace("never from dispatch", "from dispatch", 1),
-            self.text.replace(
-                "cannot occur and is not a health-failure category",
-                "counts as one failed response",
-                1,
+            (
+                "cadence reanchored",
+                self.text.replace("never from dispatch", "from dispatch", 1),
+            ),
+            (
+                "forced miss counted",
+                self.text.replace(
+                    "cannot occur and is not a health-failure category",
+                    "counts as one failed response",
+                    1,
+                ),
+            ),
+            (
+                "clause 11 deadline raised",
+                self.text.replace(
+                    "inside `HEALTH_DEADLINE_MS`, fixed at\n"
+                    "    5,000 milliseconds for `runtime.health` only",
+                    "inside `HEALTH_DEADLINE_MS`, fixed at\n"
+                    "    10,000 milliseconds for `runtime.health` only",
+                    1,
+                ),
+            ),
+            (
+                "health interval changed",
+                self.text.replace(
+                    "`HEALTH_INTERVAL_MS`, fixed at 10,000 milliseconds",
+                    "`HEALTH_INTERVAL_MS`, fixed at 20,000 milliseconds",
+                    1,
+                ),
+            ),
+            (
+                "S2 scalar binding removed",
+                self.text.replace(
+                    "the last two values use the\n"
+                    "  exact S2 `DeliveryV1.delivery_id` and "
+                    "`DeliveryV1.attempt_id` scalar\n"
+                    "  definitions",
+                    "the last two values are arbitrary strings",
+                    1,
+                ),
+            ),
+            (
+                "result equality removed",
+                self.text.replace(
+                    "The first three members equal\n"
+                    "  their params members in JSON type and value",
+                    "The first three members may differ from their params members",
+                    1,
+                ),
             ),
         )
-        self.assertEqual(len(set(mutations)), len(mutations))
-        for mutated in mutations:
-            with self.subTest():
+        mutated_texts = [mutated for _name, mutated in mutations]
+        self.assertEqual(len(set(mutated_texts)), len(mutated_texts))
+        for name, mutated in mutations:
+            with self.subTest(mutation=name):
                 self.assertNotEqual(mutated, self.text)
                 self.assertIn(False, contract_invariants(mutated).values())
 
