@@ -107,17 +107,27 @@ supplement, or combine with it.
   plus the exact trusted manifest/initialized binding. Use
   `INITIALIZE_REQUIRED`, `UNSUPPORTED_PROTOCOL_VERSION`, or
   `UNTRUSTED_MANIFEST_INPUT` as applicable.
-- **P5 — session target.** For a session method, validate the complete
-  `SessionRefV1` against the trusted registry, initialized endpoint, workspace,
-  and discriminated scope. Any failure at this step is `INVALID_SESSION_REF`,
-  even if the same input would later lack capability authority.
-- **P6 — capability authority.** Validate the exact endpoint-bound
-  `CapabilitySetV1`, trusted profile, and action authorization under Clause 6.
-  Any failure at this step is `CAPABILITY_NOT_DECLARED`. Thus a valid session
-  without the exact applicable capability authority is not reclassified as a
-  session error.
+- **P5 — session target.** For a session method, validate only the already
+  shape-valid `SessionRefV1`'s exact trusted registry/session identity and
+  binding proof under Clause 7: workspace and discriminated scope, endpoint,
+  session-ref and native-session identities, optional repository binding,
+  exact-session-binding evidence integrity/kind/quality/authority kind and
+  subjects, and adapter authority identity/implementation revision. P5 MUST
+  NOT inspect either `authority.capability_profile_*` field, a trusted
+  capability-profile revision, the action relation, or any `CapabilitySetV1`
+  entry, quality, constraints, or attestation. Any P5 failure is only
+  `INVALID_SESSION_REF`.
+- **P6 — capability authority.** Validate only the exact endpoint-bound
+  `CapabilitySetV1` and trusted profile, the deterministic session-action
+  relation, and every relevant `StateEvidenceV1` capability-profile
+  id/revision, entry, quality ceiling, constraints, and attestation under
+  Clause 6. Any P6 failure is only `CAPABILITY_NOT_DECLARED`, including a
+  capability-profile failure inside an otherwise identity-valid
+  `SessionRefV1`. P6 MUST NOT reclassify that failure as
+  `INVALID_SESSION_REF`.
 - **P7 — delivery and reconciliation identity.** Validate `DeliveryV1`,
-  `ReceiptV1`, canonical-ledger cross-identities, and reconciliation truth.
+  `ReceiptV1`, non-capability evidence/canonical-ledger cross-identities, and
+  reconciliation truth.
   After a valid session and capability, mismatched
   delivery/message/attempt/endpoint/session/evidence identities are
   `INVALID_DELIVERY`. For reconciliation, absent authoritative observation or
@@ -130,6 +140,20 @@ supplement, or combine with it.
   cancellation, reconciliation uncertainty, stderr overflow, redaction
   failure, or otherwise internal failure uses only its corresponding Clause 13
   code. Such execution failures do not reopen earlier validation steps.
+
+The P5/P6 boundary is exhaustive and non-overlapping:
+
+| Validation fact | Pipeline stage | Sole classification |
+|---|---|---|
+| `SessionRefV1` registry identity; workspace/scope/project presence; endpoint, session-ref, native-session, or repository binding; binding-evidence integrity/kind/authoritative quality/authority kind/subject; or binding-evidence adapter identity/implementation revision | P5 | `INVALID_SESSION_REF` |
+| Session-method relation lookup; exact capability-set/profile binding; or any carried `StateEvidenceV1.authority.capability_profile_id`/`capability_profile_revision`, selected entry, quality ceiling, constraints, or attestation | P6 | `CAPABILITY_NOT_DECLARED` |
+| `DeliveryV1`/`ReceiptV1` canonical or non-capability evidence cross-identity after P6 succeeds | P7 | `INVALID_DELIVERY` or, only for unresolved reconciliation truth, `RECONCILIATION_REQUIRED` |
+
+A record can fail more than one fact, but ordered validation reports only the
+first row reached. In particular, a shape-valid, identity-valid session whose
+binding evidence names a missing or stale capability profile passes P5 and
+fails only P6 as `CAPABILITY_NOT_DECLARED`; it can never also produce
+`INVALID_SESSION_REF`.
 
 The method-specific shapes are:
 
@@ -304,56 +328,116 @@ The method-specific shapes are:
 
    Before any post-initialize invocation, the host MUST revalidate the exact
    initialized adapter, manifest, endpoint, and capability-set identities and
-   independent revisions against the trusted registry and profile. For a
-   session action, the trusted local profile MUST authorize it through the
-   exact applicable non-`unsupported` entry already present in
-   `CapabilitySetV1`, and the invocation MUST satisfy its declared constraints.
-   Every canonical `StateEvidenceV1` carried by the applicable
-   `SessionRefV1`, `DeliveryV1`, or `ReceiptV1` MUST bind
-   `authority.capability_profile_id` to that exact existing capability entry
-   and MUST bind both the trusted profile revision and
-   `authority.capability_profile_revision` to `CapabilitySetV1.revision`.
-   Independently, its `authority.identity` and
-   `authority.implementation_revision` MUST equal
-   `EndpointV1.adapter_name` and `EndpointV1.adapter_revision`, and the
-   applicable capability attestation MUST carry those same values as
-   `source_id` and `source_revision`. This protocol does not create a
-   capability-name namespace, require a JSON-RPC method name to equal a
-   capability name, or reinterpret capability identities such as those frozen
-   by S2. Before a session method, the
-   `SessionRefV1.endpoint_id`, `workspace_id`, and complete scope discriminator
-   MUST also match the initialized `EndpointV1` and `CapabilitySetV1`.
-   Connection-scoped health and shutdown remain bound to that initialized
-   endpoint without accepting a session selector and without a product-
-   capability lookup. An undeclared, unsupported, stale, cross-workspace,
-   cross-project, cross-endpoint, cross-capability-set, or constraint-violating
-   session action or result is `CAPABILITY_NOT_DECLARED` at pipeline P6. A
-   session identity mismatch fails earlier as `INVALID_SESSION_REF` at P5.
-   Request failures receive the selected error; response/result failures are
-   host-local and receive no response.
-   The host MUST NOT fall back to another method, capability, endpoint,
-   capability set, project, workspace, or session.
+   independent revisions against the trusted registry and profile.
+
+   For a session-method invocation, successful P6 authorization requires the
+   reviewed repository-trusted local registry/profile to contain exactly one
+   versioned session-action relation for that exact invoked key
+   (`EndpointV1.capability_set_id`, exact `CapabilitySetV1.revision`, invoked
+   session method), where the method component is exactly one of
+   `runtime.deliver`, `runtime.cancel`, or `runtime.reconcile`. Each relation
+   row MUST select exactly one capability token that occurs exactly once in
+   that exact `CapabilitySetV1`. The selected entry MUST be non-`unsupported`;
+   its frozen S2 quality and attestation requirements MUST hold, and the
+   invocation MUST satisfy every declared constraint. The key's capability-set
+   id and revision are the exact values already bound at initialization. The
+   relation and its selected token are trusted host-local registry/profile
+   authority, never a JSON-RPC, S2 schema, request, result, transport,
+   workflow-pack, or other caller field.
+
+   A trusted profile MAY omit a relation for any or all of the three session
+   methods. Zero rows for a method is a valid unsupported endpoint
+   configuration and MUST NOT fail initialization; an invocation of that absent
+   method nevertheless fails at P6 as `CAPABILITY_NOT_DECLARED` before action.
+   Initialization does not require rows for uninvoked session methods.
+
+   P6 MUST fail as `CAPABILITY_NOT_DECLARED` before action when the exact key
+   has zero or multiple rows; the row is stale, unregistered, caller-supplied,
+   or bound to another set/revision; the selected token is absent or duplicated
+   in the exact set; or the selected entry is unsupported or fails quality,
+   constraints, or attestation validation. There is no default row, prefix
+   match, method-name equality, capability-name convention, or fallback.
+   Multiple session methods MAY select the same existing capability token only
+   through distinct explicit reviewed rows for their three distinct keys. This
+   protocol therefore freezes deterministic selection without creating a
+   universal capability-name vocabulary or reinterpreting S2 capability
+   identities.
+
+   Action authorization and evidence authority are independent. For every
+   `StateEvidenceV1` carried by the applicable `SessionRefV1`, `DeliveryV1`, or
+   `ReceiptV1`, P6 MUST separately treat
+   (`authority.capability_profile_id`,
+   `authority.capability_profile_revision`) as the evidence's own exact profile
+   key. The id MUST occur exactly once as an existing capability token in the
+   initialized `CapabilitySetV1`; the revision MUST equal that exact set's
+   `revision`; the pair MUST be registered in the trusted local profile for the
+   endpoint adapter; and the entry's non-`unsupported` quality ceiling,
+   constraints, and adapter-bound attestation MUST satisfy the frozen S2
+   validator, including authoritative requirements for exact-session binding
+   and positive delivery truth. Missing, duplicate, stale, cross-set/revision,
+   unregistered, unsupported, quality-escalating, constraint-violating, or
+   unattested evidence profiles fail only at P6 as
+   `CAPABILITY_NOT_DECLARED`.
+
+   The session-action relation selects permission to invoke the method; an
+   evidence profile selects authority for that evidence. A session-binding
+   evidence profile MAY differ from the session action's selected capability,
+   and the host MUST NOT infer equality from the method, evidence kind, or
+   shared adapter. Likewise, the `runtime.reconcile` action selection and the
+   returned `ReceiptV1` evidence profile are validated separately. Equality may
+   be required only by a separate explicit reviewed local coupling relation;
+   the action-selection row alone does not imply it.
+
+   For `SessionRefV1` evidence, adapter `authority.identity` and
+   `authority.implementation_revision` were validated exclusively at P5. For
+   `DeliveryV1` and `ReceiptV1`, adapter/evidence cross-identities remain P7
+   checks. P6 validates the selected capability entry's attestation
+   `source_id`/`source_revision` against `EndpointV1.adapter_name`/
+   `adapter_revision`; it MUST NOT use capability-profile fields to reopen P5
+   or use action selection to bypass P7.
+
+   Connection-scoped health and shutdown remain bound to the exact initialized
+   endpoint, manifest, and capability set without accepting a session selector
+   and without any session-action relation or product-capability lookup. A P6
+   request failure receives `CAPABILITY_NOT_DECLARED`; a P6 response/result
+   failure is host-local and receives no response. The host MUST NOT fall back
+   to another method, capability, endpoint, capability set, project, workspace,
+   session, relation row, or evidence profile.
 
 7. **Exact session binding (normative).** The post-initialize session methods
    `runtime.deliver`, `runtime.cancel`, and `runtime.reconcile` MUST carry one
-   complete `SessionRefV1`, and the host MUST validate it against the trusted
-   registry, the initialized `EndpointV1`, the negotiated `CapabilitySetV1`,
-   and the initialized adapter revision before invoking the adapter. A
-   project-scoped `SessionRefV1` MUST contain the exact non-null
-   `scope.project_id` present in the endpoint and capability-set registry
-   records; if `repository_binding` is present, its `project_id` MUST also
-   equal that value. A workspace-scoped `SessionRefV1` MUST omit
-   `scope.project_id`, and its endpoint and capability set MUST also be
-   workspace-scoped with `project_id` absent. In both cases, `workspace_id`,
-   the complete scope object, `endpoint_id`, registry record, and adapter
-   revision MUST match exactly. The session evidence's
-   `authority.identity`/`implementation_revision` MUST match the endpoint
-   adapter authority, while its `authority.capability_profile_revision` and
-   trusted profile revision MUST independently match the bound
-   `CapabilitySetV1.revision`. Wildcards, prefixes, display names, window
-   order, `latest`, inferred cwd, inferred project, null identity, scope
-   downgrade, and project substitution are prohibited. A missing, mismatched,
-   stale, inferred, or non-authoritative session reference MUST return
+   complete `SessionRefV1`. P3 MUST first validate its closed schema shape. At
+   P5, the host MUST then validate only its exact trusted registry/session
+   identity against the initialized `EndpointV1`: `workspace_id`, complete
+   discriminated scope, `endpoint_id`, `session_ref_id`, `native_session_id`,
+   and `repository_binding` when present. A project-scoped session MUST contain
+   the endpoint's exact non-null `scope.project_id`, and any repository binding
+   MUST contain that same project. A workspace-scoped session MUST omit
+   `scope.project_id` and MUST NOT carry a repository binding.
+
+   P5 MUST also validate that the embedded binding evidence has valid frozen S2
+   integrity; exactly matches the session's workspace and scope; has
+   `evidence_kind: "exact_session_binding"`, `quality: "authoritative"`, and
+   `authority_kind` of `native_runtime` or `trusted_adapter`; names exactly the
+   session's endpoint, session-ref, native-session, and optional repository
+   binding in its subject; and has `authority.identity` and
+   `authority.implementation_revision` exactly equal to
+   `EndpointV1.adapter_name` and `EndpointV1.adapter_revision`.
+
+   P5 MUST NOT validate or classify
+   `authority.capability_profile_id`,
+   `authority.capability_profile_revision`, the trusted capability-profile
+   revision, the session-action relation, or any `CapabilitySetV1` entry,
+   quality, constraints, or attestation. Those fields and authorities are
+   validated exclusively at P6 under Clause 6. Therefore an otherwise
+   identity-valid session whose binding evidence names a missing, stale,
+   mismatched, unsupported, or otherwise invalid capability profile is
+   `CAPABILITY_NOT_DECLARED`, never `INVALID_SESSION_REF`.
+
+   Wildcards, prefixes, display names, window order, `latest`, inferred cwd,
+   inferred project, null identity, scope downgrade, and project substitution
+   are prohibited. A missing, mismatched, stale, inferred, or non-authoritative
+   P5 session identity or binding fact MUST return only
    `INVALID_SESSION_REF`; the adapter MUST NOT choose a replacement session or
    infer a project. `runtime.health` and `runtime.shutdown` are
    connection/initialized-endpoint scoped and MUST follow their no-session
@@ -365,33 +449,38 @@ The method-specific shapes are:
    directly one `ReceiptV1`. The embedded schema objects MUST validate without
    added, removed, renamed, or adapter-private fields, and their workspace,
    scope, message, delivery, attempt, endpoint, session, and evidence identities
-   MUST agree. After params/schema, session, and capability validation pass, a
-   cross-identity request or result is `INVALID_DELIVERY`. A request failure
-   receives that error; an adapter result failure is host-local, receives no
-   response, preserves possible acceptance as unresolved, and MUST NOT advance
-   canonical delivery state.
+   MUST agree. At P6 the `runtime.deliver` action relation, session-binding
+   evidence profile, delivery evidence profile, and returned receipt evidence
+   profile MUST each pass their independent Clause 6 validation; none is
+   inferred from or required to equal another. After params/schema, session,
+   and capability validation pass, a cross-identity request or result is
+   `INVALID_DELIVERY` at P7. A request failure receives that error; an adapter
+   result failure is host-local, receives no response, preserves possible
+   acceptance as unresolved, and MUST NOT advance canonical delivery state.
 
 9. **Cancellation (normative).** The `runtime.cancel` method MUST name the exact
    original delivery request through the closed `original_request_id` param,
    use its own distinct request `id` under Clause 1, and carry the same exact
-   `SessionRefV1` as the original request. The cancel invocation's only success
-   result is the closed `{original_request_id, status:"cancelled"}` object; it
-   is not a `REQUEST_CANCELLED` error. After that success, the original pending
-   delivery request MUST terminate with the `REQUEST_CANCELLED` JSON-RPC error
-   using the original request's id. Cancellation is idempotent: repeated
-   cancellation of a request authoritatively cancelled before external
-   acceptance MUST return the same cancel success result, while the original
-   request remains terminally cancelled. Cancellation MUST NOT claim success
-   when acceptance may have occurred; that cancel invocation MUST return
-   `RECONCILIATION_REQUIRED`, preserve the original delivery and attempt as
-   unresolved, and prohibit retry until reconciliation determines
-   authoritative not-accepted evidence. Invalid cancel params return
-   `INVALID_PARAMS` before action. A missing, additional, or mistyped cancel
-   result member is host-local `INVALID_REQUEST` at P3, receives no response,
-   advances no cancellation or delivery state, and leaves possible acceptance
-   unresolved. `RECONCILIATION_REQUIRED` is reserved for a validly shaped
-   cancel response or execution outcome that establishes that acceptance may
-   have occurred.
+   `SessionRefV1` as the original request. At P6 its exact
+   `runtime.cancel` action relation and the session-binding evidence profile
+   MUST validate independently under Clause 6. The cancel invocation's only
+   success result is the closed `{original_request_id, status:"cancelled"}`
+   object; it is not a `REQUEST_CANCELLED` error. After that success, the
+   original pending delivery request MUST terminate with the
+   `REQUEST_CANCELLED` JSON-RPC error using the original request's id.
+   Cancellation is idempotent: repeated cancellation of a request
+   authoritatively cancelled before external acceptance MUST return the same
+   cancel success result, while the original request remains terminally
+   cancelled. Cancellation MUST NOT claim success when acceptance may have
+   occurred; that cancel invocation MUST return `RECONCILIATION_REQUIRED`,
+   preserve the original delivery and attempt as unresolved, and prohibit
+   retry until reconciliation determines authoritative not-accepted evidence.
+   Invalid cancel params return `INVALID_PARAMS` before action. A missing,
+   additional, or mistyped cancel result member is host-local
+   `INVALID_REQUEST` at P3, receives no response, advances no cancellation or
+   delivery state, and leaves possible acceptance unresolved.
+   `RECONCILIATION_REQUIRED` is reserved for a validly shaped cancel response
+   or execution outcome that establishes that acceptance may have occurred.
 
 10. **Reconciliation (normative).** After adapter restart, connection loss, or
     any possibly accepted request without a committed result, the host MUST
@@ -408,14 +497,19 @@ The method-specific shapes are:
 
     The core ledger remains authoritative for canonical intent, delivery
     identity, and unresolved state; the adapter is authoritative only for host
-    observations represented by that valid receipt and evidence. A missing,
-    additional, or mistyped reconciliation result member is host-local
+    observations represented by that valid receipt and evidence. P6 MUST
+    independently validate the `runtime.reconcile` action relation and every
+    relevant session/receipt evidence profile; it MUST NOT infer that the
+    returned evidence profile equals the action's selected capability. A
+    missing, additional, or mistyped reconciliation result member is host-local
     `INVALID_REQUEST` at P3; an embedded `ReceiptV1` shape failure is host-local
-    `INVALID_PARAMS` at P3. A validly shaped receipt whose delivery, attempt,
-    endpoint, session, or other canonical-ledger identity mismatches is
-    host-local `INVALID_DELIVERY` at P7. Only a validly shaped,
-    identity-matching receipt whose authoritative observation is absent,
-    ambiguous, non-authoritative, or contradictory is host-local
+    `INVALID_PARAMS` at P3. A validly shaped receipt whose capability profile,
+    revision, quality, constraints, or attestation fails is host-local
+    `CAPABILITY_NOT_DECLARED` at P6. Only after P6 succeeds does a delivery,
+    attempt, endpoint, session, or other canonical-ledger identity mismatch
+    become host-local `INVALID_DELIVERY` at P7. Only a validly shaped,
+    capability-valid, identity-matching receipt whose authoritative observation
+    is absent, ambiguous, non-authoritative, or contradictory is host-local
     `RECONCILIATION_REQUIRED` at P7. Each such response failure receives no
     response, advances no canonical state, and keeps the attempt unresolved or
     quarantined. A reconciliation request with invalid params returns
@@ -547,12 +641,18 @@ The method-specific shapes are:
 
 16. **Caller-input prohibitions (normative).** A caller MUST NEVER supply or
     override an executable path, argv, working directory, environment,
-    capability grant, adapter-id alias, session selection by pattern, or any
-    session action not backed by an applicable declared capability. The
+    capability grant, session-action relation/key/selected token, evidence-
+    profile registration, adapter-id alias, session selection by pattern, or
+    any session action not backed by the exact trusted P6 relation and declared
+    capability. A caller-supplied mapping or evidence authority is not made
+    trusted merely because its values match a registry row. The
     mandatory connection-scoped health and shutdown controls are selected by
     the host under the successfully initialized protocol, not by caller input
     and not by a product-capability grant. The host MUST reject each prohibited
+    session-action relation/key/selection or evidence-profile registration only
+    as `CAPABILITY_NOT_DECLARED` at P6. It MUST reject each other prohibited
     input as `UNTRUSTED_MANIFEST_INPUT`, `INVALID_SESSION_REF`, or
-    `CAPABILITY_NOT_DECLARED` as applicable, before spawn or dispatch. It MUST
-    NOT sanitize the input into authority, merge it with trusted configuration,
-    invoke a shell, broaden a capability, or select a fallback runtime action.
+    `CAPABILITY_NOT_DECLARED` at its ordered stage, before spawn or dispatch.
+    It MUST NOT sanitize the input into authority, merge it with trusted
+    configuration, invoke a shell, broaden a capability, or select a fallback
+    runtime action.
