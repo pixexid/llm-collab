@@ -36,6 +36,15 @@ from _session_autobridge import (
     save_session,
     update_binding_from_session,
 )
+from _activation_lease import (
+    LeaseRefused,
+    assert_lease,
+    claim_lease,
+    lease_identity,
+    load_lease,
+    owner_summary,
+    release_lease,
+)
 
 
 def parse_args():
@@ -104,6 +113,45 @@ def parse_args():
     deactivate.add_argument("--status", default="stopped", choices=("stopped", "superseded"))
     deactivate.add_argument("--superseded-by", default=None)
     deactivate.add_argument("--json", dest="json_output", action="store_true")
+
+    def add_activation_identity(subparser):
+        subparser.add_argument("--project", required=True)
+        subparser.add_argument("--chat", required=True)
+        subparser.add_argument("--task", required=True)
+        subparser.add_argument("--worktree", required=True)
+        subparser.add_argument("--branch", required=True)
+        subparser.add_argument("--target-agent", dest="target_agent", required=True)
+        subparser.add_argument("--json", dest="json_output", action="store_true")
+
+    lease_claim = subparsers.add_parser(
+        "lease-claim",
+        help="Claim the one-writer activation lease for an exact activation identity",
+    )
+    add_activation_identity(lease_claim)
+    lease_claim.add_argument("--session", required=True, help="Claiming session identifier")
+    lease_claim.add_argument("--owner-pid", type=int, default=None, help="Live claiming process id")
+    lease_claim.add_argument("--claimant-runtime-id", default=None, help="Current runtime/session id")
+    lease_claim.add_argument("--ttl-seconds", type=int, default=3600)
+    lease_claim.add_argument("--takeover", action="store_true", help="Explicitly replace an expired or provably dead owner")
+
+    lease_show = subparsers.add_parser("lease-show", help="Show the activation lease for an identity")
+    add_activation_identity(lease_show)
+
+    lease_assert = subparsers.add_parser(
+        "lease-assert",
+        help="Assert current activation authority before mutating",
+    )
+    add_activation_identity(lease_assert)
+    lease_assert.add_argument("--session", required=True, help="Owning session identifier")
+    lease_assert.add_argument("--fence-token", type=int, required=True)
+    lease_assert.add_argument("--owner-pid", type=int, default=None, help="Asserting process id")
+    lease_assert.add_argument("--claimant-runtime-id", default=None, help="Current runtime/session id")
+
+    lease_release = subparsers.add_parser("lease-release", help="Release an activation lease you own")
+    add_activation_identity(lease_release)
+    lease_release.add_argument("--session", required=True, help="Owning session identifier")
+    lease_release.add_argument("--fence-token", type=int, required=True)
+    lease_release.add_argument("--status", default="released", choices=("released", "superseded"))
     return parser.parse_args()
 
 
@@ -227,8 +275,74 @@ def deactivate_session(args) -> dict:
     return payload
 
 
+def _refusal_payload(kind: str, identity: dict, refusal: LeaseRefused) -> dict:
+    payload = {
+        kind: False,
+        "reason": refusal.reason,
+        "identity": identity,
+        "owner": refusal.owner,
+    }
+    if kind == "claimed":
+        payload["hint"] = "activation authority was not granted; hold read-only and do not mutate the worktree"
+    return payload
+
+
+def lease_claim_command(args) -> tuple[dict, int]:
+    identity = lease_identity(args)
+    try:
+        lease = claim_lease(
+            identity,
+            owner_session_id=args.session,
+            owner_pid=args.owner_pid,
+            claimant_runtime_id=args.claimant_runtime_id,
+            ttl_seconds=args.ttl_seconds,
+            takeover=args.takeover,
+        )
+    except LeaseRefused as refusal:
+        return (_refusal_payload("claimed", identity, refusal), 75)
+    return ({"claimed": True, "lease": lease}, 0)
+
+
+def lease_show_command(args) -> tuple[dict, int]:
+    identity = lease_identity(args)
+    lease = load_lease(identity)
+    if lease is None:
+        return ({"identity": identity, "lease": None}, 0)
+    return ({"identity": identity, "lease": lease, "owner": owner_summary(lease)}, 0)
+
+
+def lease_assert_command(args) -> tuple[dict, int]:
+    identity = lease_identity(args)
+    try:
+        lease = assert_lease(
+            identity,
+            owner_session_id=args.session,
+            fence_token=args.fence_token,
+            owner_pid=args.owner_pid,
+            claimant_runtime_id=args.claimant_runtime_id,
+        )
+    except LeaseRefused as refusal:
+        return (_refusal_payload("asserted", identity, refusal), 75)
+    return ({"asserted": True, "lease": lease}, 0)
+
+
+def lease_release_command(args) -> tuple[dict, int]:
+    identity = lease_identity(args)
+    try:
+        lease = release_lease(
+            identity,
+            owner_session_id=args.session,
+            fence_token=args.fence_token,
+            status=args.status,
+        )
+    except LeaseRefused as refusal:
+        return (_refusal_payload("released", identity, refusal), 75)
+    return ({"released": True, "lease": lease}, 0)
+
+
 def main():
     args = parse_args()
+    exit_code = 0
     if args.command == "register":
         result = register_session(args)
     elif args.command == "discover-runtime":
@@ -241,9 +355,19 @@ def main():
         result = show_binding(args)
     elif args.command == "dispatch":
         result = dispatch_session(args.session)
+    elif args.command == "lease-claim":
+        result, exit_code = lease_claim_command(args)
+    elif args.command == "lease-show":
+        result, exit_code = lease_show_command(args)
+    elif args.command == "lease-assert":
+        result, exit_code = lease_assert_command(args)
+    elif args.command == "lease-release":
+        result, exit_code = lease_release_command(args)
     else:
         result = deactivate_session(args)
     emit(result, getattr(args, "json_output", False))
+    if exit_code:
+        raise SystemExit(exit_code)
 
 
 if __name__ == "__main__":
