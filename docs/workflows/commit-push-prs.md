@@ -128,10 +128,15 @@ Hard cycle cap, independent of family counting:
 - Docs-only lanes whose no-consumer scan proves zero runtime consumers always
   cap at 2 cycles: residual prose ambiguity in an unconsumed document is a
   follow-up issue, never another cycle.
-- Reaching the cap forces exactly one terminal action before any further push:
-  merge at the current head with `risk-accepted-followup` (open findings move
-  to a new issue), `descope`, `split`, or a durable operator escalation packet.
-  Starting another review cycle past the cap is a process violation.
+- Reaching the cap forces exactly one terminal action before any further
+  amendment: merge at the current head with `risk-accepted-followup` (open
+  findings move to a new issue), `descope`, `split`, or a durable operator
+  escalation packet. "No further amendment" bars content changes only; the
+  publication steps the chosen disposition itself requires — pushing the
+  already-reviewed head, opening its PR, and merging — remain permitted, so a
+  lane that caps during the pre-PR loop can still land via
+  `risk-accepted-followup`. Starting another review cycle past the cap is a
+  process violation.
 - Reaching the applicable cap, or spending more than 2 hours of wall-clock
   time in the review-fix state, requires an operator-visible escalation
   message recorded alongside the terminal disposition (or before the next

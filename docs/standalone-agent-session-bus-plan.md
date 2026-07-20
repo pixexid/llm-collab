@@ -748,7 +748,9 @@ A phase is complete only when:
 - focused and full configured tests pass at the exact head;
 - schema/protocol/compatibility impact is recorded;
 - security and migration ownership are explicit;
-- a fresh independent reviewer accepts the exact head;
+- an independent reviewer accepts the exact head — fresh and context-isolated
+  for the initial PR-ready head, reused per the bounded amendment rules in
+  `docs/workflows/commit-push-prs.md` for in-contract amended heads;
 - the issue, task, and release state reflect the real result.
 
 The epic is complete only when the minimal standalone profile works, supported

@@ -10,8 +10,14 @@ so a later edit cannot silently weaken the mechanical safeguards.
 
 from __future__ import annotations
 
+import re
 import unittest
 from pathlib import Path
+
+
+def normalized(text):
+    """Collapse whitespace so assertions survive prose re-wrapping."""
+    return re.sub(r"\s+", " ", text)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW_DOC = REPO_ROOT / "docs" / "workflows" / "commit-push-prs.md"
@@ -21,13 +27,13 @@ PLAN_DOC = REPO_ROOT / "docs" / "standalone-agent-session-bus-plan.md"
 class ReviewLoopCapContractTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.workflow = WORKFLOW_DOC.read_text(encoding="utf-8")
-        cls.plan = PLAN_DOC.read_text(encoding="utf-8")
+        cls.workflow = normalized(WORKFLOW_DOC.read_text(encoding="utf-8"))
+        cls.plan = normalized(PLAN_DOC.read_text(encoding="utf-8"))
 
     def test_same_file_family_counting_is_mechanical(self):
         self.assertIn("Same-file anchoring counts mechanically", self.workflow)
         self.assertNotIn(
-            "Do not mechanically\n  auto-count finding families", self.workflow
+            "Do not mechanically auto-count finding families", self.workflow
         )
 
     def test_contract_clarified_limited_per_family(self):
@@ -35,11 +41,11 @@ class ReviewLoopCapContractTest(unittest.TestCase):
 
     def test_hard_cycle_cap_present_and_bounded(self):
         self.assertIn("Hard cycle cap, independent of family counting", self.workflow)
-        self.assertIn("at most 2 review-fix cycles are permitted per\n  lane", self.workflow)
+        self.assertIn("at most 2 review-fix cycles are permitted per lane", self.workflow)
         self.assertIn("Starting another review cycle past the cap is a process violation", self.workflow)
 
     def test_cycle_definition_ignores_reviewer_freshness(self):
-        self.assertIn("regardless of\n  reviewer freshness", self.workflow)
+        self.assertIn("regardless of reviewer freshness", self.workflow)
 
     def test_counter_is_per_lane_and_covers_pre_pr_loop(self):
         self.assertIn("per task/lane, not per PR", self.workflow)
@@ -62,6 +68,18 @@ class ReviewLoopCapContractTest(unittest.TestCase):
             "a separate fresh task/thread",
             self.plan,
         )
+
+    def test_capped_pre_pr_lane_can_still_publish(self):
+        self.assertIn("before any further amendment", self.workflow)
+        self.assertIn("caps during the pre-PR loop can still land", self.workflow)
+
+    def test_phase_completion_gate_permits_reviewer_reuse(self):
+        self.assertIn(
+            "reused per the bounded amendment rules in "
+            "`docs/workflows/commit-push-prs.md` for in-contract amended heads",
+            self.plan,
+        )
+        self.assertNotIn("a fresh independent reviewer accepts the exact head", self.plan)
 
     def test_plan_doc_caps_review_fix_cycles(self):
         self.assertIn("most 2 review-fix cycles follow the initial review", self.plan)
