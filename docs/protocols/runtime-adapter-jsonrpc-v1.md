@@ -685,23 +685,24 @@ The method-specific shapes are:
    `{original_request_id, delivery_id, attempt_id, status:"cancelled"}` object;
    all three identity members MUST equal their params members in JSON type and
    value. It is not a `REQUEST_CANCELLED` error. After P3-P6 succeed, the
-   adapter MUST refuse cancellation unless the complete
+   adapter MUST refuse cancellation unless both its complete `SessionRefV1`
+   exactly equals the original request's recorded session and the complete
    `(original_request_id, delivery_id, attempt_id)` triple exactly matches the
-   recorded original delivery and attempt. A mismatch is
+   recorded original delivery and attempt. A session or triple mismatch is
    `INVALID_DELIVERY` at P7, performs no action, and advances no state. After a
    matching success, the original pending delivery request MUST terminate with
    the `REQUEST_CANCELLED` JSON-RPC error using the original request's id.
-   Cancellation is idempotent only for the complete matching
-   `(original_request_id, delivery_id, attempt_id)` triple: repeated
-   cancellation of that triple after it was authoritatively cancelled before
-   external acceptance MUST return the same cancel success result, while the
-   original request remains terminally cancelled. Reuse of an
-   `original_request_id` with a different delivery or attempt therefore cannot
-   cancel the later or earlier delivery accidentally. Cancellation MUST NOT
-   claim success when acceptance may have occurred; that cancel invocation MUST
-   return `RECONCILIATION_REQUIRED`, preserve the original delivery and attempt
-   as unresolved, and prohibit retry until reconciliation determines
-   authoritative not-accepted evidence.
+   Cancellation is idempotent only for the same exact `SessionRefV1` and
+   complete matching `(original_request_id, delivery_id, attempt_id)` triple:
+   repeated cancellation of that session-bound triple after it was
+   authoritatively cancelled before external acceptance MUST return the same
+   cancel success result, while the original request remains terminally
+   cancelled. Reuse of an `original_request_id` in a different session,
+   delivery, or attempt therefore cannot cancel the later or earlier delivery
+   accidentally. Cancellation MUST NOT claim success when acceptance may have
+   occurred; that cancel invocation MUST return `RECONCILIATION_REQUIRED`,
+   preserve the original delivery and attempt as unresolved, and prohibit
+   retry until reconciliation determines authoritative not-accepted evidence.
    Invalid cancel params return `INVALID_PARAMS` before action. A missing,
    additional, or mistyped cancel result member is host-local
    `INVALID_REQUEST` at P3, receives no response, advances no cancellation or
@@ -782,12 +783,25 @@ The method-specific shapes are:
     endpoint, workspace and complete scope discriminator, and capability-set
     identity/revisions, and MUST arrive inside `HEALTH_DEADLINE_MS`, fixed at
     5,000 milliseconds for `runtime.health` only and strictly less than
-    `HEALTH_INTERVAL_MS`. Completion- or deadline-expiry-anchored cadence plus
-    the one-request bound makes an overlapping health request structurally
-    impossible for a conforming host. A forced miss from overlap therefore
-    cannot occur and is not a health-failure category. For
-    project scope the exact initialized `project_id` is required; for workspace
-    scope `project_id` is forbidden. A health request that exceeds
+    `HEALTH_INTERVAL_MS`. If a health request reaches its deadline without a
+    valid response, the host MUST close that connection, terminate the old
+    adapter process, and confirm its exit before initializing any replacement
+    permitted by the current adapter-state gate. Any possibly accepted delivery
+    interrupted by that teardown remains unresolved and follows Clause 10; no
+    delivery outcome is inferred from the health timeout. The timeout failure
+    is recorded before replacement admission; when it reaches
+    `HEALTH_FAILURE_THRESHOLD`, only Clause 12's explicitly authorized recovery
+    route can admit a replacement. An expiry-anchored successor may be
+    dispatched only after a permitted replacement process completes the exact
+    `initialize` exchange, never on the expired request's connection or
+    process. The endpoint's consecutive health-failure count survives that
+    connection and process replacement.
+    This mandatory expiry teardown, completion- or deadline-expiry-anchored
+    cadence, and the one-request bound make an overlapping health request
+    structurally impossible for a conforming host. A forced miss from overlap
+    therefore cannot occur and is not a health-failure category. For project
+    scope the exact initialized `project_id` is required; for workspace scope
+    `project_id` is forbidden. A health request that exceeds
     `HEALTH_DEADLINE_MS` counts as one failure. A malformed response, including
     any response without the exact `"healthy"` status, counts as one failure;
     an identity-mismatched or revision-mismatched response counts as one

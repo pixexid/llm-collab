@@ -66,18 +66,21 @@ def contract_invariants(text: str) -> dict[str, bool]:
         )
         in compact,
         "cancel_match": (
-            "MUST refuse cancellation unless the complete "
+            "MUST refuse cancellation unless both its complete `SessionRefV1` "
+            "exactly equals the original request's recorded session and the "
+            "complete "
             "`(original_request_id, delivery_id, attempt_id)` triple exactly "
             "matches the recorded original delivery and attempt"
         )
         in compact,
         "cancel_mismatch": (
-            "A mismatch is `INVALID_DELIVERY` at P7, performs no action, "
-            "and advances no state"
+            "A session or triple mismatch is `INVALID_DELIVERY` at P7, performs "
+            "no action, and advances no state"
         )
         in compact,
         "cancel_idempotence": (
-            "Cancellation is idempotent only for the complete matching "
+            "Cancellation is idempotent only for the same exact `SessionRefV1` "
+            "and complete matching "
             "`(original_request_id, delivery_id, attempt_id)` triple"
         )
         in compact,
@@ -99,13 +102,37 @@ def contract_invariants(text: str) -> dict[str, bool]:
         )
         in compact,
         "health_no_overlap": (
-            "makes an overlapping health request structurally impossible for "
+            "make an overlapping health request structurally impossible for "
             "a conforming host"
         )
         in compact,
         "health_no_forced_miss": (
             "A forced miss from overlap therefore cannot occur and is not a "
             "health-failure category"
+        )
+        in compact,
+        "health_expiry_teardown": (
+            "the host MUST close that connection, terminate the old adapter "
+            "process, and confirm its exit before initializing any replacement "
+            "permitted by the current adapter-state gate"
+        )
+        in compact,
+        "health_replacement_admission": (
+            "The timeout failure is recorded before replacement admission; "
+            "when it reaches `HEALTH_FAILURE_THRESHOLD`, only Clause 12's "
+            "explicitly authorized recovery route can admit a replacement"
+        )
+        in compact,
+        "health_fresh_replacement": (
+            "An expiry-anchored successor may be dispatched only after a "
+            "permitted replacement process completes the exact `initialize` "
+            "exchange, "
+            "never on the expired request's connection or process"
+        )
+        in compact,
+        "health_failure_continuity": (
+            "The endpoint's consecutive health-failure count survives that "
+            "connection and process replacement"
         )
         in compact,
         "health_threshold": (
@@ -143,14 +170,50 @@ def paired_cases() -> tuple[dict[str, object], ...]:
     templates = (
         {
             "scenario": "cancel",
-            "recorded_identity": ("request-reused", "delivery-1", "attempt-1"),
-            "requested_identity": ("request-reused", "delivery-1", "attempt-1"),
+            "recorded_identity": (
+                "session-a",
+                "request-reused",
+                "delivery-1",
+                "attempt-1",
+            ),
+            "requested_identity": (
+                "session-a",
+                "request-reused",
+                "delivery-1",
+                "attempt-1",
+            ),
             "expected": "cancelled",
         },
         {
             "scenario": "cancel",
-            "recorded_identity": ("request-reused", "delivery-1", "attempt-1"),
-            "requested_identity": ("request-reused", "delivery-2", "attempt-1"),
+            "recorded_identity": (
+                "session-a",
+                "request-reused",
+                "delivery-1",
+                "attempt-1",
+            ),
+            "requested_identity": (
+                "session-a",
+                "request-reused",
+                "delivery-2",
+                "attempt-1",
+            ),
+            "expected": "refused_invalid_delivery",
+        },
+        {
+            "scenario": "cancel",
+            "recorded_identity": (
+                "session-a",
+                "request-reused",
+                "delivery-1",
+                "attempt-1",
+            ),
+            "requested_identity": (
+                "session-b",
+                "request-reused",
+                "delivery-1",
+                "attempt-1",
+            ),
             "expected": "refused_invalid_delivery",
         },
         {
@@ -237,8 +300,10 @@ class RuntimeAdapterJsonRpcV1Tests(unittest.TestCase):
             (
                 "triple match removed",
                 self.text.replace(
-                    "adapter MUST refuse cancellation unless the complete",
-                    "adapter MAY accept cancellation without checking the complete",
+                    "adapter MUST refuse cancellation unless both its complete "
+                    "`SessionRefV1`",
+                    "adapter MAY accept cancellation without checking its "
+                    "`SessionRefV1`",
                     1,
                 ),
             ),
@@ -299,6 +364,54 @@ class RuntimeAdapterJsonRpcV1Tests(unittest.TestCase):
                     "The first three members equal\n"
                     "  their params members in JSON type and value",
                     "The first three members may differ from their params members",
+                    1,
+                ),
+            ),
+            (
+                "original session match removed",
+                self.text.replace(
+                    "both its complete `SessionRefV1`\n"
+                    "   exactly equals the original request's recorded session "
+                    "and the complete",
+                    "the complete",
+                    1,
+                ),
+            ),
+            (
+                "expired health process left active",
+                self.text.replace(
+                    "the host MUST close that connection, terminate the old\n"
+                    "    adapter process, and confirm its exit before "
+                    "initializing any replacement\n"
+                    "    permitted by the current adapter-state gate",
+                    "the host MAY leave the old adapter process active",
+                    1,
+                ),
+            ),
+            (
+                "successor dispatched on expired process",
+                self.text.replace(
+                    "never on the expired request's connection or\n"
+                    "    process",
+                    "even on the expired request's connection or process",
+                    1,
+                ),
+            ),
+            (
+                "failure count reset on replacement",
+                self.text.replace(
+                    "health-failure count survives that\n"
+                    "    connection and process replacement",
+                    "health-failure count resets after connection replacement",
+                    1,
+                ),
+            ),
+            (
+                "unhealthy replacement bypasses recovery gate",
+                self.text.replace(
+                    "only Clause 12's explicitly authorized recovery\n"
+                    "    route can admit a replacement",
+                    "an automatic replacement remains allowed",
                     1,
                 ),
             ),
