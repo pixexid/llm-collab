@@ -122,6 +122,32 @@ class AutonomousLoopStateRecoveryTest(unittest.TestCase):
         self.assertEqual(len(state["notes"]), 1)
         self.assertIn("Recovered from unreadable autonomous-loop.json", state["notes"][0]["text"])
 
+    def test_post_merge_evaluates_before_done_and_cleans_only_after_closure(self) -> None:
+        action = autonomous_loop.next_action(
+            {
+                "mode": "post_merge",
+                "current": {},
+            }
+        )
+
+        self.assertEqual(
+            action,
+            "Fast-forward main and run post-merge checks, then evaluate the exact merge SHA. "
+            "PENDING, MISSING, FAILURE, or CANCELLED results keep the task in review and "
+            "preserve the lane with no done transition or cleanup. Only after terminal "
+            "success or an explicit non-success disposition, mark the task done, then run "
+            "bin/post_merge_cleanup.py; continue only when cleanup is clear or deferred "
+            "items are recorded.",
+        )
+        self.assertLess(
+            action.index("evaluate the exact merge SHA"),
+            action.index("mark the task done"),
+        )
+        self.assertLess(
+            action.index("mark the task done"),
+            action.index("bin/post_merge_cleanup.py"),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -125,6 +125,22 @@ class ArchiveClosedTaskFailsClosedTest(unittest.TestCase):
 
 
 class InitReleaseGateAgentTest(unittest.TestCase):
+    def test_generated_identity_routes_completed_implementation_to_review(self) -> None:
+        identity = init_script.build_identity_md(
+            {
+                "id": "worker",
+                "display_name": "Worker",
+                "role": "implementer",
+                "activation": {},
+            },
+            "Fixture",
+            ["worker", "reviewer"],
+            [{"id": "demo"}],
+        )
+
+        self.assertIn("claim_task.py --status review", identity)
+        self.assertNotIn("claim_task.py --status done", identity)
+
     def test_enabled_agent_ids_excludes_disabled_entries(self) -> None:
         agents = [
             {"id": "codex", "role": "orchestrator", "activation": {"enabled": True}},
@@ -174,6 +190,45 @@ class InitReleaseGateAgentTest(unittest.TestCase):
         self.assertEqual(projects[0]["id"], "demo")
         self.assertEqual(projects[0]["release_gate_agent"], "codex")
         self.assertIn(projects[0]["release_gate_agent"], {"codex", "claude"})
+
+
+class ReleaseLifecycleGuidanceTest(unittest.TestCase):
+    def test_guidance_orders_evaluation_done_and_cleanup(self) -> None:
+        guidance = (
+            REPO_ROOT / "docs" / "workflows" / "task-intake-and-delegation.md"
+        ).read_text()
+        exact_sha = guidance.index(
+            "1. Evaluate the exact merge SHA through the configured release authority."
+        )
+        done = guidance.index(
+            "2. After terminal success or an explicit honest non-success disposition"
+        )
+        cleanup = guidance.index(
+            "3. Only after the `done` transition succeeds, run post-merge cleanup."
+        )
+
+        self.assertLess(exact_sha, done)
+        self.assertLess(done, cleanup)
+        self.assertIn(
+            "It preserves the task in `review` and preserves the\n"
+            "implementation lane; do not promote the task or clean the lane.",
+            guidance,
+        )
+
+    def test_guidance_distinguishes_enabled_repository_from_disabled_null(self) -> None:
+        guidance = (
+            REPO_ROOT / "docs" / "workflows" / "task-intake-and-delegation.md"
+        ).read_text()
+
+        self.assertIn(
+            "For a GitHub-enabled project with a configured repository, an honest\n"
+            "non-success record preserves that repository identity.",
+            guidance,
+        )
+        self.assertIn(
+            "Only the GitHub-disabled\ncase binds `repository: null`.",
+            guidance,
+        )
 
 
 if __name__ == "__main__":  # pragma: no cover

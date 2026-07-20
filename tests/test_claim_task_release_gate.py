@@ -22,14 +22,14 @@ SHA = "a" * 40
 TASK_ID = "TASK-GATE01"
 
 
-def project_fixture(project_id: str = "amiga", *, release_closure: bool = True) -> dict:
+def project_fixture(project_id: str = "amiga", *, release_closure: object = True) -> dict:
     project = {
         "id": project_id,
         "release_gate_agent": "codex",
         "default_branch_base": "main",
         "github": {"enabled": True, "repo": f"pixexid/{project_id}"},
     }
-    if release_closure:
+    if release_closure is True:
         project["release_closure"] = {
             "workflow": "deploy",
             "trigger_event": "push",
@@ -37,6 +37,8 @@ def project_fixture(project_id: str = "amiga", *, release_closure: bool = True) 
             "smoke_job": "deploy",
             "required_smoke_steps": ["Verify production"],
         }
+    elif release_closure is not False:
+        project["release_closure"] = release_closure
     return project
 
 
@@ -181,28 +183,83 @@ class ReleaseEvidenceRecordTest(unittest.TestCase):
         self.assertNotIn("run_id", record)
 
     def test_github_disabled_allows_both_honest_non_success_dispositions(self) -> None:
-        project = project_fixture()
-        project["github"] = {"enabled": False}
         evaluator = Mock()
-        with patch.object(claim_task, "get_project", return_value=project):
-            for verdict in ("non-production", "risk-accepted-followup"):
-                with self.subTest(verdict=verdict):
-                    record = claim_task.build_release_evidence_record(
-                        {"task_id": TASK_ID, "project_id": "amiga"},
-                        "review",
-                        "codex",
-                        json.dumps({
-                            "merge_sha": SHA,
-                            "verdict": verdict,
-                            "run_id": 77,
-                        }),
-                        evaluator=evaluator,
-                        evaluated_at="2026-07-20T12:00:00+00:00",
-                    )
-                    self.assertIsNone(record["repository"])
-                    self.assertEqual(record["terminal_verdict"], verdict)
-                    self.assertNotIn("run_id", record)
+        for project_id in ("amiga", "nuvyr"):
+            project = project_fixture(project_id)
+            project["github"] = {"enabled": False}
+            with patch.object(claim_task, "get_project", return_value=project):
+                for verdict in ("non-production", "risk-accepted-followup"):
+                    with self.subTest(project_id=project_id, verdict=verdict):
+                        record = claim_task.build_release_evidence_record(
+                            {"task_id": TASK_ID, "project_id": project_id},
+                            "review",
+                            "codex",
+                            json.dumps({
+                                "merge_sha": SHA,
+                                "verdict": verdict,
+                                "run_id": 77,
+                            }),
+                            evaluator=evaluator,
+                            evaluated_at="2026-07-20T12:00:00+00:00",
+                        )
+                        self.assertIsNone(record["repository"])
+                        self.assertEqual(record["terminal_verdict"], verdict)
+                        self.assertNotIn("run_id", record)
         evaluator.assert_not_called()
+
+    def test_absent_and_empty_closure_allow_non_success_but_refuse_success(self) -> None:
+        for project_id in ("amiga", "nuvyr"):
+            for closure_name, release_closure in (
+                ("absent", False),
+                ("empty", {}),
+            ):
+                with self.subTest(
+                    project_id=project_id,
+                    closure=closure_name,
+                ):
+                    project = project_fixture(
+                        project_id,
+                        release_closure=release_closure,
+                    )
+                    evaluator = Mock()
+                    with patch.object(claim_task, "get_project", return_value=project):
+                        for verdict in (
+                            "non-production",
+                            "risk-accepted-followup",
+                        ):
+                            record = claim_task.build_release_evidence_record(
+                                {"task_id": TASK_ID, "project_id": project_id},
+                                "review",
+                                "codex",
+                                json.dumps({
+                                    "merge_sha": SHA,
+                                    "verdict": verdict,
+                                }),
+                                evaluator=evaluator,
+                                evaluated_at="2026-07-20T12:00:00+00:00",
+                            )
+                            self.assertEqual(
+                                record["repository"],
+                                f"pixexid/{project_id}",
+                            )
+                            self.assertEqual(record["terminal_verdict"], verdict)
+
+                        with self.assertRaisesRegex(
+                            claim_task.ReleaseGateError,
+                            "no release_closure config",
+                        ):
+                            claim_task.build_release_evidence_record(
+                                {"task_id": TASK_ID, "project_id": project_id},
+                                "review",
+                                "codex",
+                                json.dumps({
+                                    "merge_sha": SHA,
+                                    "verdict": "success",
+                                    "run_id": 41,
+                                }),
+                                evaluator=evaluator,
+                            )
+                    evaluator.assert_not_called()
 
     def test_pending_failure_cancelled_missing_and_wrong_sha_all_refuse_success(self) -> None:
         project = project_fixture()
@@ -248,6 +305,8 @@ class ClaimTaskMutationSafetyTest(unittest.TestCase):
         self.temp_dir.cleanup()
 
     def write_task(self, status: str, project_id: str) -> None:
+        if self.done_path.exists():
+            self.done_path.unlink()
         self.task_path.write_text(dump_frontmatter(
             {
                 "task_id": TASK_ID,
@@ -276,6 +335,8 @@ class ClaimTaskMutationSafetyTest(unittest.TestCase):
         ]
         stdout = io.StringIO()
         stderr = io.StringIO()
+        self.queue_mutator = Mock(return_value={"ok": True})
+        self.task_writer = Mock(side_effect=claim_task.write_file)
         exit_code = 0
         with (
             patch.object(sys, "argv", argv),
@@ -287,7 +348,13 @@ class ClaimTaskMutationSafetyTest(unittest.TestCase):
             patch.object(claim_task, "ensure_agent_enabled", return_value={}),
             patch.object(claim_task, "sync_task_contract", side_effect=lambda fm, body: (fm, {})),
             patch.object(claim_task, "evaluate_project_release", side_effect=evaluator),
-            patch.object(claim_task.issue_queue, "queue_exists", return_value=False),
+            patch.object(claim_task.issue_queue, "queue_exists", return_value=True),
+            patch.object(
+                claim_task.issue_queue,
+                "mark_lane_transition",
+                self.queue_mutator,
+            ),
+            patch.object(claim_task, "write_file", self.task_writer),
             patch.object(claim_task, "utc_iso", return_value="2026-07-20T12:00:00+00:00"),
             redirect_stdout(stdout),
             redirect_stderr(stderr),
@@ -367,6 +434,92 @@ class ClaimTaskMutationSafetyTest(unittest.TestCase):
                 )
                 self.assertNotIn("Traceback", stderr)
                 evaluator.assert_not_called()
+                self.task_writer.assert_not_called()
+                self.queue_mutator.assert_not_called()
+                self.assert_refusal_did_not_mutate(before)
+
+    def test_malformed_truthy_closure_refuses_every_verdict_for_paired_projects(self) -> None:
+        for project_id in ("amiga", "nuvyr"):
+            for malformed in (
+                "deploy",
+                {"workflow": "deploy"},
+            ):
+                for verdict in (
+                    "success",
+                    "non-production",
+                    "risk-accepted-followup",
+                ):
+                    with self.subTest(
+                        project_id=project_id,
+                        malformed=malformed,
+                        verdict=verdict,
+                    ):
+                        self.write_task("review", project_id)
+                        before = self.task_path.read_text()
+                        project = project_fixture(project_id)
+                        project["release_closure"] = malformed
+                        evaluator = Mock(
+                            return_value=success_evaluation(project_id)
+                        )
+                        evidence = {
+                            "merge_sha": SHA,
+                            "verdict": verdict,
+                        }
+                        if verdict == "success":
+                            evidence["run_id"] = 41
+
+                        code, _stdout, stderr = self.invoke_done(
+                            project=project,
+                            evidence=evidence,
+                            evaluator=evaluator,
+                        )
+
+                        self.assertEqual(code, 1)
+                        self.assertIn(
+                            f"project {project_id!r}",
+                            stderr,
+                        )
+                        self.assertIn(
+                            "malformed projects.json key 'release_closure'",
+                            stderr,
+                        )
+                        self.assertIn(
+                            f"repair this task project's {project_id!r} entry "
+                            "in projects.json at key 'release_closure'",
+                            stderr,
+                        )
+                        evaluator.assert_not_called()
+                        self.task_writer.assert_not_called()
+                        self.queue_mutator.assert_not_called()
+                        self.assert_refusal_did_not_mutate(before)
+
+    def test_pending_missing_failed_and_cancelled_preserve_review_lane(self) -> None:
+        for state in ("PENDING", "MISSING", "FAILURE", "CANCELLED"):
+            with self.subTest(state=state):
+                self.write_task("review", "amiga")
+                before = self.task_path.read_text()
+                evaluation = success_evaluation()
+                evaluation.verdict.state = state
+                evaluator = Mock(return_value=evaluation)
+
+                code, _stdout, stderr = self.invoke_done(
+                    project=project_fixture(),
+                    evidence={
+                        "merge_sha": SHA,
+                        "verdict": "success",
+                        "run_id": 41,
+                    },
+                    evaluator=evaluator,
+                )
+
+                self.assertEqual(code, 1)
+                self.assertIn(
+                    f"objective release verdict is {state}",
+                    stderr,
+                )
+                evaluator.assert_called_once()
+                self.task_writer.assert_not_called()
+                self.queue_mutator.assert_not_called()
                 self.assert_refusal_did_not_mutate(before)
 
     def test_non_review_source_cannot_reach_done_or_call_evaluator(self) -> None:
@@ -398,6 +551,12 @@ class ClaimTaskMutationSafetyTest(unittest.TestCase):
         self.assertEqual(
             frontmatter["release_evidence"]["production_impact"],
             "production-release-verified",
+        )
+        self.queue_mutator.assert_called_once_with(
+            "amiga",
+            TASK_ID,
+            owner="worker",
+            task_status="done",
         )
         self.assertEqual(json.loads(stdout)["new_status"], "done")
 
