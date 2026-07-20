@@ -129,6 +129,69 @@ python3 bin/session_autobridge.py register \
   --runtime-session-source manual
 ```
 
+## Activation Leases
+
+Activation packets are writer grants only after the assigned worker claims the
+exact activation lease. The claim is scoped to the packet identity
+`project/chat/task/worktree/branch/target-agent` and to the worker's registered
+session. The session must be live and exactly bound to the same agent, project,
+and chat; null project/chat bindings are unbound and refuse rather than acting
+as wildcards.
+
+Claim with a runtime identity or live process id:
+
+```bash
+python3 bin/session_autobridge.py lease-claim \
+  --project amiga \
+  --chat CHAT-xxxx \
+  --task TASK-xxxxxx \
+  --worktree /absolute/canonical/worktree \
+  --branch codex/example \
+  --target-agent claude \
+  --session SESSION-claude-amiga \
+  --claimant-runtime-id <runtime-thread-id> \
+  --json
+```
+
+Before mutating the assigned worktree, assert the current owner and fence:
+
+```bash
+python3 bin/session_autobridge.py lease-assert \
+  --project amiga \
+  --chat CHAT-xxxx \
+  --task TASK-xxxxxx \
+  --worktree /absolute/canonical/worktree \
+  --branch codex/example \
+  --target-agent claude \
+  --session SESSION-claude-amiga \
+  --fence-token <token-from-claim> \
+  --claimant-runtime-id <runtime-thread-id> \
+  --json
+```
+
+Release when the task is done or superseded:
+
+```bash
+python3 bin/session_autobridge.py lease-release \
+  --project amiga \
+  --chat CHAT-xxxx \
+  --task TASK-xxxxxx \
+  --worktree /absolute/canonical/worktree \
+  --branch codex/example \
+  --target-agent claude \
+  --session SESSION-claude-amiga \
+  --fence-token <token-from-claim> \
+  --json
+```
+
+Refusals return exit 75 with JSON naming the reason and current owner where
+known. Do not mutate the worktree after a refused claim/assert. Takeover is
+explicit: use `--takeover` only when replacing an expired or provably dead
+owner. A live pid owner is never replaced, and unknown liveness fails closed.
+Claims resolve the requested worktree once under the lease lock to refuse
+symlink aliases of an already-active real worktree, while identity
+classification remains byte-exact and filesystem-independent.
+
 ## Inspect Bindings
 
 Show the registered session:

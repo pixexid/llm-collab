@@ -263,11 +263,63 @@ the claiming target agent, and non-string parsed identity values.
 Verdicts are CWD/HOME/filesystem-time independent: the sender canonicalizes an
 EXISTING directory exactly once before serialization, and receivers never
 re-resolve — the serialized identity is compared byte-exact, so post-send path
-creation or symlink replacement cannot move an identity. Consumption gating, lease authority, and wake-path
-enforcement ship in the follow-on lanes (GH-1571 / GH-1572). Until GH-1572
+creation or symlink replacement cannot move an identity. Lease authority uses
+the same byte-exact identity for its record key, then resolves the claimed
+worktree once under the claim lock only to reject active symlink/alias
+collisions. Consumption gating and wake-path enforcement ship in the follow-on
+lanes (GH-1572). Until GH-1572
 lands, `deliver.py --activation` FAILS CLOSED pre-write (the packet's required
 claim command is not yet runnable); this schema documents the stable contract,
 not a live delivery path.
+
+### Activation lease records
+
+Activation lease authority stores one JSON record per exact activation identity
+under `State/session_autobridge/activation_leases/{lease_key}.json`, with a
+stable never-unlinked sibling `.lock` file used for `flock(LOCK_EX|LOCK_NB)`
+claim serialization. The record is written only by `session_autobridge.py
+lease-claim`/`lease-release`; `lease-assert` is read-only.
+
+```json
+{
+  "identity": {
+    "project": "amiga",
+    "chat": "CHAT-A1B2C3D4",
+    "task": "TASK-ABC123",
+    "worktree": "/absolute/canonical/worktree",
+    "branch": "codex/example",
+    "target_agent": "claude"
+  },
+  "lease_key": "16hex",
+  "owner_session_id": "SESSION-...",
+  "owner_runtime_session_id": "runtime-thread-id",
+  "owner_pid": 12345,
+  "status": "active",
+  "fence_token": 1,
+  "claimed_utc": "2026-01-01T00:00:00+00:00",
+  "lease_expires_utc": "2026-01-01T01:00:00+00:00",
+  "previous_owner_session_id": null,
+  "worktree_realpath": "/resolved/real/worktree",
+  "updated_utc": "2026-01-01T00:00:00+00:00"
+}
+```
+
+`owner_session_id` must name a registered live autobridge session whose
+`agent_id`, `project_id`, and `chat_id` exactly match the activation identity;
+missing/null session bindings are unbound and refuse. A claim also requires a
+bound claimant identity: `--claimant-runtime-id`, a registered
+`runtime.session_id`, or a live `--owner-pid`. Claims with no runtime identity
+and no live pid refuse with `claimant_identity_required`; an identity-less
+lease record is never valid.
+
+Every ownership change increments `fence_token`. Refused claims are evaluated
+before record writes and must leave the existing lease file byte-identical.
+`lease-assert` requires `--fence-token` and verifies the owner session plus the
+runtime/pid binding recorded at claim time; same-session assertions from a
+different runtime or process refuse. Expired leases do not assert; the owner
+must reclaim to refresh TTL before mutating. Expired or provably dead owners are
+takeover-eligible only with explicit `--takeover`; live-pid owners are never
+replaced, and unknown liveness fails closed.
 
 ### Body
 
