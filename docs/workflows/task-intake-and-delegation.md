@@ -344,13 +344,30 @@ equal the evaluator-selected run ID. A watcher packet, saved artifact, stale
 run, or run for another SHA is candidate context only and never a shortcut.
 
 Projects without complete `release_closure` configuration fail `success`
-closed. They may still record an honest structured `non-production` or
-`risk-accepted-followup` disposition, including when GitHub is disabled. These
-non-success records bind `repository: null` and omit caller-provided run IDs;
-only transition-time evaluation can make a run ID authoritative. Historical
-tasks already marked `done` are grandfathered because the gate applies only to new transitions. If the
-gate itself must be rolled back, revert its code/config change; never bypass a
-refusal by moving or editing the task manually.
+closed. An absent or empty (`{}`) closure still permits an honest structured
+`non-production` or `risk-accepted-followup` disposition. In contrast, any
+truthy `release_closure` must be a complete valid closure contract: malformed
+truthy configuration refuses all three verdicts before evaluator, task, or
+queue mutation.
+
+For a GitHub-enabled project with a configured repository, an honest
+non-success record preserves that repository identity. Only the GitHub-disabled
+case binds `repository: null`. Both forms omit caller-provided run IDs; only
+transition-time evaluation can make a run ID authoritative.
+
+Post-merge release handling has one strict order:
+
+1. Evaluate the exact merge SHA through the configured release authority.
+2. After terminal success or an explicit honest non-success disposition, move
+   the task from `review` to `done`.
+3. Only after the `done` transition succeeds, run post-merge cleanup.
+
+A raw `PENDING`, `MISSING`, `FAILURE`, or `CANCELLED` evaluation is not itself a
+terminal disposition. It preserves the task in `review` and preserves the
+implementation lane; do not promote the task or clean the lane. Historical
+tasks already marked `done` are grandfathered because the gate applies only to
+new transitions. If the gate itself must be rolled back, revert its code/config
+change; never bypass a refusal by moving or editing the task manually.
 
 For UI/UX lanes, also require:
 - `ui_ux_lane: true`

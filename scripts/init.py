@@ -136,7 +136,7 @@ def build_identity_md(agent: dict, workspace_name: str, all_agent_ids: list[str]
         "",
         "- Always bootstrap your session before starting work.",
         "- Always check your inbox before starting new work.",
-        "- When you complete a task, update its status: `claim_task.py --status done`",
+        "- When implementation is ready for independent review, update its status: `claim_task.py --status review`",
         "- When you send a message to a human_relay agent, the system will print",
         "  a handoff prompt for the operator to relay to them.",
     ]

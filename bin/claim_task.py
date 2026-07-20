@@ -59,6 +59,36 @@ class ReleaseGateError(ValueError):
     """A requested done transition lacks valid objective closure authority."""
 
 
+def validate_truthy_release_closure(
+    project_id: str,
+    release_closure: object,
+) -> None:
+    """Refuse a configured-but-malformed closure before verdict-specific work."""
+    if not release_closure:
+        return
+
+    # Reuse the deploy evaluator's canonical closure validation without making
+    # an honest non-success disposition depend on GitHub being enabled or on a
+    # production branch being configured.
+    validation_project = {
+        "github": {"enabled": True, "repo": "validation/release-closure"},
+        "default_branch_base": "validation-branch",
+        "release_closure": release_closure,
+    }
+    resolved_config, config_error = resolve_release_config(
+        project_id,
+        validation_project,
+    )
+    if resolved_config is None:
+        raise ReleaseGateError(
+            f"project {project_id!r} has malformed projects.json key "
+            f"'release_closure': truthy release_closure must be a complete valid "
+            f"object; refusing every release verdict before evaluation: {config_error} "
+            f"— repair this task project's {project_id!r} entry in projects.json "
+            "at key 'release_closure'"
+        )
+
+
 def build_release_evidence_record(
     frontmatter: dict,
     old_status: str,
@@ -124,6 +154,7 @@ def build_release_evidence_record(
         else None
     )
     release_closure = project.get("release_closure")
+    validate_truthy_release_closure(project_id, release_closure)
     configured_workflow = (
         release_closure.get("workflow")
         if isinstance(release_closure, dict)
