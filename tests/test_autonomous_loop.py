@@ -21,9 +21,13 @@ class AutonomousLoopStateRecoveryTest(unittest.TestCase):
     def tearDown(self) -> None:
         self.tmp.cleanup()
 
-    def read(self, payload: dict[str, object]) -> dict[str, object]:
+    def read(
+        self,
+        payload: dict[str, object],
+        project_id: str = "amiga",
+    ) -> dict[str, object]:
         self.path.write_text(json.dumps(payload))
-        return autonomous_loop.read_state(self.path, "amiga")
+        return autonomous_loop.read_state(self.path, project_id)
 
     def test_valid_v1_state_recomputes_stale_next_action(self) -> None:
         state = self.read(
@@ -65,6 +69,26 @@ class AutonomousLoopStateRecoveryTest(unittest.TestCase):
         self.assertEqual(state["schema_version"], 1)
         self.assertIn("schema_version=2", state["notes"][-1]["text"])
         self.assertIn("normalized to schema_version=1", state["notes"][-1]["text"])
+
+    def test_registered_non_amiga_project_recovers_canonical_state(self) -> None:
+        state = self.read(
+            {
+                "schema_version": 0,
+                "project_id": "amiga",
+                "mode": "acceptance",
+                "current": {"task": "TASK-NUVYR"},
+                "next_action": "Stale cross-project instruction.",
+            },
+            project_id="nuvyr",
+        )
+
+        self.assertEqual(state["project_id"], "nuvyr")
+        self.assertEqual(state["schema_version"], 1)
+        self.assertIn("schema_version=0", state["notes"][-1]["text"])
+        self.assertEqual(
+            state["next_action"],
+            "Run dirty-worktree acceptance and task-contract review for TASK-NUVYR.",
+        )
 
     def test_boolean_version_recovers_with_stored_condition_note(self) -> None:
         state = self.read({"schema_version": True})
