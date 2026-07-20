@@ -156,6 +156,48 @@ escape hatch. Once safety is proved, recipient busy state alone does not require
 an idle wait. The doorbell works between supported distinct app identities;
 that capability does not make it a Codex-to-Codex transport.
 
+## GH-135 update-survival decision and recovery evidence
+
+**Decision state: `PENDING REAL-UPDATE EVIDENCE`.** Neither a stable
+symlink/alias nor a stable helper has been selected. The current evidence does
+not establish that either candidate is feasible or infeasible, and a process
+restart or relaunch alone is not update-survival proof. GH-135 requires evidence
+from a real app update before the decision can change.
+
+### Confirmed version-path/TCC incident
+
+- Claude Code continued running from the versioned `2.1.209` path after that
+  version tree had been deleted and only `2.1.215` remained on disk.
+- GH-127A surfaced the resulting failed AX trust state as `[ax] DOWN`.
+- The durable mailbox remained the source of truth while the doorbell was
+  unavailable.
+- Demonstrated recovery required a full app quit and relaunch, operator
+  Accessibility re-approval, and a successful `tools/axbridge/axsend check`.
+
+That sequence is recovery evidence for the observed incident, not proof that a
+candidate survives an update. Draft/composer-targeting failures, including the
+GH-1547 target-side hold, are a different failure class and are not TCC
+update-survival evidence.
+
+### Operator-run evidence matrix for a genuine update
+
+For each row, the operator records the same before-and-after fields around one
+genuine application update. A blank or ambiguous field leaves that candidate
+undecided.
+
+| Candidate or control | Before the real app update | After the real app update | Visibility and outcome |
+|---|---|---|---|
+| Current versioned-path control | App version; executable path; resolved path; AX trust | App version; executable path; resolved path; AX trust | GH-127A status; live-ring result; rollback result; recovery result |
+| Stable symlink/alias candidate | App version; executable path; resolved path; AX trust | App version; executable path; resolved path; AX trust | GH-127A status; live-ring result; rollback result; recovery result |
+| Stable-helper candidate | App version; executable path; resolved path; AX trust | App version; executable path; resolved path; AX trust | GH-127A status; live-ring result; rollback result; recovery result |
+
+Installation, launchd or service-lifecycle changes, TCC/Accessibility changes,
+the genuine app update, and live-ring validation are operator-owned. This
+protocol does not authorize an agent to perform those actions, install a
+candidate, or change targeting/session semantics. Any future implementation
+must be scoped separately after the evidence supports a mechanism decision;
+this runbook intentionally specifies no code, signing, or IPC design.
+
 ## Two channels: mailbox + doorbell
 
 - **Mailbox = `llm-collab` (durable source of truth).** Every task, handoff,
