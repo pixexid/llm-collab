@@ -49,7 +49,11 @@ from deploy_release_watch import (
     resolve_release_config,
 )
 from refine_task import RISK_REQUIRED_LABELS, RISK_SECTION, validate_implementation_risk_analysis
-from task_contract import sync_task_contract, validate_task_contract
+from task_contract import (
+    sync_task_contract,
+    validate_direct_app_policy,
+    validate_task_contract,
+)
 
 PLANNING_AGENT = "claude"
 ACCEPTANCE_AGENT = "codex"
@@ -366,6 +370,28 @@ def main():
     preflight_summary = None
     queue_summary = None
     release_evidence_record = None
+
+    if args.status != "done":
+        validation_fm = dict(fm)
+        validation_fm["status"] = args.status
+        direct_app_errors, direct_app_summary = validate_direct_app_policy(validation_fm)
+        if direct_app_errors:
+            print(
+                json.dumps(
+                    {
+                        "error": "direct-app policy rejects target status before task or queue mutation",
+                        "task_id": fm.get("task_id", args.task),
+                        "old_status": old_status,
+                        "target_status": args.status,
+                        "project_id": project_id,
+                        "direct_app": direct_app_summary,
+                        "problems": direct_app_errors,
+                    },
+                    indent=2,
+                ),
+                file=sys.stderr,
+            )
+            sys.exit(1)
 
     if args.status == "done":
         try:

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import copy
+import io
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 
@@ -460,6 +462,63 @@ class ProjectIssueQueueNormalizeTest(unittest.TestCase):
         )
 
 
+class ProjectIssueQueueArchiveCompleteTest(unittest.TestCase):
+    def archive_args(self) -> SimpleNamespace:
+        return SimpleNamespace(
+            command="archive-complete",
+            project="amiga",
+            skip_backlog_check=True,
+        )
+
+    def test_archive_complete_requires_exact_embedded_project_before_mutation(self) -> None:
+        missing = object()
+        for label, embedded_project in (
+            ("missing", missing),
+            ("null", None),
+            ("empty", ""),
+            ("foreign", "nuvyr"),
+        ):
+            with self.subTest(project_id=label):
+                payload = {"lanes": []}
+                if embedded_project is not missing:
+                    payload["project_id"] = embedded_project
+                before = copy.deepcopy(payload)
+                stderr = io.StringIO()
+
+                with patch.object(project_issue_queue, "parse_args", return_value=self.archive_args()):
+                    with patch.object(project_issue_queue, "load_queue", return_value=payload):
+                        with patch.object(project_issue_queue, "archive_complete_queue") as archive:
+                            with patch.object(project_issue_queue, "sync_markdown") as persist:
+                                with patch("sys.stderr", stderr):
+                                    result = project_issue_queue.main()
+
+                self.assertEqual(result, 1)
+                self.assertEqual(payload, before)
+                self.assertIn("expected 'amiga'", stderr.getvalue())
+                self.assertIn(f"found {payload.get('project_id')!r}", stderr.getvalue())
+                self.assertIn("before mutation", stderr.getvalue())
+                archive.assert_not_called()
+                persist.assert_not_called()
+
+    def test_archive_complete_exact_empty_queue_archives_and_syncs_once(self) -> None:
+        payload = {"project_id": "amiga", "lanes": []}
+        archived_paths = (Path("/tmp/issue-queue.json"), Path("/tmp/issue-queue.md"))
+
+        with patch.object(project_issue_queue, "parse_args", return_value=self.archive_args()):
+            with patch.object(project_issue_queue, "load_queue", return_value=payload):
+                with patch.object(
+                    project_issue_queue,
+                    "archive_complete_queue",
+                    return_value=archived_paths,
+                ) as archive:
+                    with patch.object(project_issue_queue, "sync_markdown") as persist:
+                        result = project_issue_queue.main()
+
+        self.assertEqual(result, 0)
+        archive.assert_called_once()
+        persist.assert_called_once_with("amiga", payload)
+
+
 class ProjectIssueQueueReconcileTest(unittest.TestCase):
     def write_task(self, directory: Path, name: str, body: str) -> Path:
         path = directory / name
@@ -635,6 +694,71 @@ skip_refinement: true
                     self.assertEqual(lane["queue_state"], "blocked")
                     self.assertEqual(lane["blocked_by"], ["TASK-DEP"])
                     global_lookup.assert_not_called()
+
+    def test_task_snapshot_requires_every_exact_project_duplicate_to_be_done(self) -> None:
+        for status_label, status_line in (
+            ("open", "status: open\n"),
+            ("blocked", "status: blocked\n"),
+            ("review", "status: review\n"),
+            ("missing", ""),
+            ("invalid", "status: unexpected\n"),
+        ):
+            with self.subTest(second_status=status_label):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    done = self.write_task(
+                        root,
+                        "2026-07-20_gh-783-done__TASK-DEP.md",
+                        "---\n"
+                        "task_id: TASK-DEP\n"
+                        "title: GH-783 Done mirror\n"
+                        "project_id: amiga\n"
+                        "status: done\n"
+                        "---\n",
+                    )
+                    other = self.write_task(
+                        root,
+                        "2026-07-20_gh-783-other__TASK-DEP.md",
+                        "---\n"
+                        "task_id: TASK-DEP\n"
+                        "title: GH-783 Other mirror\n"
+                        "project_id: amiga\n"
+                        f"{status_line}"
+                        "---\n",
+                    )
+
+                    with patch.object(project_issue_queue, "all_task_files", return_value=[done, other]):
+                        _, completed = project_issue_queue.project_task_snapshot("amiga")
+
+                self.assertNotIn("TASK-DEP", completed)
+
+    def test_task_snapshot_accepts_all_done_exact_mirrors_and_excludes_foreign_noise(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task_files = []
+            for label, project_id, status in (
+                ("done-a", "amiga", "done"),
+                ("done-b", "amiga", "done"),
+                ("foreign", "nuvyr", "open"),
+                ("projectless", "null", "blocked"),
+            ):
+                task_files.append(
+                    self.write_task(
+                        root,
+                        f"2026-07-20_gh-783-{label}__TASK-DEP.md",
+                        "---\n"
+                        "task_id: TASK-DEP\n"
+                        f"title: GH-783 {label}\n"
+                        f"project_id: {project_id}\n"
+                        f"status: {status}\n"
+                        "---\n",
+                    )
+                )
+
+            with patch.object(project_issue_queue, "all_task_files", return_value=task_files):
+                _, completed = project_issue_queue.project_task_snapshot("amiga")
+
+        self.assertIn("TASK-DEP", completed)
 
     def test_reconcile_blocks_and_reports_direct_app_policy_violation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -1017,6 +1017,14 @@ def main() -> int:
         return 0
 
     if args.command == "archive-complete":
+        loaded_project_id = payload.get("project_id") if isinstance(payload, dict) else None
+        if loaded_project_id != args.project:
+            print(
+                f"[error] queue project_id mismatch: expected {args.project!r}, "
+                f"found {loaded_project_id!r}; refusing archive-complete before mutation",
+                file=sys.stderr,
+            )
+            return 1
         if not args.skip_backlog_check:
             backlog_errors, _ = backlog_consistency_errors(args.project, payload)
             if backlog_errors:

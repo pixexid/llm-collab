@@ -584,6 +584,172 @@ class TaskContractDirectAppPolicyTest(unittest.TestCase):
                         errors,
                     )
 
+    def test_loop_probe_handles_old_runtime_and_new_runtime_exception_shapes(self) -> None:
+        candidate = Path("/synthetic/loop/design/planned.md")
+        for error in (RuntimeError("symlink loop"), OSError("too many symbolic links")):
+            with self.subTest(error_type=type(error).__name__):
+                with patch.object(Path, "resolve", side_effect=error):
+                    resolved, resolution_error = task_contract._resolve_direct_app_path(candidate)
+
+                self.assertIsNone(resolved)
+                self.assertIn(str(error), resolution_error)
+
+    def test_non_loop_symlinks_preserve_resolved_design_classification(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "design").mkdir()
+            (root / "src" / "design").mkdir(parents=True)
+            (root / "design-link").symlink_to(root / "design")
+            (root / "src-design-link").symlink_to(root / "src" / "design")
+            project = self.enabled_project(repos={"app": str(root)})
+
+            for field in ("related_paths", "required_dependency_artifacts"):
+                with self.subTest(field=field):
+                    design_path = str(root / "design-link" / "planned.md")
+                    source_path = str(root / "src-design-link" / "planned.ts")
+                    rejected, _ = self.validate(
+                        {"project_id": "amiga", "status": "open", field: [design_path]},
+                        project,
+                    )
+                    accepted, _ = self.validate(
+                        {"project_id": "amiga", "status": "open", field: [source_path]},
+                        project,
+                    )
+
+                    self.assertTrue(
+                        any(design_path in error and "repository-root `design/**`" in error for error in rejected),
+                        rejected,
+                    )
+                    self.assertEqual(accepted, [])
+
+    def test_relative_symlink_loop_names_field_and_offending_path_across_repo_roots(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first_repo = root / "app"
+            second_repo = root / "api"
+            first_repo.mkdir()
+            second_repo.mkdir()
+            (second_repo / "loop-a").symlink_to(second_repo / "loop-b")
+            (second_repo / "loop-b").symlink_to(second_repo / "loop-a")
+            offending_path = "loop-a/design/surface.md"
+            project = self.enabled_project(
+                repos={"app": str(first_repo), "api": str(second_repo)}
+            )
+
+            for field in ("related_paths", "required_dependency_artifacts"):
+                with self.subTest(field=field):
+                    errors, _ = self.validate(
+                        {"project_id": "amiga", "status": "open", field: [offending_path]},
+                        project,
+                    )
+
+                    self.assertTrue(
+                        any(
+                            f"cannot resolve `{field}` path {offending_path!r}" in error
+                            for error in errors
+                        ),
+                        errors,
+                    )
+
+    def test_relative_symlink_aliases_preserve_root_design_classification(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "design").mkdir()
+            (root / "src" / "design").mkdir(parents=True)
+            (root / "design-link").symlink_to(root / "design")
+            (root / "src-design-link").symlink_to(root / "src" / "design")
+            project = self.enabled_project(repos={"app": str(root)})
+
+            for field in ("related_paths", "required_dependency_artifacts"):
+                with self.subTest(field=field):
+                    rejected, _ = self.validate(
+                        {
+                            "project_id": "amiga",
+                            "status": "open",
+                            field: ["design-link/planned.md"],
+                        },
+                        project,
+                    )
+                    accepted, _ = self.validate(
+                        {
+                            "project_id": "amiga",
+                            "status": "open",
+                            field: ["src-design-link/planned.ts"],
+                        },
+                        project,
+                    )
+
+                    self.assertTrue(
+                        any(
+                            "design-link/planned.md" in error
+                            and "repository-root `design/**`" in error
+                            for error in rejected
+                        ),
+                        rejected,
+                    )
+                    self.assertEqual(accepted, [])
+
+    def test_relative_nonexistent_paths_remain_accepted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = self.enabled_project(repos={"app": str(root)})
+
+            for field in ("related_paths", "required_dependency_artifacts"):
+                for path in (
+                    "future/components/planned.ts",
+                    "src/design/planned.ts",
+                    "docs/design/planned.md",
+                ):
+                    with self.subTest(field=field, path=path):
+                        errors, _ = self.validate(
+                            {"project_id": "amiga", "status": "open", field: [path]},
+                            project,
+                        )
+
+                        self.assertEqual(errors, [])
+
+    def test_relative_aliases_evaluate_every_configured_repo_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first_repo = root / "app"
+            second_repo = root / "api"
+            (first_repo / "src" / "design").mkdir(parents=True)
+            (second_repo / "design").mkdir(parents=True)
+            (first_repo / "shared-alias").symlink_to(first_repo / "src" / "design")
+            (second_repo / "blocked-alias").symlink_to(second_repo / "design")
+            project = self.enabled_project(
+                repos={"app": str(first_repo), "api": str(second_repo)}
+            )
+
+            for field in ("related_paths", "required_dependency_artifacts"):
+                with self.subTest(field=field):
+                    accepted, _ = self.validate(
+                        {
+                            "project_id": "amiga",
+                            "status": "open",
+                            field: ["shared-alias/planned.ts"],
+                        },
+                        project,
+                    )
+                    rejected, _ = self.validate(
+                        {
+                            "project_id": "amiga",
+                            "status": "open",
+                            field: ["blocked-alias/planned.md"],
+                        },
+                        project,
+                    )
+
+                    self.assertEqual(accepted, [])
+                    self.assertTrue(
+                        any(
+                            "blocked-alias/planned.md" in error
+                            and "repository-root `design/**`" in error
+                            for error in rejected
+                        ),
+                        rejected,
+                    )
+
     def test_absolute_paths_fail_when_repo_mapping_cannot_be_resolved(self) -> None:
         repo_cases = (
             ("missing", {}),
@@ -802,11 +968,11 @@ class TaskCreationProjectTest(unittest.TestCase):
             self.assertEqual(task_path.read_text(), original)
             write_file.assert_not_called()
             mark_lane_transition.assert_not_called()
-            self.assertIn("task contract is incomplete", stderr.getvalue())
+            self.assertIn("direct-app policy rejects target status", stderr.getvalue())
             self.assertIn("`lane_type` 'design-spec'", stderr.getvalue())
 
-    def test_claim_done_design_history_uses_target_status_before_any_mutation(self) -> None:
-        for target_status in ("in_progress", "review"):
+    def test_claim_done_design_history_uses_every_non_done_target_before_any_mutation(self) -> None:
+        for target_status in ("open", "blocked", "in_progress", "review"):
             with self.subTest(target_status=target_status):
                 with tempfile.TemporaryDirectory() as tmp:
                     task_path = Path(tmp) / "task.md"
@@ -882,6 +1048,124 @@ class TaskCreationProjectTest(unittest.TestCase):
                     write_file.assert_not_called()
                     mark_lane_transition.assert_not_called()
                     self.assertIn("`lane_type` 'design-spec'", stderr.getvalue())
+
+    def test_claim_non_done_target_keeps_default_off_and_non_design_controls_usable(self) -> None:
+        cases = (
+            (
+                "default-off",
+                {"id": "amiga", "ui_ux": {"direct_app_only": False}},
+                "design-spec",
+            ),
+            (
+                "non-design",
+                {"id": "amiga", "ui_ux": {"direct_app_only": True}},
+                "implementation",
+            ),
+        )
+        for label, project, lane_type in cases:
+            with self.subTest(control=label):
+                with tempfile.TemporaryDirectory() as tmp:
+                    task_path = Path(tmp) / "task.md"
+                    task_path.write_text(
+                        "---\n"
+                        "task_id: TASK-CONTROL\n"
+                        "title: Historical control task\n"
+                        "project_id: amiga\n"
+                        "status: done\n"
+                        "owner: codex\n"
+                        "created_by: codex\n"
+                        "skip_refinement: true\n"
+                        f"lane_type: {lane_type}\n"
+                        "ui_ux_lane: false\n"
+                        "db_impact: none\n"
+                        "---\n"
+                        "# Historical control task\n"
+                    )
+                    args = SimpleNamespace(
+                        task="TASK-CONTROL",
+                        owner="codex",
+                        status="open",
+                        branch=None,
+                        note=None,
+                        skip_preflight=True,
+                        allow_queue_override=False,
+                        accepted_by=None,
+                        accepted_note=None,
+                        allow_self_plan=False,
+                        released_by=None,
+                        release_evidence=None,
+                    )
+
+                    with patch.object(claim_task, "parse_args", return_value=args):
+                        with patch.object(claim_task, "agent_ids", return_value=["codex"]):
+                            with patch.object(claim_task, "ensure_agent_enabled"):
+                                with patch.object(claim_task, "find_task_by_id", return_value=task_path):
+                                    with patch.object(claim_task, "ROOT", Path(tmp)):
+                                        with patch.object(claim_task, "target_task_path", return_value=task_path):
+                                            with patch.object(claim_task.issue_queue, "queue_exists", return_value=False):
+                                                with patch.object(task_contract, "get_project", return_value=project):
+                                                    with patch.object(claim_task, "write_file") as write_file:
+                                                        claim_task.main()
+
+                    write_file.assert_called_once()
+                    _, rendered = write_file.call_args.args
+                    transitioned, _ = task_contract.parse_frontmatter(rendered)
+                    self.assertEqual(transitioned["status"], "open")
+
+    def test_claim_done_target_uses_release_closure_without_direct_app_revalidation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            task_path = Path(tmp) / "task.md"
+            original = (
+                "---\n"
+                "task_id: TASK-RELEASE\n"
+                "title: Historical design release\n"
+                "project_id: amiga\n"
+                "status: review\n"
+                "owner: codex\n"
+                "created_by: codex\n"
+                "lane_type: design-spec\n"
+                "---\n"
+                "# Historical design release\n"
+            )
+            task_path.write_text(original)
+            args = SimpleNamespace(
+                task="TASK-RELEASE",
+                owner="codex",
+                status="done",
+                branch=None,
+                note=None,
+                skip_preflight=True,
+                allow_queue_override=False,
+                accepted_by=None,
+                accepted_note=None,
+                allow_self_plan=False,
+                released_by="codex",
+                release_evidence='{"merge_sha":"0123456789abcdef0123456789abcdef01234567","verdict":"success","run_id":1}',
+            )
+            stderr = io.StringIO()
+
+            with patch.object(claim_task, "parse_args", return_value=args):
+                with patch.object(claim_task, "agent_ids", return_value=["codex"]):
+                    with patch.object(claim_task, "ensure_agent_enabled"):
+                        with patch.object(claim_task, "find_task_by_id", return_value=task_path):
+                            with patch.object(
+                                claim_task,
+                                "build_release_evidence_record",
+                                side_effect=claim_task.ReleaseGateError("release closure refused"),
+                            ) as release_gate:
+                                with patch.object(
+                                    claim_task,
+                                    "validate_direct_app_policy",
+                                    return_value=(["historical design violation"], {}),
+                                ) as direct_app:
+                                    with patch("sys.stderr", stderr):
+                                        with self.assertRaises(SystemExit):
+                                            claim_task.main()
+
+            self.assertEqual(task_path.read_text(), original)
+            release_gate.assert_called_once()
+            direct_app.assert_not_called()
+            self.assertIn("release closure refused", stderr.getvalue())
 
 
 if __name__ == "__main__":

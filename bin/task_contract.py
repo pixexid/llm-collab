@@ -349,6 +349,23 @@ def _path_is_absolute(value) -> bool:
         return False
 
 
+def _resolve_direct_app_path(candidate: Path) -> tuple[Path | None, str | None]:
+    """Resolve a policy path while detecting loops on every supported Python."""
+    try:
+        return candidate.resolve(strict=True), None
+    except FileNotFoundError:
+        # Missing path components are valid for planned work. Resolve the
+        # existing prefix and preserve the unresolved suffix below.
+        pass
+    except (OSError, RuntimeError, ValueError) as error:
+        return None, str(error)
+
+    try:
+        return candidate.resolve(strict=False), None
+    except (OSError, RuntimeError, ValueError) as error:
+        return None, str(error)
+
+
 def _is_repo_root_design_path(value, repo_roots: list[Path]) -> tuple[bool, str | None]:
     raw = _normalize_text(value)
     if not raw:
@@ -359,10 +376,9 @@ def _is_repo_root_design_path(value, repo_roots: list[Path]) -> tuple[bool, str 
     except (OSError, RuntimeError, ValueError) as error:
         return False, str(error)
     if candidate.is_absolute():
-        try:
-            resolved = candidate.resolve()
-        except (OSError, RuntimeError, ValueError) as error:
-            return False, str(error)
+        resolved, resolution_error = _resolve_direct_app_path(candidate)
+        if resolution_error is not None or resolved is None:
+            return False, resolution_error or "path resolution failed"
         for repo_root in repo_roots:
             try:
                 relative = resolved.relative_to(repo_root)
@@ -373,6 +389,20 @@ def _is_repo_root_design_path(value, repo_roots: list[Path]) -> tuple[bool, str 
 
     normalized = posixpath.normpath(raw.replace("\\", "/"))
     parts = [part for part in normalized.split("/") if part not in {"", "."}]
+    if repo_roots:
+        targets_root_design = False
+        relative_candidate = Path(normalized)
+        for repo_root in repo_roots:
+            resolved, resolution_error = _resolve_direct_app_path(repo_root / relative_candidate)
+            if resolution_error is not None or resolved is None:
+                return False, resolution_error or "path resolution failed"
+            try:
+                relative = resolved.relative_to(repo_root)
+            except ValueError:
+                continue
+            if relative.parts and relative.parts[0].lower() == "design":
+                targets_root_design = True
+        return targets_root_design, None
     return bool(parts) and parts[0].lower() == "design", None
 
 
@@ -448,15 +478,17 @@ def validate_direct_app_policy(frontmatter: dict) -> tuple[list[str], dict]:
         if _path_is_absolute(path)
     ]
     repo_roots: list[Path] = []
-    if absolute_paths:
+    if related_paths or dependency_paths:
         repo_roots, repo_error = _project_repo_roots(project)
-        if repo_error:
+        if repo_error and absolute_paths:
             fields = ", ".join(f"`{field}`" for field in dict.fromkeys(field for field, _ in absolute_paths))
             violations.append(
                 f"Project {project_id!r} enables `ui_ux.direct_app_only: true` but cannot "
                 f"evaluate absolute paths in {fields}: projects.json `repos` is missing, "
                 f"empty, malformed, or unresolvable ({repo_error})."
             )
+        if repo_error:
+            repo_roots = []
 
     for path in related_paths:
         is_root_design, resolution_error = _is_repo_root_design_path(path, repo_roots)
