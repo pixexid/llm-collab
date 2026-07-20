@@ -323,12 +323,15 @@ Every ownership change increments `fence_token`. Refused claims are evaluated
 before record writes and must leave the existing lease file byte-identical.
 `lease-assert` requires `--fence-token` and verifies the owner session plus the
 runtime/pid binding recorded at claim time; same-session assertions from a
-different runtime or process refuse. Expired leases do not assert; the owner
-must reclaim to refresh TTL before mutating. Same-session/same-runtime
-runtime-only reclaim refreshes TTL with the same fence. Expired or provably
-dead owners are takeover-eligible only with explicit `--takeover`; live-pid
-owners are never replaced, and unknown liveness fails closed. Non-active or
-expired same-realpath lease records do not block a new identity claim.
+different runtime or process refuse. Assert never falls back to the stored
+session record runtime: the asserting runtime identity must come from
+`--claimant-runtime-id` or the reader runtime environment. Expired leases do
+not assert; the owner must reclaim to refresh TTL before mutating.
+Same-session/same-runtime runtime-only reclaim refreshes TTL with the same
+fence. Expired or provably dead owners are takeover-eligible only with explicit
+`--takeover`; live-pid owners are never replaced, and unknown liveness fails
+closed. Non-active or expired same-realpath lease records do not block a new
+identity claim.
 
 ### Body
 
