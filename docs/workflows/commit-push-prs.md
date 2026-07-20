@@ -107,9 +107,41 @@ Apply a convergence circuit breaker per finding family:
   `risk-accepted-followup`.
 - Only `contract-clarified` permits continued work in the same lane, and it
   requires updating the task/spec with the corrected invariant before the third
-  head.
-- Round counting remains reviewer/orchestrator judgment. Do not mechanically
-  auto-count finding families.
+  head. `contract-clarified` may be used at most once per family per PR; a
+  second same-family disposition must be one of the terminal values.
+- Same-file anchoring counts mechanically: two finding rounds whose findings
+  touch the same file are the same family regardless of which named invariants
+  they cite. Orchestrator judgment applies only to grouping cross-file
+  invariant findings.
+
+Hard cycle cap, independent of family counting:
+
+- A review-fix cycle is one finding round plus its amendment, regardless of
+  reviewer freshness: same-reviewer re-reviews under the bounded amendment
+  allowance consume cycles exactly like fresh cold reviews.
+- The cycle counter is per task/lane, not per PR: it starts at the initial
+  cold review — including the pre-PR collab/doorbell review loop — and carries
+  into the PR once one exists. Opening the PR never resets the count.
+- After the initial cold review, at most 2 review-fix cycles are permitted per
+  lane; 3 when the contract scope includes payments, auth, permissions,
+  schema/migrations, or irreversible writes.
+- Docs-only lanes whose no-consumer scan proves zero runtime consumers always
+  cap at 2 cycles: residual prose ambiguity in an unconsumed document is a
+  follow-up issue, never another cycle.
+- Reaching the cap forces exactly one terminal action before any further
+  amendment: merge at the current head with `risk-accepted-followup` (open
+  findings move to a new issue), `descope`, `split`, or a durable operator
+  escalation packet. "No further amendment" bars content changes only; the
+  publication steps the chosen disposition itself requires — pushing the
+  already-reviewed head, opening its PR, and merging — remain permitted, so a
+  lane that caps during the pre-PR loop can still land via
+  `risk-accepted-followup`. Starting another review cycle past the cap is a
+  process violation.
+- Reaching the applicable cap, or spending more than 2 hours of wall-clock
+  time in the review-fix state, requires an operator-visible escalation
+  message recorded alongside the terminal disposition (or before the next
+  cycle for the wall-clock trigger); a lane found past its cap is a process
+  violation that must also be escalated.
 
 When a project supports structured review notes, the disposition may be
 recorded as the optional line `Convergence-disposition: <value>` and must use
