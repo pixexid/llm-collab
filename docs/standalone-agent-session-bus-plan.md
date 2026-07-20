@@ -722,12 +722,17 @@ Every implementation slice follows this sequence:
    most 2 review-fix cycles follow the initial review (3 when the contract
    scope includes payments, auth, permissions, schema/migrations, or
    irreversible writes; docs-only lanes with a proven zero-consumer scan always
-   cap at 2), after which exactly one terminal disposition is mandatory:
-   merge at the current head with `risk-accepted-followup` (open findings move
-   to a new issue), `descope`, `split`, or a durable operator escalation;
+   cap at 2), after which a terminal disposition is mandatory only when
+   actionable findings remain open at the capped head: merge at the current
+   head with `risk-accepted-followup` (open findings move to a new issue),
+   `descope`, `split`, `backend-first`, or a durable operator escalation. A
+   clean capped head follows the normal merge gate with no disposition label;
 10. publish a focused ready-for-review PR with scope, non-goals, compatibility,
     security, verification, migration, and rollback evidence;
-11. merge only the reviewed exact head and reconcile task/issue state.
+11. merge only the reviewed exact head after the full PR Review Wait Gate in
+    `docs/workflows/commit-push-prs.md` passes, including its two exact-head
+    terminal-signal models, post-clean settle and full review/thread/reaction
+    re-read, and resettable 15-minute fallback; then reconcile task/issue state.
 
 A worker/reviewer task is never reused for a later phase or a different write
 lane; within its own lane's review-fix cycles, reviewer reuse follows the

@@ -200,10 +200,30 @@ actionable finding. The GitHub Codex signal is clean when either the latest
 no actionable issues or the watcher observed the connector's eyes-to-`+1`
 (`thumbs-up`) transition on the latest head, the `+1` postdates that head, and no
 subsequent push occurred. Either signal is terminal for the bot wait on that
-head: report the exact verdict or attributable reaction lifecycle with its
-timestamps immediately and do not wait out the remainder of the 15-minute
-fallback. If neither terminal signal exists and no bot review is actually
-pending, the resettable 15-minute settle is the fallback. For fallback
+head, and these remain the only two exact-head terminal signal sources. Their
+post-signal handling differs:
+
+- A head-named clean connector verdict is not merge-immediate. Hold an
+  approximately five-minute post-clean settle, then perform a full re-read of
+  reviews, review threads, and reactions because the connector can emit
+  multiple reviews for one head. When a re-review was explicitly requested,
+  that re-review supersedes older same-head clean artifacts for the
+  clean-verdict path; only its verdict can satisfy that path, and it receives
+  the same settle and full re-read.
+- A watcher-observed latest-head eyes-to-`+1` lifecycle is already
+  post-artifact evidence. Once it qualifies under the exact-head conditions
+  above, report it immediately and do not wait out the remainder of the
+  15-minute fallback itself. Required CI, mergeability, independent review,
+  and full comment/review/thread inspection still apply.
+
+If no head-named review and no eyes reaction appears within roughly 30–35
+minutes after the latest push, treat the request as silently dropped and
+re-trigger it with an `@codex review` comment instead of waiting indefinitely.
+The existing PR-wait heartbeat observes this timer; the re-trigger is neither a
+new terminal signal nor a new watcher mechanism.
+
+If neither terminal signal exists and no bot review is actually pending, the
+resettable 15-minute settle is the fallback. For fallback
 purposes, a pending/request state with no connector artifact for that full
 resettable window is no longer actually pending; report and escalate the stuck
 review, but do not let it extend the fallback indefinitely. Eyes or another

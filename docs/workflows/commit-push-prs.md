@@ -128,20 +128,28 @@ Hard cycle cap, independent of family counting:
 - Docs-only lanes whose no-consumer scan proves zero runtime consumers always
   cap at 2 cycles: residual prose ambiguity in an unconsumed document is a
   follow-up issue, never another cycle.
-- Reaching the cap forces exactly one terminal action before any further
-  amendment: merge at the current head with `risk-accepted-followup` (open
-  findings move to a new issue), `descope`, `split`, or a durable operator
-  escalation packet. "No further amendment" bars content changes only; the
-  publication steps the chosen disposition itself requires — pushing the
-  already-reviewed head, opening its PR, and merging — remain permitted, so a
-  lane that caps during the pre-PR loop can still land via
-  `risk-accepted-followup`. Starting another review cycle past the cap is a
-  process violation.
-- Reaching the applicable cap, or spending more than 2 hours of wall-clock
-  time in the review-fix state, requires an operator-visible escalation
-  message recorded alongside the terminal disposition (or before the next
-  cycle for the wall-clock trigger); a lane found past its cap is a process
-  violation that must also be escalated.
+- At the cap, inspect the exact current head. Only when actionable findings
+  remain open at the capped head is exactly one terminal action required
+  before any further amendment: merge at the current head with
+  `risk-accepted-followup` (open findings move to a new issue), `descope`,
+  `split`, `backend-first`, or a durable operator escalation packet. A capped
+  head with zero open actionable findings and a clean exact-head re-review
+  follows the normal merge gate with no convergence-disposition label.
+  "No further amendment" bars content changes only; the publication steps the
+  chosen disposition itself requires — pushing the already-reviewed head,
+  opening its PR, and merging — remain permitted, so a lane that caps during
+  the pre-PR loop can still land via `risk-accepted-followup`. Starting another
+  review cycle past the cap is a process violation.
+- A cap disposition never waives the PR Review Wait Gate. The cap bars another
+  fix cycle, not waiting: the capped exact head must still pass the complete
+  gate below, including its exact-head signal model, post-clean guard, and
+  resettable fallback, before merge.
+- Reaching the applicable cap requires an operator-visible escalation message
+  recorded independently, whether or not open findings require a terminal
+  disposition. When open findings do require a terminal disposition, record
+  the escalation alongside it. Spending more than 2 hours of wall-clock time
+  in the review-fix state requires escalation before the next cycle; a lane
+  found past its cap is a process violation that must also be escalated.
 
 When a project supports structured review notes, the disposition may be
 recorded as the optional line `Convergence-disposition: <value>` and must use
@@ -194,6 +202,21 @@ policy:
   head, no subsequent push occurred, and the watcher observed the connector's
   eyes-to-`+1` lifecycle on that head. Timestamp alone or a `+1` on an older or
   unrelated artifact is not head-attributable
+- these are the only two exact-head terminal signal models; no other review,
+  comment, or reaction artifact is terminal
+- a head-named clean connector verdict is not merge-immediate. Hold an
+  approximately five-minute post-clean settle, then perform a full re-read of
+  reviews, review threads, and reactions before merge because the connector
+  can emit multiple reviews for the same head
+- when a re-review was explicitly requested, that re-review supersedes older
+  same-head clean artifacts for the clean-verdict path. Only the explicit
+  re-review verdict can satisfy that path, and it receives the same
+  approximately five-minute post-clean settle and full re-read
+- if no head-named review and no eyes reaction appears within roughly 30–35
+  minutes after the latest push, treat the request as silently dropped and
+  re-trigger it with an `@codex review` comment instead of waiting
+  indefinitely. The existing PR-wait heartbeat observes this timer; the
+  re-trigger is not a new terminal signal or watcher mechanism
 - report the exact verdict or the latest-head eyes-to-`+1` transition with its
   timestamps and confirm that no later push occurred
 - any push creates a new head and invalidates every prior verdict and reaction
@@ -270,6 +293,13 @@ Codex review signal as clean when either:
   That attributable reaction is terminal for the bot wait on that head when the
   required gates above remain clean; do not wait out the remainder of the
   15-minute fallback.
+
+For the clean-verdict path, do not merge immediately after the first
+head-named clean artifact. Observe the approximately five-minute post-clean
+settle and then re-read all reviews, review threads, and reactions. When an
+explicit re-review was requested for the same head, ignore older same-head
+clean artifacts for this path and apply the same settle and re-read to the
+explicit re-review verdict.
 
 If neither a terminal GitHub Codex verdict nor a head-attributable connector
 `+1` exists for the exact current head, use the fallback only after at least 15
