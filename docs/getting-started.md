@@ -69,6 +69,7 @@ Register each code project. Provide:
 - Repo paths (relative to `projects_root`, e.g. `my-app`)
 - Optional preflight command (e.g. `pnpm preflight --json`)
 - Optional GitHub integration
+- An explicit release-gate agent selected from the enabled agents just defined
 
 Init generates:
 - `collab.config.json`
@@ -85,6 +86,12 @@ Project-specific overrides can live under:
 - `{project_state_root}/{project_id}/memory-templates/`
 
 Set `project_state_root` in `collab.config.json` to keep real project state outside the Git checkout, for example `~/.local/share/llm-collab/projects`. Use `projects/_example/` as the public template; do not commit customer, company, repository, queue, task, worker, or operational state from a real project into this open-source repo.
+
+`scripts/init.py` writes the selected agent as each new project's required
+`release_gate_agent`; blank, unknown, or disabled selections are rejected.
+Existing workspaces are not rewritten by a code upgrade: add the key manually
+to each existing local `projects.json` entry, choosing a known enabled agent,
+before attempting any new `review -> done` transition.
 
 ## Step 3: Generate memory snippets
 
@@ -206,8 +213,14 @@ python bin/claim_task.py --task TASK-xxx --owner worker --status in_progress
 
 # ... do the work ...
 
-# Mark done and report back
-python bin/claim_task.py --task TASK-xxx --owner worker --status done
+# Submit for independent review
+python bin/claim_task.py --task TASK-xxx --owner worker --status review
+
+# After acceptance, the configured release-gate agent records closure
+python bin/claim_task.py --task TASK-xxx --owner worker --status done \
+  --released-by <release-gate-agent> \
+  --release-evidence \
+  '{"merge_sha":"<full-40-hex-merge-sha>","verdict":"success","run_id":123456}'
 python bin/deliver.py --chat last --from worker --to orchestrator \
   --project my-app \
   --title "Auth implementation complete" \

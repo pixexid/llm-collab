@@ -113,15 +113,23 @@ def add_activity_log(body: str, actor: str, note: str) -> str:
     return body.rstrip() + f"\n\n## Activity Log\n\n{line}\n"
 
 
-def archive_closed_task(path: Path, issue_number: int) -> Path:
-    fm, body = parse_frontmatter(path.read_text())
-    if fm:
-        fm["status"] = "done"
-        body = add_activity_log(body, "sync", f"archived mirror after issue #{issue_number} closed on GitHub")
-        content = dump_frontmatter(fm, body)
-    else:
-        content = body
+def archive_closed_task(path: Path, issue_number: int) -> Path | None:
+    """Archive only a mirror already closed by the release authority.
 
+    GitHub issue closure is not release proof and must never promote a mirror
+    to ``done``. A non-done or malformed mirror remains in place as actionable
+    drift because moving it would bypass the release gate.
+    """
+    fm, body = parse_frontmatter(path.read_text())
+    if not fm or fm.get("status") != "done":
+        return None
+
+    body = add_activity_log(
+        body,
+        "sync",
+        f"archived already-done mirror after issue #{issue_number} closed on GitHub",
+    )
+    content = dump_frontmatter(fm, body)
     target = path.parent.parent / "done" / path.name
     write_file(target, content)
     path.unlink()
@@ -151,7 +159,10 @@ def main() -> int:
     parser.add_argument(
         "--archive-closed-active",
         action="store_true",
-        help="Move active/backlog mirrors for closed issues into Tasks/done and mark status done.",
+        help=(
+            "Archive closed-issue mirrors only when already status done. "
+            "Never promotes; non-done mirrors remain actionable drift."
+        ),
     )
     parser.add_argument(
         "--strict-project",
@@ -199,10 +210,17 @@ def main() -> int:
         if folder == "done" and issue["state"] == "OPEN":
             premature_done.append({"number": issue_number, "path": path, "folder": folder, "url": issue["url"]})
 
+    refused_promotions: list[dict] = []
     if args.archive_closed_active:
+        remaining: list[dict] = []
         for item in stale_active:
-            archived_paths.append(archive_closed_task(item["path"], item["number"]))
-        stale_active = []
+            archived = archive_closed_task(item["path"], item["number"])
+            if archived is None:
+                refused_promotions.append(item)
+                remaining.append(item)
+            else:
+                archived_paths.append(archived)
+        stale_active = remaining
 
     unresolved_mirrors = [item for item in unresolved_mirrors if item["folder"] != "done"]
 
@@ -217,9 +235,21 @@ def main() -> int:
     print(f"unresolved mirrors: {len(unresolved_mirrors)}")
 
     if archived_paths:
-        print("\nArchived closed active/backlog mirrors:")
+        print("\nArchived closed mirrors (already release-closed):")
         for path in archived_paths:
             print(f"- {path.relative_to(ROOT)}")
+
+    if refused_promotions:
+        print("\nREFUSED to promote closed-issue mirrors that are not status done:")
+        for item in refused_promotions:
+            print(
+                f"- #{item['number']} {item['path'].relative_to(ROOT)} "
+                "| task remains in place as release-lifecycle drift"
+            )
+        print(
+            "  GitHub issue closure is not release proof. Finish or explicitly "
+            "disposition release closure; do not hand-edit status to done."
+        )
 
     if missing_issue_numbers:
         print("\nMissing local mirrors for open issues:")

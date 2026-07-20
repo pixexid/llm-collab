@@ -325,6 +325,33 @@ override is logged in the task frontmatter.
 - `accepted_at`
 - `## Implementation Risk Analysis` body section with the required labels above for every non-trivial task
 
+## Done transition authority
+
+New `done` transitions are release closure, not a worker completion shortcut.
+The source status must be exactly `review`; `open`, `in_progress`, and
+`blocked` refuse before task or queue mutation. The configured project
+`release_gate_agent` supplies `--released-by`, and it must be an enabled exact
+agent match. This identity check deters accidental or misrouted closure but is
+not authentication.
+
+Objective evidence is separate and cannot be replaced by the actor name. Pass
+one strict JSON object through `--release-evidence` with a full 40-hex
+`merge_sha`, terminal disposition, optional positive integer `run_id`, and
+optional non-empty `note`. A `success` disposition requires `run_id` and a live
+transition-time evaluation by `deploy_release_watch.py` using the configured
+exact-SHA workflow/event/branch/jobs/smoke authority. The caller's run ID must
+equal the evaluator-selected run ID. A watcher packet, saved artifact, stale
+run, or run for another SHA is candidate context only and never a shortcut.
+
+Projects without complete `release_closure` configuration fail `success`
+closed. They may still record an honest structured `non-production` or
+`risk-accepted-followup` disposition, including when GitHub is disabled. These
+non-success records bind `repository: null` and omit caller-provided run IDs;
+only transition-time evaluation can make a run ID authoritative. Historical
+tasks already marked `done` are grandfathered because the gate applies only to new transitions. If the
+gate itself must be rolled back, revert its code/config change; never bypass a
+refusal by moving or editing the task manually.
+
 For UI/UX lanes, also require:
 - `ui_ux_lane: true`
 - `ui_ux_mode: implementation | docs_only`

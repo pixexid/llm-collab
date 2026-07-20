@@ -60,6 +60,13 @@ from dataclasses import dataclass, field
 TERMINAL_EXIT = {"SUCCESS": 0, "FAILURE": 10, "CANCELLED": 11, "MISSING": 12, "PENDING": 13}
 
 
+def project_mapping_error(project_id: str, key: str) -> str:
+    return (
+        f"project {project_id!r} has malformed projects.json key {key!r}: expected an object — "
+        f"repair this task project's {project_id!r} entry in projects.json"
+    )
+
+
 @dataclass
 class Verdict:
     state: str                     # SUCCESS | FAILURE | CANCELLED | MISSING | PENDING
@@ -68,6 +75,16 @@ class Verdict:
     run_conclusion: str | None = None
     failed_jobs: list[str] = field(default_factory=list)
     detail: str = ""
+
+
+@dataclass(frozen=True)
+class ReleaseEvaluation:
+    """Project-bound transition-time result returned to release consumers."""
+
+    project_id: str
+    repository: str
+    workflow: str
+    verdict: Verdict
 
 
 def run_command(argv: list[str]) -> str:
@@ -139,7 +156,11 @@ def resolve_release_config(project_id: str, project: dict | None) -> tuple[dict 
     P1 / project boundary). Anything unknown or unconfigured fails closed."""
     if project is None:
         return None, f"unknown project_id {project_id!r} — not registered in projects.json"
-    github = project.get("github") or {}
+    github = project.get("github")
+    if github is None:
+        github = {}
+    elif not isinstance(github, dict):
+        return None, project_mapping_error(project_id, "github")
     repo = github.get("repo")
     if not github.get("enabled") or not repo:
         return None, f"project {project_id!r} has no enabled github.repo — cannot correlate deploy runs"
@@ -147,13 +168,15 @@ def resolve_release_config(project_id: str, project: dict | None) -> tuple[dict 
     if not (isinstance(branch, str) and branch.strip()):
         return None, (f"project {project_id!r} has no configured default_branch_base — "
                       "refusing to guess the release branch")
-    rc = project.get("release_closure") or {}
-    if not rc:
+    rc = project.get("release_closure")
+    if rc is None or rc == {}:
         return None, (
             f"project {project_id!r} has no release_closure config (workflow, required_jobs, "
             "smoke_job, required_smoke_steps) — job/step names are project-specific; "
             "register them in projects.json before using this gate"
         )
+    if not isinstance(rc, dict):
+        return None, project_mapping_error(project_id, "release_closure")
     workflow = rc.get("workflow")
     if not (isinstance(workflow, str) and workflow.strip()):
         return None, (f"project {project_id!r} release_closure has no configured workflow — "
@@ -301,6 +324,49 @@ def evaluate_release(
                    detail=f"deploy + post-deploy smoke terminal success for run {run_id}")
 
 
+def evaluate_project_release(
+    project_id: str,
+    merge_sha: str,
+    *,
+    project: dict | None = None,
+    runner=run_command,
+) -> ReleaseEvaluation:
+    """Evaluate one exact SHA using the same project authority as the CLI.
+
+    ``runner`` is injectable so lifecycle consumers and tests can reuse the
+    complete config/fetch/verdict path without shelling out to this script or
+    weakening exact-SHA, event, branch, job, or smoke correlation.
+    """
+    resolved_project = get_project(project_id) if project is None else project
+    config, config_error = resolve_release_config(project_id, resolved_project)
+    if config is None:
+        raise ValueError(config_error)
+
+    repo = config["repo"]
+    runs = fetch_deploy_runs(
+        repo,
+        merge_sha,
+        config["workflow"],
+        runner=runner,
+    )
+    verdict = evaluate_release(
+        merge_sha,
+        runs,
+        lambda run_id: fetch_run_jobs(repo, run_id, runner=runner),
+        required_jobs=config["required_jobs"],
+        smoke_job=config["smoke_job"],
+        required_smoke_steps=config["required_smoke_steps"],
+        required_event=config["trigger_event"],
+        required_branch=config["branch"],
+    )
+    return ReleaseEvaluation(
+        project_id=project_id,
+        repository=repo,
+        workflow=config["workflow"],
+        verdict=verdict,
+    )
+
+
 def render(verdict: Verdict, repo: str) -> str:
     lines = [
         f"RELEASE {verdict.state}: merge SHA {verdict.merge_sha}",
@@ -347,33 +413,24 @@ def main() -> int:
               file=sys.stderr)
         return 64
 
-    config, config_error = resolve_release_config(args.project, get_project(args.project))
-    if config is None:
-        print(f"[error] {config_error}", file=sys.stderr)
-        return 64
-    repo = config["repo"]
-
     deadline = time.monotonic() + args.timeout_seconds
 
-    def once() -> Verdict:
-        runs = fetch_deploy_runs(repo, args.merge_sha, config["workflow"])
-        return evaluate_release(args.merge_sha, runs,
-                                lambda run_id: fetch_run_jobs(repo, run_id),
-                                required_jobs=config["required_jobs"],
-                                smoke_job=config["smoke_job"],
-                                required_smoke_steps=config["required_smoke_steps"],
-                                required_event=config["trigger_event"],
-                                required_branch=config["branch"])
+    def once() -> ReleaseEvaluation:
+        return evaluate_project_release(args.project, args.merge_sha)
 
     try:
-        verdict = once()
-        while args.wait and verdict.state in ("PENDING", "MISSING") and time.monotonic() < deadline:
+        evaluation = once()
+        while (args.wait
+               and evaluation.verdict.state in ("PENDING", "MISSING")
+               and time.monotonic() < deadline):
             time.sleep(args.poll_seconds)
-            verdict = once()
-    except RuntimeError as error:
+            evaluation = once()
+    except (RuntimeError, ValueError) as error:
         print(f"[error] {error}", file=sys.stderr)
         return 64
 
+    verdict = evaluation.verdict
+    repo = evaluation.repository
     if args.json:
         print(json.dumps({
             "state": verdict.state, "merge_sha": verdict.merge_sha,

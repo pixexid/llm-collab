@@ -45,6 +45,58 @@ AWARENESS_FILE = ROOT / "State" / "awareness.json"
 TASK_FOLDERS = ("active", "backlog", "done")
 TASK_STATUSES = ("open", "in_progress", "blocked", "review", "done")
 TASK_PRIORITIES = ("low", "normal", "high", "urgent")
+RELEASE_EVIDENCE_VERDICTS = (
+    "success",
+    "risk-accepted-followup",
+    "non-production",
+)
+RELEASE_EVIDENCE_FIELDS = {"merge_sha", "verdict", "run_id", "note"}
+
+
+def parse_release_evidence(raw: str | None) -> dict:
+    """Parse and strictly validate one release-evidence JSON object."""
+    if raw is None:
+        raise ValueError("--release-evidence is required for a done transition")
+    try:
+        evidence = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise ValueError(
+            "--release-evidence must be one valid JSON object, not free text"
+        ) from error
+    if not isinstance(evidence, dict):
+        raise ValueError("--release-evidence must decode to one JSON object")
+
+    unknown = sorted(set(evidence) - RELEASE_EVIDENCE_FIELDS)
+    if unknown:
+        raise ValueError(
+            "--release-evidence contains unknown field(s): " + ", ".join(unknown)
+        )
+
+    merge_sha = evidence.get("merge_sha")
+    if not isinstance(merge_sha, str) or re.fullmatch(r"[0-9a-fA-F]{40}", merge_sha) is None:
+        raise ValueError("release evidence merge_sha must be exactly 40 hex characters")
+
+    verdict = evidence.get("verdict")
+    if verdict not in RELEASE_EVIDENCE_VERDICTS:
+        allowed = "|".join(RELEASE_EVIDENCE_VERDICTS)
+        raise ValueError(f"release evidence verdict must be one of {allowed}")
+
+    run_id = evidence.get("run_id")
+    if run_id is not None and (
+        isinstance(run_id, bool) or not isinstance(run_id, int) or run_id <= 0
+    ):
+        raise ValueError("release evidence run_id must be a positive strict integer")
+    if verdict == "success" and run_id is None:
+        raise ValueError("release evidence run_id is required for verdict=success")
+
+    if "note" in evidence:
+        note = evidence["note"]
+        if not isinstance(note, str) or not note.strip():
+            raise ValueError("release evidence note must be a non-empty string when provided")
+        evidence["note"] = note.strip()
+
+    evidence["merge_sha"] = merge_sha.lower()
+    return evidence
 
 
 # ---------------------------------------------------------------------------
@@ -614,6 +666,12 @@ def parse_frontmatter(text: str) -> tuple[dict, str]:
             except json.JSONDecodeError:
                 inner = v[1:-1].strip()
                 fm[k] = [i.strip().strip('"').strip("'") for i in inner.split(",") if i.strip()] if inner else []
+        elif v.startswith("{") and v.endswith("}"):
+            try:
+                parsed = json.loads(v)
+                fm[k] = parsed if isinstance(parsed, dict) else v
+            except json.JSONDecodeError:
+                fm[k] = v
         elif v.lower() == "null" or v == "":
             fm[k] = None
         elif v.lower() == "true":
@@ -641,6 +699,10 @@ def dump_frontmatter(fm: dict, body: str) -> str:
             else:
                 inner = ", ".join(json.dumps(i, ensure_ascii=True) for i in v)
                 lines.append(f"{k}: [{inner}]")
+        elif isinstance(v, dict):
+            lines.append(
+                f"{k}: {json.dumps(v, ensure_ascii=True, separators=(',', ':'))}"
+            )
         else:
             lines.append(f"{k}: {v}")
     lines.append("---")
