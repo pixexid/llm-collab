@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://llm-collab.dev/schemas/standalone/v1/endpoint.schema.json",
+  "title": "EndpointV1",
+  "description": "An installed endpoint, not a session. Platform and configuration values are bounded registry references and must contain no copied secret.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "workspace_id", "scope", "endpoint_id", "agent_id", "adapter_name", "adapter_revision", "trust_class", "capability_set_id", "platform", "configuration_ref"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "workspace_id": {"$ref": "#/$defs/workspaceId"},
+    "scope": {"$ref": "#/$defs/scope"},
+    "endpoint_id": {"type": "string", "pattern": "^(?!.*[\\u0000-\\u001f\\u007f\\u0085\\u2028\\u2029])endpoint_[A-Za-z0-9][A-Za-z0-9_-]{2,127}$"},
+    "agent_id": {"type": "string", "pattern": "^(?!.*[\\u0000-\\u001f\\u007f\\u0085\\u2028\\u2029])agent_[A-Za-z0-9][A-Za-z0-9_-]{2,127}$"},
+    "adapter_name": {"$ref": "#/$defs/token"},
+    "adapter_revision": {"$ref": "#/$defs/token"},
+    "trust_class": {"enum": ["managed", "native_attached", "ui_attached", "pull_only", "human"]},
+    "capability_set_id": {"type": "string", "pattern": "^(?!.*[\\u0000-\\u001f\\u007f\\u0085\\u2028\\u2029])caps_[A-Za-z0-9][A-Za-z0-9_-]{2,127}$"},
+    "platform": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["os", "architecture"],
+      "properties": {
+        "os": {"enum": ["macos", "linux", "windows", "other"]},
+        "architecture": {"$ref": "#/$defs/token"},
+        "runtime_version": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^(?!.*[\\u0000-\\u001f\\u007f\\u0085\\u2028\\u2029]).+$"}
+      }
+    },
+    "configuration_ref": {
+      "description": "A non-secret reviewed registry reference; credentials and copied configuration values are not valid fields.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["registry_id", "revision", "reference"],
+      "properties": {
+        "registry_id": {"$ref": "#/$defs/token"},
+        "revision": {"$ref": "#/$defs/token"},
+        "reference": {"$ref": "#/$defs/token"}
+      }
+    },
+    "extensions": {"$ref": "#/$defs/extensions"}
+  },
+  "$defs": {
+    "token": {"type": "string", "pattern": "^(?!.*[\\u0000-\\u001f\\u007f\\u0085\\u2028\\u2029])[A-Za-z][A-Za-z0-9._-]{0,127}$"},
+    "workspaceId": {"type": "string", "pattern": "^(?!.*[\\u0000-\\u001f\\u007f\\u0085\\u2028\\u2029])ws_[A-Za-z0-9][A-Za-z0-9_-]{2,127}$"},
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {"kind": {"enum": ["workspace", "project"]}, "project_id": {"$ref": "#/$defs/token"}},
+      "allOf": [{"if": {"properties": {"kind": {"const": "project"}}, "required": ["kind"]}, "then": {"required": ["project_id"]}, "else": {"not": {"required": ["project_id"]}}}]
+    },
+    "extensions": {
+      "description": "Bounded non-authoritative annotations. Consumers must ignore these values for routing, trust, and execution.",
+      "type": "object",
+      "maxProperties": 8,
+      "propertyNames": {"pattern": "^x_note_[A-Za-z][A-Za-z0-9_-]{0,55}$"},
+      "additionalProperties": {
+        "anyOf": [
+          {"type": "string", "maxLength": 512, "pattern": "^(?!.*[\\u0000-\\u001f\\u007f\\u0085\\u2028\\u2029\\ud800-\\udfff]).*$"},
+          {"type": "integer", "minimum": -9007199254740991, "maximum": 9007199254740991},
+          {"type": "boolean"},
+          {"type": "null"}
+        ]
+      }
+    }
+  }
+}

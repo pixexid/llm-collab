@@ -1,0 +1,101 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://llm-collab.dev/schemas/standalone/v1/workspace.schema.json",
+  "title": "WorkspaceV1",
+  "description": "A trusted workspace registry. Duplicate identities, duplicate directed tuples, endpoint resolution, and registry-revision freshness are semantic invariants enforced by catalog conformance.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "workspace_id", "scope", "registry_revision", "projects", "repositories", "relationships"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "workspace_id": {"$ref": "#/$defs/workspaceId"},
+    "scope": {"$ref": "#/$defs/workspaceScope"},
+    "registry_revision": {"$ref": "#/$defs/token"},
+    "projects": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 256,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["project_id"],
+        "properties": {"project_id": {"$ref": "#/$defs/token"}, "extensions": {"$ref": "#/$defs/extensions"}}
+      }
+    },
+    "repositories": {
+      "description": "Each project owns unique repo_id and normalized relative_path values. Absolute, dot-segment, duplicate-separator, and trailing-separator paths are invalid.",
+      "type": "array",
+      "maxItems": 1024,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["project_id", "repo_id", "relative_path"],
+        "properties": {
+          "project_id": {"$ref": "#/$defs/token"},
+          "repo_id": {"$ref": "#/$defs/token"},
+          "relative_path": {"$ref": "#/$defs/relativePath"},
+          "extensions": {"$ref": "#/$defs/extensions"}
+        }
+      }
+    },
+    "relationships": {
+      "description": "Directed records only. No inverse documentation_companion relationship is inferred. Exact relationship-id lookup is authoritative; source/type convenience lookup must fail as relationship_missing or relationship_ambiguous unless exactly one active match exists.",
+      "type": "array",
+      "maxItems": 2048,
+      "items": {"$ref": "#/$defs/relationship"}
+    },
+    "extensions": {"$ref": "#/$defs/extensions"}
+  },
+  "$defs": {
+    "token": {"type": "string", "pattern": "^(?!.*[\\u0000-\\u001f\\u007f\\u0085\\u2028\\u2029])[A-Za-z][A-Za-z0-9._-]{0,127}$"},
+    "workspaceId": {"type": "string", "pattern": "^(?!.*[\\u0000-\\u001f\\u007f\\u0085\\u2028\\u2029])ws_[A-Za-z0-9][A-Za-z0-9_-]{2,127}$"},
+    "workspaceScope": {
+      "description": "WorkspaceV1 is itself an explicit workspace-scoped standalone record; project_id is forbidden.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {"kind": {"const": "workspace"}}
+    },
+    "relativePath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024,
+      "pattern": "^(?!/)(?!.*//)(?!\\.{1,2}(?:/|$))(?!.*(?:/\\.{1,2})(?:/|$))(?!.*[\\u0000-\\u001f\\u007f\\u0085\\u2028\\u2029])[^/](?:.*[^/])?$"
+    },
+    "extensions": {
+      "description": "Bounded non-authoritative annotations. Consumers must ignore these values for routing, trust, and execution.",
+      "type": "object",
+      "maxProperties": 8,
+      "propertyNames": {"pattern": "^x_note_[A-Za-z][A-Za-z0-9_-]{0,55}$"},
+      "additionalProperties": {
+        "anyOf": [
+          {"type": "string", "maxLength": 512, "pattern": "^(?!.*[\\u0000-\\u001f\\u007f\\u0085\\u2028\\u2029\\ud800-\\udfff]).*$"},
+          {"type": "integer", "minimum": -9007199254740991, "maximum": 9007199254740991},
+          {"type": "boolean"},
+          {"type": "null"}
+        ]
+      }
+    },
+    "repoRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["project_id", "repo_id"],
+      "properties": {"project_id": {"$ref": "#/$defs/token"}, "repo_id": {"$ref": "#/$defs/token"}}
+    },
+    "relationship": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["relationship_id", "relationship_type", "source", "target", "registry_revision", "lifecycle", "revision"],
+      "properties": {
+        "relationship_id": {"type": "string", "pattern": "^(?!.*[\\u0000-\\u001f\\u007f\\u0085\\u2028\\u2029])rel_[A-Za-z0-9][A-Za-z0-9_-]{2,127}$"},
+        "relationship_type": {"const": "documentation_companion"},
+        "source": {"$ref": "#/$defs/repoRef"},
+        "target": {"$ref": "#/$defs/repoRef"},
+        "registry_revision": {"$ref": "#/$defs/token"},
+        "lifecycle": {"enum": ["active", "retired"]},
+        "revision": {"$ref": "#/$defs/token"},
+        "extensions": {"$ref": "#/$defs/extensions"}
+      }
+    }
+  }
+}

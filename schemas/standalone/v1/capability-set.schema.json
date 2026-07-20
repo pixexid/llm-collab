@@ -1,0 +1,97 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://llm-collab.dev/schemas/standalone/v1/capability-set.schema.json",
+  "title": "CapabilitySetV1",
+  "description": "Capability quality is a ceiling. Every best-effort or authoritative capability requires exact adapter-bound attestation evidence; authoritative capabilities additionally require constraints, while unsupported capabilities forbid both. Duplicate capability identities are invalid even when their remaining fields differ.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "workspace_id", "scope", "capability_set_id", "revision", "capabilities"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "workspace_id": {"$ref": "#/$defs/workspaceId"},
+    "scope": {"$ref": "#/$defs/scope"},
+    "capability_set_id": {"type": "string", "pattern": "^(?!.*[\\u0000-\\u001f\\u007f\\u0085\\u2028\\u2029])caps_[A-Za-z0-9][A-Za-z0-9_-]{2,127}$"},
+    "revision": {"$ref": "#/$defs/token"},
+    "capabilities": {"type": "array", "minItems": 1, "maxItems": 128, "items": {"$ref": "#/$defs/capability"}},
+    "extensions": {"$ref": "#/$defs/extensions"}
+  },
+  "$defs": {
+    "token": {"type": "string", "pattern": "^(?!.*[\\u0000-\\u001f\\u007f\\u0085\\u2028\\u2029])[A-Za-z][A-Za-z0-9._-]{0,127}$"},
+    "workspaceId": {"type": "string", "pattern": "^(?!.*[\\u0000-\\u001f\\u007f\\u0085\\u2028\\u2029])ws_[A-Za-z0-9][A-Za-z0-9_-]{2,127}$"},
+    "canonicalPath": {
+      "type": "string",
+      "minLength": 2,
+      "maxLength": 4096,
+      "pattern": "^/(?!/)(?!.*//)(?!.*(?:/\\.{1,2})(?:/|$))(?!.*[\\u0000-\\u001f\\u007f\\u0085\\u2028\\u2029])[^/](?:.*[^/])?$"
+    },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {"kind": {"enum": ["workspace", "project"]}, "project_id": {"$ref": "#/$defs/token"}},
+      "allOf": [{"if": {"properties": {"kind": {"const": "project"}}, "required": ["kind"]}, "then": {"required": ["project_id"]}, "else": {"not": {"required": ["project_id"]}}}]
+    },
+    "constraints": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "access_mode": {"enum": ["observe_only", "read_only", "read_write"]},
+        "filesystem_roots": {"type": "array", "maxItems": 8, "uniqueItems": true, "items": {"$ref": "#/$defs/canonicalPath"}},
+        "network_access": {"type": "boolean"},
+        "tool_ids": {"type": "array", "maxItems": 32, "uniqueItems": true, "items": {"$ref": "#/$defs/token"}}
+      }
+    },
+    "capabilityEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["evidence_kind", "source_id", "source_revision", "integrity"],
+      "properties": {
+        "evidence_kind": {"enum": ["adapter_attestation", "profile_attestation"]},
+        "source_id": {"$ref": "#/$defs/token"},
+        "source_revision": {"$ref": "#/$defs/token"},
+        "integrity": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+      }
+    },
+    "capability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["capability", "quality"],
+      "properties": {
+        "capability": {"$ref": "#/$defs/token"},
+        "quality": {"enum": ["unsupported", "best_effort", "authoritative"]},
+        "constraints": {"$ref": "#/$defs/constraints"},
+        "evidence": {"$ref": "#/$defs/capabilityEvidence"},
+        "extensions": {"$ref": "#/$defs/extensions"}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"quality": {"const": "unsupported"}}, "required": ["quality"]},
+          "then": {"not": {"anyOf": [{"required": ["constraints"]}, {"required": ["evidence"]}]}}
+        },
+        {
+          "if": {"properties": {"quality": {"enum": ["best_effort", "authoritative"]}}, "required": ["quality"]},
+          "then": {"required": ["evidence"]}
+        },
+        {
+          "if": {"properties": {"quality": {"const": "authoritative"}}, "required": ["quality"]},
+          "then": {"required": ["constraints"]}
+        }
+      ]
+    },
+    "extensions": {
+      "description": "Bounded non-authoritative annotations. Consumers must ignore these values for routing, trust, and execution.",
+      "type": "object",
+      "maxProperties": 8,
+      "propertyNames": {"pattern": "^x_note_[A-Za-z][A-Za-z0-9_-]{0,55}$"},
+      "additionalProperties": {
+        "anyOf": [
+          {"type": "string", "maxLength": 512, "pattern": "^(?!.*[\\u0000-\\u001f\\u007f\\u0085\\u2028\\u2029\\ud800-\\udfff]).*$"},
+          {"type": "integer", "minimum": -9007199254740991, "maximum": 9007199254740991},
+          {"type": "boolean"},
+          {"type": "null"}
+        ]
+      }
+    }
+  }
+}

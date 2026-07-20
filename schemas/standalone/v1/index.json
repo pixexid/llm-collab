@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "catalog_id": "https://llm-collab.dev/schemas/standalone/v1/index.json",
+  "draft": "https://json-schema.org/draft/2020-12/schema",
+  "schemas": {
+    "WorkspaceV1": "https://llm-collab.dev/schemas/standalone/v1/workspace.schema.json",
+    "AgentV1": "https://llm-collab.dev/schemas/standalone/v1/agent.schema.json",
+    "EndpointV1": "https://llm-collab.dev/schemas/standalone/v1/endpoint.schema.json",
+    "SessionRefV1": "https://llm-collab.dev/schemas/standalone/v1/session-ref.schema.json",
+    "MessageV1": "https://llm-collab.dev/schemas/standalone/v1/message.schema.json",
+    "DeliveryV1": "https://llm-collab.dev/schemas/standalone/v1/delivery.schema.json",
+    "ReceiptV1": "https://llm-collab.dev/schemas/standalone/v1/receipt.schema.json",
+    "CapabilitySetV1": "https://llm-collab.dev/schemas/standalone/v1/capability-set.schema.json",
+    "StateEvidenceV1": "https://llm-collab.dev/schemas/standalone/v1/state-evidence.schema.json",
+    "EventEnvelopeV1": "https://llm-collab.dev/schemas/standalone/v1/event-envelope.schema.json"
+  }
+}

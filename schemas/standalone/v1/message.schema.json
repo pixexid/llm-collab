@@ -1,0 +1,87 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://llm-collab.dev/schemas/standalone/v1/message.schema.json",
+  "title": "MessageV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "workspace_id", "scope", "message_id", "body_ref", "recipients"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "workspace_id": {"$ref": "#/$defs/workspaceId"},
+    "scope": {"$ref": "#/$defs/scope"},
+    "message_id": {"type": "string", "pattern": "^(?!.*[\\u0000-\\u001f\\u007f\\u0085\\u2028\\u2029])msg_[A-Za-z0-9][A-Za-z0-9_-]{2,127}$"},
+    "body_ref": {"type": "string", "pattern": "^(?!.*[\\u0000-\\u001f\\u007f\\u0085\\u2028\\u2029])body_[A-Za-z0-9][A-Za-z0-9_-]{2,127}$"},
+    "recipients": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 256,
+      "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^(?!.*[\\u0000-\\u001f\\u007f\\u0085\\u2028\\u2029])agent_[A-Za-z0-9][A-Za-z0-9_-]{2,127}$"}
+    },
+    "activation_import": {"$ref": "#/$defs/activationPacket"},
+    "extensions": {"$ref": "#/$defs/extensions"}
+  },
+  "allOf": [
+    {
+      "if": {"required": ["activation_import"]},
+      "then": {
+        "properties": {
+          "scope": {"properties": {"kind": {"const": "project"}}}
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "token": {"type": "string", "pattern": "^(?!.*[\\u0000-\\u001f\\u007f\\u0085\\u2028\\u2029])[A-Za-z][A-Za-z0-9._-]{0,127}$"},
+    "workspaceId": {"type": "string", "pattern": "^(?!.*[\\u0000-\\u001f\\u007f\\u0085\\u2028\\u2029])ws_[A-Za-z0-9][A-Za-z0-9_-]{2,127}$"},
+    "identityString": {
+      "description": "Serialized standalone import of a current-v2 identity value. It is already trimmed and takes the portable fail-closed subset of the current Python YAML-lite frontmatter contract: explicit-case true/false/null, bracketed forms, and every signed or unsigned ASCII integer lexical form with valid single underscores are invalid regardless of digit count or PYTHONINTMAXSTRDIGITS. Catalog-aware semantic validation additionally rejects equivalent Unicode decimal integer lexical forms that JSON Schema cannot express portably. This compatibility import does not change the current runtime helper.",
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!\\s)(?!.*\\s$)(?!(?:[Tt][Rr][Uu][Ee]|[Ff][Aa][Ll][Ss][Ee]|[Nn][Uu][Ll][Ll])$)(?![+-]?[0-9](?:_?[0-9])*$)(?!\\[.*\\]$)(?!.*[\\u0000-\\u001f\\u007f\\u0085\\u2028\\u2029\\ud800-\\udfff]).+$"
+    },
+    "activationPath": {
+      "description": "Current-v2 lease_identity lexical path: absolute POSIX spelling, including root '/', with no double-leading slash, duplicate separator, dot/dotdot segment, or non-root trailing separator.",
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^/(?!/)(?!.*//)(?!.*(?:/\\.{1,2})(?:/|$))(?!.*[\\u0000-\\u001f\\u007f\\u0085\\u2028\\u2029\\ud800-\\udfff])(?:$|[^/](?:.*[^/])?)$"
+    },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {"kind": {"enum": ["workspace", "project"]}, "project_id": {"$ref": "#/$defs/token"}},
+      "allOf": [{"if": {"properties": {"kind": {"const": "project"}}, "required": ["kind"]}, "then": {"required": ["project_id"]}, "else": {"not": {"required": ["project_id"]}}}]
+    },
+    "activationPacket": {
+      "description": "Complete current-v2 lexical activation identity and compatibility provenance only. It does not confer SessionRef, native-session, lease, fence, or writer authority.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["activation", "project", "chat", "task", "worktree", "branch", "target_agent", "to"],
+      "properties": {
+        "activation": {"const": true},
+        "project": {"$ref": "#/$defs/identityString"},
+        "chat": {"$ref": "#/$defs/identityString"},
+        "task": {"$ref": "#/$defs/identityString"},
+        "worktree": {"$ref": "#/$defs/activationPath"},
+        "branch": {"$ref": "#/$defs/identityString"},
+        "target_agent": {"$ref": "#/$defs/identityString"},
+        "to": {"$ref": "#/$defs/identityString"}
+      }
+    },
+    "extensions": {
+      "description": "Bounded non-authoritative annotations. Consumers must ignore these values for routing, trust, and execution.",
+      "type": "object",
+      "maxProperties": 8,
+      "propertyNames": {"pattern": "^x_note_[A-Za-z][A-Za-z0-9_-]{0,55}$"},
+      "additionalProperties": {
+        "anyOf": [
+          {"type": "string", "maxLength": 512, "pattern": "^(?!.*[\\u0000-\\u001f\\u007f\\u0085\\u2028\\u2029\\ud800-\\udfff]).*$"},
+          {"type": "integer", "minimum": -9007199254740991, "maximum": 9007199254740991},
+          {"type": "boolean"},
+          {"type": "null"}
+        ]
+      }
+    }
+  }
+}

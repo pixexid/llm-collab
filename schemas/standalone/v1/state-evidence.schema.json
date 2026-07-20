@@ -1,0 +1,244 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://llm-collab.dev/schemas/standalone/v1/state-evidence.schema.json",
+  "title": "StateEvidenceV1",
+  "description": "Structured state proof. Canonical JSON bytes are UTF-8 for JSON with object keys sorted by Unicode code-point order, array order preserved, ',' and ':' separators with no insignificant whitespace, exact unnormalized Unicode scalar strings using JSON escapes only for quote and backslash, lowercase true/false/null, and only integers in [-9007199254740991,9007199254740991]; integer lexical -0 is normalized to JSON integer 0 before hashing; surrogates, C0/DEL/NEL/U+2028/U+2029, floats, exponents, NaN, Infinity, and duplicate keys are invalid. The evidence integrity projection omits exactly the top-level integrity field. A source label or process exit is never acceptance authority.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "workspace_id", "scope", "evidence_id", "evidence_kind", "quality", "state", "authority", "subject", "correlation_id", "observed_at_utc", "integrity"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "workspace_id": {"$ref": "#/$defs/workspaceId"},
+    "scope": {"$ref": "#/$defs/scope"},
+    "evidence_id": {"type": "string", "pattern": "^(?!.*[\\u0000-\\u001f\\u007f\\u0085\\u2028\\u2029])evidence_[A-Za-z0-9][A-Za-z0-9_-]{2,127}$"},
+    "evidence_kind": {"enum": ["adapter_observation", "native_delivery_state", "exact_session_acknowledgment", "exact_session_binding", "compatibility_import"]},
+    "quality": {"enum": ["best_effort", "authoritative"]},
+    "state": {"enum": ["persisted", "routed", "injected", "visible", "accepted", "processing", "acknowledged", "completed", "rejected_before_acceptance", "ambiguous", "pull_pending", "deferred_busy"]},
+    "authority": {"$ref": "#/$defs/authority"},
+    "subject": {"$ref": "#/$defs/subject"},
+    "correlation_id": {"$ref": "#/$defs/token"},
+    "observed_at_utc": {"type": "string", "format": "date-time"},
+    "integrity": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "legacy_manifest": {"$ref": "#/$defs/legacyManifest"},
+    "legacy_import": {"$ref": "#/$defs/legacyImport"},
+    "extensions": {"$ref": "#/$defs/extensions"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"quality": {"const": "best_effort"}}, "required": ["quality"]},
+      "then": {"not": {"properties": {"state": {"enum": ["accepted", "completed"]}}, "required": ["state"]}}
+    },
+    {
+      "if": {"properties": {"state": {"enum": ["accepted", "completed"]}}, "required": ["state"]},
+      "then": {
+        "properties": {
+          "quality": {"const": "authoritative"},
+          "evidence_kind": {"enum": ["native_delivery_state", "exact_session_acknowledgment"]},
+          "authority": {"properties": {"authority_kind": {"enum": ["native_runtime", "trusted_adapter"]}}},
+          "subject": {"required": ["message_id", "delivery_id", "attempt_id", "endpoint_id", "session_ref_id"]}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"evidence_kind": {"const": "exact_session_binding"}}, "required": ["evidence_kind"]},
+      "then": {
+        "properties": {
+          "quality": {"const": "authoritative"},
+          "authority": {"properties": {"authority_kind": {"enum": ["native_runtime", "trusted_adapter"]}}},
+          "subject": {"required": ["endpoint_id", "session_ref_id", "native_session_id"]}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"evidence_kind": {"const": "compatibility_import"}}, "required": ["evidence_kind"]},
+      "then": {
+        "required": ["legacy_manifest", "legacy_import"],
+        "properties": {
+          "quality": {"const": "best_effort"},
+          "authority": {"properties": {"authority_kind": {"const": "trusted_importer"}}},
+          "subject": {"required": ["legacy_locator"]}
+        }
+      },
+      "else": {
+        "not": {
+          "anyOf": [
+            {"required": ["legacy_manifest"]},
+            {"required": ["legacy_import"]}
+          ]
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "token": {"type": "string", "pattern": "^(?!.*[\\u0000-\\u001f\\u007f\\u0085\\u2028\\u2029])[A-Za-z][A-Za-z0-9._-]{0,127}$"},
+    "workspaceId": {"type": "string", "pattern": "^(?!.*[\\u0000-\\u001f\\u007f\\u0085\\u2028\\u2029])ws_[A-Za-z0-9][A-Za-z0-9_-]{2,127}$"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "canonicalPath": {
+      "type": "string",
+      "minLength": 2,
+      "maxLength": 4096,
+      "pattern": "^/(?!/)(?!.*//)(?!.*(?:/\\.{1,2})(?:/|$))(?!.*[\\u0000-\\u001f\\u007f\\u0085\\u2028\\u2029])[^/](?:.*[^/])?$"
+    },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {"kind": {"enum": ["workspace", "project"]}, "project_id": {"$ref": "#/$defs/token"}},
+      "allOf": [{"if": {"properties": {"kind": {"const": "project"}}, "required": ["kind"]}, "then": {"required": ["project_id"]}, "else": {"not": {"required": ["project_id"]}}}]
+    },
+    "repoRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["project_id", "repo_id", "canonical_cwd"],
+      "properties": {
+        "project_id": {"$ref": "#/$defs/token"},
+        "repo_id": {"$ref": "#/$defs/token"},
+        "canonical_cwd": {"$ref": "#/$defs/canonicalPath"}
+      }
+    },
+    "authority": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["authority_kind", "identity", "implementation_revision", "capability_profile_id", "capability_profile_revision"],
+      "properties": {
+        "authority_kind": {"enum": ["native_runtime", "trusted_adapter", "trusted_importer"]},
+        "identity": {"$ref": "#/$defs/token"},
+        "implementation_revision": {"$ref": "#/$defs/token"},
+        "capability_profile_id": {"$ref": "#/$defs/token"},
+        "capability_profile_revision": {"$ref": "#/$defs/token"}
+      }
+    },
+    "subject": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "message_id": {"type": "string", "pattern": "^(?!.*[\\u0000-\\u001f\\u007f\\u0085\\u2028\\u2029])msg_[A-Za-z0-9][A-Za-z0-9_-]{2,127}$"},
+        "delivery_id": {"type": "string", "pattern": "^(?!.*[\\u0000-\\u001f\\u007f\\u0085\\u2028\\u2029])delivery_[A-Za-z0-9][A-Za-z0-9_-]{2,127}$"},
+        "attempt_id": {"type": "string", "pattern": "^(?!.*[\\u0000-\\u001f\\u007f\\u0085\\u2028\\u2029])attempt_[A-Za-z0-9][A-Za-z0-9_-]{2,127}$"},
+        "endpoint_id": {"type": "string", "pattern": "^(?!.*[\\u0000-\\u001f\\u007f\\u0085\\u2028\\u2029])endpoint_[A-Za-z0-9][A-Za-z0-9_-]{2,127}$"},
+        "session_ref_id": {"type": "string", "pattern": "^(?!.*[\\u0000-\\u001f\\u007f\\u0085\\u2028\\u2029])session_[A-Za-z0-9][A-Za-z0-9_-]{2,127}$"},
+        "native_session_id": {"type": "string", "minLength": 1, "maxLength": 512, "pattern": "^(?!.*[\\u0000-\\u001f\\u007f\\u0085\\u2028\\u2029]).+$"},
+        "repository_binding": {"$ref": "#/$defs/repoRef"},
+        "legacy_locator": {"$ref": "#/$defs/canonicalPath"}
+      }
+    },
+    "sourceBoundary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "identity", "immutable"],
+      "properties": {
+        "kind": {"enum": ["source_snapshot", "ledger_checkpoint", "content_addressed_revision", "sealed_observation"]},
+        "identity": {"$ref": "#/$defs/token"},
+        "immutable": {"const": true}
+      }
+    },
+    "importer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["identity", "revision"],
+      "properties": {"identity": {"$ref": "#/$defs/token"}, "revision": {"$ref": "#/$defs/token"}}
+    },
+    "entryKey": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["canonical_locator", "content_hash", "evidence_form_version", "cutoff_policy_revision"],
+      "properties": {
+        "canonical_locator": {"$ref": "#/$defs/canonicalPath"},
+        "content_hash": {"$ref": "#/$defs/sha256"},
+        "evidence_form_version": {"$ref": "#/$defs/token"},
+        "cutoff_policy_revision": {"$ref": "#/$defs/token"}
+      }
+    },
+    "manifestEntry": {
+      "description": "Integrity is sha256 over the frozen canonical JSON byte algorithm of this complete entry with exactly its integrity field omitted.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["canonical_locator", "content_hash", "evidence_form_version", "cutoff_policy_revision", "source_workspace_id", "source_project_id", "source_registry_revision", "source_boundary", "trusted_importer", "transaction_id", "provenance_id", "integrity"],
+      "properties": {
+        "canonical_locator": {"$ref": "#/$defs/canonicalPath"},
+        "content_hash": {"$ref": "#/$defs/sha256"},
+        "evidence_form_version": {"$ref": "#/$defs/token"},
+        "cutoff_policy_revision": {"$ref": "#/$defs/token"},
+        "source_workspace_id": {"$ref": "#/$defs/workspaceId"},
+        "source_project_id": {"$ref": "#/$defs/token"},
+        "source_registry_revision": {"$ref": "#/$defs/token"},
+        "source_boundary": {"$ref": "#/$defs/sourceBoundary"},
+        "trusted_importer": {"$ref": "#/$defs/importer"},
+        "transaction_id": {"$ref": "#/$defs/token"},
+        "provenance_id": {"$ref": "#/$defs/token"},
+        "integrity": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "publication": {
+      "description": "Authoritative provenance for atomically publishing this complete manifest. Integrity is sha256 over the frozen canonical JSON byte algorithm of this object with exactly its integrity field omitted.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["publisher", "publication_transaction_id", "provenance_id", "workspace_id", "project_id", "registry_revision", "cutoff_policy_revision", "source_boundary", "integrity"],
+      "properties": {
+        "publisher": {"$ref": "#/$defs/importer"},
+        "publication_transaction_id": {"$ref": "#/$defs/token"},
+        "provenance_id": {"$ref": "#/$defs/token"},
+        "workspace_id": {"$ref": "#/$defs/workspaceId"},
+        "project_id": {"$ref": "#/$defs/token"},
+        "registry_revision": {"$ref": "#/$defs/token"},
+        "cutoff_policy_revision": {"$ref": "#/$defs/token"},
+        "source_boundary": {"$ref": "#/$defs/sourceBoundary"},
+        "integrity": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "legacyManifest": {
+      "description": "Seal value is sha256 over the frozen canonical JSON byte algorithm applied to the exact projection {manifest_id, cutoff_policy_revision, entries, publication}; object keys sort canonically, entries retain array order, and sealed plus seal are omitted.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["manifest_id", "cutoff_policy_revision", "sealed", "entries", "publication", "seal"],
+      "properties": {
+        "manifest_id": {"type": "string", "pattern": "^(?!.*[\\u0000-\\u001f\\u007f\\u0085\\u2028\\u2029])manifest_[A-Za-z0-9][A-Za-z0-9_-]{2,127}$"},
+        "cutoff_policy_revision": {"$ref": "#/$defs/token"},
+        "sealed": {"const": true},
+        "entries": {"type": "array", "minItems": 1, "maxItems": 4096, "items": {"$ref": "#/$defs/manifestEntry"}},
+        "publication": {"$ref": "#/$defs/publication"},
+        "seal": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["algorithm", "value"],
+          "properties": {"algorithm": {"const": "sha256"}, "value": {"$ref": "#/$defs/sha256"}}
+        }
+      }
+    },
+    "legacyImport": {
+      "description": "Compatibility parsing provenance only. Source transaction/provenance bind the manifest entry; the distinct import transaction/provenance identify this import. Integrity is sha256 over the frozen canonical JSON byte algorithm with exactly integrity omitted.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["manifest_id", "cutoff_policy_revision", "entry_key", "recorded_content_type", "recorded_bytes_base64", "source_boundary", "source_transaction_id", "source_provenance_id", "importer", "import_transaction_id", "import_provenance_id", "integrity"],
+      "properties": {
+        "manifest_id": {"type": "string", "pattern": "^(?!.*[\\u0000-\\u001f\\u007f\\u0085\\u2028\\u2029])manifest_[A-Za-z0-9][A-Za-z0-9_-]{2,127}$"},
+        "cutoff_policy_revision": {"$ref": "#/$defs/token"},
+        "entry_key": {"$ref": "#/$defs/entryKey"},
+        "recorded_content_type": {"enum": ["application/json", "text/plain"]},
+        "recorded_bytes_base64": {"type": "string", "minLength": 1, "maxLength": 1048576, "pattern": "^[A-Za-z0-9+/]*={0,2}$"},
+        "source_boundary": {"$ref": "#/$defs/sourceBoundary"},
+        "source_transaction_id": {"$ref": "#/$defs/token"},
+        "source_provenance_id": {"$ref": "#/$defs/token"},
+        "importer": {"$ref": "#/$defs/importer"},
+        "import_transaction_id": {"$ref": "#/$defs/token"},
+        "import_provenance_id": {"$ref": "#/$defs/token"},
+        "integrity": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "extensions": {
+      "description": "Bounded non-authoritative annotations. Consumers must ignore these values for routing, trust, and execution.",
+      "type": "object",
+      "maxProperties": 8,
+      "propertyNames": {"pattern": "^x_note_[A-Za-z][A-Za-z0-9_-]{0,55}$"},
+      "additionalProperties": {
+        "anyOf": [
+          {"type": "string", "maxLength": 512, "pattern": "^(?!.*[\\u0000-\\u001f\\u007f\\u0085\\u2028\\u2029\\ud800-\\udfff]).*$"},
+          {"type": "integer", "minimum": -9007199254740991, "maximum": 9007199254740991},
+          {"type": "boolean"},
+          {"type": "null"}
+        ]
+      }
+    }
+  }
+}

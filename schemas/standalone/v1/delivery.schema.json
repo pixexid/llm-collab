@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://llm-collab.dev/schemas/standalone/v1/delivery.schema.json",
+  "title": "DeliveryV1",
+  "description": "One route for one immutable message. Accepted and completed require embedded authoritative native evidence; best-effort and generic shell results cannot satisfy those outcomes.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "workspace_id", "scope", "delivery_id", "message_id", "attempt_id", "endpoint_id", "outcome", "evidence"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "workspace_id": {"$ref": "#/$defs/workspaceId"},
+    "scope": {"$ref": "#/$defs/scope"},
+    "delivery_id": {"type": "string", "pattern": "^(?!.*[\\u0000-\\u001f\\u007f\\u0085\\u2028\\u2029])delivery_[A-Za-z0-9][A-Za-z0-9_-]{2,127}$"},
+    "message_id": {"type": "string", "pattern": "^(?!.*[\\u0000-\\u001f\\u007f\\u0085\\u2028\\u2029])msg_[A-Za-z0-9][A-Za-z0-9_-]{2,127}$"},
+    "attempt_id": {"type": "string", "pattern": "^(?!.*[\\u0000-\\u001f\\u007f\\u0085\\u2028\\u2029])attempt_[A-Za-z0-9][A-Za-z0-9_-]{2,127}$"},
+    "endpoint_id": {"type": "string", "pattern": "^(?!.*[\\u0000-\\u001f\\u007f\\u0085\\u2028\\u2029])endpoint_[A-Za-z0-9][A-Za-z0-9_-]{2,127}$"},
+    "session_ref_id": {"type": "string", "pattern": "^(?!.*[\\u0000-\\u001f\\u007f\\u0085\\u2028\\u2029])session_[A-Za-z0-9][A-Za-z0-9_-]{2,127}$"},
+    "outcome": {"enum": ["pending", "deferred_busy", "rejected_before_acceptance", "pull_pending", "ambiguous", "accepted", "completed"]},
+    "evidence": {"$ref": "https://llm-collab.dev/schemas/standalone/v1/state-evidence.schema.json"},
+    "extensions": {"$ref": "#/$defs/extensions"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"outcome": {"const": "pending"}}, "required": ["outcome"]},
+      "then": {
+        "properties": {
+          "evidence": {
+            "properties": {
+              "state": {"enum": ["persisted", "routed", "injected", "visible", "processing", "acknowledged"]}
+            }
+          }
+        }
+      }
+    },
+    {"if": {"properties": {"outcome": {"const": "deferred_busy"}}, "required": ["outcome"]}, "then": {"properties": {"evidence": {"properties": {"state": {"const": "deferred_busy"}}}}}},
+    {"if": {"properties": {"outcome": {"const": "rejected_before_acceptance"}}, "required": ["outcome"]}, "then": {"properties": {"evidence": {"properties": {"state": {"const": "rejected_before_acceptance"}}}}}},
+    {"if": {"properties": {"outcome": {"const": "pull_pending"}}, "required": ["outcome"]}, "then": {"properties": {"evidence": {"properties": {"state": {"const": "pull_pending"}}}}}},
+    {"if": {"properties": {"outcome": {"const": "ambiguous"}}, "required": ["outcome"]}, "then": {"properties": {"evidence": {"properties": {"state": {"const": "ambiguous"}}}}}},
+    {
+      "if": {"properties": {"outcome": {"const": "accepted"}}, "required": ["outcome"]},
+      "then": {
+        "required": ["session_ref_id"],
+        "properties": {"evidence": {"properties": {"state": {"const": "accepted"}, "quality": {"const": "authoritative"}, "evidence_kind": {"enum": ["native_delivery_state", "exact_session_acknowledgment"]}}}}
+      }
+    },
+    {
+      "if": {"properties": {"outcome": {"const": "completed"}}, "required": ["outcome"]},
+      "then": {
+        "required": ["session_ref_id"],
+        "properties": {"evidence": {"properties": {"state": {"const": "completed"}, "quality": {"const": "authoritative"}, "evidence_kind": {"enum": ["native_delivery_state", "exact_session_acknowledgment"]}}}}
+      }
+    }
+  ],
+  "$defs": {
+    "token": {"type": "string", "pattern": "^(?!.*[\\u0000-\\u001f\\u007f\\u0085\\u2028\\u2029])[A-Za-z][A-Za-z0-9._-]{0,127}$"},
+    "workspaceId": {"type": "string", "pattern": "^(?!.*[\\u0000-\\u001f\\u007f\\u0085\\u2028\\u2029])ws_[A-Za-z0-9][A-Za-z0-9_-]{2,127}$"},
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {"kind": {"enum": ["workspace", "project"]}, "project_id": {"$ref": "#/$defs/token"}},
+      "allOf": [{"if": {"properties": {"kind": {"const": "project"}}, "required": ["kind"]}, "then": {"required": ["project_id"]}, "else": {"not": {"required": ["project_id"]}}}]
+    },
+    "extensions": {
+      "description": "Bounded non-authoritative annotations. Consumers must ignore these values for routing, trust, and execution.",
+      "type": "object",
+      "maxProperties": 8,
+      "propertyNames": {"pattern": "^x_note_[A-Za-z][A-Za-z0-9_-]{0,55}$"},
+      "additionalProperties": {
+        "anyOf": [
+          {"type": "string", "maxLength": 512, "pattern": "^(?!.*[\\u0000-\\u001f\\u007f\\u0085\\u2028\\u2029\\ud800-\\udfff]).*$"},
+          {"type": "integer", "minimum": -9007199254740991, "maximum": 9007199254740991},
+          {"type": "boolean"},
+          {"type": "null"}
+        ]
+      }
+    }
+  }
+}
