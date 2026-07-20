@@ -25,6 +25,7 @@ import subprocess
 
 sys.path.insert(0, str(Path(__file__).parent))
 import project_issue_queue as issue_queue
+from _ax_trust import format_ax_status, probe_ax_trust
 from _helpers import (
     ROOT,
     agent_ids,
@@ -115,6 +116,7 @@ def main():
         sys.exit(1)
 
     agent = get_agent(args.agent)
+    ax_result = probe_ax_trust(agent)
 
     # ── 1. Identity (FIRST — the LLM must read this before anything else) ──
     identity_file = agent_identity_path(args.agent)
@@ -208,6 +210,9 @@ def main():
                 print(f"  - {item['project_id']}: queue has no ready lane ({item['queue_path']})")
         print("")
 
+    if not args.json_output:
+        print(format_ax_status(ax_result))
+
     # ── 3. Watcher ──
     watcher_result = {"status": "skipped"}
     activation = agent.get("activation", {})
@@ -231,6 +236,7 @@ def main():
             "inbox": inbox_summary,
             "queues": queue_info,
             "watcher": watcher_result,
+            "ax": ax_result.as_dict(),
         }, indent=2))
 
 

@@ -29,6 +29,7 @@ import shutil
 import subprocess
 
 sys.path.insert(0, str(Path(__file__).parent))
+from _ax_trust import format_ax_status, probe_ax_trust
 from _helpers import ROOT, agent_ids, config_get, get_agent, watcher_enabled_agents
 
 COMMANDS = ("start", "restart", "ensure", "stop", "delete", "status", "logs")
@@ -126,6 +127,13 @@ def main():
         print("[error] Specify --agent or --all", file=sys.stderr)
         sys.exit(1)
 
+    if args.command == "status":
+        # Print every target's AX state before invoking PM2. pm2_run exits on a
+        # missing binary or timeout, but neither failure may suppress AX status.
+        for agent_id in targets:
+            print(format_ax_status(probe_ax_trust(get_agent(agent_id)), agent_id=agent_id))
+
+    status_exit_code = 0
     for agent_id in targets:
         name = app_name(agent_id)
         if args.command == "start":
@@ -139,9 +147,14 @@ def main():
         elif args.command == "delete":
             pm2_run(["delete", name])
         elif args.command == "status":
-            pm2_run(["describe", name])
+            result = pm2_run(["describe", name])
+            if result.returncode != 0 and status_exit_code == 0:
+                status_exit_code = result.returncode
         elif args.command == "logs":
             pm2_run(["logs", name, "--lines", str(args.lines), "--nostream"])
+
+    if status_exit_code != 0:
+        sys.exit(status_exit_code)
 
 
 if __name__ == "__main__":
