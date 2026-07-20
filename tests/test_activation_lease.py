@@ -252,6 +252,44 @@ class ActivationLeaseTest(unittest.TestCase):
         self.assertEqual(75, code)
         self.assertEqual("claimant_runtime_mismatch", refused["reason"])
 
+    def test_assert_requires_asserting_runtime_not_session_record_fallback(self):
+        root = self.make_workspace()
+        self.register_session(root, "SESSION-A", runtime_id="runtime-a")
+        claimed, code = self.claim(root, "SESSION-A")
+        self.assertEqual(0, code, claimed)
+        self.assertEqual("runtime-a", claimed["lease"]["owner_runtime_session_id"])
+
+        refused, code = self.run_cli(
+            root,
+            "lease-assert",
+            *self.identity_args(),
+            "--session",
+            "SESSION-A",
+            "--fence-token",
+            str(claimed["lease"]["fence_token"]),
+        )
+        self.assertEqual(75, code)
+        self.assertEqual("claimant_runtime_identity_required", refused["reason"])
+
+    def test_wrong_fence_assert_refuses_stale_fence_token(self):
+        root = self.make_workspace()
+        self.register_session(root, "SESSION-A", runtime_id="runtime-a")
+        self.claim(root, "SESSION-A", "--claimant-runtime-id", "runtime-a")
+
+        refused, code = self.run_cli(
+            root,
+            "lease-assert",
+            *self.identity_args(),
+            "--session",
+            "SESSION-A",
+            "--fence-token",
+            "99",
+            "--claimant-runtime-id",
+            "runtime-a",
+        )
+        self.assertEqual(75, code)
+        self.assertEqual("stale_fence_token", refused["reason"])
+
     def test_assert_requires_fence_token_at_cli(self):
         root = self.make_workspace()
         self.register_session(root, "SESSION-A", runtime_id="runtime-a")
@@ -530,10 +568,18 @@ class ActivationLeaseTest(unittest.TestCase):
         claimed, code = self.claim(root, "SESSION-A", "--claimant-runtime-id", "runtime-a")
         self.assertEqual(0, code, claimed)
         fence = str(claimed["lease"]["fence_token"])
+        lease_dir = root / "State" / "session_autobridge" / "activation_leases"
 
         refused, code = self.run_cli(root, "lease-release", *self.identity_args(), "--session", "SESSION-B", "--fence-token", fence)
         self.assertEqual(75, code)
         self.assertEqual("release_requires_current_owner", refused["reason"])
+
+        before = {path.name: path.read_text() for path in lease_dir.glob("*.json")}
+        stale, code = self.run_cli(root, "lease-release", *self.identity_args(), "--session", "SESSION-A", "--fence-token", "99")
+        self.assertEqual(75, code)
+        self.assertEqual("stale_fence_token", stale["reason"])
+        after = {path.name: path.read_text() for path in lease_dir.glob("*.json")}
+        self.assertEqual(before, after)
 
         released, code = self.run_cli(root, "lease-release", *self.identity_args(), "--session", "SESSION-A", "--fence-token", fence)
         self.assertEqual(0, code, released)
