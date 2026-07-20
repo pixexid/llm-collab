@@ -169,6 +169,11 @@ python3 bin/session_autobridge.py lease-assert \
   --json
 ```
 
+The claim command may use the registered session's runtime id when no explicit
+claimant runtime is provided. The assert command is stricter: the current
+runtime must be supplied explicitly or by the reader runtime environment, and
+the session record alone is not proof that this process is the lease holder.
+
 Release when the task is done or superseded:
 
 ```bash

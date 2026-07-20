@@ -270,7 +270,7 @@ def _assert_claimant_matches(
     claimant_runtime_id: str | None,
     owner_pid: int | None,
 ) -> None:
-    runtime_id = claimant_runtime_id or runtime_id_from_env() or _runtime_id_from_record(record)
+    runtime_id = claimant_runtime_id or runtime_id_from_env()
     pid = owner_pid if owner_pid is not None else pid_from_env()
     if pid is not None and not valid_process_pid(pid):
         raise LeaseRefused(
