@@ -201,13 +201,14 @@ no actionable issues or the watcher observed the connector's eyes-to-`+1`
 (`thumbs-up`) transition on the latest head, the `+1` postdates that head, and no
 subsequent push occurred. Either signal is terminal for the bot wait on that
 head, and these remain the only two exact-head terminal signal sources. Their
-post-signal handling differs:
+post-signal handling differs. A terminal signal stops waiting for further
+artifacts or the fallback timeout only; it does not waive the handling below:
 
 - A head-named clean connector verdict is not merge-immediate. Hold an
-  approximately five-minute post-clean settle, then perform a full re-read of
-  reviews, review threads, and reactions because the connector can emit
-  multiple reviews for one head. When a re-review was explicitly requested,
-  that re-review supersedes older same-head clean artifacts for the
+  approximately five-minute mandatory post-clean settle, then perform a full
+  re-read of reviews, review threads, and reactions because the connector can
+  emit multiple reviews for one head. When a re-review was explicitly
+  requested, that re-review supersedes older same-head clean artifacts for the
   clean-verdict path; only its verdict can satisfy that path, and it receives
   the same settle and full re-read.
 - A watcher-observed latest-head eyes-to-`+1` lifecycle is already
@@ -216,26 +217,27 @@ post-signal handling differs:
   15-minute fallback itself. Required CI, mergeability, independent review,
   and full comment/review/thread inspection still apply.
 
-If no head-named review and no eyes reaction appears within roughly 30–35
-minutes after the latest push, treat the request as silently dropped and
-re-trigger it with an `@codex review` comment instead of waiting indefinitely.
-The existing PR-wait heartbeat observes this timer; the re-trigger is neither a
-new terminal signal nor a new watcher mechanism.
-
-If neither terminal signal exists and no bot review is actually pending, the
-resettable 15-minute settle is the fallback. For fallback
-purposes, a pending/request state with no connector artifact for that full
-resettable window is no longer actually pending; report and escalate the stuck
-review, but do not let it extend the fallback indefinitely. Eyes or another
-non-terminal reaction does not block the fallback once review is no longer
-pending. Any push invalidates the prior signal and restarts the clock for the
-new head. The same fallback handles three named no-terminal-artifact variants:
-no explicit review request (the reviewability clock still starts at the later of
-the final push and the head becoming reviewable), eyes-only current-head
-artifact (non-blocking once no review is pending, and not itself terminal), and
-prior-head-only artifacts (a stale-head `Codex Review:` body or reaction is not
-head-attributable and is ignored for terminal-signal purposes). See
-`commit-push-prs.md` for the full enumeration.
+For requested-review silence versus the fallback, follow the canonical
+[Explicit requested-review precedence](commit-push-prs.md#explicit-requested-review-precedence).
+Do not apply the 15-minute fallback to an explicitly requested review. That
+precedence anchors each 30–35-minute clock to the corresponding explicit
+request's GitHub `created_at`, not to the latest push or head-reviewability
+time. A current-head `eyes` reaction alone does not exit requested-review
+precedence. Automation may issue exactly one re-trigger; if its own
+request-anchored clock expires without a terminal signal, no further automatic
+retry is allowed and the PR remains unmergeable until a terminal human/operator
+disposition is recorded. The fallback is limited to exactly three named
+no-terminal-artifact variants:
+no explicit review request (the reviewability clock starts at the later of the
+final push and the head becoming reviewable), eyes-only current-head artifact
+(which applies only when no explicit review request is outstanding and is
+non-blocking once no review is pending), and prior-head artifacts only (a
+stale-head `Codex Review:` body or reaction is not
+head-attributable and is ignored for terminal-signal purposes). For those
+fallback variants, any push invalidates the prior signal and restarts the
+fallback clock for the new head; it does not reset an explicit request's
+request-anchored clock. The canonical section owns the pending/re-trigger timing
+and rationale; this compact handoff rule must not define a competing timer.
 
 If GitHub Codex comments on the PR, fix the pointed issue, rerun the manual
 branch-diff review and required checks, then evaluate the new exact head and its
