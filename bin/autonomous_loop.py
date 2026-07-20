@@ -25,6 +25,7 @@ from _helpers import display_path, ensure_project, get_agent, project_state_dir,
 
 
 STATE_FILE_NAME = "autonomous-loop.json"
+STATE_SCHEMA_VERSION = 1
 REVIEW_POLICY = "local_required_github_codex_opportunistic"
 DEFAULT_STOP_CONDITIONS = [
     "operator_interrupt",
@@ -94,7 +95,7 @@ def read_state(path: Path, project_id: str) -> dict[str, Any]:
 
 def default_state(project_id: str) -> dict[str, Any]:
     return {
-        "schema_version": 1,
+        "schema_version": STATE_SCHEMA_VERSION,
         "project_id": project_id,
         "enabled": False,
         "agent": None,
@@ -123,6 +124,7 @@ def default_state(project_id: str) -> dict[str, Any]:
 
 
 def normalize_state(payload: dict[str, Any], project_id: str) -> dict[str, Any]:
+    stored_schema_version = payload.get("schema_version")
     state = default_state(project_id)
     for key, value in payload.items():
         if key in {"heartbeat", "current"} and isinstance(value, dict):
@@ -132,13 +134,30 @@ def normalize_state(payload: dict[str, Any], project_id: str) -> dict[str, Any]:
         elif key in state:
             state[key] = value
     state["project_id"] = project_id
-    state["schema_version"] = 1
+    state["schema_version"] = STATE_SCHEMA_VERSION
     if state.get("mode") not in MODES:
         state["mode"] = "idle"
     if not isinstance(state.get("stop_conditions"), list):
         state["stop_conditions"] = DEFAULT_STOP_CONDITIONS.copy()
     if not isinstance(state.get("notes"), list):
         state["notes"] = []
+    if stored_schema_version != STATE_SCHEMA_VERSION:
+        stored_condition = (
+            f"schema_version={stored_schema_version!r}"
+            if "schema_version" in payload
+            else "missing schema_version"
+        )
+        state["notes"].append(
+            {
+                "at": utc_iso(),
+                "text": (
+                    f"Recovered persisted state with {stored_condition}; "
+                    f"normalized to schema_version={STATE_SCHEMA_VERSION} "
+                    "and recomputed derived fields."
+                ),
+            }
+        )
+    state["next_action"] = next_action(state)
     return state
 
 
