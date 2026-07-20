@@ -8,7 +8,7 @@
         "head_oid": "amiga-abc301",
         "pr_open": true,
         "draft_ready": true,
-        "explicit_review_request": true,
+        "explicit_review_request": false,
         "review_visibility_exists": true,
         "final_push_utc": "2026-07-18T12:30:00Z",
         "head_reviewable_utc": "2026-07-18T12:30:00Z"
@@ -42,7 +42,7 @@
         "head_oid": "nuvyr-abc301",
         "pr_open": true,
         "draft_ready": true,
-        "explicit_review_request": true,
+        "explicit_review_request": false,
         "review_visibility_exists": true,
         "final_push_utc": "2026-07-18T15:30:00Z",
         "head_reviewable_utc": "2026-07-18T15:30:00Z"

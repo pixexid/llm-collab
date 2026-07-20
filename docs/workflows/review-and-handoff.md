@@ -219,14 +219,13 @@ artifacts or the fallback timeout only; it does not waive the handling below:
 
 For requested-review silence versus the fallback, follow the canonical
 [Explicit requested-review precedence](commit-push-prs.md#explicit-requested-review-precedence).
-Do not apply the 15-minute fallback to an explicitly requested review. That
-precedence anchors each 30–35-minute clock to the corresponding explicit
-request's GitHub `created_at`, not to the latest push or head-reviewability
-time. A current-head `eyes` reaction alone does not exit requested-review
-precedence. Automation may issue exactly one re-trigger; if its own
-request-anchored clock expires without a terminal signal, no further automatic
-retry is allowed and the PR remains unmergeable until a terminal human/operator
-disposition is recorded. The fallback is limited to exactly three named
+Do not apply the 15-minute fallback to an explicitly requested review.
+Automation may issue exactly one re-trigger, and no further automatic retry is
+allowed. The canonical section is the sole authority for both request-anchored
+clocks, current-head invalidation, the post-timeout disposition choices, and
+every effect of an exact-head operator authorization; this compact guidance
+defines no separate disposition effect. The fallback is limited to exactly
+three named
 no-terminal-artifact variants:
 no explicit review request (the reviewability clock starts at the later of the
 final push and the head becoming reviewable), eyes-only current-head artifact
@@ -236,8 +235,8 @@ stale-head `Codex Review:` body or reaction is not
 head-attributable and is ignored for terminal-signal purposes). For those
 fallback variants, any push invalidates the prior signal and restarts the
 fallback clock for the new head; it does not reset an explicit request's
-request-anchored clock. The canonical section owns the pending/re-trigger timing
-and rationale; this compact handoff rule must not define a competing timer.
+request-anchored clock. This compact handoff rule must not define a competing
+timer or disposition rule.
 
 If GitHub Codex comments on the PR, fix the pointed issue, rerun the manual
 branch-diff review and required checks, then evaluate the new exact head and its

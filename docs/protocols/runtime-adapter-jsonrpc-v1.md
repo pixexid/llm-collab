@@ -769,12 +769,13 @@ The method-specific shapes are:
 11. **Health (normative).** The host MUST make the first `runtime.health` call
     `HEALTH_INTERVAL_MS`, fixed at 10,000 milliseconds, after successful
     initialization. It MUST schedule each later health call exactly
-    `HEALTH_INTERVAL_MS` after the previous health request completes or after
-    that request's `HEALTH_DEADLINE_MS` expires, never from dispatch. Every
-    call uses exactly `{}` params. Health is connection/initialized-endpoint
-    scoped: it MUST NOT carry `SessionRefV1`, `session_ref`, a native-session
-    id, or any other session selector, and it is legal before native-session
-    discovery or binding. It uses only
+    `HEALTH_INTERVAL_MS` after the previous health request completes, never
+    from dispatch. A request that reaches its deadline instead ends that
+    connection's cadence epoch; no successor is scheduled from its expiry.
+    Every call uses exactly `{}` params. Health is
+    connection/initialized-endpoint scoped: it MUST NOT carry `SessionRefV1`,
+    `session_ref`, a native-session id, or any other session selector, and it
+    is legal before native-session discovery or binding. It uses only
     `MAX_IN_FLIGHT_HEALTH_REQUESTS = 1`; no delivery, cancel, reconcile, or
     shutdown request can consume that named bound, and a second concurrent
     health request receives `TOO_MANY_IN_FLIGHT` without queueing. A valid
@@ -784,24 +785,36 @@ The method-specific shapes are:
     identity/revisions, and MUST arrive inside `HEALTH_DEADLINE_MS`, fixed at
     5,000 milliseconds for `runtime.health` only and strictly less than
     `HEALTH_INTERVAL_MS`. If a health request reaches its deadline without a
-    valid response, the host MUST close that connection, terminate the old
-    adapter process, and confirm its exit before initializing any replacement
-    permitted by the current adapter-state gate. Any possibly accepted delivery
-    interrupted by that teardown remains unresolved and follows Clause 10; no
-    delivery outcome is inferred from the health timeout. The timeout failure
-    is recorded before replacement admission; when it reaches
+    valid response, the host MUST record exactly one health failure at expiry,
+    close that connection, terminate the old adapter process, and confirm its
+    exit before initializing any replacement permitted by the current
+    adapter-state gate. Any possibly accepted delivery interrupted by that
+    teardown remains unresolved and follows Clause 10; no delivery outcome is
+    inferred from the health timeout. The timeout failure is recorded before
+    replacement admission; when it reaches
     `HEALTH_FAILURE_THRESHOLD`, only Clause 12's explicitly authorized recovery
-    route can admit a replacement. An expiry-anchored successor may be
-    dispatched only after a permitted replacement process completes the exact
-    `initialize` exchange, never on the expired request's connection or
-    process. The endpoint's consecutive health-failure count survives that
-    connection and process replacement.
-    This mandatory expiry teardown, completion- or deadline-expiry-anchored
-    cadence, and the one-request bound make an overlapping health request
-    structurally impossible for a conforming host. A forced miss from overlap
-    therefore cannot occur and is not a health-failure category. For project
-    scope the exact initialized `project_id` is required; for workspace scope
-    `project_id` is forbidden. A health request that exceeds
+    route can admit a replacement. If the adapter-state gate admits a
+    replacement and its exact `initialize` exchange succeeds, the new
+    initialized connection begins a fresh cadence epoch: its first
+    `runtime.health` is dispatched exactly `HEALTH_INTERVAL_MS` after that
+    successful replacement initialization. The expired connection has no
+    successor or expiry-anchored slot to catch up, and no immediate catch-up
+    dispatch occurs after a slow initialization. Teardown duration,
+    replacement-initialization duration, and the absence of a health call while
+    no initialized connection exists are not additional health failures and do
+    not create a missed or overlapping health request. The endpoint's
+    consecutive health-failure count survives that connection and process
+    replacement. The same re-anchored first-health rule applies when Clause 12
+    admits and successfully initializes a recovery connection after the
+    threshold failure.
+
+    This completion-anchored cadence on a live initialized connection, the
+    timeout-ended cadence epoch, replacement-initialization re-anchor, and the
+    one-request bound make an overlapping health request structurally
+    impossible for a conforming host. A forced miss from overlap therefore
+    cannot occur and is not a health-failure category. For project scope the
+    exact initialized `project_id` is required; for workspace scope `project_id`
+    is forbidden. A health request that exceeds
     `HEALTH_DEADLINE_MS` counts as one failure. A malformed response, including
     any response without the exact `"healthy"` status, counts as one failure;
     an identity-mismatched or revision-mismatched response counts as one
