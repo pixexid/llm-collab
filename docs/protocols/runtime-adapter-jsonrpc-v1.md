@@ -298,11 +298,15 @@ The method-specific shapes are:
 - `runtime.deliver` params contain exactly `session_ref` and `delivery`, whose
   values are one complete `SessionRefV1` and one complete `DeliveryV1`. Its
   success result is directly one complete `ReceiptV1`, with no result wrapper.
-- `runtime.cancel` params contain exactly `session_ref` and
-  `original_request_id`, whose values are one complete `SessionRefV1` and the
-  original delivery request's exact bounded `RequestId` scalar. Its success
-  result contains exactly `original_request_id`, equal in JSON type and value to
-  the params member, and `status`, whose string constant is `"cancelled"`.
+- `runtime.cancel` params contain exactly `session_ref`,
+  `original_request_id`, `delivery_id`, and `attempt_id`. `session_ref` is one
+  complete `SessionRefV1`; `original_request_id` is the original delivery
+  request's exact bounded `RequestId` scalar; and the last two values use the
+  exact S2 `DeliveryV1.delivery_id` and `DeliveryV1.attempt_id` scalar
+  definitions. Its success result contains exactly `original_request_id`,
+  `delivery_id`, `attempt_id`, and `status`. The first three members equal
+  their params members in JSON type and value, and `status` is the string
+  constant `"cancelled"`.
 - `runtime.reconcile` params contain exactly `session_ref`,
   `original_request_id`, `delivery_id`, and `attempt_id`. `session_ref` is one
   complete `SessionRefV1`; `original_request_id` is the unresolved request's
@@ -444,13 +448,16 @@ The method-specific shapes are:
    MUST begin no action.
 
 3. **Time bounds (normative).** `REQUEST_DEADLINE_MS` is 30,000 milliseconds
-   from receipt of a complete frame, and `HANDSHAKE_DEADLINE_MS` is 5,000
-   milliseconds from process start. Every request MUST finish or enter an
-   explicit reconciliation state before its deadline. Handshake expiry MUST
-   return `HANDSHAKE_TIMEOUT` when possible and terminate the connection.
-   Request expiry MUST return `REQUEST_TIMEOUT`; the host MUST treat possible
-   external acceptance as unresolved and MUST NOT convert the timeout into a
-   successful result or an automatic retry.
+   from receipt of a complete frame for every request except `runtime.health`.
+   `runtime.health` alone uses `HEALTH_DEADLINE_MS`, fixed at 5,000
+   milliseconds from receipt of its complete frame.
+   `HANDSHAKE_DEADLINE_MS` is 5,000 milliseconds from process start. Every
+   request MUST finish or enter an explicit reconciliation state before its
+   applicable deadline. Handshake expiry MUST return `HANDSHAKE_TIMEOUT` when
+   possible and terminate the connection. Request expiry MUST return
+   `REQUEST_TIMEOUT`; the host MUST treat possible external acceptance as
+   unresolved and MUST NOT convert the timeout into a successful result or an
+   automatic retry.
 
 4. **Handshake and version negotiation (normative).** The first frame in each
    direction MUST be the closed `initialize` exchange above. The host MUST
@@ -665,23 +672,34 @@ The method-specific shapes are:
    delivery state, and follows the existing invalid-output/quarantine path.
 
 9. **Cancellation (normative).** The `runtime.cancel` method MUST name the exact
-   original delivery request through the closed `original_request_id` param,
-   use its own distinct request `id` under Clause 1, and carry the same exact
-   `SessionRefV1` as the original request. At P6 its exact
+   original delivery request through the closed `original_request_id`,
+   `delivery_id`, and `attempt_id` params, use its own distinct request `id`
+   under Clause 1, and carry the same exact `SessionRefV1` as the original
+   request. At P6 its exact
    `runtime.cancel` action relation and the session-binding evidence profile
    MUST validate independently under Clause 6. It uses only
    `MAX_IN_FLIGHT_CANCEL_REQUESTS = 1`; no delivery, reconcile, health, or
    shutdown request can consume that named bound, and a second concurrent
    cancel request receives `TOO_MANY_IN_FLIGHT` without queueing. The cancel
    invocation's only success result is the closed
-   `{original_request_id, status:"cancelled"}` object; it is not a
-   `REQUEST_CANCELLED` error. After that success, the original pending delivery
-   request MUST terminate with the
-   `REQUEST_CANCELLED` JSON-RPC error using the original request's id.
-   Cancellation is idempotent: repeated cancellation of a request
+   `{original_request_id, delivery_id, attempt_id, status:"cancelled"}` object;
+   all three identity members MUST equal their params members in JSON type and
+   value. It is not a `REQUEST_CANCELLED` error. After P3-P6 succeed, the
+   adapter MUST refuse cancellation unless both its complete `SessionRefV1`
+   exactly equals the original request's recorded session and the complete
+   `(original_request_id, delivery_id, attempt_id)` triple exactly matches the
+   recorded original delivery and attempt. A session or triple mismatch is
+   `INVALID_DELIVERY` at P7, performs no action, and advances no state. After a
+   matching success, the original pending delivery request MUST terminate with
+   the `REQUEST_CANCELLED` JSON-RPC error using the original request's id.
+   Cancellation is idempotent only for the same exact `SessionRefV1` and
+   complete matching `(original_request_id, delivery_id, attempt_id)` triple:
+   repeated cancellation of that session-bound triple after it was
    authoritatively cancelled before external acceptance MUST return the same
    cancel success result, while the original request remains terminally
-   cancelled. Cancellation MUST NOT claim success when acceptance may have
+   cancelled. Reuse of an `original_request_id` in a different session,
+   delivery, or attempt therefore cannot cancel the later or earlier delivery
+   accidentally. Cancellation MUST NOT claim success when acceptance may have
    occurred; that cancel invocation MUST return `RECONCILIATION_REQUIRED`,
    preserve the original delivery and attempt as unresolved, and prohibit
    retry until reconciliation determines authoritative not-accepted evidence.
@@ -748,35 +766,60 @@ The method-specific shapes are:
     recovery reconciliation resolves only its named attempt and does not clear
     quarantine or unhealthy state.
 
-11. **Health (normative).** The host MUST call `runtime.health` every
-    `HEALTH_INTERVAL_MS`, fixed at 10,000 milliseconds, using exactly `{}`
-    params. Health is connection/initialized-endpoint scoped: it MUST NOT carry
-    `SessionRefV1`, `session_ref`, a native-session id, or any other session
-    selector, and it is legal immediately after successful initialization
-    before native-session discovery or binding. It uses only
+11. **Health (normative).** The host MUST make the first `runtime.health` call
+    `HEALTH_INTERVAL_MS`, fixed at 10,000 milliseconds, after successful
+    initialization. It MUST schedule each later health call exactly
+    `HEALTH_INTERVAL_MS` after the previous health request completes or after
+    that request's `HEALTH_DEADLINE_MS` expires, never from dispatch. Every
+    call uses exactly `{}` params. Health is connection/initialized-endpoint
+    scoped: it MUST NOT carry `SessionRefV1`, `session_ref`, a native-session
+    id, or any other session selector, and it is legal before native-session
+    discovery or binding. It uses only
     `MAX_IN_FLIGHT_HEALTH_REQUESTS = 1`; no delivery, cancel, reconcile, or
     shutdown request can consume that named bound, and a second concurrent
     health request receives `TOO_MANY_IN_FLIGHT` without queueing. A valid
     response MUST have the closed scalar result shape above, MUST exactly
     identify the negotiated protocol, initialized adapter, trusted manifest,
     endpoint, workspace and complete scope discriminator, and capability-set
-    identity/revisions, and MUST arrive inside `REQUEST_DEADLINE_MS`. For
-    project scope the exact initialized `project_id` is required; for workspace
-    scope `project_id` is forbidden. Three consecutive missed, malformed,
-    unhealthy-status, identity-mismatched, or revision-mismatched health
-    responses
-    (`HEALTH_FAILURE_THRESHOLD = 3`) move the adapter out of service and return
-    `ADAPTER_UNHEALTHY` to new work. The host MUST create or update an operator-
-    visible unhealthy record for the exact adapter, manifest, profile, endpoint,
-    reason, timestamps, and every unresolved attempt eligible for recovery,
-    using the exact identities required by Clause 12. It MUST stop assigning
-    normal requests until Clause 12's recovery and separate explicit operator
-    release complete. When quarantine is not also active, blocked normal work
-    receives `ADAPTER_UNHEALTHY`; only the single operator-authorized recovery
-    connection may admit the bounded recovery controls. Successful recovery
-    health responses contribute to the required fresh healthy sequence but MUST
-    NOT automatically clear unhealthy or quarantine state. An invalid health
-    request returns `INVALID_PARAMS` before action. A missing,
+    identity/revisions, and MUST arrive inside `HEALTH_DEADLINE_MS`, fixed at
+    5,000 milliseconds for `runtime.health` only and strictly less than
+    `HEALTH_INTERVAL_MS`. If a health request reaches its deadline without a
+    valid response, the host MUST close that connection, terminate the old
+    adapter process, and confirm its exit before initializing any replacement
+    permitted by the current adapter-state gate. Any possibly accepted delivery
+    interrupted by that teardown remains unresolved and follows Clause 10; no
+    delivery outcome is inferred from the health timeout. The timeout failure
+    is recorded before replacement admission; when it reaches
+    `HEALTH_FAILURE_THRESHOLD`, only Clause 12's explicitly authorized recovery
+    route can admit a replacement. An expiry-anchored successor may be
+    dispatched only after a permitted replacement process completes the exact
+    `initialize` exchange, never on the expired request's connection or
+    process. The endpoint's consecutive health-failure count survives that
+    connection and process replacement.
+    This mandatory expiry teardown, completion- or deadline-expiry-anchored
+    cadence, and the one-request bound make an overlapping health request
+    structurally impossible for a conforming host. A forced miss from overlap
+    therefore cannot occur and is not a health-failure category. For project
+    scope the exact initialized `project_id` is required; for workspace scope
+    `project_id` is forbidden. A health request that exceeds
+    `HEALTH_DEADLINE_MS` counts as one failure. A malformed response, including
+    any response without the exact `"healthy"` status, counts as one failure;
+    an identity-mismatched or revision-mismatched response counts as one
+    failure. These are the exhaustive health-failure categories. A successful
+    health response resets the consecutive-failure count to zero. Three
+    consecutive failures (`HEALTH_FAILURE_THRESHOLD = 3`) move the adapter out
+    of service and return `ADAPTER_UNHEALTHY` to new work. The host MUST create
+    or update an operator-visible unhealthy record for the exact adapter,
+    manifest, profile, endpoint, reason, timestamps, and every unresolved
+    attempt eligible for recovery, using the exact identities required by
+    Clause 12. It MUST stop assigning normal requests until Clause 12's recovery
+    and separate explicit operator release complete. When quarantine is not
+    also active, blocked normal work receives `ADAPTER_UNHEALTHY`; only the
+    single operator-authorized recovery connection may admit the bounded
+    recovery controls. Successful recovery health responses contribute to the
+    required fresh healthy sequence but MUST NOT automatically clear unhealthy
+    or quarantine state. An invalid health request returns `INVALID_PARAMS`
+    before action. A missing,
     additional, or mistyped health result member is host-local
     `INVALID_REQUEST` at P3, receives no response, advances no health state, and
     counts as one failed response. An identity or independent-revision mismatch
