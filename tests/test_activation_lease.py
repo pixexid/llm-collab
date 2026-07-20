@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -126,6 +127,13 @@ class ActivationLeaseTest(unittest.TestCase):
     def claim(self, root: Path, session: str, *extra: str, worktree: Path | None = None) -> tuple[dict, int]:
         return self.run_cli(root, "lease-claim", *self.identity_args(worktree), "--session", session, *extra)
 
+    def lease_records(self, root: Path) -> list[dict]:
+        lease_dir = root / "State" / "session_autobridge" / "activation_leases"
+        return [
+            json.loads(path.read_text())
+            for path in sorted(lease_dir.glob("*.json"))
+        ]
+
     def test_claim_requires_bound_claimant_identity(self):
         root = self.make_workspace()
         self.register_session(root, "SESSION-A")
@@ -136,6 +144,40 @@ class ActivationLeaseTest(unittest.TestCase):
         claimed, code = self.claim(root, "SESSION-A", "--claimant-runtime-id", "runtime-a")
         self.assertEqual(0, code, claimed)
         self.assertEqual("runtime-a", claimed["lease"]["owner_runtime_session_id"])
+
+    def test_pid_only_claim_requires_positive_process_pid_cli_and_library(self):
+        root = self.make_workspace()
+        self.register_session(root, "SESSION-A")
+        for bad_pid in ("0", "-1"):
+            refused, code = self.claim(root, "SESSION-A", "--owner-pid", bad_pid)
+            self.assertEqual(75, code)
+            self.assertEqual("invalid_owner_pid", refused["reason"])
+        self.assertEqual([], self.lease_records(root))
+
+        identity = lease_lib.lease_identity(
+            {
+                "project": "amiga",
+                "chat": "CHAT-TEST0001",
+                "task": "TASK-TEST01",
+                "worktree": str(self.worktree),
+                "branch": "codex/gh-1571-test",
+                "target_agent": "claude",
+            }
+        )
+        record = {
+            "session_id": "SESSION-A",
+            "agent_id": "claude",
+            "project_id": "amiga",
+            "chat_id": "CHAT-TEST0001",
+            "status": "parked",
+        }
+        with patch.object(lease_lib, "owner_session_record", return_value=record):
+            with self.assertRaises(lease_lib.LeaseRefused) as ctx:
+                lease_lib.claim_lease(identity, owner_session_id="SESSION-A", owner_pid=0)
+            self.assertEqual("invalid_owner_pid", ctx.exception.reason)
+            with self.assertRaises(lease_lib.LeaseRefused) as ctx:
+                lease_lib.claim_lease(identity, owner_session_id="SESSION-A", owner_pid=-7)
+            self.assertEqual("invalid_owner_pid", ctx.exception.reason)
 
     def test_session_identity_must_match_activation_identity(self):
         root = self.make_workspace()
@@ -167,6 +209,20 @@ class ActivationLeaseTest(unittest.TestCase):
         self.assertEqual("SESSION-A", refused["owner"]["owner_session_id"])
         after = {path.name: path.read_text() for path in lease_dir.glob("*.json")}
         self.assertEqual(before, after)
+
+    def test_runtime_only_reclaim_is_idempotent_and_refreshes_ttl(self):
+        root = self.make_workspace()
+        self.register_session(root, "SESSION-A", runtime_id="runtime-a")
+        first, code = self.claim(root, "SESSION-A", "--claimant-runtime-id", "runtime-a", "--ttl-seconds", "1")
+        self.assertEqual(0, code, first)
+        again, code = self.claim(root, "SESSION-A", "--claimant-runtime-id", "runtime-a", "--ttl-seconds", "3600")
+        self.assertEqual(0, code, again)
+        self.assertEqual(1, again["lease"]["fence_token"])
+        self.assertIsNone(again["lease"]["owner_pid"])
+        self.assertGreater(
+            again["lease"]["lease_expires_utc"],
+            first["lease"]["lease_expires_utc"],
+        )
 
     def test_same_session_different_runtime_assert_refuses(self):
         root = self.make_workspace()
@@ -248,6 +304,144 @@ class ActivationLeaseTest(unittest.TestCase):
         )
         self.assertEqual(0, code, granted)
 
+    def test_concurrent_alias_claim_serializes_grant_across_identity_keys(self):
+        root = self.make_workspace()
+        self.register_session(root, "SESSION-A", runtime_id="runtime-a")
+        self.register_session(root, "SESSION-B", runtime_id="runtime-b")
+        alias = self.worktree.parent / "lane-alias"
+        alias.symlink_to(self.worktree)
+        start_file = root / "start-claims"
+        output_a = root / "claim-a.json"
+        output_b = root / "claim-b.json"
+        worker_code = "\n".join(
+            [
+                "import json, os, subprocess, sys, time",
+                "script, root, start, output = sys.argv[1:5]",
+                "cmd = [sys.executable, script, 'lease-claim', *sys.argv[5:], '--json']",
+                "while not os.path.exists(start):",
+                "    time.sleep(0.005)",
+                "result = subprocess.run(cmd, cwd=root, text=True, capture_output=True)",
+                "payload = json.loads(result.stdout)",
+                "payload['_returncode'] = result.returncode",
+                "open(output, 'w').write(json.dumps(payload, sort_keys=True))",
+            ]
+        )
+        common_env = self.env()
+        proc_a = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                worker_code,
+                str(SCRIPT_PATH),
+                str(root),
+                str(start_file),
+                str(output_a),
+                *self.identity_args(self.worktree),
+                "--session",
+                "SESSION-A",
+                "--claimant-runtime-id",
+                "runtime-a",
+            ],
+            cwd=root,
+            env=common_env,
+        )
+        proc_b = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                worker_code,
+                str(SCRIPT_PATH),
+                str(root),
+                str(start_file),
+                str(output_b),
+                *self.identity_args(alias),
+                "--session",
+                "SESSION-B",
+                "--claimant-runtime-id",
+                "runtime-b",
+            ],
+            cwd=root,
+            env=common_env,
+        )
+        start_file.write_text("go")
+        self.assertEqual(0, proc_a.wait(timeout=10))
+        self.assertEqual(0, proc_b.wait(timeout=10))
+        results = [json.loads(output_a.read_text()), json.loads(output_b.read_text())]
+        winners = [result for result in results if result.get("_returncode") == 0]
+        losers = [result for result in results if result.get("_returncode") == 75]
+        self.assertEqual(1, len(winners), results)
+        self.assertEqual(1, len(losers), results)
+        self.assertTrue(winners[0]["claimed"])
+        self.assertEqual("worktree_alias_collision", losers[0]["reason"])
+        records = self.lease_records(root)
+        self.assertEqual(1, len(records), records)
+        self.assertEqual(str(self.worktree.resolve()), records[0]["worktree_realpath"])
+
+    def test_alias_collision_refuses_unknown_liveness_owner(self):
+        root = self.make_workspace()
+        self.register_session(root, "SESSION-B", runtime_id="runtime-b")
+        alias = self.worktree.parent / "lane-alias"
+        alias.symlink_to(self.worktree)
+        identity = lease_lib.lease_identity(
+            {
+                "project": "amiga",
+                "chat": "CHAT-TEST0001",
+                "task": "TASK-TEST01",
+                "worktree": str(self.worktree),
+                "branch": "codex/gh-1571-test",
+                "target_agent": "claude",
+            }
+        )
+        lease_dir = root / "State" / "session_autobridge" / "activation_leases"
+        stale = {
+            "identity": identity,
+            "lease_key": lease_lib.lease_key(identity),
+            "owner_session_id": "SESSION-MISSING",
+            "owner_runtime_session_id": None,
+            "owner_pid": None,
+            "status": "active",
+            "fence_token": 1,
+            "claimed_utc": "2026-01-01T00:00:00+00:00",
+            "lease_expires_utc": "2099-01-01T00:00:00+00:00",
+            "previous_owner_session_id": None,
+            "worktree_realpath": str(self.worktree.resolve()),
+        }
+        write_json(lease_dir / f"{stale['lease_key']}.json", stale)
+        refused, code = self.claim(root, "SESSION-B", "--claimant-runtime-id", "runtime-b", worktree=alias)
+        self.assertEqual(75, code)
+        self.assertEqual("worktree_alias_collision", refused["reason"])
+
+    def test_released_and_expired_alias_records_do_not_overblock_new_identity(self):
+        root = self.make_workspace()
+        self.register_session(root, "SESSION-A", runtime_id="runtime-a")
+        self.register_session(root, "SESSION-B", runtime_id="runtime-b")
+        alias = self.worktree.parent / "lane-alias"
+        alias.symlink_to(self.worktree)
+        claimed, code = self.claim(root, "SESSION-A", "--claimant-runtime-id", "runtime-a")
+        self.assertEqual(0, code, claimed)
+        released, code = self.run_cli(
+            root,
+            "lease-release",
+            *self.identity_args(),
+            "--session",
+            "SESSION-A",
+            "--fence-token",
+            str(claimed["lease"]["fence_token"]),
+        )
+        self.assertEqual(0, code, released)
+        granted, code = self.claim(root, "SESSION-B", "--claimant-runtime-id", "runtime-b", worktree=alias)
+        self.assertEqual(0, code, granted)
+
+        root = self.make_workspace()
+        self.register_session(root, "SESSION-A", runtime_id="runtime-a")
+        self.register_session(root, "SESSION-B", runtime_id="runtime-b")
+        alias = self.worktree.parent / "expired-alias"
+        alias.symlink_to(self.worktree)
+        claimed, code = self.claim(root, "SESSION-A", "--claimant-runtime-id", "runtime-a", "--ttl-seconds", "0")
+        self.assertEqual(0, code, claimed)
+        granted, code = self.claim(root, "SESSION-B", "--claimant-runtime-id", "runtime-b", worktree=alias)
+        self.assertEqual(0, code, granted)
+
     def test_expired_owner_requires_takeover_and_assert_refuses_expired(self):
         root = self.make_workspace()
         self.register_session(root, "SESSION-A", runtime_id="runtime-a")
@@ -273,6 +467,61 @@ class ActivationLeaseTest(unittest.TestCase):
         taken, code = self.claim(root, "SESSION-B", "--claimant-runtime-id", "runtime-b", "--takeover")
         self.assertEqual(0, code, taken)
         self.assertEqual(2, taken["lease"]["fence_token"])
+
+    def test_live_positive_pid_owner_cannot_be_taken_over(self):
+        root = self.make_workspace()
+        self.register_session(root, "SESSION-A", runtime_id="runtime-a")
+        self.register_session(root, "SESSION-B", runtime_id="runtime-b")
+        claimed, code = self.claim(
+            root,
+            "SESSION-A",
+            "--claimant-runtime-id",
+            "runtime-a",
+            "--owner-pid",
+            str(os.getpid()),
+        )
+        self.assertEqual(0, code, claimed)
+        refused, code = self.claim(root, "SESSION-B", "--claimant-runtime-id", "runtime-b", "--takeover")
+        self.assertEqual(75, code)
+        self.assertEqual("lease_held_by_active_owner", refused["reason"])
+
+    def test_unknown_liveness_fails_closed_for_same_identity(self):
+        root = self.make_workspace()
+        self.register_session(root, "SESSION-B", runtime_id="runtime-b")
+        identity = lease_lib.lease_identity(
+            {
+                "project": "amiga",
+                "chat": "CHAT-TEST0001",
+                "task": "TASK-TEST01",
+                "worktree": str(self.worktree),
+                "branch": "codex/gh-1571-test",
+                "target_agent": "claude",
+            }
+        )
+        stale = {
+            "identity": identity,
+            "lease_key": lease_lib.lease_key(identity),
+            "owner_session_id": "SESSION-MISSING",
+            "owner_runtime_session_id": "runtime-missing",
+            "owner_pid": None,
+            "status": "active",
+            "fence_token": 1,
+            "claimed_utc": "2026-01-01T00:00:00+00:00",
+            "lease_expires_utc": "2099-01-01T00:00:00+00:00",
+            "previous_owner_session_id": None,
+            "worktree_realpath": str(self.worktree.resolve()),
+        }
+        write_json(
+            root
+            / "State"
+            / "session_autobridge"
+            / "activation_leases"
+            / f"{stale['lease_key']}.json",
+            stale,
+        )
+        refused, code = self.claim(root, "SESSION-B", "--claimant-runtime-id", "runtime-b", "--takeover")
+        self.assertEqual(75, code)
+        self.assertEqual("owner_liveness_unknown", refused["reason"])
 
     def test_release_requires_current_owner_and_fence(self):
         root = self.make_workspace()
