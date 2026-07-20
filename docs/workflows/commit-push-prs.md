@@ -107,9 +107,28 @@ Apply a convergence circuit breaker per finding family:
   `risk-accepted-followup`.
 - Only `contract-clarified` permits continued work in the same lane, and it
   requires updating the task/spec with the corrected invariant before the third
-  head.
-- Round counting remains reviewer/orchestrator judgment. Do not mechanically
-  auto-count finding families.
+  head. `contract-clarified` may be used at most once per family per PR; a
+  second same-family disposition must be one of the terminal values.
+- Same-file anchoring counts mechanically: two finding rounds whose findings
+  touch the same file are the same family regardless of which named invariants
+  they cite. Orchestrator judgment applies only to grouping cross-file
+  invariant findings.
+
+Hard cycle cap, independent of family counting:
+
+- After the initial cold review, at most 2 review-fix cycles (review +
+  amendment) are permitted per PR; 3 when the contract scope includes payments,
+  auth, permissions, schema/migrations, or irreversible writes.
+- Docs-only PRs whose no-consumer scan proves zero runtime consumers always
+  cap at 2 cycles: residual prose ambiguity in an unconsumed document is a
+  follow-up issue, never another cycle.
+- Reaching the cap forces exactly one terminal action before any further push:
+  merge at the current head with `risk-accepted-followup` (open findings move
+  to a new issue), `descope`, `split`, or a durable operator escalation packet.
+  Starting another review cycle past the cap is a process violation.
+- Any task that exceeds 3 total review-fix cycles or 2 hours of wall-clock time
+  in the review-fix state must send an operator-visible escalation message
+  before starting another cycle.
 
 When a project supports structured review notes, the disposition may be
 recorded as the optional line `Convergence-disposition: <value>` and must use

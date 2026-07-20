@@ -94,7 +94,7 @@ belongs to this program.
 | Artifact/task age could support retired-form compatibility. | Rejected. Only an exact entry in a sealed, cutoff-policy-bound, content-addressed legacy manifest with authoritative import/observation provenance qualifies. |
 | Session identity started from the earlier session-autobridge vocabulary. | Rebased to include the current-main exact activation tuple and malformed-never-downgrades behavior as v2 migration input. |
 | Later work could begin from the original linear phase diagram alone. | Rebased to the actual GH-88–GH-104 dependency graph and explicit external writer gates. |
-| One planning or implementation context could continue across the program. | Every implementation worker and every exact-head reviewer receives a separate fresh task/thread. |
+| One planning or implementation context could continue across the program. | Each write lane receives one fresh implementation worker, and each initial PR-ready head receives one fresh context-isolated reviewer. In-contract repair rounds reuse that reviewer under the bounded amendment rules in `docs/workflows/commit-push-prs.md`; a new cold reviewer is required only for the boundary-crossing amendments defined there. |
 
 ## Program outcome
 
@@ -715,14 +715,23 @@ Every implementation slice follows this sequence:
 5. limit writes to the exact path contract;
 6. run focused verification, the full suite, and `git diff --check`;
 7. create exactly one local checkpoint commit;
-8. activate a separate fresh reviewer against the exact checkpoint SHA;
-9. repair findings in a separately controlled writer turn and repeat exact-head
-   review as needed;
+8. activate one fresh context-isolated reviewer against the exact checkpoint
+   SHA;
+9. repair findings in a separately controlled writer turn and re-review at the
+   new exact head, reusing the same reviewer for in-contract amendments; at
+   most 2 review-fix cycles follow the initial review (3 when the contract
+   scope includes payments, auth, permissions, schema/migrations, or
+   irreversible writes; docs-only lanes with a proven zero-consumer scan always
+   cap at 2), after which exactly one terminal disposition is mandatory:
+   merge at the current head with `risk-accepted-followup` (open findings move
+   to a new issue), `descope`, `split`, or a durable operator escalation;
 10. publish a focused ready-for-review PR with scope, non-goals, compatibility,
     security, verification, migration, and rollback evidence;
 11. merge only the reviewed exact head and reconcile task/issue state.
 
-A fresh worker/reviewer task is never reused for a later phase. One worker owns
+A worker/reviewer task is never reused for a later phase or a different write
+lane; within its own lane's review-fix cycles, reviewer reuse follows the
+bounded amendment rules above. One worker owns
 one write lane. Review and planning may run in parallel when read-only; separate
 implementation writers run in parallel only with recorded path/state/resource
 non-overlap and merge order.
