@@ -61,6 +61,27 @@ stage may replace or supplement that classification. No `RequestId` is
 recoverable from a duplicate-bearing frame, even if one visible top-level `id`
 member appears exactly once.
 
+P1 always precedes direction classification. A size, physical-framing, invalid-
+JSON, or duplicate-member failure keeps its sole P1 classification and cannot
+be reclassified from an apparent request or response shape. Only after P1
+succeeds MUST the receiver apply this exhaustive P2 direction matrix:
+
+| Sender and receiver | JSON-RPC form | Sole P2 direction outcome |
+|---|---|---|
+| Host to adapter | Request | Direction-valid. The adapter validates the closed request envelope, `RequestId`, and method, then continues through P3-P9. |
+| Adapter to host | Response | Direction-valid. The host validates the closed response envelope and exact request correlation, then continues through P3-P9. |
+| Adapter to host | Request | Prohibited adapter request: host-local `INVALID_REQUEST`, no JSON-RPC response or error, no action, no canonical-state advance, connection close, and adapter quarantine under Clause 12. |
+| Host to adapter | Response | Prohibited host response: adapter-local `INVALID_REQUEST`, no JSON-RPC response or error, no action, no operation-state advance, a local direction-fault record, and connection close. The host MUST treat that close as its own outbound protocol fault and MUST NOT quarantine or blame the adapter solely for the host-originated wrong-direction frame. |
+
+For matrix selection only, request form means a top-level `method` member with
+neither top-level `result` nor `error`; response form means at least one top-
+level `result` or `error` member with no top-level `method`. The two prohibited
+rows are selected before validating their `id`, correlation, method, `result`,
+`error`, or method-specific content. A parsed object containing both
+discriminator families or neither remains an invalid closed envelope on the
+direction-valid expected path for its sender; implementations MUST NOT invent a
+fifth direction case or reinterpret one prohibited form as the other.
+
 There is exactly one exception to non-null response correlation. When the
 adapter receives a direction-valid host-to-adapter inbound would-be request but
 cannot recover a valid `RequestId` because the JSON text does not parse, any
@@ -76,7 +97,11 @@ request omits `id`, it is a prohibited JSON-RPC notification: the adapter MUST
 execute no action, send no response, and apply Clause 1's close/quarantine
 behavior. If a duplicate-free malformed direction-valid host-to-adapter request
 still contains a recoverable valid `RequestId`, the adapter MUST use the normal
-error response with that exact id.
+error response with that exact id. Neither the null-correlation exception nor
+this malformed-request response rule applies to a duplicate-free
+host-to-adapter JSON-RPC response. That frame takes only the prohibited-host-
+response row above, even when its `id` is null, missing, invalid, uncorrelated,
+or otherwise malformed.
 
 Every object described in this section is closed. Missing, additional, or
 mistyped request- or response-envelope members are `INVALID_REQUEST`. Missing,
@@ -96,11 +121,17 @@ adapter-to-host JSON-RPC request is prohibited regardless of whether it carries
 a valid `RequestId`: it is a host-local P2 `INVALID_REQUEST`, and the host MUST
 send no response, perform no action, advance no canonical state, close the
 connection, and quarantine the adapter. The host MUST NOT send a JSON-RPC
-response or error in response to any adapter output. A direction-valid
-host-to-adapter request with an unknown method returns `METHOD_NOT_FOUND`
-without action. No implementation may repair an invalid object by dropping
-members, applying defaults, coercing types, inferring identity, or selecting a
-fallback.
+response or error in response to any adapter output. After P1 succeeds, any
+host-to-adapter JSON-RPC response is prohibited regardless of its correlation
+or content: it is adapter-local P2 `INVALID_REQUEST`; the adapter MUST send no
+response or error, perform no action, advance no operation state, record the
+local direction fault, and close the connection. The host MUST record that
+close as its own outbound protocol fault and MUST NOT quarantine or attribute
+the direction violation to the adapter solely because the adapter closed as
+required. A direction-valid host-to-adapter request with an unknown method
+returns `METHOD_NOT_FOUND` without action. No implementation may repair an
+invalid object by dropping members, applying defaults, coercing types,
+inferring identity, or selecting a fallback.
 
 Every inbound host-to-adapter frame and every adapter output MUST pass the
 following exhaustive validation pipeline in order. Validation stops at the
@@ -116,15 +147,20 @@ combine with it.
   `PARSE_ERROR` for invalid JSON syntax or any repeated member name after a
   complete frame is available. A duplicate-bearing frame yields no recoverable
   request id and cannot reach P2.
-- **P2 — envelope, id, method, and direction.** After P1 succeeds, first reject
-  any adapter-to-host JSON-RPC request as host-local `INVALID_REQUEST`
-  regardless of id presence or validity; it receives no response and triggers
-  the close/quarantine behavior above. For direction-valid host-to-adapter
-  requests and adapter-to-host responses, validate the closed envelope, request
-  id/correlation, and method. Use the notification no-response rule only for a
-  direction-valid host-to-adapter request, `INVALID_REQUEST` for another invalid
-  envelope/id, and `METHOD_NOT_FOUND` for an otherwise valid direction-valid
-  host-to-adapter request naming a method outside the closed six.
+- **P2 — envelope, id, method, and direction.** After P1 succeeds, apply the
+  exhaustive four-row direction matrix above before id, correlation, method,
+  result, error, or method-specific validation. A host-to-adapter request and
+  adapter-to-host response are the only direction-valid forms. An
+  adapter-to-host request is host-local `INVALID_REQUEST` with no response and
+  the close/quarantine behavior above. A host-to-adapter response is
+  adapter-local `INVALID_REQUEST` with no response, action, or operation-state
+  advance; the adapter records the direction fault and closes, and the host
+  records its own outbound fault without adapter quarantine or blame solely for
+  that frame. Only the direction-valid host request may use the notification or
+  null-correlation rules. For the two direction-valid forms, validate the
+  closed envelope, request id/correlation, and method; use `INVALID_REQUEST` for
+  another invalid envelope/id and `METHOD_NOT_FOUND` for an otherwise valid
+  host request naming a method outside the closed six.
 - **P3 — params, result, and embedded schema shape.** Validate the
   method-specific closed params or result and every embedded S2 schema object's
   closed shape before evaluating identities. Request params or embedded-schema
@@ -286,6 +322,18 @@ The method-specific shapes are:
    close the connection, and quarantine the adapter. It MUST NOT reinterpret an
    absent-id wrong-direction request as a direction-valid notification or use a
    valid id to originate a response.
+
+   After P1 succeeds, a host-to-adapter object in JSON-RPC response form is
+   always prohibited direction, whether its `id` is valid, invalid, null,
+   absent, or uncorrelated and whether `result` or `error` would otherwise be
+   valid. The adapter MUST classify it only as adapter-local P2
+   `INVALID_REQUEST`, send no JSON-RPC response or error, perform no action,
+   advance no operation state, record the local direction fault, and close the
+   connection. It MUST NOT apply the notification, null-correlation, or
+   malformed-request response rules. The host MUST treat the resulting close as
+   its own outbound protocol fault and MUST NOT quarantine, require release for,
+   or blame the adapter solely for correctly closing on that host-originated
+   wrong-direction frame.
 
 2. **Size bounds (normative).** `MAX_MESSAGE_BYTES` is 1,048,576 bytes,
    including the JSON bytes but excluding the terminating `\n`.
@@ -603,6 +651,12 @@ The method-specific shapes are:
     bounded-diagnostic behavior are reviewed, unresolved deliveries are
     reconciled, and a fresh handshake and connection-scoped health sequence
     succeed; otherwise requests receive `ADAPTER_QUARANTINED`.
+    A connection close caused only by a duplicate-free prohibited
+    host-to-adapter response is not adapter-originated quarantine evidence. The
+    host MUST record its own outbound protocol fault and MUST NOT quarantine,
+    require operator release for, or assign the direction fault to the adapter
+    solely because the adapter made the required close; independent
+    adapter-originated evidence may still satisfy this clause.
 
 13. **Structured errors (normative).** Every direction-valid host-to-adapter
     request failure for which JSON-RPC permits a response MUST use the exact
@@ -612,7 +666,11 @@ The method-specific shapes are:
     host MUST NOT send a response to that output. In particular, a
     duplicate-bearing adapter output is host-local P1 `PARSE_ERROR`, while a
     duplicate-free prohibited adapter-to-host request is host-local P2
-    `INVALID_REQUEST` regardless of id validity. `error.data.retryable` MUST be
+    `INVALID_REQUEST` regardless of id validity. A duplicate-free prohibited
+    host-to-adapter response is instead adapter-local P2 `INVALID_REQUEST`
+    regardless of id or correlation validity; the adapter records that code and
+    closes but sends no JSON-RPC response or error, and the host records its own
+    outbound fault rather than an adapter fault. `error.data.retryable` MUST be
     the exact JSON boolean in the selected row. The `message`, `data.name`, and
     `data.retryable` values MUST all match that row exactly. The first failing
     pipeline step is the sole classifier; free-form strings, stderr, exit
