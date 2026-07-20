@@ -273,16 +273,16 @@ enum RoutineRingDecision: Equatable {
 // leaks the field placeholder into AXValue on a visually empty composer (live
 // AX evidence 2026-07-20: value "\nDo anything" refused rings for 30+ minutes
 // while the composer held only a stray newline). The accepted strings are
-// exactly the placeholder identities editableIsNativeComposer already trusts
-// for the same profile; any other content still refuses.
+// exactly, including case, the placeholder identities editableIsNativeComposer
+// already trusts for the same profile; any other content still refuses.
 func composerValueIsEffectivelyEmpty(_ profile: ComposerProfile, _ v: String) -> Bool {
-    let trimmed = v.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    let trimmed = v.trimmingCharacters(in: .whitespacesAndNewlines)
     if trimmed.isEmpty { return true }
     switch profile {
     case .codex:
-        return trimmed == "do anything" || trimmed == "ask for follow-up changes"
+        return trimmed == "Do anything" || trimmed == "Ask for follow-up changes"
     case .claude:
-        return trimmed == "type / for commands"
+        return trimmed == "Type / for commands"
     case .zcode, .unknown:
         return false
     }

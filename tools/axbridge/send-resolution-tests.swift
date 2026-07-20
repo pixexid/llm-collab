@@ -315,6 +315,10 @@ check(routineRingDecision(profile: .codex, attended: false, axValue: "  \n ") ==
       "placeholder-leak: whitespace-only AXValue proceeds")
 check(routineRingDecision(profile: .claude, attended: false, axValue: "Type / for commands") == .proceed,
       "placeholder-leak: claude placeholder AXValue proceeds")
+check(routineRingDecision(profile: .codex, attended: false, axValue: "Do Anything") == .refuseNonEmptyDraft,
+      "placeholder-leak: mixed-case codex placeholder variant still refuses")
+check(routineRingDecision(profile: .codex, attended: false, axValue: "DO ANYTHING") == .refuseNonEmptyDraft,
+      "placeholder-leak: uppercase codex placeholder variant still refuses")
 check(routineRingDecision(profile: .codex, attended: false, axValue: "Do anything now") == .refuseNonEmptyDraft,
       "placeholder-leak: placeholder plus real content still refuses")
 check(routineRingDecision(profile: .codex, attended: false, axValue: "\nreal draft") == .refuseNonEmptyDraft,
