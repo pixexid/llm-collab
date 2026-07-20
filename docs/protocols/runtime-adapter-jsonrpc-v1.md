@@ -50,51 +50,81 @@ token scalar, and `evidence_refs`, an array of at most 32 redacted
 `StateEvidenceV1.evidence_id` strings. No other error or error-data member is
 legal.
 
+For every inbound complete frame, the receiver MUST inspect the raw member
+sequence of every JSON object at every depth before an ordinary object parser
+may collapse those members into a map. Member names are compared as decoded
+JSON string values, so alternate escape spellings of the same name are the same
+member name. If any top-level, `params`, `result`, schema, `error`, `data`, or
+other nested object repeats a member name, the entire frame is duplicate-bearing
+and MUST fail only at P1 as `PARSE_ERROR`. It MUST perform no action, and no later
+stage may replace or supplement that classification. No `RequestId` is
+recoverable from a duplicate-bearing frame, even if one visible top-level `id`
+member appears exactly once.
+
 There is exactly one exception to non-null response correlation. When the
-adapter receives an inbound would-be request but cannot recover a valid
-`RequestId` because the JSON text does not parse or the parsed request
-envelope/id is invalid, it MUST emit exactly
+adapter receives a direction-valid host-to-adapter inbound would-be request but
+cannot recover a valid `RequestId` because the JSON text does not parse, any
+object repeats a member name, or the parsed request envelope/id is invalid, it
+MUST emit exactly
 `{"jsonrpc":"2.0","id":null,"error":...}`. The matching closed `error.data`
 object MUST set `request_id` to JSON `null`; `PARSE_ERROR` is required for
-invalid JSON syntax and `INVALID_REQUEST` for parsed JSON that is not a valid
-request envelope/id. No other response or `error.data.request_id` may be null.
-This exception does not make a null request id legal. If an otherwise valid
+invalid JSON syntax or a repeated member name, and `INVALID_REQUEST` is required
+for duplicate-free parsed JSON that is not a valid request envelope/id. No other
+response or `error.data.request_id` may be null. This exception does not make a
+null request id legal. If an otherwise valid direction-valid host-to-adapter
 request omits `id`, it is a prohibited JSON-RPC notification: the adapter MUST
 execute no action, send no response, and apply Clause 1's close/quarantine
-behavior. If a malformed request still contains a recoverable valid
-`RequestId`, the adapter MUST use the normal error response with that exact id.
+behavior. If a duplicate-free malformed direction-valid host-to-adapter request
+still contains a recoverable valid `RequestId`, the adapter MUST use the normal
+error response with that exact id.
 
 Every object described in this section is closed. Missing, additional, or
 mistyped request- or response-envelope members are `INVALID_REQUEST`. Missing,
 additional, or mistyped `params` members or request-embedded schema objects are
 `INVALID_PARAMS`. The adapter MUST validate the complete request before
 performing an action, and the host MUST validate the complete response before
-advancing canonical state. A malformed request performs no action and receives
-the single response allowed by the rules above. A malformed adapter response
-or result is a host-local protocol failure: the host MUST classify and record
-the single failure code selected by the ordered pipeline below, advance no
-canonical state, preserve possibly accepted work as unresolved, and quarantine
-where Clauses 10 or 12 require it. The host MUST NOT send a JSON-RPC response or
-error in response to a response. Unknown request methods return
-`METHOD_NOT_FOUND` without action. No implementation may repair an invalid
-object by dropping members, applying defaults, coercing types, inferring
-identity, or selecting a fallback.
+advancing canonical state. A malformed direction-valid host-to-adapter request
+performs no action and receives the single response allowed by the rules above.
+A malformed adapter response or result is a host-local protocol failure: the
+host MUST classify and record the single failure code selected by the ordered
+pipeline below, advance no canonical state, preserve possibly accepted work as
+unresolved, and quarantine where Clauses 10 or 12 require it. A
+duplicate-bearing adapter output is specifically a host-local P1 `PARSE_ERROR`;
+the host MUST send no response, perform no action, advance no canonical state,
+and quarantine the adapter under Clause 12. After P1 succeeds, any
+adapter-to-host JSON-RPC request is prohibited regardless of whether it carries
+a valid `RequestId`: it is a host-local P2 `INVALID_REQUEST`, and the host MUST
+send no response, perform no action, advance no canonical state, close the
+connection, and quarantine the adapter. The host MUST NOT send a JSON-RPC
+response or error in response to any adapter output. A direction-valid
+host-to-adapter request with an unknown method returns `METHOD_NOT_FOUND`
+without action. No implementation may repair an invalid object by dropping
+members, applying defaults, coercing types, inferring identity, or selecting a
+fallback.
 
-Every inbound request and adapter response MUST pass the following exhaustive
-validation pipeline in order. Validation stops at the first failing step; that
-step alone selects one response code for a request or one host-local
-failure/quarantine code for a response. Later failures MUST NOT replace,
-supplement, or combine with it.
+Every inbound host-to-adapter frame and every adapter output MUST pass the
+following exhaustive validation pipeline in order. Validation stops at the
+first failing step; that step alone selects one response code for a
+direction-valid host-to-adapter request or one host-local failure/quarantine
+code for any adapter output. Later failures MUST NOT replace, supplement, or
+combine with it.
 
 - **P1 — frame and parse.** Validate message size, physical UTF-8 line framing,
-  and then JSON syntax, in that order. Use `MESSAGE_TOO_LARGE` for the Clause 2
+  raw duplicate member names in every object at every depth, and then ordinary
+  JSON object parsing, in that order. Use `MESSAGE_TOO_LARGE` for the Clause 2
   byte bound, `INVALID_FRAMING` for a physical framing failure, and
-  `PARSE_ERROR` for invalid JSON syntax after a complete frame is available.
-- **P2 — envelope, id, method, and direction.** Validate the closed
-  request/response envelope, request id, method, and allowed direction. Use the
-  notification no-response rule above, `INVALID_REQUEST` for an invalid
-  envelope/id/direction, and `METHOD_NOT_FOUND` for an otherwise valid request
-  naming a method outside the closed six.
+  `PARSE_ERROR` for invalid JSON syntax or any repeated member name after a
+  complete frame is available. A duplicate-bearing frame yields no recoverable
+  request id and cannot reach P2.
+- **P2 — envelope, id, method, and direction.** After P1 succeeds, first reject
+  any adapter-to-host JSON-RPC request as host-local `INVALID_REQUEST`
+  regardless of id presence or validity; it receives no response and triggers
+  the close/quarantine behavior above. For direction-valid host-to-adapter
+  requests and adapter-to-host responses, validate the closed envelope, request
+  id/correlation, and method. Use the notification no-response rule only for a
+  direction-valid host-to-adapter request, `INVALID_REQUEST` for another invalid
+  envelope/id, and `METHOD_NOT_FOUND` for an otherwise valid direction-valid
+  host-to-adapter request naming a method outside the closed six.
 - **P3 — params, result, and embedded schema shape.** Validate the
   method-specific closed params or result and every embedded S2 schema object's
   closed shape before evaluating identities. Request params or embedded-schema
@@ -219,11 +249,12 @@ The method-specific shapes are:
    for reconciliation, and quarantine the adapter pending explicit release.
    `RequestId` is a non-null JSON string or a safe integer in
    [-9,007,199,254,740,991, 9,007,199,254,740,991], unique among in-flight
-   requests on that connection. Every `initialize` and `runtime.*` invocation
-   MUST carry a `RequestId`. An omitted `id` is a prohibited notification; a
-   notification or invalid id MUST execute no action. A notification receives
-   no response and MUST close the connection and quarantine the adapter rather
-   than claim an error was delivered. An invalid id follows the null-correlation
+   requests on that connection. Every direction-valid host-to-adapter
+   `initialize` and `runtime.*` invocation MUST carry a `RequestId`. An omitted
+   `id` in such a request is a prohibited notification; a notification or
+   invalid id MUST execute no action. A direction-valid notification receives no
+   response and MUST close the connection and quarantine the adapter rather than
+   claim an error was delivered. An invalid id follows the null-correlation
    `INVALID_REQUEST` exception above unless a different valid `RequestId` is
    recoverable, which V1 never infers.
 
@@ -231,14 +262,30 @@ The method-specific shapes are:
    before the required terminating `\n` is `INVALID_FRAMING`; when that failure
    prevents recovery of a complete request and valid `RequestId`, the receiver
    closes without a response rather than widening the null-correlation
-   exception. Once a complete UTF-8 line is available, all invalid JSON syntax,
-   including an empty line, is `PARSE_ERROR`; valid non-object JSON is
-   `INVALID_REQUEST`. An unescaped raw newline in a JSON string terminates that
-   physical frame, so the incomplete JSON line is `PARSE_ERROR` and the
-   following line is validated independently. The receiver MUST NOT reinterpret
-   stderr, concatenate adjacent lines, or answer malformed adapter output;
-   adapter-output failures are recorded locally under the same code and
-   direction rules above.
+   exception. Once a complete UTF-8 line is available, the receiver MUST inspect
+   every raw object-member sequence before ordinary object parsing. Any repeated
+   decoded member name at any depth, including inside `params`, `result`, a
+   schema object, `error`, or `data`, makes the complete frame only
+   `PARSE_ERROR`; no visible `id` is recoverable, no action occurs, and later
+   stages cannot replace the classification. All invalid JSON syntax, including
+   an empty line, is also `PARSE_ERROR`; valid duplicate-free non-object JSON is
+   `INVALID_REQUEST`. For direction-valid host-to-adapter input, either P1
+   `PARSE_ERROR` case uses the null-id response above. A duplicate-bearing
+   adapter output is instead a host-local `PARSE_ERROR`: the host sends no
+   response, advances no canonical state, and quarantines the adapter. An
+   unescaped raw newline in a JSON string terminates that physical frame, so the
+   incomplete JSON line is `PARSE_ERROR` and the following line is validated
+   independently. The receiver MUST NOT reinterpret stderr, concatenate
+   adjacent lines, or answer malformed adapter output; adapter-output failures
+   are recorded locally under the same code and direction rules above.
+
+   After P1 succeeds, an adapter-to-host object in JSON-RPC request form is
+   always prohibited direction, whether its `id` is valid, invalid, null, or
+   absent. The host MUST classify it only as host-local P2 `INVALID_REQUEST`,
+   send no JSON-RPC response, perform no action, advance no canonical state,
+   close the connection, and quarantine the adapter. It MUST NOT reinterpret an
+   absent-id wrong-direction request as a direction-valid notification or use a
+   valid id to originate a response.
 
 2. **Size bounds (normative).** `MAX_MESSAGE_BYTES` is 1,048,576 bytes,
    including the JSON bytes but excluding the terminating `\n`.
@@ -542,7 +589,8 @@ The method-specific shapes are:
 
 12. **Quarantine (normative).** The host MUST quarantine an adapter for
     unsupported version drift, trusted-manifest mismatch, capability or exact-
-    session contract violation, a prohibited notification, stderr overflow,
+    session contract violation, a prohibited notification, a duplicate-bearing
+    adapter output, a prohibited adapter-to-host request, stderr overflow,
     redaction failure, repeated closed-envelope, result-shape, or other invalid
     protocol output, unresolved possible acceptance, or the health failure
     threshold. Quarantine MUST create an operator-visible record containing
@@ -556,17 +604,20 @@ The method-specific shapes are:
     reconciled, and a fresh handshake and connection-scoped health sequence
     succeed; otherwise requests receive `ADAPTER_QUARANTINED`.
 
-13. **Structured errors (normative).** Every request failure for which JSON-RPC
-    permits a response MUST use the exact closed error envelope and error-data
-    shape above and one numeric code from the following closed enumeration.
-    Every adapter response/result failure MUST be recorded locally under the
-    same enumeration and ordered pipeline, but the host MUST NOT send a response
-    to that response. `error.data.retryable` MUST be the exact JSON boolean in
-    the selected row. The `message`, `data.name`, and `data.retryable` values
-    MUST all match that row exactly. The first failing pipeline step is the sole
-    classifier; free-form strings, stderr, exit status, later validation
-    failures, or host-specific exceptions are not substitutes for or additions
-    to the selected code.
+13. **Structured errors (normative).** Every direction-valid host-to-adapter
+    request failure for which JSON-RPC permits a response MUST use the exact
+    closed error envelope and error-data shape above and one numeric code from
+    the following closed enumeration. Every adapter output failure MUST be
+    recorded locally under the same enumeration and ordered pipeline, but the
+    host MUST NOT send a response to that output. In particular, a
+    duplicate-bearing adapter output is host-local P1 `PARSE_ERROR`, while a
+    duplicate-free prohibited adapter-to-host request is host-local P2
+    `INVALID_REQUEST` regardless of id validity. `error.data.retryable` MUST be
+    the exact JSON boolean in the selected row. The `message`, `data.name`, and
+    `data.retryable` values MUST all match that row exactly. The first failing
+    pipeline step is the sole classifier; free-form strings, stderr, exit
+    status, later validation failures, or host-specific exceptions are not
+    substitutes for or additions to the selected code.
 
     | Code | Name | Retryable |
     |---:|---|---|
