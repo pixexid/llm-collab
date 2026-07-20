@@ -14,9 +14,67 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "bin"))
 
 import project_design_queue
+import task_contract
 
 
 class ProjectDesignQueueTest(unittest.TestCase):
+    def test_direct_app_policy_rejects_active_legacy_design_lane_but_keeps_done_history(self) -> None:
+        project = {"id": "amiga", "ui_ux": {"direct_app_only": True}}
+
+        def validate(status: str, queue_state: str):
+            payload = {
+                "artifact_type": "ordered_design_queue",
+                "project_id": "amiga",
+                "lanes": [
+                    {
+                        "order": 1,
+                        "issue": 75,
+                        "task_id": "TASK-DIRECT",
+                        "owner": "claude",
+                        "task_status": status,
+                        "queue_state": queue_state,
+                        "lane_type": "design-spec",
+                        "depends_on": [],
+                    }
+                ],
+            }
+            task_body = "\n".join(
+                [
+                    "---",
+                    "task_id: TASK-DIRECT",
+                    "project_id: amiga",
+                    "owner: claude",
+                    f"status: {status}",
+                    "depends_on: []",
+                    "ui_ux_lane: true",
+                    "lane_type: design-spec",
+                    "---",
+                    "",
+                ]
+            )
+
+            class FakeTaskPath:
+                def read_text(self) -> str:
+                    return task_body
+
+            with patch.object(project_design_queue, "get_project", return_value=project):
+                with patch.object(project_design_queue, "find_task_by_id", return_value=FakeTaskPath()):
+                    with patch.object(task_contract, "get_project", return_value=project):
+                        return project_design_queue.validate_queue(
+                            "amiga",
+                            payload,
+                            check_github=False,
+                            check_issue_mirror=False,
+                        )
+
+        active_errors, _ = validate("open", "ready")
+        done_errors, _ = validate("done", "done")
+
+        self.assertTrue(
+            any("lane 1 task TASK-DIRECT" in error and "`lane_type`" in error for error in active_errors)
+        )
+        self.assertEqual(done_errors, [])
+
     def test_normalize_lanes_keeps_active_lane_authoritative(self) -> None:
         payload = {
             "lanes": [

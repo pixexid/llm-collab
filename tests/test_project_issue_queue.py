@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import sys
 import tempfile
 import unittest
@@ -12,6 +13,24 @@ sys.path.insert(0, str(REPO_ROOT / "bin"))
 
 import _backlog
 import project_issue_queue
+import task_contract
+
+
+class TaskMirror:
+    def __init__(self, *, project_id: str | None, status: str) -> None:
+        rendered_project_id = "null" if project_id is None else project_id
+        self._content = (
+            "---\n"
+            "task_id: TASK-E8C28D\n"
+            "title: Queue mirror\n"
+            f"project_id: {rendered_project_id}\n"
+            f"status: {status}\n"
+            "owner: claude\n"
+            "---\n"
+        )
+
+    def read_text(self) -> str:
+        return self._content
 
 
 class ProjectIssueQueueBacklogGateTest(unittest.TestCase):
@@ -85,7 +104,13 @@ class ProjectIssueQueueNormalizeTest(unittest.TestCase):
             ],
         }
 
-        project_issue_queue.normalize_lanes(payload)
+        with patch.object(
+            project_issue_queue,
+            "find_task_by_id",
+            return_value=TaskMirror(project_id="amiga", status="open"),
+        ):
+            with patch.object(task_contract, "get_project", return_value={"id": "amiga"}):
+                project_issue_queue.normalize_lanes(payload)
 
         self.assertEqual(payload["lanes"][0]["queue_state"], "ready")
         self.assertEqual(payload["lanes"][0]["blocked_by"], [])
@@ -111,7 +136,13 @@ class ProjectIssueQueueNormalizeTest(unittest.TestCase):
             ],
         }
 
-        project_issue_queue.normalize_lanes(payload)
+        with patch.object(
+            project_issue_queue,
+            "find_task_by_id",
+            return_value=TaskMirror(project_id="amiga", status="open"),
+        ):
+            with patch.object(task_contract, "get_project", return_value={"id": "amiga"}):
+                project_issue_queue.normalize_lanes(payload)
 
         self.assertEqual(payload["lanes"][0]["queue_state"], "ready")
         self.assertEqual(payload["lanes"][0]["blocked_by"], [])
@@ -136,12 +167,296 @@ class ProjectIssueQueueNormalizeTest(unittest.TestCase):
             ],
         }
 
-        project_issue_queue.normalize_lanes(payload)
+        with patch.object(
+            project_issue_queue,
+            "find_task_by_id",
+            return_value=TaskMirror(project_id="amiga", status="blocked"),
+        ):
+            with patch.object(task_contract, "get_project", return_value={"id": "amiga"}):
+                project_issue_queue.normalize_lanes(payload)
 
         self.assertEqual(payload["lanes"][0]["queue_state"], "blocked")
         self.assertEqual(
             payload["lanes"][0]["blocked_by"],
             ["GH-760/TASK-38DCF3 WAF log-only Phase-1 evidence"],
+        )
+
+    def test_normalize_requires_exact_queue_project_before_policy_evaluation(self) -> None:
+        for queue_project_id in (None, "nuvyr"):
+            with self.subTest(queue_project_id=queue_project_id):
+                payload = {
+                    "project_id": queue_project_id,
+                    "lanes": [
+                        {
+                            "order": 1,
+                            "issue": 75,
+                            "task_id": "TASK-E8C28D",
+                            "owner": "claude",
+                            "task_status": "open",
+                            "queue_state": "ready",
+                            "depends_on": [],
+                            "blocked_by": [],
+                        }
+                    ],
+                }
+
+                with patch.object(project_issue_queue, "find_task_by_id") as find_task:
+                    with patch.object(
+                        project_issue_queue,
+                        "validate_direct_app_policy",
+                    ) as validate_policy:
+                        project_issue_queue.normalize_lanes(
+                            payload,
+                            expected_project_id="amiga",
+                        )
+
+                lane = payload["lanes"][0]
+                self.assertEqual(lane["queue_state"], "blocked")
+                self.assertTrue(
+                    any(
+                        "policy evidence unavailable: queue project_id" in blocker
+                        for blocker in lane["blocked_by"]
+                    )
+                )
+                find_task.assert_not_called()
+                validate_policy.assert_not_called()
+
+    def test_normalize_foreign_projectless_and_missing_mirrors_fail_closed(self) -> None:
+        cases = (
+            ("foreign", TaskMirror(project_id="nuvyr", status="open"), "project mismatch"),
+            ("projectless", TaskMirror(project_id=None, status="open"), "project mismatch"),
+            ("missing", None, "task mirror not found"),
+        )
+        for label, mirror, expected_error in cases:
+            with self.subTest(mirror=label):
+                payload = {
+                    "project_id": "amiga",
+                    "lanes": [
+                        {
+                            "order": 1,
+                            "issue": 75,
+                            "task_id": "TASK-E8C28D",
+                            "owner": "claude",
+                            "task_status": "open",
+                            "queue_state": "ready",
+                            "depends_on": [],
+                            "blocked_by": [],
+                        }
+                    ],
+                }
+
+                with patch.object(
+                    project_issue_queue,
+                    "find_task_by_id",
+                    return_value=mirror,
+                ):
+                    with patch.object(
+                        project_issue_queue,
+                        "validate_direct_app_policy",
+                    ) as validate_policy:
+                        project_issue_queue.normalize_lanes(payload)
+
+                lane = payload["lanes"][0]
+                self.assertEqual(lane["queue_state"], "blocked")
+                self.assertTrue(
+                    any(expected_error in blocker for blocker in lane["blocked_by"])
+                )
+                validate_policy.assert_not_called()
+
+    def test_mark_transition_persists_stale_done_mirror_as_blocked(self) -> None:
+        payload = {
+            "project_id": "amiga",
+            "completed_recently": [
+                {
+                    "issue": 75,
+                    "task_id": "TASK-E8C28D",
+                    "owner": "claude",
+                    "status": "done",
+                }
+            ],
+            "lanes": [
+                {
+                    "order": 1,
+                    "issue": 75,
+                    "task_id": "TASK-E8C28D",
+                    "owner": "claude",
+                    "task_status": "blocked",
+                    "queue_state": "blocked",
+                    "depends_on": [],
+                    "blocked_by": [],
+                }
+            ],
+        }
+
+        with patch.object(project_issue_queue, "queue_exists", return_value=True):
+            with patch.object(project_issue_queue, "load_queue", return_value=payload):
+                with patch.object(
+                    project_issue_queue,
+                    "find_task_by_id",
+                    return_value=TaskMirror(project_id="amiga", status="done"),
+                ):
+                    with patch.object(
+                        project_issue_queue,
+                        "validate_direct_app_policy",
+                    ) as validate_policy:
+                        with patch.object(project_issue_queue, "sync_markdown") as persist:
+                            result = project_issue_queue.mark_lane_transition(
+                                "amiga",
+                                "TASK-E8C28D",
+                                owner="codex",
+                                task_status="open",
+                            )
+
+        lane = payload["lanes"][0]
+        self.assertEqual(result, {"updated": True, "archived": False})
+        self.assertEqual(lane["queue_state"], "blocked")
+        self.assertTrue(
+            any(
+                "task mirror status mismatch for TASK-E8C28D: queue 'open', task 'done'"
+                in blocker
+                for blocker in lane["blocked_by"]
+            )
+        )
+        validate_policy.assert_not_called()
+        persist.assert_called_once_with("amiga", payload)
+
+    def test_mark_transition_refuses_invalid_queue_project_before_any_mutation(self) -> None:
+        missing = object()
+        for label, queue_project_id in (
+            ("missing", missing),
+            ("null", None),
+            ("empty", ""),
+            ("foreign", "nuvyr"),
+        ):
+            for task_status in ("open", "done"):
+                with self.subTest(queue_project=label, task_status=task_status):
+                    payload = {
+                        "completed_recently": [],
+                        "lanes": [
+                            {
+                                "order": 1,
+                                "issue": 75,
+                                "task_id": "TASK-E8C28D",
+                                "owner": "claude",
+                                "task_status": "review",
+                                "queue_state": "review",
+                                "depends_on": [],
+                                "blocked_by": [],
+                            }
+                        ],
+                    }
+                    if queue_project_id is not missing:
+                        payload["project_id"] = queue_project_id
+                    before = copy.deepcopy(payload)
+
+                    with patch.object(project_issue_queue, "queue_exists", return_value=True):
+                        with patch.object(project_issue_queue, "load_queue", return_value=payload):
+                            with patch.object(project_issue_queue, "normalize_lanes") as normalize:
+                                with patch.object(
+                                    project_issue_queue,
+                                    "archive_complete_queue",
+                                ) as archive:
+                                    with patch.object(project_issue_queue, "sync_markdown") as persist:
+                                        with self.assertRaisesRegex(
+                                            ValueError,
+                                            "queue project_id mismatch.*before mutation",
+                                        ):
+                                            project_issue_queue.mark_lane_transition(
+                                                "amiga",
+                                                "TASK-E8C28D",
+                                                owner="codex",
+                                                task_status=task_status,
+                                            )
+
+                    self.assertEqual(payload, before)
+                    normalize.assert_not_called()
+                    archive.assert_not_called()
+                    persist.assert_not_called()
+
+    def test_mark_transition_exact_project_done_still_archives(self) -> None:
+        payload = {
+            "project_id": "amiga",
+            "completed_recently": [],
+            "lanes": [
+                {
+                    "order": 1,
+                    "issue": 75,
+                    "task_id": "TASK-E8C28D",
+                    "owner": "claude",
+                    "task_status": "review",
+                    "queue_state": "review",
+                    "depends_on": [],
+                    "blocked_by": [],
+                }
+            ],
+        }
+        archived_paths = (Path("/tmp/issue-queue.json"), Path("/tmp/issue-queue.md"))
+
+        with patch.object(project_issue_queue, "queue_exists", return_value=True):
+            with patch.object(project_issue_queue, "load_queue", return_value=payload):
+                with patch.object(
+                    project_issue_queue,
+                    "archive_complete_queue",
+                    return_value=archived_paths,
+                ) as archive:
+                    with patch.object(project_issue_queue, "sync_markdown") as persist:
+                        result = project_issue_queue.mark_lane_transition(
+                            "amiga",
+                            "TASK-E8C28D",
+                            owner="codex",
+                            task_status="done",
+                        )
+
+        self.assertTrue(result["updated"])
+        self.assertTrue(result["archived"])
+        self.assertEqual(payload["lanes"], [])
+        self.assertEqual(payload["completed_recently"][-1]["task_id"], "TASK-E8C28D")
+        archive.assert_called_once()
+        persist.assert_called_once_with("amiga", payload)
+
+    def test_direct_app_policy_blocker_never_clears_as_completed_queue_order(self) -> None:
+        payload = {
+            "project_id": "amiga",
+            "completed_recently": [
+                {
+                    "issue": 75,
+                    "task_id": "TASK-OTHER",
+                    "owner": "claude",
+                    "status": "done",
+                }
+            ],
+            "lanes": [
+                {
+                    "order": 1,
+                    "issue": 76,
+                    "task_id": "TASK-E8C28D",
+                    "owner": "claude",
+                    "task_status": "open",
+                    "queue_state": "blocked",
+                    "depends_on": [],
+                    "blocked_by": [],
+                }
+            ],
+        }
+        policy_error = "related path 'design/GH-75 queue order' is forbidden"
+
+        with patch.object(
+            project_issue_queue,
+            "find_task_by_id",
+            return_value=TaskMirror(project_id="amiga", status="open"),
+        ):
+            with patch.object(
+                project_issue_queue,
+                "validate_direct_app_policy",
+                return_value=([policy_error], {}),
+            ):
+                project_issue_queue.normalize_lanes(payload)
+
+        lane = payload["lanes"][0]
+        self.assertEqual(lane["queue_state"], "blocked")
+        self.assertEqual(
+            lane["blocked_by"],
+            [f"{project_issue_queue.DIRECT_APP_BLOCKER_PREFIX}{policy_error}"],
         )
 
 
@@ -189,6 +504,182 @@ accepted_by: null
         self.assertEqual(lane["queue_state"], "ready")
         self.assertEqual(lane["blocked_by"], [])
         self.assertTrue(lane["needs_refinement"])
+
+    def test_reconcile_dependency_requires_exact_project_done_snapshot(self) -> None:
+        cases = (
+            ("missing", None, False),
+            ("projectless", ("null", "done"), False),
+            ("empty-project", ('""', "done"), False),
+            ("foreign", ("nuvyr", "done"), False),
+            ("missing-status", ("amiga", None), False),
+            ("non-done", ("amiga", "review"), False),
+            ("exact-done", ("amiga", "done"), True),
+        )
+        for label, dependency_state, expected_ready in cases:
+            with self.subTest(dependency=label):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    active = self.write_task(
+                        root,
+                        "2026-07-20_gh-784-active__TASK-ACTIVE.md",
+                        """---
+task_id: TASK-ACTIVE
+title: GH-784 Active
+status: open
+owner: claude
+project_id: amiga
+depends_on: ["TASK-DEP"]
+skip_refinement: true
+---
+""",
+                    )
+                    dependency = None
+                    if dependency_state is not None:
+                        dependency_project, dependency_status = dependency_state
+                        status_line = (
+                            f"status: {dependency_status}\n"
+                            if dependency_status is not None
+                            else ""
+                        )
+                        dependency = self.write_task(
+                            root,
+                            f"{label}-dependency.md",
+                            (
+                                "---\n"
+                                "task_id: TASK-DEP\n"
+                                "title: Dependency\n"
+                                f"project_id: {dependency_project}\n"
+                                f"{status_line}"
+                                "owner: claude\n"
+                                "---\n"
+                            ),
+                        )
+                    issue = _backlog.BacklogIssue(number=784, title="Active", labels=())
+                    task_files = [active] + ([dependency] if dependency is not None else [])
+
+                    with patch.object(_backlog, "eligible_open_issues", return_value=[issue]):
+                        with patch.object(project_issue_queue, "all_task_files", return_value=task_files):
+                            with patch.object(project_issue_queue, "queue_exists", return_value=False):
+                                with patch.object(
+                                    project_issue_queue,
+                                    "find_task_by_id",
+                                    return_value=dependency,
+                                ) as global_lookup:
+                                    with patch.object(
+                                        task_contract,
+                                        "get_project",
+                                        return_value={"id": "amiga"},
+                                    ):
+                                        result = project_issue_queue.reconcile_queue("amiga")
+
+                    lane = result["projection"]["lanes"][0]
+                    self.assertEqual(lane["queue_state"] == "ready", expected_ready)
+                    self.assertEqual(lane["blocked_by"], [] if expected_ready else ["TASK-DEP"])
+                    global_lookup.assert_not_called()
+
+    def test_reconcile_persisted_completion_requires_exact_queue_and_done_status(self) -> None:
+        cases = (
+            ("foreign-done", "nuvyr", "done"),
+            ("exact-missing-status", "amiga", None),
+            ("exact-non-done", "amiga", "review"),
+        )
+        for label, queue_project_id, completed_status in cases:
+            with self.subTest(completion=label):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    active = self.write_task(
+                        root,
+                        "2026-07-20_gh-784-active__TASK-ACTIVE.md",
+                        """---
+task_id: TASK-ACTIVE
+title: GH-784 Active
+status: open
+owner: claude
+project_id: amiga
+depends_on: ["TASK-DEP"]
+skip_refinement: true
+---
+""",
+                    )
+                    issue = _backlog.BacklogIssue(number=784, title="Active", labels=())
+                    completion = {
+                        "issue": 783,
+                        "task_id": "TASK-DEP",
+                        "owner": "claude",
+                    }
+                    if completed_status is not None:
+                        completion["status"] = completed_status
+                    previous = {
+                        "project_id": queue_project_id,
+                        "completed_recently": [completion],
+                        "lanes": [],
+                    }
+
+                    with patch.object(_backlog, "eligible_open_issues", return_value=[issue]):
+                        with patch.object(project_issue_queue, "all_task_files", return_value=[active]):
+                            with patch.object(project_issue_queue, "queue_exists", return_value=True):
+                                with patch.object(project_issue_queue, "load_queue", return_value=previous):
+                                    with patch.object(
+                                        project_issue_queue,
+                                        "find_task_by_id",
+                                        return_value=TaskMirror(project_id="nuvyr", status="done"),
+                                    ) as global_lookup:
+                                        with patch.object(
+                                            task_contract,
+                                            "get_project",
+                                            return_value={"id": "amiga"},
+                                        ):
+                                            result = project_issue_queue.reconcile_queue("amiga")
+
+                    lane = result["projection"]["lanes"][0]
+                    self.assertEqual(lane["queue_state"], "blocked")
+                    self.assertEqual(lane["blocked_by"], ["TASK-DEP"])
+                    global_lookup.assert_not_called()
+
+    def test_reconcile_blocks_and_reports_direct_app_policy_violation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = self.write_task(
+                root,
+                "2026-07-20_gh-75-design__TASK-DIRECT.md",
+                """---
+task_id: TASK-DIRECT
+title: GH-75 Design sandbox
+status: open
+owner: unassigned
+project_id: amiga
+lane_type: design-spec
+depends_on: []
+skip_refinement: true
+---
+""",
+            )
+            issue = _backlog.BacklogIssue(number=75, title="Design sandbox", labels=())
+            project = {"id": "amiga", "ui_ux": {"direct_app_only": True}}
+
+            with patch.object(_backlog, "eligible_open_issues", return_value=[issue]):
+                with patch.object(project_issue_queue, "all_task_files", return_value=[task]):
+                    with patch.object(project_issue_queue, "queue_exists", return_value=False):
+                        with patch.object(task_contract, "get_project", return_value=project):
+                            result = project_issue_queue.reconcile_queue("amiga")
+
+            lane = result["projection"]["lanes"][0]
+            self.assertFalse(result["ok"])
+            self.assertEqual(lane["queue_state"], "blocked")
+            self.assertTrue(result["invalid_lanes"])
+            self.assertTrue(
+                any("ui_ux.direct_app_only" in blocker for blocker in lane["blocked_by"])
+            )
+
+            with patch.object(project_issue_queue, "find_task_by_id", return_value=task):
+                with patch.object(task_contract, "get_project", return_value=project):
+                    errors, _ = project_issue_queue.validate_queue(
+                        "amiga",
+                        result["projection"],
+                    )
+            self.assertTrue(
+                any("lane 1 task TASK-DIRECT" in error and "`lane_type`" in error for error in errors)
+            )
 
     def test_reconcile_ignores_projectless_and_foreign_project_mirrors(self) -> None:
         # #given

@@ -35,7 +35,7 @@ from _helpers import (
     utc_iso,
     write_file,
 )
-from task_contract import sync_task_contract
+from task_contract import sync_task_contract, validate_direct_app_policy
 
 
 def parse_args():
@@ -152,6 +152,21 @@ def main():
 """
 
     fm, _ = sync_task_contract(fm, body)
+    direct_app_errors, direct_app_summary = validate_direct_app_policy(fm)
+    if direct_app_errors:
+        print(
+            json.dumps(
+                {
+                    "error": "project direct-app policy rejected task creation before write",
+                    "task_id": tid,
+                    "contract": direct_app_summary,
+                    "problems": direct_app_errors,
+                },
+                indent=2,
+            ),
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     content = dump_frontmatter(fm, body)
     path = target_task_path(args.title, tid, args.status)

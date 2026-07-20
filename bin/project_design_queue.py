@@ -36,6 +36,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 import project_issue_queue as issue_queue
 import claude_desktop_bridge_health as bridge_health
 from _helpers import ROOT, display_path, dump_frontmatter, find_task_by_id, get_project, parse_frontmatter, project_state_dir, utc_iso, write_file
+from task_contract import validate_direct_app_policy
 
 QUEUE_STATES = {"ready", "queued", "blocked", "active", "review", "done"}
 DESIGN_FILE_NAME = "design-queue.json"
@@ -296,6 +297,11 @@ def validate_queue(
             )
         if frontmatter.get("ui_ux_lane") is not True:
             errors.append(f"lane {order} task {task_id} must set ui_ux_lane: true")
+        direct_app_errors, _ = validate_direct_app_policy(frontmatter)
+        errors.extend(
+            f"lane {order} task {task_id}: {error}"
+            for error in direct_app_errors
+        )
 
         dependency_artifacts = normalize_string_list(frontmatter.get("required_dependency_artifacts"))
         dependency_gate_enabled = frontmatter.get("dependency_materialization_gate") is True or bool(

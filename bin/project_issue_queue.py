@@ -36,11 +36,13 @@ from _helpers import (
     utc_iso,
     write_file,
 )
+from task_contract import validate_direct_app_policy
 
 QUEUE_STATES = {"ready", "queued", "blocked", "active", "review", "done"}
 QUEUE_FILE_NAME = "issue-queue.json"
 MARKDOWN_FILE_NAME = "issue-queue.md"
 HISTORY_DIR_NAME = "history"
+DIRECT_APP_BLOCKER_PREFIX = "ui_ux.direct_app_only: "
 ISSUE_RE = re.compile(r"\bGH[- #]+(\d+)\b", re.IGNORECASE)
 
 
@@ -113,28 +115,36 @@ def extract_issue_number(frontmatter: dict, task_path: Path) -> int | None:
     return None
 
 
-def project_task_mirrors(project_id: str) -> dict[int, list[dict]]:
+def project_task_snapshot(project_id: str) -> tuple[dict[int, list[dict]], set[str]]:
     mirrors: dict[int, list[dict]] = {}
+    statuses_by_task: dict[str, list[object]] = {}
     for task_path in all_task_files():
         frontmatter, _ = parse_frontmatter(task_path.read_text())
         scoped_project = frontmatter.get("project_id")
         if scoped_project != project_id:
             continue
+        task_id = frontmatter.get("task_id")
+        if not isinstance(task_id, str) or not task_id:
+            continue
+        status = frontmatter.get("status")
+        statuses_by_task.setdefault(task_id, []).append(status)
         issue = extract_issue_number(frontmatter, task_path)
         if issue is None:
-            continue
-        task_id = frontmatter.get("task_id")
-        if not isinstance(task_id, str):
             continue
         mirrors.setdefault(issue, []).append(
             {
                 "path": task_path,
                 "frontmatter": frontmatter,
                 "task_id": task_id,
-                "status": frontmatter.get("status") if isinstance(frontmatter.get("status"), str) else "open",
+                "status": status if isinstance(status, str) else "open",
             }
         )
-    return mirrors
+    completed_task_ids = {
+        task_id
+        for task_id, statuses in statuses_by_task.items()
+        if statuses and all(status == "done" for status in statuses)
+    }
+    return mirrors, completed_task_ids
 
 
 def mirror_sort_key(mirror: dict) -> tuple[int, str]:
@@ -159,20 +169,15 @@ def normalize_depends(values: object) -> list[str]:
     return [str(value) for value in values]
 
 
-def task_status(task_id: str) -> str | None:
-    task_path = find_task_by_id(task_id)
-    if task_path is None:
-        return None
-    frontmatter, _ = parse_frontmatter(task_path.read_text())
-    status = frontmatter.get("status")
-    return status if isinstance(status, str) else None
-
-
 def completed_tasks(payload: dict) -> set[str]:
     completed = {
         str(entry.get("task_id"))
         for entry in payload.get("completed_recently", [])
-        if isinstance(entry, dict) and entry.get("task_id")
+        if (
+            isinstance(entry, dict)
+            and entry.get("task_id")
+            and entry.get("status") == "done"
+        )
     }
     for lane in payload.get("lanes", []):
         if isinstance(lane, dict) and lane.get("task_status") == "done" and lane.get("task_id"):
@@ -183,7 +188,11 @@ def completed_tasks(payload: dict) -> set[str]:
 def completed_issues(payload: dict) -> set[int]:
     completed: set[int] = set()
     for entry in payload.get("completed_recently", []):
-        if isinstance(entry, dict) and isinstance(entry.get("issue"), int):
+        if (
+            isinstance(entry, dict)
+            and entry.get("status") == "done"
+            and isinstance(entry.get("issue"), int)
+        ):
             completed.add(entry["issue"])
     for lane in payload.get("lanes", []):
         if (
@@ -196,7 +205,7 @@ def completed_issues(payload: dict) -> set[int]:
 
 
 def dependency_is_satisfied(task_id: str, completed_task_ids: set[str]) -> bool:
-    return task_id in completed_task_ids or task_status(task_id) == "done"
+    return task_id in completed_task_ids
 
 
 def dependency_blockers(depends_on: list[str], completed_task_ids: set[str]) -> list[str]:
@@ -207,6 +216,8 @@ def blocker_is_satisfied(blocker: object, completed_task_ids: set[str], complete
     if not isinstance(blocker, str):
         return False
     stripped = blocker.strip()
+    if stripped.startswith(DIRECT_APP_BLOCKER_PREFIX):
+        return False
     if stripped in completed_task_ids:
         return True
     issue_match = re.fullmatch(r"GH[- #]*(\d+)", stripped, re.IGNORECASE)
@@ -330,6 +341,12 @@ def validate_queue(project_id: str, payload: dict) -> tuple[list[str], list[str]
             errors.append(
                 f"lane {order} task_status mismatch for {task_id}: queue {task_status!r} vs task {frontmatter.get('status')!r}"
             )
+        if task_project_id == project_id and task_status == frontmatter.get("status"):
+            direct_app_errors, _ = validate_direct_app_policy(frontmatter)
+            errors.extend(
+                f"lane {order} task {task_id}: {error}"
+                for error in direct_app_errors
+            )
 
         frontmatter_tier = frontmatter.get("tier")
         if tier is not None and frontmatter_tier != tier:
@@ -447,12 +464,34 @@ def reconciliation_input_hash(project_id: str, issues: list[_backlog.BacklogIssu
                     "refined_by": frontmatter.get("refined_by"),
                     "skip_refinement": frontmatter.get("skip_refinement"),
                     "accepted_by": frontmatter.get("accepted_by"),
+                    "lane_type": frontmatter.get("lane_type"),
+                    "related_paths": frontmatter.get("related_paths"),
+                    "dependency_materialization_gate": frontmatter.get(
+                        "dependency_materialization_gate"
+                    ),
+                    "required_dependency_artifacts": frontmatter.get(
+                        "required_dependency_artifacts"
+                    ),
+                    "direct_app_legacy_maintenance": frontmatter.get(
+                        "direct_app_legacy_maintenance"
+                    ),
+                    "direct_app_legacy_maintenance_approved_by": frontmatter.get(
+                        "direct_app_legacy_maintenance_approved_by"
+                    ),
+                    "direct_app_legacy_maintenance_reason": frontmatter.get(
+                        "direct_app_legacy_maintenance_reason"
+                    ),
                     "path": display_path(mirror["path"]),
                 }
             )
+    project = get_project(project_id)
+    ui_ux = project.get("ui_ux") if isinstance(project, dict) else None
+    direct_app_configured = isinstance(ui_ux, dict) and "direct_app_only" in ui_ux
     raw = json.dumps(
         {
             "project_id": project_id,
+            "direct_app_only_configured": direct_app_configured,
+            "direct_app_only": ui_ux.get("direct_app_only") if direct_app_configured else None,
             "issues": [{"number": issue.number, "title": issue.title, "labels": issue.labels} for issue in issues],
             "tasks": task_inputs,
         },
@@ -473,19 +512,26 @@ def reconcile_queue(project_id: str) -> dict:
             "projection": None,
         }
 
-    mirrors_by_issue = project_task_mirrors(project_id)
-    previous_payload = load_queue(project_id) if queue_exists(project_id) else {"completed_recently": []}
+    mirrors_by_issue, mirror_completed_task_ids = project_task_snapshot(project_id)
+    loaded_previous = load_queue(project_id) if queue_exists(project_id) else {}
+    previous_payload = (
+        loaded_previous
+        if isinstance(loaded_previous, dict) and loaded_previous.get("project_id") == project_id
+        else {"completed_recently": []}
+    )
     completed_task_ids = completed_tasks(previous_payload)
     completed_issue_ids = completed_issues(previous_payload)
+    completed_task_ids.update(mirror_completed_task_ids)
     for issue, mirrors in mirrors_by_issue.items():
         for mirror in mirrors:
-            if mirror.get("status") == "done":
-                completed_task_ids.add(mirror["task_id"])
+            if mirror["task_id"] in mirror_completed_task_ids:
                 completed_issue_ids.add(issue)
 
     lanes: list[dict] = []
+    projection_frontmatters: dict[str, dict] = {}
     needs_materialization: list[dict] = []
     duplicate_mirrors: list[dict] = []
+    invalid_lanes: list[dict] = []
     completed_recently = previous_payload.get("completed_recently", [])
     if not isinstance(completed_recently, list):
         completed_recently = []
@@ -511,15 +557,27 @@ def reconcile_queue(project_id: str) -> dict:
         task_status_value = str(frontmatter.get("status") or "open")
         if task_status_value == "done":
             continue
+        projection_frontmatters[mirror["task_id"]] = frontmatter
         depends_on = normalize_depends(frontmatter.get("depends_on"))
         blockers = dependency_blockers(depends_on, completed_task_ids)
+        direct_app_errors, _ = validate_direct_app_policy(frontmatter)
+        if direct_app_errors:
+            invalid_lanes.append(
+                {
+                    "issue": issue.number,
+                    "task_id": mirror["task_id"],
+                    "errors": direct_app_errors,
+                }
+            )
         refined = bool(frontmatter.get("refined_by")) or bool(frontmatter.get("skip_refinement"))
         needs_acceptance = (
             frontmatter.get("created_by") == "claude"
             and bool(frontmatter.get("refined_by"))
             and not bool(frontmatter.get("accepted_by"))
         )
-        if task_status_value == "in_progress":
+        if direct_app_errors:
+            queue_state = "blocked"
+        elif task_status_value == "in_progress":
             queue_state = "active"
         elif task_status_value == "review":
             queue_state = "review"
@@ -539,7 +597,13 @@ def reconcile_queue(project_id: str) -> dict:
                 "tier": frontmatter.get("tier"),
                 "lane_type": frontmatter.get("lane_type"),
                 "depends_on": depends_on,
-                "blocked_by": blockers,
+                "blocked_by": [
+                    *blockers,
+                    *[
+                        f"{DIRECT_APP_BLOCKER_PREFIX}{error}"
+                        for error in direct_app_errors
+                    ],
+                ],
                 "needs_refinement": not refined,
                 "needs_acceptance": needs_acceptance,
                 "title": issue.title,
@@ -558,16 +622,22 @@ def reconcile_queue(project_id: str) -> dict:
         "source_task": previous_payload.get("source_task"),
         "needs_materialization": needs_materialization,
         "duplicate_mirrors": duplicate_mirrors,
+        "invalid_lanes": invalid_lanes,
         "completed_recently": completed_recently[-10:],
         "lanes": lanes,
     }
-    normalize_lanes(projection)
+    normalize_lanes(
+        projection,
+        expected_project_id=project_id,
+        task_frontmatters=projection_frontmatters,
+    )
     return {
-        "ok": not needs_materialization and not duplicate_mirrors,
+        "ok": not needs_materialization and not duplicate_mirrors and not invalid_lanes,
         "backlog": "known",
         "project_id": project_id,
         "needs_materialization": needs_materialization,
         "duplicate_mirrors": duplicate_mirrors,
+        "invalid_lanes": invalid_lanes,
         "projection": projection,
     }
 
@@ -693,9 +763,85 @@ def find_lane(payload: dict, task_id: str) -> dict | None:
     return next((lane for lane in payload.get("lanes", []) if lane.get("task_id") == task_id), None)
 
 
-def normalize_lanes(payload: dict) -> None:
+def normalize_lanes(
+    payload: dict,
+    *,
+    expected_project_id: str | None = None,
+    task_frontmatters: dict[str, dict] | None = None,
+) -> None:
     lanes = sorted(payload.get("lanes", []), key=lambda lane: lane["order"])
     payload["lanes"] = lanes
+
+    project_id = payload.get("project_id")
+    queue_project_error = None
+    if not isinstance(project_id, str) or not project_id.strip():
+        queue_project_error = (
+            f"queue project_id must be a non-empty string, found {project_id!r}"
+        )
+    elif expected_project_id is not None and project_id != expected_project_id:
+        queue_project_error = (
+            f"queue project_id mismatch: expected {expected_project_id!r}, found {project_id!r}"
+        )
+
+    for lane in lanes:
+        task_id = lane.get("task_id")
+        evidence_error = queue_project_error
+        frontmatter = None
+        if evidence_error is None and not isinstance(task_id, str):
+            evidence_error = f"lane has no string task_id, found {task_id!r}"
+        if evidence_error is None:
+            if task_frontmatters is not None:
+                frontmatter = task_frontmatters.get(task_id)
+                if frontmatter is None:
+                    evidence_error = f"task mirror not found for {task_id}"
+            else:
+                task_path = find_task_by_id(task_id)
+                if task_path is None:
+                    evidence_error = f"task mirror not found for {task_id}"
+        if evidence_error is None and frontmatter is None:
+            try:
+                frontmatter, _ = parse_frontmatter(task_path.read_text())
+            except (OSError, TypeError, UnicodeError, ValueError) as error:
+                evidence_error = f"task mirror for {task_id} cannot be read: {error}"
+        if evidence_error is None and not isinstance(frontmatter, dict):
+            evidence_error = f"task mirror not found for {task_id}"
+        if evidence_error is None:
+            task_project_id = frontmatter.get("project_id")
+            if task_project_id != project_id:
+                evidence_error = (
+                    f"task mirror project mismatch for {task_id}: "
+                    f"queue {project_id!r}, task {task_project_id!r}"
+                )
+        if evidence_error is None:
+            task_status_value = frontmatter.get("status")
+            if task_status_value != lane.get("task_status"):
+                evidence_error = (
+                    f"task mirror status mismatch for {task_id}: "
+                    f"queue {lane.get('task_status')!r}, task {task_status_value!r}"
+                )
+
+        direct_app_errors = []
+        if evidence_error is None:
+            direct_app_errors, _ = validate_direct_app_policy(frontmatter)
+        managed_errors = (
+            [f"policy evidence unavailable: {evidence_error}"]
+            if evidence_error is not None
+            else direct_app_errors
+        )
+        prior_blockers = [
+            blocker
+            for blocker in normalize_depends(lane.get("blocked_by"))
+            if not blocker.startswith(DIRECT_APP_BLOCKER_PREFIX)
+        ]
+        lane["blocked_by"] = [
+            *prior_blockers,
+            *[
+                f"{DIRECT_APP_BLOCKER_PREFIX}{error}"
+                for error in managed_errors
+            ],
+        ]
+        if managed_errors:
+            lane["queue_state"] = "blocked"
 
     unblock_satisfied_lanes(payload)
 
@@ -746,6 +892,12 @@ def mark_lane_transition(project_id: str, task_id: str, *, owner: str, task_stat
         return None
 
     payload = load_queue(project_id)
+    loaded_project_id = payload.get("project_id") if isinstance(payload, dict) else None
+    if loaded_project_id != project_id:
+        raise ValueError(
+            f"queue project_id mismatch: expected {project_id!r}, found {loaded_project_id!r}; "
+            "refusing lane transition before mutation"
+        )
     lane = find_lane(payload, task_id)
     if lane is None:
         return None
@@ -787,7 +939,7 @@ def mark_lane_transition(project_id: str, task_id: str, *, owner: str, task_stat
                 "history_json": display_path(archived_json),
                 "history_md": display_path(archived_md),
             }
-    normalize_lanes(payload)
+    normalize_lanes(payload, expected_project_id=project_id)
     sync_markdown(project_id, payload)
     return {"updated": True, "archived": False}
 
@@ -820,6 +972,9 @@ def main() -> int:
             if result.get("duplicate_mirrors"):
                 issues = ", ".join(f"GH-{item['issue']}" for item in result["duplicate_mirrors"])
                 print(f"duplicate mirrors: {issues}")
+            if result.get("invalid_lanes"):
+                issues = ", ".join(f"GH-{item['issue']}" for item in result["invalid_lanes"])
+                print(f"direct-app policy violations: {issues}")
         return 0 if result.get("ok") else 1
 
     payload = load_queue(args.project)
@@ -882,7 +1037,7 @@ def main() -> int:
         print(f"archived_md: {display_path(archived_md)}")
         return 0
 
-    normalize_lanes(payload)
+    normalize_lanes(payload, expected_project_id=args.project)
     errors, warnings = validate_queue(args.project, payload)
     if errors:
         print("[error] Queue is invalid; fix queue JSON before syncing markdown.", file=sys.stderr)
