@@ -40,9 +40,16 @@ class PostMergeCleanupTest(unittest.TestCase):
     def tearDown(self) -> None:
         self.tmp.cleanup()
 
-    def args(self, *, apply: bool = False, discard: bool = False, plain_dirs: bool = False) -> SimpleNamespace:
+    def args(
+        self,
+        *,
+        project: str = "amiga",
+        apply: bool = False,
+        discard: bool = False,
+        plain_dirs: bool = False,
+    ) -> SimpleNamespace:
         return SimpleNamespace(
-            project="amiga",
+            project=project,
             repo_key="app",
             repo=str(self.repo),
             base="main",
@@ -53,23 +60,39 @@ class PostMergeCleanupTest(unittest.TestCase):
             json=False,
         )
 
-    def write_task(self, task_id: str, status: str, branch: str) -> None:
+    def write_task(
+        self,
+        task_id: str,
+        status: str,
+        branch: str,
+        *,
+        project: str | None = "amiga",
+        include_project: bool = True,
+    ) -> Path:
         task_dir = self.tasks / ("done" if status == "done" else "active")
         task_dir.mkdir(parents=True, exist_ok=True)
-        (task_dir / f"{task_id.lower()}.md").write_text(
-            "\n".join(
-                [
-                    "---",
-                    f"task_id: {task_id}",
-                    f"status: {status}",
-                    f"branch: {branch}",
-                    "---",
-                    "",
-                    "# Task",
-                    "",
-                ]
-            )
+        path = task_dir / f"{task_id.lower()}.md"
+        frontmatter = [
+            "---",
+            f"task_id: {task_id}",
+        ]
+        if include_project:
+            project_value = "null" if project is None else project
+            frontmatter.append(f"project_id: {project_value}")
+        frontmatter.extend(
+            [
+                f"status: {status}",
+                f"branch: {branch}",
+                "---",
+                "",
+                "# Task",
+                "",
+            ]
         )
+        path.write_text(
+            "\n".join(frontmatter)
+        )
+        return path
 
     def create_worktree(self, branch: str, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -78,10 +101,153 @@ class PostMergeCleanupTest(unittest.TestCase):
         git(path, "add", "branch.txt")
         git(path, "commit", "-m", branch)
 
-    def classify(self, **kwargs: bool) -> dict[str, object]:
+    def classify(self, **kwargs: object) -> dict[str, object]:
         with patch.object(post_merge_cleanup, "ensure_project", return_value=None):
             with patch.object(post_merge_cleanup, "TASKS_DIR", self.tasks):
                 return post_merge_cleanup.classify(self.args(**kwargs))
+
+    def test_foreign_or_unscoped_done_task_cannot_authorize_cleanup(self) -> None:
+        fixtures = (
+            ("FOREIGN", "amiga", True),
+            ("MISSING", None, False),
+            ("EMPTY", "", True),
+            ("NULL", None, True),
+        )
+        mounted: list[str] = []
+        unmounted: list[str] = []
+        for token, project, include_project in fixtures:
+            mounted_branch = f"codex/task-{token}WT-cleanup"
+            mounted_path = self.worktree_root / "demo" / token.lower()
+            self.create_worktree(mounted_branch, mounted_path)
+            self.write_task(
+                f"TASK-{token}WT",
+                "done",
+                mounted_branch,
+                project=project,
+                include_project=include_project,
+            )
+            mounted.append(mounted_branch)
+
+            unmounted_branch = f"codex/task-{token}BR-cleanup"
+            git(self.repo, "branch", unmounted_branch, "main")
+            self.write_task(
+                f"TASK-{token}BR",
+                "done",
+                unmounted_branch,
+                project=project,
+                include_project=include_project,
+            )
+            unmounted.append(unmounted_branch)
+
+        summary = self.classify(project="demo")
+        removed_worktrees = {
+            item["branch"] for item in summary["remove_worktrees"]
+        }
+        deferred_worktrees = {
+            item["branch"]: item for item in summary["deferred_worktrees"]
+        }
+        removed_branches = {
+            item["branch"] for item in summary["remove_branches"]
+        }
+        deferred_branches = {
+            item["branch"]: item for item in summary["deferred_branches"]
+        }
+
+        self.assertTrue(removed_worktrees.isdisjoint(mounted))
+        self.assertTrue(removed_branches.isdisjoint(unmounted))
+        for branch in mounted:
+            self.assertEqual(
+                deferred_worktrees[branch]["defer_reason"],
+                "no-task-match-not-merged",
+            )
+        for branch in unmounted:
+            self.assertEqual(
+                deferred_branches[branch]["defer_reason"],
+                "no-task-match-merged",
+            )
+
+    def test_task_bound_cleanup_requires_exact_done_for_amiga_and_non_amiga(self) -> None:
+        for project, token in (("amiga", "AMIGA"), ("demo", "DEMO")):
+            with self.subTest(project=project):
+                done_branch = f"codex/task-{token}DONE-cleanup"
+                review_branch = f"codex/task-{token}REVIEW-cleanup"
+                done_path = self.worktree_root / project / "done"
+                review_path = self.worktree_root / project / "review"
+                self.create_worktree(done_branch, done_path)
+                self.create_worktree(review_branch, review_path)
+                done_task = self.write_task(
+                    f"TASK-{token}DONE",
+                    "done",
+                    done_branch,
+                    project=project,
+                )
+                review_task = self.write_task(
+                    f"TASK-{token}REVIEW",
+                    "review",
+                    review_branch,
+                    project=project,
+                )
+
+                unmounted_done = f"codex/task-{token}BRDONE-cleanup"
+                unmounted_review = f"codex/task-{token}BRREVIEW-cleanup"
+                git(self.repo, "branch", unmounted_done, "main")
+                git(self.repo, "branch", unmounted_review, "main")
+                done_branch_task = self.write_task(
+                    f"TASK-{token}BRDONE",
+                    "done",
+                    unmounted_done,
+                    project=project,
+                )
+                review_branch_task = self.write_task(
+                    f"TASK-{token}BRREVIEW",
+                    "review",
+                    unmounted_review,
+                    project=project,
+                )
+
+                summary = self.classify(project=project)
+                removed_worktrees = {
+                    item["branch"] for item in summary["remove_worktrees"]
+                }
+                deferred_worktrees = {
+                    item["branch"]: item for item in summary["deferred_worktrees"]
+                }
+                removed_branches = {
+                    item["branch"] for item in summary["remove_branches"]
+                }
+                deferred_branches = {
+                    item["branch"]: item for item in summary["deferred_branches"]
+                }
+
+                self.assertIn(done_branch, removed_worktrees)
+                self.assertNotIn(review_branch, removed_worktrees)
+                self.assertEqual(
+                    deferred_worktrees[review_branch]["defer_reason"],
+                    "task-status-review",
+                )
+                self.assertIn(unmounted_done, removed_branches)
+                self.assertNotIn(unmounted_review, removed_branches)
+                self.assertEqual(
+                    deferred_branches[unmounted_review]["defer_reason"],
+                    "task-status-review",
+                )
+
+                git(self.repo, "worktree", "remove", str(done_path))
+                git(self.repo, "worktree", "remove", str(review_path))
+                for branch in (
+                    done_branch,
+                    review_branch,
+                    unmounted_done,
+                    unmounted_review,
+                ):
+                    git(self.repo, "branch", "-D", branch)
+                for task_path in (
+                    done_task,
+                    review_task,
+                    done_branch_task,
+                    review_branch_task,
+                ):
+                    task_path.unlink()
 
     def test_done_task_worktree_is_removed_even_when_branch_is_not_merged(self) -> None:
         branch = "codex/claude/task-ABC123-example"

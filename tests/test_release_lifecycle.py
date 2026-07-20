@@ -193,6 +193,42 @@ class InitReleaseGateAgentTest(unittest.TestCase):
 
 
 class ReleaseLifecycleGuidanceTest(unittest.TestCase):
+    def test_commit_push_guidance_orders_evaluation_done_queue_and_cleanup(self) -> None:
+        guidance = (
+            REPO_ROOT / "docs" / "workflows" / "commit-push-prs.md"
+        ).read_text()
+        post_merge = guidance.split("## Post-merge", 1)[1].split(
+            "## Release closure does not end at merge", 1
+        )[0]
+        exact_sha = post_merge.index(
+            "3. evaluate the exact merge SHA through the project's configured release"
+        )
+        done = post_merge.index(
+            "4. only after terminal success or an explicit honest non-success disposition"
+        )
+        queue = post_merge.index(
+            "5. after the `review → done` transition succeeds, perform any required project"
+        )
+        cleanup = post_merge.index(
+            "6. only then run the branch/worktree cleanup gate in applying mode"
+        )
+
+        self.assertLess(exact_sha, done)
+        self.assertLess(done, queue)
+        self.assertLess(queue, cleanup)
+        self.assertIn(
+            "`PENDING`, `MISSING`, `FAILURE`, or `CANCELLED` stops this sequence: preserve\n"
+            "the task in `review` and preserve the implementation lane. Do not apply cleanup\n"
+            "or advance the queue runner beyond `post_merge`.",
+            post_merge,
+        )
+        self.assertIn(
+            "the related local task mirror has an exact `project_id` match for the\n"
+            "   cleanup command's `--project`; a missing, empty, null, or foreign project ID\n"
+            "   is not a task match",
+            guidance,
+        )
+
     def test_guidance_orders_evaluation_done_and_cleanup(self) -> None:
         guidance = (
             REPO_ROOT / "docs" / "workflows" / "task-intake-and-delegation.md"
