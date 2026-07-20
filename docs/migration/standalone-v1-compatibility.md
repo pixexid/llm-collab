@@ -50,9 +50,38 @@ The sole declaration is
 `https://llm-collab.dev/declarations/standalone/v1/feature-declarations.json`.
 Its five independent JSON booleans are `daemon_observation`,
 `canonical_writes`, `runtime_dispatch`, `ax_v2`, and `remote_transport`, and all
-are committed `false`. Omission and explicit `false` are semantically
-identical. Strings, integers, `null`, and other truthy-looking values are
-invalid. The file grants nothing on its own, and S3 adds no reader.
+are committed `false`. The file grants nothing on its own, and S3 adds no
+production reader.
+
+Every future reader MUST parse the declaration fail-closed. Before an ordinary
+object parser may collapse members into a map, it MUST inspect the raw member
+sequence of every object at every depth and reject any repeated member name.
+Member names MUST be compared as decoded JSON strings, so names that are equal
+after decoding are duplicates even when their source uses different JSON escape
+spellings. A duplicate anywhere makes the entire declaration invalid; a reader
+MUST NOT use first-wins, last-wins, merge, or duplicate-removal behavior.
+
+The top-level declaration MUST be one closed JSON object containing exactly
+`declaration_version`, `declaration_id`, and `features`, with no missing or
+unexpected member. `declaration_version` MUST be the JSON integer `1`,
+`declaration_id` MUST be the exact identity above, and `features` MUST be a JSON
+object. The `features` object has one closed known-member vocabulary:
+`daemon_observation`, `canonical_writes`, `runtime_dispatch`, `ax_v2`, and
+`remote_transport`. Each present known feature MUST be a JSON boolean. A known
+feature MAY be omitted, and its omitted value is exactly `false`; omission does
+not make the member unknown or supply authority. Any duplicate or unknown
+feature name, unexpected member at any object depth, or missing, mistyped, or
+non-constant top-level value makes the complete declaration invalid. Strings,
+integers, `null`, objects, arrays, and other truthy-looking feature values are
+invalid and MUST NOT be coerced.
+
+For an invalid declaration, the effective value of every capability MUST be
+`false`. No invalid, unknown, duplicate, omitted, or mistyped value may
+activate a capability, fall back to a current flag, inherit authority from
+another capability or environment value, or widen current authority. The
+test-only loader in `tests/test_standalone_feature_declarations.py` is proof
+that the committed declaration satisfies part of this contract; it is not
+parsing or activation authority. S3 still adds no production reader.
 
 Any future consumer must apply this narrowing rule:
 

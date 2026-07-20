@@ -211,25 +211,56 @@ combine with it.
   capability-profile failure inside an otherwise identity-valid
   `SessionRefV1`. P6 MUST NOT reclassify that failure as
   `INVALID_SESSION_REF`.
-- **P7 — delivery and reconciliation identity.** Validate `DeliveryV1`,
-  `ReceiptV1`, non-capability evidence/canonical-ledger cross-identities, and
-  reconciliation truth.
-  After a valid session and capability, mismatched
+- **P7 — delivery and reconciliation evidence and identity.** Validate
+  `DeliveryV1`, `ReceiptV1`, every `StateEvidenceV1` they carry,
+  non-capability evidence/canonical-ledger cross-identities, and reconciliation
+  truth. Before either schema object is accepted or canonical delivery or
+  reconciliation state advances, the receiver MUST recompute and verify the
+  `integrity` of every carried `StateEvidenceV1` using the exact authority in
+  `schemas/standalone/v1/state-evidence.schema.json`. It MUST hash the frozen
+  UTF-8 canonical JSON projection of the complete evidence object with exactly
+  its top-level `integrity` member omitted. The projection MUST sort object keys
+  by Unicode code-point order, preserve array order, use `,` and `:` separators
+  with no insignificant whitespace, preserve exact unnormalized Unicode scalar
+  strings with JSON escapes only for quote and backslash, use lowercase
+  `true`/`false`/`null`, allow only integers in the safe range
+  [-9007199254740991, 9007199254740991], and normalize integer lexical `-0` to
+  JSON integer `0`. Surrogates, C0/DEL/NEL/U+2028/U+2029, floats, exponents,
+  `NaN`, `Infinity`, and duplicate decoded member names are invalid under that
+  frozen algorithm; no implementation may normalize, coerce, collapse, or
+  repair them for hashing. The SHA-256 digest MUST equal the evidence's exact
+  `sha256:`-prefixed 64-digit lowercase hexadecimal `integrity` value.
+
+  P1 retains duplicate-member ownership and P3 retains schema-shape and
+  invalid-value ownership. After those stages pass, any delivery- or receipt-
+  evidence digest mismatch is only P7 `INVALID_DELIVERY`, never
+  `RECONCILIATION_REQUIRED`. A request failure MUST return
+  `INVALID_DELIVERY`, perform no action, and advance no state. Invalid adapter
+  output receives no response, advances no canonical state, preserves possible
+  acceptance as unresolved, and follows the existing host-local invalid-output
+  and quarantine path. This P7 recomputation does not move exact-session-
+  binding evidence integrity out of P5 or capability-profile authority out of
+  P6. After a valid session, capability, and evidence digest, mismatched
   delivery/message/attempt/endpoint/session/evidence identities are
-  `INVALID_DELIVERY`. For reconciliation, absent authoritative observation or
-  contradictory, ambiguous, or non-authoritative evidence that leaves truth
-  unresolved is `RECONCILIATION_REQUIRED`.
-- **P8 — admission state.** Apply Clause 2's total, delivery, and reserved-
-  control capacity bounds and Clauses 11, 12, and 15's health, quarantine,
-  recovery-only, and shutdown gates. Shutdown blocks later work first. When an
-  adapter is quarantined, `ADAPTER_QUARANTINED` takes precedence over
-  `ADAPTER_UNHEALTHY`; without the one exact operator-authorized recovery
-  connection, either state blocks normal work. On that recovery connection,
-  only the exact methods and recorded attempts allowed by Clause 12 may reach
-  capacity admission; any other request receives the applicable adapter-state
-  error. An otherwise admissible request that exceeds its delivery or control
-  pool receives `TOO_MANY_IN_FLIGHT`. No request is queued, no pool borrows from
-  the other, and no runtime action begins before this step passes.
+  `INVALID_DELIVERY`. For reconciliation, only then may absent authoritative
+  observation or contradictory, ambiguous, or non-authoritative evidence that
+  leaves truth unresolved become `RECONCILIATION_REQUIRED`.
+- **P8 — admission state.** Apply Clause 2's total, delivery, and four named
+  non-borrowable per-method capacity bounds and Clauses 11, 12, and 15's
+  health, quarantine, recovery-only, and shutdown gates. Shutdown blocks later
+  work first. The sole exception is a second concurrently admitted
+  `runtime.shutdown` while the first remains in flight: its named same-method
+  bound selects only `TOO_MANY_IN_FLIGHT`. All other later work receives
+  `SHUTDOWN_IN_PROGRESS`. When an adapter is quarantined,
+  `ADAPTER_QUARANTINED` takes precedence over `ADAPTER_UNHEALTHY`; without the
+  one exact operator-authorized recovery connection, either state blocks normal
+  work. On that recovery connection, only the exact methods and recorded
+  attempts allowed by Clause 12 may reach capacity admission; any other request
+  receives the applicable adapter-state error. An otherwise admissible request
+  that exceeds its delivery bound, its exact method's named bound, or the total
+  bound receives `TOO_MANY_IN_FLIGHT`. No request is queued, no method borrows
+  another method's unused bound, and no runtime action begins before this step
+  passes.
 - **P9 — execution.** A subsequently observed handshake/request timeout,
   cancellation, reconciliation uncertainty, stderr overflow, redaction
   failure, or otherwise internal failure uses only its corresponding Clause 13
@@ -241,7 +272,7 @@ The P5/P6 boundary is exhaustive and non-overlapping:
 |---|---|---|
 | `SessionRefV1` registry identity; workspace/scope/project presence; endpoint, session-ref, native-session, or repository binding; binding-evidence integrity/kind/authoritative quality/authority kind/subject; or binding-evidence adapter identity/implementation revision | P5 | `INVALID_SESSION_REF` |
 | Session-method relation lookup; exact capability-set/profile binding; or any carried `StateEvidenceV1.authority.capability_profile_id`/`capability_profile_revision`, selected entry, quality ceiling, constraints, or attestation | P6 | `CAPABILITY_NOT_DECLARED` |
-| `DeliveryV1`/`ReceiptV1` canonical or non-capability evidence cross-identity after P6 succeeds | P7 | `INVALID_DELIVERY` or, only for unresolved reconciliation truth, `RECONCILIATION_REQUIRED` |
+| `DeliveryV1`/`ReceiptV1` carried-evidence integrity recomputation, canonical or non-capability evidence cross-identity, and reconciliation truth after P6 succeeds | P7 | `INVALID_DELIVERY` for an evidence digest or identity mismatch; only later unresolved authoritative reconciliation truth is `RECONCILIATION_REQUIRED` |
 
 A record can fail more than one fact, but ordered validation reports only the
 first row reached. In particular, a shape-valid, identity-valid session whose
@@ -380,22 +411,35 @@ The method-specific shapes are:
    including the JSON bytes but excluding the terminating `\n`.
    `MAX_IN_FLIGHT_REQUESTS` remains 32 total post-initialize requests per adapter
    connection. `MAX_IN_FLIGHT_DELIVERIES` is 28 and applies only to
-   `runtime.deliver`. `MAX_IN_FLIGHT_CONTROL_REQUESTS` is 4 and is a reserved
-   shared pool for `runtime.cancel`, `runtime.reconcile`, `runtime.health`, and
-   `runtime.shutdown`. Deliveries MUST NOT consume a control slot, controls MUST
-   NOT consume a delivery slot, deliveries MUST never exceed 28, controls MUST
-   never exceed four, and their sum MUST never exceed 32. Thus 28 deliveries
-   plus four controls is admissible; a 29th delivery or fifth control receives
-   `TOO_MANY_IN_FLIGHT` even if the other pool has unused slots. The sole
-   `initialize` handshake request is serialized before normal work, does not
-   compete for either post-initialize pool, and cannot overlap another method.
-   The same pools and bounds apply on the one recovery connection in Clause 12,
-   where only its permitted post-initialize control methods are admissible.
+   `runtime.deliver`. Post-initialize control capacity has exactly four named
+   bounds: `MAX_IN_FLIGHT_CANCEL_REQUESTS` is 1 and applies only to
+   `runtime.cancel`; `MAX_IN_FLIGHT_RECONCILE_REQUESTS` is 1 and applies only to
+   `runtime.reconcile`; `MAX_IN_FLIGHT_HEALTH_REQUESTS` is 1 and applies only to
+   `runtime.health`; and `MAX_IN_FLIGHT_SHUTDOWN_REQUESTS` is 1 and applies only
+   to `runtime.shutdown`. These four bounds sum to four but are not a shared
+   pool. Each second concurrent request for the same method MUST receive
+   `TOO_MANY_IN_FLIGHT`, even when another method's bound is unused. No method
+   may borrow, lend, transfer, or consume another method's unused bound, and no
+   control may consume delivery capacity or delivery consume a named control
+   bound. Deliveries MUST never exceed 28, the four controls MUST never exceed
+   one request per named method, and all post-initialize requests together MUST
+   never exceed 32. Thus 28 deliveries plus one cancel, one reconcile, one
+   health, and one shutdown request is admissible; a 29th delivery or a second
+   concurrent request of any one control method receives
+   `TOO_MANY_IN_FLIGHT`. The non-borrowable health and shutdown bounds therefore
+   cannot be consumed or capacity-starved by delivery, cancellation,
+   reconciliation, or each other; likewise, no control method can capacity-
+   starve any other control method. The sole `initialize` handshake request is
+   serialized before normal work, is outside every post-initialize capacity
+   bound, and cannot overlap another method. The same named bounds apply on the
+   one recovery connection in Clause 12, where only its permitted post-
+   initialize methods are admissible and an unused bound for a prohibited
+   method remains unusable.
    The reader MUST stop buffering a frame after
    `MAX_MESSAGE_BYTES + 1` bytes. An oversized frame MUST receive
    `MESSAGE_TOO_LARGE` when a response is possible and be
    discarded without unbounded buffering. A request above the in-flight limit
-   applicable to its pool or above the total limit MUST receive
+   applicable to its exact method or above the total limit MUST receive
    `TOO_MANY_IN_FLIGHT`; it MUST NOT be queued in a host or adapter buffer and
    MUST begin no action.
 
@@ -606,21 +650,33 @@ The method-specific shapes are:
    MUST agree. At P6 the `runtime.deliver` action relation, session-binding
    evidence profile, delivery evidence profile, and returned receipt evidence
    profile MUST each pass their independent Clause 6 validation; none is
-   inferred from or required to equal another. After params/schema, session,
-   and capability validation pass, a cross-identity request or result is
-   `INVALID_DELIVERY` at P7. A request failure receives that error; an adapter
-   result failure is host-local, receives no response, preserves possible
-   acceptance as unresolved, and MUST NOT advance canonical delivery state.
+   inferred from or required to equal another. At P7 the adapter MUST recompute
+   and verify the exact frozen `StateEvidenceV1.integrity` carried by the
+   `DeliveryV1` before accepting the delivery object or performing its action,
+   and the host MUST perform the same recomputation for the `ReceiptV1`
+   evidence before accepting the result or advancing canonical delivery state.
+   Both recomputations MUST use P7's exact
+   `state-evidence.schema.json` canonical projection and digest algorithm.
+   After params/schema, session, and capability validation pass, either
+   evidence digest mismatch or a cross-identity request or result is
+   `INVALID_DELIVERY` at P7. A request failure receives that error and performs
+   no action. An invalid adapter result is host-local, receives no response,
+   preserves possible acceptance as unresolved, MUST NOT advance canonical
+   delivery state, and follows the existing invalid-output/quarantine path.
 
 9. **Cancellation (normative).** The `runtime.cancel` method MUST name the exact
    original delivery request through the closed `original_request_id` param,
    use its own distinct request `id` under Clause 1, and carry the same exact
    `SessionRefV1` as the original request. At P6 its exact
    `runtime.cancel` action relation and the session-binding evidence profile
-   MUST validate independently under Clause 6. The cancel invocation's only
-   success result is the closed `{original_request_id, status:"cancelled"}`
-   object; it is not a `REQUEST_CANCELLED` error. After that success, the
-   original pending delivery request MUST terminate with the
+   MUST validate independently under Clause 6. It uses only
+   `MAX_IN_FLIGHT_CANCEL_REQUESTS = 1`; no delivery, reconcile, health, or
+   shutdown request can consume that named bound, and a second concurrent
+   cancel request receives `TOO_MANY_IN_FLIGHT` without queueing. The cancel
+   invocation's only success result is the closed
+   `{original_request_id, status:"cancelled"}` object; it is not a
+   `REQUEST_CANCELLED` error. After that success, the original pending delivery
+   request MUST terminate with the
    `REQUEST_CANCELLED` JSON-RPC error using the original request's id.
    Cancellation is idempotent: repeated cancellation of a request
    authoritatively cancelled before external acceptance MUST return the same
@@ -659,43 +715,56 @@ The method-specific shapes are:
     `INVALID_REQUEST` at P3; an embedded `ReceiptV1` shape failure is host-local
     `INVALID_PARAMS` at P3. A validly shaped receipt whose capability profile,
     revision, quality, constraints, or attestation fails is host-local
-    `CAPABILITY_NOT_DECLARED` at P6. Only after P6 succeeds does a delivery,
-    attempt, endpoint, session, or other canonical-ledger identity mismatch
-    become host-local `INVALID_DELIVERY` at P7. Only a validly shaped,
-    capability-valid, identity-matching receipt whose authoritative observation
-    is absent, ambiguous, non-authoritative, or contradictory is host-local
-    `RECONCILIATION_REQUIRED` at P7. Each such response failure receives no
-    response, advances no canonical state, and keeps the attempt unresolved or
-    quarantined. A reconciliation request with invalid params returns
-    `INVALID_PARAMS` before action. Neither side may synthesize success, choose
-    another session, or blindly resend.
+    `CAPABILITY_NOT_DECLARED` at P6. Only after P6 succeeds MUST the host
+    recompute the carried `StateEvidenceV1.integrity` using P7's exact frozen
+    `state-evidence.schema.json` canonical projection and digest algorithm.
+    The receipt cannot become an accepted authoritative observation or resolve
+    the attempt until that digest matches exactly. A digest mismatch or a
+    delivery, attempt, endpoint, session, or other canonical-ledger identity
+    mismatch is host-local `INVALID_DELIVERY` at P7. Only a validly shaped,
+    capability-valid, digest-valid, identity-matching receipt whose
+    authoritative observation is absent, ambiguous, non-authoritative, or
+    contradictory is host-local `RECONCILIATION_REQUIRED` at P7. Each such
+    response failure receives no response, advances no canonical state, and
+    preserves possible acceptance as unresolved. A digest-mismatched adapter
+    output is invalid output and MUST follow the existing host-local invalid-
+    output/quarantine path; other failures keep the attempt unresolved or
+    quarantined under their existing clauses as applicable. A reconciliation
+    request with invalid params returns `INVALID_PARAMS` before action. Neither
+    side may synthesize success, choose another session, or blindly resend.
 
     When Clause 12 admits a recovery connection for a quarantined or unhealthy
     adapter, `runtime.reconcile` is admissible only when its exact
     `original_request_id`, delivery id, attempt id, session, endpoint, workspace,
     and scope identify one unresolved attempt explicitly named in the governing
     quarantine or unhealthy record. The request remains subject to every P3-P7
-    validation and the four-slot control pool; operator authorization supplies
-    no identity, capability, evidence, or outcome authority. After P3-P7
-    succeeds, a reconciliation that is unrelated to or does not exactly match a
-    named record attempt receives `ADAPTER_QUARANTINED`, or
-    `ADAPTER_UNHEALTHY` when quarantine is not also active, at P8 and performs
-    no action. A valid recovery reconciliation resolves only its named attempt
-    and does not clear quarantine or unhealthy state.
+    validation, `MAX_IN_FLIGHT_RECONCILE_REQUESTS = 1`, and the total bound;
+    operator authorization supplies no identity, capability, evidence, or
+    outcome authority. Its named bound cannot be borrowed from health,
+    shutdown, cancel, or delivery capacity. After P3-P7 succeeds, a
+    reconciliation that is unrelated to or does not exactly match a named
+    record attempt receives `ADAPTER_QUARANTINED`, or `ADAPTER_UNHEALTHY` when
+    quarantine is not also active, at P8 and performs no action. A valid
+    recovery reconciliation resolves only its named attempt and does not clear
+    quarantine or unhealthy state.
 
 11. **Health (normative).** The host MUST call `runtime.health` every
     `HEALTH_INTERVAL_MS`, fixed at 10,000 milliseconds, using exactly `{}`
     params. Health is connection/initialized-endpoint scoped: it MUST NOT carry
     `SessionRefV1`, `session_ref`, a native-session id, or any other session
     selector, and it is legal immediately after successful initialization
-    before native-session discovery or binding. A valid response MUST have the
-    closed scalar result shape above, MUST exactly identify the negotiated
-    protocol, initialized adapter, trusted manifest, endpoint, workspace and
-    complete scope discriminator, and capability-set identity/revisions, and
-    MUST arrive inside `REQUEST_DEADLINE_MS`. For project scope the exact
-    initialized `project_id` is required; for workspace scope `project_id` is
-    forbidden. Three consecutive missed, malformed, unhealthy-status,
-    identity-mismatched, or revision-mismatched health responses
+    before native-session discovery or binding. It uses only
+    `MAX_IN_FLIGHT_HEALTH_REQUESTS = 1`; no delivery, cancel, reconcile, or
+    shutdown request can consume that named bound, and a second concurrent
+    health request receives `TOO_MANY_IN_FLIGHT` without queueing. A valid
+    response MUST have the closed scalar result shape above, MUST exactly
+    identify the negotiated protocol, initialized adapter, trusted manifest,
+    endpoint, workspace and complete scope discriminator, and capability-set
+    identity/revisions, and MUST arrive inside `REQUEST_DEADLINE_MS`. For
+    project scope the exact initialized `project_id` is required; for workspace
+    scope `project_id` is forbidden. Three consecutive missed, malformed,
+    unhealthy-status, identity-mismatched, or revision-mismatched health
+    responses
     (`HEALTH_FAILURE_THRESHOLD = 3`) move the adapter out of service and return
     `ADAPTER_UNHEALTHY` to new work. The host MUST create or update an operator-
     visible unhealthy record for the exact adapter, manifest, profile, endpoint,
@@ -747,16 +816,20 @@ The method-specific shapes are:
 
     The recovery connection MUST first complete only the exact trusted
     `initialize` exchange from Clause 4. That serialized handshake does not
-    consume a post-initialize control slot. After it succeeds, the only
+    consume a post-initialize capacity bound. After it succeeds, the only
     admissible methods are `runtime.reconcile` for an unresolved attempt
     explicitly named in the governing record, `runtime.health`, and
-    `runtime.shutdown`. They share Clause 2's four reserved control slots and
-    remain subject to P3-P7, deadlines, and every ordinary closed-envelope rule.
-    After P3-P7 succeeds, `runtime.deliver`, `runtime.cancel`, unrelated
-    reconciliation, and any other normal work remain blocked with
-    `ADAPTER_QUARANTINED`, or `ADAPTER_UNHEALTHY` when quarantine is not also
-    active. No blocked request is queued, no delivery slot becomes a control
-    slot, and recovery success does not admit normal work.
+    `runtime.shutdown`. Each remains subject to its own Clause 2 named one-
+    request bound, the total bound, P3-P7, deadlines, and every ordinary closed-
+    envelope rule. At most one reconcile, one health, and one shutdown request
+    can therefore be in flight on the recovery connection. The prohibited
+    `runtime.cancel` method's unused named bound remains unusable and cannot be
+    borrowed by an admissible recovery method. After P3-P7 succeeds,
+    `runtime.deliver`, `runtime.cancel`, unrelated reconciliation, and any other
+    normal work remain blocked with `ADAPTER_QUARANTINED`, or
+    `ADAPTER_UNHEALTHY` when quarantine is not also active. No blocked request
+    is queued, no method borrows delivery or another method's capacity, and
+    recovery success does not admit normal work.
 
     Final release is a separate explicit operator action. It is legal only
     after the exact manifest and capability profile, redacted diagnostics, and
@@ -854,11 +927,18 @@ The method-specific shapes are:
     the request id required by Clause 1, and MUST NOT carry a `SessionRefV1`,
     `session_ref`, or any other session selector. It is legal immediately after
     successful initialization, including before native-session discovery or
-    binding, and it remains an admissible four-slot control on the one recovery
-    connection in Clause 12. Its params MUST be exactly `{}`. On a valid
-    request, the host and adapter MUST enter shutdown before returning exactly
+    binding, and it remains admissible on the one recovery connection in
+    Clause 12 under only `MAX_IN_FLIGHT_SHUTDOWN_REQUESTS = 1`. No delivery,
+    cancel, reconcile, or health request can consume that named bound; a second
+    concurrent shutdown request receives `TOO_MANY_IN_FLIGHT` without queueing.
+    Its params MUST be exactly `{}`. On a valid request, the host and adapter
+    MUST enter shutdown before returning exactly
     `{"status":"shutdown_started"}`; they MUST stop admitting new requests and
-    return `SHUTDOWN_IN_PROGRESS` for later work. They MUST cancel work
+    return `SHUTDOWN_IN_PROGRESS` for all later work. The sole exception is a
+    second concurrently admitted `runtime.shutdown` while the first remains in
+    flight: its named same-method capacity result is only
+    `TOO_MANY_IN_FLIGHT`, as P8 requires, and it is not queued. They MUST
+    cancel work
     authoritatively known not to have been accepted, preserve and reconcile
     uncertain work, and drain remaining in-flight requests for
     `SHUTDOWN_DRAIN_MS = 10,000`. The adapter then MUST flush protocol output
