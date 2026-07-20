@@ -48,7 +48,10 @@ Clause 13 row exactly, and `request_id` MUST equal the response `id` by JSON
 type and value. `data` MAY additionally contain `correlation_id`, using the S2
 token scalar, and `evidence_refs`, an array of at most 32 redacted
 `StateEvidenceV1.evidence_id` strings. No other error or error-data member is
-legal.
+legal. Every legal `RequestId`, its mandatory response echo, and the mandatory
+`error.data.request_id` echo MUST serialize inside `MAX_MESSAGE_BYTES`; optional
+`correlation_id` or `evidence_refs` members MUST be omitted if including them
+would exceed that bound.
 
 For every inbound complete frame, the receiver MUST inspect the raw member
 sequence of every JSON object at every depth before an ordinary object parser
@@ -91,8 +94,8 @@ advance and with the existing invalid-output and quarantine rules.
 There is exactly one exception to non-null response correlation. When the
 adapter receives a direction-valid host-to-adapter inbound would-be request but
 cannot recover a valid `RequestId` because the JSON text does not parse, any
-object repeats a member name, or the parsed request envelope/id is invalid, it
-MUST emit exactly
+object repeats a member name, or the parsed request envelope/id is invalid other
+than the absent-id notification below, it MUST emit exactly
 `{"jsonrpc":"2.0","id":null,"error":...}`. The matching closed `error.data`
 object MUST set `request_id` to JSON `null`; `PARSE_ERROR` is required for
 invalid JSON syntax or a repeated member name, and `INVALID_REQUEST` is required
@@ -100,12 +103,17 @@ for duplicate-free parsed JSON that is not a valid request envelope/id. No other
 response or `error.data.request_id` may be null. This exception does not make a
 null request id legal. If an otherwise valid direction-valid host-to-adapter
 request omits `id`, it is a prohibited JSON-RPC notification: the adapter MUST
-execute no action, send no response, and apply Clause 1's close/quarantine
-behavior. If a duplicate-free malformed direction-valid host-to-adapter request
-still contains a recoverable valid `RequestId`, the adapter MUST use the normal
-error response with that exact id. Neither the null-correlation exception nor
-this malformed-request response rule applies to a duplicate-free
-host-to-adapter JSON-RPC response, including one that also contains `method`.
+classify it only as adapter-local P2 `INVALID_REQUEST`, execute no action, send
+no response, record the local notification fault, and close the connection.
+The host MUST record its own outbound protocol fault and MUST NOT quarantine,
+blame, or require operator release for the adapter solely because the adapter
+correctly closed. The absent-id notification MUST NOT reach the null-
+correlation response path. If a duplicate-free malformed direction-valid host-
+to-adapter request instead contains a recoverable valid `RequestId`, the
+adapter MUST use the normal error response with that exact id. Neither the
+null-correlation exception nor this malformed-request response rule applies to
+a duplicate-free host-to-adapter JSON-RPC response, including one that also
+contains `method`.
 That frame takes only the prohibited-host-response row above, even when its
 `id` is null, missing, invalid, uncorrelated, or otherwise malformed.
 
@@ -165,8 +173,11 @@ combine with it.
   adapter-local `INVALID_REQUEST` with no response, action, or operation-state
   advance; the adapter records the direction fault and closes, and the host
   records its own outbound fault without adapter quarantine or blame solely for
-  that frame. Only the direction-valid host request may use the notification or
-  null-correlation rules. For the two direction-valid forms, validate the
+  that frame. A direction-valid host request that omits `id` is the adapter-
+  local notification fault above and cannot use null correlation; an adapter-
+  to-host request, including one with an absent `id`, remains the host-local
+  prohibited-adapter-request fault with close and quarantine. For the two
+  direction-valid forms, validate the
   closed envelope, request id/correlation, and method; use `INVALID_REQUEST` for
   another invalid envelope/id and `METHOD_NOT_FOUND` for an otherwise valid
   host request naming a method outside the closed six.
@@ -208,9 +219,17 @@ combine with it.
   `INVALID_DELIVERY`. For reconciliation, absent authoritative observation or
   contradictory, ambiguous, or non-authoritative evidence that leaves truth
   unresolved is `RECONCILIATION_REQUIRED`.
-- **P8 — admission state.** Apply `TOO_MANY_IN_FLIGHT`,
-  `ADAPTER_UNHEALTHY`, `ADAPTER_QUARANTINED`, or
-  `SHUTDOWN_IN_PROGRESS`. No runtime action begins before this step passes.
+- **P8 — admission state.** Apply Clause 2's total, delivery, and reserved-
+  control capacity bounds and Clauses 11, 12, and 15's health, quarantine,
+  recovery-only, and shutdown gates. Shutdown blocks later work first. When an
+  adapter is quarantined, `ADAPTER_QUARANTINED` takes precedence over
+  `ADAPTER_UNHEALTHY`; without the one exact operator-authorized recovery
+  connection, either state blocks normal work. On that recovery connection,
+  only the exact methods and recorded attempts allowed by Clause 12 may reach
+  capacity admission; any other request receives the applicable adapter-state
+  error. An otherwise admissible request that exceeds its delivery or control
+  pool receives `TOO_MANY_IN_FLIGHT`. No request is queued, no pool borrows from
+  the other, and no runtime action begins before this step passes.
 - **P9 — execution.** A subsequently observed handshake/request timeout,
   cancellation, reconciliation uncertainty, stderr overflow, redaction
   failure, or otherwise internal failure uses only its corresponding Clause 13
@@ -250,13 +269,13 @@ The method-specific shapes are:
   success result is directly one complete `ReceiptV1`, with no result wrapper.
 - `runtime.cancel` params contain exactly `session_ref` and
   `original_request_id`, whose values are one complete `SessionRefV1` and the
-  original delivery request's exact `RequestId`. Its success result contains
-  exactly `original_request_id`, equal in JSON type and value to the params
-  member, and `status`, whose string constant is `"cancelled"`.
+  original delivery request's exact bounded `RequestId` scalar. Its success
+  result contains exactly `original_request_id`, equal in JSON type and value to
+  the params member, and `status`, whose string constant is `"cancelled"`.
 - `runtime.reconcile` params contain exactly `session_ref`,
   `original_request_id`, `delivery_id`, and `attempt_id`. `session_ref` is one
   complete `SessionRefV1`; `original_request_id` is the unresolved request's
-  exact `RequestId`; and the last two values use the exact S2
+  exact bounded `RequestId` scalar; and the last two values use the exact S2
   `DeliveryV1.delivery_id` and `DeliveryV1.attempt_id` scalar definitions. Its
   success result is directly one complete identity-matching `ReceiptV1`, with
   no result wrapper.
@@ -292,16 +311,28 @@ The method-specific shapes are:
    to drain, fail each affected operation with `STDERR_LIMIT_EXCEEDED` when a
    response is possible, preserve any possibly accepted delivery as unresolved
    for reconciliation, and quarantine the adapter pending explicit release.
-   `RequestId` is a non-null JSON string or a safe integer in
+   `RequestId` is either a nonempty JSON string whose decoded value is 1-256
+   UTF-8 bytes or a safe integer in
    [-9,007,199,254,740,991, 9,007,199,254,740,991], unique among in-flight
-   requests on that connection. Every direction-valid host-to-adapter
+   requests on that connection. This exact scalar and bound also apply to every
+   carried `original_request_id`; neither side may coerce, truncate, hash, or
+   substitute it. The string bound guarantees that the required top-level id
+   echo and mandatory `error.data.request_id` echo fit within
+   `MAX_MESSAGE_BYTES`; implementations MUST still measure the complete encoded
+   response before writing it. Every direction-valid host-to-adapter
    `initialize` and `runtime.*` invocation MUST carry a `RequestId`. An omitted
-   `id` in such a request is a prohibited notification; a notification or
-   invalid id MUST execute no action. A direction-valid notification receives no
-   response and MUST close the connection and quarantine the adapter rather than
-   claim an error was delivered. An invalid id follows the null-correlation
-   `INVALID_REQUEST` exception above unless a different valid `RequestId` is
-   recoverable, which V1 never infers.
+   `id` in such a request is a prohibited notification; an empty string, a
+   string over 256 UTF-8 bytes, a non-safe integer, `null`, or another JSON type
+   is an invalid id. Either case MUST execute no action. The absent-id host
+   notification is adapter-local P2 `INVALID_REQUEST`: the adapter sends no
+   response, records the local fault, and closes, while the host records its own
+   outbound protocol fault and MUST NOT quarantine, blame, or require release
+   for the adapter solely for that correct close. It cannot reach null
+   correlation. A present invalid or oversized id follows the P2 null-
+   correlation `INVALID_REQUEST` exception above unless a different valid
+   `RequestId` is recoverable, which V1 never infers. A carried
+   `original_request_id` that violates the same scalar is instead
+   `INVALID_PARAMS` at P3 before action.
 
    Physical framing is validated before JSON grammar. Invalid UTF-8 or EOF
    before the required terminating `\n` is `INVALID_FRAMING`; when that failure
@@ -347,12 +378,26 @@ The method-specific shapes are:
 
 2. **Size bounds (normative).** `MAX_MESSAGE_BYTES` is 1,048,576 bytes,
    including the JSON bytes but excluding the terminating `\n`.
-   `MAX_IN_FLIGHT_REQUESTS` is 32 requests per adapter connection. The reader
-   MUST stop buffering a frame after `MAX_MESSAGE_BYTES + 1` bytes. An oversized
-   frame MUST receive `MESSAGE_TOO_LARGE` when a response is possible and be
+   `MAX_IN_FLIGHT_REQUESTS` remains 32 total post-initialize requests per adapter
+   connection. `MAX_IN_FLIGHT_DELIVERIES` is 28 and applies only to
+   `runtime.deliver`. `MAX_IN_FLIGHT_CONTROL_REQUESTS` is 4 and is a reserved
+   shared pool for `runtime.cancel`, `runtime.reconcile`, `runtime.health`, and
+   `runtime.shutdown`. Deliveries MUST NOT consume a control slot, controls MUST
+   NOT consume a delivery slot, deliveries MUST never exceed 28, controls MUST
+   never exceed four, and their sum MUST never exceed 32. Thus 28 deliveries
+   plus four controls is admissible; a 29th delivery or fifth control receives
+   `TOO_MANY_IN_FLIGHT` even if the other pool has unused slots. The sole
+   `initialize` handshake request is serialized before normal work, does not
+   compete for either post-initialize pool, and cannot overlap another method.
+   The same pools and bounds apply on the one recovery connection in Clause 12,
+   where only its permitted post-initialize control methods are admissible.
+   The reader MUST stop buffering a frame after
+   `MAX_MESSAGE_BYTES + 1` bytes. An oversized frame MUST receive
+   `MESSAGE_TOO_LARGE` when a response is possible and be
    discarded without unbounded buffering. A request above the in-flight limit
-   MUST receive `TOO_MANY_IN_FLIGHT`; it MUST NOT be queued in an unbounded host
-   or adapter buffer.
+   applicable to its pool or above the total limit MUST receive
+   `TOO_MANY_IN_FLIGHT`; it MUST NOT be queued in a host or adapter buffer and
+   MUST begin no action.
 
 3. **Time bounds (normative).** `REQUEST_DEADLINE_MS` is 30,000 milliseconds
    from receipt of a complete frame, and `HANDSHAKE_DEADLINE_MS` is 5,000
@@ -384,6 +429,10 @@ The method-specific shapes are:
    narrower errors in Clauses 5 and 6. Every such failure occurs before
    initialization and terminates or quarantines the connection as applicable;
    it MUST NOT create a partial initialized binding.
+   An operator-authorized recovery connection under Clause 12 MUST perform this
+   same exact trusted handshake. Recovery authorization cannot supply, replace,
+   relax, or bypass any initialize, manifest, registry, endpoint, capability-
+   set, version, deadline, or echo validation.
 
 5. **Trusted manifest lookup (normative).** The host MUST resolve the adapter
    executable, immutable argument vector, working directory, environment
@@ -621,6 +670,19 @@ The method-specific shapes are:
     `INVALID_PARAMS` before action. Neither side may synthesize success, choose
     another session, or blindly resend.
 
+    When Clause 12 admits a recovery connection for a quarantined or unhealthy
+    adapter, `runtime.reconcile` is admissible only when its exact
+    `original_request_id`, delivery id, attempt id, session, endpoint, workspace,
+    and scope identify one unresolved attempt explicitly named in the governing
+    quarantine or unhealthy record. The request remains subject to every P3-P7
+    validation and the four-slot control pool; operator authorization supplies
+    no identity, capability, evidence, or outcome authority. After P3-P7
+    succeeds, a reconciliation that is unrelated to or does not exactly match a
+    named record attempt receives `ADAPTER_QUARANTINED`, or
+    `ADAPTER_UNHEALTHY` when quarantine is not also active, at P8 and performs
+    no action. A valid recovery reconciliation resolves only its named attempt
+    and does not clear quarantine or unhealthy state.
+
 11. **Health (normative).** The host MUST call `runtime.health` every
     `HEALTH_INTERVAL_MS`, fixed at 10,000 milliseconds, using exactly `{}`
     params. Health is connection/initialized-endpoint scoped: it MUST NOT carry
@@ -635,9 +697,17 @@ The method-specific shapes are:
     forbidden. Three consecutive missed, malformed, unhealthy-status,
     identity-mismatched, or revision-mismatched health responses
     (`HEALTH_FAILURE_THRESHOLD = 3`) move the adapter out of service and return
-    `ADAPTER_UNHEALTHY` to new work. The host MUST stop assigning requests until
-    a new initialization and any required operator release have completed. An
-    invalid health request returns `INVALID_PARAMS` before action. A missing,
+    `ADAPTER_UNHEALTHY` to new work. The host MUST create or update an operator-
+    visible unhealthy record for the exact adapter, manifest, profile, endpoint,
+    reason, timestamps, and every unresolved attempt eligible for recovery,
+    using the exact identities required by Clause 12. It MUST stop assigning
+    normal requests until Clause 12's recovery and separate explicit operator
+    release complete. When quarantine is not also active, blocked normal work
+    receives `ADAPTER_UNHEALTHY`; only the single operator-authorized recovery
+    connection may admit the bounded recovery controls. Successful recovery
+    health responses contribute to the required fresh healthy sequence but MUST
+    NOT automatically clear unhealthy or quarantine state. An invalid health
+    request returns `INVALID_PARAMS` before action. A missing,
     additional, or mistyped health result member is host-local
     `INVALID_REQUEST` at P3, receives no response, advances no health state, and
     counts as one failed response. An identity or independent-revision mismatch
@@ -645,28 +715,65 @@ The method-specific shapes are:
     failed response; the threshold may make future work `ADAPTER_UNHEALTHY`,
     but it does not replace the current response's first-failure code.
 
-12. **Quarantine (normative).** The host MUST quarantine an adapter for
-    unsupported version drift, trusted-manifest mismatch, capability or exact-
-    session contract violation, a prohibited notification, a duplicate-bearing
-    adapter output, a prohibited adapter-to-host request, stderr overflow,
-    redaction failure, repeated closed-envelope, result-shape, or other invalid
-    protocol output, unresolved possible acceptance, or the health failure
-    threshold. Quarantine MUST create an operator-visible record containing
-    adapter id, manifest and adapter revisions, initialized endpoint and
-    capability-set identities/revisions, reason code, correlation ids, affected
-    session and attempt ids when applicable, bounded stderr byte and truncation
-    counts when applicable, evidence references, and timestamps after
-    redaction. Quarantine MUST NOT auto-clear on reconnect or process restart.
-    Release requires an explicit operator action after the manifest/profile and
-    bounded-diagnostic behavior are reviewed, unresolved deliveries are
-    reconciled, and a fresh handshake and connection-scoped health sequence
-    succeed; otherwise requests receive `ADAPTER_QUARANTINED`.
-    A connection close caused only by a duplicate-free prohibited
-    host-to-adapter response is not adapter-originated quarantine evidence. The
-    host MUST record its own outbound protocol fault and MUST NOT quarantine,
-    require operator release for, or assign the direction fault to the adapter
-    solely because the adapter made the required close; independent
-    adapter-originated evidence may still satisfy this clause.
+12. **Quarantine and recovery (normative).** The host MUST quarantine an adapter
+    for unsupported version drift, trusted-manifest mismatch, capability or
+    exact-session contract violation, a duplicate-bearing adapter output, a
+    prohibited adapter-to-host request including one with an absent `id`, stderr
+    overflow, redaction failure, repeated closed-envelope, result-shape, or
+    other invalid protocol output, or unresolved possible acceptance. The
+    health failure threshold creates Clause 11's unhealthy state; an
+    independent quarantine trigger may make both states active. Quarantine MUST
+    create an operator-visible record
+    containing adapter id, manifest and adapter revisions, initialized endpoint
+    and capability-set identities/revisions, reason code, correlation ids,
+    affected session ids, and the exact original request, delivery, and attempt
+    ids for every unresolved attempt when applicable, bounded stderr byte and
+    truncation counts when applicable, evidence references, and timestamps after
+    redaction. Quarantine and unhealthy state MUST NOT auto-clear on reconnect,
+    process restart, successful reconciliation, handshake, or health response.
+
+    While either state is active, ordinary connection and request admission is
+    closed. An operator MAY explicitly authorize one recovery-only connection
+    tied to one exact quarantine or unhealthy record and its exact adapter,
+    manifest, profile, endpoint, workspace, and scope. The host MUST admit at
+    most one such connection; it MUST reject and terminate any concurrent or
+    not-separately-authorized replacement recovery connection under the
+    applicable adapter-state error, with `ADAPTER_QUARANTINED` taking precedence
+    when both states apply. A replacement after connection loss requires a new
+    explicit operator authorization and still cannot coexist with another
+    recovery connection. The operator authorization is admission authority only:
+    it is not a release, capability grant, identity source, evidence source,
+    reconciliation outcome, or second canonical ledger.
+
+    The recovery connection MUST first complete only the exact trusted
+    `initialize` exchange from Clause 4. That serialized handshake does not
+    consume a post-initialize control slot. After it succeeds, the only
+    admissible methods are `runtime.reconcile` for an unresolved attempt
+    explicitly named in the governing record, `runtime.health`, and
+    `runtime.shutdown`. They share Clause 2's four reserved control slots and
+    remain subject to P3-P7, deadlines, and every ordinary closed-envelope rule.
+    After P3-P7 succeeds, `runtime.deliver`, `runtime.cancel`, unrelated
+    reconciliation, and any other normal work remain blocked with
+    `ADAPTER_QUARANTINED`, or `ADAPTER_UNHEALTHY` when quarantine is not also
+    active. No blocked request is queued, no delivery slot becomes a control
+    slot, and recovery success does not admit normal work.
+
+    Final release is a separate explicit operator action. It is legal only
+    after the exact manifest and capability profile, redacted diagnostics, and
+    bounded-diagnostic behavior are reviewed; every unresolved attempt named in
+    the governing record is reconciled to authoritative truth; the recovery
+    connection completes a fresh exact handshake; and three consecutive valid
+    `runtime.health` responses form a fresh healthy sequence at
+    `HEALTH_INTERVAL_MS`. Until that action, applicable requests continue to
+    receive `ADAPTER_QUARANTINED` or `ADAPTER_UNHEALTHY`.
+
+    A connection close caused only by a duplicate-free prohibited host-to-
+    adapter response or a direction-valid host request missing `id` is not
+    adapter-originated quarantine evidence. The host MUST record its own
+    outbound protocol fault and MUST NOT quarantine, require operator release
+    for, or assign either fault to the adapter solely because the adapter made
+    the required close; independent adapter-originated evidence may still
+    satisfy this clause.
 
 13. **Structured errors (normative).** Every direction-valid host-to-adapter
     request failure for which JSON-RPC permits a response MUST use the exact
@@ -680,8 +787,11 @@ The method-specific shapes are:
     host-to-adapter response is instead adapter-local P2 `INVALID_REQUEST`
     regardless of id or correlation validity; the adapter records that code and
     closes but sends no JSON-RPC response or error, and the host records its own
-    outbound fault rather than an adapter fault. `error.data.retryable` MUST be
-    the exact JSON boolean in the selected row. The `message`, `data.name`, and
+    outbound fault rather than an adapter fault. The same adapter-local P2
+    `INVALID_REQUEST`, no-response, local-record, and host-owned-fault behavior
+    applies to a direction-valid host request missing `id`; it cannot use the
+    null-correlation error envelope. `error.data.retryable` MUST be the exact
+    JSON boolean in the selected row. The `message`, `data.name`, and
     `data.retryable` values MUST all match that row exactly. The first failing
     pipeline step is the sole classifier; free-form strings, stderr, exit
     status, later validation failures, or host-specific exceptions are not
@@ -716,12 +826,15 @@ The method-specific shapes are:
     Any numeric code outside this list is a protocol violation. The host MUST
     record it and quarantine the adapter rather than guessing retryability.
     `TOO_MANY_IN_FLIGHT` may be retried only after capacity is available.
-    `ADAPTER_UNHEALTHY` may be retried only after a fresh healthy
-    initialization. `REQUEST_TIMEOUT` and `RECONCILIATION_REQUIRED` are not
-    resend permissions and require reconciliation rather than retry.
+    `ADAPTER_UNHEALTHY` normal work may be retried only after Clause 12's fresh
+    handshake, exact reconciliation, healthy sequence, and separate operator
+    release. `REQUEST_TIMEOUT` and `RECONCILIATION_REQUIRED` are not resend
+    permissions and require reconciliation rather than retry.
     `STDERR_LIMIT_EXCEEDED` and `ADAPTER_QUARANTINED` remain non-retryable
-    pending explicit operator release. Every other `false` row remains
-    non-retryable under its defining clause.
+    pending explicit operator release. Operator-authorized recovery admission
+    for the exact Clause 12 controls is not a retry permission for a blocked
+    normal request and does not change any table literal. Every other `false`
+    row remains non-retryable under its defining clause.
 
 14. **Redaction (normative).** Before any log, evidence file, diagnostic,
     quarantine record, or persistent protocol trace is written, both sides MUST
@@ -741,8 +854,9 @@ The method-specific shapes are:
     the request id required by Clause 1, and MUST NOT carry a `SessionRefV1`,
     `session_ref`, or any other session selector. It is legal immediately after
     successful initialization, including before native-session discovery or
-    binding. Its params MUST be exactly `{}`. On a valid request, the host and
-    adapter MUST enter shutdown before returning exactly
+    binding, and it remains an admissible four-slot control on the one recovery
+    connection in Clause 12. Its params MUST be exactly `{}`. On a valid
+    request, the host and adapter MUST enter shutdown before returning exactly
     `{"status":"shutdown_started"}`; they MUST stop admitting new requests and
     return `SHUTDOWN_IN_PROGRESS` for later work. They MUST cancel work
     authoritatively known not to have been accepted, preserve and reconcile
