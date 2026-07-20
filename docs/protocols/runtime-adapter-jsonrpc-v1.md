@@ -19,11 +19,29 @@ objects.
    with exactly one UTF-8 encoded JSON object per line, terminated by one `\n`.
    JSON strings MUST escape newlines; an embedded raw newline ends the frame.
    Standard output MUST contain protocol frames only. Standard error is for
-   bounded diagnostics only and MUST NOT contain protocol responses. On invalid
-   UTF-8, non-object JSON, a missing terminator, an embedded raw newline, or
-   non-protocol standard output, the receiver MUST return `INVALID_FRAMING`
-   when a response is possible and otherwise close the connection; it MUST NOT
-   reinterpret stderr or concatenate adjacent lines into a request.
+   diagnostics only and MUST NOT contain protocol responses.
+   `MAX_STDERR_BYTES_PER_CONNECTION` is 65,536 bytes, counted cumulatively from
+   process start through stderr EOF. The host MUST continuously drain stderr,
+   independently of stdout and request processing, until process exit or hard
+   kill so the pipe cannot deadlock. It MUST retain no more than
+   `MAX_STDERR_BYTES_PER_CONNECTION`; after the first excess byte it MUST mark
+   the retained diagnostic as truncated, discard all overflow while continuing
+   to drain, fail each affected operation with `STDERR_LIMIT_EXCEEDED` when a
+   response is possible, preserve any possibly accepted delivery as unresolved
+   for reconciliation, and quarantine the adapter pending explicit release.
+   Every `initialize` and `runtime.*` invocation MUST be a JSON-RPC request with
+   a non-null `id` that is either a JSON string or a safe integer in
+   [-9,007,199,254,740,991, 9,007,199,254,740,991], unique among in-flight
+   requests on that connection. An omitted `id` is a prohibited notification;
+   a notification or invalid id MUST execute no action. The receiver MUST return
+   `INVALID_REQUEST` when a correlatable response is possible, and for a
+   notification, where JSON-RPC permits no response, it MUST close the
+   connection and quarantine the adapter rather than claim an error was
+   delivered. On invalid UTF-8, non-object JSON, a missing terminator, an
+   embedded raw newline, or non-protocol standard output, the receiver MUST
+   return `INVALID_FRAMING` when a response is possible and otherwise close the
+   connection; it MUST NOT reinterpret stderr or concatenate adjacent lines
+   into a request.
 
 2. **Size bounds (normative).** `MAX_MESSAGE_BYTES` is 1,048,576 bytes,
    including the JSON bytes but excluding the terminating `\n`.
@@ -45,7 +63,8 @@ objects.
 
 4. **Handshake and version negotiation (normative).** The first frame in each
    direction MUST be the `initialize` exchange. The request MUST carry the
-   requested protocol version, whose V1 spelling is `1.0`, and the response
+   request id required by Clause 1 and the requested protocol version, whose V1
+   spelling is `1.0`; an `initialize` notification is prohibited. The response
    MUST return the negotiated protocol version and the adapter's
    `CapabilitySetV1`. Before initialization succeeds, no other method is legal.
    An unknown or unsupported major version MUST return
@@ -71,15 +90,17 @@ objects.
    invocation MUST return `CAPABILITY_NOT_DECLARED`; the host MUST NOT fall back
    to another method, capability, endpoint, or session.
 
-7. **Exact session binding (normative).** Every post-initialize request,
-   including delivery, cancellation, reconciliation, health, and shutdown,
-   MUST carry one complete `SessionRefV1`, and the host MUST validate it against
-   the trusted registry and the initialized adapter revision. Wildcards,
-   prefixes, display names, window order, `latest`, inferred cwd, inferred
-   project, and omitted or `null` project identity are prohibited. A missing,
-   mismatched, stale, inferred, or non-authoritative session reference MUST
-   return `INVALID_SESSION_REF`; the adapter MUST NOT choose a replacement
-   session.
+7. **Exact session binding (normative).** Every post-initialize stateful or
+   session method other than the connection-scoped `runtime.shutdown`—namely
+   `runtime.deliver`, `runtime.cancel`, `runtime.reconcile`, and
+   `runtime.health`—MUST carry one complete `SessionRefV1`, and the host MUST
+   validate it against the trusted registry and the initialized adapter
+   revision. Wildcards, prefixes, display names, window order, `latest`,
+   inferred cwd, inferred project, and omitted or `null` project identity are
+   prohibited. A missing, mismatched, stale, inferred, or non-authoritative
+   session reference MUST return `INVALID_SESSION_REF`; the adapter MUST NOT
+   choose a replacement session. `runtime.shutdown` MUST follow the no-session
+   connection rule in Clause 15 instead.
 
 8. **Delivery (normative).** The `runtime.deliver` method MUST receive exactly
    two protocol members: `session_ref`, whose value is a `SessionRefV1`, and
@@ -91,24 +112,26 @@ objects.
    `INVALID_DELIVERY`; it MUST NOT advance canonical delivery state.
 
 9. **Cancellation (normative).** The `runtime.cancel` method MUST name the exact
-   JSON-RPC request id being cancelled and carry the same `SessionRefV1` as the
-   original request. Cancellation is idempotent: repeated cancellation of a
-   request that was authoritatively cancelled before external acceptance MUST
-   return the same `REQUEST_CANCELLED` terminal result. Cancellation MUST NOT
-   claim success when acceptance may have occurred; that case MUST return
+   original JSON-RPC request id being cancelled, use its own distinct request id
+   under Clause 1, and carry the same `SessionRefV1` as the original request.
+   Cancellation is idempotent: repeated cancellation of a request that was
+   authoritatively cancelled before external acceptance MUST return the same
+   `REQUEST_CANCELLED` terminal result. Cancellation MUST NOT claim success
+   when acceptance may have occurred; that case MUST return
    `RECONCILIATION_REQUIRED`, preserve the attempt as unresolved, and prohibit
    retry until reconciliation determines authoritative not-accepted evidence.
 
 10. **Reconciliation (normative).** After adapter restart, connection loss, or
     any possibly accepted request without a committed result, the host MUST
-    invoke `runtime.reconcile` with the exact `SessionRefV1` and the outstanding
-    delivery and attempt identities. The core ledger remains authoritative for
-    canonical intent, delivery identity, and unresolved state; the adapter is
-    authoritative only for host observations represented by valid `ReceiptV1`
-    and `StateEvidenceV1` values. Missing or contradictory host evidence MUST
-    return `RECONCILIATION_REQUIRED` and keep the attempt unresolved or
-    quarantined; neither side may synthesize success, choose another session,
-    or blindly resend.
+    invoke `runtime.reconcile` with its own request id, the exact original
+    JSON-RPC request id being reconciled, the exact `SessionRefV1`, and the
+    outstanding delivery and attempt identities. The core ledger remains
+    authoritative for canonical intent, delivery identity, and unresolved
+    state; the adapter is authoritative only for host observations represented
+    by valid `ReceiptV1` and `StateEvidenceV1` values. Missing or contradictory
+    host evidence MUST return `RECONCILIATION_REQUIRED` and keep the attempt
+    unresolved or quarantined; neither side may synthesize success, choose
+    another session, or blindly resend.
 
 11. **Health (normative).** The host MUST call `runtime.health` every
     `HEALTH_INTERVAL_MS`, fixed at 10,000 milliseconds, for an exact
@@ -121,15 +144,18 @@ objects.
 
 12. **Quarantine (normative).** The host MUST quarantine an adapter for
     unsupported version drift, trusted-manifest mismatch, capability or exact-
-    session contract violation, redaction failure, repeated invalid protocol
-    output, unresolved possible acceptance, or the health failure threshold.
-    Quarantine MUST create an operator-visible record containing adapter id,
-    manifest and adapter revisions, reason code, correlation ids, affected
-    session and attempt ids, evidence references, and timestamps after
-    redaction. Quarantine MUST NOT auto-clear on reconnect or process restart.
-    Release requires an explicit operator action after the manifest/profile is
+    session contract violation, a prohibited notification, stderr overflow,
+    redaction failure, repeated invalid protocol output, unresolved possible
+    acceptance, or the health failure threshold. Quarantine MUST create an
+    operator-visible record containing adapter id, manifest and adapter
+    revisions, reason code, correlation ids, affected session and attempt ids,
+    bounded stderr byte and truncation counts when applicable, evidence
+    references, and timestamps after redaction. Quarantine MUST NOT auto-clear
+    on reconnect or process restart. Release requires an explicit operator
+    action after the manifest/profile and bounded-diagnostic behavior are
     reviewed, unresolved deliveries are reconciled, and a fresh handshake and
-    health sequence succeed; otherwise requests receive `ADAPTER_QUARANTINED`.
+    health sequence succeed; otherwise requests receive
+    `ADAPTER_QUARANTINED`.
 
 13. **Structured errors (normative).** Every failure MUST use a JSON-RPC error
     whose numeric code is from the following closed enumeration. `message` is a
@@ -162,6 +188,7 @@ objects.
     | -32014 | `ADAPTER_QUARANTINED` | no; explicit release required |
     | -32015 | `REDACTION_FAILURE` | no |
     | -32016 | `SHUTDOWN_IN_PROGRESS` | no |
+    | -32017 | `STDERR_LIMIT_EXCEEDED` | no; explicit release required |
 
     Any numeric code outside this list is a protocol violation. The host MUST
     record it and quarantine the adapter rather than guessing retryability.
@@ -172,19 +199,28 @@ objects.
     environment values, message-body bytes, caller-provided raw payloads,
     `configuration_ref` resolution data, local user/home paths, and native
     session identifiers except for approved stable hashes or schema identity
-    references. Redaction MUST happen before persistence, not at read time. If
-    required redaction cannot be proven, persistence MUST stop, the request MUST
-    return `REDACTION_FAILURE`, and the adapter MUST be quarantined.
+    references. The bounded retained stderr prefix is subject to the same rule;
+    discarded stderr overflow MUST NOT be reconstructed or persisted, and only
+    redacted bounded diagnostics, byte counts, and a truncation marker may enter
+    the quarantine record. Redaction MUST happen before persistence, not at read
+    time. If required redaction cannot be proven, persistence MUST stop, the
+    request MUST return `REDACTION_FAILURE`, and the adapter MUST be
+    quarantined.
 
-15. **Shutdown (normative).** On `runtime.shutdown`, the host MUST stop
-    admitting new requests and return `SHUTDOWN_IN_PROGRESS` for later work. It
-    MUST cancel work authoritatively known not to have been accepted, preserve
-    and reconcile uncertain work, and drain remaining in-flight requests for
-    `SHUTDOWN_DRAIN_MS = 10,000`. The adapter then MUST flush protocol output and
-    exit. At `SHUTDOWN_HARD_KILL_MS = 15,000` from shutdown start, the host MUST
-    terminate a still-running process. A hard kill MUST leave possibly accepted
-    attempts unresolved or quarantined; it MUST NOT mark them cancelled,
-    accepted, or completed without authoritative evidence.
+15. **Shutdown (normative).** `runtime.shutdown` is connection-scoped, MUST use
+    the request id required by Clause 1, and MUST NOT carry a `SessionRefV1`,
+    `session_ref`, or any other session selector. It is legal immediately after
+    successful initialization, including before native-session discovery or
+    binding. On `runtime.shutdown`, the host MUST stop admitting new requests
+    and return `SHUTDOWN_IN_PROGRESS` for later work. It MUST cancel work
+    authoritatively known not to have been accepted, preserve and reconcile
+    uncertain work, and drain remaining in-flight requests for
+    `SHUTDOWN_DRAIN_MS = 10,000`. The adapter then MUST flush protocol output
+    and exit. At `SHUTDOWN_HARD_KILL_MS = 15,000` from shutdown start, the host
+    MUST terminate a still-running process while continuing to drain stderr to
+    EOF. A hard kill MUST leave possibly accepted attempts unresolved or
+    quarantined; it MUST NOT mark them cancelled, accepted, or completed without
+    authoritative evidence.
 
 16. **Caller-input prohibitions (normative).** A caller MUST NEVER supply or
     override an executable path, argv, working directory, environment,

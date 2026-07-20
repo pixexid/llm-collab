@@ -31,16 +31,38 @@ def reject_json_constant(value: str) -> None:
     raise ValueError(f"non-standard JSON constant: {value}")
 
 
+def reject_duplicate_pairs(
+    pairs: list[tuple[str, object]],
+) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON key {key!r}")
+        result[key] = value
+    return result
+
+
 def load_declaration() -> dict[str, object]:
     return json.loads(
         DECLARATION_PATH.read_text(encoding="utf-8"),
         parse_constant=reject_json_constant,
+        object_pairs_hook=reject_duplicate_pairs,
     )
 
 
 class StandaloneFeatureDeclarationTests(unittest.TestCase):
     def test_declaration_parses_as_strict_json(self) -> None:
         self.assertIsInstance(load_declaration(), dict)
+        with self.assertRaisesRegex(
+            ValueError,
+            "duplicate JSON key 'runtime_dispatch'",
+        ):
+            json.loads(
+                '{"features":{"runtime_dispatch":true,'
+                '"runtime_dispatch":false}}',
+                parse_constant=reject_json_constant,
+                object_pairs_hook=reject_duplicate_pairs,
+            )
 
     def test_top_level_key_set_is_exact(self) -> None:
         self.assertEqual(set(load_declaration()), TOP_LEVEL_KEYS)
