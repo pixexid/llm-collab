@@ -396,18 +396,25 @@ After merge:
 
 1. fast-forward local `main`
 2. run targeted post-merge smoke only when the merge is browser-relevant
-3. update the project queue artifact when lane ordering/state changes
-4. run the executable branch/worktree cleanup gate
-5. mark local task done — EXCEPT for a production-affecting merge, where
-   done-marking waits for the release-closure gate below ("Release closure
-   does not end at merge"): terminal deploy+smoke success for the exact merge
-   SHA, or an explicit Codex disposition on a non-success. Never mark done
-   with the release outcome unknown or red. For production-affecting merges
-   the queue runner likewise remains in `post_merge` — it does not advance to
-   the next lane — until exact-SHA release SUCCESS or Codex's explicit
-   terminal non-success disposition is recorded. A docs-only or otherwise
-   non-production-impacting merge exits via an explicit scope disposition
-   (recorded as such); a skipped deploy is never called deploy success.
+3. evaluate the exact merge SHA through the project's configured release
+   authority
+4. only after terminal success or an explicit honest non-success disposition,
+   move the local task from `review` to `done`
+5. after the `review → done` transition succeeds, perform any required project
+   queue refresh for lane-ordering or state changes
+6. only then run the branch/worktree cleanup gate in applying mode
+
+`PENDING`, `MISSING`, `FAILURE`, or `CANCELLED` stops this sequence: preserve
+the task in `review` and preserve the implementation lane. Do not apply cleanup
+or advance the queue runner beyond `post_merge`.
+
+For a production-affecting merge, the `review → done` transition waits for the
+release-closure gate below ("Release closure does not end at merge"): terminal
+deploy+smoke success for the exact merge SHA, or an explicit Codex disposition
+on a non-success. Never mark done with the release outcome unknown or red. A
+docs-only or otherwise non-production-impacting merge exits via an explicit
+scope disposition (recorded as such); a skipped deploy is never called deploy
+success.
 
 For `llm-collab` itself, the shared local checkout is part of the shipped
 workflow. After a PR that changes workflow docs, scripts, gates, skills, agent
@@ -545,11 +552,14 @@ Do not treat `merged` as sufficient evidence that a worker branch/worktree is di
 Worker branches/worktrees are deletion candidates only when all of the following are true:
 
 1. the related PR is merged or the related issue is closed
-2. the related local task mirror is `done`, not `open`, `in_progress`, `blocked`, or `review`
-3. the branch is not the active branch of any existing worktree
-4. the worktree is clean enough to discard (`git status --short --untracked-files=all`)
-5. the branch tip is merged into `main` or patch-equivalent to a merged commit on `main`
-6. no active chat/task/brief still points to that branch/worktree as the implementation lane
+2. the related local task mirror has an exact `project_id` match for the
+   cleanup command's `--project`; a missing, empty, null, or foreign project ID
+   is not a task match
+3. the related local task mirror is `done`, not `open`, `in_progress`, `blocked`, or `review`
+4. the branch is not the active branch of any existing worktree
+5. the worktree is clean enough to discard (`git status --short --untracked-files=all`)
+6. the branch tip is merged into `main` or patch-equivalent to a merged commit on `main`
+7. no active chat/task/brief still points to that branch/worktree as the implementation lane
 
 If any one of those checks fails, defer cleanup.
 

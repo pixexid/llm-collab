@@ -131,7 +131,7 @@ def resolve_worktree_root(args: argparse.Namespace, repo: Path) -> Path:
     return repo.parent / f"{repo.name}-worktrees"
 
 
-def load_tasks() -> tuple[dict[str, TaskRecord], dict[str, TaskRecord]]:
+def load_tasks(project: str) -> tuple[dict[str, TaskRecord], dict[str, TaskRecord]]:
     by_id: dict[str, TaskRecord] = {}
     by_branch: dict[str, TaskRecord] = {}
     for folder in ("active", "backlog", "done"):
@@ -140,6 +140,8 @@ def load_tasks() -> tuple[dict[str, TaskRecord], dict[str, TaskRecord]]:
             continue
         for task_path in sorted(task_dir.glob("*.md")):
             frontmatter, _body = parse_frontmatter(task_path.read_text())
+            if frontmatter.get("project_id") != project:
+                continue
             task_id = str(frontmatter.get("task_id") or "").strip()
             if not task_id:
                 continue
@@ -294,7 +296,7 @@ def classify(args: argparse.Namespace) -> dict[str, Any]:
     ensure_project(args.project, allow_none=False)
     repo = resolve_repo(args)
     worktree_root = resolve_worktree_root(args, repo)
-    by_id, by_branch = load_tasks()
+    by_id, by_branch = load_tasks(args.project)
     worktrees = parse_worktrees(repo)
     registered_paths = {record.path.resolve() for record in worktrees}
 
