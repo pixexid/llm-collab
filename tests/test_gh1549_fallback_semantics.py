@@ -23,7 +23,7 @@ import inspect
 import json
 import re
 import unittest
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -65,6 +65,17 @@ _RUNNABLE_AX_RE = re.compile(
     r"\s+"
     r"(?:--[\w-]+|<[^>]+>|\w)"  # a shell argument: flag, placeholder, or value
 )
+
+
+def _parse_explicit_timezone_iso8601(value: str) -> datetime:
+    """Parse an explicit-timezone ISO 8601 value and normalize it to UTC."""
+    if not isinstance(value, str) or not value:
+        raise ValueError("timestamp must be a non-empty string")
+    normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
+    parsed = datetime.fromisoformat(normalized)
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError("timestamp must include an explicit timezone")
+    return parsed.astimezone(timezone.utc)
 
 
 def _bare_runnable_ax_lines(text: str) -> list[str]:
@@ -402,6 +413,125 @@ class Gh1549FallbackFixturesTest(unittest.TestCase):
                 ):
                     self._assert_fallback_case_coherent(case)
 
+    def test_fallback_timestamp_parser_normalizes_explicit_instants_to_utc(
+        self,
+    ) -> None:
+        trailing_z = _parse_explicit_timezone_iso8601(
+            "2026-07-18T12:00:00Z"
+        )
+        explicit_offset = _parse_explicit_timezone_iso8601(
+            "2026-07-18T14:00:00+02:00"
+        )
+        self.assertEqual(trailing_z, explicit_offset)
+        self.assertIs(trailing_z.tzinfo, timezone.utc)
+        self.assertIs(explicit_offset.tzinfo, timezone.utc)
+
+    def test_fallback_timestamp_parser_rejects_naive_timestamp(self) -> None:
+        with self.assertRaisesRegex(ValueError, "explicit timezone"):
+            _parse_explicit_timezone_iso8601("2026-07-18T12:00:00")
+
+    def test_fallback_timestamp_parser_rejects_lowercase_z_and_malformed(
+        self,
+    ) -> None:
+        for value in (
+            "2026-07-18T12:00:00z",
+            "not-a-timestamp",
+        ):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    _parse_explicit_timezone_iso8601(value)
+
+    def test_fallback_timestamp_parser_requires_non_empty_string(self) -> None:
+        for value in (
+            "",
+            None,
+            0,
+            1,
+            False,
+            True,
+            [],
+            [1],
+            {},
+            {"x": 1},
+            b"x",
+        ):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, "non-empty string"):
+                    _parse_explicit_timezone_iso8601(value)  # type: ignore[arg-type]
+
+    def test_fallback_clock_uses_later_of_both_anchors(self) -> None:
+        cases = (
+            (
+                "final_push_later",
+                "2026-07-18T12:05:00Z",
+                "2026-07-18T12:00:00Z",
+                "2026-07-18T12:20:00Z",
+            ),
+            (
+                "head_reviewable_later",
+                "2026-07-18T12:00:00Z",
+                "2026-07-18T12:07:00Z",
+                "2026-07-18T12:22:00Z",
+            ),
+        )
+        for name, final_push, head_reviewable, fallback in cases:
+            case = {
+                "pr_state": {
+                    "explicit_review_request": False,
+                    "final_push_utc": final_push,
+                    "head_reviewable_utc": head_reviewable,
+                },
+                "expected": {
+                    "fallback_eligible_after_utc": fallback,
+                },
+            }
+            with self.subTest(name=name):
+                self._assert_fallback_case_coherent(case)
+
+    def test_fallback_coherence_routes_all_timestamps_through_parser(
+        self,
+    ) -> None:
+        source = inspect.getsource(type(self)._assert_fallback_case_coherent)
+        helper_call = "_parse_explicit_timezone_iso8601("
+        self.assertEqual(
+            source.count(helper_call),
+            3,
+            "coherence must route exactly three timestamp fields through "
+            "the Python-3.10-compatible parser",
+        )
+        routed_values = re.findall(
+            r"_parse_explicit_timezone_iso8601\(\s*"
+            r"(pr\[[\"'](?:final_push_utc|head_reviewable_utc)[\"']\]"
+            r"|fallback_utc)\s*\)",
+            source,
+        )
+        self.assertEqual(
+            routed_values,
+            [
+                'pr["final_push_utc"]',
+                'pr["head_reviewable_utc"]',
+                "fallback_utc",
+            ],
+            "coherence timestamp routing must remain final push, head "
+            "reviewable, then fallback eligibility",
+        )
+
+    def test_fixture_coherence_timestamps_retain_trailing_z(self) -> None:
+        for variant in self.VARIANT_FILES:
+            for case in self._project_cases(variant):
+                timestamps = [
+                    case["pr_state"]["final_push_utc"],
+                    case["pr_state"]["head_reviewable_utc"],
+                    case["expected"].get("fallback_eligible_after_utc"),
+                ]
+                for value in timestamps:
+                    if value is not None:
+                        self.assertTrue(
+                            value.endswith("Z"),
+                            f"{variant} coherence timestamp must retain "
+                            f"trailing Z: {value!r}",
+                        )
+
     def _assert_fallback_case_coherent(self, case: dict) -> None:
         pr = case["pr_state"]
         fallback_utc = case["expected"]["fallback_eligible_after_utc"]
@@ -411,11 +541,11 @@ class Gh1549FallbackFixturesTest(unittest.TestCase):
             "are mutually exclusive",
         )
         clock_start = max(
-            datetime.fromisoformat(pr["final_push_utc"]),
-            datetime.fromisoformat(pr["head_reviewable_utc"]),
+            _parse_explicit_timezone_iso8601(pr["final_push_utc"]),
+            _parse_explicit_timezone_iso8601(pr["head_reviewable_utc"]),
         )
         self.assertEqual(
-            datetime.fromisoformat(fallback_utc),
+            _parse_explicit_timezone_iso8601(fallback_utc),
             clock_start + timedelta(minutes=15),
             "fallback eligibility must be exactly 15 minutes after "
             "later_of(final_push, head_reviewable)",
