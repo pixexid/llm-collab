@@ -244,9 +244,11 @@ explicitly, so none of them silently extends the wait:
   request exists on the PR (the PR is open, any draft is marked ready, and review
   visibility exists for that head). Absence of an explicit request does not
   pre-expire the fallback, and it does not extend it indefinitely either.
-- **Eyes-only current-head artifact.** A current-head non-terminal `eyes` reaction
-  is not blocking once no review is actually pending; it does not restart or
-  suppress the resettable fallback, and it is not itself a terminal signal.
+- **Eyes-only current-head artifact.** This fallback variant applies only when
+  no explicit review request is outstanding. A current-head non-terminal
+  `eyes` reaction is not blocking once no review is actually pending; it does
+  not restart or suppress the resettable fallback, and it is not itself a
+  terminal signal.
 - **Prior-head artifacts only.** Any push creates a new head and invalidates every
   prior verdict and reaction lifecycle; a prior-head `Codex Review:` body or
   `eyes`/`+1` reaction is not head-attributable for the current head and is
@@ -255,13 +257,23 @@ explicitly, so none of them silently extends the wait:
 
 #### Explicit requested-review precedence
 
-An explicitly requested review that produces neither a head-named review nor
-an eyes reaction remains pending until the roughly 30–35-minute re-trigger; it
-never ages into the 15-minute fallback. At that point, treat the request as
-silently dropped and re-trigger it with an `@codex review` comment instead of
-waiting indefinitely. Report and escalate the stuck review when re-triggering.
-The existing PR-wait heartbeat observes this timer; the re-trigger is neither
-a new terminal signal nor a new watcher mechanism. This longer timer exists
+An explicitly requested review remains pending until its roughly 30–35-minute
+clock expires unless one of the two exact-head terminal signals arrives; it
+never ages into the 15-minute fallback. Anchor each clock to the corresponding
+explicit request artifact's GitHub `created_at`, never to the latest push or
+the time the head became reviewable. A current-head `eyes` reaction alone is
+non-terminal: it does not exit requested-review precedence, reset that request's
+clock, or move the PR into the eyes-only fallback.
+
+When the initial request's clock expires without a terminal signal, treat that
+request as silently dropped and issue exactly one `@codex review` re-trigger.
+The re-trigger is the sole automatic retry and starts its own 30–35-minute clock
+at its GitHub `created_at`. If that clock also expires without a terminal
+signal, do not re-trigger again: require a terminal human/operator disposition,
+and keep the PR unmergeable until that disposition is recorded. Report and
+escalate the stuck review at each expiry. The existing PR-wait heartbeat
+observes these clocks; neither the re-trigger nor the disposition is a new
+terminal signal or watcher mechanism. The longer request-anchored timer exists
 because a dropped request is indistinguishable from a review that is still
 processing, unlike the absent-request variant, where there is nothing to drop.
 

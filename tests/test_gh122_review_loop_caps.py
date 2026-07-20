@@ -213,12 +213,30 @@ class ReviewLoopCapContractTest(unittest.TestCase):
             (
                 precedence,
                 (
-                    "remains pending until the roughly 30–35-minute re-trigger",
+                    "remains pending until its roughly 30–35-minute clock expires",
                     "never ages into the 15-minute fallback",
+                    "Anchor each clock to the corresponding explicit request "
+                    "artifact's GitHub `created_at`, never to the latest push or "
+                    "the time the head became reviewable",
+                    "A current-head `eyes` reaction alone is non-terminal: it "
+                    "does not exit requested-review precedence",
+                    "issue exactly one `@codex review` re-trigger",
+                    "The re-trigger is the sole automatic retry",
+                    "do not re-trigger again: require a terminal human/operator "
+                    "disposition, and keep the PR unmergeable until that "
+                    "disposition is recorded",
                     "a dropped request is indistinguishable from a review that "
                     "is still processing",
                     "unlike the absent-request variant, where there is nothing "
                     "to drop",
+                ),
+            ),
+            (
+                fallback,
+                (
+                    "Eyes-only current-head artifact",
+                    "This fallback variant applies only when no explicit review "
+                    "request is outstanding",
                 ),
             ),
             (
@@ -239,6 +257,19 @@ class ReviewLoopCapContractTest(unittest.TestCase):
                     "(commit-push-prs.md#explicit-requested-review-precedence)",
                     "Do not apply the 15-minute fallback to an explicitly "
                     "requested review",
+                    "anchors each 30–35-minute clock to the corresponding "
+                    "explicit request's GitHub `created_at`, not to the latest "
+                    "push or head-reviewability time",
+                    "A current-head `eyes` reaction alone does not exit "
+                    "requested-review precedence",
+                    "Automation may issue exactly one re-trigger",
+                    "no further automatic retry is allowed and the PR remains "
+                    "unmergeable until a terminal human/operator disposition is "
+                    "recorded",
+                    "eyes-only current-head artifact (which applies only when no "
+                    "explicit review request is outstanding",
+                    "it does not reset an explicit request's request-anchored "
+                    "clock",
                     "A terminal signal stops waiting for further artifacts or "
                     "the fallback timeout only; it does not waive the handling "
                     "below",
@@ -473,19 +504,22 @@ class ReviewLoopCapContractTest(unittest.TestCase):
 
         self.assert_scenario_cases("canonical_wait_gate", check)
 
-    def test_silently_dropped_review_is_retriggered(self):
+    def test_silently_dropped_review_gets_one_request_anchored_retrigger(self):
         def check(case, sources):
             self.assertIn(
-                "remains pending until the roughly 30–35-minute re-trigger",
+                "remains pending until its roughly 30–35-minute clock expires",
                 sources["review_policy"],
             )
             self.assertIn(
-                "treat the request as silently dropped", sources["review_policy"]
-            )
-            self.assertIn(
-                "re-trigger it with an `@codex review` comment",
+                "request as silently dropped and issue exactly one `@codex "
+                "review` re-trigger",
                 sources["review_policy"],
             )
+            self.assertIn(
+                "starts its own 30–35-minute clock at its GitHub `created_at`",
+                sources["review_policy"],
+            )
+            self.assertIn("do not re-trigger again", sources["review_policy"])
 
         self.assert_scenario_cases("canonical_wait_gate", check)
 
@@ -653,7 +687,7 @@ class ReviewLoopCapContractTest(unittest.TestCase):
 
         self.assert_scenario_cases("wait_gate_precedence", check)
 
-    def test_wait_gate_guards_reject_seven_frozen_mutations(self):
+    def test_wait_gate_guards_reject_ten_frozen_mutations(self):
         self.assert_wait_gate_residual_contract(
             self.workflow_text,
             self.handoff_text,
@@ -702,6 +736,24 @@ class ReviewLoopCapContractTest(unittest.TestCase):
                 "workflow",
                 "it does not waive post-signal handling",
                 "it waives post-signal handling",
+            ),
+            (
+                "automatic re-trigger repeats indefinitely",
+                "workflow",
+                "issue exactly one `@codex review` re-trigger",
+                "repeatedly issue an `@codex review` re-trigger",
+            ),
+            (
+                "request clock re-anchored to latest push",
+                "workflow",
+                "GitHub `created_at`, never to the latest push",
+                "the latest push, never to GitHub `created_at`",
+            ),
+            (
+                "eyes exits requested-review precedence",
+                "workflow",
+                "does not exit requested-review precedence",
+                "exits requested-review precedence",
             ),
         )
         for name, target, old, new in mutations:

@@ -220,15 +220,24 @@ artifacts or the fallback timeout only; it does not waive the handling below:
 For requested-review silence versus the fallback, follow the canonical
 [Explicit requested-review precedence](commit-push-prs.md#explicit-requested-review-precedence).
 Do not apply the 15-minute fallback to an explicitly requested review. That
-fallback is limited to exactly three named no-terminal-artifact variants:
+precedence anchors each 30–35-minute clock to the corresponding explicit
+request's GitHub `created_at`, not to the latest push or head-reviewability
+time. A current-head `eyes` reaction alone does not exit requested-review
+precedence. Automation may issue exactly one re-trigger; if its own
+request-anchored clock expires without a terminal signal, no further automatic
+retry is allowed and the PR remains unmergeable until a terminal human/operator
+disposition is recorded. The fallback is limited to exactly three named
+no-terminal-artifact variants:
 no explicit review request (the reviewability clock starts at the later of the
 final push and the head becoming reviewable), eyes-only current-head artifact
-(non-blocking once no review is pending and not itself terminal), and prior-head
-artifacts only (a stale-head `Codex Review:` body or reaction is not
-head-attributable and is ignored for terminal-signal purposes). Any push
-invalidates the prior signal and restarts the clock for the new head. The
-canonical section owns the pending/re-trigger timing and rationale; this compact
-handoff rule must not define a competing timer.
+(which applies only when no explicit review request is outstanding and is
+non-blocking once no review is pending), and prior-head artifacts only (a
+stale-head `Codex Review:` body or reaction is not
+head-attributable and is ignored for terminal-signal purposes). For those
+fallback variants, any push invalidates the prior signal and restarts the
+fallback clock for the new head; it does not reset an explicit request's
+request-anchored clock. The canonical section owns the pending/re-trigger timing
+and rationale; this compact handoff rule must not define a competing timer.
 
 If GitHub Codex comments on the PR, fix the pointed issue, rerun the manual
 branch-diff review and required checks, then evaluate the new exact head and its
