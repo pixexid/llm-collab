@@ -226,6 +226,17 @@ def iter_refs(value):
             yield from iter_refs(item)
 
 
+def iter_schema_patterns(value):
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key == "pattern":
+                yield item
+            yield from iter_schema_patterns(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from iter_schema_patterns(item)
+
+
 def references_resolve(registry, schemas) -> bool:
     try:
         for schema in schemas.values():
@@ -711,6 +722,9 @@ FORBIDDEN_PAYLOAD_COMPACT_KEYS = {
     key.replace("_", ""): key
     for key in FORBIDDEN_PAYLOAD_KEYS
 }
+CANONICAL_PAYLOAD_PROPERTY_NAME = re.compile(
+    r"^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$"
+)
 
 
 def normalize_payload_key(key):
@@ -764,6 +778,8 @@ def payload_error(value, *, depth=0):
             authority_key = canonical_payload_authority_key(key)
             if authority_key is not None:
                 return f"forbidden_payload_key:{authority_key}"
+            if CANONICAL_PAYLOAD_PROPERTY_NAME.fullmatch(key) is None:
+                return "payload_property_name"
             error = payload_error(item, depth=depth + 1)
             if error:
                 return error
@@ -1830,6 +1846,11 @@ class StandaloneContractSchemaTest(unittest.TestCase):
             Draft202012Validator.check_schema(schema)
             self.assertEqual(REGISTRY.contents(schema["$id"]), schema)
         self.assertTrue(references_resolve(REGISTRY, SCHEMAS))
+        self.assertEqual(
+            len(tuple(iter_schema_patterns(SCHEMAS))),
+            88,
+            "the frozen catalog must keep exactly 88 JSON Schema patterns",
+        )
 
         mutations = []
         unknown = copy.deepcopy(CATALOG)
@@ -3269,122 +3290,71 @@ class StandaloneContractSchemaTest(unittest.TestCase):
                 f"missing frozen {required_adapter_field}",
             )
 
-        exact_aliases = {
-            "adapter_name": "adapter_name",
-            "adapter_revision": "adapter_revision",
-            "adapter_version": "adapter_version",
-            "handler_name": "handler_name",
-            "handler_version": "handler_version",
-            "handler_revision": "handler_revision",
-            "capability_profile": "capability_profile",
-            "capability_profile_id": "capability_profile_id",
-            "capability_profile_revision": "capability_profile_revision",
-            "profile_id": "profile_id",
-            "profile_revision": "profile_revision",
-            "identity": "identity",
-            "exact_identity": "exact_identity",
-            "subscription_id": "subscription_id",
-            "subscription_revision": "subscription_revision",
-            "revision": "revision",
-            "registry_revision": "registry_revision",
-            "received_at_utc": "received_at_utc",
-            "receive_time": "receive_time",
-            "receive_time_utc": "receive_time_utc",
-            "content_hash": "content_hash",
-            "envelope_hash": "envelope_hash",
-            "command": "command",
-            "path": "path",
-            "routing": "routing",
-            "retry_policy": "retry_policy",
-            "reconciliation_policy": "reconciliation_policy",
-            "retention_policy": "retention_policy",
-            "feature_flag": "feature_flag",
-            "delivery_state": "delivery_state",
-            "filesystem_roots": "filesystem_roots",
-            "native_session_id": "native_session_id",
-        }
-        for key, normalized in exact_aliases.items():
-            candidate = copy.deepcopy(envelope)
-            candidate["payload"] = {"nested": [{"safe": {key: "unsafe"}}]}
-            with self.subTest(exact_alias=key):
-                self.assertEqual(
-                    envelope_error(candidate),
-                    f"forbidden_payload_key:{normalized}",
-                )
-                self.assert_schema_rejects(
-                    "EventEnvelopeV1",
-                    candidate,
-                    "forbidden authority key",
-                )
+        safe_property_name = SCHEMAS["EventEnvelopeV1"]["$defs"][
+            "safePropertyName"
+        ]
+        self.assertEqual(
+            set(safe_property_name),
+            {"type", "description", "minLength", "maxLength", "pattern"},
+        )
+        self.assertIn(
+            "canonical ASCII lower snake case",
+            safe_property_name["description"],
+        )
+        self.assertNotIn("ａ", safe_property_name["pattern"])
+        self.assertEqual(len(FORBIDDEN_PAYLOAD_KEYS), 118)
+        self.assertEqual(len(FORBIDDEN_PAYLOAD_COMPACT_KEYS), 118)
 
-        normalized_aliases = {
-            "ＡＤＡＰＴＥＲ－ＮＡＭＥ": "adapter_name",
-            "Handler.Version": "handler_version",
-            "Capability Profile Revision": "capability_profile_revision",
-            "PROFILE/ID": "profile_id",
-            "ExactIdentity": "exact_identity",
-            "Subscription--Revision": "subscription_revision",
-            "Registry Revision": "registry_revision",
-            "Receive.Time.UTC": "receive_time_utc",
-            "CONTENT-HASH": "content_hash",
-            "Envelope Hash": "envelope_hash",
-            "Routing Policy": "routing_policy",
-        }
-        for key, normalized in normalized_aliases.items():
-            candidate = copy.deepcopy(envelope)
-            candidate["payload"] = {"nested": [{"deeper": {key: "unsafe"}}]}
-            with self.subTest(normalized_alias=key):
-                self.assertEqual(
-                    envelope_error(candidate),
-                    f"forbidden_payload_key:{normalized}",
-                )
-
-        acronym_aliases = {
-            "ADAPTERName": "adapter_name",
-            "ＡＤＡＰＴＥＲName": "adapter_name",
-            "CAPABILITYProfileID": "capability_profile_id",
-            "ＣＡＰＡＢＩＬＩＴＹProfileID": "capability_profile_id",
-            "NATIVESessionID": "native_session_id",
-            "ＮＡＴＩＶＥSessionID": "native_session_id",
-            "REGISTRYRevision": "registry_revision",
-            "ＲＥＧＩＳＴＲＹRevision": "registry_revision",
-            "SUBSCRIPTIONRevision": "subscription_revision",
-            "ＳＵＢＳＣＲＩＰＴＩＯＮRevision": "subscription_revision",
-            "RECEIVETimeUTC": "receive_time_utc",
-            "ＲＥＣＥＩＶＥTimeUTC": "receive_time_utc",
-        }
-        for key, normalized in acronym_aliases.items():
-            with self.subTest(acronym_alias=key, case="normalization"):
-                self.assertEqual(normalize_payload_key(key), normalized)
-            candidate = copy.deepcopy(envelope)
-            candidate["payload"] = {"nested": [{"safe": {key: "unsafe"}}]}
-            with self.subTest(acronym_alias=key, case="nested_rejection"):
-                self.assertEqual(
-                    envelope_error(candidate),
-                    f"forbidden_payload_key:{normalized}",
-                )
-                self.assert_schema_rejects(
-                    "EventEnvelopeV1",
-                    candidate,
-                    "schema-expressible acronym authority alias",
-                )
-
-        def compact_aliases(canonical):
-            compact = canonical.replace("_", "")
-            uppercase = compact.upper()
-            fullwidth_uppercase = "".join(
-                chr(ord(character) + 0xFEE0)
-                for character in uppercase
-            )
-            return tuple(dict.fromkeys((compact, uppercase, fullwidth_uppercase)))
+        def payload_at_depth(key, depth, value="unsafe"):
+            payload = {key: value}
+            for level in range(depth):
+                payload = {f"safe_level_{level}": payload}
+            return payload
 
         for canonical in sorted(FORBIDDEN_PAYLOAD_KEYS):
-            for alias in compact_aliases(canonical):
+            compact = canonical.replace("_", "")
+            alternating_segmented = "".join(
+                character + ("_" if index % 2 == 0 else "")
+                for index, character in enumerate(compact[:-1])
+            ) + compact[-1]
+            aliases = (
+                ("canonical", canonical),
+                ("compact", compact),
+                ("alternating_segmented", alternating_segmented),
+                ("fully_segmented", "_".join(compact)),
+            )
+            for depth in range(6):
+                for alias_kind, alias in aliases:
+                    candidate = copy.deepcopy(envelope)
+                    candidate["payload"] = payload_at_depth(alias, depth)
+                    with self.subTest(
+                        authority_key=canonical,
+                        alias_kind=alias_kind,
+                        depth=depth,
+                    ):
+                        self.assertEqual(
+                            envelope_error(candidate),
+                            f"forbidden_payload_key:{canonical}",
+                        )
+                        self.assert_schema_rejects(
+                            "EventEnvelopeV1",
+                            candidate,
+                            "reserved lower-snake authority segmentation",
+                        )
+
+        unicode_authority_aliases = {
+            "𝐏𝐑𝐎𝐉𝐄𝐂𝐓𝐈𝐃": "project_id",
+            "ⓅⓇⓄⒿⒺⒸⓉⒾⒹ": "project_id",
+            "p𝕣o𝐣e𝖼tid": "project_id",
+            "tasKid": "task_id",
+        }
+        for key, canonical in unicode_authority_aliases.items():
+            for depth in range(6):
                 candidate = copy.deepcopy(envelope)
-                candidate["payload"] = {alias: "unsafe"}
+                candidate["payload"] = payload_at_depth(key, depth)
                 with self.subTest(
-                    compact_authority=canonical,
-                    alias=alias,
+                    unicode_authority_alias=key,
+                    depth=depth,
                 ):
                     self.assertEqual(
                         envelope_error(candidate),
@@ -3393,73 +3363,94 @@ class StandaloneContractSchemaTest(unittest.TestCase):
                     self.assert_schema_rejects(
                         "EventEnvelopeV1",
                         candidate,
-                        "compact authority alias",
+                        "Unicode authority alias",
                     )
 
-        recursive_compact_aliases = {
-            "projectid": "project_id",
-            "PROJECTID": "project_id",
-            "PrOjEcTiD": "project_id",
-            "NATIVESESSIONID": "native_session_id",
+        semantic_authority_aliases = {
+            "_project_id": "project_id",
+            "project_id_": "project_id",
+            "project__id": "project_id",
+            "project-id": "project_id",
+            "project.id": "project_id",
+            "project/id": "project_id",
+            "PROJECT ID": "project_id",
             "ＰＲＯＪＥＣＴＩＤ": "project_id",
-            "ＰrＯjＥcＴiＤ": "project_id",
+            "ADAPTERName": "adapter_name",
+            "Capability Profile Revision": "capability_profile_revision",
+            "ExactIdentity": "exact_identity",
+            "REGISTRYRevision": "registry_revision",
         }
-        for depth in range(6):
-            for key, canonical in recursive_compact_aliases.items():
-                value = {key: "unsafe"}
-                for level in range(depth):
-                    value = {f"safe_level_{level}": value}
+        for key, canonical in semantic_authority_aliases.items():
+            candidate = copy.deepcopy(envelope)
+            candidate["payload"] = {key: "unsafe"}
+            with self.subTest(semantic_authority_alias=key):
+                self.assertEqual(
+                    envelope_error(candidate),
+                    f"forbidden_payload_key:{canonical}",
+                )
+                self.assert_schema_rejects(
+                    "EventEnvelopeV1",
+                    candidate,
+                    "noncanonical authority alias",
+                )
+
+        benign_lower_snake_keys = (
+            "project_summary",
+            "retry_countdown",
+            "implementation_notes",
+            "tooling_note",
+            "pathology",
+            "registry_revision_note",
+            "phase2_state",
+            "x9",
+        )
+        for key in benign_lower_snake_keys:
+            for depth in range(6):
                 candidate = copy.deepcopy(envelope)
-                candidate["payload"] = value
-                with self.subTest(recursive_compact=key, depth=depth):
+                candidate["payload"] = payload_at_depth(key, depth, "benign")
+                with self.subTest(benign_lower_snake=key, depth=depth):
+                    self.assertEqual(self.errors("EventEnvelopeV1", candidate), [])
+                    self.assertIsNone(envelope_error(candidate))
+
+        noncanonical_benign_keys = (
+            "_project_summary",
+            "project_summary_",
+            "project__summary",
+            "project-summary",
+            "project.summary",
+            "project summary",
+            "projectSummary",
+            "PROJECTSummary",
+            "ＰＲＯＪＥＣＴSummary",
+            "café_note",
+            "9lives",
+        )
+        for key in noncanonical_benign_keys:
+            for depth in range(6):
+                candidate = copy.deepcopy(envelope)
+                candidate["payload"] = payload_at_depth(key, depth, "benign")
+                with self.subTest(noncanonical_benign=key, depth=depth):
                     self.assertEqual(
                         envelope_error(candidate),
-                        f"forbidden_payload_key:{canonical}",
+                        "payload_property_name",
                     )
                     self.assert_schema_rejects(
                         "EventEnvelopeV1",
                         candidate,
-                        "recursive compact authority alias",
+                        "noncanonical benign property name",
                     )
 
-        benign_normalizations = {
-            "adapter_summary": "adapter_summary",
-            "capability_profile_summary": "capability_profile_summary",
-            "native_session_note": "native_session_note",
-            "registry_revision_note": "registry_revision_note",
-            "project_summary": "project_summary",
-            "PROJECTSummary": "project_summary",
-            "ＰＲＯＪＥＣＴSummary": "project_summary",
+        unicode_values = copy.deepcopy(envelope)
+        unicode_values["payload"] = {
+            "display_text": "Café 雪 🧪",
+            "localized_values": [
+                "naïve",
+                "東京",
+                {"emoji_text": "🙂", "combining_text": "e\u0301"},
+            ],
         }
-        for key, normalized in benign_normalizations.items():
-            with self.subTest(benign_normalization=key):
-                self.assertEqual(normalize_payload_key(key), normalized)
-
-        benign = copy.deepcopy(envelope)
-        benign["payload"] = {
-            "project_summary": "benign",
-            "retry_countdown": 2,
-            "implementation_notes": "benign",
-            "tooling_note": "benign",
-            "pathology": "benign",
-            "identity_summary": "benign",
-            "revision_note": "benign",
-            "adapter_summary": "benign",
-            "handler_version_note": "benign",
-            "capability_profile_summary": "benign",
-            "native_session_note": "benign",
-            "registry_revision_note": "benign",
-            "exact_identity_note": "benign",
-            "subscription_revision_note": "benign",
-            "receive_time_note": "benign",
-            "content_hash_note": "benign",
-            "routing_policy_summary": "benign",
-            "ＡＤＡＰＴＥＲSummary": "benign",
-            "PROJECTSummary": "benign",
-            "ＰＲＯＪＥＣＴSummary": "benign",
-        }
-        self.assertEqual(self.errors("EventEnvelopeV1", benign), [])
-        self.assertIsNone(envelope_error(benign))
+        self.assertEqual(self.errors("EventEnvelopeV1", unicode_values), [])
+        self.assertIsNone(envelope_error(unicode_values))
 
     def test_event_envelope_utf8_size_encoding_depth_and_collection_bounds(self):
         envelope = load(FIXTURE_DIR / "valid" / "event-envelope.json")
