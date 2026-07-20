@@ -384,7 +384,7 @@ def classify(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def is_blocking_deferred(item: dict[str, Any]) -> bool:
-    return True
+    return item.get("task_status") == "done" or (item.get("branch") is None and bool(item.get("dirty")))
 
 
 def defer_reason(record: WorktreeRecord, task: TaskRecord | None, lines: list[str], merged: bool) -> str:

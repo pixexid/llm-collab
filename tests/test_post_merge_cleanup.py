@@ -126,13 +126,16 @@ class PostMergeCleanupTest(unittest.TestCase):
 
         self.assertFalse(worktree_summary["remove_worktrees"])
         self.assertEqual(worktree_summary["deferred_worktrees"][0]["defer_reason"], "task-status-review")
-        self.assertEqual(worktree_summary["blocking_deferred"][0]["branch"], branch)
+        self.assertFalse(worktree_summary["blocking_deferred"])
+        self.assertTrue(worktree_summary["ok_to_clear_post_merge"])
 
         git(self.repo, "worktree", "remove", str(path))
         branch_summary = self.classify()
 
         self.assertFalse(branch_summary["remove_branches"])
         self.assertEqual(branch_summary["deferred_branches"][0]["defer_reason"], "task-status-review")
+        self.assertFalse(branch_summary["blocking_deferred"])
+        self.assertTrue(branch_summary["ok_to_clear_post_merge"])
 
     def test_no_task_worktrees_are_deferred_even_when_merged_review_or_clean_detached(self) -> None:
         review_branch = "codex/review/no-task"
@@ -149,10 +152,20 @@ class PostMergeCleanupTest(unittest.TestCase):
         deferred_by_path = {Path(item["path"]).resolve(): item for item in summary["deferred_worktrees"]}
         self.assertEqual(deferred_by_path[review_path.resolve()]["defer_reason"], "no-task-match-merged")
         self.assertEqual(deferred_by_path[detached_path.resolve()]["defer_reason"], "no-task-detached-worktree")
-        self.assertEqual(
-            {Path(item["path"]).resolve() for item in summary["blocking_deferred"]},
-            {review_path.resolve(), detached_path.resolve()},
-        )
+        self.assertFalse(summary["blocking_deferred"])
+        self.assertTrue(summary["ok_to_clear_post_merge"])
+
+    def test_dirty_detached_worktree_remains_blocking(self) -> None:
+        path = self.worktree_root / "codex" / "detached-dirty"
+        git(self.repo, "worktree", "add", "--detach", str(path), "main")
+        (path / "human-note.md").write_text("preserve\n")
+
+        summary = self.classify()
+
+        self.assertFalse(summary["remove_worktrees"])
+        self.assertEqual(summary["deferred_worktrees"][0]["defer_reason"], "dirty-non-disposable")
+        self.assertEqual(summary["blocking_deferred"][0]["branch"], None)
+        self.assertFalse(summary["ok_to_clear_post_merge"])
 
     def test_no_task_merged_branches_are_all_deferred_and_reported(self) -> None:
         branches = ["codex/review/no-task", "codex/worker/no-task", "feature/no-task"]
@@ -164,6 +177,8 @@ class PostMergeCleanupTest(unittest.TestCase):
         self.assertFalse(summary["remove_branches"])
         self.assertEqual([item["branch"] for item in summary["deferred_branches"]], sorted(branches))
         self.assertTrue(all(item["defer_reason"] == "no-task-match-merged" for item in summary["deferred_branches"]))
+        self.assertFalse(summary["blocking_deferred"])
+        self.assertTrue(summary["ok_to_clear_post_merge"])
 
     def test_dirty_non_disposable_done_task_is_deferred(self) -> None:
         branch = "codex/cdx2/task-DEF456-example"
@@ -179,6 +194,7 @@ class PostMergeCleanupTest(unittest.TestCase):
         self.assertFalse(summary["remove_worktrees"])
         self.assertEqual(summary["deferred_worktrees"][0]["defer_reason"], "dirty-non-disposable")
         self.assertEqual(summary["blocking_deferred"][0]["branch"], branch)
+        self.assertFalse(summary["ok_to_clear_post_merge"])
 
     def test_disposable_sitemap_dirty_can_be_removed_when_enabled(self) -> None:
         branch = "codex/claude/task-GHI789-example"
