@@ -17,6 +17,8 @@ from unittest.mock import Mock, patch
 
 import llm_collab.ledger.store as store_module
 from llm_collab.daemon import cli
+from llm_collab.daemon.gate import GateStatus
+from llm_collab.daemon.observe import ObservationEngine
 from llm_collab.daemon.server import (
     LOG_LIMIT,
     REQUEST_LIMIT,
@@ -27,10 +29,29 @@ from llm_collab.daemon.server import (
     parse_request,
     peer_uid,
 )
-from llm_collab.ledger import LedgerPaths, LedgerStore
+from llm_collab.ledger import LedgerPaths, LedgerStore, WriterAlreadyOpenError
 
 
 SAFE_VERSION = (3, 51, 3)
+ENABLED_ENV = {
+    "THREAD_EVENT_RUNNER_ENABLED": "1",
+    "THREAD_EVENT_RUNNER_OBSERVE": "1",
+}
+OBSERVATION_FEATURE = "daemon_" + "observation"
+FEATURE_DECLARATION_ID = (
+    "https://llm-collab.dev/declarations/standalone/v1/"
+    + "feature-declarations.json"
+)
+
+
+def declaration(enabled: bool) -> str:
+    return json.dumps(
+        {
+            "declaration_version": 1,
+            "declaration_id": FEATURE_DECLARATION_ID,
+            "features": {OBSERVATION_FEATURE: enabled},
+        }
+    )
 
 
 class DaemonTest(unittest.TestCase):
@@ -40,10 +61,27 @@ class DaemonTest(unittest.TestCase):
         self.addCleanup(self.version.stop)
         self.tmp = TemporaryDirectory(dir="/tmp")
         self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name) / "workspace"
+        self.root.mkdir()
+        (self.root / "collab.config.json").write_text('{"workspace_id":"ws_alpha"}')
+        (self.root / "projects.json").write_text(
+            json.dumps({"projects": [{"id": "amiga"}]})
+        )
+        (self.root / "Chats").mkdir()
+        (self.root / "agents").mkdir()
+        self.declaration = self.root / "declaration.json"
+        self.declaration.write_text(declaration(True))
         self.paths = LedgerPaths.derive(Path(self.tmp.name) / "state", "ws_alpha")
 
     def start(self, *, peer=None) -> tuple[DaemonServer, threading.Thread]:
-        server = DaemonServer(self.paths) if peer is None else DaemonServer(self.paths, peer_uid_getter=peer)
+        kwargs = {
+            "workspace_root": self.root,
+            "declaration_path": self.declaration,
+            "environment": ENABLED_ENV,
+        }
+        if peer is not None:
+            kwargs["peer_uid_getter"] = peer
+        server = DaemonServer(self.paths, **kwargs)
         thread = threading.Thread(target=server.run)
         thread.start()
         deadline = time.monotonic() + 2
@@ -58,7 +96,13 @@ class DaemonTest(unittest.TestCase):
             client.settimeout(2)
             client.connect(os.fspath(self.paths.socket))
             client.sendall(value)
-            client.shutdown(socket.SHUT_WR)
+            try:
+                client.shutdown(socket.SHUT_WR)
+            except OSError as exc:
+                # The daemon may authenticate/reject and close before the test
+                # half-closes; the response is still readable from the socket.
+                if exc.errno not in {errno.ENOTCONN, errno.EPIPE}:
+                    raise
             return json.loads(client.recv(70_000).decode())
         finally:
             client.close()
@@ -88,6 +132,261 @@ class DaemonTest(unittest.TestCase):
         finally:
             if active.is_alive():
                 self.stop(active)
+
+    def test_gated_off_holds_the_same_lock_without_opening_or_creating_a_ledger(self) -> None:
+        self.declaration.write_text(declaration(False))
+        server = DaemonServer(
+            self.paths,
+            workspace_root=self.root,
+            declaration_path=self.declaration,
+            environment=ENABLED_ENV,
+        )
+        with patch.object(LedgerStore, "open_writer", side_effect=AssertionError("must not open")):
+            thread = threading.Thread(target=server.run)
+            thread.start()
+            deadline = time.monotonic() + 2
+            while not self.paths.socket.exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertTrue(self.paths.socket.exists())
+            status = self.request(b'{"version":1,"op":"status"}')
+            self.assertFalse(status["observation_gate"]["effective"])
+            self.assertEqual(status["ledger"]["state"], "absent")
+            self.assertFalse(self.paths.ledger.exists())
+            self.assertEqual(list(self.paths.backups.iterdir()), [])
+            self.stop(thread)
+        self.assertFalse(self.paths.ledger.exists())
+
+    def test_each_false_gate_and_all_false_perform_no_observation_reads_or_ledger_open(self) -> None:
+        cases = (
+            ("feature", declaration(False), ENABLED_ENV),
+            (
+                "runner-enabled-env",
+                declaration(True),
+                {**ENABLED_ENV, "THREAD_EVENT_RUNNER_ENABLED": "0"},
+            ),
+            (
+                "observe-env",
+                declaration(True),
+                {**ENABLED_ENV, "THREAD_EVENT_RUNNER_OBSERVE": "0"},
+            ),
+            (
+                "all-false",
+                declaration(False),
+                {
+                    "THREAD_EVENT_RUNNER_ENABLED": "0",
+                    "THREAD_EVENT_RUNNER_OBSERVE": "0",
+                },
+            ),
+            ("invalid-declaration", '{"features":', ENABLED_ENV),
+        )
+        for name, declaration_text, environment in cases:
+            with self.subTest(name=name):
+                self.declaration.write_text(declaration_text)
+                server = DaemonServer(
+                    self.paths,
+                    workspace_root=self.root,
+                    declaration_path=self.declaration,
+                    environment=environment,
+                )
+                with (
+                    patch.object(
+                        LedgerStore,
+                        "open_writer",
+                        side_effect=AssertionError("gate-off must not open the ledger"),
+                    ) as open_writer,
+                    patch(
+                        "llm_collab.daemon.observe.read_registry_snapshot",
+                        side_effect=AssertionError("gate-off must not read the registry"),
+                    ) as registry_read,
+                    patch(
+                        "llm_collab.daemon.observe._load_watchdog",
+                        side_effect=AssertionError("gate-off must not load watchdog"),
+                    ) as watchdog_load,
+                ):
+                    thread = threading.Thread(target=server.run)
+                    thread.start()
+                    deadline = time.monotonic() + 2
+                    while not self.paths.socket.exists() and time.monotonic() < deadline:
+                        time.sleep(0.01)
+                    self.assertTrue(self.paths.socket.exists())
+                    status = self.request(b'{"version":1,"op":"status"}')
+                    self.assertFalse(status["observation_gate"]["effective"])
+                    self.assertEqual(status["observation"]["state"], "gated_off")
+                    self.assertEqual(status["observation"]["source_reachability"], "not_checked")
+                    self.stop(thread)
+                    open_writer.assert_not_called()
+                    registry_read.assert_not_called()
+                    watchdog_load.assert_not_called()
+                self.assertFalse(self.paths.ledger.exists())
+                self.assertEqual(list(self.paths.backups.iterdir()), [])
+
+    def test_gated_off_daemon_lock_refuses_a_second_writer(self) -> None:
+        self.declaration.write_text(declaration(False))
+        server = DaemonServer(
+            self.paths,
+            workspace_root=self.root,
+            declaration_path=self.declaration,
+            environment=ENABLED_ENV,
+        )
+        thread = threading.Thread(target=server.run)
+        thread.start()
+        deadline = time.monotonic() + 2
+        while not self.paths.socket.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        try:
+            with self.assertRaises(WriterAlreadyOpenError):
+                LedgerStore.open_writer(self.paths)
+        finally:
+            self.stop(thread)
+
+    def test_status_runs_one_shared_integrity_scan_or_zero_when_gated_off(self) -> None:
+        def request_status(server: DaemonServer) -> dict[str, object]:
+            client, connection = socket.socketpair()
+            try:
+                client.sendall(b'{"version":1,"op":"status"}')
+                client.shutdown(socket.SHUT_WR)
+                server._handle(connection)
+                return json.loads(client.recv(RESPONSE_LIMIT + 1).decode())
+            finally:
+                connection.close()
+                client.close()
+
+        enabled_gate = GateStatus(
+            declaration_valid=True,
+            features={OBSERVATION_FEATURE: True},
+            thread_event_runner_enabled=True,
+            thread_event_runner_observe=True,
+            effective=True,
+        )
+        with LedgerStore.open_writer(self.paths) as store:
+            engine = ObservationEngine(
+                workspace_root=self.root,
+                workspace_id="ws_alpha",
+                projects_path=self.root / "projects.json",
+            )
+            server = DaemonServer(
+                self.paths,
+                workspace_root=self.root,
+                peer_uid_getter=lambda _connection: os.getuid(),
+            )
+            server._gate_status = enabled_gate
+            server._store = store
+            server._observation = engine
+
+            statements: list[str] = []
+            store._connection.set_trace_callback(statements.append)
+            try:
+                response = request_status(server)
+                scans = [
+                    statement
+                    for statement in statements
+                    if statement.strip().lower() == "pragma integrity_check"
+                ]
+                self.assertEqual(len(scans), 1)
+                self.assertEqual(response["ledger"]["integrity"], "ok")
+                self.assertEqual(
+                    response["observation"]["ledger"]["integrity"],
+                    response["ledger"]["integrity"],
+                )
+
+                statements.clear()
+                server._observation = None
+                without_observation = request_status(server)
+                scans = [
+                    statement
+                    for statement in statements
+                    if statement.strip().lower() == "pragma integrity_check"
+                ]
+                self.assertEqual(len(scans), 1)
+                self.assertEqual(without_observation["ledger"]["integrity"], "ok")
+
+                statements.clear()
+                server._store = None
+                gated_off = request_status(server)
+                scans = [
+                    statement
+                    for statement in statements
+                    if statement.strip().lower() == "pragma integrity_check"
+                ]
+                self.assertEqual(scans, [])
+                self.assertEqual(
+                    gated_off["ledger"]["integrity"], "not_checked_gate_off"
+                )
+            finally:
+                store._connection.set_trace_callback(None)
+
+    def test_server_resolves_nested_cwd_to_the_collab_workspace(self) -> None:
+        nested = self.root / "one" / "two"
+        nested.mkdir(parents=True)
+        old_cwd = Path.cwd()
+        os.chdir(nested)
+        try:
+            self.assertEqual(DaemonServer(self.paths).workspace_root, self.root.resolve())
+        finally:
+            os.chdir(old_cwd)
+
+    def test_first_status_is_ready_before_slow_initial_reconciliation(self) -> None:
+        entered = threading.Event()
+        release = threading.Event()
+
+        def slow_reconcile(_engine, _store, *, force=False):
+            entered.set()
+            release.wait(2)
+            return True
+
+        with patch(
+            "llm_collab.daemon.observe.ObservationEngine.reconcile_due",
+            autospec=True,
+            side_effect=slow_reconcile,
+        ):
+            _server, thread = self.start()
+            time.sleep(0.2)
+            started = time.monotonic()
+            status = self.request(b'{"version":1,"op":"status"}')
+            self.assertTrue(status["running"])
+            self.assertLess(time.monotonic() - started, 2)
+            self.assertTrue(entered.wait(1))
+            release.set()
+            self.stop(thread)
+
+    def test_listener_and_observer_setup_share_cleanup_discipline(self) -> None:
+        gate = GateStatus(
+            declaration_valid=True,
+            features={OBSERVATION_FEATURE: True},
+            thread_event_runner_enabled=True,
+            thread_event_runner_observe=True,
+            effective=True,
+        )
+        store = Mock(owns_writer_lock=True)
+        server = DaemonServer(self.paths, workspace_root=self.root)
+        server._gate_status = gate
+        with (
+            patch.object(server, "_open_listener", side_effect=RuntimeError("bind failed")),
+            patch("llm_collab.daemon.observe.ObservationEngine") as engine_factory,
+            patch.object(server, "_write_log"),
+            self.assertRaisesRegex(RuntimeError, "bind failed"),
+        ):
+            server._serve(store)
+        engine_factory.assert_not_called()
+        self.assertIsNone(server._store)
+        self.assertIsNone(server._observation)
+
+        listener = Mock()
+        listener.accept.side_effect = RuntimeError("accept failed")
+        observer = Mock()
+        server = DaemonServer(self.paths, workspace_root=self.root)
+        server._gate_status = gate
+        with (
+            patch.object(server, "_open_listener", return_value=listener),
+            patch("llm_collab.daemon.observe.ObservationEngine", return_value=observer),
+            patch.object(server, "_write_log"),
+            self.assertRaisesRegex(RuntimeError, "accept failed"),
+        ):
+            server._serve(store)
+        observer.close.assert_called_once()
+        listener.close.assert_called_once()
+        self.assertIsNone(server._store)
+        self.assertIsNone(server._observation)
 
     def test_closed_request_schema_and_size_limits(self) -> None:
         valid = b'{"version":1,"op":"status"}'
@@ -312,7 +611,7 @@ class DaemonTest(unittest.TestCase):
         self.assertEqual(fifth.read_text(), "prior-fifth")
 
     def test_cli_diagnostics_do_not_create_or_mutate(self) -> None:
-        root = Path(self.tmp.name) / "workspace"
+        root = Path(self.tmp.name) / "diagnostic-workspace"
         root.mkdir()
         config = root / "collab.config.json"
         original = b'{"project_state_root":"state"}'

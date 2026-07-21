@@ -25,6 +25,10 @@ FEATURES = {
 TOP_LEVEL_KEYS = {"declaration_version", "declaration_id", "features"}
 EXCLUDED_PREFIXES = ("docs/protocols/", "docs/migration/", "Tasks/", "Chats/")
 THIS_TEST = "tests/test_standalone_feature_declarations.py"
+SANCTIONED_CONSUMERS = {
+    "llm_collab/daemon/gate.py",
+    "tests/test_collabd_gate.py",
+}
 
 
 def reject_json_constant(value: str) -> None:
@@ -83,7 +87,18 @@ class StandaloneFeatureDeclarationTests(unittest.TestCase):
         features = load_declaration()["features"]
         self.assertTrue(all(value is False for value in features.values()))
 
-    def test_tracked_runtime_paths_have_zero_consumers(self) -> None:
+    def test_tracked_runtime_paths_have_no_unapproved_consumers(self) -> None:
+        self.assertEqual(
+            SANCTIONED_CONSUMERS,
+            {
+                "llm_collab/daemon/gate.py",
+                "tests/test_collabd_gate.py",
+            },
+        )
+        self.assertIn(
+            DECLARATION_ID,
+            (ROOT / "llm_collab" / "daemon" / "gate.py").read_text(),
+        )
         tracked = subprocess.run(
             ["git", "ls-files", "-z"],
             cwd=ROOT,
@@ -101,8 +116,10 @@ class StandaloneFeatureDeclarationTests(unittest.TestCase):
             if not raw_path:
                 continue
             relative_path = raw_path.decode("utf-8")
-            if relative_path == THIS_TEST or relative_path.startswith(
-                EXCLUDED_PREFIXES
+            if (
+                relative_path == THIS_TEST
+                or relative_path in SANCTIONED_CONSUMERS
+                or relative_path.startswith(EXCLUDED_PREFIXES)
             ):
                 continue
             path = ROOT / relative_path
@@ -113,7 +130,7 @@ class StandaloneFeatureDeclarationTests(unittest.TestCase):
                 if needle.encode("utf-8") in content:
                     matches.append(f"{relative_path}: {label}")
 
-        self.assertEqual(matches, [], "standalone declaration gained a consumer")
+        self.assertEqual(matches, [], "standalone declaration gained an unapproved consumer")
 
 
 if __name__ == "__main__":

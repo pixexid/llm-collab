@@ -12,18 +12,27 @@ import struct
 import sys
 import time
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Mapping
 
+from llm_collab.daemon.gate import GateStatus, evaluate_observation_gate
 from llm_collab.ledger import LedgerPaths, LedgerStore
 
 REQUEST_LIMIT = 4 * 1024
 RESPONSE_LIMIT = 64 * 1024
 DEADLINE_SECONDS = 2
 LOG_LIMIT = 10 * 1024 * 1024
+OBSERVATION_STARTUP_GRACE_SECONDS = 0.5
 
 
 class ProtocolError(ValueError):
     pass
+
+
+def _workspace_root_from_cwd() -> Path:
+    for candidate in (Path.cwd(), *Path.cwd().parents):
+        if (candidate / "collab.config.json").is_file():
+            return candidate
+    return Path.cwd()
 
 
 def _no_duplicates(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -101,6 +110,9 @@ class DaemonServer:
         owner_uid: int | None = None,
         peer_uid_getter: Callable[[socket.socket], int] = peer_uid,
         clock: Callable[[], float] = time.monotonic,
+        workspace_root: Path | None = None,
+        declaration_path: Path | None = None,
+        environment: Mapping[str, str] | None = None,
     ) -> None:
         self.paths = paths
         self.owner_uid = os.getuid() if owner_uid is None else owner_uid
@@ -108,25 +120,97 @@ class DaemonServer:
         self._clock = clock
         self._stopping = False
         self._socket_identity: tuple[int, int] | None = None
+        self.workspace_root = (
+            _workspace_root_from_cwd() if workspace_root is None else workspace_root
+        )
+        self.declaration_path = (
+            Path(__file__).parents[2]
+            / "docs"
+            / "protocols"
+            / "standalone-v1-feature-declarations.json"
+            if declaration_path is None
+            else declaration_path
+        )
+        self._environment = environment
+        self._gate_status: GateStatus | None = None
+        self._observation: object | None = None
+        self._observation_error: str | None = None
+        self._store: LedgerStore | None = None
 
     def run(self) -> None:
-        with LedgerStore.open_writer(self.paths) as store:
+        self._gate_status = evaluate_observation_gate(
+            self.declaration_path, environ=self._environment
+        )
+        if self._gate_status.effective:
+            with LedgerStore.open_writer(self.paths) as store:
+                self._serve(store)
+            return
+        self.paths.ensure_directories()
+        writer_lock = LedgerStore._acquire_writer_lock(self.paths)
+        try:
+            self._serve(None)
+        finally:
+            writer_lock.close()
+
+    def _serve(self, store: LedgerStore | None) -> None:
+        if store is not None:
             if not store.owns_writer_lock:
                 raise RuntimeError("daemon did not acquire the ledger writer lock")
+        self._store = store
+        listener: socket.socket | None = None
+        try:
+            # Establish the control surface before starting optional background
+            # hints so every later setup failure shares the cleanup below.
             listener = self._open_listener()
-            try:
-                self._write_log({"event": "started"})
-                while not self._stopping:
-                    try:
-                        connection, _address = listener.accept()
-                    except socket.timeout:
-                        continue
+            if self._gate_status is not None and self._gate_status.effective:
+                from llm_collab.daemon.observe import ObservationEngine
+
+                self._observation = ObservationEngine(
+                    workspace_root=self.workspace_root,
+                    workspace_id=self.paths.workspace_id,
+                    projects_path=self.workspace_root / "projects.json",
+                    monotonic=self._clock,
+                )
+                try:
+                    self._observation.start()
+                except Exception as exc:
+                    self._observation_error = (
+                        f"watchdog unavailable: {type(exc).__name__}: {exc}"
+                    )
+            self._write_log({"event": "started"})
+            initial_reconcile = True
+            observation_not_before = self._clock() + OBSERVATION_STARTUP_GRACE_SECONDS
+            while not self._stopping:
+                try:
+                    connection, _address = listener.accept()
+                except socket.timeout:
+                    pass
+                else:
                     with connection:
                         self._handle(connection)
-            finally:
+                if not self._stopping and self._clock() >= observation_not_before:
+                    self._tick_observation(force=initial_reconcile)
+                    initial_reconcile = False
+        finally:
+            if listener is not None:
                 listener.close()
-                self._remove_owned_socket()
-                self._write_log({"event": "stopped"})
+            self._remove_owned_socket()
+            if self._observation is not None:
+                self._observation.close()
+                self._observation = None
+            self._store = None
+            self._write_log({"event": "stopped"})
+
+    def _tick_observation(self, *, force: bool = False) -> None:
+        if self._observation is None or self._store is None:
+            return
+        try:
+            self._observation.reconcile_due(self._store, force=force)
+        except Exception as exc:
+            self._observation_error = f"{type(exc).__name__}: {exc}"
+            self._write_log(
+                {"event": "observation_error", "error": self._observation_error}
+            )
 
     def _open_listener(self) -> socket.socket:
         self._recover_stale_socket()
@@ -201,7 +285,7 @@ class DaemonServer:
                 raise ProtocolError("empty control request")
             op = parse_request(b"".join(chunks))
             if op == "status":
-                response: object = {"version": 1, "running": True, "pid": os.getpid()}
+                response: object = self._status_response()
             elif op == "logs":
                 response = {"version": 1, "logs": self._read_logs()}
             else:
@@ -210,6 +294,42 @@ class DaemonServer:
             self._send(connection, response)
         except (OSError, PermissionError, ProtocolError) as exc:
             self._send(connection, {"version": 1, "error": str(exc)})
+
+    def _status_response(self) -> dict[str, object]:
+        gate = None if self._gate_status is None else self._gate_status.as_dict()
+        response: dict[str, object] = {
+            "version": 1,
+            "running": True,
+            "pid": os.getpid(),
+            "observation_gate": gate,
+        }
+        integrity: str | None = None
+        if self._store is not None:
+            integrity = self._store.integrity_check()
+            response["ledger"] = {
+                "schema_version": self._store.schema_version(),
+                "integrity": integrity,
+                "migration_state": "exact_latest",
+            }
+        else:
+            response["ledger"] = {
+                "state": "present_not_opened_gate_off" if self.paths.ledger.exists() else "absent",
+                "schema_version": "not_checked_gate_off",
+                "integrity": "not_checked_gate_off",
+                "migration_state": "not_checked_gate_off",
+            }
+        if self._observation is None:
+            response["observation"] = {
+                "state": "gated_off",
+                "source_reachability": "not_checked",
+            }
+        else:
+            response["observation"] = self._observation.diagnostics(
+                self._store, integrity=integrity
+            )
+            if self._observation_error is not None:
+                response["observation"]["error"] = self._observation_error
+        return response
 
     def _send(self, connection: socket.socket, response: object) -> None:
         encoded = json.dumps(response, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
