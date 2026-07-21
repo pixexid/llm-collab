@@ -89,6 +89,80 @@ def _validate_active_lease_state(path: Path, payload: Any) -> None:
             raise _malformed_lease_state(path, field, problem)
 
 
+def _validate_loaded_lease_state(identity: dict[str, str], payload: Any) -> None:
+    path = lease_path(identity)
+    _validate_active_lease_state(path, payload)
+    if not isinstance(payload, dict) or payload.get("status") != "active":
+        return
+    if payload.get("lease_key") != lease_key(identity):
+        raise _malformed_lease_state(path, "lease_key", "mismatch")
+    payload_identity = payload.get("identity")
+    if payload_identity is None:
+        reason = "missing" if "identity" not in payload else "null"
+        raise _malformed_lease_state(path, "identity", reason)
+    if not isinstance(payload_identity, dict):
+        raise _malformed_lease_state(path, "identity", "wrong_type")
+    for field, expected in identity.items():
+        if field not in payload_identity:
+            raise _malformed_lease_state(path, f"identity.{field}", "missing")
+        if payload_identity[field] is None:
+            raise _malformed_lease_state(path, f"identity.{field}", "null")
+        if not isinstance(payload_identity[field], str):
+            raise _malformed_lease_state(path, f"identity.{field}", "wrong_type")
+        if payload_identity[field] != expected:
+            raise _malformed_lease_state(path, f"identity.{field}", "mismatch")
+
+
+def load_authority_lease(identity: dict[str, str]) -> dict[str, Any] | None:
+    path = lease_path(identity)
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text())
+    except json.JSONDecodeError as exc:
+        raise LeaseRefused(
+            "corrupt_lease_state",
+            {"lease_file": path.name, "field": "json", "reason": exc.__class__.__name__},
+        ) from exc
+    _validate_loaded_lease_state(identity, payload)
+    return payload
+
+
+def validate_lease_and_claimant(
+    identity: dict[str, str],
+    *,
+    owner_session_id: str | None = None,
+    fence_token: int | None = None,
+    owner_pid: int | None = None,
+    claimant_runtime_id: str | None = None,
+    owner_mismatch_reason: str = "lease_owned_by_other_session",
+) -> dict[str, Any] | None:
+    lease = load_authority_lease(identity)
+    if lease is None or owner_session_id is None:
+        return lease
+
+    record = owner_session_record(owner_session_id)
+    if record is None:
+        raise LeaseRefused("owner_session_not_registered")
+    if not _session_is_live(record):
+        raise LeaseRefused("owner_session_not_live", _session_not_live_owner(record))
+    _require_bound_session(record, identity)
+    if lease.get("status") != "active":
+        raise LeaseRefused("lease_not_active", owner_summary(lease))
+    if lease.get("owner_session_id") != owner_session_id:
+        raise LeaseRefused(owner_mismatch_reason, owner_summary(lease))
+    _assert_claimant_matches(
+        lease,
+        claimant_runtime_id=claimant_runtime_id,
+        owner_pid=owner_pid,
+    )
+    if fence_token is not None and int(lease.get("fence_token", -1)) != int(fence_token):
+        raise LeaseRefused("stale_fence_token", owner_summary(lease))
+    if lease_is_expired(lease):
+        raise LeaseRefused("lease_expired", owner_summary(lease))
+    return lease
+
+
 def iter_leases() -> list[dict[str, Any]]:
     if not ACTIVATION_LEASES_DIR.exists():
         return []
@@ -254,6 +328,9 @@ def owner_is_live(lease: dict[str, Any]) -> bool | None:
     record = owner_session_record(str(lease.get("owner_session_id")))
     if record is None:
         return False if pid_alive is False else None
+    identity = lease.get("identity")
+    if not isinstance(identity, dict) or not _session_matches_identity(record, identity):
+        return False
     if not _session_is_live(record):
         return False
     if pid_alive is True:
@@ -338,6 +415,8 @@ def _assert_claimant_matches(
             raise LeaseRefused("claimant_pid_required", owner_summary(lease))
         if int(lease_pid) != int(pid):
             raise LeaseRefused("claimant_pid_mismatch", owner_summary(lease))
+        if process_alive(pid) is not True:
+            raise LeaseRefused("owner_pid_not_live", owner_summary(lease))
 
 
 def _require_bound_session(record: dict[str, Any], identity: dict[str, str]) -> None:
@@ -355,6 +434,17 @@ def _require_bound_session(record: dict[str, Any], identity: dict[str, str]) -> 
                     "identity_value": identity[identity_field],
                 },
             )
+
+
+def _session_matches_identity(record: dict[str, Any], identity: dict[str, str]) -> bool:
+    try:
+        return (
+            record.get("agent_id") == identity["target_agent"]
+            and record.get("project_id") == identity["project"]
+            and record.get("chat_id") == identity["chat"]
+        )
+    except KeyError:
+        return False
 
 
 def _claim_realpath(identity: dict[str, str]) -> str:
@@ -384,9 +474,7 @@ def _active_alias_collision(identity: dict[str, str], worktree_realpath: str) ->
             continue
         if existing.get("worktree_realpath") != worktree_realpath:
             continue
-        alive = owner_is_live(existing)
-        if alive is True or alive is None:
-            return existing
+        return existing
     return None
 
 
@@ -415,7 +503,7 @@ def claim_lease(
         if collision is not None:
             raise LeaseRefused("worktree_alias_collision", owner_summary(collision))
 
-        existing = load_lease(identity)
+        existing = validate_lease_and_claimant(identity)
         fence_token = 1
         previous_owner: str | None = None
         if existing is not None:
@@ -485,28 +573,15 @@ def assert_lease(
     owner_pid: int | None = None,
     claimant_runtime_id: str | None = None,
 ) -> dict[str, Any]:
-    record = owner_session_record(owner_session_id)
-    if record is None:
-        raise LeaseRefused("owner_session_not_registered")
-    if not _session_is_live(record):
-        raise LeaseRefused("owner_session_not_live", _session_not_live_owner(record))
-    _require_bound_session(record, identity)
-    lease = load_lease(identity)
+    lease = validate_lease_and_claimant(
+        identity,
+        owner_session_id=owner_session_id,
+        fence_token=fence_token,
+        owner_pid=owner_pid,
+        claimant_runtime_id=claimant_runtime_id,
+    )
     if lease is None:
         raise LeaseRefused("no_lease_for_identity")
-    if lease.get("status") != "active":
-        raise LeaseRefused("lease_not_active", owner_summary(lease))
-    if lease.get("owner_session_id") != owner_session_id:
-        raise LeaseRefused("lease_owned_by_other_session", owner_summary(lease))
-    _assert_claimant_matches(
-        lease,
-        claimant_runtime_id=claimant_runtime_id,
-        owner_pid=owner_pid,
-    )
-    if int(lease.get("fence_token", -1)) != int(fence_token):
-        raise LeaseRefused("stale_fence_token", owner_summary(lease))
-    if lease_is_expired(lease):
-        raise LeaseRefused("lease_expired", owner_summary(lease))
     return lease
 
 
@@ -519,26 +594,17 @@ def release_lease(
     claimant_runtime_id: str | None = None,
     status: str = "released",
 ) -> dict[str, Any]:
-    record = owner_session_record(owner_session_id)
-    if record is None:
-        raise LeaseRefused("owner_session_not_registered")
-    if not _session_is_live(record):
-        raise LeaseRefused("owner_session_not_live", _session_not_live_owner(record))
-    _require_bound_session(record, identity)
-
     with _ClaimLock(identity):
-        existing = load_lease(identity)
+        existing = validate_lease_and_claimant(
+            identity,
+            owner_session_id=owner_session_id,
+            fence_token=fence_token,
+            owner_pid=owner_pid,
+            claimant_runtime_id=claimant_runtime_id,
+            owner_mismatch_reason="release_requires_current_owner",
+        )
         if existing is None:
             raise LeaseRefused("no_lease_for_identity")
-        if existing.get("owner_session_id") != owner_session_id:
-            raise LeaseRefused("release_requires_current_owner", owner_summary(existing))
-        _assert_claimant_matches(
-            existing,
-            claimant_runtime_id=claimant_runtime_id,
-            owner_pid=owner_pid,
-        )
-        if int(existing.get("fence_token", -1)) != int(fence_token):
-            raise LeaseRefused("stale_fence_token", owner_summary(existing))
         existing["status"] = status
         existing["released_utc"] = utc_iso()
         save_lease(existing)

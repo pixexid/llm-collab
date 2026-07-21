@@ -349,6 +349,10 @@ activation lease JSON fails closed with `corrupt_lease_state`; the refusal names
 only the bad lease filename, field, and reason, never file contents. Active,
 unexpired lease records are structurally invalid unless `worktree_realpath`,
 `lease_key`, `owner_session_id`, and `status` are all present non-null strings.
+Claim, assert, and release route existing-lease authority through one shared
+validation entry point covering structural validity, lease-key and identity
+binding, session liveness and binding, claimant runtime/PID binding, PID
+liveness, fence, and lease expiry.
 
 ### Body
 
