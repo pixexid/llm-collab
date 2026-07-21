@@ -89,10 +89,25 @@ class ActivationLeaseTest(unittest.TestCase):
         self.assertTrue(result.stdout.strip(), result.stderr)
         return json.loads(result.stdout), result.returncode
 
-    def identity_args(self, worktree: Path | None = None) -> list[str]:
+    def run_raw_cli(self, root: Path, *args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, str(SCRIPT_PATH), *args, "--json"],
+            cwd=root,
+            text=True,
+            capture_output=True,
+            env=self.env(),
+            check=False,
+        )
+
+    def identity_args(
+        self,
+        worktree: Path | None = None,
+        *,
+        project: str = "amiga",
+    ) -> list[str]:
         selected_worktree = worktree or self.worktree
         return [
-            "--project", "amiga",
+            "--project", project,
             "--chat", "CHAT-TEST0001",
             "--task", "TASK-TEST01",
             "--worktree", str(selected_worktree),
@@ -128,6 +143,12 @@ class ActivationLeaseTest(unittest.TestCase):
         path = root / "State" / "session_autobridge" / "sessions" / f"{session}.json"
         payload = json.loads(path.read_text())
         payload["status"] = status
+        write_json(path, payload)
+
+    def expire_session_lease(self, root: Path, session: str) -> None:
+        path = root / "State" / "session_autobridge" / "sessions" / f"{session}.json"
+        payload = json.loads(path.read_text())
+        payload["lease_expires_utc"] = "2000-01-01T00:00:00+00:00"
         write_json(path, payload)
 
     def claim(self, root: Path, session: str, *extra: str, worktree: Path | None = None) -> tuple[dict, int]:
@@ -433,6 +454,62 @@ class ActivationLeaseTest(unittest.TestCase):
                 self.assertEqual(2, taken["lease"]["fence_token"])
                 self.assertEqual("SESSION-A", taken["lease"]["previous_owner_session_id"])
 
+    def test_expired_parked_owner_session_takeover_blocks_old_assert_and_release(self):
+        root = self.make_workspace()
+        self.register_session(root, "SESSION-A", runtime_id="runtime-a")
+        self.register_session(root, "SESSION-B", runtime_id="runtime-b")
+        claimed, code = self.claim(root, "SESSION-A", "--claimant-runtime-id", "runtime-a")
+        self.assertEqual(0, code, claimed)
+        fence = str(claimed["lease"]["fence_token"])
+        lease_dir = root / "State" / "session_autobridge" / "activation_leases"
+
+        self.expire_session_lease(root, "SESSION-A")
+        before = {path.name: path.read_text() for path in lease_dir.glob("*.json")}
+        refused, code = self.claim(root, "SESSION-B", "--claimant-runtime-id", "runtime-b")
+        self.assertEqual(75, code)
+        self.assertEqual("dead_owner_requires_takeover", refused["reason"])
+        self.assertEqual(before, {path.name: path.read_text() for path in lease_dir.glob("*.json")})
+
+        taken, code = self.claim(root, "SESSION-B", "--claimant-runtime-id", "runtime-b", "--takeover")
+        self.assertEqual(0, code, taken)
+        self.assertEqual(2, taken["lease"]["fence_token"])
+        self.assertEqual("SESSION-A", taken["lease"]["previous_owner_session_id"])
+
+        after_takeover = {path.name: path.read_text() for path in lease_dir.glob("*.json")}
+        refused, code = self.run_cli(
+            root,
+            "lease-assert",
+            *self.identity_args(),
+            "--session",
+            "SESSION-A",
+            "--fence-token",
+            fence,
+            "--claimant-runtime-id",
+            "runtime-a",
+        )
+        self.assertEqual(75, code)
+        self.assertEqual("owner_session_not_live", refused["reason"])
+        self.assertEqual(
+            "2000-01-01T00:00:00+00:00",
+            refused["owner"]["owner_session_lease_expires_utc"],
+        )
+        self.assertEqual(after_takeover, {path.name: path.read_text() for path in lease_dir.glob("*.json")})
+
+        refused, code = self.run_cli(
+            root,
+            "lease-release",
+            *self.identity_args(),
+            "--session",
+            "SESSION-A",
+            "--fence-token",
+            fence,
+            "--claimant-runtime-id",
+            "runtime-a",
+        )
+        self.assertEqual(75, code)
+        self.assertEqual("owner_session_not_live", refused["reason"])
+        self.assertEqual(after_takeover, {path.name: path.read_text() for path in lease_dir.glob("*.json")})
+
     def test_expired_takeover_invalidates_old_fence_token(self):
         root = self.make_workspace()
         self.register_session(root, "SESSION-A", runtime_id="runtime-a")
@@ -589,6 +666,37 @@ class ActivationLeaseTest(unittest.TestCase):
         )
         self.assertNotEqual(0, result.returncode)
         self.assertIn("--fence-token", result.stderr)
+
+    def test_lease_commands_reject_unknown_project_before_identity_access(self):
+        root = self.make_workspace()
+        self.register_session(root, "SESSION-A", runtime_id="runtime-a")
+        unknown_identity = self.identity_args(project="unknown-project")
+        cases = [
+            ("lease-claim", [*unknown_identity, "--session", "SESSION-A", "--claimant-runtime-id", "runtime-a"]),
+            ("lease-show", unknown_identity),
+            (
+                "lease-assert",
+                [*unknown_identity, "--session", "SESSION-A", "--fence-token", "1", "--claimant-runtime-id", "runtime-a"],
+            ),
+            (
+                "lease-release",
+                [*unknown_identity, "--session", "SESSION-A", "--fence-token", "1", "--claimant-runtime-id", "runtime-a"],
+            ),
+        ]
+        for command, args in cases:
+            with self.subTest(command=command):
+                result = self.run_raw_cli(root, command, *args)
+                self.assertNotEqual(0, result.returncode)
+                self.assertEqual("", result.stdout)
+                self.assertIn("Unknown project_id: 'unknown-project'", result.stderr)
+        self.assertEqual([], self.lease_records(root))
+
+    def test_lease_show_accepts_registered_project(self):
+        root = self.make_workspace()
+        shown, code = self.run_cli(root, "lease-show", *self.identity_args())
+        self.assertEqual(0, code, shown)
+        self.assertIsNone(shown["lease"])
+        self.assertEqual("amiga", shown["identity"]["project"])
 
     def test_alias_collapse_refuses_symlink_claim_under_lock(self):
         root = self.make_workspace()

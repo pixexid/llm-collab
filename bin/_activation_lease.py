@@ -196,15 +196,27 @@ def _session_expires_dead(record: dict[str, Any]) -> bool:
     return expires_at is not None and expires_at <= _now()
 
 
+def _session_is_live(record: dict[str, Any]) -> bool:
+    return (
+        record.get("status") in LIVE_SESSION_STATUSES
+        and not _session_expires_dead(record)
+    )
+
+
+def _session_not_live_owner(record: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "owner_session_status": record.get("status"),
+        "owner_session_lease_expires_utc": record.get("lease_expires_utc"),
+    }
+
+
 def owner_is_live(lease: dict[str, Any]) -> bool | None:
     pid_alive = process_alive(lease.get("owner_pid"))
 
     record = owner_session_record(str(lease.get("owner_session_id")))
     if record is None:
         return False if pid_alive is False else None
-    if record.get("status") not in LIVE_SESSION_STATUSES:
-        return False
-    if _session_expires_dead(record):
+    if not _session_is_live(record):
         return False
     if pid_alive is True:
         return True
@@ -352,10 +364,8 @@ def claim_lease(
     record = owner_session_record(owner_session_id)
     if record is None:
         raise LeaseRefused("owner_session_not_registered")
-    if record.get("status") not in LIVE_SESSION_STATUSES:
-        raise LeaseRefused(
-            "owner_session_not_live", {"owner_session_status": record.get("status")}
-        )
+    if not _session_is_live(record):
+        raise LeaseRefused("owner_session_not_live", _session_not_live_owner(record))
     _require_bound_session(record, identity)
     runtime_id, pid = _resolve_claimant(
         claimant_runtime_id=claimant_runtime_id, owner_pid=owner_pid
@@ -440,10 +450,8 @@ def assert_lease(
     record = owner_session_record(owner_session_id)
     if record is None:
         raise LeaseRefused("owner_session_not_registered")
-    if record.get("status") not in LIVE_SESSION_STATUSES:
-        raise LeaseRefused(
-            "owner_session_not_live", {"owner_session_status": record.get("status")}
-        )
+    if not _session_is_live(record):
+        raise LeaseRefused("owner_session_not_live", _session_not_live_owner(record))
     _require_bound_session(record, identity)
     lease = load_lease(identity)
     if lease is None:
@@ -476,10 +484,8 @@ def release_lease(
     record = owner_session_record(owner_session_id)
     if record is None:
         raise LeaseRefused("owner_session_not_registered")
-    if record.get("status") not in LIVE_SESSION_STATUSES:
-        raise LeaseRefused(
-            "owner_session_not_live", {"owner_session_status": record.get("status")}
-        )
+    if not _session_is_live(record):
+        raise LeaseRefused("owner_session_not_live", _session_not_live_owner(record))
     _require_bound_session(record, identity)
 
     with _ClaimLock(identity):
