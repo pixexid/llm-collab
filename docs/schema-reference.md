@@ -267,10 +267,12 @@ creation or symlink replacement cannot move an identity. Lease authority uses
 the same byte-exact identity for its record key, then resolves the claimed
 worktree once under the claim lock only to reject active symlink/alias
 collisions. Consumption gating and wake-path enforcement ship in the follow-on
-lanes (GH-1572). Until GH-1572
-lands, `deliver.py --activation` FAILS CLOSED pre-write (the packet's required
-claim command is not yet runnable); this schema documents the stable contract,
-not a live delivery path.
+lanes (GH-1572). Runtime consumption is active: the emitted claim command uses
+`inbox.py --packet <basename>` and must select exactly one packet across the
+recipient's read+unread inbox union. Ambiguous selectors, malformed activation
+packets, and refused lease claims fail closed before any inbox read mutation.
+`--mark-all-read` clears stale missing pointers and ordinary mail, but holds
+existing activation-shaped packets for explicit claim or manual adjudication.
 
 ### Activation lease records
 
@@ -351,12 +353,37 @@ unexpired lease records are structurally invalid unless `worktree_realpath`,
 `lease_key`, `owner_session_id`, and `status` are all present non-null strings.
 During alias enumeration, active unexpired lease records are also invalid unless
 the payload `lease_key` matches the filename-derived key and the payload
-`identity` hashes back to that same key; this semantic binding must stay in
-place before GH-1572 enables activation leases.
+`identity` hashes back to that same key; this semantic binding is required by
+the runtime activation gate.
 Claim, assert, and release route existing-lease authority through one shared
 validation entry point covering structural validity, lease-key and identity
 binding, session liveness and binding, claimant runtime/PID binding, PID
 liveness, fence, and lease expiry.
+
+Runtime activation claims first audit stale recurring inbox pollers for the
+same activation identity. PM2 `jlist` PIDs are the authoritative preserved set:
+registered watcher PIDs are reported and preserved. Unregistered matching
+pollers must be terminated with verified SIGTERM/SIGKILL proof, or the claim
+refuses with a cleanup/audit reason. Test suites must use
+`LLM_COLLAB_PS_FIXTURE` for process listings so fixture cleanup cannot signal a
+real PID. Chat-id poller matching is target-agent-bound; a poller for another
+agent that mentions the same chat id is never a match.
+
+Session autobridge dispatch treats activation-shaped packets as activation
+packets before loop-protection or processed-message mutations. A malformed
+packet or concurrent claim loss stays unread/unprocessed. A successful dispatch
+attaches the activation identity and fence to the runtime payload and resume
+prompt. Dispatcher claims bind both runtime id and dispatcher process pid, so
+two dispatcher processes sharing one registered runtime/session cannot both
+idempotently wake the same packet. Each protected filesystem or process
+mutation for an activation packet runs through a lease-held mutation guard that
+acquires the per-identity claim lock, validates the exact owner/runtime/pid and
+fence, holds that lock through the mutation, and then releases it. Protected
+boundaries include turn summaries, runtime triggers, relay prompts, UI
+refreshes, loop-protection processed writes, and ordinary processed-message
+writes. A stale fence at any boundary stops that packet without marking it
+processed; a dead predecessor process may be taken over only by minting a newer
+fence.
 
 ### Body
 

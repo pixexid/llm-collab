@@ -25,6 +25,7 @@ from _helpers import (
     write_file,
     write_chat_note,
 )
+from _activation_identity import classify_activation
 
 AUTOBRIDGE_ROOT = ROOT / "State" / "session_autobridge"
 SESSIONS_DIR = AUTOBRIDGE_ROOT / "sessions"
@@ -497,12 +498,19 @@ def find_dispatchable_target_session(
     project_id: str | None,
     chat_id: str | None,
     target_session_id: str | None,
+    require_exact_scope: bool = False,
 ) -> dict[str, Any] | None:
     for session in iter_sessions(agent_id=agent_id):
-        if project_id and session.get("project_id") not in {None, project_id}:
-            continue
-        if chat_id and session.get("chat_id") not in {None, chat_id}:
-            continue
+        if require_exact_scope:
+            if project_id is not None and session.get("project_id") != project_id:
+                continue
+            if chat_id is not None and session.get("chat_id") != chat_id:
+                continue
+        else:
+            if project_id and session.get("project_id") not in {None, project_id}:
+                continue
+            if chat_id and session.get("chat_id") not in {None, chat_id}:
+                continue
         if target_session_id and str(target_session_id) not in session_target_ids(session):
             continue
         dispatchable, _ = session_is_dispatchable(session)
@@ -547,6 +555,149 @@ def mark_message_processed(session: dict, message_path: str) -> None:
         existing.append(message_path)
     session["processed_messages"] = existing
     save_session(session)
+
+
+def claim_message_activation(session: dict, message: dict) -> tuple[bool, dict[str, Any] | None]:
+    kind, detail = classify_activation(
+        message.get("frontmatter", {}),
+        target_agent=str(session["agent_id"]),
+    )
+    if kind == "none":
+        return True, None
+    if kind == "malformed":
+        return False, {
+            "event": "activation_refused",
+            "message_path": message["path"],
+            "reason": "malformed_activation",
+            "detail": detail,
+        }
+
+    from _activation_cleanup import claim_activation_lease
+    from _activation_lease import LeaseRefused
+
+    runtime = runtime_metadata(session)
+    runtime_id = runtime.get("session_id")
+    owner_pid = os.getpid()
+    try:
+        claim = claim_activation_lease(
+            detail or {},
+            owner_session_id=str(session["session_id"]),
+            owner_pid=owner_pid,
+            claimant_runtime_id=str(runtime_id) if runtime_id else None,
+            takeover=True,
+        )
+    except LeaseRefused as exc:
+        return False, {
+            "event": "activation_refused",
+            "message_path": message["path"],
+            "reason": exc.reason,
+            "owner": exc.owner,
+            "identity": detail,
+        }
+    message["activation_lease"] = claim
+    return True, {
+        "event": "activation_claimed",
+        "message_path": message["path"],
+        "lease": claim["lease"],
+        "fence_token": claim["fence_token"],
+        "identity": claim["identity"],
+        "poller_audit": claim["poller_audit"],
+    }
+
+
+def activation_claimant(session: dict) -> tuple[str | None, int]:
+    runtime = runtime_metadata(session)
+    runtime_id = runtime.get("session_id")
+    return str(runtime_id) if runtime_id else None, os.getpid()
+
+
+def assert_message_activation(
+    session: dict,
+    message: dict,
+    *,
+    boundary: str,
+) -> tuple[bool, dict[str, Any] | None]:
+    activation_lease = message.get("activation_lease")
+    if not activation_lease:
+        return True, None
+
+    from _activation_lease import LeaseRefused, assert_lease
+
+    runtime_id, owner_pid = activation_claimant(session)
+    try:
+        lease = assert_lease(
+            activation_lease["identity"],
+            owner_session_id=str(session["session_id"]),
+            fence_token=int(activation_lease["fence_token"]),
+            owner_pid=owner_pid,
+            claimant_runtime_id=str(runtime_id) if runtime_id else None,
+        )
+    except LeaseRefused as exc:
+        return False, {
+            "event": "activation_assert_refused",
+            "message_path": message["path"],
+            "boundary": boundary,
+            "reason": exc.reason,
+            "owner": exc.owner,
+        }
+    return True, {
+        "event": "activation_asserted",
+        "message_path": message["path"],
+        "boundary": boundary,
+        "lease": {
+            "lease_key": lease.get("lease_key"),
+            "fence_token": lease.get("fence_token"),
+            "owner_session_id": lease.get("owner_session_id"),
+            "owner_runtime_session_id": lease.get("owner_runtime_session_id"),
+            "owner_pid": lease.get("owner_pid"),
+        },
+    }
+
+
+def activation_fenced_mutation(
+    session: dict,
+    message: dict,
+    *,
+    boundary: str,
+    mutation,
+) -> tuple[bool, dict[str, Any] | None, Any]:
+    activation_lease = message.get("activation_lease")
+    if not activation_lease:
+        return True, None, mutation()
+
+    from _activation_lease import LeaseRefused, with_lease_fence
+
+    runtime_id, owner_pid = activation_claimant(session)
+    try:
+        result = with_lease_fence(
+            activation_lease["identity"],
+            owner_session_id=str(session["session_id"]),
+            fence_token=int(activation_lease["fence_token"]),
+            owner_pid=owner_pid,
+            claimant_runtime_id=runtime_id,
+            mutation=mutation,
+        )
+    except LeaseRefused as exc:
+        return False, {
+            "event": "activation_assert_refused",
+            "message_path": message["path"],
+            "boundary": boundary,
+            "reason": exc.reason,
+            "owner": exc.owner,
+        }, None
+    lease = activation_lease.get("lease") or {}
+    return True, {
+        "event": "activation_asserted",
+        "message_path": message["path"],
+        "boundary": boundary,
+        "lease": {
+            "lease_key": lease.get("lease_key"),
+            "fence_token": activation_lease.get("fence_token"),
+            "owner_session_id": activation_lease.get("owner_session_id"),
+            "owner_runtime_session_id": activation_lease.get("owner_runtime_session_id"),
+            "owner_pid": activation_lease.get("owner_pid"),
+        },
+    }, result
 
 
 def is_codex_self_target_message(message: dict) -> bool:
@@ -630,12 +781,14 @@ def build_runtime_payload(session: dict, message: dict) -> dict[str, Any]:
             "supersedes_session_id": fm.get("supersedes_session_id"),
             "body": message.get("body", ""),
         },
+        "activation_lease": message.get("activation_lease"),
     }
 
 
 def build_resume_prompt(session: dict, message: dict) -> str:
     fm = message["frontmatter"]
     body = message.get("body", "").strip()
+    activation_lease = message.get("activation_lease")
     lines = [
         "You are resuming a registered llm-collab worker session for one bounded action.",
         "Read the routed message context below and produce exactly one bounded reply or action.",
@@ -648,12 +801,33 @@ def build_resume_prompt(session: dict, message: dict) -> str:
         f"chat_id: {fm.get('chat_id', '')}",
         f"project_id: {fm.get('project_id', '')}",
         f"title: {fm.get('title', '')}",
-        "",
-        "Message body:",
-        body or "(no body)",
-        "",
-        "If the request is trivial, answer tersely. Do not start unrelated work.",
     ]
+    if activation_lease:
+        identity = activation_lease.get("identity") or {}
+        lease = activation_lease.get("lease") or {}
+        lines.extend(
+            [
+                f"activation_lease_key: {lease.get('lease_key', '')}",
+                f"activation_fence_token: {activation_lease.get('fence_token', '')}",
+                f"activation_owner_session_id: {activation_lease.get('owner_session_id', '')}",
+                f"activation_project: {identity.get('project', '')}",
+                f"activation_chat: {identity.get('chat', '')}",
+                f"activation_task: {identity.get('task', '')}",
+                f"activation_worktree: {identity.get('worktree', '')}",
+                f"activation_branch: {identity.get('branch', '')}",
+                f"activation_target_agent: {identity.get('target_agent', '')}",
+                "Before mutating protected lane state, assert this exact activation lease fence.",
+            ]
+        )
+    lines.extend(
+        [
+            "",
+            "Message body:",
+            body or "(no body)",
+            "",
+            "If the request is trivial, answer tersely. Do not start unrelated work.",
+        ]
+    )
     return "\n".join(lines)
 
 
@@ -1645,6 +1819,11 @@ def dispatch_session(session_id: str) -> dict[str, Any]:
                 },
             )
             continue
+        activation_allowed, activation_event = claim_message_activation(session, message)
+        if activation_event is not None:
+            append_event(session_id, activation_event)
+        if not activation_allowed:
+            continue
         skip, skip_reason = should_skip_for_loop_protection(session, message)
         if skip:
             append_event(
@@ -1655,7 +1834,23 @@ def dispatch_session(session_id: str) -> dict[str, Any]:
                     "reason": skip_reason,
                 },
             )
-            mark_message_processed(session, message["path"])
+            fenced, assertion_event, _ = activation_fenced_mutation(
+                session,
+                message,
+                boundary="loop_protection_mark_message_processed",
+                mutation=lambda: mark_message_processed(session, message["path"]),
+            )
+            if assertion_event is not None:
+                append_event(session_id, assertion_event)
+            if not fenced:
+                append_event(
+                    session_id,
+                    {
+                        "event": "message_skipped_unprocessed",
+                        "message_path": message["path"],
+                        "reason": assertion_event["reason"] if assertion_event else "activation_assert_refused",
+                    },
+                )
             continue
         matched.append(message)
 
@@ -1676,25 +1871,67 @@ def dispatch_session(session_id: str) -> dict[str, Any]:
 
         if action == "runtime_trigger":
             runtime = runtime_metadata(session)
-            write_operator_turn_summary(
+            asserted, assertion_event, _ = activation_fenced_mutation(
                 session,
                 message,
-                event_name="picked_up",
-                body="\n".join(
-                    [
-                        f"{session['agent_id']} picked up `{message['frontmatter'].get('title', '(no title)')}`.",
-                        f"From: `{message['frontmatter'].get('sender_agent_id', message['frontmatter'].get('from', ''))}`",
-                        f"Receiver runtime thread: `{runtime.get('session_id', '')}`",
-                        f"Sender thread: `{message['frontmatter'].get('sender_session_id', '')}`",
-                    ]
+                boundary="operator_turn_summary",
+                mutation=lambda: write_operator_turn_summary(
+                    session,
+                    message,
+                    event_name="picked_up",
+                    body="\n".join(
+                        [
+                            f"{session['agent_id']} picked up `{message['frontmatter'].get('title', '(no title)')}`.",
+                            f"From: `{message['frontmatter'].get('sender_agent_id', message['frontmatter'].get('from', ''))}`",
+                            f"Receiver runtime thread: `{runtime.get('session_id', '')}`",
+                            f"Sender thread: `{message['frontmatter'].get('sender_session_id', '')}`",
+                        ]
+                    ),
                 ),
             )
-            runtime_result = execute_runtime_trigger(session, message)
+            if assertion_event is not None:
+                event.setdefault("activation_assertions", []).append(assertion_event)
+            if not asserted:
+                event["reason"] = assertion_event["reason"] if assertion_event else "activation_assert_refused"
+                append_event(session_id, event)
+                actions.append(event)
+                continue
+            asserted, assertion_event, runtime_result = activation_fenced_mutation(
+                session,
+                message,
+                boundary="runtime_trigger",
+                mutation=lambda: execute_runtime_trigger(session, message),
+            )
+            if assertion_event is not None:
+                event.setdefault("activation_assertions", []).append(assertion_event)
+            if not asserted:
+                event["reason"] = assertion_event["reason"] if assertion_event else "activation_assert_refused"
+                append_event(session_id, event)
+                actions.append(event)
+                continue
             event["runtime_result"] = runtime_result
             should_mark_processed = runtime_result.get("returncode") == 0
             if should_mark_processed:
                 try:
-                    event["ui_refresh_result"] = refresh_runtime_ui(session)
+                    asserted, assertion_event, ui_refresh_result = activation_fenced_mutation(
+                        session,
+                        message,
+                        boundary="runtime_ui_refresh",
+                        mutation=lambda: refresh_runtime_ui(session),
+                    )
+                    if assertion_event is not None:
+                        event.setdefault("activation_assertions", []).append(assertion_event)
+                    if not asserted:
+                        event["reason"] = (
+                            assertion_event["reason"]
+                            if assertion_event
+                            else "activation_assert_refused"
+                        )
+                        should_mark_processed = False
+                        append_event(session_id, event)
+                        actions.append(event)
+                        continue
+                    event["ui_refresh_result"] = ui_refresh_result
                 except Exception as exc:
                     event["ui_refresh_result"] = {
                         "skipped": False,
@@ -1702,10 +1939,39 @@ def dispatch_session(session_id: str) -> dict[str, Any]:
                         "stderr": str(exc),
                     }
         elif action == "relay_prompt":
-            event["relay_result"] = create_relay_prompt(session, message)
+            asserted, assertion_event, relay_result = activation_fenced_mutation(
+                session,
+                message,
+                boundary="relay_prompt",
+                mutation=lambda: create_relay_prompt(session, message),
+            )
+            if assertion_event is not None:
+                event.setdefault("activation_assertions", []).append(assertion_event)
+            if not asserted:
+                event["reason"] = assertion_event["reason"] if assertion_event else "activation_assert_refused"
+                append_event(session_id, event)
+                actions.append(event)
+                continue
+            event["relay_result"] = relay_result
 
-        append_event(session_id, event)
+        mark_after_event = False
         if should_mark_processed:
+            if message.get("activation_lease"):
+                asserted, assertion_event, _ = activation_fenced_mutation(
+                    session,
+                    message,
+                    boundary="mark_message_processed",
+                    mutation=lambda: mark_message_processed(session, message["path"]),
+                )
+                if assertion_event is not None:
+                    event.setdefault("activation_assertions", []).append(assertion_event)
+                if not asserted:
+                    event["reason"] = assertion_event["reason"] if assertion_event else "activation_assert_refused"
+                    should_mark_processed = False
+            else:
+                mark_after_event = True
+        append_event(session_id, event)
+        if should_mark_processed and mark_after_event:
             mark_message_processed(session, message["path"])
         actions.append(event)
 

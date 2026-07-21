@@ -74,7 +74,7 @@ from _activation_identity import (
 # packet's claim command (`inbox.py --packet`) runnable. Deliberately a code
 # constant, NOT an environment variable or flag: the production CLI must have
 # no way to enable activation delivery before the runtime integration exists.
-ACTIVATION_RUNTIME_INTEGRATED = False
+ACTIVATION_RUNTIME_INTEGRATED = True
 
 
 def allocate_activation_packet_paths(
@@ -402,6 +402,7 @@ def main():
             project_id=args.project,
             chat_id=chat_id,
             target_session_id=args.target_session_id,
+            require_exact_scope=args.activation,
         )
     autobridge_ready = autobridge_target is not None
 

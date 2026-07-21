@@ -78,6 +78,9 @@ class AxDoorbellRoutingTest(unittest.TestCase):
             deliver.is_ax_doorbell_target(agent, "x", sender_id="codex")
         )
 
+    def test_activation_runtime_integration_is_enabled(self) -> None:
+        self.assertTrue(deliver.ACTIVATION_RUNTIME_INTEGRATED)
+
 
 
 

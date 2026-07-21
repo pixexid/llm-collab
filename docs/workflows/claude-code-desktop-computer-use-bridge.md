@@ -301,6 +301,12 @@ unread inbox** on wake, not just read the referenced file:
 python3 bin/inbox.py --me <agent> --project <project-id> --limit 5
 ```
 
+Activation doorbells are the exception: follow the exact claim command embedded
+in the durable packet body, which includes `--chat <chat-id> --packet
+<packet-name>`. That command claims the activation lease before marking the
+packet read. A refusal exits 75 and leaves the packet unresolved; do not treat a
+generic inbox read as activation authority.
+
 This makes a missed doorbell self-healing: the next ring surfaces any earlier
 unread packets too. There is no routine polling backstop by default (see
 safety-fuse).

@@ -18,6 +18,7 @@ SCRIPT_PATH = REPO_ROOT / "bin" / "session_autobridge.py"
 sys.path.insert(0, str(REPO_ROOT / "bin"))
 
 import _activation_lease as lease_lib
+import _session_autobridge as session_autobridge_lib
 
 
 def write(path: Path, content: str) -> None:
@@ -175,7 +176,7 @@ class ActivationLeaseTest(unittest.TestCase):
             "_validate_loaded_lease_state",
             "_assert_claimant_matches",
         }
-        for name in ("claim_lease", "assert_lease", "release_lease"):
+        for name in ("claim_lease", "assert_lease", "with_lease_fence", "release_lease"):
             with self.subTest(function=name):
                 calls = {
                     node.func.id
@@ -184,6 +185,244 @@ class ActivationLeaseTest(unittest.TestCase):
                 }
                 self.assertIn("validate_lease_and_claimant", calls)
                 self.assertFalse(forbidden & calls)
+
+    def test_same_registered_runtime_workers_do_not_idempotently_dual_claim(self):
+        root = self.make_workspace()
+        self.register_session(root, "SESSION-A", runtime_id="runtime-a")
+        identity = lease_lib.lease_identity(
+            {
+                "project": "amiga",
+                "chat": "CHAT-TEST0001",
+                "task": "TASK-TEST01",
+                "worktree": str(self.worktree),
+                "branch": "codex/gh-1571-test",
+                "target_agent": "claude",
+            }
+        )
+        alive = {111: True, 222: True}
+
+        with (
+            patch.object(
+                session_autobridge_lib,
+                "SESSIONS_DIR",
+                root / "State" / "session_autobridge" / "sessions",
+            ),
+            patch.object(
+                lease_lib,
+                "ACTIVATION_LEASES_DIR",
+                root / "State" / "session_autobridge" / "activation_leases",
+            ),
+            patch.object(
+                lease_lib,
+                "ACTIVATION_GRANT_LOCK",
+                root / "State" / "session_autobridge" / "activation_leases" / ".claim-grant.lock",
+            ),
+            patch.object(lease_lib, "process_alive", side_effect=lambda pid: alive.get(pid)),
+        ):
+            first = lease_lib.claim_lease(
+                identity,
+                owner_session_id="SESSION-A",
+                owner_pid=111,
+                claimant_runtime_id="runtime-a",
+                takeover=True,
+            )
+            with self.assertRaises(lease_lib.LeaseRefused) as ctx:
+                lease_lib.claim_lease(
+                    identity,
+                    owner_session_id="SESSION-A",
+                    owner_pid=222,
+                    claimant_runtime_id="runtime-a",
+                    takeover=True,
+                )
+
+        self.assertEqual(1, first["fence_token"])
+        self.assertEqual("same_session_different_claimant", ctx.exception.reason)
+
+    def test_dead_dispatcher_process_allows_successor_generation_newer_fence(self):
+        root = self.make_workspace()
+        self.register_session(root, "SESSION-A", runtime_id="runtime-a")
+        identity = lease_lib.lease_identity(
+            {
+                "project": "amiga",
+                "chat": "CHAT-TEST0001",
+                "task": "TASK-TEST01",
+                "worktree": str(self.worktree),
+                "branch": "codex/gh-1571-test",
+                "target_agent": "claude",
+            }
+        )
+        alive = {111: True, 222: True}
+
+        with (
+            patch.object(
+                session_autobridge_lib,
+                "SESSIONS_DIR",
+                root / "State" / "session_autobridge" / "sessions",
+            ),
+            patch.object(
+                lease_lib,
+                "ACTIVATION_LEASES_DIR",
+                root / "State" / "session_autobridge" / "activation_leases",
+            ),
+            patch.object(
+                lease_lib,
+                "ACTIVATION_GRANT_LOCK",
+                root / "State" / "session_autobridge" / "activation_leases" / ".claim-grant.lock",
+            ),
+            patch.object(lease_lib, "process_alive", side_effect=lambda pid: alive.get(pid)),
+        ):
+            first = lease_lib.claim_lease(
+                identity,
+                owner_session_id="SESSION-A",
+                owner_pid=111,
+                claimant_runtime_id="runtime-a",
+                takeover=True,
+            )
+            alive[111] = False
+            successor = lease_lib.claim_lease(
+                identity,
+                owner_session_id="SESSION-A",
+                owner_pid=222,
+                claimant_runtime_id="runtime-a",
+                takeover=True,
+            )
+
+        self.assertEqual(1, first["fence_token"])
+        self.assertEqual(2, successor["fence_token"])
+        self.assertEqual("SESSION-A", successor["previous_owner_session_id"])
+
+    def test_with_lease_fence_holds_lock_through_protected_mutation(self):
+        root = self.make_workspace()
+        self.register_session(root, "SESSION-A", runtime_id="runtime-a")
+        identity = lease_lib.lease_identity(
+            {
+                "project": "amiga",
+                "chat": "CHAT-TEST0001",
+                "task": "TASK-TEST01",
+                "worktree": str(self.worktree),
+                "branch": "codex/gh-1571-test",
+                "target_agent": "claude",
+            }
+        )
+        alive = {111: True, 222: True}
+        output = root / "guarded-mutation.txt"
+        inner_refusal: list[str] = []
+
+        with (
+            patch.object(
+                session_autobridge_lib,
+                "SESSIONS_DIR",
+                root / "State" / "session_autobridge" / "sessions",
+            ),
+            patch.object(
+                lease_lib,
+                "ACTIVATION_LEASES_DIR",
+                root / "State" / "session_autobridge" / "activation_leases",
+            ),
+            patch.object(
+                lease_lib,
+                "ACTIVATION_GRANT_LOCK",
+                root / "State" / "session_autobridge" / "activation_leases" / ".claim-grant.lock",
+            ),
+            patch.object(lease_lib, "process_alive", side_effect=lambda pid: alive.get(pid)),
+        ):
+            claimed = lease_lib.claim_lease(
+                identity,
+                owner_session_id="SESSION-A",
+                owner_pid=111,
+                claimant_runtime_id="runtime-a",
+                takeover=True,
+            )
+
+            def mutation() -> str:
+                try:
+                    lease_lib.claim_lease(
+                        identity,
+                        owner_session_id="SESSION-A",
+                        owner_pid=222,
+                        claimant_runtime_id="runtime-a",
+                        takeover=True,
+                    )
+                except lease_lib.LeaseRefused as exc:
+                    inner_refusal.append(exc.reason)
+                output.write_text("mutated")
+                return "ok"
+
+            result = lease_lib.with_lease_fence(
+                identity,
+                owner_session_id="SESSION-A",
+                owner_pid=111,
+                claimant_runtime_id="runtime-a",
+                fence_token=claimed["fence_token"],
+                mutation=mutation,
+            )
+
+        self.assertEqual("ok", result)
+        self.assertEqual(["claim_in_progress"], inner_refusal)
+        self.assertEqual("mutated", output.read_text())
+
+    def test_old_generation_cannot_mutate_after_successor_takeover(self):
+        root = self.make_workspace()
+        self.register_session(root, "SESSION-A", runtime_id="runtime-a")
+        identity = lease_lib.lease_identity(
+            {
+                "project": "amiga",
+                "chat": "CHAT-TEST0001",
+                "task": "TASK-TEST01",
+                "worktree": str(self.worktree),
+                "branch": "codex/gh-1571-test",
+                "target_agent": "claude",
+            }
+        )
+        alive = {111: True, 222: True}
+        output = root / "old-generation.txt"
+
+        with (
+            patch.object(
+                session_autobridge_lib,
+                "SESSIONS_DIR",
+                root / "State" / "session_autobridge" / "sessions",
+            ),
+            patch.object(
+                lease_lib,
+                "ACTIVATION_LEASES_DIR",
+                root / "State" / "session_autobridge" / "activation_leases",
+            ),
+            patch.object(
+                lease_lib,
+                "ACTIVATION_GRANT_LOCK",
+                root / "State" / "session_autobridge" / "activation_leases" / ".claim-grant.lock",
+            ),
+            patch.object(lease_lib, "process_alive", side_effect=lambda pid: alive.get(pid)),
+        ):
+            old = lease_lib.claim_lease(
+                identity,
+                owner_session_id="SESSION-A",
+                owner_pid=111,
+                claimant_runtime_id="runtime-a",
+                takeover=True,
+            )
+            alive[111] = False
+            successor = lease_lib.claim_lease(
+                identity,
+                owner_session_id="SESSION-A",
+                owner_pid=222,
+                claimant_runtime_id="runtime-a",
+                takeover=True,
+            )
+            with self.assertRaises(lease_lib.LeaseRefused) as ctx:
+                lease_lib.with_lease_fence(
+                    identity,
+                    owner_session_id="SESSION-A",
+                    owner_pid=111,
+                    claimant_runtime_id="runtime-a",
+                    fence_token=old["fence_token"],
+                    mutation=lambda: output.write_text("old mutated"),
+                )
+
+        self.assertEqual(2, successor["fence_token"])
+        self.assertIn(ctx.exception.reason, {"claimant_pid_mismatch", "stale_fence_token"})
+        self.assertFalse(output.exists())
 
     def test_claim_requires_bound_claimant_identity(self):
         root = self.make_workspace()

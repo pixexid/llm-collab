@@ -256,7 +256,12 @@ heartbeat before post-merge cleanup.
 When the PR comment needs implementer action, route it through the mailbox and
 doorbell immediately instead of leaving the PR-wait heartbeat to poll in silence.
 The packet must name the PR, review thread/comment, current head SHA, exact
-finding, and required fix scope. If the wait cannot progress because the
+finding, head status, and required fix scope. If the packet is a writer
+activation, send it with `deliver.py --activation` and tell the worker to use
+the embedded `inbox.py --packet` claim command. The worker must not start from a
+generic inbox read, because activation authority is granted only after the exact
+packet lease claim succeeds and the returned fence is carried to later
+mutation-time assertions. If the wait cannot progress because the
 implementer has not acknowledged, the next heartbeat escalates by doorbell with
 the blocker rather than waiting for operator discovery.
 

@@ -494,20 +494,88 @@ class DeliverFoundationTest(unittest.TestCase):
         state["inbox"] = (root / "agents" / "claude" / "inbox.json").read_text()
         return state
 
-    def test_activation_delivery_fails_closed_until_runtime_integration(self):
-        """BLOCK P2: the required claim command is not runnable until GH-1572;
-        the public path must refuse pre-write with an explicit diagnostic."""
+    def test_activation_delivery_emits_exact_packet_claim_command(self):
+        """GH-1572: the public activation path is live and the packet body
+        carries the runnable exact-packet claim command."""
         root = self.make_workspace()
-        before = self.workspace_snapshot(root)
         result = self.run_deliver(
             root, "--activation", "--related-task", "TASK-TEST01",
             "--worktree", self.worktree, "--branch", "b",
             runtime_ready=False,
         )
-        self.assertEqual(2, result.returncode)
-        self.assertIn("runtime integration", result.stderr)
-        self.assertIn("GH-1572", result.stderr)
-        self.assertEqual(before, self.workspace_snapshot(root), "zero mutations on refusal")
+        self.assertEqual(0, result.returncode, result.stderr)
+        payload, _ = json.JSONDecoder().raw_decode(result.stdout)
+        packet_path = root / payload["to_file"]
+        content = packet_path.read_text()
+        self.assertIn("--packet", content)
+        self.assertIn(packet_path.name, content)
+        self.assertIn("--chat CHAT-TEST0001", content)
+
+    def test_activation_ax_budget_failure_only_when_ax_selected(self):
+        root = self.make_workspace()
+        agents_path = root / "agents.json"
+        agents = json.loads(agents_path.read_text())
+        for agent in agents["agents"]:
+            if agent["id"] == "claude":
+                agent["activation"]["ax_app"] = "Claude"
+        write_json(agents_path, agents)
+        body = root / "b.md"
+        write(body, "work")
+        patch_prompt = (
+            "deliver.build_activation_ring_prompt = "
+            "lambda *a, **k: (_ for _ in ()).throw(ValueError('long-root budget')); "
+        )
+        argv = [
+            sys.executable,
+            "-c",
+            self.WRAPPER.format(extra_patch=patch_prompt),
+            str(REPO_ROOT / "bin"),
+            *self.BASE,
+            "--body-file",
+            str(body),
+            "--activation",
+            "--related-task",
+            "TASK-TEST01",
+            "--worktree",
+            self.worktree,
+            "--branch",
+            "b",
+        ]
+
+        ax_selected = subprocess.run(
+            argv, cwd=root, text=True, capture_output=True, env={**os.environ}, check=False
+        )
+
+        self.assertEqual(2, ax_selected.returncode)
+        self.assertIn("long-root budget", ax_selected.stderr)
+
+        write_json(
+            root / "State" / "session_autobridge" / "sessions" / "SESSION-CLAUDE-EXACT.json",
+            {
+                "session_id": "SESSION-CLAUDE-EXACT",
+                "agent_id": "claude",
+                "project_id": "amiga",
+                "chat_id": "CHAT-TEST0001",
+                "mode": "auto-read",
+                "status": "parked",
+                "wake_strategy": "runtime_trigger",
+                "lease_owner": "claude",
+                "lease_expires_utc": "2099-01-01T00:00:00+00:00",
+                "runtime": {
+                    "family": "claude_app",
+                    "session_id": "claude-runtime",
+                    "session_source": "test_fixture",
+                },
+            },
+        )
+        autobridge_selected = subprocess.run(
+            argv, cwd=root, text=True, capture_output=True, env={**os.environ}, check=False
+        )
+
+        self.assertEqual(0, autobridge_selected.returncode, autobridge_selected.stderr)
+        payload, _ = json.JSONDecoder().raw_decode(autobridge_selected.stdout)
+        self.assertTrue(payload["autobridge_ready"])
+        self.assertFalse(payload["ax_doorbell_required"])
 
     def test_whitespace_only_fields_refused_with_zero_mutations(self):
         """BLOCK P1.3: whitespace-only task/branch must exit 2 and leave the
