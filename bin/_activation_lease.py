@@ -15,7 +15,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from _activation_identity import lease_identity, lease_key
+from _activation_identity import IDENTITY_FIELDS, lease_identity, lease_key
 from _helpers import utc_iso, write_file
 from _session_autobridge import AUTOBRIDGE_ROOT, load_session, parse_iso8601
 
@@ -73,7 +73,32 @@ def _field_problem(payload: dict[str, Any], field: str) -> str | None:
     return None
 
 
-def _validate_active_lease_state(path: Path, payload: Any) -> None:
+def _validate_active_lease_identity(
+    path: Path, payload: dict[str, Any], expected_lease_key: str
+) -> None:
+    if payload.get("lease_key") != expected_lease_key:
+        raise _malformed_lease_state(path, "lease_key", "mismatch")
+    payload_identity = payload.get("identity")
+    if payload_identity is None:
+        reason = "missing" if "identity" not in payload else "null"
+        raise _malformed_lease_state(path, "identity", reason)
+    if not isinstance(payload_identity, dict):
+        raise _malformed_lease_state(path, "identity", "wrong_type")
+    for field in IDENTITY_FIELDS:
+        problem = _field_problem(payload_identity, field)
+        if problem is not None:
+            raise _malformed_lease_state(path, f"identity.{field}", problem)
+    try:
+        identity = lease_identity(payload_identity)
+    except ValueError as exc:
+        raise _malformed_lease_state(path, "identity", "malformed") from exc
+    if lease_key(identity) != expected_lease_key:
+        raise _malformed_lease_state(path, "identity", "mismatch")
+
+
+def _validate_active_lease_state(
+    path: Path, payload: Any, *, expected_lease_key: str | None = None
+) -> None:
     if not isinstance(payload, dict):
         raise _malformed_lease_state(path, "record", "wrong_type")
     status_problem = _field_problem(payload, "status")
@@ -87,6 +112,8 @@ def _validate_active_lease_state(path: Path, payload: Any) -> None:
         problem = _field_problem(payload, field)
         if problem is not None:
             raise _malformed_lease_state(path, field, problem)
+    if expected_lease_key is not None:
+        _validate_active_lease_identity(path, payload, expected_lease_key)
 
 
 def _validate_loaded_lease_state(identity: dict[str, str], payload: Any) -> None:
@@ -175,7 +202,7 @@ def iter_leases() -> list[dict[str, Any]]:
                 "corrupt_lease_state",
                 {"lease_file": path.name, "field": "json", "reason": exc.__class__.__name__},
             ) from exc
-        _validate_active_lease_state(path, payload)
+        _validate_active_lease_state(path, payload, expected_lease_key=path.stem)
         leases.append(payload)
     return leases
 
