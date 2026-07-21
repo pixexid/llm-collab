@@ -312,21 +312,24 @@ read-only.
 `owner_session_id` must name a registered live autobridge session whose
 `agent_id`, `project_id`, and `chat_id` exactly match the activation identity;
 missing/null session bindings are unbound and refuse. A claim also requires a
-bound claimant identity: `--claimant-runtime-id`, a registered
-`runtime.session_id`, or a live positive `--owner-pid`. PID `0` and negative
-PIDs are process-group selectors rather than process identities and refuse with
-`invalid_owner_pid`. Claims with no runtime identity and no live pid refuse
-with `claimant_identity_required`; an identity-less lease record is never
-valid.
+bound claimant identity from the current caller: `--claimant-runtime-id`, a
+reader runtime environment variable, or a live positive `--owner-pid`. Claim,
+assert, and release never derive claimant identity from the session or lease
+record being checked. PID `0` and negative PIDs are process-group selectors
+rather than process identities and refuse with `invalid_owner_pid`. Claims with
+no runtime identity and no live pid refuse with `claimant_identity_required`;
+an identity-less lease record is never valid.
 
 Every ownership change increments `fence_token`. Refused claims are evaluated
 before record writes and must leave the existing lease file byte-identical.
 `lease-assert` requires `--fence-token` and verifies the owner session plus the
 runtime/pid binding recorded at claim time; same-session assertions from a
-different runtime or process refuse. Assert never falls back to the stored
-session record runtime: the asserting runtime identity must come from
-`--claimant-runtime-id` or the reader runtime environment. Expired leases do
-not assert; the owner must reclaim to refresh TTL before mutating.
+different runtime or process refuse. `lease-release` applies the same
+owner-session and claimant runtime/pid binding before it writes a released or
+superseded status; a refused release leaves the lease file byte-identical.
+Assert and release refuse stopped or superseded owner sessions with
+`owner_session_not_live`. Expired leases do not assert; the owner must reclaim
+to refresh TTL before mutating.
 Same-session/same-runtime runtime-only reclaim refreshes TTL with the same
 fence. Expired or provably dead owners are takeover-eligible only with explicit
 `--takeover`; live-pid owners are never replaced, and unknown liveness fails
