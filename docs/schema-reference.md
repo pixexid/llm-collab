@@ -311,16 +311,23 @@ read-only.
 }
 ```
 
+The lease CLI subcommands (`lease-claim`, `lease-show`, `lease-assert`, and
+`lease-release`) require `--project` to name a registered `projects.json` entry
+before they construct, read, or write an activation-lease identity.
+
 `owner_session_id` must name a registered live autobridge session whose
 `agent_id`, `project_id`, and `chat_id` exactly match the activation identity;
-missing/null session bindings are unbound and refuse. A claim also requires a
-bound claimant identity from the current caller: `--claimant-runtime-id`, a
-reader runtime environment variable, or a live positive `--owner-pid`. Claim,
-assert, and release never derive claimant identity from the session or lease
-record being checked. PID `0` and negative PIDs are process-group selectors
-rather than process identities and refuse with `invalid_owner_pid`. A positive
-explicit `--owner-pid` that is provably dead refuses with `owner_pid_not_live`.
-Claims with no runtime identity and no live pid refuse with
+missing/null session bindings are unbound and refuse. A registered session is
+live only when its status is in the live set (`active` or `parked`) and its
+session `lease_expires_utc` has not expired. Claim, assert, and release use that
+same registered-session liveness rule. A claim also requires a bound claimant
+identity from the current caller: `--claimant-runtime-id`, a reader runtime
+environment variable, or a live positive `--owner-pid`. Claim, assert, and
+release never derive claimant identity from the session or lease record being
+checked. PID `0` and negative PIDs are process-group selectors rather than
+process identities and refuse with `invalid_owner_pid`. A positive explicit
+`--owner-pid` that is provably dead refuses with `owner_pid_not_live`. Claims
+with no runtime identity and no live pid refuse with
 `claimant_identity_required`; an identity-less lease record is never valid.
 
 Every ownership change increments `fence_token`. Refused claims are evaluated
@@ -330,14 +337,14 @@ runtime/pid binding recorded at claim time; same-session assertions from a
 different runtime or process refuse. `lease-release` applies the same
 owner-session and claimant runtime/pid binding before it writes a released or
 superseded status; a refused release leaves the lease file byte-identical.
-Assert and release refuse stopped or superseded owner sessions with
-`owner_session_not_live`. Expired leases do not assert; the owner must reclaim
-to refresh TTL before mutating. Live, unexpired same-session/same-runtime
-runtime-only reclaim refreshes TTL with the same fence. Expired or provably
-dead leases are never idempotently reclaimed: every identity combination
-requires explicit `--takeover` and writes a new `fence_token`. Unknown liveness
-fails closed. Non-active or expired same-realpath lease records do not block a
-new identity claim.
+Assert and release refuse stopped, superseded, or session-expired owner
+sessions with `owner_session_not_live`. Expired activation leases do not assert;
+the owner must reclaim to refresh TTL before mutating. Live, unexpired
+same-session/same-runtime runtime-only reclaim refreshes TTL with the same
+fence. Expired or provably dead leases are never idempotently reclaimed: every
+identity combination requires explicit `--takeover` and writes a new
+`fence_token`. Unknown liveness fails closed. Non-active or expired
+same-realpath lease records do not block a new identity claim.
 
 ### Body
 

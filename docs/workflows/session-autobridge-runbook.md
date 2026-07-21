@@ -134,9 +134,12 @@ python3 bin/session_autobridge.py register \
 Activation packets are writer grants only after the assigned worker claims the
 exact activation lease. The claim is scoped to the packet identity
 `project/chat/task/worktree/branch/target-agent` and to the worker's registered
-session. The session must be live and exactly bound to the same agent, project,
-and chat; null project/chat bindings are unbound and refuse rather than acting
-as wildcards.
+session. The `--project` value must be registered in `projects.json` before
+lease claim/show/assert/release construct, read, or write the lease identity.
+The session must be live and exactly bound to the same agent, project, and chat;
+null project/chat bindings are unbound and refuse rather than acting as
+wildcards. A registered session is live only when its status is `active` or
+`parked` and its session `lease_expires_utc` has not expired.
 
 Claim with a runtime identity or live process id:
 
@@ -193,18 +196,17 @@ python3 bin/session_autobridge.py lease-release \
 Refusals return exit 75 with JSON naming the reason and current owner where
 known. Do not mutate the worktree after a refused claim/assert, and do not
 treat a refused release as cleanup evidence. Takeover is explicit: use
-`--takeover` when replacing an expired or provably dead owner; those leases are
-never idempotently reclaimed and always mint a new fence. A live, unexpired
-same-session/same-runtime runtime-only reclaim may refresh TTL with the same
-fence. PID `0` and negative PIDs are invalid claimant identities; a positive
-explicit `--owner-pid` that is provably dead refuses with
-`owner_pid_not_live`; unknown liveness fails closed. Claims resolve the
-requested worktree once under a nonblocking global grant lock and refuse
-symlink aliases of an already-active real worktree, while identity
+`--takeover` when replacing an expired activation lease, session-expired owner,
+or provably dead owner; those leases are never idempotently reclaimed and always
+mint a new fence. A live, unexpired same-session/same-runtime runtime-only
+reclaim may refresh TTL with the same fence. PID `0` and negative PIDs are
+invalid claimant identities; a positive explicit `--owner-pid` that is provably
+dead refuses with `owner_pid_not_live`; unknown liveness fails closed. Claims
+resolve the requested worktree once under a nonblocking global grant lock and
+refuse symlink aliases of an already-active real worktree, while identity
 classification remains byte-exact and filesystem-independent. Grant-lock
-contention returns bounded
-`claim_in_progress`. Released and expired same-realpath lease records do not
-block a new identity claim.
+contention returns bounded `claim_in_progress`. Released and expired
+same-realpath lease records do not block a new identity claim.
 
 ## Inspect Bindings
 

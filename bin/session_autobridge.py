@@ -23,7 +23,7 @@ import argparse
 import json
 
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent))
-from _helpers import get_agent, now_utc, utc_iso
+from _helpers import ensure_project, get_agent, now_utc, utc_iso
 from _session_autobridge import (
     SESSION_MODES,
     SESSION_STATUSES,
@@ -289,7 +289,12 @@ def _refusal_payload(kind: str, identity: dict, refusal: LeaseRefused) -> dict:
     return payload
 
 
+def _require_registered_lease_project(args) -> None:
+    ensure_project(args.project, allow_none=False)
+
+
 def lease_claim_command(args) -> tuple[dict, int]:
+    _require_registered_lease_project(args)
     identity = lease_identity(args)
     try:
         lease = claim_lease(
@@ -306,6 +311,7 @@ def lease_claim_command(args) -> tuple[dict, int]:
 
 
 def lease_show_command(args) -> tuple[dict, int]:
+    _require_registered_lease_project(args)
     identity = lease_identity(args)
     lease = load_lease(identity)
     if lease is None:
@@ -314,6 +320,7 @@ def lease_show_command(args) -> tuple[dict, int]:
 
 
 def lease_assert_command(args) -> tuple[dict, int]:
+    _require_registered_lease_project(args)
     identity = lease_identity(args)
     try:
         lease = assert_lease(
@@ -329,6 +336,7 @@ def lease_assert_command(args) -> tuple[dict, int]:
 
 
 def lease_release_command(args) -> tuple[dict, int]:
+    _require_registered_lease_project(args)
     identity = lease_identity(args)
     try:
         lease = release_lease(
