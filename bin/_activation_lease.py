@@ -63,8 +63,11 @@ def iter_leases() -> list[dict[str, Any]]:
     for path in sorted(ACTIVATION_LEASES_DIR.glob("*.json")):
         try:
             leases.append(json.loads(path.read_text()))
-        except json.JSONDecodeError:
-            continue
+        except json.JSONDecodeError as exc:
+            raise LeaseRefused(
+                "corrupt_lease_state",
+                {"lease_file": path.name, "error": exc.__class__.__name__},
+            ) from exc
     return leases
 
 
