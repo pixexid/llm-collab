@@ -307,7 +307,7 @@ class ActivationLeaseTest(unittest.TestCase):
     def test_runtime_only_reclaim_is_idempotent_and_refreshes_ttl(self):
         root = self.make_workspace()
         self.register_session(root, "SESSION-A", runtime_id="runtime-a")
-        first, code = self.claim(root, "SESSION-A", "--claimant-runtime-id", "runtime-a", "--ttl-seconds", "1")
+        first, code = self.claim(root, "SESSION-A", "--claimant-runtime-id", "runtime-a", "--ttl-seconds", "60")
         self.assertEqual(0, code, first)
         again, code = self.claim(root, "SESSION-A", "--claimant-runtime-id", "runtime-a", "--ttl-seconds", "3600")
         self.assertEqual(0, code, again)
@@ -317,6 +317,98 @@ class ActivationLeaseTest(unittest.TestCase):
             again["lease"]["lease_expires_utc"],
             first["lease"]["lease_expires_utc"],
         )
+
+    def test_expired_same_identity_runtime_only_requires_takeover_and_increments_fence(self):
+        root = self.make_workspace()
+        self.register_session(root, "SESSION-A", runtime_id="runtime-a")
+        first, code = self.claim(root, "SESSION-A", "--claimant-runtime-id", "runtime-a", "--ttl-seconds", "0")
+        self.assertEqual(0, code, first)
+
+        refused, code = self.claim(root, "SESSION-A", "--claimant-runtime-id", "runtime-a")
+        self.assertEqual(75, code)
+        self.assertEqual("lease_expired_requires_takeover", refused["reason"])
+
+        taken, code = self.claim(root, "SESSION-A", "--claimant-runtime-id", "runtime-a", "--takeover")
+        self.assertEqual(0, code, taken)
+        self.assertEqual(2, taken["lease"]["fence_token"])
+        self.assertEqual("SESSION-A", taken["lease"]["previous_owner_session_id"])
+
+    def test_expired_same_identity_same_pid_requires_takeover(self):
+        root = self.make_workspace()
+        self.register_session(root, "SESSION-A", runtime_id="runtime-a")
+        pid = str(os.getpid())
+        first, code = self.claim(
+            root,
+            "SESSION-A",
+            "--claimant-runtime-id",
+            "runtime-a",
+            "--owner-pid",
+            pid,
+            "--ttl-seconds",
+            "0",
+        )
+        self.assertEqual(0, code, first)
+
+        refused, code = self.claim(
+            root,
+            "SESSION-A",
+            "--claimant-runtime-id",
+            "runtime-a",
+            "--owner-pid",
+            pid,
+        )
+        self.assertEqual(75, code)
+        self.assertEqual("lease_expired_requires_takeover", refused["reason"])
+
+    def test_dead_owner_same_identity_requires_takeover(self):
+        root = self.make_workspace()
+        self.register_session(root, "SESSION-A", runtime_id="runtime-a")
+        sleeper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(0.2)"])
+        try:
+            claimed, code = self.claim(
+                root,
+                "SESSION-A",
+                "--claimant-runtime-id",
+                "runtime-a",
+                "--owner-pid",
+                str(sleeper.pid),
+            )
+            self.assertEqual(0, code, claimed)
+        finally:
+            sleeper.wait(timeout=5)
+
+        refused, code = self.claim(root, "SESSION-A", "--claimant-runtime-id", "runtime-a")
+        self.assertEqual(75, code)
+        self.assertEqual("dead_owner_requires_takeover", refused["reason"])
+
+        taken, code = self.claim(root, "SESSION-A", "--claimant-runtime-id", "runtime-a", "--takeover")
+        self.assertEqual(0, code, taken)
+        self.assertEqual(2, taken["lease"]["fence_token"])
+
+    def test_expired_takeover_invalidates_old_fence_token(self):
+        root = self.make_workspace()
+        self.register_session(root, "SESSION-A", runtime_id="runtime-a")
+        first, code = self.claim(root, "SESSION-A", "--claimant-runtime-id", "runtime-a", "--ttl-seconds", "0")
+        self.assertEqual(0, code, first)
+        old_fence = str(first["lease"]["fence_token"])
+
+        taken, code = self.claim(root, "SESSION-A", "--claimant-runtime-id", "runtime-a", "--takeover")
+        self.assertEqual(0, code, taken)
+        self.assertGreater(taken["lease"]["fence_token"], first["lease"]["fence_token"])
+
+        refused, code = self.run_cli(
+            root,
+            "lease-assert",
+            *self.identity_args(),
+            "--session",
+            "SESSION-A",
+            "--fence-token",
+            old_fence,
+            "--claimant-runtime-id",
+            "runtime-a",
+        )
+        self.assertEqual(75, code)
+        self.assertEqual("stale_fence_token", refused["reason"])
 
     def test_same_session_different_runtime_assert_refuses(self):
         root = self.make_workspace()
@@ -549,7 +641,26 @@ class ActivationLeaseTest(unittest.TestCase):
         self.assertEqual(1, len(winners), results)
         self.assertEqual(1, len(losers), results)
         self.assertTrue(winners[0]["claimed"])
-        self.assertEqual("worktree_alias_collision", losers[0]["reason"])
+        self.assertIn(losers[0]["reason"], {"worktree_alias_collision", "claim_in_progress"})
+        if losers[0]["reason"] == "claim_in_progress":
+            if winners[0]["lease"]["owner_session_id"] == "SESSION-A":
+                retried, code = self.claim(
+                    root,
+                    "SESSION-B",
+                    "--claimant-runtime-id",
+                    "runtime-b",
+                    worktree=alias,
+                )
+            else:
+                retried, code = self.claim(
+                    root,
+                    "SESSION-A",
+                    "--claimant-runtime-id",
+                    "runtime-a",
+                    worktree=self.worktree,
+                )
+            self.assertEqual(75, code)
+            self.assertEqual("worktree_alias_collision", retried["reason"])
         records = self.lease_records(root)
         self.assertEqual(1, len(records), records)
         self.assertEqual(str(self.worktree.resolve()), records[0]["worktree_realpath"])
@@ -794,6 +905,76 @@ class ActivationLeaseTest(unittest.TestCase):
             with self.assertRaises(OSError):
                 with lease_lib._ClaimLock(identity):
                     pass
+
+        grant_lock_path = lease_lib.ACTIVATION_GRANT_LOCK
+        grant_lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with grant_lock_path.open("w") as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with self.assertRaises(lease_lib.LeaseRefused) as ctx:
+                with lease_lib._claim_grant_lock():
+                    pass
+            self.assertEqual("claim_in_progress", ctx.exception.reason)
+
+        with patch("fcntl.flock", side_effect=OSError(errno.EIO, "io")):
+            with self.assertRaises(OSError):
+                with lease_lib._claim_grant_lock():
+                    pass
+
+    def test_global_claim_grant_lock_contention_returns_bounded_refusal(self):
+        root = self.make_workspace()
+        self.register_session(root, "SESSION-A", runtime_id="runtime-a")
+        ready = root / "grant-lock-ready"
+        locker_code = "\n".join(
+            [
+                "import fcntl, os, sys, time",
+                "from pathlib import Path",
+                "root, ready = sys.argv[1:3]",
+                "path = Path(root) / 'State' / 'session_autobridge' / 'activation_leases' / '.claim-grant.lock'",
+                "path.parent.mkdir(parents=True, exist_ok=True)",
+                "fd = os.open(path, os.O_CREAT | os.O_RDWR)",
+                "fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)",
+                "Path(ready).write_text('locked')",
+                "time.sleep(5)",
+            ]
+        )
+        locker = subprocess.Popen([sys.executable, "-c", locker_code, str(root), str(ready)])
+        try:
+            deadline = time.monotonic() + 5
+            while not ready.exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertTrue(ready.exists(), "grant lock holder did not start")
+
+            started = time.monotonic()
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT_PATH),
+                    "lease-claim",
+                    *self.identity_args(),
+                    "--session",
+                    "SESSION-A",
+                    "--claimant-runtime-id",
+                    "runtime-a",
+                    "--json",
+                ],
+                cwd=root,
+                text=True,
+                capture_output=True,
+                env=self.env(),
+                timeout=2,
+                check=False,
+            )
+            elapsed = time.monotonic() - started
+            self.assertLess(elapsed, 2)
+            self.assertEqual(75, result.returncode, result.stdout + result.stderr)
+            self.assertEqual("claim_in_progress", json.loads(result.stdout)["reason"])
+        finally:
+            locker.terminate()
+            try:
+                locker.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                locker.kill()
+                locker.wait(timeout=5)
 
     def test_crashed_lock_holder_frees_kernel_flock(self):
         root = self.make_workspace()

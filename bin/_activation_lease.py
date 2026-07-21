@@ -118,9 +118,11 @@ class _BlockingLock:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         fd = os.open(self.path, os.O_CREAT | os.O_RDWR)
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
-        except Exception:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
             os.close(fd)
+            if exc.errno in CONTENTION_ERRNOS:
+                raise LeaseRefused("claim_in_progress") from exc
             raise
         self.fd = fd
         return self
@@ -375,40 +377,35 @@ def claim_lease(
                     and pid is not None
                     and int(existing_pid) == int(pid)
                 )
-                predecessor_dead = (
-                    existing_pid is not None and process_alive(int(existing_pid)) is False
-                )
                 runtime_only_reclaim = existing_pid is None and pid is None
-                if same_session and same_runtime and (
-                    runtime_only_reclaim or same_pid or predecessor_dead
-                ):
-                    fence_token = int(existing.get("fence_token", 1))
-                    previous_owner = existing.get("previous_owner_session_id")
+                if lease_is_expired(existing):
+                    if not takeover:
+                        raise LeaseRefused(
+                            "lease_expired_requires_takeover",
+                            owner_summary(existing),
+                        )
+                    previous_owner = existing.get("owner_session_id")
                 else:
-                    if lease_is_expired(existing) and process_alive(existing.get("owner_pid")) is not True:
-                        if not takeover:
-                            raise LeaseRefused(
-                                "lease_expired_requires_takeover",
-                                owner_summary(existing),
-                            )
-                        previous_owner = existing.get("owner_session_id")
-                    else:
-                        alive = owner_is_live(existing)
-                        if alive is True:
-                            reason = (
-                                "same_session_different_claimant"
-                                if same_session
-                                else "lease_held_by_active_owner"
-                            )
-                            raise LeaseRefused(reason, owner_summary(existing))
-                        if alive is None:
-                            raise LeaseRefused("owner_liveness_unknown", owner_summary(existing))
+                    alive = owner_is_live(existing)
+                    if alive is False:
                         if not takeover:
                             raise LeaseRefused(
                                 "dead_owner_requires_takeover",
                                 owner_summary(existing),
                             )
                         previous_owner = existing.get("owner_session_id")
+                    elif alive is None:
+                        raise LeaseRefused("owner_liveness_unknown", owner_summary(existing))
+                    elif same_session and same_runtime and (runtime_only_reclaim or same_pid):
+                        fence_token = int(existing.get("fence_token", 1))
+                        previous_owner = existing.get("previous_owner_session_id")
+                    else:
+                        reason = (
+                            "same_session_different_claimant"
+                            if same_session
+                            else "lease_held_by_active_owner"
+                        )
+                        raise LeaseRefused(reason, owner_summary(existing))
 
         payload = {
             "identity": identity,
