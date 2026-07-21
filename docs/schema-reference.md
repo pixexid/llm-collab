@@ -657,32 +657,44 @@ checkout.
 
 ---
 
-## Planned project_state_root/{project_id}/thread-event-runner/runner.sqlite3 (not implemented)
+## Implemented workspace observation ledger
 
-**Phase 1 contract only.** The repository does not currently create this
-database, run a Thread Event Runner daemon, or provide the delivery guarantees
-described below. See the
-[Thread Event Runner RFC](workflows/thread-event-runner-rfc.md) for the full
-architecture, state machines, threat review, and rollout gates.
+GH-90 implements a narrower observation foundation for the broader
+[Thread Event Runner RFC](workflows/thread-event-runner-rfc.md). It does not
+implement subscriptions, timers, canonical delivery, attempts, receipts,
+leases, fences, retries, quarantine, dead letters, dispatch, or management of
+those planned objects.
 
-The planned ledger is a fresh per-project SQLite database, independent of
-session autobridge, at:
+Fresh initialization generates an opaque `WorkspaceV1`-compatible
+`workspace_id`. An existing workspace can add one without reinitialization:
 
-```text
-{project_state_root}/{project_id}/thread-event-runner/runner.sqlite3
+```bash
+python3.11 scripts/init.py --add-workspace-id
 ```
 
-`project_state_root` comes from `collab.config.json`; `project_id` must be an
-exact registered, path-component-safe ID. The runner derives this path and does
-not accept an arbitrary ledger-path override. Canonical resolution must remain
-inside the matching `{project_state_root}/{project_id}/` directory and rejects
-missing/unregistered IDs, traversal, symlink escape, or project mismatch before
-migration or use. Each database belongs to exactly one project, and all
-project-bound rows must match that owning project ID. Opening one project's
-database from another project's context fails closed.
+That command refuses to replace an existing identity, writes the original
+bytes once to `collab.config.json.pre-workspace-id.bak` with mode `0600`, then
+atomically replaces only `collab.config.json`. Configuration
+`schema_version: 2` is independent of the ledger's `PRAGMA user_version`.
 
-Every connection requires WAL mode, foreign keys, a 5-second busy timeout, and
-full synchronous writes:
+All artifacts for one workspace are derived, without path overrides, at:
+
+```text
+{project_state_root}/llm-collabd/{workspace_id}/
+├── ledger.sqlite3
+├── backups/ledger-{prior_version}-{utc_stamp}.sqlite3
+├── daemon.lock
+├── daemon.sock
+└── logs/llm-collabd.jsonl
+```
+
+Directories are mode `0700`; the database, SQLite sidecars, backups, lock,
+socket, and logs are mode `0600` where POSIX permissions apply. The encoded Unix
+socket path is limited to 103 bytes. One non-blocking `flock` owner is the only
+writer/checkpointer; readers are separate thread-bound, query-only connections.
+
+Every connection applies and verifies WAL mode, foreign keys, a 5-second busy
+timeout, and full synchronous writes:
 
 ```sql
 PRAGMA journal_mode = WAL;
@@ -691,11 +703,120 @@ PRAGMA busy_timeout = 5000;
 PRAGMA synchronous = FULL;
 ```
 
-The per-project `thread-event-runner/` directory is planned as mode `0700` and
-database, WAL, shared-memory, backup, and export files as `0600` on POSIX
-systems. All generated runner artifacts remain under that owning directory;
-there is no workspace-level `State/` fallback. All four identity fields below
-are non-null and exact:
+SQLite must be exactly 3.44.6 or 3.50.7, or 3.51.3 and newer. Every open verifies
+the actual SQLite main-database descriptor against a no-follow `(device,inode)`
+pin and rejects symlinked/non-regular artifacts. Migrations are sequential and
+recorded in both `PRAGMA user_version` and `schema_migrations` with released SQL
+checksums, schema fingerprints, tool version, timestamp, and a verified backup
+of the prior version. Startup requires exact table, migration-row, fingerprint,
+`integrity_check`, and `foreign_key_check` agreement. A failed migration restores
+its verified backup.
+
+The private `project_state_root` is a trust boundary. No-follow traversal,
+descriptor identity checks, fixed paths, and permissions are defense in depth;
+Python's stdlib SQLite API cannot bind SQLite's separately opened `-wal` and
+`-shm` sidecars to a retained ancestor directory descriptor. A same-UID actor
+that can replace an ancestor of the private state root is outside the supported
+threat model. The implementation does not claim WAL/SHM ancestor-swap
+containment.
+
+### Implemented ledger versions
+
+The exact current ledger is `PRAGMA user_version = 3`:
+
+| Version | Tables and constraints |
+|---|---|
+| v1 | `schema_migrations`, `workspace_registry_snapshots`, `project_registry_snapshots`, `observation_source_registry_snapshots`, and `daemon_instances`. Registry rows are immutable snapshots keyed by exact `workspace_id`, `project_id`, `source_id`, and `registry_revision`. |
+| v2 | Adds `observations`, `observation_checkpoints`, and `observation_audit`. Every row is composite-scoped by workspace, exact project, closed source `chats_mailbox`, and exact registry revision. Paths and hashes have database-level NUL, traversal, length, and lowercase-hex checks. |
+| v3 | Adds append-only `legacy_provenance_imports`, including UPDATE/DELETE refusal triggers and exact-project versus `legacy_unscoped` scope constraints. |
+
+No P2+ subscription, event, delivery, attempt, receipt, lease, fence, retry,
+quarantine, or dead-letter table exists in v1, v2, or v3.
+
+### Implemented daemon and observation surface
+
+The public command grammar is:
+
+```text
+bin/llm-collab daemon <start|stop|status|logs>
+bin/llm-collab doctor
+```
+
+`bin/llm-collab daemon start --background` is also supported. The fixed
+version-1 Unix-socket protocol accepts only
+`{"version":1,"op":"status|logs|shutdown"}` with no
+unknown or duplicate members. Requests are bounded to 4096 bytes, responses to
+65536 bytes, and I/O to a 2-second deadline. The server proves the peer UID
+before reading or parsing request bytes. Stale recovery unlinks only an
+inode-stable, non-listening socket; it never unlinks a symlink or non-socket.
+
+Observation is effective only when all three inputs are true:
+
+1. the closed feature declaration is valid and declares
+   its daemon-observation feature true;
+2. `THREAD_EVENT_RUNNER_ENABLED=1`;
+3. `THREAD_EVENT_RUNNER_OBSERVE=1`.
+
+The semantics are AND, never OR. A missing, malformed, duplicate-member,
+wrong-version, wrong-identity, unknown-feature, or non-boolean declaration sets
+every declared feature false. With the gate off, the daemon still acquires the
+writer lock and serves honest control diagnostics, but it does not open, create,
+migrate, integrity-check, or observe the ledger.
+
+The only implemented source is `chats_mailbox`: fixed `Chats/*/*.md` packets and
+the `read`/`unread` packet pointers in `agents/*/inbox.json`. It stores bounded
+path, hash, size, mtime, cursor, count, resolution, and audit metadata; it does
+not store message bodies. Filesystem events only mark the engine dirty and
+reduce latency. Periodic reconciliation every 30 seconds is the sole correctness
+authority. For each project-scoped checkpoint, one pass scans at most 2000
+candidate directory entries and atomically inserts at most 500 new observations
+plus that checkpoint and its reconciliation audit row. It may then prune at most
+500 resolved observations older than 30 days and write the matching retention
+audit. Because the engine runs that work once per registered project, one
+30-second cadence may perform up to N times those bounds for N projects. There
+is no global per-cadence bound or fairness policy yet; open
+[#179](https://github.com/pixexid/llm-collab/issues/179) owns that prerequisite.
+Observation, checkpoint, and audit reads and writes require the exact workspace,
+project, source, and registry revision. Provenance import is scoped by workspace
+and registry revision; each row is either bound to one exact registered project
+or is `legacy_unscoped` with a `NULL` project, and only exact-project rows appear
+in exact-project projections. One workspace ledger may contain many projects.
+
+### Implemented legacy provenance import
+
+P1d imports only the closed current-v2 source families
+`State/session_autobridge/sessions/*.json` and
+`State/session_autobridge/activation_leases/*.json`. It records source family,
+record kind, relative locator, SHA-256, byte size, timestamps, import revision,
+and transaction ID. It never stores source JSON and no runtime, dispatcher,
+lease, activation, inbox, or other consumer reads these rows.
+
+Session scope comes only from a top-level `project_id`; activation-lease scope
+comes only from `identity.project`. The claim must exactly match a project in
+the immutable registry snapshot. Missing, malformed, duplicate-member,
+non-RFC JSON, excessive-depth, unknown, or foreign claims become
+`legacy_unscoped` and are never projected by exact-project reads. Collection is
+bounded to **5000 directory entries total across both source directories** and
+**1048576 bytes (1 MiB) per regular JSON file**. The entry budget counts every
+directory entry before suffix filtering and fails closed rather than
+truncating. No-follow, non-blocking file opens reject symlinks, FIFOs, devices,
+sockets, and files that change during collection. The complete set is collected
+and revalidated before one append-only transaction.
+
+### Rollback
+
+Rollback disables observation by clearing either environment gate or setting
+the declaration false, then optionally stops the daemon. It preserves
+unresolved observations and imported provenance, leaves the ledger available
+through query-only readers, and leaves current v2 writers and owners unchanged.
+It never performs an in-place schema downgrade. A migration failure may restore
+the verified pre-migration backup automatically; an intentional rollback keeps
+the v3 evidence intact.
+
+## Planned Thread Event Runner records
+
+Everything below this heading remains a broader future contract. The exact
+identity tuple for a future targeted subscription is:
 
 ```text
 (project_id, runtime_home_id, runtime_home_realpath, native_thread_id)
@@ -1158,11 +1279,14 @@ separate short transactions around external work.
 The exact-thread dispatcher is not part of Phase 2. A SQLite authorizer/trace
 must prove Phase 2 observation and reprocessing do not read or write
 `delivery_lineages` or any other dispatch table. Phase 2 proof also requires
-two registered projects to resolve distinct databases beneath their own
-`{project_state_root}/{project_id}/thread-event-runner/` directories. It rejects
-unregistered/traversal/symlink-escape IDs, arbitrary path overrides, owning-row
-project mismatches, and cross-project opens; WAL, shared-memory, backup, and
-export files remain inside the owning directory. Proof also requires zero new
+every observation, checkpoint, and audit row and query for two registered
+projects in one workspace ledger to remain isolated by exact workspace,
+project, source, and registry revision. V3 provenance is instead scoped by
+workspace and registry revision; each row is either bound to one exact
+registered project or is `legacy_unscoped` with a `NULL` project, and
+exact-project projections exclude legacy-unscoped rows. Phase 2 rejects
+unregistered, empty, null, traversal-like, and foreign project scope,
+arbitrary path overrides, and cross-project reads or writes. Proof also requires zero new
 lineage, delivery, attempt, dispatch-lease, or target/lineage-quarantine rows
 after timer/filesystem/mailbox observation and reprocessing, plus proof that
 simulation rows have no claim/promotion path. Phase 3 first proves an

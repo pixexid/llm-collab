@@ -4,10 +4,11 @@
 
 - **Epic:** [`#85`](https://github.com/pixexid/llm-collab/issues/85)
 - **Phase 0 issue:** [`#88`](https://github.com/pixexid/llm-collab/issues/88)
-- **Accepted rebaseline:** TASK-240A0F
+- **Phase 1 issue:** [`#90`](https://github.com/pixexid/llm-collab/issues/90)
+- **Accepted rebaseline:** TASK-31A510
 - **Current implementation base:**
-  `c4ade47c5086371d35e79370a5ec815282d51097`
-- **Rebaselined:** 2026-07-19
+  `7c1728a3b5979e51f79ccc29b636cd71c6f1d27d`
+- **Rebaselined:** 2026-07-21
 
 This is the repository-tracked implementation plan for the standalone
 agent-session-bus program. It supersedes the sequencing and current-state
@@ -18,9 +19,10 @@ The [standalone architecture](standalone-agent-session-bus-architecture.md) is
 the normative vocabulary, ownership, identity, evidence, registry, and safety
 contract. The
 [Thread Event Runner RFC](workflows/thread-event-runner-rfc.md) remains the
-frozen safety floor. Current v2 code and the
-[schema reference](schema-reference.md) remain operational authority until a
-later migration gate transfers ownership.
+frozen safety floor. The GH-90 P1 observation foundation and current v2 code are
+operational authority for their separate surfaces; the
+[schema reference](schema-reference.md) records the exact implemented boundary.
+No later-phase ownership transfers merely because it is planned here.
 
 This document uses:
 
@@ -35,6 +37,14 @@ No phase becomes active merely because it is described here.
 
 ### Landed facts
 
+- GH-90 P1a through P1d are merged on the current base. One workspace-scoped
+  v3 ledger, the control daemon, strict three-way observation gate, bounded
+  `chats_mailbox` reconciliation, and inert hash-only legacy provenance import
+  are implemented. P1e is the documentation/release slice; GH-90 is not claimed
+  closed until that release gate completes.
+- The configured-root gate at the exact P1d merge passed 733/733 tests on both
+  Python 3.11 and 3.14.
+
 - GH-87 landed through PR
   [`#116`](https://github.com/pixexid/llm-collab/pull/116) at
   `6b9760df6b0ddf8f7028c1930f5645a4feca6247`. Project-scoped
@@ -43,8 +53,6 @@ No phase becomes active merely because it is described here.
   [`#117`](https://github.com/pixexid/llm-collab/pull/117) at the current base.
   `refine_task.py` rejects hollow task contracts rather than stamping
   placeholder, truncated, duplicate-section, or label-only planning.
-- The configured-root S1 baseline gate runs 337 tests with
-  `python3.11 -m unittest discover -s tests`; all pass on the current base.
 - Current activation identity is the exact tuple
   `(project, chat, task, worktree, branch, target_agent)` with sender-only
   canonical worktree resolution, byte-exact receiver identity, and
@@ -68,8 +76,9 @@ No phase becomes active merely because it is described here.
 - Current task/container time and evidence self-reported timestamps cannot
   objectively prove that retired evidence existed before a compatibility
   cutoff.
-- Amiga GH-1571 and GH-1572 remain open owners of v2 activation lease authority
-  and runtime integration. P1 must not race those writers.
+- Amiga GH-1571 and GH-1572 are settled. Their v2 activation and runtime owners
+  remain unchanged; GH-90 imported only inert provenance and did not write or
+  assume authority over their current state.
 - Amiga PR #1579 was narrowed to app-only scope and squash-merged at
   `e31872053314faab09f0f9fee936c965d561f6ef`; it supplies no universal
   `llm-collab` schema or evidence authority.
@@ -86,9 +95,9 @@ belongs to this program.
 
 ### Changes from the 2026-07-16 source plan
 
-| Source-plan assumption | 2026-07-19 disposition |
+| Source-plan assumption | 2026-07-21 disposition |
 |---|---|
-| Phase 0 could begin from the original epic baseline. | Rebased after the GH-86/GH-87 prerequisite merges on `c4ade47`. |
+| Phase 0 could begin from the original epic baseline. | Rebased after the GH-86/GH-87 prerequisite merges; P1 is now rebaselined through exact merge `7c1728a3`. |
 | One broad Phase 0 implementation sequence. | Frozen as three separately reviewed slices: S1 architecture/plan, S2 schemas/tests, S3 protocols/compatibility/inert flags. |
 | Project configuration could be described as declaring sibling docs. | Rejected. A typed registry relationship with exact registered repository endpoints is required. |
 | Artifact/task age could support retired-form compatibility. | Rejected. Only an exact entry in a sealed, cutoff-policy-bound, content-addressed legacy manifest with authoritative import/observation provenance qualifies. |
@@ -243,13 +252,14 @@ repair, or runtime cleanup is required because Phase 0 consumes none of them.
 
 ## Current issue graph
 
-All program issues are open at this rebaseline unless marked otherwise.
+Issue state is rediscovered dynamically. This table records dependencies and
+implemented outcomes at the exact rebaseline, not a closed issue snapshot.
 
 | Issue | Phase | Minimum dependency | Owning outcome |
 |---|---|---|---|
 | [#85](https://github.com/pixexid/llm-collab/issues/85) | Epic | — | Program acceptance and child tracking. |
 | [#88](https://github.com/pixexid/llm-collab/issues/88) | P0 | GH-86 and GH-87 landed | S1/S2/S3 contract freeze; no runtime mutation. |
-| [#90](https://github.com/pixexid/llm-collab/issues/90) | P1 | #88 merged; Amiga #1571/#1572 merged or explicitly descoped/superseded | Observation-only daemon and ledger. |
+| [#90](https://github.com/pixexid/llm-collab/issues/90) | P1 | #88, Amiga #1571, and Amiga #1572 settled | Observation-only daemon and ledger implemented through P1d; P1e release/closure pending. |
 | [#91](https://github.com/pixexid/llm-collab/issues/91) | P2 | P1 merged; #88 schemas/protocols frozen | Canonical messages/receipts and v2 importer/projections. |
 | [#92](https://github.com/pixexid/llm-collab/issues/92) | P3 | P2 merged; runtime-adapter V1 frozen | Adapter supervisor, SDK, and conformance kit. |
 | [#93](https://github.com/pixexid/llm-collab/issues/93) | P4A | P3 merged | Managed Codex read-only/session adapter. |
@@ -307,8 +317,8 @@ does not create duplicate mechanisms.
 | Amiga #1564 | `parallel-safe` | Release-watcher correctness remains project work and later maps to P8B. |
 | Amiga #1565 | `close-as-superseded` | Closed as duplicate; exact-SHA persisted release verdict requirements transfer to #89/P8B. |
 | Amiga #1566 | `map-to-later-phase` | Exact root-Codex AX targeting and honest outcomes belong to P6; no second AX mechanism. |
-| Amiga #1571 | `parallel-safe` with P1 gate | Owns current v2 activation lease/fence work; must settle before P1 and becomes P4B import/retirement input. |
-| Amiga #1572 | `parallel-safe` with P1/P2 gate | Owns current v2 inbox/dispatch integration; must settle before P1 and informs P2 hold/refusal compatibility. |
+| Amiga #1571 | `settled external owner` | Its current v2 activation lease/fence authority remains outside GH-90; P1d records hash-only provenance without consumption or ownership transfer. |
+| Amiga #1572 | `settled external owner` | Its current v2 inbox/dispatch authority remains outside GH-90 and informs later compatibility; P1 performs no dispatch. |
 
 Duplicate-mechanism guards:
 
@@ -324,30 +334,35 @@ Duplicate-mechanism guards:
 
 **Goal:** introduce one transactional local service without waking any runtime.
 
-### Planned deliverables
+### Landed slice and evidence map
 
-- SQLite migration framework with WAL, foreign keys, bounded busy timeout,
-  private permissions, integrity checks, and backup;
-- single-instance daemon and local Unix control socket;
-- daemon start/stop/status/logs and doctor surfaces;
-- filesystem events plus periodic reconciliation for mailbox/chat observation;
-- transactional observations, checkpoints, dedupe, project/workspace
-  isolation, bounded retention, and audit;
-- import of current activation/session-autobridge records as provenance only;
-- all dispatch paths structurally disabled.
+| Slice | Merge | Landed boundary |
+|---|---|---|
+| P1a storage foundation | `35069cbb` (PR #173) | Persistent generated `workspace_id`; fixed workspace artifact tree; safe-SQLite gate; one writer/query-only readers; v1 migration/checksum/fingerprint/backup/restore/integrity contract. |
+| P1b daemon control | `17e0249` (PR #174) | Single-instance daemon, same-UID-before-parse bounded Unix control socket, start/stop/status/logs/doctor, safe stale-socket recovery, and atomic bounded log rotation. |
+| P1c observation | `1f463989` (PR #180) | Strict declaration + two-environment-variable AND gate; v2 scoped observation/checkpoint/audit schema; fixed `chats_mailbox` packet and inbox-pointer observation; filesystem hints plus reconciliation as sole correctness authority. |
+| P1d provenance | `7c1728a3` (PR #184) | v3 append-only hash/metadata provenance for the closed current session and activation-lease sources; exact-project or `legacy_unscoped`; 5000 directory entries across both families and 1 MiB per regular JSON file; no consumer or authority. |
+| P1e documentation/release | TASK-31A510 | This exact-base documentation correction and the remaining GH-90 release/closure gate. It is not landed merely because this plan describes it. |
 
-### Activation gate
+The implemented ledger lives at
+`{project_state_root}/llm-collabd/{workspace_id}/ledger.sqlite3`, not one
+database per project. Exact workspace/project/source/registry scope is enforced
+on rows and APIs inside that one workspace ledger. The private state root is a
+trust boundary: no-follow and descriptor checks are defense in depth, not a
+claim that stdlib SQLite contains `-wal`/`-shm` against same-UID ancestor swaps.
 
-Amiga #1571/#1572 must merge or be explicitly descoped/superseded with one
-remaining owner. P1 may not write active v2 lease/inbox/autobridge state while
-those lanes own it.
+All subscriptions, timers, canonical message/delivery/attempt/receipt state,
+leases, fences, retries, quarantine, dead letters, dispatcher, transports, and
+their management surfaces remain planned and dependency-gated in P2+.
 
 ### Acceptance and rollback
 
-Prove duplicate observation suppression, concurrent scan safety, crash recovery,
-project isolation, sleep/wake cursor correctness, retention of unresolved
-state, and zero runtime/AX/GitHub/app mutation. Rollback stops observation and
-leaves the ledger as read-only evidence; current v2 owners remain unchanged.
+The landed tests prove duplicate observation suppression, bounded resumable
+scans, project isolation, retention of unresolved state, and zero
+runtime/AX/GitHub/app mutation. Rollback disables observation, optionally stops
+the daemon, preserves unresolved observations and provenance, leaves the ledger
+query-only, and keeps current v2 owners unchanged. It never performs an in-place
+schema downgrade.
 
 ## Phase 2 — canonical messages, receipts, and v2 compatibility
 

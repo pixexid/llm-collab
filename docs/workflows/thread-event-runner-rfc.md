@@ -2,11 +2,12 @@
 
 ## Status
 
-**Phase 1 architecture and threat/safety contract. No runner described here is
-implemented yet.** Normative planned behavior uses **MUST**, **MUST NOT**,
-**SHOULD**, and **MAY**. The confirmed sections under "Evidence classification"
-describe the Phase 1 baseline; all other runner schemas, states, commands,
-feature flags, and guarantees are planned contracts for later phases.
+**Broader runner architecture and threat/safety contract, with the narrower
+GH-90 observation foundation implemented.** Normative planned behavior uses
+**MUST**, **MUST NOT**, **SHOULD**, and **MAY**. Sections explicitly labeled
+implemented describe current code; subscriptions, timers, delivery, attempts,
+leases, fences, retries, quarantine, dead letters, dispatch, and their
+management surfaces remain planned.
 
 Source continuity:
 
@@ -16,10 +17,11 @@ Source continuity:
 
 ## Purpose
 
-The Thread Event Runner is a planned local daemon and ledger for durable,
+The broader Thread Event Runner is a planned local service for durable,
 project-scoped event subscriptions that can eventually wake one exact Codex
-thread. It is not another inbox watcher and it is not an unbounded command
-scheduler.
+thread. GH-90 provides only its workspace-scoped observation ledger, daemon
+control lifecycle, and `chats_mailbox` observer. That foundation is not a
+subscription manager or dispatcher and is not an unbounded command scheduler.
 
 The runner must make these properties mechanical:
 
@@ -106,6 +108,57 @@ Local code cannot safely infer these contracts:
 The exact-thread dispatcher MUST remain feature-disabled until these behaviors
 are integration-proven against the supported Codex runtime. A successful
 happy-path `thread/resume` plus `turn/start` call is not sufficient proof.
+
+## Implemented GH-90 observation foundation
+
+GH-90 is narrower than the full runner described by this RFC. It implements one
+workspace ledger at
+`{project_state_root}/llm-collabd/{workspace_id}/ledger.sqlite3`, one
+single-writer daemon with a same-UID local control socket, and one fixed
+`chats_mailbox` observer. The ledger can hold multiple projects, but every
+registry, observation, checkpoint, audit, and provenance query or mutation uses
+exact workspace/project/source/registry-revision scope. Missing, empty, null, or
+foreign project identity never matches.
+
+The implemented source observes fixed `Chats/*/*.md` packets plus the matching
+`read` and `unread` pointers in `agents/*/inbox.json`. It records only bounded
+paths, hashes, sizes, mtimes, cursors, counts, resolution state, and audit
+metadata. Filesystem notifications are latency hints; the bounded 30-second
+periodic reconciliation cadence is the sole correctness authority. For each
+project-scoped checkpoint, one pass scans at most 2000 candidate directory
+entries and atomically inserts at most 500 new observations plus that checkpoint
+and its reconciliation audit row. It may then prune at most 500 resolved
+observations and write the matching retention audit. The engine repeats those
+bounds for every registered project, so one cadence may perform up to N times
+that work for N projects. No global per-cadence bound or fairness policy exists
+yet; open [#179](https://github.com/pixexid/llm-collab/issues/179) owns that
+prerequisite.
+
+Observation remains inert and default off. It runs only when the closed feature
+declaration has its daemon-observation feature true **and** both
+`THREAD_EVENT_RUNNER_ENABLED=1` and `THREAD_EVENT_RUNNER_OBSERVE=1`. Invalid
+declaration data sets all features false. With the gate off, the daemon serves
+honest control diagnostics but does not open, create, migrate, or observe the
+ledger.
+
+The v3 provenance import reads only current session-autobridge session and
+activation-lease JSON files, then stores hash and metadata rows. Exact project
+scope comes only from the session's top-level `project_id` or the activation
+lease's `identity.project`; every other claim is `legacy_unscoped`. The import
+has no consumer and grants no session, activation, lease, fence, delivery, or
+runtime authority. It fails closed after 5000 directory entries total across
+both source families or when any regular JSON file exceeds 1 MiB.
+
+The workspace's private `project_state_root` is a trust boundary. Fixed paths,
+private modes, no-follow opens, and main-database descriptor identity checks are
+defense in depth. The Python stdlib SQLite surface cannot anchor SQLite's own
+`-wal` and `-shm` sidecar opens to a retained ancestor directory descriptor, so
+the implementation makes no same-UID ancestor-swap containment claim.
+
+Rollback disables either observation environment gate or the declaration and
+may stop the daemon. It preserves unresolved observations and provenance,
+leaves the v3 ledger query-only, does not transfer or rewrite current v2
+ownership, and never performs an in-place schema downgrade.
 
 ## Scope and non-goals
 
@@ -379,31 +432,23 @@ before hashing. Oversize, malformed, unknown-field, invalid-encoding, and schema
 violations fail closed and create a bounded diagnostic; they are never
 truncated into a different semantic event.
 
-## Planned SQLite ledger
+## Implemented observation ledger and planned runner records
 
-### Location and connection contract
+### Implemented location and connection contract
 
-The new ledger is independent of session autobridge:
+The observation ledger is independent of session autobridge:
 
 ```text
-{project_state_root}/{project_id}/thread-event-runner/runner.sqlite3
+{project_state_root}/llm-collabd/{workspace_id}/ledger.sqlite3
 ```
 
-Management MUST resolve `project_state_root` from `collab.config.json`, require
-an exact registered and path-component-safe `project_id`, and derive this path;
-callers cannot supply an arbitrary ledger path. Canonical resolution MUST remain
-inside `{project_state_root}/{project_id}/` and fail closed on a missing,
-unregistered, empty, traversal, symlink-escape, or mismatched project. Each
-database belongs to exactly one project. Its project-bound rows MUST match the
-owning directory's project ID, and a process opened for another project MUST
-fail before migration, observation, or dispatch.
-
-The per-project `thread-event-runner/` directory MUST be mode `0700` and the
-database, WAL, shared-memory, backup, and export files MUST be mode `0600` where
-the platform supports POSIX permissions. WAL/shared-memory siblings and every
-generated backup or export MUST remain beneath that same per-project directory;
-runner output never falls back to workspace-level `State/` or another project's
-state directory.
+`project_state_root` and the generated persistent `workspace_id` come from
+`collab.config.json`; callers cannot override any artifact path. The fixed
+workspace directory, `backups/`, and `logs/` are mode `0700`; database,
+sidecars, verified migration backups, socket, lock, and logs are mode `0600` on
+POSIX. The Unix socket path is rejected above 103 encoded bytes. A single
+non-blocking `flock` protects the only writer/checkpointer while reader
+connections set `query_only=ON`.
 
 Every connection MUST apply and verify:
 
@@ -415,13 +460,23 @@ PRAGMA synchronous = FULL;
 ```
 
 The busy timeout is bounded to 5 seconds; lock contention is an observable
-runner error, not permission to wait forever. Schema version is recorded in
-both `PRAGMA user_version` and a migration table. A mismatch fails startup
-before adapters or dispatch run.
+error, not permission to wait forever. Ledger versions v1, v2, and v3 are
+recorded in both `PRAGMA user_version` and `schema_migrations` with released SQL
+checksums, exact schema fingerprints, verified pre-migration backups,
+`integrity_check`, and `foreign_key_check`. Configuration `schema_version: 2`
+is unrelated. Current v3 contains only registry/daemon tables, scoped
+observations/checkpoints/audit, and append-only provenance. No P2+ runner table
+exists.
+
+The private-state-root trust boundary and WAL/SHM ancestor-swap residual stated
+in the implemented section above apply. The sidecars receive private modes and
+symlink checks, but stdlib defense in depth is not containment against a same-UID
+actor that can replace a trusted ancestor.
 
 ### Planned tables
 
-This is a logical contract; column spelling may change only through a reviewed
+The following is the broader logical contract for P2+ and is not implemented by
+the GH-90 v1/v2/v3 schema. Column spelling may change only through a reviewed
 schema migration that preserves the stated constraints.
 
 | Table | Required purpose and constraints |
@@ -937,17 +992,17 @@ gate.
 
 | Phase | Planned scope | Required flag posture |
 |---|---|---|
-| 1 | This architecture/threat contract only | No runtime flags or processes. |
-| 2 | SQLite ledger; management/status; read-only timer, filesystem, and mailbox observation; optional permanently non-deliverable `simulation_projections`; no lineage, delivery, attempt, dispatch lease/quarantine, retry, or thread-wake state | `THREAD_EVENT_RUNNER_ENABLED=1`, `THREAD_EVENT_RUNNER_OBSERVE=1`, allowlist limited to `timer,filesystem,mailbox`; `THREAD_EVENT_RUNNER_DISPATCH_EXACT_THREAD=0` and the test dispatch flag off. Observation transactions are structurally barred from dispatch tables. |
+| GH-90 foundation (implemented) | Workspace ledger v1/v2/v3; control daemon; fixed `chats_mailbox` packet and inbox-pointer observation; append-only hash provenance; no subscriptions, timers, lineage, delivery, attempt, lease/quarantine, retry, or thread-wake state | Valid declaration with its daemon-observation feature true **and** `THREAD_EVENT_RUNNER_ENABLED=1` **and** `THREAD_EVENT_RUNNER_OBSERVE=1`; every dispatch/canonical-write flag remains off. |
+| 2 | Add planned subscription management, timer/filesystem adapters, and optional permanently non-deliverable `simulation_projections` to the existing observation foundation; no lineage, delivery, attempt, dispatch lease/quarantine, retry, or thread-wake state | Retain a valid declaration with its daemon-observation feature true **and** `THREAD_EVENT_RUNNER_ENABLED=1` **and** `THREAD_EVENT_RUNNER_OBSERVE=1`; expand the planned trusted adapter allowlist only to `timer,filesystem,mailbox`; keep `THREAD_EVENT_RUNNER_DISPATCH_EXACT_THREAD=0` and the test dispatch flag off. Observation transactions are structurally barred from dispatch tables. |
 | 3 | Exact-thread dispatcher plus mandatory immutable revisions, project binding, pointer-only prompt, runtime capability enforcement, lease/quarantine/fencing, retry, dead-letter, busy-deferral, and reconciliation substrate. Activation cancels the Phase 2 observation-only subscription and creates a separate delivery-capable subscription with a frozen dispatch profile; only fresh observations under the new subscription may create delivery state. Phase 2 events/projections remain non-deliverable history. | Production dispatch remains off. After non-send contract tests, use only `THREAD_EVENT_RUNNER_TEST_DISPATCH_DISPOSABLE_RUNTIME=1` for the isolated dispatch/fault matrix and then one disposable subscription. |
 | 4 | Broader multi-runner, crash, sleep/wake, clock-change, load, runtime-upgrade, and quarantine-recovery hardening | Test-only disposable dispatch may continue; production/project dispatch remains off. |
 | 5 | Process, GitHub, queue/task/worktree, and AX safety adapters | Each adapter has a separate allowlist/feature flag and reviewed capability profile; AX mutation is not implied by observation; production/project dispatch remains off. |
-| 6 | Project pilots, observability, legacy cutover, documented rollback | After explicit approval, set `THREAD_EVENT_RUNNER_DISPATCH_EXACT_THREAD=1` for one exact subscription at a time; no workspace-wide wildcard enablement. |
+| 6 | Project pilots, observability, legacy cutover, documented rollback | Retain every preceding phase gate, including the observation declaration/environment gates and trusted registries. After explicit approval, require a valid declaration with its runtime-dispatch feature true **and** `THREAD_EVENT_RUNNER_DISPATCH_EXACT_THREAD=1` for one exact subscription at a time; keep the test-only dispatch flag off and allow no workspace-wide wildcard enablement. |
 
-Phase 2 is the next authorized implementation phase: **SQLite plus read-only
-timer/filesystem/mailbox observation only**. It must not extract or activate
-exact-thread dispatch, start PM2 state, mutate AX/apps, or claim busy deferral
-works.
+Phase 2 is the next broader implementation phase: **subscription-managed,
+read-only timer/filesystem/mailbox observation only**, building on the GH-90
+workspace ledger. It must not extract or activate exact-thread dispatch, start
+PM2 state, mutate AX/apps, or claim busy deferral works.
 
 ## Proof gates for later phases
 
@@ -957,12 +1012,14 @@ Before Phase 2 handoff:
   dedupe, quiet-state, coalescing simulation, cancellation/update, retention,
   project isolation, deterministic timer occurrence IDs, all missed-fire/DST
   policies, unavailable tzdb, sleep/wake, and forward/backward clock tests pass;
-- two registered projects resolve distinct ledgers beneath their own
-  `{project_state_root}/{project_id}/thread-event-runner/` directories; tests
-  reject unregistered/traversal/symlink-escape IDs, arbitrary path overrides,
-  mismatched owning-project rows, and opening one project's ledger in another
-  project's context, while WAL, shared-memory, backup, and export artifacts stay
-  inside the owning directory;
+- two registered projects share the exact workspace ledger while every
+  observation, checkpoint, and audit row and query remains isolated by exact
+  workspace, project, source, and registry revision; v3 provenance is instead
+  scoped by workspace and registry revision, with each row either bound to one
+  exact registered project or marked `legacy_unscoped` with a `NULL` project,
+  and exact-project projections exclude legacy-unscoped rows; tests reject
+  missing, null, empty, unregistered, traversal-like, and foreign scope plus
+  arbitrary artifact-path overrides;
 - timer, filesystem, mailbox, replay, and invalid-observation reprocessing tests
   use a SQLite authorizer/trace to prove Phase 2 observation does not read or
   write `delivery_lineages` or any other dispatch table and leaves zero new rows

@@ -30,8 +30,11 @@ notifications are optional adapters for teams that need them.
   templates live under `{project_state_root}/{project_id}/`, normally outside
   this public Git checkout.
 - **Separate scheduled-work surfaces** — Codex app automations remain app-owned.
-  The proposed Thread Event Runner is a separate, currently unimplemented local
-  subscription/ledger design; it does not own or mirror app automation state.
+  The standalone observation ledger and daemon control lifecycle have landed
+  but remain inert and default off. Observation requires the declaration's
+  daemon-observation feature to be true **and** both
+  `THREAD_EVENT_RUNNER_ENABLED=1` and `THREAD_EVENT_RUNNER_OBSERVE=1`; invalid
+  declarations fail closed. They do not own or mirror app automation state.
 
 Project-scoped is the default; universal behavior is the exception. Read
 [Multi-Project Support](docs/multi-project.md#scoping-principles) before adding
@@ -299,15 +302,19 @@ for operational safety rules.
 ### Thread Event Runner versus app automations
 
 The [Thread Event Runner RFC](docs/workflows/thread-event-runner-rfc.md) defines
-a Phase 1 architecture and threat contract for durable local event
-subscriptions. It does **not** add a daemon, database, PM2 process, adapter, or
-exact-thread dispatch behavior in the current release.
+the broader threat contract for durable local event subscriptions. GH-90 has
+implemented the narrower workspace observation ledger, daemon control lifecycle,
+and `chats_mailbox` observer. They remain inert and default off behind the strict
+three-way gate: the declaration's daemon-observation feature and both
+`THREAD_EVENT_RUNNER_ENABLED=1` and `THREAD_EVENT_RUNNER_OBSERVE=1` must be true.
+With the gate off, the daemon does not open, create, migrate, or observe the
+ledger. It performs no observation, dispatch, delivery, or observation-ledger
+state mutation. No exact-thread dispatch behavior is enabled.
 
 Codex app automations remain owned by the Codex app, including their schedules,
-thread behavior, lifecycle, UI, and storage. A future runner subscription would
-be an independently managed local record for observing external state. Neither
-surface may silently import, pause, cancel, deduplicate, or take ownership of
-the other.
+thread behavior, lifecycle, UI, and storage. The observation foundation has no
+subscription or timer ownership. Neither surface may silently import, pause,
+cancel, deduplicate, or take ownership of the other.
 
 ### Standalone architecture and program
 
@@ -317,9 +324,11 @@ freezes the future core, runtime-adapter, transport-adapter, and workflow-pack
 boundaries. The
 [Standalone Implementation Plan](docs/standalone-agent-session-bus-plan.md)
 records the phase-gated GH-88 through GH-104 rollout. Both documents are
-contract and planning authority only: current v2 commands and files remain
-operational, and no standalone daemon, ledger, adapter, transport, feature
-consumer, or new mutation path is enabled by those documents.
+contract and planning authority. Current v2 commands and files remain
+operational. The implemented observation ledger and daemon stay inert unless all
+three observation gates pass; subscriptions, timers, canonical delivery,
+attempts, receipts, leases, fences, retries, quarantine, dead letters,
+dispatch, transports, and feature consumers remain planned.
 
 ## Command reference
 
