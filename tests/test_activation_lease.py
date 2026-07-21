@@ -124,6 +124,12 @@ class ActivationLeaseTest(unittest.TestCase):
         payload, code = self.run_cli(root, *args)
         self.assertEqual(0, code, payload)
 
+    def update_session_status(self, root: Path, session: str, status: str) -> None:
+        path = root / "State" / "session_autobridge" / "sessions" / f"{session}.json"
+        payload = json.loads(path.read_text())
+        payload["status"] = status
+        write_json(path, payload)
+
     def claim(self, root: Path, session: str, *extra: str, worktree: Path | None = None) -> tuple[dict, int]:
         return self.run_cli(root, "lease-claim", *self.identity_args(worktree), "--session", session, *extra)
 
@@ -144,6 +150,78 @@ class ActivationLeaseTest(unittest.TestCase):
         claimed, code = self.claim(root, "SESSION-A", "--claimant-runtime-id", "runtime-a")
         self.assertEqual(0, code, claimed)
         self.assertEqual("runtime-a", claimed["lease"]["owner_runtime_session_id"])
+
+    def test_claim_rejects_registered_session_runtime_fallback(self):
+        root = self.make_workspace()
+        self.register_session(root, "SESSION-A", runtime_id="runtime-a")
+        refused, code = self.claim(root, "SESSION-A")
+        self.assertEqual(75, code)
+        self.assertEqual("claimant_identity_required", refused["reason"])
+        self.assertEqual([], self.lease_records(root))
+
+    def test_identityless_processes_cannot_dual_grant_from_session_runtime(self):
+        root = self.make_workspace()
+        self.register_session(root, "SESSION-A", runtime_id="runtime-a")
+        self.register_session(root, "SESSION-B", runtime_id="runtime-b")
+        start_file = root / "start-identityless"
+        output_a = root / "identityless-a.json"
+        output_b = root / "identityless-b.json"
+        worker_code = "\n".join(
+            [
+                "import json, os, subprocess, sys, time",
+                "script, root, start, output = sys.argv[1:5]",
+                "cmd = [sys.executable, script, 'lease-claim', *sys.argv[5:], '--json']",
+                "while not os.path.exists(start):",
+                "    time.sleep(0.005)",
+                "result = subprocess.run(cmd, cwd=root, text=True, capture_output=True)",
+                "payload = json.loads(result.stdout)",
+                "payload['_returncode'] = result.returncode",
+                "open(output, 'w').write(json.dumps(payload, sort_keys=True))",
+            ]
+        )
+        common_env = self.env()
+        proc_a = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                worker_code,
+                str(SCRIPT_PATH),
+                str(root),
+                str(start_file),
+                str(output_a),
+                *self.identity_args(),
+                "--session",
+                "SESSION-A",
+            ],
+            cwd=root,
+            env=common_env,
+        )
+        proc_b = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                worker_code,
+                str(SCRIPT_PATH),
+                str(root),
+                str(start_file),
+                str(output_b),
+                *self.identity_args(),
+                "--session",
+                "SESSION-B",
+            ],
+            cwd=root,
+            env=common_env,
+        )
+        start_file.write_text("go")
+        self.assertEqual(0, proc_a.wait(timeout=10))
+        self.assertEqual(0, proc_b.wait(timeout=10))
+        results = [json.loads(output_a.read_text()), json.loads(output_b.read_text())]
+        self.assertEqual(
+            ["claimant_identity_required", "claimant_identity_required"],
+            sorted(result["reason"] for result in results),
+        )
+        self.assertEqual([75, 75], sorted(result["_returncode"] for result in results))
+        self.assertEqual([], self.lease_records(root))
 
     def test_pid_only_claim_requires_positive_process_pid_cli_and_library(self):
         root = self.make_workspace()
@@ -210,6 +288,22 @@ class ActivationLeaseTest(unittest.TestCase):
         after = {path.name: path.read_text() for path in lease_dir.glob("*.json")}
         self.assertEqual(before, after)
 
+    def test_different_session_same_runtime_cannot_reclaim_without_takeover(self):
+        root = self.make_workspace()
+        self.register_session(root, "SESSION-A", runtime_id="runtime-shared")
+        self.register_session(root, "SESSION-B", runtime_id="runtime-shared")
+        first, code = self.claim(root, "SESSION-A", "--claimant-runtime-id", "runtime-shared")
+        self.assertEqual(0, code, first)
+        lease_dir = root / "State" / "session_autobridge" / "activation_leases"
+        before = {path.name: path.read_text() for path in lease_dir.glob("*.json")}
+
+        refused, code = self.claim(root, "SESSION-B", "--claimant-runtime-id", "runtime-shared")
+        self.assertEqual(75, code)
+        self.assertEqual("lease_held_by_active_owner", refused["reason"])
+        self.assertEqual("SESSION-A", refused["owner"]["owner_session_id"])
+        after = {path.name: path.read_text() for path in lease_dir.glob("*.json")}
+        self.assertEqual(before, after)
+
     def test_runtime_only_reclaim_is_idempotent_and_refreshes_ttl(self):
         root = self.make_workspace()
         self.register_session(root, "SESSION-A", runtime_id="runtime-a")
@@ -255,7 +349,7 @@ class ActivationLeaseTest(unittest.TestCase):
     def test_assert_requires_asserting_runtime_not_session_record_fallback(self):
         root = self.make_workspace()
         self.register_session(root, "SESSION-A", runtime_id="runtime-a")
-        claimed, code = self.claim(root, "SESSION-A")
+        claimed, code = self.claim(root, "SESSION-A", "--claimant-runtime-id", "runtime-a")
         self.assertEqual(0, code, claimed)
         self.assertEqual("runtime-a", claimed["lease"]["owner_runtime_session_id"])
 
@@ -270,6 +364,51 @@ class ActivationLeaseTest(unittest.TestCase):
         )
         self.assertEqual(75, code)
         self.assertEqual("claimant_runtime_identity_required", refused["reason"])
+
+    def test_assert_refuses_stopped_and_superseded_owner_sessions(self):
+        for status in ("stopped", "superseded"):
+            with self.subTest(status=status):
+                root = self.make_workspace()
+                self.register_session(root, "SESSION-A", runtime_id="runtime-a")
+                claimed, code = self.claim(root, "SESSION-A", "--claimant-runtime-id", "runtime-a")
+                self.assertEqual(0, code, claimed)
+                self.update_session_status(root, "SESSION-A", status)
+
+                refused, code = self.run_cli(
+                    root,
+                    "lease-assert",
+                    *self.identity_args(),
+                    "--session",
+                    "SESSION-A",
+                    "--fence-token",
+                    str(claimed["lease"]["fence_token"]),
+                    "--claimant-runtime-id",
+                    "runtime-a",
+                )
+                self.assertEqual(75, code)
+                self.assertEqual("owner_session_not_live", refused["reason"])
+
+    def test_assert_requires_the_recorded_owner_session(self):
+        root = self.make_workspace()
+        self.register_session(root, "SESSION-A", runtime_id="runtime-a")
+        self.register_session(root, "SESSION-B", runtime_id="runtime-b")
+        claimed, code = self.claim(root, "SESSION-A", "--claimant-runtime-id", "runtime-a")
+        self.assertEqual(0, code, claimed)
+
+        refused, code = self.run_cli(
+            root,
+            "lease-assert",
+            *self.identity_args(),
+            "--session",
+            "SESSION-B",
+            "--fence-token",
+            str(claimed["lease"]["fence_token"]),
+            "--claimant-runtime-id",
+            "runtime-a",
+        )
+        self.assertEqual(75, code)
+        self.assertEqual("lease_owned_by_other_session", refused["reason"])
+        self.assertEqual("SESSION-A", refused["owner"]["owner_session_id"])
 
     def test_wrong_fence_assert_refuses_stale_fence_token(self):
         root = self.make_workspace()
@@ -465,6 +604,8 @@ class ActivationLeaseTest(unittest.TestCase):
             "SESSION-A",
             "--fence-token",
             str(claimed["lease"]["fence_token"]),
+            "--claimant-runtime-id",
+            "runtime-a",
         )
         self.assertEqual(0, code, released)
         granted, code = self.claim(root, "SESSION-B", "--claimant-runtime-id", "runtime-b", worktree=alias)
@@ -561,6 +702,23 @@ class ActivationLeaseTest(unittest.TestCase):
         self.assertEqual(75, code)
         self.assertEqual("owner_liveness_unknown", refused["reason"])
 
+    def test_dead_owner_requires_explicit_takeover(self):
+        root = self.make_workspace()
+        self.register_session(root, "SESSION-A", runtime_id="runtime-a")
+        self.register_session(root, "SESSION-B", runtime_id="runtime-b")
+        claimed, code = self.claim(root, "SESSION-A", "--claimant-runtime-id", "runtime-a")
+        self.assertEqual(0, code, claimed)
+        self.update_session_status(root, "SESSION-A", "stopped")
+
+        refused, code = self.claim(root, "SESSION-B", "--claimant-runtime-id", "runtime-b")
+        self.assertEqual(75, code)
+        self.assertEqual("dead_owner_requires_takeover", refused["reason"])
+
+        taken, code = self.claim(root, "SESSION-B", "--claimant-runtime-id", "runtime-b", "--takeover")
+        self.assertEqual(0, code, taken)
+        self.assertEqual(2, taken["lease"]["fence_token"])
+        self.assertEqual("SESSION-A", taken["lease"]["previous_owner_session_id"])
+
     def test_release_requires_current_owner_and_fence(self):
         root = self.make_workspace()
         self.register_session(root, "SESSION-A", runtime_id="runtime-a")
@@ -575,13 +733,39 @@ class ActivationLeaseTest(unittest.TestCase):
         self.assertEqual("release_requires_current_owner", refused["reason"])
 
         before = {path.name: path.read_text() for path in lease_dir.glob("*.json")}
-        stale, code = self.run_cli(root, "lease-release", *self.identity_args(), "--session", "SESSION-A", "--fence-token", "99")
+        unbound, code = self.run_cli(root, "lease-release", *self.identity_args(), "--session", "SESSION-A", "--fence-token", fence)
+        self.assertEqual(75, code)
+        self.assertEqual("claimant_runtime_identity_required", unbound["reason"])
+        after_unbound = {path.name: path.read_text() for path in lease_dir.glob("*.json")}
+        self.assertEqual(before, after_unbound)
+
+        stale, code = self.run_cli(
+            root,
+            "lease-release",
+            *self.identity_args(),
+            "--session",
+            "SESSION-A",
+            "--fence-token",
+            "99",
+            "--claimant-runtime-id",
+            "runtime-a",
+        )
         self.assertEqual(75, code)
         self.assertEqual("stale_fence_token", stale["reason"])
         after = {path.name: path.read_text() for path in lease_dir.glob("*.json")}
         self.assertEqual(before, after)
 
-        released, code = self.run_cli(root, "lease-release", *self.identity_args(), "--session", "SESSION-A", "--fence-token", fence)
+        released, code = self.run_cli(
+            root,
+            "lease-release",
+            *self.identity_args(),
+            "--session",
+            "SESSION-A",
+            "--fence-token",
+            fence,
+            "--claimant-runtime-id",
+            "runtime-a",
+        )
         self.assertEqual(0, code, released)
         self.assertTrue(released["released"])
 

@@ -139,13 +139,6 @@ def _claim_grant_lock() -> _BlockingLock:
     return _BlockingLock(ACTIVATION_GRANT_LOCK)
 
 
-def _runtime_id_from_record(record: dict[str, Any]) -> str | None:
-    runtime = record.get("runtime")
-    if isinstance(runtime, dict) and runtime.get("session_id"):
-        return str(runtime["session_id"])
-    return None
-
-
 def runtime_id_from_env() -> str | None:
     for name in (
         "LLM_COLLAB_READER_RUNTIME_ID",
@@ -238,12 +231,11 @@ def owner_summary(lease: dict[str, Any]) -> dict[str, Any]:
 
 
 def _resolve_claimant(
-    record: dict[str, Any],
     *,
     claimant_runtime_id: str | None,
     owner_pid: int | None,
 ) -> tuple[str | None, int | None]:
-    runtime_id = claimant_runtime_id or runtime_id_from_env() or _runtime_id_from_record(record)
+    runtime_id = claimant_runtime_id or runtime_id_from_env()
     pid = owner_pid if owner_pid is not None else pid_from_env()
     if pid is not None and not valid_process_pid(pid):
         raise LeaseRefused(
@@ -258,14 +250,13 @@ def _resolve_claimant(
     raise LeaseRefused(
         "claimant_identity_required",
         {
-            "detail": "lease claim requires --claimant-runtime-id, a registered runtime.session_id, or a live --owner-pid"
+            "detail": "lease claim requires --claimant-runtime-id, reader runtime env, or a live --owner-pid"
         },
     )
 
 
 def _assert_claimant_matches(
     lease: dict[str, Any],
-    record: dict[str, Any],
     *,
     claimant_runtime_id: str | None,
     owner_pid: int | None,
@@ -360,7 +351,7 @@ def claim_lease(
         )
     _require_bound_session(record, identity)
     runtime_id, pid = _resolve_claimant(
-        record, claimant_runtime_id=claimant_runtime_id, owner_pid=owner_pid
+        claimant_runtime_id=claimant_runtime_id, owner_pid=owner_pid
     )
 
     with _claim_grant_lock(), _ClaimLock(identity):
@@ -447,6 +438,10 @@ def assert_lease(
     record = owner_session_record(owner_session_id)
     if record is None:
         raise LeaseRefused("owner_session_not_registered")
+    if record.get("status") not in LIVE_SESSION_STATUSES:
+        raise LeaseRefused(
+            "owner_session_not_live", {"owner_session_status": record.get("status")}
+        )
     _require_bound_session(record, identity)
     lease = load_lease(identity)
     if lease is None:
@@ -457,7 +452,6 @@ def assert_lease(
         raise LeaseRefused("lease_owned_by_other_session", owner_summary(lease))
     _assert_claimant_matches(
         lease,
-        record,
         claimant_runtime_id=claimant_runtime_id,
         owner_pid=owner_pid,
     )
@@ -473,14 +467,30 @@ def release_lease(
     *,
     owner_session_id: str,
     fence_token: int,
+    owner_pid: int | None = None,
+    claimant_runtime_id: str | None = None,
     status: str = "released",
 ) -> dict[str, Any]:
+    record = owner_session_record(owner_session_id)
+    if record is None:
+        raise LeaseRefused("owner_session_not_registered")
+    if record.get("status") not in LIVE_SESSION_STATUSES:
+        raise LeaseRefused(
+            "owner_session_not_live", {"owner_session_status": record.get("status")}
+        )
+    _require_bound_session(record, identity)
+
     with _ClaimLock(identity):
         existing = load_lease(identity)
         if existing is None:
             raise LeaseRefused("no_lease_for_identity")
         if existing.get("owner_session_id") != owner_session_id:
             raise LeaseRefused("release_requires_current_owner", owner_summary(existing))
+        _assert_claimant_matches(
+            existing,
+            claimant_runtime_id=claimant_runtime_id,
+            owner_pid=owner_pid,
+        )
         if int(existing.get("fence_token", -1)) != int(fence_token):
             raise LeaseRefused("stale_fence_token", owner_summary(existing))
         existing["status"] = status
