@@ -475,6 +475,17 @@ requirements:
 - bounded coalescing, retries, retention, diagnostics, and dead letters;
 - unresolved state and evidence never deleted by age or rollback.
 
+**Option A trust boundary.** The configured private canonical state root
+`project_state_root/llm-collabd/{workspace_id}` is trusted not to be concurrently
+replaced by another process running as the same OS user while the daemon is active.
+This matches the frozen Thread Event Runner RFC's local-user threat boundary.
+
+The stdlib `sqlite3` implementation opens WAL/SHM sidecars by pathname, so it cannot
+contain those sidecars against a concurrent same-UID ancestor rename outside that
+trust boundary. Transient dirfd/no-follow directory creation, final-file no-follow
+pins, SQLite actual-fd identity proof, preflight sidecar checks, and private modes
+remain defense in depth; they do not claim WAL/SHM containment for that case.
+
 The Thread Event Runner's Codex-specific exact tuple remains mandatory for a
 Codex exact-session adapter:
 

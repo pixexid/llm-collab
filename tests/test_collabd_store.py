@@ -151,12 +151,17 @@ class LedgerStoreTest(unittest.TestCase):
         with (
             patch.object(store_module.os, "listdir", return_value=["8"]),
             patch.object(store_module.fcntl, "fcntl", return_value=encoded_path),
+            patch.object(store_module.fcntl, "F_GETPATH", 50, create=True),
             patch.object(store_module.os, "fstat", return_value=regular),
         ):
             self.assertEqual(
                 _darwin_fd_snapshot(),
                 {8: (11, 22, stat.S_IFREG | 0o600, "/tmp/ledger.sqlite3")},
             )
+
+        with patch.object(store_module, "fcntl", Mock(spec=["fcntl"])):
+            with self.assertRaisesRegex(SQLiteSafetyError, "unsupported.*F_GETPATH"):
+                _darwin_fd_snapshot()
 
         with patch.object(store_module.sys, "platform", "unsupported"):
             with self.assertRaisesRegex(SQLiteSafetyError, "unsupported"):

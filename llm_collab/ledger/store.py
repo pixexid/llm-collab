@@ -244,9 +244,12 @@ def _linux_fd_snapshot() -> dict[int, tuple[int, int, int, str]]:
 
 def _darwin_fd_snapshot() -> dict[int, tuple[int, int, int, str]]:
     root = "/dev/fd"
+    f_getpath = getattr(fcntl, "F_GETPATH", None)
+    if f_getpath is None:
+        raise SQLiteSafetyError("SQLite connection identity proof is unsupported: fcntl.F_GETPATH unavailable")
 
     def get_path(fd: int) -> str:
-        value = fcntl.fcntl(fd, fcntl.F_GETPATH, b"\0" * 1024)
+        value = fcntl.fcntl(fd, f_getpath, b"\0" * 1024)
         return value.split(b"\0", 1)[0].decode("utf-8")
 
     records = {}
