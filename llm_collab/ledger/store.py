@@ -8,6 +8,8 @@ import json
 import os
 import re
 import sqlite3
+import stat
+import sys
 import threading
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timezone
@@ -44,8 +46,11 @@ class MigrationError(RuntimeError):
     pass
 
 
-def require_safe_sqlite(version_info: Sequence[int] | None = None) -> tuple[int, int, int]:
-    raw = sqlite3.sqlite_version_info if version_info is None else version_info
+def _linked_sqlite_version_info() -> Sequence[int]:
+    return sqlite3.sqlite_version_info
+
+
+def _validate_sqlite_version(raw: Sequence[int]) -> tuple[int, int, int]:
     if len(raw) < 3 or any(isinstance(item, bool) or not isinstance(item, int) for item in raw[:3]):
         raise SQLiteSafetyError("SQLite WAL safety version must contain three integers")
     version = tuple(raw[:3])
@@ -56,6 +61,10 @@ def require_safe_sqlite(version_info: Sequence[int] | None = None) -> tuple[int,
             "requires exactly 3.44.6, 3.50.7, or 3.51.3 and newer"
         )
     return version
+
+
+def require_safe_sqlite() -> tuple[int, int, int]:
+    return _validate_sqlite_version(_linked_sqlite_version_info())
 
 
 V1_SQL = (
@@ -175,6 +184,95 @@ class _OwnedWriterLock:
             pass
 
 
+class _PinnedFile:
+    """Own one no-follow descriptor and its immutable file identity."""
+
+    def __init__(self, fd: int, identity: tuple[int, int]) -> None:
+        self._fd = fd
+        self.identity = identity
+
+    def fchmod(self, mode: int) -> None:
+        if self._fd is None:
+            raise SQLiteSafetyError("pinned SQLite file is closed")
+        os.fchmod(self._fd, mode)
+
+    def close(self) -> None:
+        fd, self._fd = self._fd, None
+        if fd is not None:
+            os.close(fd)
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except BaseException:
+            pass
+
+
+def _close_connection_and_pin(
+    connection: sqlite3.Connection | None, pin: _PinnedFile | None
+) -> None:
+    try:
+        if connection is not None:
+            connection.close()
+    finally:
+        if pin is not None:
+            pin.close()
+
+
+def _stable_fd_record(fd: int, path_reader: Callable[[int], str]) -> tuple[int, int, int, str]:
+    before = os.fstat(fd)
+    reported_path = path_reader(fd)
+    after = os.fstat(fd)
+    before_identity = (before.st_dev, before.st_ino, before.st_mode)
+    after_identity = (after.st_dev, after.st_ino, after.st_mode)
+    if before_identity != after_identity or not reported_path:
+        raise OSError("file descriptor changed during inspection")
+    return before.st_dev, before.st_ino, before.st_mode, reported_path
+
+
+def _linux_fd_snapshot() -> dict[int, tuple[int, int, int, str]]:
+    root = "/proc/self/fd"
+    records = {}
+    for name in os.listdir(root):
+        try:
+            fd = int(name)
+            records[fd] = _stable_fd_record(fd, lambda value: os.readlink(f"{root}/{value}"))
+        except (OSError, ValueError):
+            continue
+    return records
+
+
+def _darwin_fd_snapshot() -> dict[int, tuple[int, int, int, str]]:
+    root = "/dev/fd"
+
+    def get_path(fd: int) -> str:
+        value = fcntl.fcntl(fd, fcntl.F_GETPATH, b"\0" * 1024)
+        return value.split(b"\0", 1)[0].decode("utf-8")
+
+    records = {}
+    for name in os.listdir(root):
+        try:
+            fd = int(name)
+            records[fd] = _stable_fd_record(fd, get_path)
+        except (OSError, UnicodeError, ValueError):
+            continue
+    return records
+
+
+def _connection_fd_snapshot() -> dict[int, tuple[int, int, int, str]]:
+    if sys.platform.startswith("linux"):
+        return _linux_fd_snapshot()
+    if sys.platform == "darwin":
+        return _darwin_fd_snapshot()
+    raise SQLiteSafetyError(f"SQLite connection identity proof is unsupported on {sys.platform}")
+
+
+def _reported_path_matches(reported_path: str, database: Path) -> bool:
+    if reported_path.endswith(" (deleted)"):
+        reported_path = reported_path[: -len(" (deleted)")]
+    return os.path.realpath(reported_path) == os.path.realpath(database)
+
+
 class LedgerStore:
     """One thread-bound writer/checkpointer or query-only reader connection."""
 
@@ -182,6 +280,7 @@ class LedgerStore:
         self,
         paths: LedgerPaths,
         connection: sqlite3.Connection,
+        database_pin: _PinnedFile,
         *,
         read_only: bool,
         writer_lock: _OwnedWriterLock | None,
@@ -189,6 +288,7 @@ class LedgerStore:
     ) -> None:
         self.paths = paths
         self._connection = connection
+        self._database_pin = database_pin
         self._read_only = read_only
         self._writer_lock = writer_lock
         self._clock = clock
@@ -200,61 +300,156 @@ class LedgerStore:
         cls,
         paths: LedgerPaths,
         *,
-        sqlite_version_info: Sequence[int] | None = None,
         clock: Callable[[], datetime] = _utc_now,
         migrations: Sequence[tuple[int, Sequence[str]]] = MIGRATIONS,
     ) -> "LedgerStore":
-        require_safe_sqlite(sqlite_version_info)
+        require_safe_sqlite()
         paths.ensure_directories()
         cls._preflight_sqlite_files(paths.ledger)
         writer_lock = cls._acquire_writer_lock(paths)
         connection = None
+        database_pin = None
         try:
-            connection = sqlite3.connect(
+            connection, database_pin = cls._open_verified_connection(
                 paths.ledger,
+                read_only=False,
+                create=True,
                 timeout=BUSY_TIMEOUT_MS / 1_000,
-                isolation_level=None,
             )
             cls._validate_schema_or_empty(connection, paths)
             paths.assert_contained()
-            paths.ledger.chmod(0o600)
             cls._configure(connection, writer=True)
-            store = cls(paths, connection, read_only=False, writer_lock=writer_lock, clock=clock)
-            store._secure_sqlite_files(paths.ledger)
+            store = cls(
+                paths,
+                connection,
+                database_pin,
+                read_only=False,
+                writer_lock=writer_lock,
+                clock=clock,
+            )
+            store._secure_sqlite_files(paths.ledger, main_pin=database_pin)
             store._migrate(migrations)
             store._validate_schema(connection, paths)
-            store._secure_sqlite_files(paths.ledger)
+            store._secure_sqlite_files(paths.ledger, main_pin=database_pin)
             return store
         except BaseException:
-            if connection is not None:
-                connection.close()
-            writer_lock.close()
+            try:
+                _close_connection_and_pin(connection, database_pin)
+            finally:
+                writer_lock.close()
             raise
 
     @classmethod
     def open_reader(
         cls,
         paths: LedgerPaths,
-        *,
-        sqlite_version_info: Sequence[int] | None = None,
     ) -> "LedgerStore":
-        require_safe_sqlite(sqlite_version_info)
+        require_safe_sqlite()
         paths.assert_contained()
         cls._preflight_sqlite_files(paths.ledger)
         if not paths.ledger.is_file():
             raise FileNotFoundError(paths.ledger)
-        connection = sqlite3.connect(
-            paths.ledger.resolve().as_uri() + "?mode=ro",
-            uri=True,
+        connection, database_pin = cls._open_verified_connection(
+            paths.ledger,
+            read_only=True,
             timeout=BUSY_TIMEOUT_MS / 1_000,
-            isolation_level=None,
         )
         try:
             cls._validate_schema(connection, paths)
             cls._configure(connection, writer=False)
-            return cls(paths, connection, read_only=True, writer_lock=None, clock=_utc_now)
+            return cls(
+                paths,
+                connection,
+                database_pin,
+                read_only=True,
+                writer_lock=None,
+                clock=_utc_now,
+            )
         except BaseException:
-            connection.close()
+            _close_connection_and_pin(connection, database_pin)
+            raise
+
+    @staticmethod
+    def _pin_regular_file(
+        path: Path,
+        *,
+        writable: bool,
+        create: bool = False,
+        exclusive: bool = False,
+    ) -> _PinnedFile:
+        nofollow = getattr(os, "O_NOFOLLOW", None)
+        if nofollow is None:
+            raise SQLiteSafetyError("O_NOFOLLOW is required for SQLite file safety")
+        flags = (os.O_RDWR if writable else os.O_RDONLY) | nofollow
+        flags |= getattr(os, "O_CLOEXEC", 0)
+        if create:
+            flags |= os.O_CREAT
+        if exclusive:
+            flags |= os.O_EXCL
+        directory_flags = os.O_RDONLY | nofollow | getattr(os, "O_DIRECTORY", 0)
+        directory_flags |= getattr(os, "O_CLOEXEC", 0)
+        directory_fd = os.open(path.parent, directory_flags)
+        try:
+            try:
+                fd = os.open(path.name, flags, 0o600, dir_fd=directory_fd)
+            except IsADirectoryError as exc:
+                raise SQLiteSafetyError(f"refusing non-regular SQLite file: {path}") from exc
+        finally:
+            os.close(directory_fd)
+        try:
+            status = os.fstat(fd)
+            if not stat.S_ISREG(status.st_mode):
+                raise SQLiteSafetyError(f"refusing non-regular SQLite file: {path}")
+            return _PinnedFile(fd, (status.st_dev, status.st_ino))
+        except BaseException:
+            os.close(fd)
+            raise
+
+    @classmethod
+    def _open_verified_connection(
+        cls,
+        path: Path,
+        *,
+        read_only: bool,
+        create: bool = False,
+        exclusive: bool = False,
+        timeout: float = BUSY_TIMEOUT_MS / 1_000,
+    ) -> tuple[sqlite3.Connection, _PinnedFile]:
+        pin = cls._pin_regular_file(
+            path,
+            writable=not read_only,
+            create=create,
+            exclusive=exclusive,
+        )
+        connection = None
+        try:
+            before = _connection_fd_snapshot()
+            connection = sqlite3.connect(
+                path.as_uri() + ("?mode=ro" if read_only else "?mode=rw"),
+                uri=True,
+                timeout=timeout,
+                isolation_level=None,
+            )
+            after = _connection_fd_snapshot()
+            opened_regular_files = [
+                record
+                for fd, record in after.items()
+                if fd not in before
+                and stat.S_ISREG(record[2])
+                and _reported_path_matches(record[3], path)
+            ]
+            if len(opened_regular_files) != 1:
+                raise SQLiteSafetyError(
+                    "SQLite main-database descriptor proof is unavailable or ambiguous"
+                )
+            actual = opened_regular_files[0]
+            if (actual[0], actual[1]) != pin.identity:
+                raise SQLiteSafetyError("SQLite opened a different file than the no-follow pin")
+            if not read_only:
+                pin.fchmod(0o600)
+            return connection, pin
+        except BaseException:
+            _close_connection_and_pin(connection, pin)
             raise
 
     @staticmethod
@@ -431,12 +626,20 @@ class LedgerStore:
                 raise SQLiteSafetyError(f"refusing symlinked SQLite artifact: {path}")
 
     @classmethod
-    def _secure_sqlite_files(cls, database: Path) -> None:
+    def _secure_sqlite_files(
+        cls, database: Path, *, main_pin: _PinnedFile | None = None
+    ) -> None:
         for path in cls._sqlite_files(database):
-            if path.is_symlink():
-                raise SQLiteSafetyError(f"refusing symlinked SQLite artifact: {path}")
-            if path.exists():
-                path.chmod(0o600)
+            try:
+                pin = cls._pin_regular_file(path, writable=True)
+            except FileNotFoundError:
+                continue
+            try:
+                if path == database and main_pin is not None and pin.identity != main_pin.identity:
+                    raise SQLiteSafetyError("SQLite database pathname no longer matches its pin")
+                pin.fchmod(0o600)
+            finally:
+                pin.close()
 
     def _backup_before_migration(self, schema_version: int) -> Path:
         if self._connection.in_transaction:
@@ -444,18 +647,18 @@ class LedgerStore:
         stamp = self._clock().astimezone(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
         backup = self.paths.backup_path(schema_version, stamp)
         self._preflight_sqlite_files(backup)
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-        if hasattr(os, "O_NOFOLLOW"):
-            flags |= os.O_NOFOLLOW
-        fd = os.open(backup, flags, 0o600)
-        os.close(fd)
-        destination = sqlite3.connect(backup, isolation_level=None)
+        destination, destination_pin = self._open_verified_connection(
+            backup,
+            read_only=False,
+            create=True,
+            exclusive=True,
+        )
         try:
             self._connection.backup(destination)
             destination.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             destination.execute("PRAGMA journal_mode = DELETE")
         finally:
-            destination.close()
+            _close_connection_and_pin(destination, destination_pin)
         self._secure_sqlite_files(backup)
         self._verify_database(backup)
         return backup
@@ -463,24 +666,24 @@ class LedgerStore:
     def _restore_from_backup(self, backup: Path) -> None:
         if self._connection.in_transaction:
             raise MigrationError("refusing restore while a database transaction is active")
-        source = sqlite3.connect(backup.resolve().as_uri() + "?mode=ro", uri=True, isolation_level=None)
+        source, source_pin = self._open_verified_connection(backup, read_only=True)
         try:
             source.backup(self._connection)
         finally:
-            source.close()
-        self.paths.ledger.chmod(0o600)
-        self._secure_sqlite_files(self.paths.ledger)
+            _close_connection_and_pin(source, source_pin)
+        self._database_pin.fchmod(0o600)
+        self._secure_sqlite_files(self.paths.ledger, main_pin=self._database_pin)
         if self.integrity_check() != "ok":
             raise MigrationError("restored ledger failed integrity_check")
 
-    @staticmethod
-    def _verify_database(path: Path) -> None:
-        connection = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, isolation_level=None)
+    @classmethod
+    def _verify_database(cls, path: Path) -> None:
+        connection, pin = cls._open_verified_connection(path, read_only=True)
         try:
             result = connection.execute("PRAGMA integrity_check").fetchone()[0]
             foreign_key_failure = connection.execute("PRAGMA foreign_key_check").fetchone()
         finally:
-            connection.close()
+            _close_connection_and_pin(connection, pin)
         if result != "ok":
             raise MigrationError(f"backup failed integrity_check: {result}")
         if foreign_key_failure is not None:
@@ -662,7 +865,7 @@ class LedgerStore:
         if self._read_only:
             raise PermissionError("only the writer connection may checkpoint")
         result = tuple(self._connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone())
-        self._secure_sqlite_files(self.paths.ledger)
+        self._secure_sqlite_files(self.paths.ledger, main_pin=self._database_pin)
         return result
 
     def close(self) -> None:
@@ -671,12 +874,14 @@ class LedgerStore:
         if self._closed:
             return
         try:
-            self._connection.close()
+            _close_connection_and_pin(self._connection, self._database_pin)
         finally:
-            if self._writer_lock is not None:
-                self._writer_lock.close()
+            try:
+                if self._writer_lock is not None:
+                    self._writer_lock.close()
+            finally:
                 self._writer_lock = None
-            self._closed = True
+                self._closed = True
 
     def __enter__(self) -> "LedgerStore":
         self._ensure_thread()

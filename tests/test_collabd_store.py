@@ -3,17 +3,21 @@ from __future__ import annotations
 import gc
 import inspect
 import json
+import os
 import re
 import sqlite3
+import stat
 import threading
 import unittest
 import warnings
 import weakref
+from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
+import llm_collab.ledger.store as store_module
 from llm_collab.ledger import LedgerPaths, LedgerStore, SQLiteSafetyError, WriterAlreadyOpenError
 from llm_collab.ledger.store import (
     BUSY_TIMEOUT_MS,
@@ -23,7 +27,12 @@ from llm_collab.ledger.store import (
     V1_SCHEMA_FINGERPRINT,
     MigrationError,
     V1_SQL,
+    _close_connection_and_pin,
+    _connection_fd_snapshot,
+    _darwin_fd_snapshot,
+    _linux_fd_snapshot,
     _migration_checksum,
+    _validate_sqlite_version,
     _v1_schema_fingerprint_from_sql,
     require_safe_sqlite,
 )
@@ -36,6 +45,13 @@ NUVYR = "nuvyr"
 
 
 class LedgerStoreTest(unittest.TestCase):
+    def setUp(self) -> None:
+        linked_version = patch.object(
+            store_module, "_linked_sqlite_version_info", return_value=SAFE_VERSION
+        )
+        linked_version.start()
+        self.addCleanup(linked_version.stop)
+
     def test_busy_timeout_policy_is_literal_and_configure_overrides_zero(self) -> None:
         self.assertEqual(BUSY_TIMEOUT_MS, 5_000)
         with TemporaryDirectory(dir="/tmp") as tmp:
@@ -87,9 +103,9 @@ class LedgerStoreTest(unittest.TestCase):
 
         with TemporaryDirectory(dir="/tmp") as tmp:
             paths = LedgerPaths.derive(Path(tmp) / "state", "ws_alpha")
-            with LedgerStore.open_writer(paths, sqlite_version_info=SAFE_VERSION):
+            with LedgerStore.open_writer(paths):
                 pass
-            with LedgerStore.open_reader(paths, sqlite_version_info=SAFE_VERSION) as reader:
+            with LedgerStore.open_reader(paths) as reader:
                 self.assertEqual(
                     reader._connection.execute("PRAGMA synchronous").fetchone()[0],
                     SYNCHRONOUS_FULL,
@@ -98,16 +114,284 @@ class LedgerStoreTest(unittest.TestCase):
     def test_sqlite_wal_safety_gate_is_exact_and_fails_closed(self) -> None:
         for accepted in ((3, 44, 6), (3, 50, 7), (3, 51, 3), (3, 52, 0), (4, 0, 0)):
             with self.subTest(accepted=accepted):
-                self.assertEqual(require_safe_sqlite(accepted), accepted)
+                self.assertEqual(_validate_sqlite_version(accepted), accepted)
         for rejected in ((3, 44, 5), (3, 50, 6), (3, 51, 1), (3, 51, 2), (3, 43, 99)):
             with self.subTest(rejected=rejected):
                 with self.assertRaisesRegex(SQLiteSafetyError, "unsafe for WAL.*safety fix"):
-                    require_safe_sqlite(rejected)
+                    _validate_sqlite_version(rejected)
         with self.assertRaises(SQLiteSafetyError):
-            require_safe_sqlite((3, 51, True))
-        if sqlite3.sqlite_version_info == (3, 51, 1):
+            _validate_sqlite_version((3, 51, True))
+        with patch.object(store_module, "_linked_sqlite_version_info", return_value=(3, 51, 1)):
             with self.assertRaisesRegex(SQLiteSafetyError, "unsafe for WAL"):
                 require_safe_sqlite()
+        self.assertNotIn("sqlite_version_info", inspect.signature(require_safe_sqlite).parameters)
+        self.assertNotIn("sqlite_version_info", inspect.signature(LedgerStore.open_writer).parameters)
+        self.assertNotIn("sqlite_version_info", inspect.signature(LedgerStore.open_reader).parameters)
+        with TemporaryDirectory(dir="/tmp") as tmp, patch.object(
+            store_module, "_linked_sqlite_version_info", return_value=(3, 51, 1)
+        ):
+            paths = LedgerPaths.derive(tmp, "ws_alpha")
+            with self.assertRaisesRegex(SQLiteSafetyError, "unsafe for WAL"):
+                LedgerStore.open_writer(paths)
+            self.assertFalse(paths.workspace_root.exists())
+
+    def test_linux_and_darwin_fd_enumeration_is_stable_and_fail_closed(self) -> None:
+        regular = Mock(st_dev=11, st_ino=22, st_mode=stat.S_IFREG | 0o600)
+        with (
+            patch.object(store_module.os, "listdir", return_value=["7", "not-an-fd"]),
+            patch.object(store_module.os, "readlink", return_value="/tmp/ledger.sqlite3"),
+            patch.object(store_module.os, "fstat", return_value=regular),
+        ):
+            self.assertEqual(
+                _linux_fd_snapshot(),
+                {7: (11, 22, stat.S_IFREG | 0o600, "/tmp/ledger.sqlite3")},
+            )
+
+        encoded_path = b"/tmp/ledger.sqlite3\0" + b"\0" * 1000
+        with (
+            patch.object(store_module.os, "listdir", return_value=["8"]),
+            patch.object(store_module.fcntl, "fcntl", return_value=encoded_path),
+            patch.object(store_module.os, "fstat", return_value=regular),
+        ):
+            self.assertEqual(
+                _darwin_fd_snapshot(),
+                {8: (11, 22, stat.S_IFREG | 0o600, "/tmp/ledger.sqlite3")},
+            )
+
+        with patch.object(store_module.sys, "platform", "unsupported"):
+            with self.assertRaisesRegex(SQLiteSafetyError, "unsupported"):
+                _connection_fd_snapshot()
+
+    def test_verified_open_rejects_mismatch_ambiguity_and_unavailable_proof_with_cleanup(self) -> None:
+        cases = {
+            "mismatch": ({}, {91: (1, 2, stat.S_IFREG | 0o600, "/tmp/db")}),
+            "ambiguous": (
+                {},
+                {
+                    91: (1, 2, stat.S_IFREG | 0o600, "/tmp/db"),
+                    92: (1, 2, stat.S_IFREG | 0o600, "/tmp/db"),
+                },
+            ),
+            "unavailable": OSError("fd surface unavailable"),
+        }
+        for kind, snapshots in cases.items():
+            with self.subTest(kind=kind), TemporaryDirectory(dir="/tmp") as tmp:
+                database = Path(tmp) / "db"
+                database.touch()
+                pinned = []
+                fake_connection = Mock()
+                original_pin = LedgerStore._pin_regular_file
+
+                def capture_pin(*args, **kwargs):
+                    pin = original_pin(*args, **kwargs)
+                    pinned.append(pin)
+                    return pin
+
+                if isinstance(snapshots, BaseException):
+                    snapshot_patch = patch.object(
+                        store_module, "_connection_fd_snapshot", side_effect=snapshots
+                    )
+                else:
+                    before, after = snapshots
+                    if kind == "mismatch":
+                        status = database.stat()
+                        after[91] = (
+                            status.st_dev,
+                            status.st_ino + 1,
+                            stat.S_IFREG | 0o600,
+                            str(database),
+                        )
+                    else:
+                        identity = (database.stat().st_dev, database.stat().st_ino)
+                        after = {
+                            fd: (identity[0], identity[1], value[2], str(database))
+                            for fd, value in after.items()
+                        }
+                    snapshot_patch = patch.object(
+                        store_module, "_connection_fd_snapshot", side_effect=[before, after]
+                    )
+
+                with (
+                    patch.object(LedgerStore, "_pin_regular_file", side_effect=capture_pin),
+                    patch.object(store_module.sqlite3, "connect", return_value=fake_connection),
+                    snapshot_patch,
+                ):
+                    with self.assertRaises((OSError, SQLiteSafetyError)):
+                        LedgerStore._open_verified_connection(database, read_only=True)
+                self.assertIsNone(pinned[0]._fd)
+                if kind == "unavailable":
+                    fake_connection.close.assert_not_called()
+                else:
+                    fake_connection.close.assert_called_once_with()
+
+    def test_identity_mismatch_does_not_chmod_the_pinned_file(self) -> None:
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            database = Path(tmp) / "db"
+            database.touch(mode=0o644)
+            status = database.stat()
+            mismatch = (
+                status.st_dev,
+                status.st_ino + 1,
+                stat.S_IFREG | 0o644,
+                str(database),
+            )
+            fake_connection = Mock()
+            with (
+                patch.object(store_module, "_connection_fd_snapshot", side_effect=[{}, {91: mismatch}]),
+                patch.object(store_module.sqlite3, "connect", return_value=fake_connection),
+            ):
+                with self.assertRaisesRegex(SQLiteSafetyError, "different file"):
+                    LedgerStore._open_verified_connection(database, read_only=False)
+            self.assertEqual(database.stat().st_mode & 0o777, 0o644)
+            fake_connection.close.assert_called_once_with()
+
+    def test_secure_main_compares_identity_before_chmod(self) -> None:
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            database = Path(tmp) / "db"
+            database.touch(mode=0o600)
+            main_pin = LedgerStore._pin_regular_file(database, writable=True)
+            parked = database.with_name("db.pinned")
+            database.rename(parked)
+            database.touch(mode=0o644)
+            try:
+                with self.assertRaisesRegex(SQLiteSafetyError, "no longer matches"):
+                    LedgerStore._secure_sqlite_files(database, main_pin=main_pin)
+                self.assertEqual(database.stat().st_mode & 0o777, 0o644)
+            finally:
+                main_pin.close()
+
+    def test_close_helper_closes_pin_when_connection_close_raises(self) -> None:
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            database = Path(tmp) / "db"
+            database.touch()
+            pin = LedgerStore._pin_regular_file(database, writable=False)
+            connection = Mock()
+            connection.close.side_effect = RuntimeError("close failed")
+            with self.assertRaisesRegex(RuntimeError, "close failed"):
+                _close_connection_and_pin(connection, pin)
+            connection.close.assert_called_once_with()
+            self.assertIsNone(pin._fd)
+
+    def test_open_writer_close_error_still_closes_pin_and_releases_lock(self) -> None:
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            paths = LedgerPaths.derive(tmp, "ws_alpha")
+            paths.ensure_directories()
+            paths.ledger.touch()
+            pin = LedgerStore._pin_regular_file(paths.ledger, writable=True)
+            connection = Mock()
+            connection.close.side_effect = RuntimeError("close failed")
+            acquired_locks = []
+            original_acquire = LedgerStore._acquire_writer_lock
+
+            def capture_lock(target_paths):
+                writer_lock = original_acquire(target_paths)
+                acquired_locks.append(writer_lock)
+                return writer_lock
+
+            with (
+                patch.object(
+                    LedgerStore,
+                    "_acquire_writer_lock",
+                    side_effect=capture_lock,
+                ),
+                patch.object(
+                    LedgerStore,
+                    "_open_verified_connection",
+                    return_value=(connection, pin),
+                ),
+                patch.object(
+                    LedgerStore,
+                    "_validate_schema_or_empty",
+                    side_effect=MigrationError("validation failed"),
+                ),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "close failed"):
+                    LedgerStore.open_writer(paths)
+            connection.close.assert_called_once_with()
+            self.assertIsNone(pin._fd)
+            self.assertEqual(len(acquired_locks), 1)
+            self.assertIsNone(acquired_locks[0]._fd)
+            writer_lock = LedgerStore._acquire_writer_lock(paths)
+            writer_lock.close()
+
+    def test_open_reader_close_error_still_closes_pin(self) -> None:
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            paths = LedgerPaths.derive(tmp, "ws_alpha")
+            paths.ensure_directories()
+            paths.ledger.touch()
+            pin = LedgerStore._pin_regular_file(paths.ledger, writable=False)
+            connection = Mock()
+            connection.close.side_effect = RuntimeError("close failed")
+            with (
+                patch.object(
+                    LedgerStore,
+                    "_open_verified_connection",
+                    return_value=(connection, pin),
+                ),
+                patch.object(
+                    LedgerStore,
+                    "_validate_schema",
+                    side_effect=MigrationError("validation failed"),
+                ),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "close failed"):
+                    LedgerStore.open_reader(paths)
+            connection.close.assert_called_once_with()
+            self.assertIsNone(pin._fd)
+
+    def test_verified_open_proves_identity_before_any_connection_operation(self) -> None:
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            database = Path(tmp) / "db"
+            database.touch()
+            identity = (database.stat().st_dev, database.stat().st_ino)
+            record = (identity[0], identity[1], stat.S_IFREG | 0o600, str(database))
+            fake_connection = Mock()
+            with (
+                patch.object(store_module, "_connection_fd_snapshot", side_effect=[{}, {91: record}]),
+                patch.object(store_module.sqlite3, "connect", return_value=fake_connection),
+            ):
+                connection, pin = LedgerStore._open_verified_connection(database, read_only=True)
+            self.assertIs(connection, fake_connection)
+            fake_connection.execute.assert_not_called()
+            fake_connection.close()
+            pin.close()
+
+    def test_writer_releases_lock_when_fd_proof_is_unavailable(self) -> None:
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            paths = LedgerPaths.derive(tmp, "ws_alpha")
+            with patch.object(
+                store_module,
+                "_connection_fd_snapshot",
+                side_effect=OSError("fd surface unavailable"),
+            ):
+                with self.assertRaisesRegex(OSError, "fd surface unavailable"):
+                    LedgerStore.open_writer(paths)
+            with LedgerStore.open_writer(paths) as writer:
+                self.assertEqual(writer.schema_version(), 1)
+
+    def test_all_file_backed_connects_use_one_verified_noncreating_open(self) -> None:
+        source = inspect.getsource(store_module)
+        self.assertEqual(source.count("sqlite3.connect("), 2)
+        self.assertEqual(source.count("_close_connection_and_pin("), 8)
+        self.assertIn('path.as_uri() + ("?mode=ro" if read_only else "?mode=rw")', source)
+        self.assertNotIn(".resolve().as_uri()", source)
+        self.assertNotIn(".chmod(", source)
+        self.assertNotIn("fchmod", inspect.getsource(LedgerStore._pin_regular_file))
+
+    def test_no_follow_pin_refuses_symlink_and_nonregular_final_components(self) -> None:
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            root = Path(tmp)
+            outside = root / "outside"
+            outside.write_bytes(b"operator-owned")
+            symlink = root / "symlink"
+            symlink.symlink_to(outside)
+            with self.assertRaises(OSError):
+                LedgerStore._pin_regular_file(symlink, writable=True)
+            directory = root / "directory"
+            directory.mkdir()
+            with self.assertRaisesRegex(SQLiteSafetyError, "non-regular"):
+                LedgerStore._pin_regular_file(directory, writable=True)
+            self.assertEqual(outside.read_bytes(), b"operator-owned")
 
     def test_v1_schema_connection_guards_backup_and_private_permissions(self) -> None:
         with TemporaryDirectory(dir="/tmp") as tmp:
@@ -116,7 +400,6 @@ class LedgerStoreTest(unittest.TestCase):
             paths = LedgerPaths.derive(state, "ws_alpha")
             with LedgerStore.open_writer(
                 paths,
-                sqlite_version_info=SAFE_VERSION,
                 clock=lambda: FIXED_TIME,
             ) as store:
                 connection = store._connection
@@ -164,10 +447,10 @@ class LedgerStoreTest(unittest.TestCase):
             backups = list(paths.backups.iterdir())
             self.assertEqual([path.name for path in backups], ["ledger-0-20260721T080506123456Z.sqlite3"])
             self.assertEqual(backups[0].stat().st_mode & 0o777, 0o600)
-            with sqlite3.connect(backups[0]) as backup:
+            with closing(sqlite3.connect(backups[0])) as backup, backup:
                 self.assertEqual(backup.execute("PRAGMA integrity_check").fetchone()[0], "ok")
                 self.assertEqual(backup.execute("PRAGMA user_version").fetchone()[0], 0)
-            with sqlite3.connect(paths.ledger) as ledger:
+            with closing(sqlite3.connect(paths.ledger)) as ledger, ledger:
                 self.assertEqual(
                     ledger.execute(
                         "SELECT migration_checksum, applied_at_utc, tool_version, backup_reference "
@@ -208,7 +491,7 @@ class LedgerStoreTest(unittest.TestCase):
         }
         with TemporaryDirectory(dir="/tmp") as tmp:
             paths = LedgerPaths.derive(tmp, "ws_alpha")
-            with LedgerStore.open_writer(paths, sqlite_version_info=SAFE_VERSION) as writer:
+            with LedgerStore.open_writer(paths) as writer:
                 writer.record_registry_snapshot(
                     workspace_id="ws_alpha",
                     registry_revision=revision,
@@ -229,7 +512,7 @@ class LedgerStoreTest(unittest.TestCase):
                         source_snapshots=sources,
                     )
 
-            with LedgerStore.open_reader(paths, sqlite_version_info=SAFE_VERSION) as reader:
+            with LedgerStore.open_reader(paths) as reader:
                 expected_amiga = {
                     "workspace_id": "ws_alpha",
                     "project_id": AMIGA,
@@ -314,14 +597,145 @@ class LedgerStoreTest(unittest.TestCase):
             sidecar.symlink_to(outside)
 
             with self.assertRaisesRegex(SQLiteSafetyError, "symlinked SQLite artifact"):
-                LedgerStore.open_writer(paths, sqlite_version_info=SAFE_VERSION)
+                LedgerStore.open_writer(paths)
             self.assertEqual(outside.read_bytes(), b"unchanged")
             self.assertFalse(paths.ledger.exists())
+
+    @unittest.skipUnless(hasattr(os, "O_NOFOLLOW"), "no-follow opens unavailable")
+    def test_writer_and_reader_refuse_swap_then_restore_to_outside_targets(self) -> None:
+        real_connect = sqlite3.connect
+        for opener in (LedgerStore.open_writer, LedgerStore.open_reader):
+            for outside_exists in (True, False):
+                with self.subTest(opener=opener.__name__, outside_exists=outside_exists), TemporaryDirectory(
+                    dir="/tmp"
+                ) as tmp:
+                    root = Path(tmp)
+                    paths = LedgerPaths.derive(root / "state", "ws_alpha")
+                    with LedgerStore.open_writer(paths):
+                        pass
+                    original_identity = (paths.ledger.stat().st_dev, paths.ledger.stat().st_ino)
+                    outside = root / "operator-owned.sqlite3"
+                    if outside_exists:
+                        outside.write_bytes(b"operator-owned")
+                    parked = paths.ledger.with_name(paths.ledger.name + ".pinned")
+                    swapped = False
+
+                    def connect_with_swap(database, *args, **kwargs):
+                        nonlocal swapped
+                        if not swapped and str(database).startswith(paths.ledger.as_uri()):
+                            swapped = True
+                            paths.ledger.rename(parked)
+                            paths.ledger.symlink_to(outside)
+                            try:
+                                return real_connect(database, *args, **kwargs)
+                            finally:
+                                paths.ledger.unlink()
+                                parked.rename(paths.ledger)
+                        return real_connect(database, *args, **kwargs)
+
+                    with patch.object(store_module.sqlite3, "connect", side_effect=connect_with_swap):
+                        with self.assertRaises((sqlite3.Error, SQLiteSafetyError)):
+                            opener(paths)
+                    self.assertTrue(swapped)
+                    self.assertEqual(
+                        (paths.ledger.stat().st_dev, paths.ledger.stat().st_ino),
+                        original_identity,
+                    )
+                    if outside_exists:
+                        self.assertEqual(outside.read_bytes(), b"operator-owned")
+                    else:
+                        self.assertFalse(outside.exists())
+                    with LedgerStore.open_writer(paths):
+                        pass
+
+    @unittest.skipUnless(hasattr(os, "O_NOFOLLOW"), "no-follow opens unavailable")
+    def test_backup_destination_refuses_swap_then_restore_to_outside_targets(self) -> None:
+        real_connect = sqlite3.connect
+        for outside_exists in (True, False):
+            with self.subTest(outside_exists=outside_exists), TemporaryDirectory(dir="/tmp") as tmp:
+                root = Path(tmp)
+                paths = LedgerPaths.derive(root / "state", "ws_alpha")
+                with LedgerStore.open_writer(paths) as writer:
+                    backup_time = FIXED_TIME.replace(second=FIXED_TIME.second + 1)
+                    writer._clock = lambda: backup_time
+                    backup = paths.backup_path(
+                        1, backup_time.strftime("%Y%m%dT%H%M%S%fZ")
+                    )
+                    outside = root / "operator-owned.sqlite3"
+                    if outside_exists:
+                        outside.write_bytes(b"operator-owned")
+                    parked = backup.with_name(backup.name + ".pinned")
+                    swapped = False
+
+                    def connect_with_swap(database, *args, **kwargs):
+                        nonlocal swapped
+                        if not swapped and str(database).startswith(backup.as_uri()):
+                            swapped = True
+                            backup.rename(parked)
+                            backup.symlink_to(outside)
+                            try:
+                                return real_connect(database, *args, **kwargs)
+                            finally:
+                                backup.unlink()
+                                parked.rename(backup)
+                        return real_connect(database, *args, **kwargs)
+
+                    with patch.object(store_module.sqlite3, "connect", side_effect=connect_with_swap):
+                        with self.assertRaises((sqlite3.Error, SQLiteSafetyError)):
+                            writer._backup_before_migration(1)
+                    self.assertTrue(swapped)
+                    if outside_exists:
+                        self.assertEqual(outside.read_bytes(), b"operator-owned")
+                    else:
+                        self.assertFalse(outside.exists())
+                    self.assertEqual(writer.schema_version(), 1)
+
+    @unittest.skipUnless(hasattr(os, "O_NOFOLLOW"), "no-follow opens unavailable")
+    def test_restore_source_refuses_swap_then_restore_to_outside_targets(self) -> None:
+        real_connect = sqlite3.connect
+        for outside_exists in (True, False):
+            with self.subTest(outside_exists=outside_exists), TemporaryDirectory(dir="/tmp") as tmp:
+                root = Path(tmp)
+                paths = LedgerPaths.derive(root / "state", "ws_alpha")
+                with LedgerStore.open_writer(paths) as writer:
+                    backup = next(paths.backups.iterdir())
+                    original_identity = (backup.stat().st_dev, backup.stat().st_ino)
+                    outside = root / "operator-owned.sqlite3"
+                    if outside_exists:
+                        outside.write_bytes(b"operator-owned")
+                    parked = backup.with_name(backup.name + ".pinned")
+                    swapped = False
+
+                    def connect_with_swap(database, *args, **kwargs):
+                        nonlocal swapped
+                        if not swapped and str(database).startswith(backup.as_uri()):
+                            swapped = True
+                            backup.rename(parked)
+                            backup.symlink_to(outside)
+                            try:
+                                return real_connect(database, *args, **kwargs)
+                            finally:
+                                backup.unlink()
+                                parked.rename(backup)
+                        return real_connect(database, *args, **kwargs)
+
+                    with patch.object(store_module.sqlite3, "connect", side_effect=connect_with_swap):
+                        with self.assertRaises((sqlite3.Error, SQLiteSafetyError)):
+                            writer._restore_from_backup(backup)
+                    self.assertTrue(swapped)
+                    self.assertEqual(
+                        (backup.stat().st_dev, backup.stat().st_ino), original_identity
+                    )
+                    if outside_exists:
+                        self.assertEqual(outside.read_bytes(), b"operator-owned")
+                    else:
+                        self.assertFalse(outside.exists())
+                    self.assertEqual(writer.schema_version(), 1)
 
     def test_foreign_keys_prevent_cross_scope_source_rows(self) -> None:
         with TemporaryDirectory(dir="/tmp") as tmp:
             paths = LedgerPaths.derive(tmp, "ws_alpha")
-            with LedgerStore.open_writer(paths, sqlite_version_info=SAFE_VERSION) as store:
+            with LedgerStore.open_writer(paths) as store:
                 with self.assertRaises(sqlite3.IntegrityError):
                     store._connection.execute(
                         "INSERT INTO observation_source_registry_snapshots "
@@ -334,9 +748,9 @@ class LedgerStoreTest(unittest.TestCase):
         for opener in (LedgerStore.open_writer, LedgerStore.open_reader):
             with self.subTest(opener=opener.__name__), TemporaryDirectory(dir="/tmp") as tmp:
                 paths = LedgerPaths.derive(tmp, "ws_alpha")
-                with LedgerStore.open_writer(paths, sqlite_version_info=SAFE_VERSION):
+                with LedgerStore.open_writer(paths):
                     pass
-                with sqlite3.connect(paths.ledger) as connection:
+                with closing(sqlite3.connect(paths.ledger)) as connection, connection:
                     connection.execute("PRAGMA foreign_keys = OFF")
                     connection.execute(
                         "INSERT INTO project_registry_snapshots "
@@ -349,10 +763,11 @@ class LedgerStoreTest(unittest.TestCase):
                             json.dumps({"project_id": AMIGA}),
                         ),
                     )
+                connection.close()
                 before = paths.ledger.read_bytes()
 
                 with self.assertRaisesRegex(MigrationError, "foreign_key_check"):
-                    opener(paths, sqlite_version_info=SAFE_VERSION)
+                    opener(paths)
                 self.assertEqual(paths.ledger.read_bytes(), before)
                 with self.assertRaisesRegex(MigrationError, "foreign_key_check"):
                     LedgerStore._verify_database(paths.ledger)
@@ -408,15 +823,15 @@ class LedgerStoreTest(unittest.TestCase):
                 ) as tmp:
                     paths = LedgerPaths.derive(tmp, "ws_alpha")
                     with LedgerStore.open_writer(
-                        paths, sqlite_version_info=SAFE_VERSION, clock=lambda: FIXED_TIME
+                        paths, clock=lambda: FIXED_TIME
                     ):
                         pass
-                    with sqlite3.connect(paths.ledger) as connection:
+                    with closing(sqlite3.connect(paths.ledger)) as connection, connection:
                         connection.executescript(script)
                     before = paths.ledger.read_bytes()
 
                     with self.assertRaisesRegex(MigrationError, expected):
-                        opener(paths, sqlite_version_info=SAFE_VERSION)
+                        opener(paths)
                     self.assertEqual(paths.ledger.read_bytes(), before)
 
     def test_registry_snapshot_identity_validation_is_pretransactional(self) -> None:
@@ -521,7 +936,7 @@ class LedgerStoreTest(unittest.TestCase):
         }
         with TemporaryDirectory(dir="/tmp") as tmp:
             paths = LedgerPaths.derive(tmp, "ws_alpha")
-            with LedgerStore.open_writer(paths, sqlite_version_info=SAFE_VERSION) as writer:
+            with LedgerStore.open_writer(paths) as writer:
                 tables = (
                     "workspace_registry_snapshots",
                     "project_registry_snapshots",
@@ -547,9 +962,9 @@ class LedgerStoreTest(unittest.TestCase):
     def test_writer_checkpoint_is_exclusive_and_connections_are_thread_bound(self) -> None:
         with TemporaryDirectory(dir="/tmp") as tmp:
             paths = LedgerPaths.derive(tmp, "ws_alpha")
-            with LedgerStore.open_writer(paths, sqlite_version_info=SAFE_VERSION) as writer:
+            with LedgerStore.open_writer(paths) as writer:
                 with self.assertRaises(WriterAlreadyOpenError):
-                    LedgerStore.open_writer(paths, sqlite_version_info=SAFE_VERSION)
+                    LedgerStore.open_writer(paths)
                 errors = []
 
                 def cross_thread_query() -> None:
@@ -580,7 +995,7 @@ class LedgerStoreTest(unittest.TestCase):
                 self.assertIsInstance(close_errors[0], sqlite3.ProgrammingError)
                 self.assertEqual(writer.schema_version(), 1)
 
-            with LedgerStore.open_reader(paths, sqlite_version_info=SAFE_VERSION) as reader:
+            with LedgerStore.open_reader(paths) as reader:
                 self.assertEqual(reader._connection.execute("PRAGMA query_only").fetchone()[0], 1)
                 with self.assertRaises(PermissionError):
                     reader.checkpoint()
@@ -590,13 +1005,13 @@ class LedgerStoreTest(unittest.TestCase):
     def test_writer_lock_is_idempotent_and_released_when_store_is_abandoned(self) -> None:
         with TemporaryDirectory(dir="/tmp") as tmp:
             paths = LedgerPaths.derive(tmp, "ws_alpha")
-            writer = LedgerStore.open_writer(paths, sqlite_version_info=SAFE_VERSION)
+            writer = LedgerStore.open_writer(paths)
             writer.close()
             writer.close()
-            with LedgerStore.open_writer(paths, sqlite_version_info=SAFE_VERSION):
+            with LedgerStore.open_writer(paths):
                 pass
 
-            abandoned = LedgerStore.open_writer(paths, sqlite_version_info=SAFE_VERSION)
+            abandoned = LedgerStore.open_writer(paths)
             store_reference = weakref.ref(abandoned)
             lock_reference = weakref.ref(abandoned._writer_lock)
             del abandoned
@@ -605,7 +1020,7 @@ class LedgerStoreTest(unittest.TestCase):
                 gc.collect()
             self.assertIsNone(store_reference())
             self.assertIsNone(lock_reference())
-            with LedgerStore.open_writer(paths, sqlite_version_info=SAFE_VERSION) as reopened:
+            with LedgerStore.open_writer(paths) as reopened:
                 self.assertEqual(reopened.schema_version(), 1)
 
     def test_failed_migration_restores_verified_pre_migration_database(self) -> None:
@@ -623,12 +1038,11 @@ class LedgerStoreTest(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "verified backup was restored"):
                     LedgerStore.open_writer(
                         paths,
-                        sqlite_version_info=SAFE_VERSION,
                         clock=lambda: FIXED_TIME,
                         migrations=broken,
                     )
             self.assertEqual(observed_transaction_state, [False])
-            with sqlite3.connect(paths.ledger) as restored:
+            with closing(sqlite3.connect(paths.ledger)) as restored, restored:
                 self.assertEqual(restored.execute("PRAGMA integrity_check").fetchone()[0], "ok")
                 self.assertEqual(restored.execute("PRAGMA user_version").fetchone()[0], 0)
                 self.assertEqual(
@@ -643,12 +1057,12 @@ class LedgerStoreTest(unittest.TestCase):
             with self.subTest(opener=opener.__name__), TemporaryDirectory(dir="/tmp") as tmp:
                 paths = LedgerPaths.derive(tmp, "ws_alpha")
                 paths.ensure_directories()
-                with sqlite3.connect(paths.ledger) as connection:
+                with closing(sqlite3.connect(paths.ledger)) as connection, connection:
                     connection.execute("PRAGMA user_version = 1")
                 before = paths.ledger.read_bytes()
 
                 with self.assertRaisesRegex(MigrationError, "corrupt or incoherent"):
-                    opener(paths, sqlite_version_info=SAFE_VERSION)
+                    opener(paths)
                 self.assertEqual(paths.ledger.read_bytes(), before)
 
     def test_shared_schema_validator_rejects_failed_integrity_check(self) -> None:
@@ -668,9 +1082,9 @@ class LedgerStoreTest(unittest.TestCase):
 
         with TemporaryDirectory(dir="/tmp") as tmp:
             paths = LedgerPaths.derive(tmp, "ws_alpha")
-            with LedgerStore.open_writer(paths, sqlite_version_info=SAFE_VERSION):
+            with LedgerStore.open_writer(paths):
                 pass
-            with sqlite3.connect(paths.ledger) as connection:
+            with closing(sqlite3.connect(paths.ledger)) as connection, connection:
                 with self.assertRaisesRegex(MigrationError, "failed integrity_check"):
                     LedgerStore._validate_schema(IntegrityFailureConnection(connection), paths)
 
@@ -683,7 +1097,7 @@ class LedgerStoreTest(unittest.TestCase):
                     paths = LedgerPaths.derive(tmp, "ws_alpha")
                     paths.ensure_directories()
                     if kind == "unsupported":
-                        with sqlite3.connect(paths.ledger) as connection:
+                        with closing(sqlite3.connect(paths.ledger)) as connection, connection:
                             connection.execute("PRAGMA user_version = 2")
                         expected = "unsupported ledger schema version"
                     else:
@@ -691,19 +1105,15 @@ class LedgerStoreTest(unittest.TestCase):
                             paths.ledger.write_bytes(b"not a sqlite database")
                             expected = "corrupt"
                         elif kind == "extra-table":
-                            with LedgerStore.open_writer(
-                                paths, sqlite_version_info=SAFE_VERSION
-                            ):
+                            with LedgerStore.open_writer(paths):
                                 pass
-                            with sqlite3.connect(paths.ledger) as connection:
+                            with closing(sqlite3.connect(paths.ledger)) as connection, connection:
                                 connection.execute("CREATE TABLE unsupported_extra(value TEXT)")
                             expected = "table set is incoherent"
                         else:
-                            with LedgerStore.open_writer(
-                                paths, sqlite_version_info=SAFE_VERSION
-                            ):
+                            with LedgerStore.open_writer(paths):
                                 pass
-                            with sqlite3.connect(paths.ledger) as connection:
+                            with closing(sqlite3.connect(paths.ledger)) as connection, connection:
                                 connection.execute(
                                     "UPDATE schema_migrations SET tool_version = 'changed'"
                                 )
@@ -711,7 +1121,7 @@ class LedgerStoreTest(unittest.TestCase):
                     before = paths.ledger.read_bytes()
 
                     with self.assertRaisesRegex(MigrationError, expected):
-                        opener(paths, sqlite_version_info=SAFE_VERSION)
+                        opener(paths)
                     self.assertEqual(paths.ledger.read_bytes(), before)
 
 
