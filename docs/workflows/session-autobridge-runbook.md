@@ -129,6 +129,93 @@ python3 bin/session_autobridge.py register \
   --runtime-session-source manual
 ```
 
+## Activation Leases
+
+Activation packets are writer grants only after the assigned worker claims the
+exact activation lease. The claim is scoped to the packet identity
+`project/chat/task/worktree/branch/target-agent` and to the worker's registered
+session. The `--project` value must be registered in `projects.json` before
+lease claim/show/assert/release construct, read, or write the lease identity.
+The session must be live and exactly bound to the same agent, project, and chat;
+null project/chat bindings are unbound and refuse rather than acting as
+wildcards. A registered session is live only when its status is `active` or
+`parked` and its session `lease_expires_utc` has not expired.
+
+Claim with a runtime identity or live process id:
+
+```bash
+python3 bin/session_autobridge.py lease-claim \
+  --project amiga \
+  --chat CHAT-xxxx \
+  --task TASK-xxxxxx \
+  --worktree /absolute/canonical/worktree \
+  --branch codex/example \
+  --target-agent claude \
+  --session SESSION-claude-amiga \
+  --claimant-runtime-id <runtime-thread-id> \
+  --json
+```
+
+Before mutating the assigned worktree, assert the current owner and fence:
+
+```bash
+python3 bin/session_autobridge.py lease-assert \
+  --project amiga \
+  --chat CHAT-xxxx \
+  --task TASK-xxxxxx \
+  --worktree /absolute/canonical/worktree \
+  --branch codex/example \
+  --target-agent claude \
+  --session SESSION-claude-amiga \
+  --fence-token <token-from-claim> \
+  --claimant-runtime-id <runtime-thread-id> \
+  --json
+```
+
+Claim, assert, and release require claimant identity from the current caller:
+`--claimant-runtime-id`, a reader runtime environment variable, or a live
+positive `--owner-pid`. The registered session record and stored lease record
+are never proof that the current process is the lease holder.
+
+Release when the task is done or superseded:
+
+```bash
+python3 bin/session_autobridge.py lease-release \
+  --project amiga \
+  --chat CHAT-xxxx \
+  --task TASK-xxxxxx \
+  --worktree /absolute/canonical/worktree \
+  --branch codex/example \
+  --target-agent claude \
+  --session SESSION-claude-amiga \
+  --fence-token <token-from-claim> \
+  --claimant-runtime-id <runtime-thread-id> \
+  --json
+```
+
+Refusals return exit 75 with JSON naming the reason and current owner where
+known. Do not mutate the worktree after a refused claim/assert, and do not
+treat a refused release as cleanup evidence. Takeover is explicit: use
+`--takeover` when replacing an expired activation lease, session-expired owner,
+or provably dead owner; those leases are never idempotently reclaimed and always
+mint a new fence. A live, unexpired same-session/same-runtime runtime-only
+reclaim may refresh TTL with the same fence. PID `0` and negative PIDs are
+invalid claimant identities; a positive explicit `--owner-pid` that is provably
+dead refuses with `owner_pid_not_live`; unknown liveness fails closed. Claims
+resolve the requested worktree once under a nonblocking global grant lock and
+refuse symlink aliases of an already-active real worktree, while identity
+classification remains byte-exact and filesystem-independent. Grant-lock
+contention returns bounded `claim_in_progress`. Released and expired
+same-realpath lease records do not block a new identity claim. Malformed
+activation lease JSON fails closed with `corrupt_lease_state`; the refusal names
+only the bad lease filename, field, and reason, never file contents. Active,
+unexpired lease records are structurally invalid unless `worktree_realpath`,
+`lease_key`, `owner_session_id`, and `status` are all present non-null strings.
+Claim, assert, and release route existing-lease authority through one shared
+validation entry point covering structural validity, lease-key and identity
+binding, session liveness and binding, claimant runtime/PID binding, PID
+liveness, fence, and lease expiry.
+
 ## Inspect Bindings
 
 Show the registered session:
