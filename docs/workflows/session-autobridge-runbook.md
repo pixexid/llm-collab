@@ -208,7 +208,9 @@ classification remains byte-exact and filesystem-independent. Grant-lock
 contention returns bounded `claim_in_progress`. Released and expired
 same-realpath lease records do not block a new identity claim. Malformed
 activation lease JSON fails closed with `corrupt_lease_state`; the refusal names
-only the bad lease filename and error type, never file contents.
+only the bad lease filename, field, and reason, never file contents. Active,
+unexpired lease records are structurally invalid unless `worktree_realpath`,
+`lease_key`, `owner_session_id`, and `status` are all present non-null strings.
 
 ## Inspect Bindings
 

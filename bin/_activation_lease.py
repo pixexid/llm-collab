@@ -56,18 +56,53 @@ def load_lease(identity: dict[str, str]) -> dict[str, Any] | None:
     return json.loads(path.read_text())
 
 
+def _malformed_lease_state(path: Path, field: str, reason: str) -> LeaseRefused:
+    return LeaseRefused(
+        "corrupt_lease_state",
+        {"lease_file": path.name, "field": field, "reason": reason},
+    )
+
+
+def _field_problem(payload: dict[str, Any], field: str) -> str | None:
+    if field not in payload:
+        return "missing"
+    if payload[field] is None:
+        return "null"
+    if not isinstance(payload[field], str):
+        return "wrong_type"
+    return None
+
+
+def _validate_active_lease_state(path: Path, payload: Any) -> None:
+    if not isinstance(payload, dict):
+        raise _malformed_lease_state(path, "record", "wrong_type")
+    status_problem = _field_problem(payload, "status")
+    if status_problem is not None:
+        if lease_is_expired(payload):
+            return
+        raise _malformed_lease_state(path, "status", status_problem)
+    if payload["status"] != "active" or lease_is_expired(payload):
+        return
+    for field in ("worktree_realpath", "lease_key", "owner_session_id"):
+        problem = _field_problem(payload, field)
+        if problem is not None:
+            raise _malformed_lease_state(path, field, problem)
+
+
 def iter_leases() -> list[dict[str, Any]]:
     if not ACTIVATION_LEASES_DIR.exists():
         return []
     leases: list[dict[str, Any]] = []
     for path in sorted(ACTIVATION_LEASES_DIR.glob("*.json")):
         try:
-            leases.append(json.loads(path.read_text()))
+            payload = json.loads(path.read_text())
         except json.JSONDecodeError as exc:
             raise LeaseRefused(
                 "corrupt_lease_state",
-                {"lease_file": path.name, "error": exc.__class__.__name__},
+                {"lease_file": path.name, "field": "json", "reason": exc.__class__.__name__},
             ) from exc
+        _validate_active_lease_state(path, payload)
+        leases.append(payload)
     return leases
 
 
