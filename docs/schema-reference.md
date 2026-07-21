@@ -278,10 +278,12 @@ Activation lease authority stores one JSON record per exact activation identity
 under `State/session_autobridge/activation_leases/{lease_key}.json`, with a
 stable never-unlinked sibling `.lock` file used for `flock(LOCK_EX|LOCK_NB)`
 per-identity claim contention and a stable never-unlinked global
-`.claim-grant.lock` used to serialize the authority-granting instant across
-distinct identity keys. The global grant lock covers worktree realpath
-resolution, active lease alias scan, and lease write so symlink aliases cannot
-race into two active records. The record is written only by
+`.claim-grant.lock` file also acquired with `flock(LOCK_EX|LOCK_NB)` to
+serialize the authority-granting instant across distinct identity keys. Lock
+contention returns bounded `claim_in_progress`; non-contention lock errors
+re-raise. The global grant lock covers worktree realpath resolution, active
+lease alias scan, and lease write so symlink aliases cannot race into two
+active records. The record is written only by
 `session_autobridge.py lease-claim`/`lease-release`; `lease-assert` is
 read-only.
 
@@ -329,12 +331,12 @@ owner-session and claimant runtime/pid binding before it writes a released or
 superseded status; a refused release leaves the lease file byte-identical.
 Assert and release refuse stopped or superseded owner sessions with
 `owner_session_not_live`. Expired leases do not assert; the owner must reclaim
-to refresh TTL before mutating.
-Same-session/same-runtime runtime-only reclaim refreshes TTL with the same
-fence. Expired or provably dead owners are takeover-eligible only with explicit
-`--takeover`; live-pid owners are never replaced, and unknown liveness fails
-closed. Non-active or expired same-realpath lease records do not block a new
-identity claim.
+to refresh TTL before mutating. Live, unexpired same-session/same-runtime
+runtime-only reclaim refreshes TTL with the same fence. Expired or provably
+dead leases are never idempotently reclaimed: every identity combination
+requires explicit `--takeover` and writes a new `fence_token`. Unknown liveness
+fails closed. Non-active or expired same-realpath lease records do not block a
+new identity claim.
 
 ### Body
 
