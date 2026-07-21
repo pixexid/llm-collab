@@ -18,7 +18,7 @@ from pathlib import Path
 from .paths import LedgerPaths, validate_project_id, validate_registry_token, validate_workspace_id
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 BUSY_TIMEOUT_MS = 5_000
 SYNCHRONOUS_FULL = 2
 MIGRATION_TOOL_VERSION = "llm-collab-ledger/1"
@@ -39,6 +39,7 @@ V2_TABLES = V1_TABLES | frozenset(
         "observation_audit",
     }
 )
+V3_TABLES = V2_TABLES | frozenset({"legacy_provenance_imports"})
 
 
 class SQLiteSafetyError(RuntimeError):
@@ -263,7 +264,127 @@ V2_SQL = (
 
 V2_MIGRATION_CHECKSUM = "sha256:338a5d526b6fdea47af667c469897fd38d97a4a2dc8caf90dc5d62c067610e36"
 V2_SCHEMA_FINGERPRINT = "sha256:805aa5ae43c31d85dbe9a84590050b701ddc69cfe1dd225e9c6e67afbd889a7c"
-MIGRATIONS = ((1, V1_SQL), (2, V2_SQL))
+
+V3_SQL = (
+    """
+    CREATE TABLE legacy_provenance_imports (
+        workspace_id TEXT NOT NULL
+            CHECK (
+                instr(workspace_id, char(0)) = 0
+                AND length(CAST(workspace_id AS BLOB)) > 0
+            ),
+        registry_revision TEXT NOT NULL
+            CHECK (
+                instr(registry_revision, char(0)) = 0
+                AND length(CAST(registry_revision AS BLOB)) = 71
+                AND substr(registry_revision, 1, 7) = 'sha256:'
+                AND substr(registry_revision, 8) NOT GLOB '*[^0-9a-f]*'
+            ),
+        scope_kind TEXT NOT NULL
+            CHECK (scope_kind IN ('exact_project', 'legacy_unscoped')),
+        scope_identity TEXT NOT NULL,
+        project_id TEXT
+            CHECK (
+                project_id IS NULL
+                OR (
+                    instr(project_id, char(0)) = 0
+                    AND length(CAST(project_id AS BLOB)) > 0
+                )
+            ),
+        source_family TEXT NOT NULL CHECK (source_family = 'session_autobridge'),
+        record_kind TEXT NOT NULL CHECK (record_kind IN ('session', 'activation_lease')),
+        source_locator TEXT NOT NULL
+            CHECK (
+                instr(source_locator, char(0)) = 0
+                AND length(CAST(source_locator AS BLOB)) BETWEEN 1 AND 4096
+                AND substr(source_locator, 1, 1) != '/'
+                AND substr(source_locator, -1, 1) != '/'
+                AND instr(source_locator, '//') = 0
+                AND instr(source_locator, '\\') = 0
+                AND source_locator != '.'
+                AND source_locator != '..'
+                AND source_locator NOT LIKE '../%'
+                AND source_locator NOT LIKE '%/../%'
+                AND source_locator NOT LIKE '%/..'
+                AND source_locator NOT LIKE './%'
+                AND source_locator NOT LIKE '%/./%'
+                AND source_locator NOT LIKE '%/.'
+            ),
+        content_sha256 TEXT NOT NULL
+            CHECK (
+                instr(content_sha256, char(0)) = 0
+                AND length(CAST(content_sha256 AS BLOB)) = 64
+                AND content_sha256 NOT GLOB '*[^0-9a-f]*'
+            ),
+        byte_size INTEGER NOT NULL
+            CHECK (typeof(byte_size) = 'integer' AND byte_size BETWEEN 0 AND 1048576),
+        observed_at_utc TEXT NOT NULL
+            CHECK (
+                instr(observed_at_utc, char(0)) = 0
+                AND length(CAST(observed_at_utc AS BLOB)) BETWEEN 1 AND 128
+            ),
+        imported_at_utc TEXT NOT NULL
+            CHECK (
+                instr(imported_at_utc, char(0)) = 0
+                AND length(CAST(imported_at_utc AS BLOB)) BETWEEN 1 AND 128
+            ),
+        import_transaction_id TEXT NOT NULL
+            CHECK (
+                instr(import_transaction_id, char(0)) = 0
+                AND length(CAST(import_transaction_id AS BLOB)) = 32
+                AND import_transaction_id NOT GLOB '*[^0-9a-f]*'
+            ),
+        import_revision TEXT NOT NULL CHECK (import_revision = 'legacy-provenance/1'),
+        PRIMARY KEY (
+            workspace_id,
+            registry_revision,
+            scope_kind,
+            scope_identity,
+            source_family,
+            record_kind,
+            source_locator,
+            content_sha256,
+            import_revision
+        ),
+        FOREIGN KEY (workspace_id, registry_revision)
+            REFERENCES workspace_registry_snapshots (workspace_id, registry_revision)
+            ON DELETE RESTRICT,
+        FOREIGN KEY (workspace_id, project_id, registry_revision)
+            REFERENCES project_registry_snapshots (workspace_id, project_id, registry_revision)
+            ON DELETE RESTRICT,
+        CHECK (
+            (
+                scope_kind = 'exact_project'
+                AND project_id IS NOT NULL
+                AND scope_identity = project_id
+            )
+            OR
+            (
+                scope_kind = 'legacy_unscoped'
+                AND project_id IS NULL
+                AND scope_identity = 'legacy_unscoped'
+            )
+        )
+    ) STRICT
+    """,
+    """
+    CREATE TRIGGER legacy_provenance_imports_no_update
+    BEFORE UPDATE ON legacy_provenance_imports
+    BEGIN
+        SELECT RAISE(ABORT, 'legacy provenance is append-only');
+    END
+    """,
+    """
+    CREATE TRIGGER legacy_provenance_imports_no_delete
+    BEFORE DELETE ON legacy_provenance_imports
+    BEGIN
+        SELECT RAISE(ABORT, 'legacy provenance is append-only');
+    END
+    """,
+)
+V3_MIGRATION_CHECKSUM = "sha256:1b8380593b73695bf8824425b58eda7c94f51fc0937f07dbcbd1786a6e5d467b"
+V3_SCHEMA_FINGERPRINT = "sha256:88e59c9be91df366c03985f99f8b3db1c68382b4846612c0334fd15cc505e673"
+MIGRATIONS = ((1, V1_SQL), (2, V2_SQL), (3, V3_SQL))
 
 
 def _migration_checksum(statements: Sequence[str]) -> str:
@@ -295,6 +416,16 @@ def _v2_schema_fingerprint_from_sql() -> str:
     connection = sqlite3.connect(":memory:", isolation_level=None)
     try:
         for statement in (*V1_SQL, *V2_SQL):
+            connection.execute(statement)
+        return _schema_fingerprint(connection)
+    finally:
+        connection.close()
+
+
+def _v3_schema_fingerprint_from_sql() -> str:
+    connection = sqlite3.connect(":memory:", isolation_level=None)
+    try:
+        for statement in (*V1_SQL, *V2_SQL, *V3_SQL):
             connection.execute(statement)
         return _schema_fingerprint(connection)
     finally:
@@ -648,6 +779,9 @@ class LedgerStore:
         if claimed == 1:
             cls._validate_released_v1(connection, paths)
             return
+        if claimed == 2:
+            cls._validate_released_v2(connection, paths)
+            return
         cls._validate_schema(connection, paths)
 
     @staticmethod
@@ -669,6 +803,45 @@ class LedgerStore:
                 raise MigrationError(
                     f"unsupported ledger schema version {claimed}; expected {SCHEMA_VERSION}"
                 )
+            if _migration_checksum(V1_SQL) != V1_MIGRATION_CHECKSUM:
+                raise MigrationError("released v1 migration checksum is incoherent")
+            if _v1_schema_fingerprint_from_sql() != V1_SCHEMA_FINGERPRINT:
+                raise MigrationError("released v1 schema fingerprint is incoherent")
+            if _migration_checksum(V2_SQL) != V2_MIGRATION_CHECKSUM:
+                raise MigrationError("released v2 migration checksum is incoherent")
+            if _v2_schema_fingerprint_from_sql() != V2_SCHEMA_FINGERPRINT:
+                raise MigrationError("released v2 schema fingerprint is incoherent")
+            if _migration_checksum(V3_SQL) != V3_MIGRATION_CHECKSUM:
+                raise MigrationError("released v3 migration checksum is incoherent")
+            if _v3_schema_fingerprint_from_sql() != V3_SCHEMA_FINGERPRINT:
+                raise MigrationError("released v3 schema fingerprint is incoherent")
+            rows = cls._migration_rows(connection)
+            if [row[0] for row in rows] != [1, 2, 3]:
+                raise MigrationError("ledger migration metadata is incoherent")
+            cls._validate_migration_row(rows[0], V1_MIGRATION_CHECKSUM, 0, paths)
+            cls._validate_migration_row(rows[1], V2_MIGRATION_CHECKSUM, 1, paths)
+            cls._validate_migration_row(rows[2], V3_MIGRATION_CHECKSUM, 2, paths)
+            actual_tables = cls._table_names(connection)
+            if actual_tables != V3_TABLES:
+                raise MigrationError(
+                    "ledger v3 table set is incoherent: "
+                    f"missing={sorted(V3_TABLES - actual_tables)}, "
+                    f"extra={sorted(actual_tables - V3_TABLES)}"
+                )
+            if _schema_fingerprint(connection) != V3_SCHEMA_FINGERPRINT:
+                raise MigrationError("ledger v3 schema fingerprint is incoherent")
+        except sqlite3.DatabaseError as exc:
+            raise MigrationError("ledger schema is corrupt or incoherent") from exc
+
+    @classmethod
+    def _validate_released_v2(
+        cls, connection: sqlite3.Connection, paths: LedgerPaths
+    ) -> None:
+        """Accept only the exact released v2 long enough for a writer migration."""
+        try:
+            cls._validate_database_health(connection)
+            if connection.execute("PRAGMA user_version").fetchone()[0] != 2:
+                raise MigrationError("ledger is not released schema v2")
             if _migration_checksum(V1_SQL) != V1_MIGRATION_CHECKSUM:
                 raise MigrationError("released v1 migration checksum is incoherent")
             if _v1_schema_fingerprint_from_sql() != V1_SCHEMA_FINGERPRINT:
@@ -793,6 +966,7 @@ class LedgerStore:
                 expected_checksum = {
                     1: V1_MIGRATION_CHECKSUM,
                     2: V2_MIGRATION_CHECKSUM,
+                    3: V3_MIGRATION_CHECKSUM,
                 }.get(version)
                 if expected_checksum is None or checksum != expected_checksum:
                     raise MigrationError(f"migration {version} does not match its released checksum")
@@ -1080,6 +1254,207 @@ class LedgerStore:
             ).fetchone()
             is not None
         )
+
+    def registered_project_ids(
+        self, *, workspace_id: str, registry_revision: str
+    ) -> frozenset[str]:
+        """Return the exact registered projects for one immutable registry snapshot."""
+        self._ensure_thread()
+        if validate_workspace_id(workspace_id) != self.paths.workspace_id:
+            raise ValueError("workspace_id does not own this ledger")
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", registry_revision):
+            raise ValueError("registry_revision must be sha256:<lowercase hex>")
+        if not self.has_registry_snapshot(
+            workspace_id=workspace_id, registry_revision=registry_revision
+        ):
+            raise ValueError("registry snapshot is absent")
+        rows = self._connection.execute(
+            "SELECT project_id FROM project_registry_snapshots "
+            "WHERE workspace_id = ? AND registry_revision = ? ORDER BY project_id",
+            (workspace_id, registry_revision),
+        ).fetchall()
+        return frozenset(row[0] for row in rows)
+
+    def legacy_import_preflight(
+        self, *, workspace_id: str, registry_revision: str
+    ) -> frozenset[str]:
+        """Prove writer and transaction readiness before any legacy filesystem read."""
+        self._ensure_thread()
+        if self._read_only:
+            raise PermissionError("query-only readers cannot import legacy provenance")
+        if self._connection.in_transaction:
+            raise RuntimeError("refusing legacy import while a transaction is active")
+        return self.registered_project_ids(
+            workspace_id=workspace_id, registry_revision=registry_revision
+        )
+
+    def import_legacy_provenance(
+        self,
+        *,
+        workspace_id: str,
+        registry_revision: str,
+        import_transaction_id: str,
+        import_revision: str,
+        imported_at_utc: str,
+        records: Sequence[Mapping[str, object]],
+        failpoint: Callable[[str], None] | None = None,
+    ) -> int:
+        """Atomically append one already-collected hash-only provenance batch."""
+        projects = self.legacy_import_preflight(
+            workspace_id=workspace_id, registry_revision=registry_revision
+        )
+        if re.fullmatch(r"[0-9a-f]{32}", import_transaction_id) is None:
+            raise ValueError("import_transaction_id must be 32 lowercase hexadecimal characters")
+        if import_revision != "legacy-provenance/1":
+            raise ValueError("import_revision must be legacy-provenance/1")
+        if (
+            not isinstance(imported_at_utc, str)
+            or not imported_at_utc
+            or "\x00" in imported_at_utc
+            or len(imported_at_utc.encode("utf-8")) > 128
+        ):
+            raise ValueError("imported_at_utc must be bounded text")
+        if len(records) > 5_000:
+            raise ValueError("one import may contain at most 5000 records")
+
+        required = {
+            "source_family",
+            "record_kind",
+            "source_locator",
+            "content_sha256",
+            "byte_size",
+            "observed_at_utc",
+            "scope_kind",
+            "project_id",
+        }
+        normalized = []
+        prefixes = {
+            "session": "State/session_autobridge/sessions/",
+            "activation_lease": "State/session_autobridge/activation_leases/",
+        }
+        for record in records:
+            if not isinstance(record, Mapping) or set(record) != required:
+                raise ValueError("legacy provenance record has an invalid field set")
+            if record["source_family"] != "session_autobridge":
+                raise ValueError("legacy provenance source family is closed")
+            record_kind = record["record_kind"]
+            if record_kind not in prefixes:
+                raise ValueError("legacy provenance record kind is closed")
+            locator = record["source_locator"]
+            prefix = prefixes[record_kind]
+            if not isinstance(locator, str):
+                raise ValueError("legacy provenance source locator must be text")
+            filename = locator[len(prefix) :] if locator.startswith(prefix) else ""
+            if (
+                not filename.endswith(".json")
+                or "/" in filename
+                or "\\" in filename
+                or "\x00" in locator
+                or len(locator.encode("utf-8")) > 4_096
+            ):
+                raise ValueError("legacy provenance source locator is outside the closed set")
+            content_sha256 = self._require_lower_hex(
+                record["content_sha256"], "content_sha256"
+            )
+            byte_size = record["byte_size"]
+            if (
+                isinstance(byte_size, bool)
+                or not isinstance(byte_size, int)
+                or not 0 <= byte_size <= 1_048_576
+            ):
+                raise ValueError("legacy provenance byte_size is outside its fixed bound")
+            observed_at_utc = record["observed_at_utc"]
+            if (
+                not isinstance(observed_at_utc, str)
+                or not observed_at_utc
+                or "\x00" in observed_at_utc
+                or len(observed_at_utc.encode("utf-8")) > 128
+            ):
+                raise ValueError("observed_at_utc must be bounded text")
+            scope_kind = record["scope_kind"]
+            project_id = record["project_id"]
+            if scope_kind == "exact_project":
+                if not isinstance(project_id, str) or project_id not in projects:
+                    raise ValueError("exact-project provenance must bind a registered project")
+                scope_identity = project_id
+            elif scope_kind == "legacy_unscoped":
+                if project_id is not None:
+                    raise ValueError("legacy-unscoped provenance cannot carry a project")
+                scope_identity = "legacy_unscoped"
+            else:
+                raise ValueError("legacy provenance scope kind is closed")
+            normalized.append(
+                (
+                    workspace_id,
+                    registry_revision,
+                    scope_kind,
+                    scope_identity,
+                    project_id,
+                    "session_autobridge",
+                    record_kind,
+                    locator,
+                    content_sha256,
+                    byte_size,
+                    observed_at_utc,
+                    imported_at_utc,
+                    import_transaction_id,
+                    import_revision,
+                )
+            )
+
+        inserted = 0
+        self._connection.execute("BEGIN IMMEDIATE")
+        try:
+            for values in normalized:
+                inserted += self._connection.execute(
+                    "INSERT INTO legacy_provenance_imports "
+                    "(workspace_id, registry_revision, scope_kind, scope_identity, project_id, "
+                    "source_family, record_kind, source_locator, content_sha256, byte_size, "
+                    "observed_at_utc, imported_at_utc, import_transaction_id, import_revision) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
+                    values,
+                ).rowcount
+            if failpoint is not None:
+                failpoint("after_provenance")
+            self._connection.execute("COMMIT")
+        except BaseException:
+            if self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
+            raise
+        return inserted
+
+    def get_legacy_provenance(
+        self,
+        *,
+        workspace_id: str,
+        project_id: str,
+        registry_revision: str,
+    ) -> list[dict[str, object]]:
+        """Return exact-project provenance; legacy-unscoped rows are never projected."""
+        self._ensure_thread()
+        if validate_workspace_id(workspace_id) != self.paths.workspace_id:
+            raise ValueError("workspace_id does not own this ledger")
+        validate_project_id(project_id)
+        rows = self._connection.execute(
+            "SELECT source_family, record_kind, source_locator, content_sha256, byte_size, "
+            "observed_at_utc, imported_at_utc, import_transaction_id, import_revision "
+            "FROM legacy_provenance_imports WHERE workspace_id = ? AND project_id = ? "
+            "AND registry_revision = ? AND scope_kind = 'exact_project' "
+            "ORDER BY record_kind, source_locator, content_sha256",
+            (workspace_id, project_id, registry_revision),
+        ).fetchall()
+        keys = (
+            "source_family",
+            "record_kind",
+            "source_locator",
+            "content_sha256",
+            "byte_size",
+            "observed_at_utc",
+            "imported_at_utc",
+            "import_transaction_id",
+            "import_revision",
+        )
+        return [dict(zip(keys, row)) for row in rows]
 
     def observation_checkpoint_cursor(
         self,
