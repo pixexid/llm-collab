@@ -257,6 +257,24 @@ class ActivationLeaseTest(unittest.TestCase):
                 lease_lib.claim_lease(identity, owner_session_id="SESSION-A", owner_pid=-7)
             self.assertEqual("invalid_owner_pid", ctx.exception.reason)
 
+    def test_runtime_claim_refuses_dead_positive_owner_pid(self):
+        root = self.make_workspace()
+        self.register_session(root, "SESSION-A", runtime_id="runtime-a")
+        sleeper = subprocess.Popen([sys.executable, "-c", "pass"])
+        sleeper.wait(timeout=5)
+
+        refused, code = self.claim(
+            root,
+            "SESSION-A",
+            "--claimant-runtime-id",
+            "runtime-a",
+            "--owner-pid",
+            str(sleeper.pid),
+        )
+        self.assertEqual(75, code)
+        self.assertEqual("owner_pid_not_live", refused["reason"])
+        self.assertEqual([], self.lease_records(root))
+
     def test_session_identity_must_match_activation_identity(self):
         root = self.make_workspace()
         self.add_agent(root, "codex")
@@ -384,6 +402,36 @@ class ActivationLeaseTest(unittest.TestCase):
         taken, code = self.claim(root, "SESSION-A", "--claimant-runtime-id", "runtime-a", "--takeover")
         self.assertEqual(0, code, taken)
         self.assertEqual(2, taken["lease"]["fence_token"])
+
+    def test_stopped_or_superseded_owner_session_overrides_live_recorded_pid(self):
+        for status in ("stopped", "superseded"):
+            with self.subTest(status=status):
+                root = self.make_workspace()
+                self.register_session(root, "SESSION-A", runtime_id="runtime-a")
+                self.register_session(root, "SESSION-B", runtime_id="runtime-b")
+                claimed, code = self.claim(
+                    root,
+                    "SESSION-A",
+                    "--claimant-runtime-id",
+                    "runtime-a",
+                    "--owner-pid",
+                    str(os.getpid()),
+                )
+                self.assertEqual(0, code, claimed)
+                self.update_session_status(root, "SESSION-A", status)
+                lease_dir = root / "State" / "session_autobridge" / "activation_leases"
+                before = {path.name: path.read_text() for path in lease_dir.glob("*.json")}
+
+                refused, code = self.claim(root, "SESSION-B", "--claimant-runtime-id", "runtime-b")
+                self.assertEqual(75, code)
+                self.assertEqual("dead_owner_requires_takeover", refused["reason"])
+                after = {path.name: path.read_text() for path in lease_dir.glob("*.json")}
+                self.assertEqual(before, after)
+
+                taken, code = self.claim(root, "SESSION-B", "--claimant-runtime-id", "runtime-b", "--takeover")
+                self.assertEqual(0, code, taken)
+                self.assertEqual(2, taken["lease"]["fence_token"])
+                self.assertEqual("SESSION-A", taken["lease"]["previous_owner_session_id"])
 
     def test_expired_takeover_invalidates_old_fence_token(self):
         root = self.make_workspace()
