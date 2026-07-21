@@ -855,6 +855,24 @@ class ActivationLeaseTest(unittest.TestCase):
         self.assertEqual(75, code)
         self.assertEqual("worktree_alias_collision", refused["reason"])
 
+    def test_corrupt_alias_lease_json_fails_closed_without_mutation(self):
+        root = self.make_workspace()
+        self.register_session(root, "SESSION-B", runtime_id="runtime-b")
+        lease_dir = root / "State" / "session_autobridge" / "activation_leases"
+        corrupt = lease_dir / "bad-alias-candidate.json"
+        write(corrupt, "{not-json")
+        before = {path.name: path.read_text() for path in lease_dir.glob("*.json")}
+
+        refused, code = self.claim(root, "SESSION-B", "--claimant-runtime-id", "runtime-b")
+        self.assertEqual(75, code)
+        self.assertEqual("corrupt_lease_state", refused["reason"])
+        self.assertEqual(
+            {"lease_file": "bad-alias-candidate.json", "error": "JSONDecodeError"},
+            refused["owner"],
+        )
+        after = {path.name: path.read_text() for path in lease_dir.glob("*.json")}
+        self.assertEqual(before, after)
+
     def test_released_and_expired_alias_records_do_not_overblock_new_identity(self):
         root = self.make_workspace()
         self.register_session(root, "SESSION-A", runtime_id="runtime-a")

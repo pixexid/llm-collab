@@ -344,7 +344,9 @@ same-session/same-runtime runtime-only reclaim refreshes TTL with the same
 fence. Expired or provably dead leases are never idempotently reclaimed: every
 identity combination requires explicit `--takeover` and writes a new
 `fence_token`. Unknown liveness fails closed. Non-active or expired
-same-realpath lease records do not block a new identity claim.
+same-realpath lease records do not block a new identity claim. Malformed
+activation lease JSON fails closed with `corrupt_lease_state`; the refusal names
+only the bad lease filename and error type, never file contents.
 
 ### Body
 

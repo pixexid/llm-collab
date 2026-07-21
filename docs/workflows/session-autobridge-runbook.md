@@ -206,7 +206,9 @@ resolve the requested worktree once under a nonblocking global grant lock and
 refuse symlink aliases of an already-active real worktree, while identity
 classification remains byte-exact and filesystem-independent. Grant-lock
 contention returns bounded `claim_in_progress`. Released and expired
-same-realpath lease records do not block a new identity claim.
+same-realpath lease records do not block a new identity claim. Malformed
+activation lease JSON fails closed with `corrupt_lease_state`; the refusal names
+only the bad lease filename and error type, never file contents.
 
 ## Inspect Bindings
 
