@@ -196,11 +196,13 @@ treat a refused release as cleanup evidence. Takeover is explicit: use
 `--takeover` when replacing an expired or provably dead owner; those leases are
 never idempotently reclaimed and always mint a new fence. A live, unexpired
 same-session/same-runtime runtime-only reclaim may refresh TTL with the same
-fence. PID `0` and negative PIDs are invalid claimant identities, and unknown
-liveness fails closed. Claims resolve the requested worktree once under a
-nonblocking global grant lock and refuse symlink aliases of an already-active
-real worktree, while identity classification remains byte-exact and
-filesystem-independent. Grant-lock contention returns bounded
+fence. PID `0` and negative PIDs are invalid claimant identities; a positive
+explicit `--owner-pid` that is provably dead refuses with
+`owner_pid_not_live`; unknown liveness fails closed. Claims resolve the
+requested worktree once under a nonblocking global grant lock and refuse
+symlink aliases of an already-active real worktree, while identity
+classification remains byte-exact and filesystem-independent. Grant-lock
+contention returns bounded
 `claim_in_progress`. Released and expired same-realpath lease records do not
 block a new identity claim.
 

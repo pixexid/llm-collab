@@ -318,9 +318,10 @@ bound claimant identity from the current caller: `--claimant-runtime-id`, a
 reader runtime environment variable, or a live positive `--owner-pid`. Claim,
 assert, and release never derive claimant identity from the session or lease
 record being checked. PID `0` and negative PIDs are process-group selectors
-rather than process identities and refuse with `invalid_owner_pid`. Claims with
-no runtime identity and no live pid refuse with `claimant_identity_required`;
-an identity-less lease record is never valid.
+rather than process identities and refuse with `invalid_owner_pid`. A positive
+explicit `--owner-pid` that is provably dead refuses with `owner_pid_not_live`.
+Claims with no runtime identity and no live pid refuse with
+`claimant_identity_required`; an identity-less lease record is never valid.
 
 Every ownership change increments `fence_token`. Refused claims are evaluated
 before record writes and must leave the existing lease file byte-identical.
