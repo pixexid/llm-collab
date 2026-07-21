@@ -169,10 +169,10 @@ python3 bin/session_autobridge.py lease-assert \
   --json
 ```
 
-The claim command may use the registered session's runtime id when no explicit
-claimant runtime is provided. The assert command is stricter: the current
-runtime must be supplied explicitly or by the reader runtime environment, and
-the session record alone is not proof that this process is the lease holder.
+Claim, assert, and release require claimant identity from the current caller:
+`--claimant-runtime-id`, a reader runtime environment variable, or a live
+positive `--owner-pid`. The registered session record and stored lease record
+are never proof that the current process is the lease holder.
 
 Release when the task is done or superseded:
 
@@ -186,18 +186,20 @@ python3 bin/session_autobridge.py lease-release \
   --target-agent claude \
   --session SESSION-claude-amiga \
   --fence-token <token-from-claim> \
+  --claimant-runtime-id <runtime-thread-id> \
   --json
 ```
 
 Refusals return exit 75 with JSON naming the reason and current owner where
-known. Do not mutate the worktree after a refused claim/assert. Takeover is
-explicit: use `--takeover` only when replacing an expired or provably dead
-owner. A live positive-pid owner is never replaced, PID `0` and negative PIDs
-are invalid claimant identities, and unknown liveness fails closed. Claims
-resolve the requested worktree once under a global grant lock and refuse
-symlink aliases of an already-active real worktree, while identity
-classification remains byte-exact and filesystem-independent. Released and
-expired same-realpath lease records do not block a new identity claim.
+known. Do not mutate the worktree after a refused claim/assert, and do not
+treat a refused release as cleanup evidence. Takeover is explicit: use
+`--takeover` only when replacing an expired or provably dead owner. A live
+positive-pid owner is never replaced, PID `0` and negative PIDs are invalid
+claimant identities, and unknown liveness fails closed. Claims resolve the
+requested worktree once under a global grant lock and refuse symlink aliases of
+an already-active real worktree, while identity classification remains
+byte-exact and filesystem-independent. Released and expired same-realpath
+lease records do not block a new identity claim.
 
 ## Inspect Bindings
 

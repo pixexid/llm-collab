@@ -151,6 +151,8 @@ def parse_args():
     add_activation_identity(lease_release)
     lease_release.add_argument("--session", required=True, help="Owning session identifier")
     lease_release.add_argument("--fence-token", type=int, required=True)
+    lease_release.add_argument("--owner-pid", type=int, default=None, help="Releasing process id")
+    lease_release.add_argument("--claimant-runtime-id", default=None, help="Current runtime/session id")
     lease_release.add_argument("--status", default="released", choices=("released", "superseded"))
     return parser.parse_args()
 
@@ -333,6 +335,8 @@ def lease_release_command(args) -> tuple[dict, int]:
             identity,
             owner_session_id=args.session,
             fence_token=args.fence_token,
+            owner_pid=args.owner_pid,
+            claimant_runtime_id=args.claimant_runtime_id,
             status=args.status,
         )
     except LeaseRefused as refusal:
