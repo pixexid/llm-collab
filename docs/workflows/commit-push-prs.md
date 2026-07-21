@@ -173,6 +173,13 @@ Include:
 - verification summary
 - risk notes
 - docs-sync confirmation when behavior contracts changed
+- for work that must leave its referenced issue open, use a neutral reference
+  such as `Related #123` or `Related to #123`. Do not place any GitHub closing
+  keyword (`close`, `closes`, `closed`, `fix`, `fixes`, `fixed`, `resolve`,
+  `resolves`, or `resolved`) immediately before the issue reference anywhere
+  in the PR body or a commit message, even inside negated prose. GitHub still
+  interpreted `does not close #135` in PR #153 as a closing reference and
+  auto-closed issue #135 when the PR merged.
 
 ## PR Review Wait Gate
 
