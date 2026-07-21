@@ -18,7 +18,7 @@ from pathlib import Path
 from .paths import LedgerPaths, validate_project_id, validate_registry_token, validate_workspace_id
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 BUSY_TIMEOUT_MS = 5_000
 SYNCHRONOUS_FULL = 2
 MIGRATION_TOOL_VERSION = "llm-collab-ledger/1"
@@ -30,6 +30,13 @@ V1_TABLES = frozenset(
         "project_registry_snapshots",
         "observation_source_registry_snapshots",
         "daemon_instances",
+    }
+)
+V2_TABLES = V1_TABLES | frozenset(
+    {
+        "observations",
+        "observation_checkpoints",
+        "observation_audit",
     }
 )
 
@@ -128,9 +135,135 @@ V1_SQL = (
     ) STRICT
     """,
 )
-MIGRATIONS = ((1, V1_SQL),)
 V1_MIGRATION_CHECKSUM = "sha256:ce236daff444f736e01f3666ed44baf1c3ba17e81215fedb638276aff76b01c7"
 V1_SCHEMA_FINGERPRINT = "sha256:26a856329406e45d22a8fbecdbd769d9c632acae3652d8c72438d228de7cfca2"
+
+V2_SQL = (
+    """
+    CREATE TABLE observations (
+        workspace_id TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        source_id TEXT NOT NULL CHECK (source_id = 'chats_mailbox'),
+        registry_revision TEXT NOT NULL,
+        dedupe_key TEXT NOT NULL
+            CHECK (
+                instr(dedupe_key, char(0)) = 0
+                AND length(CAST(dedupe_key AS BLOB)) = 64
+                AND dedupe_key NOT GLOB '*[^0-9a-f]*'
+            ),
+        path TEXT NOT NULL
+            CHECK (
+                length(path) > 0
+                AND substr(path, 1, 1) != '/'
+                AND substr(path, -1, 1) != '/'
+                AND instr(path, '//') = 0
+                AND instr(path, '\\') = 0
+                AND instr(path, char(0)) = 0
+                AND path != '.'
+                AND path != '..'
+                AND path NOT LIKE '../%'
+                AND path NOT LIKE '%/../%'
+                AND path NOT LIKE '%/..'
+                AND path NOT LIKE './%'
+                AND path NOT LIKE '%/./%'
+                AND path NOT LIKE '%/.'
+            ),
+        content_sha256 TEXT NOT NULL
+            CHECK (
+                instr(content_sha256, char(0)) = 0
+                AND length(CAST(content_sha256 AS BLOB)) = 64
+                AND content_sha256 NOT GLOB '*[^0-9a-f]*'
+            ),
+        byte_size INTEGER NOT NULL
+            CHECK (typeof(byte_size) = 'integer' AND byte_size >= 0),
+        mtime_ns INTEGER NOT NULL
+            CHECK (
+                typeof(mtime_ns) = 'integer'
+                AND mtime_ns BETWEEN -9223372036854775808 AND 9223372036854775807
+            ),
+        resolution_state TEXT NOT NULL DEFAULT 'unresolved'
+            CHECK (resolution_state IN ('unresolved', 'resolved')),
+        observed_at_utc TEXT NOT NULL
+            CHECK (
+                instr(observed_at_utc, char(0)) = 0
+                AND length(CAST(observed_at_utc AS BLOB)) > 0
+            ),
+        resolved_at_utc TEXT,
+        PRIMARY KEY (
+            workspace_id, project_id, source_id, registry_revision, dedupe_key
+        ),
+        FOREIGN KEY (workspace_id, project_id, source_id, registry_revision)
+            REFERENCES observation_source_registry_snapshots
+                (workspace_id, project_id, source_id, registry_revision)
+            ON DELETE RESTRICT,
+        CHECK (
+            (resolution_state = 'unresolved' AND resolved_at_utc IS NULL)
+            OR
+            (
+                resolution_state = 'resolved'
+                AND resolved_at_utc IS NOT NULL
+                AND instr(resolved_at_utc, char(0)) = 0
+                AND length(CAST(resolved_at_utc AS BLOB)) > 0
+            )
+        )
+    ) STRICT
+    """,
+    """
+    CREATE TABLE observation_checkpoints (
+        workspace_id TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        source_id TEXT NOT NULL CHECK (source_id = 'chats_mailbox'),
+        registry_revision TEXT NOT NULL,
+        cursor TEXT NOT NULL,
+        scanned_count INTEGER NOT NULL
+            CHECK (typeof(scanned_count) = 'integer' AND scanned_count BETWEEN 0 AND 2000),
+        written_count INTEGER NOT NULL
+            CHECK (typeof(written_count) = 'integer' AND written_count BETWEEN 0 AND 500),
+        updated_at_utc TEXT NOT NULL
+            CHECK (
+                instr(updated_at_utc, char(0)) = 0
+                AND length(CAST(updated_at_utc AS BLOB)) > 0
+            ),
+        PRIMARY KEY (workspace_id, project_id, source_id, registry_revision),
+        FOREIGN KEY (workspace_id, project_id, source_id, registry_revision)
+            REFERENCES observation_source_registry_snapshots
+                (workspace_id, project_id, source_id, registry_revision)
+            ON DELETE RESTRICT
+    ) STRICT
+    """,
+    """
+    CREATE TABLE observation_audit (
+        workspace_id TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        source_id TEXT NOT NULL CHECK (source_id = 'chats_mailbox'),
+        registry_revision TEXT NOT NULL,
+        audit_id INTEGER NOT NULL CHECK (typeof(audit_id) = 'integer' AND audit_id > 0),
+        action TEXT NOT NULL CHECK (action IN ('reconcile', 'resolve', 'retention')),
+        result TEXT NOT NULL CHECK (result = 'committed'),
+        occurred_at_utc TEXT NOT NULL
+            CHECK (
+                instr(occurred_at_utc, char(0)) = 0
+                AND length(CAST(occurred_at_utc AS BLOB)) > 0
+            ),
+        detail_json TEXT NOT NULL
+            CHECK (
+                instr(detail_json, char(0)) = 0
+                AND length(CAST(detail_json AS BLOB)) BETWEEN 2 AND 4096
+            ),
+        PRIMARY KEY (
+            workspace_id, project_id, source_id, registry_revision, audit_id
+        ),
+        FOREIGN KEY (workspace_id, project_id, source_id, registry_revision)
+            REFERENCES observation_source_registry_snapshots
+                (workspace_id, project_id, source_id, registry_revision)
+            ON DELETE RESTRICT
+    ) STRICT
+    """,
+)
+
+V2_MIGRATION_CHECKSUM = "sha256:338a5d526b6fdea47af667c469897fd38d97a4a2dc8caf90dc5d62c067610e36"
+V2_SCHEMA_FINGERPRINT = "sha256:805aa5ae43c31d85dbe9a84590050b701ddc69cfe1dd225e9c6e67afbd889a7c"
+MIGRATIONS = ((1, V1_SQL), (2, V2_SQL))
 
 
 def _migration_checksum(statements: Sequence[str]) -> str:
@@ -152,6 +285,16 @@ def _v1_schema_fingerprint_from_sql() -> str:
     connection = sqlite3.connect(":memory:", isolation_level=None)
     try:
         for statement in V1_SQL:
+            connection.execute(statement)
+        return _schema_fingerprint(connection)
+    finally:
+        connection.close()
+
+
+def _v2_schema_fingerprint_from_sql() -> str:
+    connection = sqlite3.connect(":memory:", isolation_level=None)
+    try:
+        for statement in (*V1_SQL, *V2_SQL):
             connection.execute(statement)
         return _schema_fingerprint(connection)
     finally:
@@ -502,6 +645,9 @@ class LedgerStore:
             raise MigrationError("ledger is corrupt or unreadable") from exc
         if claimed == 0 and not tables:
             return
+        if claimed == 1:
+            cls._validate_released_v1(connection, paths)
+            return
         cls._validate_schema(connection, paths)
 
     @staticmethod
@@ -515,50 +661,56 @@ class LedgerStore:
 
     @classmethod
     def _validate_schema(cls, connection: sqlite3.Connection, paths: LedgerPaths) -> None:
-        """Fail closed on corrupt, unsupported, or incoherent claimed schema."""
+        """Require the exact latest schema; query-only readers never accept v1."""
         try:
-            if connection.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
-                raise MigrationError("ledger failed integrity_check")
-            if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
-                raise MigrationError("ledger failed foreign_key_check")
+            cls._validate_database_health(connection)
             claimed = connection.execute("PRAGMA user_version").fetchone()[0]
             if claimed != SCHEMA_VERSION:
                 raise MigrationError(
                     f"unsupported ledger schema version {claimed}; expected {SCHEMA_VERSION}"
                 )
-            rows = connection.execute(
-                "SELECT version, migration_checksum, applied_at_utc, tool_version, backup_reference "
-                "FROM schema_migrations ORDER BY version"
-            ).fetchall()
             if _migration_checksum(V1_SQL) != V1_MIGRATION_CHECKSUM:
                 raise MigrationError("released v1 migration checksum is incoherent")
             if _v1_schema_fingerprint_from_sql() != V1_SCHEMA_FINGERPRINT:
                 raise MigrationError("released v1 schema fingerprint is incoherent")
-            if len(rows) != 1 or rows[0][0] != 1:
+            if _migration_checksum(V2_SQL) != V2_MIGRATION_CHECKSUM:
+                raise MigrationError("released v2 migration checksum is incoherent")
+            if _v2_schema_fingerprint_from_sql() != V2_SCHEMA_FINGERPRINT:
+                raise MigrationError("released v2 schema fingerprint is incoherent")
+            rows = cls._migration_rows(connection)
+            if [row[0] for row in rows] != [1, 2]:
                 raise MigrationError("ledger migration metadata is incoherent")
-            _, checksum, applied_at, tool_version, backup_reference = rows[0]
-            backup_match = (
-                re.fullmatch(r"ledger-0-(\d{8}T\d{12}Z)\.sqlite3", backup_reference)
-                if isinstance(backup_reference, str)
-                else None
-            )
-            if (
-                checksum != V1_MIGRATION_CHECKSUM
-                or not isinstance(applied_at, str)
-                or not applied_at
-                or tool_version != MIGRATION_TOOL_VERSION
-                or backup_match is None
-            ):
+            cls._validate_migration_row(rows[0], V1_MIGRATION_CHECKSUM, 0, paths)
+            cls._validate_migration_row(rows[1], V2_MIGRATION_CHECKSUM, 1, paths)
+            actual_tables = cls._table_names(connection)
+            if actual_tables != V2_TABLES:
+                raise MigrationError(
+                    "ledger v2 table set is incoherent: "
+                    f"missing={sorted(V2_TABLES - actual_tables)}, "
+                    f"extra={sorted(actual_tables - V2_TABLES)}"
+                )
+            if _schema_fingerprint(connection) != V2_SCHEMA_FINGERPRINT:
+                raise MigrationError("ledger v2 schema fingerprint is incoherent")
+        except sqlite3.DatabaseError as exc:
+            raise MigrationError("ledger schema is corrupt or incoherent") from exc
+
+    @classmethod
+    def _validate_released_v1(
+        cls, connection: sqlite3.Connection, paths: LedgerPaths
+    ) -> None:
+        """Accept only the exact released v1 long enough for a writer migration."""
+        try:
+            cls._validate_database_health(connection)
+            if connection.execute("PRAGMA user_version").fetchone()[0] != 1:
+                raise MigrationError("ledger is not released schema v1")
+            if _migration_checksum(V1_SQL) != V1_MIGRATION_CHECKSUM:
+                raise MigrationError("released v1 migration checksum is incoherent")
+            if _v1_schema_fingerprint_from_sql() != V1_SCHEMA_FINGERPRINT:
+                raise MigrationError("released v1 schema fingerprint is incoherent")
+            rows = cls._migration_rows(connection)
+            if [row[0] for row in rows] != [1]:
                 raise MigrationError("ledger migration metadata is incoherent")
-            backup_time = datetime.strptime(
-                backup_match.group(1), "%Y%m%dT%H%M%S%fZ"
-            ).replace(tzinfo=timezone.utc)
-            if applied_at != backup_time.isoformat():
-                raise MigrationError("ledger migration metadata is incoherent")
-            backup = paths.backups / backup_reference
-            if backup.is_symlink() or not backup.is_file():
-                raise MigrationError("ledger migration backup reference is incoherent")
-            cls._verify_database(backup)
+            cls._validate_migration_row(rows[0], V1_MIGRATION_CHECKSUM, 0, paths)
             actual_tables = cls._table_names(connection)
             if actual_tables != V1_TABLES:
                 raise MigrationError(
@@ -570,6 +722,55 @@ class LedgerStore:
                 raise MigrationError("ledger v1 schema fingerprint is incoherent")
         except sqlite3.DatabaseError as exc:
             raise MigrationError("ledger schema is corrupt or incoherent") from exc
+
+    @staticmethod
+    def _validate_database_health(connection: sqlite3.Connection) -> None:
+        if connection.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+            raise MigrationError("ledger failed integrity_check")
+        if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
+            raise MigrationError("ledger failed foreign_key_check")
+
+    @staticmethod
+    def _migration_rows(connection: sqlite3.Connection) -> list[tuple[object, ...]]:
+        return connection.execute(
+            "SELECT version, migration_checksum, applied_at_utc, tool_version, backup_reference "
+            "FROM schema_migrations ORDER BY version"
+        ).fetchall()
+
+    @classmethod
+    def _validate_migration_row(
+        cls,
+        row: tuple[object, ...],
+        expected_checksum: str,
+        prior_version: int,
+        paths: LedgerPaths,
+    ) -> None:
+        _version, checksum, applied_at, tool_version, backup_reference = row
+        backup_match = (
+            re.fullmatch(
+                rf"ledger-{prior_version}-(\d{{8}}T\d{{12}}Z)\.sqlite3",
+                backup_reference,
+            )
+            if isinstance(backup_reference, str)
+            else None
+        )
+        if (
+            checksum != expected_checksum
+            or not isinstance(applied_at, str)
+            or not applied_at
+            or tool_version != MIGRATION_TOOL_VERSION
+            or backup_match is None
+        ):
+            raise MigrationError("ledger migration metadata is incoherent")
+        backup_time = datetime.strptime(
+            backup_match.group(1), "%Y%m%dT%H%M%S%fZ"
+        ).replace(tzinfo=timezone.utc)
+        if applied_at != backup_time.isoformat():
+            raise MigrationError("ledger migration metadata is incoherent")
+        backup = paths.backups / backup_reference
+        if backup.is_symlink() or not backup.is_file():
+            raise MigrationError("ledger migration backup reference is incoherent")
+        cls._verify_database(backup)
 
     def _migrate(self, migrations: Sequence[tuple[int, Sequence[str]]]) -> None:
         current = self.schema_version()
@@ -589,7 +790,11 @@ class LedgerStore:
             ).replace(tzinfo=timezone.utc).isoformat()
             try:
                 checksum = _migration_checksum(statements)
-                if version != 1 or checksum != V1_MIGRATION_CHECKSUM:
+                expected_checksum = {
+                    1: V1_MIGRATION_CHECKSUM,
+                    2: V2_MIGRATION_CHECKSUM,
+                }.get(version)
+                if expected_checksum is None or checksum != expected_checksum:
                     raise MigrationError(f"migration {version} does not match its released checksum")
                 self._connection.execute("BEGIN IMMEDIATE")
                 for statement in statements:
@@ -862,6 +1067,520 @@ class LedgerStore:
         ).fetchall()
         keys = ("workspace_id", "project_id", "source_id", "registry_revision", "snapshot_json")
         return [dict(zip(keys, row)) for row in rows]
+
+    def has_registry_snapshot(self, *, workspace_id: str, registry_revision: str) -> bool:
+        self._ensure_thread()
+        if validate_workspace_id(workspace_id) != self.paths.workspace_id:
+            raise ValueError("workspace_id does not own this ledger")
+        return (
+            self._connection.execute(
+                "SELECT 1 FROM workspace_registry_snapshots "
+                "WHERE workspace_id = ? AND registry_revision = ?",
+                (workspace_id, registry_revision),
+            ).fetchone()
+            is not None
+        )
+
+    def observation_checkpoint_cursor(
+        self,
+        *,
+        workspace_id: str,
+        project_id: str,
+        source_id: str,
+        registry_revision: str,
+    ) -> str:
+        self._ensure_thread()
+        self._validate_observation_scope(
+            workspace_id, project_id, source_id, registry_revision
+        )
+        row = self._connection.execute(
+            "SELECT cursor FROM observation_checkpoints "
+            "WHERE workspace_id = ? AND project_id = ? AND source_id = ? "
+            "AND registry_revision = ?",
+            (workspace_id, project_id, source_id, registry_revision),
+        ).fetchone()
+        return "" if row is None else row[0]
+
+    def reconcile_observations(
+        self,
+        *,
+        workspace_id: str,
+        project_id: str,
+        source_id: str,
+        registry_revision: str,
+        candidates: Sequence[Mapping[str, object]],
+        next_cursor: str,
+        scanned_count: int,
+        observed_at_utc: str,
+        write_limit: int = 500,
+        failpoint: Callable[[str], None] | None = None,
+    ) -> dict[str, object]:
+        """Atomically dedupe observations, advance one scoped cursor, and audit."""
+        self._ensure_thread()
+        if self._read_only:
+            raise PermissionError("query-only readers cannot reconcile observations")
+        self._validate_observation_scope(
+            workspace_id, project_id, source_id, registry_revision
+        )
+        if (
+            not isinstance(observed_at_utc, str)
+            or not observed_at_utc
+            or "\x00" in observed_at_utc
+        ):
+            raise ValueError("observed_at_utc is required")
+        if (
+            not isinstance(next_cursor, str)
+            or "\x00" in next_cursor
+            or len(next_cursor.encode("utf-8")) > 4096
+        ):
+            raise ValueError("checkpoint cursor must be bounded text")
+        if (
+            isinstance(scanned_count, bool)
+            or not isinstance(scanned_count, int)
+            or not 0 <= scanned_count <= 2_000
+        ):
+            raise ValueError("one reconciliation may scan at most 2000 source entries")
+        if len(candidates) > scanned_count:
+            raise ValueError("observation candidates exceed the scanned source count")
+        if (
+            isinstance(write_limit, bool)
+            or not isinstance(write_limit, int)
+            or not 1 <= write_limit <= 500
+        ):
+            raise ValueError("one reconciliation may write at most 500 new observations")
+        normalized = [self._validate_observation_candidate(item) for item in candidates]
+
+        processed = scanned_count
+        written = 0
+        cursor = next_cursor
+        self._connection.execute("BEGIN IMMEDIATE")
+        try:
+            for candidate in normalized:
+                result = self._connection.execute(
+                    "INSERT INTO observations "
+                    "(workspace_id, project_id, source_id, registry_revision, dedupe_key, path, "
+                    "content_sha256, byte_size, mtime_ns, resolution_state, observed_at_utc, "
+                    "resolved_at_utc) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'unresolved', ?, NULL) "
+                    "ON CONFLICT (workspace_id, project_id, source_id, registry_revision, dedupe_key) "
+                    "DO NOTHING",
+                    (
+                        workspace_id,
+                        project_id,
+                        source_id,
+                        registry_revision,
+                        candidate["dedupe_key"],
+                        candidate["path"],
+                        candidate["content_sha256"],
+                        candidate["byte_size"],
+                        candidate["mtime_ns"],
+                        observed_at_utc,
+                    ),
+                )
+                written += result.rowcount
+                if written == write_limit:
+                    cursor = candidate["scan_cursor"]
+                    processed = candidate["scan_count"]
+                    break
+            if failpoint is not None:
+                failpoint("after_observations")
+            self._connection.execute(
+                "INSERT INTO observation_checkpoints "
+                "(workspace_id, project_id, source_id, registry_revision, cursor, scanned_count, "
+                "written_count, updated_at_utc) VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT (workspace_id, project_id, source_id, registry_revision) DO UPDATE SET "
+                "cursor = excluded.cursor, scanned_count = excluded.scanned_count, "
+                "written_count = excluded.written_count, updated_at_utc = excluded.updated_at_utc",
+                (
+                    workspace_id,
+                    project_id,
+                    source_id,
+                    registry_revision,
+                    cursor,
+                    processed,
+                    written,
+                    observed_at_utc,
+                ),
+            )
+            if failpoint is not None:
+                failpoint("after_checkpoint")
+            self._insert_observation_audit(
+                workspace_id=workspace_id,
+                project_id=project_id,
+                source_id=source_id,
+                registry_revision=registry_revision,
+                action="reconcile",
+                occurred_at_utc=observed_at_utc,
+                detail={
+                    "cursor_bytes": len(cursor.encode("utf-8")),
+                    "cursor_incomplete": bool(cursor),
+                    "cursor_sha256": hashlib.sha256(cursor.encode("utf-8")).hexdigest(),
+                    "scanned": processed,
+                    "written": written,
+                },
+            )
+            if failpoint is not None:
+                failpoint("after_audit")
+            self._connection.execute("COMMIT")
+        except BaseException:
+            if self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
+            raise
+        return {"cursor": cursor, "scanned": processed, "written": written}
+
+    def resolve_observation(
+        self,
+        *,
+        workspace_id: str,
+        project_id: str,
+        source_id: str,
+        registry_revision: str,
+        dedupe_key: str,
+        resolved_at_utc: str,
+    ) -> bool:
+        self._ensure_thread()
+        if self._read_only:
+            raise PermissionError("query-only readers cannot resolve observations")
+        self._validate_observation_scope(
+            workspace_id, project_id, source_id, registry_revision
+        )
+        self._require_lower_hex(dedupe_key, "dedupe_key")
+        if (
+            not isinstance(resolved_at_utc, str)
+            or not resolved_at_utc
+            or "\x00" in resolved_at_utc
+        ):
+            raise ValueError("resolved_at_utc is required")
+        self._connection.execute("BEGIN IMMEDIATE")
+        try:
+            changed = self._connection.execute(
+                "UPDATE observations SET resolution_state = 'resolved', resolved_at_utc = ? "
+                "WHERE workspace_id = ? AND project_id = ? AND source_id = ? "
+                "AND registry_revision = ? AND dedupe_key = ? AND resolution_state = 'unresolved'",
+                (
+                    resolved_at_utc,
+                    workspace_id,
+                    project_id,
+                    source_id,
+                    registry_revision,
+                    dedupe_key,
+                ),
+            ).rowcount
+            if changed:
+                self._insert_observation_audit(
+                    workspace_id=workspace_id,
+                    project_id=project_id,
+                    source_id=source_id,
+                    registry_revision=registry_revision,
+                    action="resolve",
+                    occurred_at_utc=resolved_at_utc,
+                    detail={"dedupe_key": dedupe_key},
+                )
+            self._connection.execute("COMMIT")
+            return bool(changed)
+        except BaseException:
+            if self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
+            raise
+
+    def prune_resolved_observations(
+        self,
+        *,
+        workspace_id: str,
+        project_id: str,
+        source_id: str,
+        registry_revision: str,
+        resolved_before_utc: str,
+        occurred_at_utc: str,
+        limit: int = 500,
+    ) -> int:
+        self._ensure_thread()
+        if self._read_only:
+            raise PermissionError("query-only readers cannot prune observations")
+        self._validate_observation_scope(
+            workspace_id, project_id, source_id, registry_revision
+        )
+        if not isinstance(resolved_before_utc, str) or not resolved_before_utc:
+            raise ValueError("resolved_before_utc is required")
+        if (
+            not isinstance(occurred_at_utc, str)
+            or not occurred_at_utc
+            or "\x00" in occurred_at_utc
+        ):
+            raise ValueError("occurred_at_utc is required")
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 500:
+            raise ValueError("retention limit must be between 1 and 500")
+        self._connection.execute("BEGIN IMMEDIATE")
+        try:
+            removed = self._connection.execute(
+                "DELETE FROM observations WHERE rowid IN ("
+                "SELECT rowid FROM observations WHERE workspace_id = ? AND project_id = ? "
+                "AND source_id = ? AND registry_revision = ? AND resolution_state = 'resolved' "
+                "AND resolved_at_utc < ? ORDER BY resolved_at_utc LIMIT ?)",
+                (
+                    workspace_id,
+                    project_id,
+                    source_id,
+                    registry_revision,
+                    resolved_before_utc,
+                    limit,
+                ),
+            ).rowcount
+            self._insert_observation_audit(
+                workspace_id=workspace_id,
+                project_id=project_id,
+                source_id=source_id,
+                registry_revision=registry_revision,
+                action="retention",
+                occurred_at_utc=occurred_at_utc,
+                detail={"removed": removed},
+            )
+            self._connection.execute("COMMIT")
+            return removed
+        except BaseException:
+            if self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
+            raise
+
+    def observation_diagnostics(
+        self,
+        *,
+        workspace_id: str,
+        integrity: str | None = None,
+        group_limit: int = 50,
+        audit_limit: int = 200,
+    ) -> dict[str, object]:
+        self._ensure_thread()
+        if validate_workspace_id(workspace_id) != self.paths.workspace_id:
+            raise ValueError("workspace_id does not own this ledger")
+        if group_limit != 50 or audit_limit != 200:
+            raise ValueError("diagnostic limits are fixed at 50 groups and 200 audit rows")
+        group_rows = self._connection.execute(
+            "SELECT project_id, source_id, registry_revision, resolution_state, count(*) "
+            "FROM observations WHERE workspace_id = ? "
+            "GROUP BY project_id, source_id, registry_revision, resolution_state "
+            "ORDER BY project_id, source_id, registry_revision, resolution_state LIMIT 51",
+            (workspace_id,),
+        ).fetchall()
+        audit_rows = self._connection.execute(
+            "SELECT audit_id, project_id, source_id, registry_revision, action, result, "
+            "occurred_at_utc, detail_json FROM observation_audit WHERE workspace_id = ? "
+            "ORDER BY occurred_at_utc DESC, project_id, source_id, registry_revision, "
+            "audit_id DESC LIMIT 201",
+            (workspace_id,),
+        ).fetchall()
+        group_keys = (
+            "project_id",
+            "source_id",
+            "registry_revision",
+            "resolution_state",
+            "count",
+        )
+        audit_keys = (
+            "audit_id",
+            "project_id",
+            "source_id",
+            "registry_revision",
+            "action",
+            "result",
+            "occurred_at_utc",
+            "detail_json",
+        )
+        groups, groups_byte_truncated = self._bounded_diagnostic_rows(
+            group_rows[:50], group_keys, byte_limit=12 * 1024
+        )
+        audit, audit_byte_truncated = self._bounded_diagnostic_rows(
+            audit_rows[:200], audit_keys, byte_limit=24 * 1024
+        )
+        integrity_result = self.integrity_check() if integrity is None else integrity
+        return {
+            "schema_version": self.schema_version(),
+            "integrity": integrity_result,
+            "groups": groups,
+            "groups_returned": len(groups),
+            "groups_truncated": len(group_rows) > 50 or groups_byte_truncated,
+            "audit": audit,
+            "audit_returned": len(audit),
+            "audit_truncated": len(audit_rows) > 200 or audit_byte_truncated,
+        }
+
+    @staticmethod
+    def _bounded_diagnostic_rows(
+        rows: Sequence[Sequence[object]],
+        keys: Sequence[str],
+        *,
+        byte_limit: int,
+    ) -> tuple[list[dict[str, object]], bool]:
+        result: list[dict[str, object]] = []
+        used = 2
+        for row in rows:
+            item = dict(zip(keys, row))
+            encoded = json.dumps(
+                item, ensure_ascii=True, separators=(",", ":"), sort_keys=True
+            ).encode("utf-8")
+            additional = len(encoded) + (1 if result else 0)
+            if used + additional > byte_limit:
+                return result, True
+            result.append(item)
+            used += additional
+        return result, False
+
+    def _validate_observation_scope(
+        self,
+        workspace_id: str,
+        project_id: str,
+        source_id: str,
+        registry_revision: str,
+    ) -> None:
+        if validate_workspace_id(workspace_id) != self.paths.workspace_id:
+            raise ValueError("workspace_id does not own this ledger")
+        validate_project_id(project_id)
+        if source_id != "chats_mailbox":
+            raise ValueError("source_id must be chats_mailbox")
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", registry_revision):
+            raise ValueError("registry_revision must be sha256:<lowercase hex>")
+
+    def _insert_observation_audit(
+        self,
+        *,
+        workspace_id: str,
+        project_id: str,
+        source_id: str,
+        registry_revision: str,
+        action: str,
+        occurred_at_utc: str,
+        detail: Mapping[str, object],
+    ) -> None:
+        """Append bounded metadata only; callers cannot supply raw source content."""
+        if action == "reconcile":
+            if set(detail) != {
+                "cursor_bytes",
+                "cursor_incomplete",
+                "cursor_sha256",
+                "scanned",
+                "written",
+            }:
+                raise ValueError("reconcile audit detail has an invalid field set")
+            cursor_bytes = detail["cursor_bytes"]
+            cursor_incomplete = detail["cursor_incomplete"]
+            cursor_sha256 = detail["cursor_sha256"]
+            scanned = detail["scanned"]
+            written = detail["written"]
+            if type(cursor_bytes) is not int or not 0 <= cursor_bytes <= 4_096:
+                raise ValueError("reconcile audit cursor length is invalid")
+            if type(cursor_incomplete) is not bool:
+                raise ValueError("reconcile audit cursor state is invalid")
+            self._require_lower_hex(cursor_sha256, "cursor_sha256")
+            if type(scanned) is not int or not 0 <= scanned <= 2_000:
+                raise ValueError("reconcile audit scanned count is invalid")
+            if type(written) is not int or not 0 <= written <= 500:
+                raise ValueError("reconcile audit written count is invalid")
+        elif action == "resolve":
+            if set(detail) != {"dedupe_key"}:
+                raise ValueError("resolve audit detail has an invalid field set")
+            self._require_lower_hex(detail["dedupe_key"], "dedupe_key")
+        elif action == "retention":
+            if (
+                set(detail) != {"removed"}
+                or type(detail["removed"]) is not int
+                or not 0 <= detail["removed"] <= 500
+            ):
+                raise ValueError("retention audit detail has an invalid field set")
+        else:
+            raise ValueError("observation audit action is invalid")
+        detail_json = json.dumps(detail, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+        if not 2 <= len(detail_json) <= 4_096:
+            raise ValueError("observation audit detail exceeds its fixed bound")
+        self._connection.execute(
+            "INSERT INTO observation_audit "
+            "(workspace_id, project_id, source_id, registry_revision, audit_id, action, "
+            "result, occurred_at_utc, detail_json) "
+            "SELECT ?, ?, ?, ?, coalesce(max(audit_id), 0) + 1, ?, 'committed', ?, ? "
+            "FROM observation_audit WHERE workspace_id = ? AND project_id = ? "
+            "AND source_id = ? AND registry_revision = ?",
+            (
+                workspace_id,
+                project_id,
+                source_id,
+                registry_revision,
+                action,
+                occurred_at_utc,
+                detail_json,
+                workspace_id,
+                project_id,
+                source_id,
+                registry_revision,
+            ),
+        )
+
+    @classmethod
+    def _validate_observation_candidate(
+        cls, candidate: Mapping[str, object]
+    ) -> dict[str, object]:
+        required = {
+            "dedupe_key",
+            "path",
+            "content_sha256",
+            "byte_size",
+            "mtime_ns",
+            "scan_cursor",
+            "scan_count",
+        }
+        if not isinstance(candidate, Mapping) or set(candidate) != required:
+            raise ValueError("observation candidate has an invalid field set")
+        dedupe_key = cls._require_lower_hex(candidate["dedupe_key"], "dedupe_key")
+        content_sha256 = cls._require_lower_hex(
+            candidate["content_sha256"], "content_sha256"
+        )
+        path = candidate["path"]
+        if not isinstance(path, str):
+            raise ValueError("observation path must be text")
+        parts = path.split("/")
+        if (
+            not path
+            or path.startswith("/")
+            or "\\" in path
+            or any(part in {"", ".", ".."} for part in parts)
+        ):
+            raise ValueError("observation path must be normalized workspace-relative evidence")
+        byte_size = candidate["byte_size"]
+        mtime_ns = candidate["mtime_ns"]
+        scan_cursor = candidate["scan_cursor"]
+        scan_count = candidate["scan_count"]
+        if isinstance(byte_size, bool) or not isinstance(byte_size, int) or byte_size < 0:
+            raise ValueError("byte_size must be a nonnegative integer")
+        if (
+            isinstance(mtime_ns, bool)
+            or not isinstance(mtime_ns, int)
+            or not -(1 << 63) <= mtime_ns <= (1 << 63) - 1
+        ):
+            raise ValueError("mtime_ns must be a signed 64-bit integer")
+        if (
+            not isinstance(scan_cursor, str)
+            or "\x00" in scan_cursor
+            or len(scan_cursor.encode("utf-8")) > 4096
+        ):
+            raise ValueError("candidate scan cursor must be bounded text")
+        if (
+            isinstance(scan_count, bool)
+            or not isinstance(scan_count, int)
+            or not 1 <= scan_count <= 2_000
+        ):
+            raise ValueError("candidate scan count must be between 1 and 2000")
+        return {
+            "dedupe_key": dedupe_key,
+            "path": path,
+            "content_sha256": content_sha256,
+            "byte_size": byte_size,
+            "mtime_ns": mtime_ns,
+            "scan_cursor": scan_cursor,
+            "scan_count": scan_count,
+        }
+
+    @staticmethod
+    def _require_lower_hex(value: object, name: str) -> str:
+        if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+            raise ValueError(f"{name} must be 64 lowercase hexadecimal characters")
+        return value
 
     def checkpoint(self) -> tuple[int, int, int]:
         self._ensure_thread()
