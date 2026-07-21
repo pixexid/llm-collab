@@ -217,6 +217,279 @@ class SessionAutobridgeTest(unittest.TestCase):
         dispatch_again = self.run_cli(root, "dispatch", "--session", "SESSION-RUNTIME")
         self.assertEqual([], dispatch_again["actions"])
 
+    def test_activation_lookup_requires_exact_scope_during_search(self):
+        root = self.make_workspace()
+        self.add_agent(
+            root,
+            {
+                "id": "codex",
+                "display_name": "Codex",
+                "activation": {"type": "cli_session", "watcher_enabled": True},
+            },
+        )
+        self.run_cli(
+            root,
+            "register",
+            "--session",
+            "SESSION-A-WILDCARD",
+            "--agent",
+            "codex",
+            "--mode",
+            "notify",
+            "--status",
+            "parked",
+        )
+        self.run_cli(
+            root,
+            "register",
+            "--session",
+            "SESSION-Z-EXACT",
+            "--agent",
+            "codex",
+            "--project",
+            "amiga",
+            "--chat",
+            "CHAT-EXACT",
+            "--mode",
+            "notify",
+            "--status",
+            "parked",
+        )
+
+        with patch.object(
+            session_autobridge_lib,
+            "SESSIONS_DIR",
+            root / "State" / "session_autobridge" / "sessions",
+        ):
+            ordinary = session_autobridge_lib.find_dispatchable_target_session(
+                agent_id="codex",
+                project_id="amiga",
+                chat_id="CHAT-EXACT",
+                target_session_id=None,
+            )
+            activation = session_autobridge_lib.find_dispatchable_target_session(
+                agent_id="codex",
+                project_id="amiga",
+                chat_id="CHAT-EXACT",
+                target_session_id=None,
+                require_exact_scope=True,
+            )
+
+        self.assertEqual("SESSION-A-WILDCARD", ordinary["session_id"])
+        self.assertEqual("SESSION-Z-EXACT", activation["session_id"])
+
+    def test_activation_lease_is_carried_in_payload_and_resume_prompt(self):
+        session = {
+            "session_id": "SESSION-ACT",
+            "agent_id": "codex",
+            "project_id": "amiga",
+            "chat_id": "CHAT-ACT",
+            "mode": "auto-read",
+            "wake_strategy": "runtime_trigger",
+            "allowed_actions": [],
+            "runtime": {"family": "codex_app", "session_id": "runtime-act"},
+        }
+        message = {
+            "path": "Chats/x/packet.md",
+            "frontmatter": {
+                "from": "claude",
+                "to": "codex",
+                "title": "Activation",
+                "project_id": "amiga",
+                "chat_id": "CHAT-ACT",
+                "related_task": "TASK-97402D",
+            },
+            "body": "Do the lane.",
+            "activation_lease": {
+                "identity": {
+                    "project": "amiga",
+                    "chat": "CHAT-ACT",
+                    "task": "TASK-97402D",
+                    "worktree": "/tmp/lane",
+                    "branch": "codex/gh-1572-runtime-integration",
+                    "target_agent": "codex",
+                },
+                "lease": {
+                    "lease_key": "lease123",
+                    "owner_session_id": "SESSION-ACT",
+                    "fence_token": 2,
+                },
+                "owner_session_id": "SESSION-ACT",
+                "fence_token": 2,
+            },
+        }
+
+        payload = session_autobridge_lib.build_runtime_payload(session, message)
+        prompt = session_autobridge_lib.build_resume_prompt(session, message)
+
+        self.assertEqual(message["activation_lease"], payload["activation_lease"])
+        self.assertIn("activation_fence_token: 2", prompt)
+        self.assertIn("Before mutating protected lane state", prompt)
+
+    def test_activation_assert_refusal_stops_before_protected_runtime_mutations(self):
+        session = {
+            "session_id": "SESSION-ACT",
+            "agent_id": "codex",
+            "project_id": "amiga",
+            "chat_id": "CHAT-ACT",
+            "mode": "auto-read",
+            "wake_strategy": "runtime_trigger",
+            "runtime": {"family": "codex_app", "session_id": "runtime-act"},
+        }
+        message = {
+            "path": "Chats/x/packet.md",
+            "frontmatter": {
+                "from": "claude",
+                "to": "codex",
+                "title": "Activation",
+                "project_id": "amiga",
+                "chat_id": "CHAT-ACT",
+            },
+            "body": "Do the lane.",
+            "activation_lease": {
+                "identity": {
+                    "project": "amiga",
+                    "chat": "CHAT-ACT",
+                    "task": "TASK-97402D",
+                    "worktree": "/tmp/lane",
+                    "branch": "codex/gh-1572-runtime-integration",
+                    "target_agent": "codex",
+                },
+                "lease": {"lease_key": "lease123"},
+                "owner_session_id": "SESSION-ACT",
+                "fence_token": 2,
+            },
+        }
+        events: list[dict] = []
+
+        with (
+            patch.object(session_autobridge_lib, "load_session", return_value=session),
+            patch.object(session_autobridge_lib, "session_is_dispatchable", return_value=(True, "ok")),
+            patch.object(session_autobridge_lib, "matching_unread_messages", return_value=[message]),
+            patch.object(session_autobridge_lib, "processed_messages", return_value=set()),
+            patch.object(session_autobridge_lib, "message_targets_session", return_value=(True, "ok")),
+            patch.object(session_autobridge_lib, "claim_message_activation", return_value=(True, {"event": "activation_claimed"})),
+            patch.object(session_autobridge_lib, "should_skip_for_loop_protection", return_value=(False, "ok")),
+            patch.object(session_autobridge_lib, "resolve_effective_action", return_value=("runtime_trigger", "runtime_command_available")),
+            patch.object(
+                session_autobridge_lib,
+                "activation_fenced_mutation",
+                return_value=(
+                    False,
+                    {
+                        "event": "activation_assert_refused",
+                        "boundary": "operator_turn_summary",
+                        "reason": "stale_fence_token",
+                    },
+                    None,
+                ),
+            ),
+            patch.object(session_autobridge_lib, "append_event", side_effect=lambda _sid, event: events.append(event)),
+            patch.object(session_autobridge_lib, "write_operator_turn_summary") as write_summary,
+            patch.object(session_autobridge_lib, "execute_runtime_trigger") as runtime_trigger,
+            patch.object(session_autobridge_lib, "mark_message_processed") as mark_processed,
+        ):
+            result = session_autobridge_lib.dispatch_session("SESSION-ACT")
+
+        self.assertEqual(1, len(result["actions"]))
+        self.assertEqual("stale_fence_token", result["actions"][0]["reason"])
+        write_summary.assert_not_called()
+        runtime_trigger.assert_not_called()
+        mark_processed.assert_not_called()
+        self.assertTrue(any(event.get("event") == "message_dispatched" for event in events))
+
+    def test_malformed_activation_dispatch_never_downgrades_or_marks_processed(self):
+        session = {
+            "session_id": "SESSION-ACT",
+            "agent_id": "codex",
+            "project_id": "amiga",
+            "chat_id": "CHAT-ACT",
+            "mode": "auto-read",
+            "wake_strategy": "runtime_trigger",
+        }
+        malformed = {
+            "path": "Chats/x/malformed.md",
+            "frontmatter": {
+                "from": "claude",
+                "to": "codex",
+                "title": "Malformed activation",
+                "project_id": "amiga",
+                "chat_id": "CHAT-ACT",
+                "activation": True,
+            },
+            "body": "missing identity",
+        }
+        events: list[dict] = []
+
+        with (
+            patch.object(session_autobridge_lib, "load_session", return_value=session),
+            patch.object(session_autobridge_lib, "session_is_dispatchable", return_value=(True, "ok")),
+            patch.object(session_autobridge_lib, "matching_unread_messages", return_value=[malformed]),
+            patch.object(session_autobridge_lib, "processed_messages", return_value=set()),
+            patch.object(session_autobridge_lib, "message_targets_session", return_value=(True, "ok")),
+            patch.object(session_autobridge_lib, "append_event", side_effect=lambda _sid, event: events.append(event)),
+            patch.object(session_autobridge_lib, "resolve_effective_action") as resolve_action,
+            patch.object(session_autobridge_lib, "mark_message_processed") as mark_processed,
+        ):
+            result = session_autobridge_lib.dispatch_session("SESSION-ACT")
+
+        self.assertEqual([], result["actions"])
+        self.assertEqual("activation_refused", events[-1]["event"])
+        self.assertEqual("malformed_activation", events[-1]["reason"])
+        resolve_action.assert_not_called()
+        mark_processed.assert_not_called()
+
+    def test_concurrent_activation_loser_remains_unprocessed(self):
+        session = {
+            "session_id": "SESSION-ACT",
+            "agent_id": "codex",
+            "project_id": "amiga",
+            "chat_id": "CHAT-ACT",
+            "mode": "auto-read",
+            "wake_strategy": "runtime_trigger",
+        }
+        message = {
+            "path": "Chats/x/packet.md",
+            "frontmatter": {
+                "from": "claude",
+                "to": "codex",
+                "title": "Activation",
+                "project_id": "amiga",
+                "chat_id": "CHAT-ACT",
+            },
+            "body": "Do the lane.",
+        }
+        events: list[dict] = []
+
+        with (
+            patch.object(session_autobridge_lib, "load_session", return_value=session),
+            patch.object(session_autobridge_lib, "session_is_dispatchable", return_value=(True, "ok")),
+            patch.object(session_autobridge_lib, "matching_unread_messages", return_value=[message]),
+            patch.object(session_autobridge_lib, "processed_messages", return_value=set()),
+            patch.object(session_autobridge_lib, "message_targets_session", return_value=(True, "ok")),
+            patch.object(
+                session_autobridge_lib,
+                "claim_message_activation",
+                return_value=(
+                    False,
+                    {
+                        "event": "activation_refused",
+                        "message_path": "Chats/x/packet.md",
+                        "reason": "same_session_different_claimant",
+                    },
+                ),
+            ),
+            patch.object(session_autobridge_lib, "append_event", side_effect=lambda _sid, event: events.append(event)),
+            patch.object(session_autobridge_lib, "resolve_effective_action") as resolve_action,
+            patch.object(session_autobridge_lib, "mark_message_processed") as mark_processed,
+        ):
+            result = session_autobridge_lib.dispatch_session("SESSION-ACT")
+
+        self.assertEqual([], result["actions"])
+        self.assertEqual("same_session_different_claimant", events[-1]["reason"])
+        resolve_action.assert_not_called()
+        mark_processed.assert_not_called()
+
     def test_runtime_trigger_derives_resume_command_from_registered_session(self):
         fixtures = [
             ("codex_app", "LLM_COLLAB_CODEX_BIN", ["exec", "resume"], ["--json", "--skip-git-repo-check"]),

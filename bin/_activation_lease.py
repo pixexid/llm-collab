@@ -13,7 +13,7 @@ import json
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, TypeVar
 
 from _activation_identity import IDENTITY_FIELDS, lease_identity, lease_key
 from _helpers import utc_iso, write_file
@@ -23,6 +23,7 @@ ACTIVATION_LEASES_DIR = AUTOBRIDGE_ROOT / "activation_leases"
 ACTIVATION_GRANT_LOCK = ACTIVATION_LEASES_DIR / ".claim-grant.lock"
 LIVE_SESSION_STATUSES = {"active", "parked"}
 CONTENTION_ERRNOS = {errno.EAGAIN, errno.EWOULDBLOCK, errno.EACCES}
+T = TypeVar("T")
 
 
 class LeaseRefused(Exception):
@@ -610,6 +611,29 @@ def assert_lease(
     if lease is None:
         raise LeaseRefused("no_lease_for_identity")
     return lease
+
+
+def with_lease_fence(
+    identity: dict[str, str],
+    *,
+    owner_session_id: str,
+    fence_token: int,
+    mutation: Callable[[], T],
+    owner_pid: int | None = None,
+    claimant_runtime_id: str | None = None,
+) -> T:
+    """Hold the per-identity lease lock through one protected mutation."""
+    with _ClaimLock(identity):
+        lease = validate_lease_and_claimant(
+            identity,
+            owner_session_id=owner_session_id,
+            fence_token=fence_token,
+            owner_pid=owner_pid,
+            claimant_runtime_id=claimant_runtime_id,
+        )
+        if lease is None:
+            raise LeaseRefused("no_lease_for_identity")
+        return mutation()
 
 
 def release_lease(

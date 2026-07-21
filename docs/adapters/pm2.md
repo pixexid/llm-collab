@@ -69,6 +69,18 @@ and status matches the roster, so reboot state preserves the reconciled
 configuration. Do not treat a healthy stale PM2 process as proof that current
 routing policy authorizes it.
 
+Activation cleanup uses PM2 state as a preservation boundary. Before an
+activation lease claim, the runtime may audit recurring `watch_inbox.py` pollers
+for the same activation identity; any PID returned by `pm2 jlist` is treated as
+an authoritative registered watcher and is preserved, not signaled. Only
+unregistered matching pollers may be cleaned, and then only with verified
+SIGTERM/SIGKILL exit proof. If the PM2 binary is unavailable, `pm2 jlist` fails
+or times out, PM2 emits invalid/non-list JSON, cleanup is report-only, or
+termination cannot be verified, the activation claim refuses rather than
+mutating inbox or lease state. Tests for this path must use
+`LLM_COLLAB_PS_FIXTURE`; fixture cleanup simulates termination and never signals
+real PIDs.
+
 ---
 
 ## Commands

@@ -27,8 +27,13 @@ require_python()
 
 import argparse
 import json
+import os
+from datetime import datetime
 
 sys.path.insert(0, str(Path(__file__).parent))
+from _activation_cleanup import claim_activation_lease
+from _activation_identity import classify_activation, lease_key
+from _activation_lease import LeaseRefused, load_lease, owner_summary, pid_from_env, runtime_id_from_env
 from _helpers import (
     ROOT,
     agent_ids,
@@ -36,9 +41,10 @@ from _helpers import (
     load_agent_inbox,
     mark_messages_read,
     parse_frontmatter,
-    CHATS_DIR,
+    now_utc,
+    utc_iso,
 )
-from _session_autobridge import discover_runtime_session
+from _session_autobridge import discover_runtime_session, load_session, save_session
 from session_autobridge import register_session
 
 
@@ -56,6 +62,11 @@ def parse_args():
         help="Explicitly target every project (only valid with --mark-all-read)",
     )
     p.add_argument("--chat", default=None, help="Filter by chat substring")
+    p.add_argument(
+        "--packet",
+        default=None,
+        help="Select exactly one packet by basename or relative path across read+unread messages",
+    )
     p.add_argument(
         "--mark-all-read",
         action="store_true",
@@ -81,6 +92,8 @@ def parse_args():
         incompatible = []
         if args.chat is not None:
             incompatible.append("--chat")
+        if args.packet is not None:
+            incompatible.append("--packet")
         if args.show_all:
             incompatible.append("--all")
         if args.peek:
@@ -166,12 +179,153 @@ def load_all_messages(agent_id: str) -> list[dict]:
     return messages
 
 
-def filter_messages(messages: list[dict], project: str | None, chat: str | None) -> list[dict]:
+def filter_messages(
+    messages: list[dict],
+    project: str | None,
+    chat: str | None,
+    packet: str | None = None,
+) -> list[dict]:
     if project:
         messages = [m for m in messages if m["frontmatter"].get("project_id") == project]
     if chat:
         messages = [m for m in messages if chat.lower() in m["path"].lower()]
+    if packet:
+        packet = packet.strip()
+        if "/" in packet:
+            messages = [m for m in messages if m["path"] == packet]
+        else:
+            messages = [m for m in messages if Path(m["path"]).name == packet]
     return messages
+
+
+def packet_selection_error(args, messages: list[dict]) -> None:
+    payload = {
+        "error": "packet_selection_not_unique",
+        "packet": args.packet,
+        "matches": [message["path"] for message in messages],
+    }
+    if args.json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print(
+            f"[activation] refused: --packet {args.packet!r} matched "
+            f"{len(messages)} messages; expected exactly one.",
+            file=sys.stderr,
+        )
+        for path in payload["matches"]:
+            print(f"  - {path}", file=sys.stderr)
+    sys.exit(75)
+
+
+def activation_reader_runtime_id() -> str | None:
+    return runtime_id_from_env()
+
+
+def activation_reader_pid() -> int | None:
+    return pid_from_env() or os.getpid()
+
+
+def activation_reader_session_id(args, identity: dict[str, str]) -> str:
+    if args.session:
+        return args.session
+    runtime_id = activation_reader_runtime_id()
+    suffix = runtime_id or f"pid-{activation_reader_pid()}"
+    return f"SESSION-activation-{lease_key(identity)}-{str(suffix)[:24]}"
+
+
+def ensure_reader_session(
+    session_id: str,
+    agent_id: str,
+    identity: dict[str, str],
+    *,
+    runtime_id: str | None,
+) -> dict:
+    try:
+        return load_session(session_id)
+    except FileNotFoundError:
+        expires = now_utc().timestamp() + 6 * 60 * 60
+        payload = {
+            "session_id": session_id,
+            "agent_id": agent_id,
+            "project_id": identity["project"],
+            "chat_id": identity["chat"],
+            "mode": "manual",
+            "status": "parked",
+            "wake_strategy": "none",
+            "lease_owner": agent_id,
+            "lease_expires_utc": datetime.fromtimestamp(
+                expires, tz=now_utc().tzinfo
+            ).isoformat(timespec="seconds"),
+            "allowed_actions": [],
+            "runtime": (
+                {
+                    "family": "reader",
+                    "session_id": runtime_id,
+                    "session_source": "activation_reader_env",
+                }
+                if runtime_id
+                else {}
+            ),
+            "activation_identity": identity,
+            "ephemeral_reader": True,
+            "created_utc": utc_iso(),
+        }
+        save_session(payload)
+        return payload
+
+
+def gate_activation_message(args, msg: dict, *, consume: bool) -> dict | None:
+    kind, detail = classify_activation(msg["frontmatter"], target_agent=args.me)
+    if kind == "none":
+        return None
+    if kind == "malformed":
+        return {
+            "authorized": False,
+            "reason": "malformed_activation",
+            "detail": detail,
+        }
+    identity = detail or {}
+    existing = None
+    try:
+        existing_lease = load_lease(identity)
+        existing = owner_summary(existing_lease) if existing_lease else None
+    except Exception as exc:
+        existing = {"error": exc.__class__.__name__}
+    if not consume:
+        return {
+            "authorized": False,
+            "reason": "peek_only",
+            "identity": identity,
+            "owner": existing,
+        }
+
+    runtime_id = activation_reader_runtime_id()
+    owner_pid = None if runtime_id else activation_reader_pid()
+    session_id = activation_reader_session_id(args, identity)
+    ensure_reader_session(session_id, args.me, identity, runtime_id=runtime_id)
+    try:
+        claim = claim_activation_lease(
+            identity,
+            owner_session_id=session_id,
+            owner_pid=owner_pid,
+            claimant_runtime_id=runtime_id,
+            takeover=True,
+        )
+    except LeaseRefused as exc:
+        return {
+            "authorized": False,
+            "reason": exc.reason,
+            "identity": identity,
+            "owner": exc.owner or existing,
+        }
+    return {
+        "authorized": True,
+        "reason": "claimed",
+        "identity": identity,
+        "lease": claim["lease"],
+        "fence_token": claim["fence_token"],
+        "poller_audit": claim["poller_audit"],
+    }
 
 
 UNSCOPED_PROJECT_BUCKET = "<unscoped-or-missing-project>"
@@ -219,19 +373,33 @@ def mark_all_read(args) -> dict:
         messages = filter_messages(get_unread_messages(args.me), args.project, None)
 
     marked_by_project: dict[str, int] = {}
+    held_activation = 0
+    held_paths: list[str] = []
+    markable: list[dict] = []
     for message in messages:
+        if not message.get("missing_message"):
+            kind, _ = classify_activation(message["frontmatter"], target_agent=args.me)
+            if kind != "none":
+                held_activation += 1
+                held_paths.append(message["path"])
+                continue
+        markable.append(message)
         if message.get("missing_message"):
             bucket = MISSING_MESSAGE_BUCKET
         else:
             bucket = project_bucket(message["frontmatter"])
         marked_by_project[bucket] = marked_by_project.get(bucket, 0) + 1
 
-    paths = [message["path"] for message in messages]
+    paths = [message["path"] for message in markable]
     mark_messages_read(args.me, paths)
-    return {
+    result = {
         "marked_read": len(paths),
         "marked_read_by_project": dict(sorted(marked_by_project.items())),
     }
+    if held_activation:
+        result["held_activation"] = held_activation
+        result["held_activation_paths"] = held_paths
+    return result
 
 
 def format_message(msg: dict, index: int) -> str:
@@ -257,6 +425,14 @@ def format_message(msg: dict, index: int) -> str:
     if fm.get("supersedes_session_id"):
         lines.append(f"  Supersedes: {fm['supersedes_session_id']}")
     lines.append(f"  Sent:     {fm.get('sent_utc', '?')}")
+    activation_gate = msg.get("activation_gate")
+    if activation_gate:
+        lines.append(f"  Activation Gate: {activation_gate.get('reason')}")
+        if activation_gate.get("fence_token") is not None:
+            lines.append(f"  Activation Fence: {activation_gate['fence_token']}")
+        owner = activation_gate.get("owner") or activation_gate.get("lease")
+        if owner:
+            lines.append(f"  Activation Owner: {json.dumps(owner, sort_keys=True)}")
     lines.append("")
     lines.append(msg["body"])
     lines.append("")
@@ -278,13 +454,18 @@ def main():
 
     published_runtime = publish_runtime_identity(args)
 
-    if args.show_all:
+    if args.packet:
+        messages = load_all_messages(args.me)
+    elif args.show_all:
         messages = load_all_messages(args.me)
     else:
         messages = get_unread_messages(args.me)
 
-    messages = filter_messages(messages, args.project, args.chat)
-    messages = messages[: args.limit]
+    messages = filter_messages(messages, args.project, args.chat, args.packet)
+    if args.packet and len(messages) != 1:
+        packet_selection_error(args, messages)
+    if not args.packet:
+        messages = messages[: args.limit]
 
     if not messages:
         if args.json_output:
@@ -293,7 +474,31 @@ def main():
             print(f"[inbox] No {'messages' if args.show_all else 'unread messages'} for {args.me}.")
         return
 
-    shown_paths = [m["path"] for m in messages]
+    consume = not args.peek and not args.show_all
+    refused_gates: list[dict] = []
+    for message in messages:
+        gate = gate_activation_message(args, message, consume=consume)
+        if gate is not None:
+            message["activation_gate"] = gate
+            if consume and not gate.get("authorized"):
+                refused_gates.append({"path": message["path"], **gate})
+
+    if refused_gates:
+        payload = {"activation_refused": refused_gates, "messages": messages}
+        if args.json_output:
+            print(json.dumps(payload, indent=2, sort_keys=True))
+        else:
+            for gate in refused_gates:
+                print(
+                    f"[activation] refused {gate['path']}: {gate.get('reason')}",
+                    file=sys.stderr,
+                )
+                owner = gate.get("owner")
+                if owner:
+                    print(f"  owner: {json.dumps(owner, sort_keys=True)}", file=sys.stderr)
+        sys.exit(75)
+
+    shown_paths = [m["path"] for m in messages if not m.get("read")]
 
     if args.json_output:
         payload: dict[str, object] = {"messages": messages}
@@ -312,7 +517,7 @@ def main():
         for i, msg in enumerate(messages):
             print(format_message(msg, i))
 
-    if not args.peek and not args.show_all:
+    if consume:
         mark_messages_read(args.me, shown_paths)
 
 

@@ -213,12 +213,51 @@ unexpired lease records are structurally invalid unless `worktree_realpath`,
 `lease_key`, `owner_session_id`, and `status` are all present non-null strings.
 During alias enumeration, active unexpired lease records are also invalid unless
 the payload `lease_key` matches the filename-derived key and the payload
-`identity` hashes back to that same key; this semantic binding must stay in
-place before GH-1572 enables activation leases.
+`identity` hashes back to that same key; this semantic binding is required by
+the runtime activation gate.
 Claim, assert, and release route existing-lease authority through one shared
 validation entry point covering structural validity, lease-key and identity
 binding, session liveness and binding, claimant runtime/PID binding, PID
 liveness, fence, and lease expiry.
+
+For activation packets delivered by `deliver.py --activation`, the packet body
+contains the exact claim command:
+
+```bash
+python3 bin/inbox.py --me <agent> --project <project> --chat <chat> --packet <packet-name>
+```
+
+`--packet` searches the recipient's read+unread inbox union and must match
+exactly one packet. Ambiguous or missing selectors exit 75 before any inbox
+mutation. The first successful reader claims the lease, prints the owner/fence,
+and only then marks the packet read. A later reader exits 75 with the current
+owner while leaving the packet state unchanged. `--mark-all-read` may clear
+ordinary stale mail and missing pointers, but it holds existing activation
+packets.
+
+Runtime dispatch performs the same activation classification before any
+loop-protection skip or processed-message mutation. Malformed activation
+packets and concurrent-loss refusals remain unread/unprocessed. A successful
+dispatch carries the activation identity and fence into the runtime payload and
+resume prompt. Dispatcher claims bind both runtime id and dispatcher process
+pid. Each protected filesystem/process boundary then runs inside a lease-held
+mutation guard: acquire the per-identity claim lock, validate exact
+owner/runtime/pid/fence, perform the mutation while the lock is held, then
+release. Protected boundaries include turn summaries, runtime triggers, relay
+prompts, UI refreshes, loop-protection processed writes, and final
+processed-message writes. A one-time preflight assertion is not enough.
+Stale-fence refusal at the boundary stops the packet and leaves it unprocessed;
+a dead predecessor process can be replaced only by a successor claim with a
+newer fence.
+
+Activation cleanup is deliberately conservative. Before a claim, stale recurring
+pollers for the same activation identity are audited. PM2 `jlist` PIDs are
+preserved as authoritative watcher processes. Unregistered matching pollers must
+be terminated and verified gone; report-only, unverified, or audit-unavailable
+results refuse the claim. Matching a chat-id poller also requires `--me` for the
+target agent, so a different agent watching the same chat is never terminated.
+Tests must use `LLM_COLLAB_PS_FIXTURE`; fixture cleanup simulates termination
+and never signals real PIDs.
 
 ## Inspect Bindings
 
@@ -309,12 +348,14 @@ The implemented behavior is narrower:
 - later watcher passes consider the unread message again
 - a later successful runtime result emits `autobridge_consumed` and moves the
   message to `read`
+- activation packets add a lease gate and mutation-time fence assertions, but
+  they do not create a general busy queue
 
 Because a transport failure may occur after runtime acceptance, an automatic
 retry is not a proven exactly-once contract. Use disposable sessions for tests
 and do not target an active operator thread. Transactional busy deferral,
-coalescing, leases/fencing, and ambiguous-delivery reconciliation belong to the
-planned [Thread Event Runner](thread-event-runner-rfc.md), not this provisional
+coalescing, and broad ambiguous-delivery reconciliation belong to the planned
+[Thread Event Runner](thread-event-runner-rfc.md), not this provisional
 autobridge.
 
 If a message is intentionally abandoned, clear it explicitly by marking it read:
