@@ -14,10 +14,15 @@ from __future__ import annotations
 import json
 import os
 import sys
+import tempfile
 from collections.abc import Callable
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from llm_collab.ledger.paths import generate_workspace_id, validate_workspace_id
 
 
 def prompt(
@@ -68,6 +73,71 @@ def write_file(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content)
     print(f"  ✓ {path.relative_to(ROOT)}")
+
+
+def _write_private_file_exclusive(path: Path, content: bytes) -> None:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(path, flags, 0o600)
+    try:
+        with os.fdopen(fd, "wb", closefd=False) as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except BaseException:
+        path.unlink(missing_ok=True)
+        raise
+    finally:
+        os.close(fd)
+
+
+def _atomic_write_private_json(path: Path, payload: dict) -> None:
+    fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    temp_path = Path(temp_name)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8", closefd=False) as handle:
+            json.dump(payload, handle, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.close(fd)
+        fd = -1
+        os.replace(temp_path, path)
+        directory_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        temp_path.unlink(missing_ok=True)
+
+
+def add_workspace_id() -> str:
+    """Atomically add, but never replace, the identity in an existing config."""
+    config_file = ROOT / "collab.config.json"
+    if config_file.is_symlink() or not config_file.is_file():
+        raise RuntimeError(f"existing regular config required: {config_file}")
+    original = config_file.read_bytes()
+    try:
+        config = json.loads(original)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"invalid JSON in {config_file}") from exc
+    if not isinstance(config, dict):
+        raise RuntimeError(f"config must contain one JSON object: {config_file}")
+    if "workspace_id" in config:
+        raise RuntimeError("workspace_id already exists; refusing to overwrite or rotate it")
+
+    backup = config_file.with_name(config_file.name + ".pre-workspace-id.bak")
+    _write_private_file_exclusive(backup, original)
+    workspace_id = generate_workspace_id()
+    config["workspace_id"] = workspace_id
+    _atomic_write_private_json(config_file, config)
+    print(f"Added workspace_id {workspace_id}; backup: {backup}")
+    return workspace_id
 
 
 def build_identity_md(agent: dict, workspace_name: str, all_agent_ids: list[str], projects: list[dict]) -> str:
@@ -606,6 +676,7 @@ def main(*, input_fn: Callable[[str], str] | None = None):
     projects_file = ROOT / "projects.json"
     allow_new_release_closure = not (config_file.exists() or projects_file.exists())
     reinitialize = config_file.exists()
+    existing_workspace_id = None
     if reinitialize:
         if not yn(
             "collab.config.json already exists. Reinitialize?",
@@ -614,6 +685,14 @@ def main(*, input_fn: Callable[[str], str] | None = None):
         ):
             print("Aborted.")
             sys.exit(0)
+        try:
+            existing_config = json.loads(config_file.read_bytes())
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"invalid JSON in {config_file}; refusing to rotate workspace identity") from exc
+        if not isinstance(existing_config, dict):
+            raise RuntimeError(f"config must contain one JSON object: {config_file}")
+        if "workspace_id" in existing_config:
+            existing_workspace_id = validate_workspace_id(existing_config["workspace_id"])
 
     print("\n[Workspace Config]\n")
     workspace_name = prompt(
@@ -633,8 +712,10 @@ def main(*, input_fn: Callable[[str], str] | None = None):
     )
     poll_interval = prompt("Inbox poll interval in seconds", default="15", input_fn=input_fn)
     notifications = yn("Enable desktop notifications?", default=True, input_fn=input_fn)
+    workspace_id = existing_workspace_id or generate_workspace_id()
 
     _local_config = {
+        "workspace_id": workspace_id,
         "workspace_name": workspace_name,
         "projects_root": projects_root,
         "project_state_root": project_state_root,
@@ -643,6 +724,7 @@ def main(*, input_fn: Callable[[str], str] | None = None):
     }
 
     config = {
+        "workspace_id": workspace_id,
         "workspace_name": workspace_name,
         "schema_version": 2,
         "projects_root": projects_root,
@@ -710,5 +792,21 @@ def main(*, input_fn: Callable[[str], str] | None = None):
     print("Done. See docs/getting-started.md for the full workflow.\n")
 
 
+def cli(argv: list[str] | None = None) -> None:
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Initialize an llm-collab workspace")
+    parser.add_argument(
+        "--add-workspace-id",
+        action="store_true",
+        help="non-destructively add workspace_id to an existing collab.config.json",
+    )
+    args = parser.parse_args(argv)
+    if args.add_workspace_id:
+        add_workspace_id()
+    else:
+        main()
+
+
 if __name__ == "__main__":
-    main()
+    cli()
