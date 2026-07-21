@@ -871,6 +871,11 @@ class LedgerStore:
         self._secure_sqlite_files(self.paths.ledger, main_pin=self._database_pin)
         return result
 
+    @property
+    def owns_writer_lock(self) -> bool:
+        self._ensure_thread()
+        return not self._read_only and self._writer_lock is not None and not self._closed
+
     def close(self) -> None:
         if threading.get_ident() != self._thread_id:
             raise sqlite3.ProgrammingError("ledger connections may not be reused across threads")

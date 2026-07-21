@@ -21,6 +21,14 @@ fi
 script="$1"
 shift
 
+if [[ "$script" == "daemon" ]]; then
+  set -- daemon "$@"
+  script="llm_collabd.py"
+elif [[ "$script" == "doctor" ]]; then
+  set -- doctor "$@"
+  script="llm_collabd.py"
+fi
+
 if [[ "$script" != *.py ]]; then
   script="${script}.py"
 fi
