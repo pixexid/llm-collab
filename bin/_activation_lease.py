@@ -198,8 +198,6 @@ def _session_expires_dead(record: dict[str, Any]) -> bool:
 
 def owner_is_live(lease: dict[str, Any]) -> bool | None:
     pid_alive = process_alive(lease.get("owner_pid"))
-    if pid_alive is True:
-        return True
 
     record = owner_session_record(str(lease.get("owner_session_id")))
     if record is None:
@@ -208,6 +206,8 @@ def owner_is_live(lease: dict[str, Any]) -> bool | None:
         return False
     if _session_expires_dead(record):
         return False
+    if pid_alive is True:
+        return True
     if pid_alive is False:
         return False
     return True
@@ -245,6 +245,11 @@ def _resolve_claimant(
             {"detail": "--owner-pid must be a positive process id"},
         )
     pid_live = process_alive(pid)
+    if pid is not None and pid_live is False:
+        raise LeaseRefused(
+            "owner_pid_not_live",
+            {"detail": "--owner-pid must name a live process"},
+        )
     if runtime_id:
         return runtime_id, pid
     if pid is not None and pid_live is True:
