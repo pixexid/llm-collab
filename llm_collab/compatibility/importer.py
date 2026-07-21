@@ -62,7 +62,10 @@ def _file_flags() -> int:
     nofollow = getattr(os, "O_NOFOLLOW", None)
     if nofollow is None:
         raise LegacyImportError("O_NOFOLLOW is required for legacy provenance import")
-    return os.O_RDONLY | nofollow | getattr(os, "O_CLOEXEC", 0)
+    nonblock = getattr(os, "O_NONBLOCK", None)
+    if nonblock is None:
+        raise LegacyImportError("O_NONBLOCK is required for legacy provenance import")
+    return os.O_RDONLY | nofollow | nonblock | getattr(os, "O_CLOEXEC", 0)
 
 
 def _identity(status: os.stat_result) -> tuple[int, int, int, int, int, int]:
@@ -91,15 +94,19 @@ def _open_optional_directory(
     return fd, _directory_identity(os.fstat(fd))
 
 
-def _json_names(directory_fd: int, remaining: int) -> tuple[str, ...]:
+def _json_names(directory_fd: int, remaining: int) -> tuple[tuple[str, ...], int]:
     names = []
+    scanned = 0
     with os.scandir(directory_fd) as entries:
         for entry in entries:
+            if scanned == remaining:
+                raise LegacyImportError(
+                    "legacy source set exceeds 5000 directory entries"
+                )
+            scanned += 1
             name = entry.name
             if not name.endswith(".json"):
                 continue
-            if len(names) == remaining:
-                raise LegacyImportError("legacy source set exceeds 5000 files")
             try:
                 name.encode("utf-8")
             except UnicodeEncodeError as exc:
@@ -107,7 +114,7 @@ def _json_names(directory_fd: int, remaining: int) -> tuple[str, ...]:
             if not name or name in {".", ".."} or "/" in name or "\\" in name or "\x00" in name:
                 raise LegacyImportError("legacy source filename is unsafe")
             names.append(name)
-    return tuple(sorted(names))
+    return tuple(sorted(names)), scanned
 
 
 def _revalidate_root(
@@ -252,16 +259,16 @@ def import_current_provenance(
                 if bridge_fd is None:
                     directory_fd, directory_identity = None, None
                     names = ()
+                    scanned = 0
                 else:
                     directory_fd, directory_identity = _open_optional_directory(
                         bridge_fd, directory_name, stack
                     )
-                    names = (
-                        ()
-                        if directory_fd is None
-                        else _json_names(directory_fd, remaining)
-                    )
-                remaining -= len(names)
+                    if directory_fd is None:
+                        names, scanned = (), 0
+                    else:
+                        names, scanned = _json_names(directory_fd, remaining)
+                remaining -= scanned
                 snapshots.append(
                     (
                         source_family,
@@ -271,6 +278,7 @@ def import_current_provenance(
                         directory_fd,
                         directory_identity,
                         names,
+                        scanned,
                     )
                 )
 
@@ -283,6 +291,7 @@ def import_current_provenance(
                 directory_fd,
                 _directory_identity_value,
                 names,
+                _scanned,
             ) in snapshots:
                 if directory_fd is None:
                     continue
@@ -326,6 +335,7 @@ def import_current_provenance(
                     directory_fd,
                     directory_identity,
                     names,
+                    scanned,
                 ) in snapshots:
                     _revalidate_component(
                         bridge_fd,
@@ -335,7 +345,10 @@ def import_current_provenance(
                     )
                     if directory_fd is None:
                         continue
-                    if _json_names(directory_fd, len(names)) != names:
+                    current_names, current_scanned = _json_names(
+                        directory_fd, scanned
+                    )
+                    if current_names != names or current_scanned != scanned:
                         raise LegacyImportError(
                             "legacy source set changed during collection"
                         )

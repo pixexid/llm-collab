@@ -4,6 +4,8 @@ import ast
 import inspect
 import json
 import os
+import subprocess
+import sys
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,6 +22,31 @@ SAFE_VERSION = (3, 51, 3)
 NOW = datetime(2026, 7, 21, 21, 30, tzinfo=timezone.utc)
 REVISION_HASH = "a" * 64
 REVISION = f"sha256:{REVISION_HASH}"
+
+
+class FakeDirectoryEntries:
+    def __init__(self, total: int, *, json_at: int | None = None) -> None:
+        self.total = total
+        self.json_at = json_at
+        self.consumed = 0
+        self.name = ""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        pass
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        if self.consumed == self.total:
+            raise StopIteration
+        self.consumed += 1
+        suffix = "json" if self.consumed == self.json_at else "ignored"
+        self.name = f"{self.consumed}.{suffix}"
+        return self
 
 
 def resolved_import_targets(source: str, module: str, package: str) -> set[str]:
@@ -379,6 +406,45 @@ class LegacyProvenanceImportTest(unittest.TestCase):
                     0,
                 )
 
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "FIFO creation unavailable")
+    def test_fifo_candidate_open_is_nonblocking_and_fails_closed(self) -> None:
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            os.mkfifo(Path(tmp) / "trap.json")
+            script = """
+import os
+import sys
+from llm_collab.compatibility.importer import LegacyImportError, _read_stable
+
+directory_fd = os.open(sys.argv[1], os.O_RDONLY)
+try:
+    try:
+        _read_stable(directory_fd, "trap.json")
+    except LegacyImportError:
+        raise SystemExit(0)
+    raise SystemExit(2)
+finally:
+    os.close(directory_fd)
+"""
+            result = subprocess.run(
+                [sys.executable, "-c", script, tmp],
+                cwd=Path(__file__).parents[1],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_candidate_flags_require_nonblocking_opens(self) -> None:
+        self.assertEqual(importer_module.MAX_FILE_BYTES, 1048576)
+        nonblock = getattr(os, "O_NONBLOCK", None)
+        self.assertIsNotNone(nonblock)
+        assert nonblock is not None
+        self.assertEqual(importer_module._file_flags() & nonblock, nonblock)
+        with patch.object(importer_module.os, "O_NONBLOCK", None):
+            with self.assertRaisesRegex(LegacyImportError, "O_NONBLOCK is required"):
+                importer_module._file_flags()
+
     def test_final_path_inode_swap_is_rejected_even_when_bytes_match(self) -> None:
         with TemporaryDirectory(dir="/tmp") as tmp:
             root = Path(tmp) / "workspace"
@@ -507,7 +573,7 @@ class LegacyProvenanceImportTest(unittest.TestCase):
                     0,
                 )
 
-    def test_family_ancestor_symlink_and_literal_file_count_cap_fail_closed(self) -> None:
+    def test_family_ancestor_symlink_and_literal_entry_cap_fail_closed(self) -> None:
         with TemporaryDirectory(dir="/tmp") as tmp:
             root = Path(tmp) / "workspace"
             root.mkdir()
@@ -526,46 +592,58 @@ class LegacyProvenanceImportTest(unittest.TestCase):
                         clock=lambda: NOW,
                     )
 
-                class Entries:
-                    def __init__(self) -> None:
-                        self.consumed = 0
-
-                    def __enter__(self):
-                        return self
-
-                    def __exit__(self, *_args: object) -> None:
-                        pass
-
-                    def __iter__(self):
-                        return self
-
-                    def __next__(self):
-                        self.consumed += 1
-                        return type("Entry", (), {"name": f"{self.consumed}.json"})()
-
-                entries = Entries()
+                self.assertEqual(importer_module.MAX_FILES, 5000)
+                entries = FakeDirectoryEntries(5000, json_at=5000)
                 with patch.object(importer_module.os, "scandir", return_value=entries):
-                    with self.assertRaisesRegex(LegacyImportError, "5000 files"):
-                        importer_module._json_names(9, 5_000)
-                self.assertEqual(entries.consumed, 5_001)
+                    self.assertEqual(
+                        importer_module._json_names(9, 5000),
+                        (("5000.json",), 5000),
+                    )
+                self.assertEqual(entries.consumed, 5000)
+
+                entries = FakeDirectoryEntries(5001)
+                with patch.object(importer_module.os, "scandir", return_value=entries):
+                    with self.assertRaisesRegex(LegacyImportError, "5000 directory entries"):
+                        importer_module._json_names(9, 5000)
+                self.assertEqual(entries.consumed, 5001)
                 self.assertNotIn("os.listdir", inspect.getsource(importer_module))
 
-                (root / "State").unlink()
-                source_dirs(root)
-                budgets: list[int] = []
+    def test_directory_entry_budget_is_cumulative_across_source_families(self) -> None:
+        self.assertEqual(importer_module.MAX_FILES, 5000)
+        self.assertEqual(importer_module.MAX_FILE_BYTES, 1048576)
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            root = Path(tmp) / "workspace"
+            root.mkdir()
+            sessions, leases = source_dirs(root)
+            counts = {
+                sessions.stat().st_ino: 4999,
+                leases.stat().st_ino: 1,
+            }
 
-                def bounded_names(_directory_fd: int, remaining: int):
-                    budgets.append(remaining)
-                    if remaining == 0:
-                        raise LegacyImportError("legacy source set exceeds 5000 files")
-                    return tuple(f"{index}.json" for index in range(5_000))
+            def entries_for(directory_fd: int) -> FakeDirectoryEntries:
+                return FakeDirectoryEntries(counts[os.fstat(directory_fd).st_ino])
 
+            paths = LedgerPaths.derive(Path(tmp) / "ledger-state", "ws_alpha")
+            with LedgerStore.open_writer(paths) as store:
+                record_registry(store)
                 with patch.object(
-                    importer_module,
-                    "_json_names",
-                    side_effect=bounded_names,
+                    importer_module.os, "scandir", side_effect=entries_for
                 ):
-                    with self.assertRaisesRegex(LegacyImportError, "5000 files"):
+                    self.assertEqual(
+                        import_current_provenance(
+                            workspace_root=root,
+                            store=store,
+                            workspace_id="ws_alpha",
+                            registry_revision=REVISION,
+                            clock=lambda: NOW,
+                        ),
+                        0,
+                    )
+
+                    counts[sessions.stat().st_ino] = 5000
+                    with self.assertRaisesRegex(
+                        LegacyImportError, "5000 directory entries"
+                    ):
                         import_current_provenance(
                             workspace_root=root,
                             store=store,
@@ -573,7 +651,12 @@ class LegacyProvenanceImportTest(unittest.TestCase):
                             registry_revision=REVISION,
                             clock=lambda: NOW,
                         )
-                self.assertEqual(budgets, [5_000, 0])
+                self.assertEqual(
+                    store._connection.execute(
+                        "SELECT count(*) FROM legacy_provenance_imports"
+                    ).fetchone()[0],
+                    0,
+                )
 
     def test_compatibility_importer_has_no_runtime_consumer_or_v2_authority_import(self) -> None:
         source = inspect.getsource(importer_module)
