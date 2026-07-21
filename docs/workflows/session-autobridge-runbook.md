@@ -211,6 +211,10 @@ activation lease JSON fails closed with `corrupt_lease_state`; the refusal names
 only the bad lease filename, field, and reason, never file contents. Active,
 unexpired lease records are structurally invalid unless `worktree_realpath`,
 `lease_key`, `owner_session_id`, and `status` are all present non-null strings.
+During alias enumeration, active unexpired lease records are also invalid unless
+the payload `lease_key` matches the filename-derived key and the payload
+`identity` hashes back to that same key; this semantic binding must stay in
+place before GH-1572 enables activation leases.
 Claim, assert, and release route existing-lease authority through one shared
 validation entry point covering structural validity, lease-key and identity
 binding, session liveness and binding, claimant runtime/PID binding, PID
