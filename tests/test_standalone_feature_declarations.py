@@ -24,9 +24,12 @@ FEATURES = {
 }
 TOP_LEVEL_KEYS = {"declaration_version", "declaration_id", "features"}
 EXCLUDED_PREFIXES = ("docs/protocols/", "docs/migration/", "Tasks/", "Chats/")
+RUNTIME_ROOTS = ("bin/", "scripts/", "tools/", "pm2/", "llm_collab/", "tests/")
 THIS_TEST = "tests/test_standalone_feature_declarations.py"
 SANCTIONED_CONSUMERS = {
+    "llm_collab/canonical/control.py",
     "llm_collab/daemon/gate.py",
+    "tests/test_collabd_canonical.py",
     "tests/test_collabd_gate.py",
 }
 
@@ -52,6 +55,37 @@ def load_declaration() -> dict[str, object]:
         parse_constant=reject_json_constant,
         object_pairs_hook=reject_duplicate_pairs,
     )
+
+
+def feature_declaration_matches(
+    tracked_paths: tuple[str, ...],
+    content_by_path: dict[str, bytes],
+) -> list[str]:
+    needles = {
+        "declaration path": str(DECLARATION_PATH.relative_to(ROOT)),
+        "declaration id": DECLARATION_ID,
+        **{f"feature {feature}": feature for feature in FEATURES},
+    }
+    matches: list[str] = []
+
+    for relative_path in tracked_paths:
+        if (
+            not relative_path.startswith(RUNTIME_ROOTS)
+            or relative_path == THIS_TEST
+            or relative_path in SANCTIONED_CONSUMERS
+            or relative_path.startswith(EXCLUDED_PREFIXES)
+        ):
+            continue
+        path = ROOT / relative_path
+        content = content_by_path.get(relative_path)
+        if content is None:
+            if not path.is_file():
+                continue
+            content = path.read_bytes()
+        for label, needle in needles.items():
+            if needle.encode("utf-8") in content:
+                matches.append(f"{relative_path}: {label}")
+    return matches
 
 
 class StandaloneFeatureDeclarationTests(unittest.TestCase):
@@ -89,9 +123,15 @@ class StandaloneFeatureDeclarationTests(unittest.TestCase):
 
     def test_tracked_runtime_paths_have_no_unapproved_consumers(self) -> None:
         self.assertEqual(
+            RUNTIME_ROOTS,
+            ("bin/", "scripts/", "tools/", "pm2/", "llm_collab/", "tests/"),
+        )
+        self.assertEqual(
             SANCTIONED_CONSUMERS,
             {
+                "llm_collab/canonical/control.py",
                 "llm_collab/daemon/gate.py",
+                "tests/test_collabd_canonical.py",
                 "tests/test_collabd_gate.py",
             },
         )
@@ -105,32 +145,44 @@ class StandaloneFeatureDeclarationTests(unittest.TestCase):
             check=True,
             capture_output=True,
         ).stdout.split(b"\0")
-        needles = {
-            "declaration path": str(DECLARATION_PATH.relative_to(ROOT)),
-            "declaration id": DECLARATION_ID,
-            **{f"feature {feature}": feature for feature in FEATURES},
-        }
-        matches: list[str] = []
-
-        for raw_path in tracked:
-            if not raw_path:
-                continue
-            relative_path = raw_path.decode("utf-8")
-            if (
-                relative_path == THIS_TEST
-                or relative_path in SANCTIONED_CONSUMERS
-                or relative_path.startswith(EXCLUDED_PREFIXES)
-            ):
-                continue
-            path = ROOT / relative_path
-            if not path.is_file():
-                continue
-            content = path.read_bytes()
-            for label, needle in needles.items():
-                if needle.encode("utf-8") in content:
-                    matches.append(f"{relative_path}: {label}")
+        matches = feature_declaration_matches(
+            tuple(raw_path.decode("utf-8") for raw_path in tracked if raw_path),
+            {},
+        )
 
         self.assertEqual(matches, [], "standalone declaration gained an unapproved consumer")
+
+    def test_unsanctioned_feature_consumer_still_fails_guard(self) -> None:
+        matches = feature_declaration_matches(
+            (
+                THIS_TEST,
+                "llm_collab/canonical/control.py",
+                "llm_collab/daemon/gate.py",
+                "tests/test_collabd_canonical.py",
+                "tests/test_collabd_gate.py",
+                "llm_collab/unapproved_consumer.py",
+            ),
+            {"llm_collab/unapproved_consumer.py": b"canonical_writes = True"},
+        )
+        self.assertEqual(
+            matches,
+            ["llm_collab/unapproved_consumer.py: feature canonical_writes"],
+        )
+
+    def test_prose_feature_mentions_are_outside_runtime_scan(self) -> None:
+        matches = feature_declaration_matches(
+            (
+                "README.md",
+                "docs/schema-reference.md",
+                "docs/standalone-agent-session-bus-architecture.md",
+            ),
+            {
+                "README.md": b"canonical_writes",
+                "docs/schema-reference.md": b"runtime_dispatch",
+                "docs/standalone-agent-session-bus-architecture.md": DECLARATION_ID.encode("utf-8"),
+            },
+        )
+        self.assertEqual(matches, [])
 
 
 if __name__ == "__main__":
