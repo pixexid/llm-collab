@@ -85,3 +85,22 @@ For an existing workspace, update `projects.json` directly. Do not rerun
 This checkout may contain another lane's local work. Inspect `git status` before
 switching branches, pulling, staging, or cleaning. Preserve unrelated tracked
 changes and untracked files unless their owner explicitly authorizes removal.
+
+## GitHub Autolink Safety
+
+This repository has a GitHub autolink for the `GH-` issue prefix. Treat
+`GH-123` as a real issue reference here, not as inert project shorthand.
+
+Do not put any GitHub closing keyword immediately before a `GH-<number>`
+reference in PR bodies, merge commit bodies, ordinary commit messages, or issue
+comments, even inside negated prose. Use neutral wording such as `Related
+GH-123`, `Related #123`, or a full issue URL when the referenced issue should
+stay open.
+
+Two incidents established this as repo-local policy:
+
+- PR #153 placed negated non-resolution wording adjacent to issue #135 and
+  GitHub changed issue #135 to closed when the PR merged.
+- PR #198 repeated the same class through the `GH-` autolink; the merge commit
+  body put a closing keyword adjacent to the autolinked reference for issue 91,
+  and GitHub changed GH-91 to closed.
