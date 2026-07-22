@@ -395,7 +395,7 @@ Each allowed entry is keyed by the exact tuple:
 )
 ```
 
-The entry also records authoritative provenance:
+The entry also records sealed import provenance:
 
 - the trusted observer/importer identity and implementation revision;
 - the immutable observation/import transaction ID;
@@ -403,6 +403,13 @@ The entry also records authoritative provenance:
 - the exact bytes or a canonical byte derivation used for the hash;
 - the authority's observation/import record and integrity evidence;
 - timestamps as audit metadata, never as sole eligibility proof.
+
+**Landed Phase 2 caveat.** GH-91 P2c landed sealed legacy import manifests in
+merge `a42585b`. The seal proves integrity and exact closed-source membership;
+it does not authenticate the publisher identity or signer authority. Current
+P2d/P2e projections label this provenance
+`caller_asserted_unauthenticated`, and GH-195 remains the open gate for any
+future authenticated manifest-authority model.
 
 An importer running after the cutoff may read only the immutable source
 snapshot named by that boundary and must prove that the exact bytes were in it.
@@ -421,8 +428,15 @@ To accept retired evidence, a compatibility reader MUST:
 2. hash the actual bytes under the recorded algorithm;
 3. require an exact manifest entry for locator, hash, form version, and cutoff
    policy revision;
-4. verify the authoritative provenance and manifest seal;
+4. verify the manifest seal and trusted/authenticated provenance required by
+   that reader's authority model;
 5. reject on any mismatch, missing entry, unknown form, or untrusted importer.
+
+The landed P2 manifest rows cannot satisfy step 4 for publisher/authorship
+authority: their publication provenance is explicitly
+`caller_asserted_unauthenticated` until GH-195 supplies a signer or equivalent
+authority model. A reader that requires authenticated provenance must therefore
+block rather than treating the P2 label as trust.
 
 Task/container `created_utc`, task status, filesystem mtime, current container
 age, path age, commit prose, and self-reported `produced_at_utc` are not cutoff
@@ -433,6 +447,38 @@ bytes at a grandfathered locator also fails because the hash changes.
 Retired evidence never becomes authoritative merely by import. Its manifest
 entry authorizes compatibility parsing under the recorded support window; the
 resulting claim still carries the evidence quality supported by that form.
+
+## Landed Phase 2 canonical boundary
+
+The following GH-91 Phase 2 slices have landed in the shared runtime:
+
+- **P2a, merge `5673037`:** v4 canonical messages, content-addressed bodies,
+  immutable intent dedupe, normalized recipients, artifact references, tags,
+  workspace/project scope, and sealed child collections.
+- **P2b, merge `1369eaf`:** v5 canonical deliveries, attempts, append-only
+  receipts, state evidence bodies, TTL attempt boundaries, and terminal
+  acknowledgment authority checks.
+- **P2c, merge `a42585b`:** v6 sealed legacy-v2 import manifests for chat
+  packet and inbox-index source membership. The seal verifies bytes and closed
+  membership only; publisher/provenance fields are unauthenticated
+  caller assertions under GH-195.
+- **P2d, merge `df0fe31`:** read-only v2 compatibility projections for chat
+  packets, inbox pointers, and labelled legacy manifest provenance.
+- **P2e, merge `cf50d239`:** library-only gated control helpers for terminal
+  acknowledgment, dead-letter/reconciliation receipts, and read-only inspection.
+  Mutating controls require exact project `canonical_writes: true`,
+  `LLM_COLLAB_CANONICAL_CONTROL=enabled`, and per-call
+  `allow_canonical_write=True`; `canonical_writes` alone is not authority.
+
+### Not yet delivered by Phase 2
+
+Phase 2 does not deliver live delivery routing, inbox mark-read, inbox
+consumption, inbox write projection, v2 ownership transfer, command or CLI
+cutover, authenticated manifest provenance, or `canonical_writes` enabled by
+default. Current v2 commands and files remain the operational authority until a
+separately reviewed current-authority cutover. GH-141 continues to gate inbox
+ownership transfer, and GH-195 continues to gate authenticated manifest
+provenance.
 
 ## Trusted registries and untrusted data
 

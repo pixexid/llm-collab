@@ -722,16 +722,68 @@ containment.
 
 ### Implemented ledger versions
 
-The exact current ledger is `PRAGMA user_version = 3`:
+The exact current ledger is `PRAGMA user_version = 6`
+(`llm_collab.ledger.store.SCHEMA_VERSION == 6`):
 
-| Version | Tables and constraints |
+| Version | Landed in | Tables, triggers, and constraints |
 |---|---|
-| v1 | `schema_migrations`, `workspace_registry_snapshots`, `project_registry_snapshots`, `observation_source_registry_snapshots`, and `daemon_instances`. Registry rows are immutable snapshots keyed by exact `workspace_id`, `project_id`, `source_id`, and `registry_revision`. |
-| v2 | Adds `observations`, `observation_checkpoints`, and `observation_audit`. Every row is composite-scoped by workspace, exact project, closed source `chats_mailbox`, and exact registry revision. Paths and hashes have database-level NUL, traversal, length, and lowercase-hex checks. |
-| v3 | Adds append-only `legacy_provenance_imports`, including UPDATE/DELETE refusal triggers and exact-project versus `legacy_unscoped` scope constraints. |
+| v1 | P1a merge `b89d12d` | 5 tables: `schema_migrations`, `workspace_registry_snapshots`, `project_registry_snapshots`, `observation_source_registry_snapshots`, and `daemon_instances`. Registry rows are immutable snapshots keyed by exact `workspace_id`, `project_id`, `source_id`, and `registry_revision`. |
+| v2 | P1c merge `6e3768e` | 3 tables: `observations`, `observation_checkpoints`, and `observation_audit`. Every row is composite-scoped by workspace, exact project, closed source `chats_mailbox`, and exact registry revision. Paths and hashes have database-level NUL, traversal, length, and lowercase-hex checks. |
+| v3 | P1d merge `a235f89` | 1 table plus 2 triggers: append-only `legacy_provenance_imports`, including UPDATE/DELETE refusal triggers and exact-project versus `legacy_unscoped` scope constraints. |
+| v4 | P2a merge `5673037` | 5 tables plus 18 triggers: content-addressed `canonical_bodies`, immutable `canonical_messages`, and normalized child tables for recipients, artifacts, and tags. Scope uses `(workspace_id, scope_kind, scope_identity)`, with project rows bound to exact registry snapshots and workspace rows bound to the workspace registry snapshot. Child collections are sealed after parent creation and count-capped. |
+| v5 | P2b merge `1369eaf` | 4 tables plus 12 triggers: `canonical_evidence_bodies`, `canonical_deliveries`, `canonical_delivery_attempts`, and `canonical_delivery_receipts`. Attempts are TTL-bounded; receipts are append-only and carry closed state/evidence vocabularies. Terminal `accepted`/`completed` receipts require authoritative `native_delivery_state` or `exact_session_acknowledgment` evidence plus `session_ref_id`. |
+| v6 | P2c merge `a42585b` | 3 tables plus 6 triggers: `legacy_import_manifests`, `legacy_import_manifest_entries`, and `legacy_import_records`. The import manifest is sealed, idempotent, append-only, and records exact locator/content-hash/source membership for legacy v2 packets and inbox indexes. Its publisher/provenance fields are caller-asserted and unauthenticated; GH-195 remains open. |
 
-No P2+ subscription, event, delivery, attempt, receipt, lease, fence, retry,
-quarantine, or dead-letter table exists in v1, v2, or v3.
+The migration checksums and schema fingerprints are code authority in
+`llm_collab/ledger/store.py` and are verified on open. Current values are:
+
+| Version | Migration checksum | Schema fingerprint |
+|---|---|---|
+| v1 | `sha256:ce236daff444f736e01f3666ed44baf1c3ba17e81215fedb638276aff76b01c7` | `sha256:26a856329406e45d22a8fbecdbd769d9c632acae3652d8c72438d228de7cfca2` |
+| v2 | `sha256:338a5d526b6fdea47af667c469897fd38d97a4a2dc8caf90dc5d62c067610e36` | `sha256:805aa5ae43c31d85dbe9a84590050b701ddc69cfe1dd225e9c6e67afbd889a7c` |
+| v3 | `sha256:1b8380593b73695bf8824425b58eda7c94f51fc0937f07dbcbd1786a6e5d467b` | `sha256:88e59c9be91df366c03985f99f8b3db1c68382b4846612c0334fd15cc505e673` |
+| v4 | `sha256:63f00990d9c3e01384d14d7613c961856ff48037504b1e0ada1f95b034cedf01` | `sha256:665e17152991c6c21cb8756a5d5720e35e3154d13a4a069b4c74440ed425b39e` |
+| v5 | `sha256:d6498cf5728ec3d56c0d1360a065243d72384a0de50af55bead8054881bbd9b9` | `sha256:4495eab6339d339b770442d994b5878e0743d011917cc99b370991a793891a99` |
+| v6 | `sha256:56e7ca2ba9eb0a8eb79079372abdc7a39c024977e71a40931b8b60a6acc33c00` | `sha256:eb8bc4ddd4348ce05874b91c63ce963c5bb3653636363b7437e2046900996d60` |
+
+No subscription, timer, runtime-dispatch lease, fence, retry, or quarantine
+table exists in v1 through v6. Dead-letter and reconciliation outcomes in
+Phase 2 are receipts, not a separate table.
+
+### Implemented Phase 2 canonical surfaces
+
+Phase 2 canonical message and compatibility work is implemented but remains
+default-off and non-authoritative for current v2 operations.
+
+- **Message intent (P2a, merge `5673037`).** Library calls store canonical body
+  bytes once, derive message identity from immutable intent, normalize
+  recipients/artifacts/tags, and reject divergent duplicate dedupe keys.
+- **Deliveries and receipts (P2b, merge `1369eaf`).** Library calls create
+  delivery routes, attempts, and append-only receipts. Receipt states are
+  `persisted`, `routed`, `injected`, `visible`, `accepted`, `processing`,
+  `acknowledged`, `completed`, `rejected_before_acceptance`, `ambiguous`,
+  `pull_pending`, and `deferred_busy`. `accepted` and `completed` require
+  authoritative evidence and `session_ref_id`.
+- **Sealed legacy import manifests (P2c, merge `a42585b`).** The importer
+  records immutable source membership and hashes for legacy v2 chat packet and
+  inbox-index inputs. The seal verifies integrity and closed membership only;
+  publisher identity and manifest provenance remain
+  `caller_asserted_unauthenticated` under GH-195.
+- **Read-only compatibility projections (P2d, merge `df0fe31`).** Projection
+  helpers expose honest v2-shaped packet, inbox-pointer, and legacy-provenance
+  views without writing v2 files or fabricating unrepresentable fields.
+- **Gated library controls (P2e, merge `cf50d239`).** Mutating control helpers
+  are library-only and require one conjunctive gate:
+  exact project `canonical_writes` is `true` in the admitting registry snapshot,
+  `LLM_COLLAB_CANONICAL_CONTROL=enabled`, and per-call
+  `allow_canonical_write=True`. `canonical_writes` alone is insufficient.
+
+#### Not yet in Phase 2
+
+Phase 2 does **not** deliver live delivery routing, inbox mark-read,
+inbox consumption, inbox write projection, v2 ownership transfer, any command or
+CLI cutover, authenticated manifest provenance, or `canonical_writes` enabled by
+default.
 
 ### Implemented daemon and observation surface
 
@@ -807,11 +859,17 @@ and revalidated before one append-only transaction.
 
 Rollback disables observation by clearing either environment gate or setting
 the declaration false, then optionally stops the daemon. It preserves
-unresolved observations and imported provenance, leaves the ledger available
-through query-only readers, and leaves current v2 writers and owners unchanged.
-It never performs an in-place schema downgrade. A migration failure may restore
-the verified pre-migration backup automatically; an intentional rollback keeps
-the v3 evidence intact.
+unresolved observations, canonical rows, receipts, and imported provenance,
+leaves the ledger available through query-only readers, and leaves current v2
+writers and owners unchanged. To roll back Phase 2 operational use or a future
+cutover attempt, keep `canonical_writes` false or unset, do not set
+`LLM_COLLAB_CANONICAL_CONTROL=enabled`, and keep current `bin/` commands on v2
+files. Those gates block P2e controls and current-authority activation; they are
+not a process-wide kill switch for direct in-process `LedgerStore` or
+`llm_collab.canonical` library calls. Rollback never performs an in-place schema
+downgrade or destructive cleanup of canonical evidence. A migration failure may
+restore the verified pre-migration backup automatically; an intentional rollback
+keeps v1-v6 evidence intact for later reconciliation.
 
 ## Planned Thread Event Runner records
 

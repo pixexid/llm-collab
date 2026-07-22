@@ -35,6 +35,12 @@ notifications are optional adapters for teams that need them.
   daemon-observation feature to be true **and** both
   `THREAD_EVENT_RUNNER_ENABLED=1` and `THREAD_EVENT_RUNNER_OBSERVE=1`; invalid
   declarations fail closed. They do not own or mirror app automation state.
+- **Default-off canonical Phase 2 foundation** — GH-91 Phase 2 has landed
+  canonical message/body intent storage (merge `5673037`), delivery attempts and
+  receipts (merge `1369eaf`), sealed legacy-v2 import manifests (merge
+  `a42585b`), read-only compatibility projections (merge `df0fe31`), and
+  library-only gated control helpers (merge `cf50d239`). Current `bin/` commands
+  and v2 files remain operational authority until a separately reviewed cutover.
 
 Project-scoped is the default; universal behavior is the exception. Read
 [Multi-Project Support](docs/multi-project.md#scoping-principles) before adding
@@ -326,9 +332,30 @@ boundaries. The
 records the phase-gated GH-88 through GH-104 rollout. Both documents are
 contract and planning authority. Current v2 commands and files remain
 operational. The implemented observation ledger and daemon stay inert unless all
-three observation gates pass; subscriptions, timers, canonical delivery,
-attempts, receipts, leases, fences, retries, quarantine, dead letters,
-dispatch, transports, and feature consumers remain planned.
+three observation gates pass.
+
+GH-91 Phase 2 is partially implemented and deliberately default-off:
+
+- v4 canonical messages, bodies, recipient sets, artifact references, and
+  immutable intent/dedupe landed in merge `5673037`;
+- v5 delivery, attempt, receipt, and state-evidence storage landed in merge
+  `1369eaf`;
+- v6 sealed legacy-v2 import manifests landed in merge `a42585b`; those seals
+  prove integrity and exact imported-source membership, not authenticated
+  authorship or publisher identity (GH-195 remains open);
+- read-only v2 compatibility projections landed in merge `df0fe31`; they do
+  not write inboxes, chats, tasks, or pointer indexes;
+- library-only canonical control helpers landed in merge `cf50d239`; mutating
+  helpers require exact project `canonical_writes: true`,
+  `LLM_COLLAB_CANONICAL_CONTROL=enabled`, and per-call
+  `allow_canonical_write=True`.
+
+#### Not yet in Phase 2
+
+Phase 2 does not deliver live routing, inbox mark-read/consumption/write
+projection, v2 ownership transfer, any command or CLI cutover, authenticated manifest provenance, or
+`canonical_writes` enabled by default. Subscriptions, timers, leases, fences,
+runtime dispatch, transports, and current-authority handoff remain future work.
 
 ## Command reference
 
