@@ -587,6 +587,9 @@ def _normalize_legacy_manifest(value: Mapping[str, object]) -> dict[str, object]
     entries = tuple(_normalize_manifest_entry(entry) for entry in manifest.get("entries", ()))
     if not 1 <= len(entries) <= 4096:
         raise ValueError("manifest entries must contain between 1 and 4096 entries")
+    locators = [entry["canonical_locator"] for entry in entries]
+    if len(set(locators)) != len(locators):
+        raise ValueError("manifest entries must have duplicate-free canonical_locator values")
     normalized_publication = {
         **publication,
         "publisher": {
@@ -3567,10 +3570,17 @@ class LedgerStore:
             frontmatter = to_member["frontmatter"]  # type: ignore[assignment]
             body = to_member["body"]  # type: ignore[assignment]
             project_id = frontmatter.get("project_id")  # type: ignore[union-attr]
+            publication_project_id = str(normalized["publication"]["project_id"])  # type: ignore[index]
+            entry_project_ids = {
+                str(entry_by_locator[str(member[direction]["locator"])]["source_project_id"])  # type: ignore[index]
+                for direction in ("to", "from")
+            }
             if project_id is None:
-                scope_kind, scope_identity = "workspace", "workspace"
+                raise ValueError("legacy packet project_id must match manifest provenance")
             else:
                 project_id = validate_project_id(project_id)  # type: ignore[arg-type]
+                if project_id != publication_project_id or entry_project_ids != {project_id}:
+                    raise ValueError("legacy packet project_id must match manifest provenance")
                 if self.get_project_snapshot(
                     workspace_id=workspace_id,
                     project_id=project_id,

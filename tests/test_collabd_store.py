@@ -74,14 +74,16 @@ def with_integrity(value: dict[str, object]) -> dict[str, object]:
     return item
 
 
-def legacy_manifest(entries: list[dict[str, object]]) -> dict[str, object]:
+def legacy_manifest(
+    entries: list[dict[str, object]], *, project_id: str = AMIGA
+) -> dict[str, object]:
     publication = with_integrity(
         {
             "publisher": {"identity": "codex", "revision": "p2c_v1"},
             "publication_transaction_id": "publish_txn",
             "provenance_id": "publish_proof",
             "workspace_id": "ws_alpha",
-            "project_id": AMIGA,
+            "project_id": project_id,
             "registry_revision": REVISION,
             "cutoff_policy_revision": "cutoff_v1",
             "source_boundary": {
@@ -108,7 +110,11 @@ def legacy_manifest(entries: list[dict[str, object]]) -> dict[str, object]:
 
 
 def manifest_entry(
-    locator: str, payload: bytes, *, evidence_form_version: str = "v2_packet"
+    locator: str,
+    payload: bytes,
+    *,
+    evidence_form_version: str = "v2_packet",
+    project_id: str = AMIGA,
 ) -> dict[str, object]:
     return with_integrity(
         {
@@ -118,7 +124,7 @@ def manifest_entry(
             "evidence_form_version": evidence_form_version,
             "cutoff_policy_revision": "cutoff_v1",
             "source_workspace_id": "ws_alpha",
-            "source_project_id": AMIGA,
+            "source_project_id": project_id,
             "source_registry_revision": REVISION,
             "source_boundary": {
                 "kind": "content_addressed_revision",
@@ -137,6 +143,7 @@ def legacy_packet_bytes(
     sender: str = "codex",
     recipient: str = "claude",
     priority: str = "high",
+    project_id: str = AMIGA,
     body: bytes = b"hello exact body\n",
 ) -> bytes:
     frontmatter = "\n".join(
@@ -148,7 +155,7 @@ def legacy_packet_bytes(
             "title: Imported packet",
             f"priority: {priority}",
             "tags: [p2c, import]",
-            f"project_id: {AMIGA}",
+            f"project_id: {project_id}",
             "related_task: TASK-6C7155",
             'repo_targets: ["llm-collab"]',
             'path_targets: ["llm_collab/ledger/store.py"]',
@@ -994,6 +1001,29 @@ class LedgerStoreTest(unittest.TestCase):
                     0,
                 )
 
+    def test_v6_manifest_rejects_duplicate_locators_before_rows(self) -> None:
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            paths = LedgerPaths.derive(tmp, "ws_alpha")
+            with LedgerStore.open_writer(paths, clock=lambda: FIXED_TIME) as store:
+                record_test_registry(store)
+                locator = "/Chats/chat-a/2026-07-22T00-00-00_to-claude.md"
+                entries = [
+                    manifest_entry(locator, b"hello"),
+                    manifest_entry(locator, b"hello"),
+                ]
+                manifest = legacy_manifest(entries)
+                with self.assertRaisesRegex(ValueError, "duplicate-free canonical_locator"):
+                    store.record_legacy_import_manifest(
+                        workspace_id="ws_alpha",
+                        manifest=manifest,
+                        records=(),
+                        imported_at_utc=FIXED_TIME.isoformat(),
+                    )
+                self.assertEqual(
+                    store._connection.execute("SELECT count(*) FROM legacy_import_manifests").fetchone()[0],
+                    0,
+                )
+
     def test_v6_import_legacy_v2_pair_meta_and_inbox_in_one_transaction_without_v5_rows(self) -> None:
         with TemporaryDirectory(dir="/tmp") as tmp:
             root = Path(tmp) / "workspace"
@@ -1120,6 +1150,38 @@ class LedgerStoreTest(unittest.TestCase):
             with LedgerStore.open_writer(paths, clock=lambda: FIXED_TIME) as store:
                 record_test_registry(store)
                 with self.assertRaisesRegex(ValueError, "priority"):
+                    store.import_legacy_v2_manifest(
+                        workspace_root=root,
+                        workspace_id="ws_alpha",
+                        manifest=manifest,
+                        registry_revision=REVISION,
+                        imported_at_utc=FIXED_TIME.isoformat(),
+                    )
+                self.assertEqual(
+                    store._connection.execute("SELECT count(*) FROM canonical_messages").fetchone()[0],
+                    0,
+                )
+                self.assertEqual(
+                    store._connection.execute("SELECT count(*) FROM legacy_import_manifests").fetchone()[0],
+                    0,
+                )
+
+    def test_v6_import_legacy_v2_project_mismatch_aborts_without_rows(self) -> None:
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            root = Path(tmp) / "workspace"
+            root.mkdir()
+            paths = LedgerPaths.derive(Path(tmp) / "ledger", "ws_alpha")
+            packet = legacy_packet_bytes(project_id=NUVYR)
+            to_locator = "/Chats/chat-a/2026-07-22T00-00-00_to-claude_import.md"
+            from_locator = "/Chats/chat-a/2026-07-22T00-00-00_from-codex_import.md"
+            write_source(root, to_locator, packet)
+            write_source(root, from_locator, packet)
+            manifest = legacy_manifest(
+                [manifest_entry(to_locator, packet), manifest_entry(from_locator, packet)]
+            )
+            with LedgerStore.open_writer(paths, clock=lambda: FIXED_TIME) as store:
+                record_test_registry(store)
+                with self.assertRaisesRegex(ValueError, "project_id must match manifest provenance"):
                     store.import_legacy_v2_manifest(
                         workspace_root=root,
                         workspace_id="ws_alpha",
