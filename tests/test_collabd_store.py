@@ -1198,6 +1198,73 @@ class LedgerStoreTest(unittest.TestCase):
                     0,
                 )
 
+    def test_v6_import_legacy_v2_non_packet_project_mismatch_aborts_without_rows(self) -> None:
+        cases = (
+            (
+                "/Chats/chat-a/meta.json",
+                b'{"chat_id":"CHAT-8976EECB","project_id":"nuvyr"}',
+                "v2_chat_meta",
+            ),
+            (
+                "/agents/claude/inbox.json",
+                b'{"unread":[],"read":[]}',
+                "v2_inbox_index",
+            ),
+        )
+        for locator, payload, evidence_form_version in cases:
+            with self.subTest(evidence_form_version=evidence_form_version), TemporaryDirectory(dir="/tmp") as tmp:
+                root = Path(tmp) / "workspace"
+                root.mkdir()
+                paths = LedgerPaths.derive(Path(tmp) / "ledger", "ws_alpha")
+                write_source(root, locator, payload)
+                entries = [
+                    manifest_entry(
+                        locator,
+                        payload,
+                        evidence_form_version=evidence_form_version,
+                        project_id=NUVYR,
+                    )
+                ]
+                manifest = legacy_manifest(entries)
+                with LedgerStore.open_writer(paths, clock=lambda: FIXED_TIME) as store:
+                    record_test_registry(store)
+                    begin_count = 0
+
+                    def counting_trace(statement: str) -> None:
+                        nonlocal begin_count
+                        if statement == "BEGIN IMMEDIATE":
+                            begin_count += 1
+
+                    store._connection.set_trace_callback(counting_trace)
+                    try:
+                        with self.assertRaisesRegex(ValueError, "source_project_id"):
+                            store.import_legacy_v2_manifest(
+                                workspace_root=root,
+                                workspace_id="ws_alpha",
+                                manifest=manifest,
+                                registry_revision=REVISION,
+                                imported_at_utc=FIXED_TIME.isoformat(),
+                            )
+                    finally:
+                        store._connection.set_trace_callback(None)
+                    self.assertEqual(begin_count, 0)
+                    self.assertEqual(
+                        store._connection.execute("SELECT count(*) FROM canonical_messages").fetchone()[0],
+                        0,
+                    )
+                    self.assertEqual(
+                        store._connection.execute("SELECT count(*) FROM legacy_import_manifests").fetchone()[0],
+                        0,
+                    )
+                    self.assertEqual(
+                        store._connection.execute("SELECT count(*) FROM legacy_import_manifest_entries").fetchone()[0],
+                        0,
+                    )
+                    self.assertEqual(
+                        store._connection.execute("SELECT count(*) FROM legacy_import_records").fetchone()[0],
+                        0,
+                    )
+
     def test_v6_import_legacy_v2_missing_pair_member_aborts_without_rows(self) -> None:
         with TemporaryDirectory(dir="/tmp") as tmp:
             root = Path(tmp) / "workspace"

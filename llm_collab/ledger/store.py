@@ -625,6 +625,9 @@ def _normalize_legacy_manifest(value: Mapping[str, object]) -> dict[str, object]
     if publication.get("integrity") != expected_publication:
         raise CanonicalIntegrityError("publication integrity does not match")
     normalized_publication["integrity"] = expected_publication
+    publication_project_id = normalized_publication["project_id"]
+    if any(entry["source_project_id"] != publication_project_id for entry in entries):
+        raise ValueError("manifest entry source_project_id must match publication project_id")
     if manifest.get("sealed") is not True:
         raise ValueError("legacy manifest must be sealed")
     seal_projection = {
