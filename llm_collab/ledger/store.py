@@ -18,7 +18,7 @@ from pathlib import Path
 from .paths import LedgerPaths, validate_project_id, validate_registry_token, validate_workspace_id
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 BUSY_TIMEOUT_MS = 5_000
 SYNCHRONOUS_FULL = 2
 MIGRATION_TOOL_VERSION = "llm-collab-ledger/1"
@@ -49,6 +49,14 @@ V4_TABLES = V3_TABLES | frozenset(
         "canonical_message_tags",
     }
 )
+V5_TABLES = V4_TABLES | frozenset(
+    {
+        "canonical_evidence_bodies",
+        "canonical_deliveries",
+        "canonical_delivery_attempts",
+        "canonical_delivery_receipts",
+    }
+)
 
 
 class SQLiteSafetyError(RuntimeError):
@@ -73,12 +81,71 @@ class CanonicalIntegrityError(RuntimeError):
 
 _CANONICAL_AGENT_ID = re.compile(r"agent_[A-Za-z0-9][A-Za-z0-9_-]{2,127}\Z")
 _CANONICAL_MESSAGE_ID = re.compile(r"msg_[0-9a-f]{64}\Z")
+_CANONICAL_DELIVERY_ID = re.compile(r"delivery_[0-9a-f]{64}\Z")
+_CANONICAL_ATTEMPT_ID = re.compile(r"attempt_[0-9a-f]{64}\Z")
+_CANONICAL_RECEIPT_ID = re.compile(r"receipt_[0-9a-f]{64}\Z")
+_CANONICAL_ENDPOINT_ID = re.compile(r"endpoint_[A-Za-z0-9][A-Za-z0-9_-]{2,127}\Z")
+_CANONICAL_SESSION_REF_ID = re.compile(r"session_[A-Za-z0-9][A-Za-z0-9_-]{2,127}\Z")
 _CANONICAL_REGISTRY_REVISION = re.compile(r"sha256:[0-9a-f]{64}\Z")
+_CANONICAL_TOKEN = re.compile(r"[A-Za-z][A-Za-z0-9._-]{0,127}\Z")
+_CANONICAL_EVIDENCE_ID = re.compile(r"evidence_[A-Za-z0-9][A-Za-z0-9_-]{2,127}\Z")
+_CANONICAL_EXTENSION_KEY = re.compile(r"x_note_[A-Za-z][A-Za-z0-9_-]{0,55}\Z")
 _CANONICAL_ACK_POLICIES = frozenset({"none", "required"})
 _CANONICAL_PRIORITIES = frozenset({"low", "normal", "high", "urgent"})
 _CANONICAL_ARTIFACT_KINDS = frozenset(
     {"chat", "task", "repo", "path", "branch", "worktree"}
 )
+_CANONICAL_EVIDENCE_KINDS = frozenset(
+    {
+        "adapter_observation",
+        "native_delivery_state",
+        "exact_session_acknowledgment",
+        "exact_session_binding",
+        "compatibility_import",
+    }
+)
+_CANONICAL_EVIDENCE_QUALITIES = frozenset({"best_effort", "authoritative"})
+_CANONICAL_TERMINAL_RECEIPT_STATES = frozenset({"accepted", "completed"})
+_CANONICAL_TERMINAL_EVIDENCE_KINDS = frozenset(
+    {"native_delivery_state", "exact_session_acknowledgment"}
+)
+_CANONICAL_TERMINAL_AUTHORITY_KINDS = frozenset({"native_runtime", "trusted_adapter"})
+_CANONICAL_AUTHORITY_KINDS = _CANONICAL_TERMINAL_AUTHORITY_KINDS | frozenset(
+    {"trusted_importer"}
+)
+_CANONICAL_RECEIPT_STATES = frozenset(
+    {
+        "persisted",
+        "routed",
+        "injected",
+        "visible",
+        "accepted",
+        "processing",
+        "acknowledged",
+        "completed",
+        "rejected_before_acceptance",
+        "ambiguous",
+        "pull_pending",
+        "deferred_busy",
+    }
+)
+_DELIVERY_OUTCOME_BY_STATE = {
+    "completed": (100, "completed"),
+    "accepted": (90, "accepted"),
+    "rejected_before_acceptance": (80, "rejected_before_acceptance"),
+    "ambiguous": (70, "ambiguous"),
+    "pull_pending": (60, "pull_pending"),
+    "deferred_busy": (50, "deferred_busy"),
+    "acknowledged": (40, "pending"),
+    "processing": (30, "pending"),
+    "visible": (20, "pending"),
+    "injected": (10, "pending"),
+    "routed": (5, "pending"),
+    "persisted": (0, "pending"),
+}
+_SAFE_JSON_INTEGER_MIN = -9_007_199_254_740_991
+_SAFE_JSON_INTEGER_MAX = 9_007_199_254_740_991
+_JSON_FORBIDDEN_CODEPOINTS = {0x7F, 0x85, 0x2028, 0x2029}
 
 
 def _bounded_text(value: object, name: str, maximum: int) -> str:
@@ -117,6 +184,38 @@ def _canonical_agent_id(value: object, name: str) -> str:
 def _canonical_message_id(value: object, name: str) -> str:
     if not isinstance(value, str) or _CANONICAL_MESSAGE_ID.fullmatch(value) is None:
         raise ValueError(f"{name} must be a canonical msg_ identifier")
+    return value
+
+
+def _canonical_delivery_id(value: object, name: str) -> str:
+    if not isinstance(value, str) or _CANONICAL_DELIVERY_ID.fullmatch(value) is None:
+        raise ValueError(f"{name} must be a canonical delivery_ identifier")
+    return value
+
+
+def _canonical_attempt_id(value: object, name: str) -> str:
+    if not isinstance(value, str) or _CANONICAL_ATTEMPT_ID.fullmatch(value) is None:
+        raise ValueError(f"{name} must be a canonical attempt_ identifier")
+    return value
+
+
+def _canonical_receipt_id(value: object, name: str) -> str:
+    if not isinstance(value, str) or _CANONICAL_RECEIPT_ID.fullmatch(value) is None:
+        raise ValueError(f"{name} must be a canonical receipt_ identifier")
+    return value
+
+
+def _canonical_endpoint_id(value: object, name: str) -> str:
+    if not isinstance(value, str) or _CANONICAL_ENDPOINT_ID.fullmatch(value) is None:
+        raise ValueError(f"{name} must be an endpoint_ identifier")
+    return value
+
+
+def _optional_session_ref_id(value: object) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or _CANONICAL_SESSION_REF_ID.fullmatch(value) is None:
+        raise ValueError("session_ref_id must be a session_ identifier")
     return value
 
 
@@ -225,6 +324,346 @@ def _derive_message_id(
         )
     )
     return "msg_" + hashlib.sha256(canonical_intent).hexdigest()
+
+
+def _derive_delivery_id(
+    workspace_id: str,
+    scope_kind: str,
+    scope_identity: str,
+    message_id: str,
+    recipient_agent_id: str,
+    endpoint_id: str,
+) -> str:
+    return "delivery_" + hashlib.sha256(
+        b"".join(
+            (
+                _frame(workspace_id),
+                _frame(scope_kind),
+                _frame(scope_identity),
+                _frame(message_id),
+                _frame(recipient_agent_id),
+                _frame(endpoint_id),
+            )
+        )
+    ).hexdigest()
+
+
+def _derive_attempt_id(
+    workspace_id: str,
+    scope_kind: str,
+    scope_identity: str,
+    message_id: str,
+    delivery_id: str,
+    attempt_index: int,
+) -> str:
+    return "attempt_" + hashlib.sha256(
+        b"".join(
+            (
+                _frame(workspace_id),
+                _frame(scope_kind),
+                _frame(scope_identity),
+                _frame(message_id),
+                _frame(delivery_id),
+                _frame(str(attempt_index)),
+            )
+        )
+    ).hexdigest()
+
+
+def _derive_receipt_id(
+    workspace_id: str,
+    scope_kind: str,
+    scope_identity: str,
+    message_id: str,
+    delivery_id: str,
+    attempt_id: str,
+    evidence_sha256: str,
+) -> str:
+    return "receipt_" + hashlib.sha256(
+        b"".join(
+            (
+                _frame(workspace_id),
+                _frame(scope_kind),
+                _frame(scope_identity),
+                _frame(message_id),
+                _frame(delivery_id),
+                _frame(attempt_id),
+                _frame(evidence_sha256),
+            )
+        )
+    ).hexdigest()
+
+
+def _validate_canonical_json_text(value: str) -> None:
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError("canonical JSON strings must be valid UTF-8") from exc
+    for character in value:
+        codepoint = ord(character)
+        if (
+            codepoint < 0x20
+            or codepoint in _JSON_FORBIDDEN_CODEPOINTS
+            or 0xD800 <= codepoint <= 0xDFFF
+        ):
+            raise ValueError("canonical JSON strings must not contain controls or surrogates")
+
+
+def _validate_canonical_json_value(value: object) -> None:
+    if value is None or isinstance(value, bool):
+        return
+    if isinstance(value, int):
+        if not _SAFE_JSON_INTEGER_MIN <= value <= _SAFE_JSON_INTEGER_MAX:
+            raise ValueError("canonical JSON integers must be in the safe range")
+        return
+    if isinstance(value, float):
+        raise ValueError("canonical JSON does not admit floats")
+    if isinstance(value, str):
+        _validate_canonical_json_text(value)
+        return
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise ValueError("canonical JSON object keys must be strings")
+            _validate_canonical_json_text(key)
+            _validate_canonical_json_value(item)
+        return
+    if isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray, str)):
+        for item in value:
+            _validate_canonical_json_value(item)
+        return
+    raise ValueError("canonical JSON values must be objects, arrays, strings, integers, booleans, or null")
+
+
+def _canonical_json_bytes(value: Mapping[str, object]) -> bytes:
+    _validate_canonical_json_value(value)
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode(
+        "utf-8"
+    )
+
+
+def _normalize_evidence(value: Mapping[str, object]) -> tuple[bytes, str, str, str, str]:
+    if not isinstance(value, Mapping):
+        raise ValueError("evidence must be a mapping")
+    evidence = dict(value)
+    state = evidence.get("state")
+    quality = evidence.get("quality")
+    evidence_kind = evidence.get("evidence_kind")
+    if not isinstance(state, str) or state not in _CANONICAL_RECEIPT_STATES:
+        raise ValueError("evidence state is not in the closed vocabulary")
+    if not isinstance(quality, str) or quality not in _CANONICAL_EVIDENCE_QUALITIES:
+        raise ValueError("evidence quality is not in the closed vocabulary")
+    if not isinstance(evidence_kind, str) or evidence_kind not in _CANONICAL_EVIDENCE_KINDS:
+        raise ValueError("evidence_kind is not in the closed vocabulary")
+    integrity = evidence.get("integrity")
+    projection = dict(evidence)
+    projection.pop("integrity", None)
+    expected = "sha256:" + hashlib.sha256(_canonical_json_bytes(projection)).hexdigest()
+    if integrity != expected:
+        raise CanonicalIntegrityError("state evidence integrity does not match its bytes")
+    body = _canonical_json_bytes(evidence)
+    if len(body) > 1048576:
+        raise ValueError("evidence must be at most 1048576 bytes")
+    return body, hashlib.sha256(body).hexdigest(), state, quality, evidence_kind
+
+
+def _scope_projection(scope_kind: str, scope_identity: str) -> dict[str, str]:
+    scope = {"kind": scope_kind}
+    if scope_kind == "project":
+        scope["project_id"] = scope_identity
+    return scope
+
+
+def _validate_state_evidence_core_schema(evidence: Mapping[str, object]) -> None:
+    required = {
+        "schema_version",
+        "workspace_id",
+        "scope",
+        "evidence_id",
+        "evidence_kind",
+        "quality",
+        "state",
+        "authority",
+        "subject",
+        "correlation_id",
+        "observed_at_utc",
+        "integrity",
+    }
+    allowed = required | {"legacy_manifest", "legacy_import", "extensions"}
+    if set(evidence) - allowed:
+        raise CanonicalIntegrityError("canonical state evidence has unexpected fields")
+    if not required <= set(evidence):
+        raise CanonicalIntegrityError("canonical state evidence is missing required fields")
+    if evidence.get("schema_version") != 1:
+        raise CanonicalIntegrityError("canonical state evidence schema_version mismatch")
+    if (
+        not isinstance(evidence.get("evidence_id"), str)
+        or _CANONICAL_EVIDENCE_ID.fullmatch(str(evidence["evidence_id"])) is None
+    ):
+        raise CanonicalIntegrityError("canonical state evidence_id is invalid")
+    if (
+        not isinstance(evidence.get("correlation_id"), str)
+        or _CANONICAL_TOKEN.fullmatch(str(evidence["correlation_id"])) is None
+    ):
+        raise CanonicalIntegrityError("canonical state evidence correlation_id is invalid")
+    _utc_timestamp(evidence.get("observed_at_utc"), "observed_at_utc")
+    authority = evidence.get("authority")
+    if not isinstance(authority, Mapping):
+        raise CanonicalIntegrityError("canonical state evidence authority is invalid")
+    required_authority = {
+        "authority_kind",
+        "identity",
+        "implementation_revision",
+        "capability_profile_id",
+        "capability_profile_revision",
+    }
+    if set(authority) != required_authority:
+        raise CanonicalIntegrityError("canonical state evidence authority fields are invalid")
+    if authority.get("authority_kind") not in _CANONICAL_AUTHORITY_KINDS:
+        raise CanonicalIntegrityError("canonical state evidence authority kind is invalid")
+    for key in required_authority - {"authority_kind"}:
+        if not isinstance(authority.get(key), str) or _CANONICAL_TOKEN.fullmatch(
+            str(authority[key])
+        ) is None:
+            raise CanonicalIntegrityError("canonical state evidence authority token is invalid")
+    subject = evidence.get("subject")
+    if not isinstance(subject, Mapping):
+        raise CanonicalIntegrityError("canonical receipt evidence subject is missing")
+    allowed_subject = {
+        "message_id",
+        "delivery_id",
+        "attempt_id",
+        "endpoint_id",
+        "session_ref_id",
+        "native_session_id",
+        "repository_binding",
+        "legacy_locator",
+    }
+    if not subject or set(subject) - allowed_subject:
+        raise CanonicalIntegrityError("canonical state evidence subject fields are invalid")
+    for key, value in subject.items():
+        if key in {"repository_binding"}:
+            if not isinstance(value, Mapping):
+                raise CanonicalIntegrityError(
+                    "canonical state evidence repository binding is invalid"
+                )
+            continue
+        if not isinstance(value, str) or not value:
+            raise CanonicalIntegrityError("canonical state evidence subject value is invalid")
+    if evidence.get("evidence_kind") == "exact_session_binding":
+        if evidence.get("quality") != "authoritative":
+            raise CanonicalIntegrityError(
+                "canonical exact-session evidence must be authoritative"
+            )
+        if authority.get("authority_kind") not in _CANONICAL_TERMINAL_AUTHORITY_KINDS:
+            raise CanonicalIntegrityError(
+                "canonical exact-session evidence authority is not trusted"
+            )
+        for key in ("endpoint_id", "session_ref_id", "native_session_id"):
+            if key not in subject:
+                raise CanonicalIntegrityError(
+                    "canonical exact-session evidence subject is incomplete"
+                )
+    if evidence.get("evidence_kind") == "compatibility_import":
+        if evidence.get("quality") != "best_effort":
+            raise CanonicalIntegrityError(
+                "canonical compatibility-import evidence must be best effort"
+            )
+        if authority.get("authority_kind") != "trusted_importer":
+            raise CanonicalIntegrityError(
+                "canonical compatibility-import authority is invalid"
+            )
+        if "legacy_manifest" not in evidence or "legacy_import" not in evidence:
+            raise CanonicalIntegrityError(
+                "canonical compatibility-import evidence is missing legacy provenance"
+            )
+        if "legacy_locator" not in subject:
+            raise CanonicalIntegrityError(
+                "canonical compatibility-import subject is incomplete"
+            )
+    elif "legacy_manifest" in evidence or "legacy_import" in evidence:
+        raise CanonicalIntegrityError(
+            "canonical non-import evidence must not carry legacy provenance"
+        )
+    extensions = evidence.get("extensions")
+    if extensions is not None:
+        if not isinstance(extensions, Mapping) or len(extensions) > 8:
+            raise CanonicalIntegrityError("canonical state evidence extensions are invalid")
+        for key, value in extensions.items():
+            if not isinstance(key, str) or _CANONICAL_EXTENSION_KEY.fullmatch(key) is None:
+                raise CanonicalIntegrityError(
+                    "canonical state evidence extension key is invalid"
+                )
+            if value is None or isinstance(value, bool):
+                continue
+            if isinstance(value, int) and not isinstance(value, bool):
+                if not _SAFE_JSON_INTEGER_MIN <= value <= _SAFE_JSON_INTEGER_MAX:
+                    raise CanonicalIntegrityError(
+                        "canonical state evidence extension integer is invalid"
+                    )
+                continue
+            if isinstance(value, str):
+                if len(value) > 512:
+                    raise CanonicalIntegrityError(
+                        "canonical state evidence extension string is too long"
+                    )
+                _validate_canonical_json_text(value)
+                continue
+            raise CanonicalIntegrityError("canonical state evidence extension value is invalid")
+
+
+def _validate_receipt_evidence_contract(
+    evidence: Mapping[str, object],
+    *,
+    workspace_id: str,
+    scope_kind: str,
+    scope_identity: str,
+    message_id: str,
+    delivery_id: str,
+    attempt_id: str,
+    endpoint_id: str,
+    session_ref_id: str | None,
+) -> None:
+    _validate_state_evidence_core_schema(evidence)
+    if evidence.get("workspace_id") != workspace_id:
+        raise CanonicalIntegrityError("canonical receipt evidence workspace mismatch")
+    if evidence.get("scope") != _scope_projection(scope_kind, scope_identity):
+        raise CanonicalIntegrityError("canonical receipt evidence scope mismatch")
+    subject = evidence.get("subject")
+    if not isinstance(subject, Mapping):
+        raise CanonicalIntegrityError("canonical receipt evidence subject is missing")
+    expected_subject = {
+        "message_id": message_id,
+        "delivery_id": delivery_id,
+        "attempt_id": attempt_id,
+        "endpoint_id": endpoint_id,
+    }
+    for key, value in expected_subject.items():
+        if subject.get(key) != value:
+            raise CanonicalIntegrityError("canonical receipt evidence subject mismatch")
+    if subject.get("session_ref_id") != session_ref_id:
+        raise CanonicalIntegrityError("canonical receipt evidence session mismatch")
+    state = evidence.get("state")
+    if state in _CANONICAL_TERMINAL_RECEIPT_STATES:
+        if session_ref_id is None:
+            raise CanonicalIntegrityError(
+                "canonical terminal receipt evidence requires a session reference"
+            )
+        if evidence.get("quality") != "authoritative":
+            raise CanonicalIntegrityError(
+                "canonical terminal receipt evidence must be authoritative"
+            )
+        if evidence.get("evidence_kind") not in _CANONICAL_TERMINAL_EVIDENCE_KINDS:
+            raise CanonicalIntegrityError(
+                "canonical terminal receipt evidence kind is not authoritative"
+            )
+        authority = evidence.get("authority")
+        if not isinstance(authority, Mapping) or authority.get(
+            "authority_kind"
+        ) not in _CANONICAL_TERMINAL_AUTHORITY_KINDS:
+            raise CanonicalIntegrityError(
+                "canonical terminal receipt evidence authority is not trusted"
+            )
 
 
 def _linked_sqlite_version_info() -> Sequence[int]:
@@ -959,7 +1398,307 @@ V4_SQL = (
 )
 V4_MIGRATION_CHECKSUM = "sha256:63f00990d9c3e01384d14d7613c961856ff48037504b1e0ada1f95b034cedf01"
 V4_SCHEMA_FINGERPRINT = "sha256:665e17152991c6c21cb8756a5d5720e35e3154d13a4a069b4c74440ed425b39e"
-MIGRATIONS = ((1, V1_SQL), (2, V2_SQL), (3, V3_SQL), (4, V4_SQL))
+V5_SQL = (
+    """
+    CREATE TABLE canonical_evidence_bodies (
+        workspace_id TEXT NOT NULL
+            CHECK (
+                instr(workspace_id, char(0)) = 0
+                AND length(CAST(workspace_id AS BLOB)) BETWEEN 6 AND 131
+                AND substr(workspace_id, 1, 3) = 'ws_'
+                AND substr(workspace_id, 4, 1) GLOB '[A-Za-z0-9]'
+                AND substr(workspace_id, 4) NOT GLOB '*[^A-Za-z0-9_-]*'
+            ),
+        evidence_sha256 TEXT NOT NULL
+            CHECK (
+                instr(evidence_sha256, char(0)) = 0
+                AND length(CAST(evidence_sha256 AS BLOB)) = 64
+                AND evidence_sha256 NOT GLOB '*[^0-9a-f]*'
+            ),
+        byte_size INTEGER NOT NULL
+            CHECK (typeof(byte_size) = 'integer' AND byte_size BETWEEN 0 AND 1048576),
+        body BLOB NOT NULL
+            CHECK (typeof(body) = 'blob' AND length(body) = byte_size),
+        created_at_utc TEXT NOT NULL
+            CHECK (
+                instr(created_at_utc, char(0)) = 0
+                AND length(CAST(created_at_utc AS BLOB)) BETWEEN 1 AND 128
+            ),
+        PRIMARY KEY (workspace_id, evidence_sha256)
+    ) STRICT
+    """,
+    """
+    CREATE TABLE canonical_deliveries (
+        workspace_id TEXT NOT NULL,
+        scope_kind TEXT NOT NULL,
+        scope_identity TEXT NOT NULL,
+        message_id TEXT NOT NULL,
+        delivery_id TEXT NOT NULL
+            CHECK (
+                instr(delivery_id, char(0)) = 0
+                AND length(CAST(delivery_id AS BLOB)) = 73
+                AND substr(delivery_id, 1, 9) = 'delivery_'
+                AND substr(delivery_id, 10) NOT GLOB '*[^0-9a-f]*'
+            ),
+        recipient_agent_id TEXT NOT NULL
+            CHECK (
+                instr(recipient_agent_id, char(0)) = 0
+                AND length(CAST(recipient_agent_id AS BLOB)) BETWEEN 9 AND 134
+                AND substr(recipient_agent_id, 1, 6) = 'agent_'
+                AND substr(recipient_agent_id, 7, 1) GLOB '[A-Za-z0-9]'
+                AND substr(recipient_agent_id, 7) NOT GLOB '*[^A-Za-z0-9_-]*'
+            ),
+        endpoint_id TEXT NOT NULL
+            CHECK (
+                instr(endpoint_id, char(0)) = 0
+                AND length(CAST(endpoint_id AS BLOB)) BETWEEN 12 AND 137
+                AND substr(endpoint_id, 1, 9) = 'endpoint_'
+                AND substr(endpoint_id, 10, 1) GLOB '[A-Za-z0-9]'
+                AND substr(endpoint_id, 10) NOT GLOB '*[^A-Za-z0-9_-]*'
+            ),
+        deadline_epoch_ms INTEGER NOT NULL
+            CHECK (typeof(deadline_epoch_ms) = 'integer' AND deadline_epoch_ms >= 0),
+        created_at_utc TEXT NOT NULL
+            CHECK (
+                instr(created_at_utc, char(0)) = 0
+                AND length(CAST(created_at_utc AS BLOB)) BETWEEN 1 AND 128
+            ),
+        PRIMARY KEY (workspace_id, scope_kind, scope_identity, message_id, delivery_id),
+        UNIQUE (
+            workspace_id, scope_kind, scope_identity, message_id, recipient_agent_id, endpoint_id
+        ),
+        FOREIGN KEY (workspace_id, scope_kind, scope_identity, message_id)
+            REFERENCES canonical_messages (workspace_id, scope_kind, scope_identity, message_id)
+            ON DELETE RESTRICT,
+        FOREIGN KEY (
+            workspace_id, scope_kind, scope_identity, message_id, recipient_agent_id
+        )
+            REFERENCES canonical_message_recipients (
+                workspace_id, scope_kind, scope_identity, message_id, recipient_agent_id
+            )
+            ON DELETE RESTRICT
+    ) STRICT
+    """,
+    """
+    CREATE TABLE canonical_delivery_attempts (
+        workspace_id TEXT NOT NULL,
+        scope_kind TEXT NOT NULL,
+        scope_identity TEXT NOT NULL,
+        message_id TEXT NOT NULL,
+        delivery_id TEXT NOT NULL,
+        attempt_id TEXT NOT NULL
+            CHECK (
+                instr(attempt_id, char(0)) = 0
+                AND length(CAST(attempt_id AS BLOB)) = 72
+                AND substr(attempt_id, 1, 8) = 'attempt_'
+                AND substr(attempt_id, 9) NOT GLOB '*[^0-9a-f]*'
+            ),
+        attempt_index INTEGER NOT NULL
+            CHECK (typeof(attempt_index) = 'integer' AND attempt_index >= 0),
+        attempt_epoch_ms INTEGER NOT NULL
+            CHECK (typeof(attempt_epoch_ms) = 'integer' AND attempt_epoch_ms >= 0),
+        created_at_utc TEXT NOT NULL
+            CHECK (
+                instr(created_at_utc, char(0)) = 0
+                AND length(CAST(created_at_utc AS BLOB)) BETWEEN 1 AND 128
+            ),
+        PRIMARY KEY (workspace_id, scope_kind, scope_identity, message_id, delivery_id, attempt_id),
+        UNIQUE (workspace_id, scope_kind, scope_identity, message_id, delivery_id, attempt_index),
+        FOREIGN KEY (workspace_id, scope_kind, scope_identity, message_id, delivery_id)
+            REFERENCES canonical_deliveries (
+                workspace_id, scope_kind, scope_identity, message_id, delivery_id
+            )
+            ON DELETE RESTRICT
+    ) STRICT
+    """,
+    """
+    CREATE TABLE canonical_delivery_receipts (
+        workspace_id TEXT NOT NULL,
+        scope_kind TEXT NOT NULL,
+        scope_identity TEXT NOT NULL,
+        message_id TEXT NOT NULL,
+        delivery_id TEXT NOT NULL,
+        attempt_id TEXT NOT NULL,
+        receipt_id TEXT NOT NULL
+            CHECK (
+                instr(receipt_id, char(0)) = 0
+                AND length(CAST(receipt_id AS BLOB)) = 72
+                AND substr(receipt_id, 1, 8) = 'receipt_'
+                AND substr(receipt_id, 9) NOT GLOB '*[^0-9a-f]*'
+            ),
+        evidence_sha256 TEXT NOT NULL
+            CHECK (
+                instr(evidence_sha256, char(0)) = 0
+                AND length(CAST(evidence_sha256 AS BLOB)) = 64
+                AND evidence_sha256 NOT GLOB '*[^0-9a-f]*'
+            ),
+        state TEXT NOT NULL CHECK (
+            state IN (
+                'persisted', 'routed', 'injected', 'visible', 'accepted', 'processing',
+                'acknowledged', 'completed', 'rejected_before_acceptance', 'ambiguous',
+                'pull_pending', 'deferred_busy'
+            )
+        ),
+        quality TEXT NOT NULL CHECK (quality IN ('best_effort', 'authoritative')),
+        evidence_kind TEXT NOT NULL CHECK (
+            evidence_kind IN (
+                'adapter_observation', 'native_delivery_state',
+                'exact_session_acknowledgment', 'exact_session_binding',
+                'compatibility_import'
+            )
+        ),
+        session_ref_id TEXT
+            CHECK (
+                session_ref_id IS NULL
+                OR (
+                    instr(session_ref_id, char(0)) = 0
+                    AND length(CAST(session_ref_id AS BLOB)) BETWEEN 11 AND 136
+                    AND substr(session_ref_id, 1, 8) = 'session_'
+                    AND substr(session_ref_id, 9, 1) GLOB '[A-Za-z0-9]'
+                    AND substr(session_ref_id, 9) NOT GLOB '*[^A-Za-z0-9_-]*'
+                )
+            ),
+        created_at_utc TEXT NOT NULL
+            CHECK (
+                instr(created_at_utc, char(0)) = 0
+                AND length(CAST(created_at_utc AS BLOB)) BETWEEN 1 AND 128
+            ),
+        PRIMARY KEY (
+            workspace_id, scope_kind, scope_identity, message_id, delivery_id, attempt_id, receipt_id
+        ),
+        FOREIGN KEY (workspace_id, evidence_sha256)
+            REFERENCES canonical_evidence_bodies (workspace_id, evidence_sha256)
+            ON DELETE RESTRICT,
+        FOREIGN KEY (workspace_id, scope_kind, scope_identity, message_id, delivery_id, attempt_id)
+            REFERENCES canonical_delivery_attempts (
+                workspace_id, scope_kind, scope_identity, message_id, delivery_id, attempt_id
+            )
+            ON DELETE RESTRICT,
+        CHECK (state NOT IN ('accepted', 'completed') OR session_ref_id IS NOT NULL)
+    ) STRICT
+    """,
+    """
+    CREATE TRIGGER canonical_evidence_bodies_no_update
+    BEFORE UPDATE ON canonical_evidence_bodies
+    BEGIN
+        SELECT RAISE(ABORT, 'canonical evidence bodies are append-only');
+    END
+    """,
+    """
+    CREATE TRIGGER canonical_evidence_bodies_no_delete
+    BEFORE DELETE ON canonical_evidence_bodies
+    BEGIN
+        SELECT RAISE(ABORT, 'canonical evidence bodies are append-only');
+    END
+    """,
+    """
+    CREATE TRIGGER canonical_deliveries_no_update
+    BEFORE UPDATE ON canonical_deliveries
+    BEGIN
+        SELECT RAISE(ABORT, 'canonical deliveries are append-only');
+    END
+    """,
+    """
+    CREATE TRIGGER canonical_deliveries_no_delete
+    BEFORE DELETE ON canonical_deliveries
+    BEGIN
+        SELECT RAISE(ABORT, 'canonical deliveries are append-only');
+    END
+    """,
+    """
+    CREATE TRIGGER canonical_delivery_attempts_no_update
+    BEFORE UPDATE ON canonical_delivery_attempts
+    BEGIN
+        SELECT RAISE(ABORT, 'canonical delivery attempts are append-only');
+    END
+    """,
+    """
+    CREATE TRIGGER canonical_delivery_attempts_no_delete
+    BEFORE DELETE ON canonical_delivery_attempts
+    BEGIN
+        SELECT RAISE(ABORT, 'canonical delivery attempts are append-only');
+    END
+    """,
+    """
+    CREATE TRIGGER canonical_delivery_receipts_no_update
+    BEFORE UPDATE ON canonical_delivery_receipts
+    BEGIN
+        SELECT RAISE(ABORT, 'canonical delivery receipts are append-only');
+    END
+    """,
+    """
+    CREATE TRIGGER canonical_delivery_receipts_no_delete
+    BEFORE DELETE ON canonical_delivery_receipts
+    BEGIN
+        SELECT RAISE(ABORT, 'canonical delivery receipts are append-only');
+    END
+    """,
+    """
+    CREATE TRIGGER canonical_deliveries_count_cap
+    BEFORE INSERT ON canonical_deliveries
+    WHEN (
+        SELECT count(*) FROM canonical_deliveries
+        WHERE workspace_id = NEW.workspace_id
+          AND scope_kind = NEW.scope_kind
+          AND scope_identity = NEW.scope_identity
+          AND message_id = NEW.message_id
+    ) >= 256
+    BEGIN
+        SELECT RAISE(ABORT, 'canonical delivery count exceeds 256');
+    END
+    """,
+    """
+    CREATE TRIGGER canonical_delivery_attempts_count_cap
+    BEFORE INSERT ON canonical_delivery_attempts
+    WHEN (
+        SELECT count(*) FROM canonical_delivery_attempts
+        WHERE workspace_id = NEW.workspace_id
+          AND scope_kind = NEW.scope_kind
+          AND scope_identity = NEW.scope_identity
+          AND message_id = NEW.message_id
+          AND delivery_id = NEW.delivery_id
+    ) >= 64
+    BEGIN
+        SELECT RAISE(ABORT, 'canonical delivery attempt count exceeds 64');
+    END
+    """,
+    """
+    CREATE TRIGGER canonical_delivery_receipts_count_cap
+    BEFORE INSERT ON canonical_delivery_receipts
+    WHEN (
+        SELECT count(*) FROM canonical_delivery_receipts
+        WHERE workspace_id = NEW.workspace_id
+          AND scope_kind = NEW.scope_kind
+          AND scope_identity = NEW.scope_identity
+          AND message_id = NEW.message_id
+          AND delivery_id = NEW.delivery_id
+          AND attempt_id = NEW.attempt_id
+    ) >= 256
+    BEGIN
+        SELECT RAISE(ABORT, 'canonical delivery receipt count exceeds 256');
+    END
+    """,
+    """
+    CREATE TRIGGER canonical_delivery_attempts_not_expired
+    BEFORE INSERT ON canonical_delivery_attempts
+    WHEN EXISTS (
+        SELECT 1 FROM canonical_deliveries
+        WHERE workspace_id = NEW.workspace_id
+          AND scope_kind = NEW.scope_kind
+          AND scope_identity = NEW.scope_identity
+          AND message_id = NEW.message_id
+          AND delivery_id = NEW.delivery_id
+          AND deadline_epoch_ms != 0
+          AND NEW.attempt_epoch_ms >= deadline_epoch_ms
+    )
+    BEGIN
+        SELECT RAISE(ABORT, 'canonical delivery attempt is expired');
+    END
+    """,
+)
+V5_MIGRATION_CHECKSUM = "sha256:d6498cf5728ec3d56c0d1360a065243d72384a0de50af55bead8054881bbd9b9"
+V5_SCHEMA_FINGERPRINT = "sha256:4495eab6339d339b770442d994b5878e0743d011917cc99b370991a793891a99"
+MIGRATIONS = ((1, V1_SQL), (2, V2_SQL), (3, V3_SQL), (4, V4_SQL), (5, V5_SQL))
 
 
 def _migration_checksum(statements: Sequence[str]) -> str:
@@ -1011,6 +1750,16 @@ def _v4_schema_fingerprint_from_sql() -> str:
     connection = sqlite3.connect(":memory:", isolation_level=None)
     try:
         for statement in (*V1_SQL, *V2_SQL, *V3_SQL, *V4_SQL):
+            connection.execute(statement)
+        return _schema_fingerprint(connection)
+    finally:
+        connection.close()
+
+
+def _v5_schema_fingerprint_from_sql() -> str:
+    connection = sqlite3.connect(":memory:", isolation_level=None)
+    try:
+        for statement in (*V1_SQL, *V2_SQL, *V3_SQL, *V4_SQL, *V5_SQL):
             connection.execute(statement)
         return _schema_fingerprint(connection)
     finally:
@@ -1370,6 +2119,9 @@ class LedgerStore:
         if claimed == 3:
             cls._validate_released_v3(connection, paths)
             return
+        if claimed == 4:
+            cls._validate_released_v4(connection, paths)
+            return
         cls._validate_schema(connection, paths)
 
     @staticmethod
@@ -1407,6 +2159,50 @@ class LedgerStore:
                 raise MigrationError("released v4 migration checksum is incoherent")
             if _v4_schema_fingerprint_from_sql() != V4_SCHEMA_FINGERPRINT:
                 raise MigrationError("released v4 schema fingerprint is incoherent")
+            if _migration_checksum(V5_SQL) != V5_MIGRATION_CHECKSUM:
+                raise MigrationError("released v5 migration checksum is incoherent")
+            if _v5_schema_fingerprint_from_sql() != V5_SCHEMA_FINGERPRINT:
+                raise MigrationError("released v5 schema fingerprint is incoherent")
+            rows = cls._migration_rows(connection)
+            if [row[0] for row in rows] != [1, 2, 3, 4, 5]:
+                raise MigrationError("ledger migration metadata is incoherent")
+            cls._validate_migration_row(rows[0], V1_MIGRATION_CHECKSUM, 0, paths)
+            cls._validate_migration_row(rows[1], V2_MIGRATION_CHECKSUM, 1, paths)
+            cls._validate_migration_row(rows[2], V3_MIGRATION_CHECKSUM, 2, paths)
+            cls._validate_migration_row(rows[3], V4_MIGRATION_CHECKSUM, 3, paths)
+            cls._validate_migration_row(rows[4], V5_MIGRATION_CHECKSUM, 4, paths)
+            actual_tables = cls._table_names(connection)
+            if actual_tables != V5_TABLES:
+                raise MigrationError(
+                    "ledger v5 table set is incoherent: "
+                    f"missing={sorted(V5_TABLES - actual_tables)}, "
+                    f"extra={sorted(actual_tables - V5_TABLES)}"
+                )
+            if _schema_fingerprint(connection) != V5_SCHEMA_FINGERPRINT:
+                raise MigrationError("ledger v5 schema fingerprint is incoherent")
+        except sqlite3.DatabaseError as exc:
+            raise MigrationError("ledger schema is corrupt or incoherent") from exc
+
+    @classmethod
+    def _validate_released_v4(
+        cls, connection: sqlite3.Connection, paths: LedgerPaths
+    ) -> None:
+        """Accept only the exact released v4 long enough for a writer migration."""
+        try:
+            cls._validate_database_health(connection)
+            if connection.execute("PRAGMA user_version").fetchone()[0] != 4:
+                raise MigrationError("ledger is not released schema v4")
+            released = (
+                (V1_SQL, V1_MIGRATION_CHECKSUM, V1_SCHEMA_FINGERPRINT, _v1_schema_fingerprint_from_sql),
+                (V2_SQL, V2_MIGRATION_CHECKSUM, V2_SCHEMA_FINGERPRINT, _v2_schema_fingerprint_from_sql),
+                (V3_SQL, V3_MIGRATION_CHECKSUM, V3_SCHEMA_FINGERPRINT, _v3_schema_fingerprint_from_sql),
+                (V4_SQL, V4_MIGRATION_CHECKSUM, V4_SCHEMA_FINGERPRINT, _v4_schema_fingerprint_from_sql),
+            )
+            for statements, checksum, fingerprint, fingerprint_from_sql in released:
+                if _migration_checksum(statements) != checksum:
+                    raise MigrationError("released migration checksum is incoherent")
+                if fingerprint_from_sql() != fingerprint:
+                    raise MigrationError("released schema fingerprint is incoherent")
             rows = cls._migration_rows(connection)
             if [row[0] for row in rows] != [1, 2, 3, 4]:
                 raise MigrationError("ledger migration metadata is incoherent")
@@ -1598,6 +2394,7 @@ class LedgerStore:
                     2: V2_MIGRATION_CHECKSUM,
                     3: V3_MIGRATION_CHECKSUM,
                     4: V4_MIGRATION_CHECKSUM,
+                    5: V5_MIGRATION_CHECKSUM,
                 }.get(version)
                 if expected_checksum is None or checksum != expected_checksum:
                     raise MigrationError(f"migration {version} does not match its released checksum")
@@ -1620,6 +2417,7 @@ class LedgerStore:
                     2: V2_SCHEMA_FINGERPRINT,
                     3: V3_SCHEMA_FINGERPRINT,
                     4: V4_SCHEMA_FINGERPRINT,
+                    5: V5_SCHEMA_FINGERPRINT,
                 }[version]
                 if _schema_fingerprint(self._connection) != expected_fingerprint:
                     raise MigrationError(f"migration {version} produced an incoherent schema")
@@ -1955,6 +2753,360 @@ class LedgerStore:
             raise
         return message_id, True
 
+    def create_canonical_deliveries(
+        self,
+        *,
+        workspace_id: str,
+        scope_kind: str,
+        scope_identity: str,
+        message_id: str,
+        routes: Iterable[tuple[str, str]],
+        now_epoch_ms: int,
+        created_at_utc: str,
+    ) -> tuple[tuple[str, bool], ...]:
+        """Append route-only delivery rows for existing message recipients."""
+        self.canonical_preflight(write=True)
+        workspace_id, scope_kind, scope_identity = _canonical_scope(
+            workspace_id, scope_kind, scope_identity
+        )
+        self._validate_canonical_scope(workspace_id, scope_kind, scope_identity)
+        message_id = _canonical_message_id(message_id, "message_id")
+        message = self._read_canonical_message(
+            workspace_id, scope_kind, scope_identity, message_id
+        )
+        if message is None:
+            raise KeyError(message_id)
+        if (
+            isinstance(now_epoch_ms, bool)
+            or not isinstance(now_epoch_ms, int)
+            or now_epoch_ms < 0
+        ):
+            raise ValueError("now_epoch_ms must be a non-negative integer")
+        created_at_utc = _utc_timestamp(created_at_utc, "created_at_utc")
+        ttl_seconds = message["ttl_seconds"]
+        deadline_epoch_ms = (
+            0 if ttl_seconds == 0 else now_epoch_ms + int(ttl_seconds) * 1000
+        )
+        normalized_routes = tuple(
+            sorted(
+                {
+                    (
+                        _canonical_agent_id(recipient, "recipient_agent_id"),
+                        _canonical_endpoint_id(endpoint, "endpoint_id"),
+                    )
+                    for recipient, endpoint in routes
+                }
+            )
+        )
+        if not normalized_routes:
+            raise ValueError("routes must contain at least one recipient endpoint")
+        deliveries = []
+        self._connection.execute("BEGIN IMMEDIATE")
+        try:
+            for recipient_agent_id, endpoint_id in normalized_routes:
+                delivery_id = _derive_delivery_id(
+                    workspace_id,
+                    scope_kind,
+                    scope_identity,
+                    message_id,
+                    recipient_agent_id,
+                    endpoint_id,
+                )
+                row = self._connection.execute(
+                    "SELECT recipient_agent_id, endpoint_id FROM canonical_deliveries "
+                    "WHERE workspace_id = ? AND scope_kind = ? AND scope_identity = ? "
+                    "AND message_id = ? AND delivery_id = ?",
+                    (workspace_id, scope_kind, scope_identity, message_id, delivery_id),
+                ).fetchone()
+                if row is not None:
+                    if row != (recipient_agent_id, endpoint_id):
+                        raise CanonicalIntegrityError(
+                            "canonical delivery_id conflicts with different route identity"
+                        )
+                    deliveries.append((delivery_id, False))
+                    continue
+                self._connection.execute(
+                    "INSERT INTO canonical_deliveries "
+                    "(workspace_id, scope_kind, scope_identity, message_id, delivery_id, "
+                    "recipient_agent_id, endpoint_id, deadline_epoch_ms, created_at_utc) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        workspace_id,
+                        scope_kind,
+                        scope_identity,
+                        message_id,
+                        delivery_id,
+                        recipient_agent_id,
+                        endpoint_id,
+                        deadline_epoch_ms,
+                        created_at_utc,
+                    ),
+                )
+                deliveries.append((delivery_id, True))
+            self._connection.execute("COMMIT")
+        except BaseException:
+            if self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
+            raise
+        return tuple(deliveries)
+
+    def create_canonical_delivery_attempt(
+        self,
+        *,
+        workspace_id: str,
+        scope_kind: str,
+        scope_identity: str,
+        message_id: str,
+        delivery_id: str,
+        attempt_index: int,
+        attempt_epoch_ms: int,
+        created_at_utc: str,
+    ) -> tuple[str, bool]:
+        self.canonical_preflight(write=True)
+        workspace_id, scope_kind, scope_identity = _canonical_scope(
+            workspace_id, scope_kind, scope_identity
+        )
+        self._validate_canonical_scope(workspace_id, scope_kind, scope_identity)
+        message_id = _canonical_message_id(message_id, "message_id")
+        delivery_id = _canonical_delivery_id(delivery_id, "delivery_id")
+        if (
+            isinstance(attempt_index, bool)
+            or not isinstance(attempt_index, int)
+            or attempt_index < 0
+        ):
+            raise ValueError("attempt_index must be a non-negative integer")
+        if (
+            isinstance(attempt_epoch_ms, bool)
+            or not isinstance(attempt_epoch_ms, int)
+            or attempt_epoch_ms < 0
+        ):
+            raise ValueError("attempt_epoch_ms must be a non-negative integer")
+        created_at_utc = _utc_timestamp(created_at_utc, "created_at_utc")
+        attempt_id = _derive_attempt_id(
+            workspace_id,
+            scope_kind,
+            scope_identity,
+            message_id,
+            delivery_id,
+            attempt_index,
+        )
+        row = self._connection.execute(
+            "SELECT attempt_epoch_ms, created_at_utc FROM canonical_delivery_attempts "
+            "WHERE workspace_id = ? AND scope_kind = ? AND scope_identity = ? "
+            "AND message_id = ? AND delivery_id = ? AND attempt_id = ?",
+            (workspace_id, scope_kind, scope_identity, message_id, delivery_id, attempt_id),
+        ).fetchone()
+        if row is not None:
+            if row != (attempt_epoch_ms, created_at_utc):
+                raise CanonicalConflictError(
+                    "canonical delivery attempt conflicts with different metadata"
+                )
+            return attempt_id, False
+        self._connection.execute(
+            "INSERT INTO canonical_delivery_attempts "
+            "(workspace_id, scope_kind, scope_identity, message_id, delivery_id, "
+            "attempt_id, attempt_index, attempt_epoch_ms, created_at_utc) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                workspace_id,
+                scope_kind,
+                scope_identity,
+                message_id,
+                delivery_id,
+                attempt_id,
+                attempt_index,
+                attempt_epoch_ms,
+                created_at_utc,
+            ),
+        )
+        return attempt_id, True
+
+    def append_canonical_delivery_receipt(
+        self,
+        *,
+        workspace_id: str,
+        scope_kind: str,
+        scope_identity: str,
+        message_id: str,
+        delivery_id: str,
+        attempt_id: str,
+        evidence: Mapping[str, object],
+        session_ref_id: str | None = None,
+        created_at_utc: str,
+    ) -> tuple[str, bool]:
+        self.canonical_preflight(write=True)
+        workspace_id, scope_kind, scope_identity = _canonical_scope(
+            workspace_id, scope_kind, scope_identity
+        )
+        self._validate_canonical_scope(workspace_id, scope_kind, scope_identity)
+        message_id = _canonical_message_id(message_id, "message_id")
+        delivery_id = _canonical_delivery_id(delivery_id, "delivery_id")
+        attempt_id = _canonical_attempt_id(attempt_id, "attempt_id")
+        session_ref_id = _optional_session_ref_id(session_ref_id)
+        created_at_utc = _utc_timestamp(created_at_utc, "created_at_utc")
+        body, evidence_sha256, state, quality, evidence_kind = _normalize_evidence(evidence)
+        attempt_context = self._connection.execute(
+            "SELECT d.endpoint_id FROM canonical_delivery_attempts AS a "
+            "JOIN canonical_deliveries AS d ON d.workspace_id = a.workspace_id "
+            "AND d.scope_kind = a.scope_kind AND d.scope_identity = a.scope_identity "
+            "AND d.message_id = a.message_id AND d.delivery_id = a.delivery_id "
+            "WHERE a.workspace_id = ? AND a.scope_kind = ? AND a.scope_identity = ? "
+            "AND a.message_id = ? AND a.delivery_id = ? AND a.attempt_id = ?",
+            (
+                workspace_id,
+                scope_kind,
+                scope_identity,
+                message_id,
+                delivery_id,
+                attempt_id,
+            ),
+        ).fetchone()
+        if attempt_context is None:
+            raise CanonicalIntegrityError("canonical delivery attempt is missing")
+        _validate_receipt_evidence_contract(
+            evidence,
+            workspace_id=workspace_id,
+            scope_kind=scope_kind,
+            scope_identity=scope_identity,
+            message_id=message_id,
+            delivery_id=delivery_id,
+            attempt_id=attempt_id,
+            endpoint_id=str(attempt_context[0]),
+            session_ref_id=session_ref_id,
+        )
+        receipt_id = _derive_receipt_id(
+            workspace_id,
+            scope_kind,
+            scope_identity,
+            message_id,
+            delivery_id,
+            attempt_id,
+            evidence_sha256,
+        )
+        row = self._connection.execute(
+            "SELECT state, quality, evidence_kind, session_ref_id, created_at_utc "
+            "FROM canonical_delivery_receipts WHERE workspace_id = ? AND scope_kind = ? "
+            "AND scope_identity = ? AND message_id = ? AND delivery_id = ? "
+            "AND attempt_id = ? AND receipt_id = ?",
+            (
+                workspace_id,
+                scope_kind,
+                scope_identity,
+                message_id,
+                delivery_id,
+                attempt_id,
+                receipt_id,
+            ),
+        ).fetchone()
+        if row is not None:
+            if row != (state, quality, evidence_kind, session_ref_id, created_at_utc):
+                raise CanonicalConflictError(
+                    "canonical delivery receipt conflicts with different metadata"
+                )
+            self._read_canonical_receipt(
+                workspace_id,
+                scope_kind,
+                scope_identity,
+                message_id,
+                delivery_id,
+                attempt_id,
+                receipt_id,
+            )
+            return receipt_id, False
+        body_row = self._connection.execute(
+            "SELECT byte_size, body FROM canonical_evidence_bodies "
+            "WHERE workspace_id = ? AND evidence_sha256 = ?",
+            (workspace_id, evidence_sha256),
+        ).fetchone()
+        if body_row is not None and body_row != (len(body), body):
+            raise CanonicalConflictError(
+                "canonical evidence hash conflicts with different bytes"
+            )
+        self._connection.execute("BEGIN IMMEDIATE")
+        try:
+            if body_row is None:
+                self._connection.execute(
+                    "INSERT INTO canonical_evidence_bodies "
+                    "(workspace_id, evidence_sha256, byte_size, body, created_at_utc) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (workspace_id, evidence_sha256, len(body), body, created_at_utc),
+                )
+            self._connection.execute(
+                "INSERT INTO canonical_delivery_receipts "
+                "(workspace_id, scope_kind, scope_identity, message_id, delivery_id, "
+                "attempt_id, receipt_id, evidence_sha256, state, quality, evidence_kind, "
+                "session_ref_id, created_at_utc) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    workspace_id,
+                    scope_kind,
+                    scope_identity,
+                    message_id,
+                    delivery_id,
+                    attempt_id,
+                    receipt_id,
+                    evidence_sha256,
+                    state,
+                    quality,
+                    evidence_kind,
+                    session_ref_id,
+                    created_at_utc,
+                ),
+            )
+            self._connection.execute("COMMIT")
+        except BaseException:
+            if self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
+            raise
+        return receipt_id, True
+
+    def read_canonical_delivery(
+        self,
+        *,
+        workspace_id: str,
+        scope_kind: str,
+        scope_identity: str,
+        message_id: str,
+        delivery_id: str,
+    ) -> dict[str, object] | None:
+        self.canonical_preflight(write=False)
+        workspace_id, scope_kind, scope_identity = _canonical_scope(
+            workspace_id, scope_kind, scope_identity
+        )
+        self._validate_canonical_scope(workspace_id, scope_kind, scope_identity)
+        return self._read_canonical_delivery(
+            workspace_id,
+            scope_kind,
+            scope_identity,
+            _canonical_message_id(message_id, "message_id"),
+            _canonical_delivery_id(delivery_id, "delivery_id"),
+        )
+
+    def read_canonical_receipt(
+        self,
+        *,
+        workspace_id: str,
+        scope_kind: str,
+        scope_identity: str,
+        message_id: str,
+        delivery_id: str,
+        attempt_id: str,
+        receipt_id: str,
+    ) -> dict[str, object] | None:
+        self.canonical_preflight(write=False)
+        workspace_id, scope_kind, scope_identity = _canonical_scope(
+            workspace_id, scope_kind, scope_identity
+        )
+        self._validate_canonical_scope(workspace_id, scope_kind, scope_identity)
+        return self._read_canonical_receipt(
+            workspace_id,
+            scope_kind,
+            scope_identity,
+            _canonical_message_id(message_id, "message_id"),
+            _canonical_delivery_id(delivery_id, "delivery_id"),
+            _canonical_attempt_id(attempt_id, "attempt_id"),
+            _canonical_receipt_id(receipt_id, "receipt_id"),
+        )
+
     def _read_canonical_message(
         self,
         workspace_id: str,
@@ -2061,6 +3213,245 @@ class LedgerStore:
             raise CanonicalIntegrityError(
                 "canonical message_id does not match its normalized immutable intent"
             )
+        return result
+
+    def _read_canonical_evidence_body(
+        self, workspace_id: str, evidence_sha256: str
+    ) -> tuple[dict[str, object], bytes]:
+        row = self._connection.execute(
+            "SELECT byte_size, body FROM canonical_evidence_bodies "
+            "WHERE workspace_id = ? AND evidence_sha256 = ?",
+            (workspace_id, evidence_sha256),
+        ).fetchone()
+        if row is None:
+            raise CanonicalIntegrityError("canonical evidence body is missing")
+        byte_size, body = row
+        if (
+            not isinstance(body, bytes)
+            or not isinstance(byte_size, int)
+            or len(body) != byte_size
+            or hashlib.sha256(body).hexdigest() != evidence_sha256
+        ):
+            raise CanonicalIntegrityError(
+                "canonical evidence failed size or SHA-256 verification"
+            )
+        try:
+            parsed = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise CanonicalIntegrityError("canonical evidence is not valid JSON") from exc
+        if not isinstance(parsed, dict):
+            raise CanonicalIntegrityError("canonical evidence is not a JSON object")
+        normalized_body, normalized_sha, _state, _quality, _kind = _normalize_evidence(parsed)
+        if normalized_sha != evidence_sha256 or normalized_body != body:
+            raise CanonicalIntegrityError(
+                "canonical evidence bytes are not canonical for their integrity"
+            )
+        return parsed, body
+
+    @staticmethod
+    def _delivery_outcome(receipts: Iterable[dict[str, object]]) -> tuple[str, dict[str, object] | None]:
+        best: tuple[int, str, dict[str, object]] | None = None
+        for receipt in receipts:
+            rank, outcome = _DELIVERY_OUTCOME_BY_STATE[str(receipt["state"])]
+            candidate = (rank, str(receipt["receipt_id"]), receipt)
+            if best is None or rank > best[0] or (rank == best[0] and candidate[1] < best[1]):
+                best = candidate
+        if best is None:
+            return "pending", None
+        return _DELIVERY_OUTCOME_BY_STATE[str(best[2]["state"])][1], best[2]
+
+    def _read_canonical_receipt(
+        self,
+        workspace_id: str,
+        scope_kind: str,
+        scope_identity: str,
+        message_id: str,
+        delivery_id: str,
+        attempt_id: str,
+        receipt_id: str,
+    ) -> dict[str, object] | None:
+        row = self._connection.execute(
+            "SELECT workspace_id, scope_kind, scope_identity, message_id, delivery_id, "
+            "attempt_id, receipt_id, evidence_sha256, state, quality, evidence_kind, "
+            "session_ref_id, created_at_utc FROM canonical_delivery_receipts "
+            "WHERE workspace_id = ? AND scope_kind = ? AND scope_identity = ? "
+            "AND message_id = ? AND delivery_id = ? AND attempt_id = ? AND receipt_id = ?",
+            (
+                workspace_id,
+                scope_kind,
+                scope_identity,
+                message_id,
+                delivery_id,
+                attempt_id,
+                receipt_id,
+            ),
+        ).fetchone()
+        if row is None:
+            return None
+        keys = (
+            "workspace_id",
+            "scope_kind",
+            "scope_identity",
+            "message_id",
+            "delivery_id",
+            "attempt_id",
+            "receipt_id",
+            "evidence_sha256",
+            "state",
+            "quality",
+            "evidence_kind",
+            "session_ref_id",
+            "created_at_utc",
+        )
+        result = dict(zip(keys, row))
+        evidence, evidence_body = self._read_canonical_evidence_body(
+            str(result["workspace_id"]), str(result["evidence_sha256"])
+        )
+        derived_receipt_id = _derive_receipt_id(
+            str(result["workspace_id"]),
+            str(result["scope_kind"]),
+            str(result["scope_identity"]),
+            str(result["message_id"]),
+            str(result["delivery_id"]),
+            str(result["attempt_id"]),
+            str(result["evidence_sha256"]),
+        )
+        if derived_receipt_id != result["receipt_id"]:
+            raise CanonicalIntegrityError(
+                "canonical receipt_id does not match its immutable receipt tuple"
+            )
+        if (
+            evidence.get("state") != result["state"]
+            or evidence.get("quality") != result["quality"]
+            or evidence.get("evidence_kind") != result["evidence_kind"]
+        ):
+            raise CanonicalIntegrityError(
+                "canonical receipt fold columns do not match evidence bytes"
+            )
+        attempt = self._connection.execute(
+            "SELECT d.recipient_agent_id, d.endpoint_id, a.attempt_index "
+            "FROM canonical_delivery_attempts AS a "
+            "JOIN canonical_deliveries AS d ON d.workspace_id = a.workspace_id "
+            "AND d.scope_kind = a.scope_kind AND d.scope_identity = a.scope_identity "
+            "AND d.message_id = a.message_id AND d.delivery_id = a.delivery_id "
+            "WHERE a.workspace_id = ? AND a.scope_kind = ? AND a.scope_identity = ? "
+            "AND a.message_id = ? AND a.delivery_id = ? AND a.attempt_id = ?",
+            (
+                workspace_id,
+                scope_kind,
+                scope_identity,
+                message_id,
+                delivery_id,
+                attempt_id,
+            ),
+        ).fetchone()
+        if attempt is None:
+            raise CanonicalIntegrityError("canonical receipt attempt is missing")
+        expected_delivery_id = _derive_delivery_id(
+            str(result["workspace_id"]),
+            str(result["scope_kind"]),
+            str(result["scope_identity"]),
+            str(result["message_id"]),
+            str(attempt[0]),
+            str(attempt[1]),
+        )
+        if expected_delivery_id != result["delivery_id"]:
+            raise CanonicalIntegrityError(
+                "canonical delivery_id does not match its immutable route tuple"
+            )
+        expected_attempt_id = _derive_attempt_id(
+            str(result["workspace_id"]),
+            str(result["scope_kind"]),
+            str(result["scope_identity"]),
+            str(result["message_id"]),
+            str(result["delivery_id"]),
+            int(attempt[2]),
+        )
+        if expected_attempt_id != result["attempt_id"]:
+            raise CanonicalIntegrityError(
+                "canonical attempt_id does not match its immutable attempt tuple"
+            )
+        _validate_receipt_evidence_contract(
+            evidence,
+            workspace_id=str(result["workspace_id"]),
+            scope_kind=str(result["scope_kind"]),
+            scope_identity=str(result["scope_identity"]),
+            message_id=str(result["message_id"]),
+            delivery_id=str(result["delivery_id"]),
+            attempt_id=str(result["attempt_id"]),
+            endpoint_id=str(attempt[1]),
+            session_ref_id=result["session_ref_id"],  # type: ignore[arg-type]
+        )
+        result["evidence"] = evidence
+        result["evidence_body"] = evidence_body
+        return result
+
+    def _read_canonical_delivery(
+        self,
+        workspace_id: str,
+        scope_kind: str,
+        scope_identity: str,
+        message_id: str,
+        delivery_id: str,
+    ) -> dict[str, object] | None:
+        row = self._connection.execute(
+            "SELECT workspace_id, scope_kind, scope_identity, message_id, delivery_id, "
+            "recipient_agent_id, endpoint_id, deadline_epoch_ms, created_at_utc "
+            "FROM canonical_deliveries WHERE workspace_id = ? AND scope_kind = ? "
+            "AND scope_identity = ? AND message_id = ? AND delivery_id = ?",
+            (workspace_id, scope_kind, scope_identity, message_id, delivery_id),
+        ).fetchone()
+        if row is None:
+            return None
+        keys = (
+            "workspace_id",
+            "scope_kind",
+            "scope_identity",
+            "message_id",
+            "delivery_id",
+            "recipient_agent_id",
+            "endpoint_id",
+            "deadline_epoch_ms",
+            "created_at_utc",
+        )
+        result = dict(zip(keys, row))
+        expected_delivery_id = _derive_delivery_id(
+            str(result["workspace_id"]),
+            str(result["scope_kind"]),
+            str(result["scope_identity"]),
+            str(result["message_id"]),
+            str(result["recipient_agent_id"]),
+            str(result["endpoint_id"]),
+        )
+        if expected_delivery_id != result["delivery_id"]:
+            raise CanonicalIntegrityError(
+                "canonical delivery_id does not match its immutable route tuple"
+            )
+        receipts = []
+        for receipt_row in self._connection.execute(
+            "SELECT attempt_id, receipt_id FROM canonical_delivery_receipts "
+            "WHERE workspace_id = ? AND scope_kind = ? AND scope_identity = ? "
+            "AND message_id = ? AND delivery_id = ? ORDER BY attempt_id, receipt_id",
+            (workspace_id, scope_kind, scope_identity, message_id, delivery_id),
+        ):
+            receipt = self._read_canonical_receipt(
+                workspace_id,
+                scope_kind,
+                scope_identity,
+                message_id,
+                delivery_id,
+                receipt_row[0],
+                receipt_row[1],
+            )
+            if receipt is not None:
+                receipts.append(receipt)
+        outcome, selected = self._delivery_outcome(receipts)
+        result["outcome"] = outcome
+        result["receipts"] = tuple(receipts)
+        result["selected_receipt"] = selected
+        result["attempt_id"] = selected["attempt_id"] if selected is not None else None
+        result["evidence"] = selected["evidence"] if selected is not None else None
+        result["session_ref_id"] = selected["session_ref_id"] if selected is not None else None
         return result
 
     def _validate_canonical_scope(
