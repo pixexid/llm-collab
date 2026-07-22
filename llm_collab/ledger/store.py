@@ -3152,6 +3152,12 @@ class LedgerStore:
         publication = normalized["publication"]  # type: ignore[index]
         if publication["workspace_id"] != workspace_id:  # type: ignore[index]
             raise ValueError("manifest publication workspace_id must match the ledger workspace")
+        if self.get_project_snapshot(
+            workspace_id=workspace_id,
+            project_id=str(publication["project_id"]),
+            registry_revision=str(publication["registry_revision"]),
+        ) is None:
+            raise ValueError("manifest publication project_id references an unknown project")
         manifest_id = str(normalized["manifest_id"])
         manifest_seal = str(normalized["seal"]["value"])  # type: ignore[index]
         entries = normalized["entries"]  # type: ignore[assignment]
@@ -3511,6 +3517,12 @@ class LedgerStore:
         normalized = _normalize_legacy_manifest(manifest)
         if normalized["publication"]["workspace_id"] != workspace_id:  # type: ignore[index]
             raise ValueError("manifest publication workspace_id must match the ledger workspace")
+        if self.get_project_snapshot(
+            workspace_id=workspace_id,
+            project_id=str(normalized["publication"]["project_id"]),  # type: ignore[index]
+            registry_revision=registry_revision,
+        ) is None:
+            raise ValueError("manifest publication project_id references an unknown project")
         entries = normalized["entries"]  # type: ignore[assignment]
         sources = self._read_legacy_v2_sources(workspace_root=workspace_root, entries=entries)  # type: ignore[arg-type]
 

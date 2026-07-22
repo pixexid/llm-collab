@@ -64,6 +64,7 @@ SAFE_VERSION = (3, 51, 3)
 FIXED_TIME = datetime(2026, 7, 21, 8, 5, 6, 123456, tzinfo=timezone.utc)
 AMIGA = "amiga"
 NUVYR = "nuvyr"
+GHOST = "ghost"
 REVISION_HASH = "a" * 64
 REVISION = f"sha256:{REVISION_HASH}"
 
@@ -1025,6 +1026,41 @@ class LedgerStoreTest(unittest.TestCase):
                     0,
                 )
 
+    def test_v6_manifest_rejects_unregistered_publication_project_before_rows(self) -> None:
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            paths = LedgerPaths.derive(tmp, "ws_alpha")
+            meta = b'{"chat_id":"CHAT-8976EECB","project_id":"ghost"}'
+            entries = [
+                manifest_entry(
+                    "/Chats/chat-a/meta.json",
+                    meta,
+                    evidence_form_version="v2_chat_meta",
+                    project_id=GHOST,
+                )
+            ]
+            manifest = legacy_manifest(entries, project_id=GHOST)
+            with LedgerStore.open_writer(paths, clock=lambda: FIXED_TIME) as store:
+                record_test_registry(store)
+                with self.assertRaisesRegex(ValueError, "unknown project"):
+                    store.record_legacy_import_manifest(
+                        workspace_id="ws_alpha",
+                        manifest=manifest,
+                        records=(),
+                        imported_at_utc=FIXED_TIME.isoformat(),
+                    )
+                self.assertEqual(
+                    store._connection.execute("SELECT count(*) FROM legacy_import_manifests").fetchone()[0],
+                    0,
+                )
+                self.assertEqual(
+                    store._connection.execute("SELECT count(*) FROM legacy_import_manifest_entries").fetchone()[0],
+                    0,
+                )
+                self.assertEqual(
+                    store._connection.execute("SELECT count(*) FROM legacy_import_records").fetchone()[0],
+                    0,
+                )
+
     def test_v6_import_legacy_v2_pair_meta_and_inbox_in_one_transaction_without_v5_rows(self) -> None:
         with TemporaryDirectory(dir="/tmp") as tmp:
             root = Path(tmp) / "workspace"
@@ -1217,7 +1253,6 @@ class LedgerStoreTest(unittest.TestCase):
                 root = Path(tmp) / "workspace"
                 root.mkdir()
                 paths = LedgerPaths.derive(Path(tmp) / "ledger", "ws_alpha")
-                write_source(root, locator, payload)
                 entries = [
                     manifest_entry(
                         locator,
@@ -1341,6 +1376,80 @@ class LedgerStoreTest(unittest.TestCase):
                                 registry_revision=REVISION,
                                 imported_at_utc=FIXED_TIME.isoformat(),
                             )
+                    finally:
+                        store._connection.set_trace_callback(None)
+                    self.assertEqual(begin_count, 0)
+                    self.assertEqual(
+                        store._connection.execute("SELECT count(*) FROM canonical_messages").fetchone()[0],
+                        0,
+                    )
+                    self.assertEqual(
+                        store._connection.execute("SELECT count(*) FROM legacy_import_manifests").fetchone()[0],
+                        0,
+                    )
+                    self.assertEqual(
+                        store._connection.execute("SELECT count(*) FROM legacy_import_manifest_entries").fetchone()[0],
+                        0,
+                    )
+                    self.assertEqual(
+                        store._connection.execute("SELECT count(*) FROM legacy_import_records").fetchone()[0],
+                        0,
+                    )
+
+    def test_v6_import_legacy_v2_metadata_only_unregistered_project_aborts_without_rows(self) -> None:
+        cases = (
+            (
+                "/Chats/chat-a/meta.json",
+                b'{"chat_id":"CHAT-8976EECB","project_id":"ghost"}',
+                "v2_chat_meta",
+            ),
+            (
+                "/agents/claude/inbox.json",
+                b'{"unread":[],"read":[]}',
+                "v2_inbox_index",
+            ),
+        )
+        for locator, payload, evidence_form_version in cases:
+            with self.subTest(evidence_form_version=evidence_form_version), TemporaryDirectory(dir="/tmp") as tmp:
+                root = Path(tmp) / "workspace"
+                root.mkdir()
+                paths = LedgerPaths.derive(Path(tmp) / "ledger", "ws_alpha")
+                entries = [
+                    manifest_entry(
+                        locator,
+                        payload,
+                        evidence_form_version=evidence_form_version,
+                        project_id=GHOST,
+                    )
+                ]
+                manifest = legacy_manifest(entries, project_id=GHOST)
+                with LedgerStore.open_writer(paths, clock=lambda: FIXED_TIME) as store:
+                    record_test_registry(store)
+                    begin_count = 0
+
+                    def counting_trace(statement: str) -> None:
+                        nonlocal begin_count
+                        if statement == "BEGIN IMMEDIATE":
+                            begin_count += 1
+
+                    store._connection.set_trace_callback(counting_trace)
+                    try:
+                        with (
+                            patch.object(
+                                store,
+                                "_read_legacy_v2_sources",
+                                side_effect=AssertionError("must not read sources for unknown projects"),
+                            ) as read_sources,
+                            self.assertRaisesRegex(ValueError, "unknown project"),
+                        ):
+                            store.import_legacy_v2_manifest(
+                                workspace_root=root,
+                                workspace_id="ws_alpha",
+                                manifest=manifest,
+                                registry_revision=REVISION,
+                                imported_at_utc=FIXED_TIME.isoformat(),
+                            )
+                        read_sources.assert_not_called()
                     finally:
                         store._connection.set_trace_callback(None)
                     self.assertEqual(begin_count, 0)
