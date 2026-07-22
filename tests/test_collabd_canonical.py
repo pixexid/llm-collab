@@ -13,13 +13,19 @@ from unittest.mock import patch
 from jsonschema import Draft202012Validator
 
 import llm_collab.canonical as canonical
+import llm_collab.canonical.delivery as delivery_module
 import llm_collab.canonical.messages as messages_module
 import llm_collab.ledger.store as store_module
 from llm_collab.canonical import (
     CanonicalConflictError,
     CanonicalIntegrityError,
+    append_receipt,
+    create_attempt,
+    create_deliveries,
     create_or_return_equivalent,
+    project_delivery_v1,
     project_message_v1,
+    project_receipt_v1,
     read_message,
 )
 from llm_collab.ledger import LedgerPaths, LedgerStore
@@ -75,6 +81,62 @@ def intent(**changes: object) -> dict[str, object]:
     }
     result.update(changes)
     return result
+
+
+def state_evidence(
+    *,
+    message_id: str,
+    delivery_id: str,
+    attempt_id: str,
+    endpoint_id: str,
+    state: str,
+    session_ref_id: str | None = None,
+    correlation_id: str = "corr_alpha",
+    observed_at_utc: str = NOW,
+) -> dict[str, object]:
+    evidence: dict[str, object] = {
+        "schema_version": 1,
+        "workspace_id": WORKSPACE,
+        "scope": {"kind": "project", "project_id": PROJECT},
+        "evidence_id": f"evidence_{correlation_id}",
+        "evidence_kind": "native_delivery_state",
+        "quality": "authoritative" if state in {"accepted", "completed"} else "best_effort",
+        "state": state,
+        "authority": {
+            "authority_kind": "native_runtime",
+            "identity": "agent_claude",
+            "implementation_revision": "rev_v1",
+            "capability_profile_id": "profile_claude",
+            "capability_profile_revision": "profile_rev_v1",
+        },
+        "subject": {
+            "message_id": message_id,
+            "delivery_id": delivery_id,
+            "attempt_id": attempt_id,
+            "endpoint_id": endpoint_id,
+        },
+        "correlation_id": correlation_id,
+        "observed_at_utc": observed_at_utc,
+    }
+    if session_ref_id is not None:
+        evidence["subject"]["session_ref_id"] = session_ref_id  # type: ignore[index]
+    projection = dict(evidence)
+    projection.pop("integrity", None)
+    body = json.dumps(
+        projection, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
+    evidence["integrity"] = "sha256:" + hashlib.sha256(body).hexdigest()
+    return evidence
+
+
+def reseal_evidence(evidence: dict[str, object]) -> dict[str, object]:
+    projection = dict(evidence)
+    projection.pop("integrity", None)
+    body = json.dumps(
+        projection, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
+    evidence["integrity"] = "sha256:" + hashlib.sha256(body).hexdigest()
+    return evidence
 
 
 class CanonicalMessageTest(unittest.TestCase):
@@ -225,6 +287,1176 @@ class CanonicalMessageTest(unittest.TestCase):
                     (("chat", "CHAT-1"), ("path", "docs/file.md")),
                 )
                 self.assertEqual(loaded["tags"], ("review", "urgent"))
+
+    def test_delivery_routes_are_recipient_scoped_and_deadline_enforced(self) -> None:
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            paths = LedgerPaths.derive(tmp, WORKSPACE)
+            with LedgerStore.open_writer(paths) as store:
+                record_registry(store)
+                message_id, created = create_or_return_equivalent(
+                    store,
+                    **intent(ttl_seconds=1, recipients=["agent_claude"]),
+                )
+                self.assertTrue(created)
+                deliveries = create_deliveries(
+                    store,
+                    workspace_id=WORKSPACE,
+                    scope_kind="project",
+                    scope_identity=PROJECT,
+                    message_id=message_id,
+                    routes=[("agent_claude", "endpoint_claude_desktop")],
+                    now_epoch_ms=1_000,
+                    created_at_utc=NOW,
+                )
+                self.assertEqual(len(deliveries), 1)
+                delivery_id, created = deliveries[0]
+                self.assertTrue(created)
+                self.assertRegex(delivery_id, r"^delivery_[0-9a-f]{64}$")
+                self.assertEqual(
+                    store._connection.execute(
+                        "SELECT count(*) FROM canonical_bodies"
+                    ).fetchone()[0],
+                    1,
+                )
+
+                non_recipient_delivery_id = store_module._derive_delivery_id(
+                    WORKSPACE,
+                    "project",
+                    PROJECT,
+                    message_id,
+                    "agent_other",
+                    "endpoint_other_desktop",
+                )
+                with self.assertRaises(sqlite3.IntegrityError):
+                    store._connection.execute(
+                        "INSERT INTO canonical_deliveries "
+                        "(workspace_id, scope_kind, scope_identity, message_id, delivery_id, "
+                        "recipient_agent_id, endpoint_id, deadline_epoch_ms, created_at_utc) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            WORKSPACE,
+                            "project",
+                            PROJECT,
+                            message_id,
+                            non_recipient_delivery_id,
+                            "agent_other",
+                            "endpoint_other_desktop",
+                            2_000,
+                            NOW,
+                        ),
+                    )
+
+                attempt_id, created = create_attempt(
+                    store,
+                    workspace_id=WORKSPACE,
+                    scope_kind="project",
+                    scope_identity=PROJECT,
+                    message_id=message_id,
+                    delivery_id=delivery_id,
+                    attempt_index=0,
+                    attempt_epoch_ms=1_999,
+                    created_at_utc=NOW,
+                )
+                self.assertTrue(created)
+                self.assertRegex(attempt_id, r"^attempt_[0-9a-f]{64}$")
+                with self.assertRaisesRegex(sqlite3.IntegrityError, "expired"):
+                    create_attempt(
+                        store,
+                        workspace_id=WORKSPACE,
+                        scope_kind="project",
+                        scope_identity=PROJECT,
+                        message_id=message_id,
+                        delivery_id=delivery_id,
+                        attempt_index=1,
+                        attempt_epoch_ms=2_000,
+                        created_at_utc=NOW,
+                    )
+                receipt_id, created = append_receipt(
+                    store,
+                    workspace_id=WORKSPACE,
+                    scope_kind="project",
+                    scope_identity=PROJECT,
+                    message_id=message_id,
+                    delivery_id=delivery_id,
+                    attempt_id=attempt_id,
+                    evidence=state_evidence(
+                        message_id=message_id,
+                        delivery_id=delivery_id,
+                        attempt_id=attempt_id,
+                        endpoint_id="endpoint_claude_desktop",
+                        state="acknowledged",
+                    ),
+                    created_at_utc=NOW,
+                )
+                self.assertTrue(created)
+                self.assertRegex(receipt_id, r"^receipt_[0-9a-f]{64}$")
+
+    def test_delivery_retry_returns_existing_route_without_rewriting_metadata(self) -> None:
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            paths = LedgerPaths.derive(tmp, WORKSPACE)
+            with LedgerStore.open_writer(paths) as store:
+                record_registry(store)
+                message_id, _created = create_or_return_equivalent(
+                    store,
+                    **intent(ttl_seconds=1, recipients=["agent_claude"]),
+                )
+                ((delivery_id, created),) = create_deliveries(
+                    store,
+                    workspace_id=WORKSPACE,
+                    scope_kind="project",
+                    scope_identity=PROJECT,
+                    message_id=message_id,
+                    routes=[("agent_claude", "endpoint_claude_desktop")],
+                    now_epoch_ms=1_000,
+                    created_at_utc=NOW,
+                )
+                self.assertTrue(created)
+                ((same_delivery_id, created),) = create_deliveries(
+                    store,
+                    workspace_id=WORKSPACE,
+                    scope_kind="project",
+                    scope_identity=PROJECT,
+                    message_id=message_id,
+                    routes=[("agent_claude", "endpoint_claude_desktop")],
+                    now_epoch_ms=9_000,
+                    created_at_utc="2026-07-22T00:00:09+00:00",
+                )
+                self.assertEqual((same_delivery_id, created), (delivery_id, False))
+                self.assertEqual(
+                    store._connection.execute(
+                        "SELECT deadline_epoch_ms, created_at_utc FROM canonical_deliveries "
+                        "WHERE delivery_id = ?",
+                        (delivery_id,),
+                    ).fetchone(),
+                    (2_000, NOW),
+                )
+
+    def test_delivery_receipt_fold_integrity_projection_and_derivation_are_shared(self) -> None:
+        self.assertIs(delivery_module._derive_delivery_id, store_module._derive_delivery_id)
+        self.assertIs(delivery_module._derive_attempt_id, store_module._derive_attempt_id)
+        self.assertIs(delivery_module._derive_receipt_id, store_module._derive_receipt_id)
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            paths = LedgerPaths.derive(tmp, WORKSPACE)
+            with LedgerStore.open_writer(paths) as store:
+                record_registry(store)
+                message_id, _created = create_or_return_equivalent(
+                    store, **intent(recipients=["agent_claude"])
+                )
+                ((delivery_id, _created),) = create_deliveries(
+                    store,
+                    workspace_id=WORKSPACE,
+                    scope_kind="project",
+                    scope_identity=PROJECT,
+                    message_id=message_id,
+                    routes=[("agent_claude", "endpoint_claude_desktop")],
+                    now_epoch_ms=1_000,
+                    created_at_utc=NOW,
+                )
+                attempt_id, _created = create_attempt(
+                    store,
+                    workspace_id=WORKSPACE,
+                    scope_kind="project",
+                    scope_identity=PROJECT,
+                    message_id=message_id,
+                    delivery_id=delivery_id,
+                    attempt_index=0,
+                    attempt_epoch_ms=1_100,
+                    created_at_utc=NOW,
+                )
+                completed = state_evidence(
+                    message_id=message_id,
+                    delivery_id=delivery_id,
+                    attempt_id=attempt_id,
+                    endpoint_id="endpoint_claude_desktop",
+                    state="completed",
+                    session_ref_id="session_claude_alpha",
+                    correlation_id="corr_completed",
+                )
+                receipt_id, created = append_receipt(
+                    store,
+                    workspace_id=WORKSPACE,
+                    scope_kind="project",
+                    scope_identity=PROJECT,
+                    message_id=message_id,
+                    delivery_id=delivery_id,
+                    attempt_id=attempt_id,
+                    evidence=completed,
+                    session_ref_id="session_claude_alpha",
+                    created_at_utc=NOW,
+                )
+                self.assertTrue(created)
+                same_receipt, created = append_receipt(
+                    store,
+                    workspace_id=WORKSPACE,
+                    scope_kind="project",
+                    scope_identity=PROJECT,
+                    message_id=message_id,
+                    delivery_id=delivery_id,
+                    attempt_id=attempt_id,
+                    evidence=completed,
+                    session_ref_id="session_claude_alpha",
+                    created_at_utc=NOW,
+                )
+                self.assertEqual((same_receipt, created), (receipt_id, False))
+                ambiguous = state_evidence(
+                    message_id=message_id,
+                    delivery_id=delivery_id,
+                    attempt_id=attempt_id,
+                    endpoint_id="endpoint_claude_desktop",
+                    state="ambiguous",
+                    correlation_id="corr_ambiguous",
+                )
+                append_receipt(
+                    store,
+                    workspace_id=WORKSPACE,
+                    scope_kind="project",
+                    scope_identity=PROJECT,
+                    message_id=message_id,
+                    delivery_id=delivery_id,
+                    attempt_id=attempt_id,
+                    evidence=ambiguous,
+                    created_at_utc=NOW,
+                )
+
+                projected_delivery = project_delivery_v1(
+                    store,
+                    workspace_id=WORKSPACE,
+                    scope_kind="project",
+                    scope_identity=PROJECT,
+                    message_id=message_id,
+                    delivery_id=delivery_id,
+                )
+                self.assertEqual(projected_delivery["outcome"], "completed")
+                self.assertEqual(projected_delivery["attempt_id"], attempt_id)
+                self.assertEqual(projected_delivery["evidence"], completed)
+                self.assertEqual(projected_delivery["session_ref_id"], "session_claude_alpha")
+                self.assertEqual(
+                    set(projected_delivery),
+                    {
+                        "schema_version",
+                        "workspace_id",
+                        "scope",
+                        "delivery_id",
+                        "message_id",
+                        "attempt_id",
+                        "endpoint_id",
+                        "session_ref_id",
+                        "outcome",
+                        "evidence",
+                    },
+                )
+                projected_receipt = project_receipt_v1(
+                    store,
+                    workspace_id=WORKSPACE,
+                    scope_kind="project",
+                    scope_identity=PROJECT,
+                    message_id=message_id,
+                    delivery_id=delivery_id,
+                    attempt_id=attempt_id,
+                    receipt_id=receipt_id,
+                )
+                self.assertEqual(projected_receipt["state"], "completed")
+                self.assertEqual(projected_receipt["session_ref_id"], "session_claude_alpha")
+                Draft202012Validator(
+                    json.loads(
+                        (
+                            Path(__file__).parents[1]
+                            / "schemas/standalone/v1/state-evidence.schema.json"
+                        ).read_text()
+                    )
+                ).validate(projected_receipt["evidence"])
+
+                forged = state_evidence(
+                    message_id=message_id,
+                    delivery_id=delivery_id,
+                    attempt_id=attempt_id,
+                    endpoint_id="endpoint_claude_desktop",
+                    state="completed",
+                    session_ref_id="session_claude_alpha",
+                    correlation_id="corr_forged",
+                )
+                body, evidence_sha256, state, quality, kind = store_module._normalize_evidence(
+                    forged
+                )
+                forged_receipt_id = store_module._derive_receipt_id(
+                    WORKSPACE,
+                    "project",
+                    PROJECT,
+                    message_id,
+                    delivery_id,
+                    attempt_id,
+                    evidence_sha256,
+                )
+                store._connection.execute(
+                    "INSERT INTO canonical_evidence_bodies VALUES (?, ?, ?, ?, ?)",
+                    (WORKSPACE, evidence_sha256, len(body), body, NOW),
+                )
+                store._connection.execute(
+                    "INSERT INTO canonical_delivery_receipts "
+                    "(workspace_id, scope_kind, scope_identity, message_id, delivery_id, "
+                    "attempt_id, receipt_id, evidence_sha256, state, quality, evidence_kind, "
+                    "session_ref_id, created_at_utc) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        WORKSPACE,
+                        "project",
+                        PROJECT,
+                        message_id,
+                        delivery_id,
+                        attempt_id,
+                        forged_receipt_id,
+                        evidence_sha256,
+                        "ambiguous",
+                        quality,
+                        kind,
+                        "session_claude_alpha",
+                        NOW,
+                    ),
+                )
+                with self.assertRaises(CanonicalIntegrityError):
+                    store.read_canonical_receipt(
+                        workspace_id=WORKSPACE,
+                        scope_kind="project",
+                        scope_identity=PROJECT,
+                        message_id=message_id,
+                        delivery_id=delivery_id,
+                        attempt_id=attempt_id,
+                        receipt_id=forged_receipt_id,
+                    )
+
+    def test_receipt_evidence_scope_and_terminal_authority_are_rejected_before_write(self) -> None:
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            paths = LedgerPaths.derive(tmp, WORKSPACE)
+            with LedgerStore.open_writer(paths) as store:
+                record_registry(store)
+                message_id, _created = create_or_return_equivalent(
+                    store, **intent(recipients=["agent_claude"])
+                )
+                ((delivery_id, _created),) = create_deliveries(
+                    store,
+                    workspace_id=WORKSPACE,
+                    scope_kind="project",
+                    scope_identity=PROJECT,
+                    message_id=message_id,
+                    routes=[("agent_claude", "endpoint_claude_desktop")],
+                    now_epoch_ms=1_000,
+                    created_at_utc=NOW,
+                )
+                attempt_id, _created = create_attempt(
+                    store,
+                    workspace_id=WORKSPACE,
+                    scope_kind="project",
+                    scope_identity=PROJECT,
+                    message_id=message_id,
+                    delivery_id=delivery_id,
+                    attempt_index=0,
+                    attempt_epoch_ms=1_100,
+                    created_at_utc=NOW,
+                )
+                foreign_scope = state_evidence(
+                    message_id=message_id,
+                    delivery_id=delivery_id,
+                    attempt_id=attempt_id,
+                    endpoint_id="endpoint_claude_desktop",
+                    state="acknowledged",
+                )
+                foreign_scope["scope"] = {"kind": "project", "project_id": OTHER_PROJECT}
+                reseal_evidence(foreign_scope)
+                terminal_best_effort = state_evidence(
+                    message_id=message_id,
+                    delivery_id=delivery_id,
+                    attempt_id=attempt_id,
+                    endpoint_id="endpoint_claude_desktop",
+                    state="completed",
+                    session_ref_id="session_claude_alpha",
+                    correlation_id="corr_bad_terminal",
+                )
+                terminal_best_effort["quality"] = "best_effort"
+                terminal_best_effort["evidence_kind"] = "adapter_observation"
+                reseal_evidence(terminal_best_effort)
+                missing_required = state_evidence(
+                    message_id=message_id,
+                    delivery_id=delivery_id,
+                    attempt_id=attempt_id,
+                    endpoint_id="endpoint_claude_desktop",
+                    state="processing",
+                    correlation_id="corr_missing_required",
+                )
+                del missing_required["authority"]
+                reseal_evidence(missing_required)
+                invalid_extensions = state_evidence(
+                    message_id=message_id,
+                    delivery_id=delivery_id,
+                    attempt_id=attempt_id,
+                    endpoint_id="endpoint_claude_desktop",
+                    state="processing",
+                    correlation_id="corr_invalid_extensions",
+                )
+                invalid_extensions["extensions"] = {"invalid_key": {"nested": "value"}}
+                reseal_evidence(invalid_extensions)
+                cases = (
+                    (foreign_scope, None, "scope mismatch"),
+                    (terminal_best_effort, "session_claude_alpha", "authoritative"),
+                    (missing_required, None, "missing required"),
+                    (invalid_extensions, None, "extension"),
+                )
+                for evidence, session_ref_id, error in cases:
+                    with self.subTest(error=error), self.assertRaisesRegex(
+                        CanonicalIntegrityError, error
+                    ):
+                        append_receipt(
+                            store,
+                            workspace_id=WORKSPACE,
+                            scope_kind="project",
+                            scope_identity=PROJECT,
+                            message_id=message_id,
+                            delivery_id=delivery_id,
+                            attempt_id=attempt_id,
+                            evidence=evidence,
+                            session_ref_id=session_ref_id,
+                            created_at_utc=NOW,
+                        )
+                self.assertEqual(
+                    store._connection.execute(
+                        "SELECT count(*) FROM canonical_evidence_bodies"
+                    ).fetchone()[0],
+                    0,
+                )
+                self.assertEqual(
+                    store._connection.execute(
+                        "SELECT count(*) FROM canonical_delivery_receipts"
+                    ).fetchone()[0],
+                    0,
+                )
+
+    def test_projection_refuses_receiptless_delivery_v1(self) -> None:
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            paths = LedgerPaths.derive(tmp, WORKSPACE)
+            with LedgerStore.open_writer(paths) as store:
+                record_registry(store)
+                message_id, _created = create_or_return_equivalent(
+                    store, **intent(recipients=["agent_claude"])
+                )
+                ((delivery_id, _created),) = create_deliveries(
+                    store,
+                    workspace_id=WORKSPACE,
+                    scope_kind="project",
+                    scope_identity=PROJECT,
+                    message_id=message_id,
+                    routes=[("agent_claude", "endpoint_claude_desktop")],
+                    now_epoch_ms=1_000,
+                    created_at_utc=NOW,
+                )
+                with self.assertRaisesRegex(CanonicalIntegrityError, "receipt-backed"):
+                    project_delivery_v1(
+                        store,
+                        workspace_id=WORKSPACE,
+                        scope_kind="project",
+                        scope_identity=PROJECT,
+                        message_id=message_id,
+                        delivery_id=delivery_id,
+                    )
+                create_attempt(
+                    store,
+                    workspace_id=WORKSPACE,
+                    scope_kind="project",
+                    scope_identity=PROJECT,
+                    message_id=message_id,
+                    delivery_id=delivery_id,
+                    attempt_index=0,
+                    attempt_epoch_ms=1_100,
+                    created_at_utc=NOW,
+                )
+                with self.assertRaisesRegex(CanonicalIntegrityError, "receipt-backed"):
+                    project_delivery_v1(
+                        store,
+                        workspace_id=WORKSPACE,
+                        scope_kind="project",
+                        scope_identity=PROJECT,
+                        message_id=message_id,
+                        delivery_id=delivery_id,
+                    )
+
+    def test_read_paths_rederive_v5_identities_from_direct_sql_rows(self) -> None:
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            paths = LedgerPaths.derive(tmp, WORKSPACE)
+            with LedgerStore.open_writer(paths) as store:
+                record_registry(store)
+                message_id, _created = create_or_return_equivalent(
+                    store, **intent(recipients=["agent_claude"])
+                )
+                forged_delivery_id = "delivery_" + "f" * 64
+                store._connection.execute(
+                    "INSERT INTO canonical_deliveries VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        WORKSPACE,
+                        "project",
+                        PROJECT,
+                        message_id,
+                        forged_delivery_id,
+                        "agent_claude",
+                        "endpoint_forged_route",
+                        0,
+                        NOW,
+                    ),
+                )
+                with self.assertRaisesRegex(CanonicalIntegrityError, "delivery_id"):
+                    store.read_canonical_delivery(
+                        workspace_id=WORKSPACE,
+                        scope_kind="project",
+                        scope_identity=PROJECT,
+                        message_id=message_id,
+                        delivery_id=forged_delivery_id,
+                    )
+
+                ((delivery_id, _created),) = create_deliveries(
+                    store,
+                    workspace_id=WORKSPACE,
+                    scope_kind="project",
+                    scope_identity=PROJECT,
+                    message_id=message_id,
+                    routes=[("agent_claude", "endpoint_claude_desktop")],
+                    now_epoch_ms=1_000,
+                    created_at_utc=NOW,
+                )
+                forged_attempt_id = "attempt_" + "e" * 64
+                store._connection.execute(
+                    "INSERT INTO canonical_delivery_attempts VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        WORKSPACE,
+                        "project",
+                        PROJECT,
+                        message_id,
+                        delivery_id,
+                        forged_attempt_id,
+                        0,
+                        1_100,
+                        NOW,
+                    ),
+                )
+                forged_attempt_evidence = state_evidence(
+                    message_id=message_id,
+                    delivery_id=delivery_id,
+                    attempt_id=forged_attempt_id,
+                    endpoint_id="endpoint_claude_desktop",
+                    state="acknowledged",
+                    correlation_id="corr_forged_attempt",
+                )
+                body, evidence_sha256, state, quality, kind = store_module._normalize_evidence(
+                    forged_attempt_evidence
+                )
+                forged_attempt_receipt_id = store_module._derive_receipt_id(
+                    WORKSPACE,
+                    "project",
+                    PROJECT,
+                    message_id,
+                    delivery_id,
+                    forged_attempt_id,
+                    evidence_sha256,
+                )
+                store._connection.execute(
+                    "INSERT INTO canonical_evidence_bodies VALUES (?, ?, ?, ?, ?)",
+                    (WORKSPACE, evidence_sha256, len(body), body, NOW),
+                )
+                store._connection.execute(
+                    "INSERT INTO canonical_delivery_receipts VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        WORKSPACE,
+                        "project",
+                        PROJECT,
+                        message_id,
+                        delivery_id,
+                        forged_attempt_id,
+                        forged_attempt_receipt_id,
+                        evidence_sha256,
+                        state,
+                        quality,
+                        kind,
+                        None,
+                        NOW,
+                    ),
+                )
+                with self.assertRaisesRegex(CanonicalIntegrityError, "attempt_id"):
+                    store.read_canonical_receipt(
+                        workspace_id=WORKSPACE,
+                        scope_kind="project",
+                        scope_identity=PROJECT,
+                        message_id=message_id,
+                        delivery_id=delivery_id,
+                        attempt_id=forged_attempt_id,
+                        receipt_id=forged_attempt_receipt_id,
+                    )
+
+                proper_attempt_id, _created = create_attempt(
+                    store,
+                    workspace_id=WORKSPACE,
+                    scope_kind="project",
+                    scope_identity=PROJECT,
+                    message_id=message_id,
+                    delivery_id=delivery_id,
+                    attempt_index=1,
+                    attempt_epoch_ms=1_200,
+                    created_at_utc=NOW,
+                )
+                forged_receipt_evidence = state_evidence(
+                    message_id=message_id,
+                    delivery_id=delivery_id,
+                    attempt_id=proper_attempt_id,
+                    endpoint_id="endpoint_claude_desktop",
+                    state="processing",
+                    correlation_id="corr_forged_receipt",
+                )
+                body, evidence_sha256, state, quality, kind = store_module._normalize_evidence(
+                    forged_receipt_evidence
+                )
+                forged_receipt_id = "receipt_" + "d" * 64
+                store._connection.execute(
+                    "INSERT INTO canonical_evidence_bodies VALUES (?, ?, ?, ?, ?)",
+                    (WORKSPACE, evidence_sha256, len(body), body, NOW),
+                )
+                store._connection.execute(
+                    "INSERT INTO canonical_delivery_receipts VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        WORKSPACE,
+                        "project",
+                        PROJECT,
+                        message_id,
+                        delivery_id,
+                        proper_attempt_id,
+                        forged_receipt_id,
+                        evidence_sha256,
+                        state,
+                        quality,
+                        kind,
+                        None,
+                        NOW,
+                    ),
+                )
+                with self.assertRaisesRegex(CanonicalIntegrityError, "receipt_id"):
+                    store.read_canonical_receipt(
+                        workspace_id=WORKSPACE,
+                        scope_kind="project",
+                        scope_identity=PROJECT,
+                        message_id=message_id,
+                        delivery_id=delivery_id,
+                        attempt_id=proper_attempt_id,
+                        receipt_id=forged_receipt_id,
+                    )
+
+    def test_receipt_read_revalidates_evidence_scope_and_authority_from_direct_sql(self) -> None:
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            paths = LedgerPaths.derive(tmp, WORKSPACE)
+            with LedgerStore.open_writer(paths) as store:
+                record_registry(store)
+                message_id, _created = create_or_return_equivalent(
+                    store, **intent(recipients=["agent_claude"])
+                )
+                ((delivery_id, _created),) = create_deliveries(
+                    store,
+                    workspace_id=WORKSPACE,
+                    scope_kind="project",
+                    scope_identity=PROJECT,
+                    message_id=message_id,
+                    routes=[("agent_claude", "endpoint_claude_desktop")],
+                    now_epoch_ms=1_000,
+                    created_at_utc=NOW,
+                )
+                attempt_id, _created = create_attempt(
+                    store,
+                    workspace_id=WORKSPACE,
+                    scope_kind="project",
+                    scope_identity=PROJECT,
+                    message_id=message_id,
+                    delivery_id=delivery_id,
+                    attempt_index=0,
+                    attempt_epoch_ms=1_100,
+                    created_at_utc=NOW,
+                )
+                cases = []
+                foreign_scope = state_evidence(
+                    message_id=message_id,
+                    delivery_id=delivery_id,
+                    attempt_id=attempt_id,
+                    endpoint_id="endpoint_claude_desktop",
+                    state="acknowledged",
+                    correlation_id="corr_foreign_scope",
+                )
+                foreign_scope["scope"] = {"kind": "project", "project_id": OTHER_PROJECT}
+                cases.append((reseal_evidence(foreign_scope), None, "scope mismatch"))
+                terminal_best_effort = state_evidence(
+                    message_id=message_id,
+                    delivery_id=delivery_id,
+                    attempt_id=attempt_id,
+                    endpoint_id="endpoint_claude_desktop",
+                    state="completed",
+                    session_ref_id="session_claude_alpha",
+                    correlation_id="corr_direct_terminal",
+                )
+                terminal_best_effort["quality"] = "best_effort"
+                terminal_best_effort["evidence_kind"] = "adapter_observation"
+                cases.append(
+                    (
+                        reseal_evidence(terminal_best_effort),
+                        "session_claude_alpha",
+                        "authoritative",
+                    )
+                )
+                missing_required = state_evidence(
+                    message_id=message_id,
+                    delivery_id=delivery_id,
+                    attempt_id=attempt_id,
+                    endpoint_id="endpoint_claude_desktop",
+                    state="processing",
+                    correlation_id="corr_direct_missing_required",
+                )
+                del missing_required["authority"]
+                cases.append((reseal_evidence(missing_required), None, "missing required"))
+                invalid_extensions = state_evidence(
+                    message_id=message_id,
+                    delivery_id=delivery_id,
+                    attempt_id=attempt_id,
+                    endpoint_id="endpoint_claude_desktop",
+                    state="processing",
+                    correlation_id="corr_direct_invalid_extensions",
+                )
+                invalid_extensions["extensions"] = {"invalid_key": {"nested": "value"}}
+                cases.append((reseal_evidence(invalid_extensions), None, "extension"))
+                for evidence, session_ref_id, error in cases:
+                    body, evidence_sha256, state, quality, kind = store_module._normalize_evidence(
+                        evidence
+                    )
+                    receipt_id = store_module._derive_receipt_id(
+                        WORKSPACE,
+                        "project",
+                        PROJECT,
+                        message_id,
+                        delivery_id,
+                        attempt_id,
+                        evidence_sha256,
+                    )
+                    store._connection.execute(
+                        "INSERT INTO canonical_evidence_bodies VALUES (?, ?, ?, ?, ?)",
+                        (WORKSPACE, evidence_sha256, len(body), body, NOW),
+                    )
+                    store._connection.execute(
+                        "INSERT INTO canonical_delivery_receipts VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            WORKSPACE,
+                            "project",
+                            PROJECT,
+                            message_id,
+                            delivery_id,
+                            attempt_id,
+                            receipt_id,
+                            evidence_sha256,
+                            state,
+                            quality,
+                            kind,
+                            session_ref_id,
+                            NOW,
+                        ),
+                    )
+                    with self.subTest(error=error), self.assertRaisesRegex(
+                        CanonicalIntegrityError, error
+                    ):
+                        store.read_canonical_receipt(
+                            workspace_id=WORKSPACE,
+                            scope_kind="project",
+                            scope_identity=PROJECT,
+                            message_id=message_id,
+                            delivery_id=delivery_id,
+                            attempt_id=attempt_id,
+                            receipt_id=receipt_id,
+                        )
+
+    def test_delivery_equal_rank_tie_selects_lexicographically_smallest_receipt_id(self) -> None:
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            paths = LedgerPaths.derive(tmp, WORKSPACE)
+            with LedgerStore.open_writer(paths) as store:
+                record_registry(store)
+                message_id, _created = create_or_return_equivalent(
+                    store, **intent(recipients=["agent_claude"])
+                )
+                ((delivery_id, _created),) = create_deliveries(
+                    store,
+                    workspace_id=WORKSPACE,
+                    scope_kind="project",
+                    scope_identity=PROJECT,
+                    message_id=message_id,
+                    routes=[("agent_claude", "endpoint_claude_desktop")],
+                    now_epoch_ms=1_000,
+                    created_at_utc=NOW,
+                )
+                attempt_id, _created = create_attempt(
+                    store,
+                    workspace_id=WORKSPACE,
+                    scope_kind="project",
+                    scope_identity=PROJECT,
+                    message_id=message_id,
+                    delivery_id=delivery_id,
+                    attempt_index=0,
+                    attempt_epoch_ms=1_100,
+                    created_at_utc=NOW,
+                )
+                receipts: dict[str, dict[str, object]] = {}
+                for correlation_id in ("corr_ack_alpha", "corr_ack_beta"):
+                    evidence = state_evidence(
+                        message_id=message_id,
+                        delivery_id=delivery_id,
+                        attempt_id=attempt_id,
+                        endpoint_id="endpoint_claude_desktop",
+                        state="acknowledged",
+                        correlation_id=correlation_id,
+                    )
+                    receipt_id, created = append_receipt(
+                        store,
+                        workspace_id=WORKSPACE,
+                        scope_kind="project",
+                        scope_identity=PROJECT,
+                        message_id=message_id,
+                        delivery_id=delivery_id,
+                        attempt_id=attempt_id,
+                        evidence=evidence,
+                        created_at_utc=NOW,
+                    )
+                    self.assertTrue(created)
+                    receipts[receipt_id] = evidence
+                selected_receipt_id = min(receipts)
+                self.assertGreater(len(set(receipts)), 1)
+                projected = project_delivery_v1(
+                    store,
+                    workspace_id=WORKSPACE,
+                    scope_kind="project",
+                    scope_identity=PROJECT,
+                    message_id=message_id,
+                    delivery_id=delivery_id,
+                )
+                self.assertEqual(projected["outcome"], "pending")
+                self.assertEqual(projected["evidence"], receipts[selected_receipt_id])
+
+    def test_v5_tables_are_behaviorally_append_only_under_direct_sql(self) -> None:
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            paths = LedgerPaths.derive(tmp, WORKSPACE)
+            with LedgerStore.open_writer(paths) as store:
+                record_registry(store)
+                message_id, _created = create_or_return_equivalent(
+                    store, **intent(recipients=["agent_claude"])
+                )
+                ((delivery_id, _created),) = create_deliveries(
+                    store,
+                    workspace_id=WORKSPACE,
+                    scope_kind="project",
+                    scope_identity=PROJECT,
+                    message_id=message_id,
+                    routes=[("agent_claude", "endpoint_claude_desktop")],
+                    now_epoch_ms=1_000,
+                    created_at_utc=NOW,
+                )
+                attempt_id, _created = create_attempt(
+                    store,
+                    workspace_id=WORKSPACE,
+                    scope_kind="project",
+                    scope_identity=PROJECT,
+                    message_id=message_id,
+                    delivery_id=delivery_id,
+                    attempt_index=0,
+                    attempt_epoch_ms=1_100,
+                    created_at_utc=NOW,
+                )
+                append_receipt(
+                    store,
+                    workspace_id=WORKSPACE,
+                    scope_kind="project",
+                    scope_identity=PROJECT,
+                    message_id=message_id,
+                    delivery_id=delivery_id,
+                    attempt_id=attempt_id,
+                    evidence=state_evidence(
+                        message_id=message_id,
+                        delivery_id=delivery_id,
+                        attempt_id=attempt_id,
+                        endpoint_id="endpoint_claude_desktop",
+                        state="acknowledged",
+                    ),
+                    created_at_utc=NOW,
+                )
+                for table in (
+                    "canonical_evidence_bodies",
+                    "canonical_deliveries",
+                    "canonical_delivery_attempts",
+                    "canonical_delivery_receipts",
+                ):
+                    with self.subTest(table=table, operation="update"), self.assertRaisesRegex(
+                        sqlite3.IntegrityError, "append-only"
+                    ):
+                        store._connection.execute(f"UPDATE {table} SET rowid = rowid")
+                    with self.subTest(table=table, operation="delete"), self.assertRaisesRegex(
+                        sqlite3.IntegrityError, "append-only"
+                    ):
+                        store._connection.execute(f"DELETE FROM {table}")
+
+    def test_state_evidence_canonical_json_rejects_noncanonical_values_before_write(self) -> None:
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            paths = LedgerPaths.derive(tmp, WORKSPACE)
+            with LedgerStore.open_writer(paths) as store:
+                record_registry(store)
+                message_id, _created = create_or_return_equivalent(
+                    store, **intent(recipients=["agent_claude"])
+                )
+                ((delivery_id, _created),) = create_deliveries(
+                    store,
+                    workspace_id=WORKSPACE,
+                    scope_kind="project",
+                    scope_identity=PROJECT,
+                    message_id=message_id,
+                    routes=[("agent_claude", "endpoint_claude_desktop")],
+                    now_epoch_ms=1_000,
+                    created_at_utc=NOW,
+                )
+                attempt_id, _created = create_attempt(
+                    store,
+                    workspace_id=WORKSPACE,
+                    scope_kind="project",
+                    scope_identity=PROJECT,
+                    message_id=message_id,
+                    delivery_id=delivery_id,
+                    attempt_index=0,
+                    attempt_epoch_ms=1_100,
+                    created_at_utc=NOW,
+                )
+                base = state_evidence(
+                    message_id=message_id,
+                    delivery_id=delivery_id,
+                    attempt_id=attempt_id,
+                    endpoint_id="endpoint_claude_desktop",
+                    state="processing",
+                )
+                cases = (
+                    ("float", {"extensions": {"x_note_value": 1.5}}),
+                    ("nan", {"extensions": {"x_note_value": float("nan")}}),
+                    ("unsafe integer", {"extensions": {"x_note_value": 9_007_199_254_740_992}}),
+                    ("control", {"extensions": {"x_note_value": "bad\u0001"}}),
+                    ("surrogate", {"extensions": {"x_note_value": "\ud800"}}),
+                )
+                for label, mutation in cases:
+                    evidence = dict(base)
+                    evidence.update(mutation)
+                    projection = dict(evidence)
+                    projection.pop("integrity", None)
+                    try:
+                        body = json.dumps(
+                            projection,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                            ensure_ascii=False,
+                        ).encode("utf-8", "surrogatepass")
+                    except ValueError:
+                        body = b"unserializable"
+                    evidence["integrity"] = "sha256:" + hashlib.sha256(body).hexdigest()
+                    with self.subTest(label=label), self.assertRaises(ValueError):
+                        append_receipt(
+                            store,
+                            workspace_id=WORKSPACE,
+                            scope_kind="project",
+                            scope_identity=PROJECT,
+                            message_id=message_id,
+                            delivery_id=delivery_id,
+                            attempt_id=attempt_id,
+                            evidence=evidence,
+                            created_at_utc=NOW,
+                        )
+                self.assertEqual(
+                    store._connection.execute(
+                        "SELECT count(*) FROM canonical_evidence_bodies"
+                    ).fetchone()[0],
+                    0,
+                )
+                self.assertEqual(
+                    store._connection.execute(
+                        "SELECT count(*) FROM canonical_delivery_receipts"
+                    ).fetchone()[0],
+                    0,
+                )
+
+    def test_delivery_count_caps_fire_by_direct_sql(self) -> None:
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            paths = LedgerPaths.derive(tmp, WORKSPACE)
+            with LedgerStore.open_writer(paths) as store:
+                record_registry(store)
+                recipients = [f"agent_r{index:03d}" for index in range(256)]
+                message_id, _created = create_or_return_equivalent(
+                    store,
+                    **intent(
+                        recipients=recipients,
+                        ttl_seconds=0,
+                        ack_policy="none",
+                        dedupe_key="cap-test",
+                    ),
+                )
+                delivery_rows = create_deliveries(
+                    store,
+                    workspace_id=WORKSPACE,
+                    scope_kind="project",
+                    scope_identity=PROJECT,
+                    message_id=message_id,
+                    routes=[
+                        (recipient, f"endpoint_route_{index:03d}")
+                        for index, recipient in enumerate(recipients)
+                    ],
+                    now_epoch_ms=1_000,
+                    created_at_utc=NOW,
+                )
+                self.assertEqual(len(delivery_rows), 256)
+                with self.assertRaisesRegex(sqlite3.IntegrityError, "delivery count"):
+                    extra_delivery_id = store_module._derive_delivery_id(
+                        WORKSPACE,
+                        "project",
+                        PROJECT,
+                        message_id,
+                        recipients[0],
+                        "endpoint_extra_route",
+                    )
+                    store._connection.execute(
+                        "INSERT INTO canonical_deliveries VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            WORKSPACE,
+                            "project",
+                            PROJECT,
+                            message_id,
+                            extra_delivery_id,
+                            recipients[0],
+                            "endpoint_extra_route",
+                            0,
+                            NOW,
+                        ),
+                    )
+
+                delivery_id = delivery_rows[0][0]
+                for index in range(64):
+                    attempt_id = store_module._derive_attempt_id(
+                        WORKSPACE, "project", PROJECT, message_id, delivery_id, index
+                    )
+                    store._connection.execute(
+                        "INSERT INTO canonical_delivery_attempts VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            WORKSPACE,
+                            "project",
+                            PROJECT,
+                            message_id,
+                            delivery_id,
+                            attempt_id,
+                            index,
+                            1_000 + index,
+                            NOW,
+                        ),
+                    )
+                with self.assertRaisesRegex(sqlite3.IntegrityError, "attempt count"):
+                    attempt_id = store_module._derive_attempt_id(
+                        WORKSPACE, "project", PROJECT, message_id, delivery_id, 64
+                    )
+                    store._connection.execute(
+                        "INSERT INTO canonical_delivery_attempts VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            WORKSPACE,
+                            "project",
+                            PROJECT,
+                            message_id,
+                            delivery_id,
+                            attempt_id,
+                            64,
+                            1_064,
+                            NOW,
+                        ),
+                    )
+
+                attempt_id = store_module._derive_attempt_id(
+                    WORKSPACE, "project", PROJECT, message_id, delivery_id, 0
+                )
+                for index in range(256):
+                    evidence = state_evidence(
+                        message_id=message_id,
+                        delivery_id=delivery_id,
+                        attempt_id=attempt_id,
+                        endpoint_id="endpoint_route_000",
+                        state="processing",
+                        correlation_id=f"corr_receipt_{index:03d}",
+                    )
+                    body, evidence_sha256, state, quality, kind = store_module._normalize_evidence(
+                        evidence
+                    )
+                    receipt_id = store_module._derive_receipt_id(
+                        WORKSPACE,
+                        "project",
+                        PROJECT,
+                        message_id,
+                        delivery_id,
+                        attempt_id,
+                        evidence_sha256,
+                    )
+                    store._connection.execute(
+                        "INSERT INTO canonical_evidence_bodies VALUES (?, ?, ?, ?, ?)",
+                        (WORKSPACE, evidence_sha256, len(body), body, NOW),
+                    )
+                    store._connection.execute(
+                        "INSERT INTO canonical_delivery_receipts VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            WORKSPACE,
+                            "project",
+                            PROJECT,
+                            message_id,
+                            delivery_id,
+                            attempt_id,
+                            receipt_id,
+                            evidence_sha256,
+                            state,
+                            quality,
+                            kind,
+                            None,
+                            NOW,
+                        ),
+                    )
+                evidence = state_evidence(
+                    message_id=message_id,
+                    delivery_id=delivery_id,
+                    attempt_id=attempt_id,
+                    endpoint_id="endpoint_route_000",
+                    state="processing",
+                    correlation_id="corr_receipt_256",
+                )
+                body, evidence_sha256, state, quality, kind = store_module._normalize_evidence(
+                    evidence
+                )
+                receipt_id = store_module._derive_receipt_id(
+                    WORKSPACE,
+                    "project",
+                    PROJECT,
+                    message_id,
+                    delivery_id,
+                    attempt_id,
+                    evidence_sha256,
+                )
+                store._connection.execute(
+                    "INSERT INTO canonical_evidence_bodies VALUES (?, ?, ?, ?, ?)",
+                    (WORKSPACE, evidence_sha256, len(body), body, NOW),
+                )
+                with self.assertRaisesRegex(sqlite3.IntegrityError, "receipt count"):
+                    store._connection.execute(
+                        "INSERT INTO canonical_delivery_receipts VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            WORKSPACE,
+                            "project",
+                            PROJECT,
+                            message_id,
+                            delivery_id,
+                            attempt_id,
+                            receipt_id,
+                            evidence_sha256,
+                            state,
+                            quality,
+                            kind,
+                            None,
+                            NOW,
+                        ),
+                    )
 
     def test_store_rejects_invalid_normalized_sets_before_write(self) -> None:
         invalid_sets = (
@@ -656,8 +1888,13 @@ class CanonicalMessageTest(unittest.TestCase):
             {
                 "CanonicalConflictError",
                 "CanonicalIntegrityError",
+                "append_receipt",
+                "create_attempt",
+                "create_deliveries",
                 "create_or_return_equivalent",
+                "project_delivery_v1",
                 "project_message_v1",
+                "project_receipt_v1",
                 "read_message",
             },
         )
