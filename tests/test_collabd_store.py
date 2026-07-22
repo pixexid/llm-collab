@@ -11,7 +11,7 @@ import threading
 import unittest
 import warnings
 import weakref
-from contextlib import closing
+from contextlib import closing, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -29,10 +29,13 @@ from llm_collab.ledger.store import (
     V2_SCHEMA_FINGERPRINT,
     V3_MIGRATION_CHECKSUM,
     V3_SCHEMA_FINGERPRINT,
+    V4_MIGRATION_CHECKSUM,
+    V4_SCHEMA_FINGERPRINT,
     MigrationError,
     V1_SQL,
     V2_SQL,
     V3_SQL,
+    V4_SQL,
     _close_connection_and_pin,
     _connection_fd_snapshot,
     _darwin_fd_snapshot,
@@ -42,6 +45,7 @@ from llm_collab.ledger.store import (
     _v1_schema_fingerprint_from_sql,
     _v2_schema_fingerprint_from_sql,
     _v3_schema_fingerprint_from_sql,
+    _v4_schema_fingerprint_from_sql,
     require_safe_sqlite,
 )
 
@@ -103,6 +107,64 @@ def create_released_v2(paths: LedgerPaths, *, now: datetime = FIXED_TIME) -> Pat
         connection.execute("PRAGMA user_version = 2")
         connection.execute("COMMIT")
     return backup
+
+
+def create_released_v3(paths: LedgerPaths, *, now: datetime = FIXED_TIME) -> Path:
+    """Materialize the exact released v3 bytes for migration-only tests."""
+    create_released_v2(paths, now=now)
+    stamp = now.strftime("%Y%m%dT%H%M%S%fZ")
+    backup = paths.backup_path(2, stamp)
+    with closing(sqlite3.connect(paths.ledger)) as source, closing(
+        sqlite3.connect(backup)
+    ) as destination:
+        source.backup(destination)
+    backup.chmod(0o600)
+    with closing(sqlite3.connect(paths.ledger, isolation_level=None)) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        for statement in V3_SQL:
+            connection.execute(statement)
+        connection.execute(
+            "INSERT INTO schema_migrations "
+            "(version, migration_checksum, applied_at_utc, tool_version, backup_reference) "
+            "VALUES (3, ?, ?, ?, ?)",
+            (V3_MIGRATION_CHECKSUM, now.isoformat(), MIGRATION_TOOL_VERSION, backup.name),
+        )
+        connection.execute("PRAGMA user_version = 3")
+        connection.execute("COMMIT")
+    return backup
+
+
+def v4_fingerprint(statements: tuple[str, ...]) -> str:
+    with closing(sqlite3.connect(":memory:", isolation_level=None)) as connection:
+        for statement in (*V1_SQL, *V2_SQL, *V3_SQL, *statements):
+            connection.execute(statement)
+        return store_module._schema_fingerprint(connection)
+
+
+def mutate_v4(old: str, new: str, *, occurrence: int = 1) -> tuple[str, ...]:
+    statements = list(V4_SQL)
+    matches = [index for index, statement in enumerate(statements) if old in statement]
+    if len(matches) < occurrence:
+        raise AssertionError(f"v4 mutation target not found: {old!r}")
+    index = matches[occurrence - 1]
+    statements[index] = statements[index].replace(old, new, 1)
+    return tuple(statements)
+
+
+@contextmanager
+def open_mutated_v4(paths: LedgerPaths, statements: tuple[str, ...]):
+    checksum = _migration_checksum(statements)
+    fingerprint = v4_fingerprint(statements)
+    with (
+        patch.object(store_module, "V4_SQL", statements),
+        patch.object(store_module, "V4_MIGRATION_CHECKSUM", checksum),
+        patch.object(store_module, "V4_SCHEMA_FINGERPRINT", fingerprint),
+        LedgerStore.open_writer(
+            paths,
+            migrations=((1, V1_SQL), (2, V2_SQL), (3, V3_SQL), (4, statements)),
+        ) as store,
+    ):
+        yield store
 
 
 def record_test_registry(store: LedgerStore) -> None:
@@ -465,11 +527,11 @@ class LedgerStoreTest(unittest.TestCase):
                 with self.assertRaisesRegex(OSError, "fd surface unavailable"):
                     LedgerStore.open_writer(paths)
             with LedgerStore.open_writer(paths) as writer:
-                self.assertEqual(writer.schema_version(), 3)
+                self.assertEqual(writer.schema_version(), 4)
 
     def test_all_file_backed_connects_use_one_verified_noncreating_open(self) -> None:
         source = inspect.getsource(store_module)
-        self.assertEqual(source.count("sqlite3.connect("), 4)
+        self.assertEqual(source.count("sqlite3.connect("), 5)
         self.assertEqual(source.count("_close_connection_and_pin("), 8)
         self.assertIn('path.as_uri() + ("?mode=ro" if read_only else "?mode=rw")', source)
         self.assertNotIn(".resolve().as_uri()", source)
@@ -491,7 +553,9 @@ class LedgerStoreTest(unittest.TestCase):
                 LedgerStore._pin_regular_file(directory, writable=True)
             self.assertEqual(outside.read_bytes(), b"operator-owned")
 
-    def test_v3_schema_connection_guards_backups_and_private_permissions(self) -> None:
+    def test_v4_schema_connection_guards_backups_and_private_permissions(self) -> None:
+        self.assertEqual(sum("CREATE TABLE canonical_" in sql for sql in V4_SQL), 5)
+        self.assertEqual(sum("CREATE TRIGGER" in sql for sql in V4_SQL), 15)
         with TemporaryDirectory(dir="/tmp") as tmp:
             state = Path(tmp) / "existing-state"
             state.mkdir(mode=0o755)
@@ -506,7 +570,7 @@ class LedgerStoreTest(unittest.TestCase):
                 self.assertEqual(connection.execute("PRAGMA busy_timeout").fetchone()[0], BUSY_TIMEOUT_MS)
                 self.assertEqual(connection.execute("PRAGMA synchronous").fetchone()[0], 2)
                 self.assertEqual(connection.execute("PRAGMA query_only").fetchone()[0], 0)
-                self.assertEqual(store.schema_version(), 3)
+                self.assertEqual(store.schema_version(), 4)
                 self.assertEqual(store.integrity_check(), "ok")
                 for suffix in ("-wal", "-shm"):
                     sidecar = paths.ledger.with_name(paths.ledger.name + suffix)
@@ -523,6 +587,11 @@ class LedgerStoreTest(unittest.TestCase):
                     "observation_checkpoints",
                     "observation_audit",
                     "legacy_provenance_imports",
+                    "canonical_bodies",
+                    "canonical_messages",
+                    "canonical_message_recipients",
+                    "canonical_message_artifacts",
+                    "canonical_message_tags",
                 }
                 tables = {
                     row[0]
@@ -532,7 +601,7 @@ class LedgerStoreTest(unittest.TestCase):
                 }
                 self.assertEqual(tables, expected)
                 forbidden = re.compile(
-                    r"message|delivery|attempt|receipt|lease|fence|quarantine|retry|dead_letter"
+                    r"delivery|attempt|receipt|lease|fence|quarantine|retry|dead_letter"
                 )
                 for table in tables:
                     self.assertIsNone(forbidden.search(table))
@@ -551,6 +620,7 @@ class LedgerStoreTest(unittest.TestCase):
                     "ledger-0-20260721T080506123456Z.sqlite3",
                     "ledger-1-20260721T080506123456Z.sqlite3",
                     "ledger-2-20260721T080506123456Z.sqlite3",
+                    "ledger-3-20260721T080506123456Z.sqlite3",
                 ],
             )
             for version, backup in enumerate(backups):
@@ -583,6 +653,12 @@ class LedgerStoreTest(unittest.TestCase):
                             MIGRATION_TOOL_VERSION,
                             backups[2].name,
                         ),
+                        (
+                            V4_MIGRATION_CHECKSUM,
+                            FIXED_TIME.isoformat(),
+                            MIGRATION_TOOL_VERSION,
+                            backups[3].name,
+                        ),
                     ],
                 )
             self.assertEqual(_migration_checksum(V1_SQL), V1_MIGRATION_CHECKSUM)
@@ -591,6 +667,8 @@ class LedgerStoreTest(unittest.TestCase):
             self.assertEqual(_v2_schema_fingerprint_from_sql(), V2_SCHEMA_FINGERPRINT)
             self.assertEqual(_migration_checksum(V3_SQL), V3_MIGRATION_CHECKSUM)
             self.assertEqual(_v3_schema_fingerprint_from_sql(), V3_SCHEMA_FINGERPRINT)
+            self.assertEqual(_migration_checksum(V4_SQL), V4_MIGRATION_CHECKSUM)
+            self.assertEqual(_v4_schema_fingerprint_from_sql(), V4_SCHEMA_FINGERPRINT)
 
             source = inspect.getsource(__import__("llm_collab.ledger.store", fromlist=["*"]))
             self.assertIn(".backup(", source)
@@ -718,7 +796,7 @@ class LedgerStoreTest(unittest.TestCase):
             with self.assertRaisesRegex(MigrationError, "unsupported ledger schema version 1"):
                 LedgerStore.open_reader(paths)
             with LedgerStore.open_writer(paths, clock=lambda: FIXED_TIME) as writer:
-                self.assertEqual(writer.schema_version(), 3)
+                self.assertEqual(writer.schema_version(), 4)
                 self.assertEqual(writer.integrity_check(), "ok")
             v1_backup = paths.backup_path(
                 1, FIXED_TIME.strftime("%Y%m%dT%H%M%S%fZ")
@@ -744,16 +822,16 @@ class LedgerStoreTest(unittest.TestCase):
                     },
                 )
             with LedgerStore.open_reader(paths) as reader:
-                self.assertEqual(reader.schema_version(), 3)
+                self.assertEqual(reader.schema_version(), 4)
 
-    def test_exact_released_v2_migrates_to_v3_and_failed_v3_restores_v2(self) -> None:
+    def test_exact_released_v2_migrates_to_v4_and_failed_v3_restores_v2(self) -> None:
         with TemporaryDirectory(dir="/tmp") as tmp:
             paths = LedgerPaths.derive(tmp, "ws_alpha")
             create_released_v2(paths)
             with self.assertRaisesRegex(MigrationError, "unsupported ledger schema version 2"):
                 LedgerStore.open_reader(paths)
             with LedgerStore.open_writer(paths, clock=lambda: FIXED_TIME) as writer:
-                self.assertEqual(writer.schema_version(), 3)
+                self.assertEqual(writer.schema_version(), 4)
             v2_backup = paths.backup_path(2, FIXED_TIME.strftime("%Y%m%dT%H%M%S%fZ"))
             with closing(sqlite3.connect(v2_backup)) as backup:
                 self.assertEqual(backup.execute("PRAGMA user_version").fetchone()[0], 2)
@@ -777,6 +855,432 @@ class LedgerStoreTest(unittest.TestCase):
                 self.assertEqual(
                     store_module._schema_fingerprint(restored), V2_SCHEMA_FINGERPRINT
                 )
+
+    def test_exact_released_v3_migrates_to_v4_and_failed_v4_restores_v3(self) -> None:
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            paths = LedgerPaths.derive(tmp, "ws_alpha")
+            create_released_v3(paths)
+            with self.assertRaisesRegex(MigrationError, "unsupported ledger schema version 3"):
+                LedgerStore.open_reader(paths)
+            with LedgerStore.open_writer(paths, clock=lambda: FIXED_TIME) as writer:
+                self.assertEqual(writer.schema_version(), 4)
+            v3_backup = paths.backup_path(3, FIXED_TIME.strftime("%Y%m%dT%H%M%S%fZ"))
+            with closing(sqlite3.connect(v3_backup)) as backup:
+                self.assertEqual(backup.execute("PRAGMA user_version").fetchone()[0], 3)
+                self.assertEqual(store_module._schema_fingerprint(backup), V3_SCHEMA_FINGERPRINT)
+
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            paths = LedgerPaths.derive(tmp, "ws_alpha")
+            create_released_v3(paths)
+            broken_sql = V4_SQL + ("CREATE TABLE broken(",)
+            with (
+                patch.object(
+                    store_module,
+                    "V4_MIGRATION_CHECKSUM",
+                    _migration_checksum(broken_sql),
+                ),
+                self.assertRaisesRegex(MigrationError, "verified backup was restored"),
+            ):
+                LedgerStore.open_writer(
+                    paths,
+                    clock=lambda: FIXED_TIME,
+                    migrations=((4, broken_sql),),
+                )
+            with closing(sqlite3.connect(paths.ledger)) as restored:
+                self.assertEqual(restored.execute("PRAGMA user_version").fetchone()[0], 3)
+                self.assertEqual(
+                    store_module._schema_fingerprint(restored), V3_SCHEMA_FINGERPRINT
+                )
+
+    def test_v4_direct_sql_constraints_count_caps_and_append_only_guards(self) -> None:
+        from llm_collab.canonical import create_or_return_equivalent
+
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            paths = LedgerPaths.derive(tmp, "ws_alpha")
+            with LedgerStore.open_writer(paths) as store:
+                record_test_registry(store)
+                message_id, _ = create_or_return_equivalent(
+                    store,
+                    workspace_id="ws_alpha",
+                    scope_kind="project",
+                    scope_identity=AMIGA,
+                    sender_agent_id="agent_codex",
+                    dedupe_key="direct-matrix",
+                    body=b"body",
+                    recipients=["agent_codex"],
+                    registry_revision=REVISION,
+                    created_at_utc=FIXED_TIME.isoformat(),
+                    title="title",
+                )
+                connection = store._connection
+                body_sha256 = "230d8358dc8e8890b4c58deeb62912ee2f20357ae92a5cc861b98e68fe31acb5"
+                self.assertEqual(
+                    connection.execute(
+                        "SELECT body_sha256 FROM canonical_messages WHERE message_id = ?",
+                        (message_id,),
+                    ).fetchone()[0],
+                    body_sha256,
+                )
+
+                invalid_bodies = (
+                    ("a" * 63 + "\x00", 0, b""),
+                    ("A" * 64, 0, b""),
+                    ("a" * 63, 0, b""),
+                    ("b" * 64, 2, b"x"),
+                    ("c" * 64, 1048577, b"x" * 1048577),
+                )
+                for digest, byte_size, body in invalid_bodies:
+                    with self.subTest(body_digest=digest[:8]), self.assertRaises(sqlite3.IntegrityError):
+                        connection.execute(
+                            "INSERT INTO canonical_bodies "
+                            "(workspace_id, body_sha256, byte_size, body, created_at_utc) "
+                            "VALUES (?, ?, ?, ?, ?)",
+                            ("ws_alpha", digest, byte_size, body, FIXED_TIME.isoformat()),
+                        )
+
+                insert_message = (
+                    "INSERT INTO canonical_messages "
+                    "(workspace_id, scope_kind, scope_identity, message_id, sender_agent_id, "
+                    "dedupe_key, body_sha256, reply_to_message_id, ttl_seconds, ack_policy, "
+                    "title, priority, chat_link, task_link, registry_revision, project_id, "
+                    "created_at_utc) VALUES (:workspace_id, :scope_kind, :scope_identity, "
+                    ":message_id, :sender_agent_id, :dedupe_key, :body_sha256, "
+                    ":reply_to_message_id, :ttl_seconds, :ack_policy, :title, :priority, "
+                    ":chat_link, :task_link, :registry_revision, :project_id, :created_at_utc)"
+                )
+                base = {
+                    "workspace_id": "ws_alpha",
+                    "scope_kind": "project",
+                    "scope_identity": AMIGA,
+                    "message_id": "msg_" + "1" * 64,
+                    "sender_agent_id": "agent_codex",
+                    "dedupe_key": "raw-message",
+                    "body_sha256": body_sha256,
+                    "reply_to_message_id": None,
+                    "ttl_seconds": 0,
+                    "ack_policy": "none",
+                    "title": "title",
+                    "priority": "normal",
+                    "chat_link": None,
+                    "task_link": None,
+                    "registry_revision": REVISION,
+                    "project_id": AMIGA,
+                    "created_at_utc": FIXED_TIME.isoformat(),
+                }
+                invalid_messages = (
+                    {"scope_kind": "foreign"},
+                    {"scope_kind": "workspace", "scope_identity": "workspace"},
+                    {"project_id": None},
+                    {"scope_identity": NUVYR},
+                    {"project_id": "unknown", "scope_identity": "unknown"},
+                    {"registry_revision": "sha256:" + "f" * 64},
+                    {"priority": "foreign"},
+                    {"ack_policy": "foreign"},
+                    {"dedupe_key": "d" * 257},
+                    {"title": "t" * 513},
+                    {"message_id": "msg_" + "A" * 64},
+                    {"ttl_seconds": None},
+                )
+                for number, changes in enumerate(invalid_messages, 2):
+                    candidate = dict(base)
+                    candidate.update(changes)
+                    candidate["message_id"] = changes.get("message_id", "msg_" + f"{number:064x}")
+                    candidate["dedupe_key"] = changes.get("dedupe_key", f"raw-{number}")
+                    with self.subTest(message_changes=changes), self.assertRaises(sqlite3.IntegrityError):
+                        connection.execute(insert_message, candidate)
+
+                workspace_claim = dict(base)
+                workspace_claim.update(
+                    message_id="msg_" + "e" * 64,
+                    dedupe_key="workspace-claim",
+                    scope_kind="workspace",
+                    scope_identity="workspace",
+                    project_id=AMIGA,
+                )
+                with self.assertRaises(sqlite3.IntegrityError):
+                    connection.execute(insert_message, workspace_claim)
+
+                prefix = ("ws_alpha", "project", AMIGA, message_id)
+                connection.executemany(
+                    "INSERT INTO canonical_message_recipients VALUES (?, ?, ?, ?, ?)",
+                    ((*prefix, f"agent_r{number:03d}") for number in range(255)),
+                )
+                with self.assertRaisesRegex(sqlite3.IntegrityError, "exceeds 256"):
+                    connection.execute(
+                        "INSERT INTO canonical_message_recipients VALUES (?, ?, ?, ?, ?)",
+                        (*prefix, "agent_over"),
+                    )
+                connection.executemany(
+                    "INSERT INTO canonical_message_artifacts VALUES (?, ?, ?, ?, ?, ?)",
+                    ((*prefix, "path", f"path-{number}") for number in range(256)),
+                )
+                with self.assertRaisesRegex(sqlite3.IntegrityError, "exceeds 256"):
+                    connection.execute(
+                        "INSERT INTO canonical_message_artifacts VALUES (?, ?, ?, ?, ?, ?)",
+                        (*prefix, "path", "path-over"),
+                    )
+                connection.executemany(
+                    "INSERT INTO canonical_message_tags VALUES (?, ?, ?, ?, ?)",
+                    ((*prefix, f"tag-{number}") for number in range(64)),
+                )
+                with self.assertRaisesRegex(sqlite3.IntegrityError, "exceeds 64"):
+                    connection.execute(
+                        "INSERT INTO canonical_message_tags VALUES (?, ?, ?, ?, ?)",
+                        (*prefix, "tag-over"),
+                    )
+                with self.assertRaises(sqlite3.IntegrityError):
+                    connection.execute(
+                        "INSERT INTO canonical_message_artifacts VALUES (?, ?, ?, ?, ?, ?)",
+                        (*prefix, "foreign", "ref"),
+                    )
+                with self.assertRaises(sqlite3.IntegrityError):
+                    connection.execute(
+                        "INSERT INTO canonical_message_artifacts VALUES (?, ?, ?, ?, ?, ?)",
+                        (*prefix, "repo", "r" * 4097),
+                    )
+                with self.assertRaises(sqlite3.IntegrityError):
+                    connection.execute(
+                        "INSERT INTO canonical_message_tags VALUES (?, ?, ?, ?, ?)",
+                        (*prefix, "t" * 129),
+                    )
+
+                for table in (
+                    "canonical_bodies",
+                    "canonical_messages",
+                    "canonical_message_recipients",
+                    "canonical_message_artifacts",
+                    "canonical_message_tags",
+                ):
+                    with self.subTest(table=table, operation="update"), self.assertRaisesRegex(
+                        sqlite3.IntegrityError, "append-only"
+                    ):
+                        connection.execute(f"UPDATE {table} SET rowid = rowid")
+                    with self.subTest(table=table, operation="delete"), self.assertRaisesRegex(
+                        sqlite3.IntegrityError, "append-only"
+                    ):
+                        connection.execute(f"DELETE FROM {table}")
+
+    def test_v4_schema_migration_metadata_rejects_nul_on_insert_and_update(self) -> None:
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            with LedgerStore.open_writer(LedgerPaths.derive(tmp, "ws_alpha")) as store:
+                connection = store._connection
+                fields = (
+                    "migration_checksum",
+                    "applied_at_utc",
+                    "tool_version",
+                    "backup_reference",
+                )
+                original = connection.execute(
+                    "SELECT migration_checksum, applied_at_utc, tool_version, backup_reference "
+                    "FROM schema_migrations WHERE version = 1"
+                ).fetchone()
+                for index, field in enumerate(fields):
+                    with self.subTest(field=field, operation="update"), self.assertRaisesRegex(
+                        sqlite3.IntegrityError, "contains NUL"
+                    ):
+                        connection.execute(
+                            f"UPDATE schema_migrations SET {field} = ? WHERE version = 1",
+                            (str(original[index]) + "\x00hidden",),
+                        )
+                    values = list(original)
+                    values[index] = str(values[index]) + "\x00hidden"
+                    with self.subTest(field=field, operation="insert"), self.assertRaisesRegex(
+                        sqlite3.IntegrityError, "contains NUL"
+                    ):
+                        connection.execute(
+                            "INSERT INTO schema_migrations VALUES (?, ?, ?, ?, ?)",
+                            (100 + index, *values),
+                        )
+
+    def test_v4_ddl_mutations_recompute_metadata_and_break_named_properties(self) -> None:
+        from llm_collab.canonical import create_or_return_equivalent
+
+        killed = []
+
+        nul_guard = mutate_v4("instr(body_sha256, char(0)) = 0", "1 = 1")
+        with TemporaryDirectory(dir="/tmp") as tmp, open_mutated_v4(
+            LedgerPaths.derive(tmp, "ws_alpha"), nul_guard
+        ) as store:
+            store._connection.execute(
+                "INSERT INTO canonical_bodies VALUES (?, ?, ?, ?, ?)",
+                ("ws_alpha", "a" * 63 + "\x00", 0, b"", FIXED_TIME.isoformat()),
+            )
+            killed.append("01_drop_nul_guard")
+
+        missing_scope_pk = mutate_v4(
+            "PRIMARY KEY (workspace_id, scope_kind, scope_identity, message_id)",
+            "PRIMARY KEY (workspace_id, scope_kind, message_id)",
+        )
+        with TemporaryDirectory(dir="/tmp") as tmp, self.assertRaisesRegex(
+            MigrationError, "verified backup was restored"
+        ):
+            with open_mutated_v4(
+                LedgerPaths.derive(tmp, "ws_alpha"), missing_scope_pk
+            ):
+                pass
+        killed.append("02_drop_scope_identity_from_pk")
+
+        nullable_project_unique = mutate_v4(
+            "UNIQUE (workspace_id, scope_kind, scope_identity, sender_agent_id, dedupe_key)",
+            "UNIQUE (workspace_id, scope_kind, project_id, sender_agent_id, dedupe_key)",
+        )
+        with TemporaryDirectory(dir="/tmp") as tmp, open_mutated_v4(
+            LedgerPaths.derive(tmp, "ws_alpha"), nullable_project_unique
+        ) as store:
+            record_test_registry(store)
+            first, _ = create_or_return_equivalent(
+                store,
+                workspace_id="ws_alpha",
+                scope_kind="workspace",
+                scope_identity="workspace",
+                sender_agent_id="agent_codex",
+                dedupe_key="nullable-namespace",
+                body=b"body",
+                recipients=["agent_codex"],
+                registry_revision=REVISION,
+                created_at_utc=FIXED_TIME.isoformat(),
+                title="one",
+            )
+            store._connection.execute(
+                "INSERT INTO canonical_messages "
+                "SELECT workspace_id, scope_kind, scope_identity, ?, sender_agent_id, "
+                "dedupe_key, body_sha256, reply_to_message_id, ttl_seconds, ack_policy, ?, "
+                "priority, chat_link, task_link, registry_revision, project_id, created_at_utc "
+                "FROM canonical_messages WHERE message_id = ?",
+                ("msg_" + "f" * 64, "two", first),
+            )
+            killed.append("03_nullable_project_uniqueness")
+
+        no_append_guard = tuple(
+            statement
+            for statement in V4_SQL
+            if "CREATE TRIGGER canonical_messages_no_update" not in statement
+        )
+        with TemporaryDirectory(dir="/tmp") as tmp, open_mutated_v4(
+            LedgerPaths.derive(tmp, "ws_alpha"), no_append_guard
+        ) as store:
+            record_test_registry(store)
+            message_id, _ = create_or_return_equivalent(
+                store,
+                workspace_id="ws_alpha",
+                scope_kind="project",
+                scope_identity=AMIGA,
+                sender_agent_id="agent_codex",
+                dedupe_key="mutable",
+                body=b"body",
+                recipients=["agent_codex"],
+                registry_revision=REVISION,
+                created_at_utc=FIXED_TIME.isoformat(),
+                title="one",
+            )
+            store._connection.execute(
+                "UPDATE canonical_messages SET title = 'two' WHERE message_id = ?",
+                (message_id,),
+            )
+            killed.append("04_remove_append_only_trigger")
+
+        no_count_cap = tuple(
+            statement
+            for statement in V4_SQL
+            if "CREATE TRIGGER canonical_message_recipients_count_cap" not in statement
+        )
+        with TemporaryDirectory(dir="/tmp") as tmp, open_mutated_v4(
+            LedgerPaths.derive(tmp, "ws_alpha"), no_count_cap
+        ) as store:
+            record_test_registry(store)
+            message_id, _ = create_or_return_equivalent(
+                store,
+                workspace_id="ws_alpha",
+                scope_kind="project",
+                scope_identity=AMIGA,
+                sender_agent_id="agent_codex",
+                dedupe_key="over-count",
+                body=b"body",
+                recipients=["agent_codex"],
+                registry_revision=REVISION,
+                created_at_utc=FIXED_TIME.isoformat(),
+                title="one",
+            )
+            prefix = ("ws_alpha", "project", AMIGA, message_id)
+            store._connection.executemany(
+                "INSERT INTO canonical_message_recipients VALUES (?, ?, ?, ?, ?)",
+                ((*prefix, f"agent_r{number:03d}") for number in range(256)),
+            )
+            self.assertEqual(
+                store._connection.execute(
+                    "SELECT count(*) FROM canonical_message_recipients WHERE message_id = ?",
+                    (message_id,),
+                ).fetchone()[0],
+                257,
+            )
+            killed.append("05_remove_count_cap_trigger")
+
+        no_migration_nul_guard = tuple(
+            statement
+            for statement in V4_SQL
+            if "CREATE TRIGGER schema_migrations_no_nul_update" not in statement
+        )
+        with TemporaryDirectory(dir="/tmp") as tmp, open_mutated_v4(
+            LedgerPaths.derive(tmp, "ws_alpha"), no_migration_nul_guard
+        ) as store:
+            store._connection.execute(
+                "UPDATE schema_migrations SET tool_version = ? WHERE version = 1",
+                (MIGRATION_TOOL_VERSION + "\x00hidden",),
+            )
+            killed.append("06_remove_schema_migrations_nul_trigger")
+
+        child_fk = """FOREIGN KEY (workspace_id, scope_kind, scope_identity, message_id)
+            REFERENCES canonical_messages (workspace_id, scope_kind, scope_identity, message_id)
+            ON DELETE RESTRICT"""
+        no_child_fk = mutate_v4(child_fk, "CHECK (1 = 1)", occurrence=1)
+        with TemporaryDirectory(dir="/tmp") as tmp, open_mutated_v4(
+            LedgerPaths.derive(tmp, "ws_alpha"), no_child_fk
+        ) as store:
+            store._connection.execute(
+                "INSERT INTO canonical_message_recipients VALUES (?, ?, ?, ?, ?)",
+                ("ws_alpha", "project", AMIGA, "msg_" + "e" * 64, "agent_codex"),
+            )
+            killed.append("11_drop_scope_tuple_from_child_fk")
+
+        self.assertEqual(
+            killed,
+            [
+                "01_drop_nul_guard",
+                "02_drop_scope_identity_from_pk",
+                "03_nullable_project_uniqueness",
+                "04_remove_append_only_trigger",
+                "05_remove_count_cap_trigger",
+                "06_remove_schema_migrations_nul_trigger",
+                "11_drop_scope_tuple_from_child_fk",
+            ],
+        )
+
+    def test_mutation_09_gapped_zero_newer_and_corrupt_migrations_fail_closed(self) -> None:
+        cases = ("gapped", "zero-nonempty", "newer", "corrupt-checksum")
+        for case in cases:
+            with self.subTest(case=case), TemporaryDirectory(dir="/tmp") as tmp:
+                paths = LedgerPaths.derive(tmp, "ws_alpha")
+                if case in {"gapped", "corrupt-checksum"}:
+                    create_released_v3(paths)
+                    with closing(sqlite3.connect(paths.ledger)) as connection, connection:
+                        if case == "gapped":
+                            connection.execute("DELETE FROM schema_migrations WHERE version = 2")
+                        else:
+                            connection.execute(
+                                "UPDATE schema_migrations SET migration_checksum = ? WHERE version = 2",
+                                ("sha256:" + "f" * 64,),
+                            )
+                else:
+                    paths.ensure_directories()
+                    with closing(sqlite3.connect(paths.ledger)) as connection, connection:
+                        if case == "zero-nonempty":
+                            connection.execute("CREATE TABLE unexpected(value TEXT)")
+                        else:
+                            connection.execute("PRAGMA user_version = 5")
+                before = paths.ledger.read_bytes()
+                with self.assertRaises(MigrationError):
+                    LedgerStore.open_writer(paths)
+                self.assertEqual(paths.ledger.read_bytes(), before)
 
     def test_legacy_provenance_is_atomic_idempotent_scoped_and_append_only(self) -> None:
         with TemporaryDirectory(dir="/tmp") as tmp:
@@ -998,7 +1502,7 @@ class LedgerStoreTest(unittest.TestCase):
                         self.assertEqual(outside.read_bytes(), b"operator-owned")
                     else:
                         self.assertFalse(outside.exists())
-                    self.assertEqual(writer.schema_version(), 3)
+                    self.assertEqual(writer.schema_version(), 4)
 
     @unittest.skipUnless(hasattr(os, "O_NOFOLLOW"), "no-follow opens unavailable")
     def test_restore_source_refuses_swap_then_restore_to_outside_targets(self) -> None:
@@ -1040,7 +1544,7 @@ class LedgerStoreTest(unittest.TestCase):
                         self.assertEqual(outside.read_bytes(), b"operator-owned")
                     else:
                         self.assertFalse(outside.exists())
-                    self.assertEqual(writer.schema_version(), 3)
+                    self.assertEqual(writer.schema_version(), 4)
 
     def test_foreign_keys_prevent_cross_scope_source_rows(self) -> None:
         with TemporaryDirectory(dir="/tmp") as tmp:
@@ -1303,7 +1807,7 @@ class LedgerStoreTest(unittest.TestCase):
                 close_thread.join()
                 self.assertEqual(len(close_errors), 1)
                 self.assertIsInstance(close_errors[0], sqlite3.ProgrammingError)
-                self.assertEqual(writer.schema_version(), 3)
+                self.assertEqual(writer.schema_version(), 4)
 
             with LedgerStore.open_reader(paths) as reader:
                 self.assertEqual(reader._connection.execute("PRAGMA query_only").fetchone()[0], 1)
@@ -1331,7 +1835,7 @@ class LedgerStoreTest(unittest.TestCase):
             self.assertIsNone(store_reference())
             self.assertIsNone(lock_reference())
             with LedgerStore.open_writer(paths) as reopened:
-                self.assertEqual(reopened.schema_version(), 3)
+                self.assertEqual(reopened.schema_version(), 4)
 
     def test_failed_migration_restores_verified_pre_migration_database(self) -> None:
         with TemporaryDirectory(dir="/tmp") as tmp:
@@ -1410,7 +1914,7 @@ class LedgerStoreTest(unittest.TestCase):
                     paths.ensure_directories()
                     if kind == "unsupported":
                         with closing(sqlite3.connect(paths.ledger)) as connection, connection:
-                            connection.execute("PRAGMA user_version = 4")
+                            connection.execute("PRAGMA user_version = 5")
                         expected = "unsupported ledger schema version"
                     else:
                         if kind == "corrupt":

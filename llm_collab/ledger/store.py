@@ -18,7 +18,7 @@ from pathlib import Path
 from .paths import LedgerPaths, validate_project_id, validate_registry_token, validate_workspace_id
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 BUSY_TIMEOUT_MS = 5_000
 SYNCHRONOUS_FULL = 2
 MIGRATION_TOOL_VERSION = "llm-collab-ledger/1"
@@ -40,6 +40,15 @@ V2_TABLES = V1_TABLES | frozenset(
     }
 )
 V3_TABLES = V2_TABLES | frozenset({"legacy_provenance_imports"})
+V4_TABLES = V3_TABLES | frozenset(
+    {
+        "canonical_bodies",
+        "canonical_messages",
+        "canonical_message_recipients",
+        "canonical_message_artifacts",
+        "canonical_message_tags",
+    }
+)
 
 
 class SQLiteSafetyError(RuntimeError):
@@ -51,6 +60,10 @@ class WriterAlreadyOpenError(RuntimeError):
 
 
 class MigrationError(RuntimeError):
+    pass
+
+
+class CanonicalConflictError(RuntimeError):
     pass
 
 
@@ -384,7 +397,364 @@ V3_SQL = (
 )
 V3_MIGRATION_CHECKSUM = "sha256:1b8380593b73695bf8824425b58eda7c94f51fc0937f07dbcbd1786a6e5d467b"
 V3_SCHEMA_FINGERPRINT = "sha256:88e59c9be91df366c03985f99f8b3db1c68382b4846612c0334fd15cc505e673"
-MIGRATIONS = ((1, V1_SQL), (2, V2_SQL), (3, V3_SQL))
+
+# V4 hardens the resultant schema_migrations table with triggers. Released
+# fingerprints remain byte-exact because each is rebuilt from its own released SQL only.
+V4_SQL = (
+    """
+    CREATE TABLE canonical_bodies (
+        workspace_id TEXT NOT NULL
+            CHECK (
+                instr(workspace_id, char(0)) = 0
+                AND length(CAST(workspace_id AS BLOB)) BETWEEN 6 AND 131
+                AND substr(workspace_id, 1, 3) = 'ws_'
+                AND substr(workspace_id, 4, 1) GLOB '[A-Za-z0-9]'
+                AND substr(workspace_id, 4) NOT GLOB '*[^A-Za-z0-9_-]*'
+            ),
+        body_sha256 TEXT NOT NULL
+            CHECK (
+                instr(body_sha256, char(0)) = 0
+                AND length(CAST(body_sha256 AS BLOB)) = 64
+                AND body_sha256 NOT GLOB '*[^0-9a-f]*'
+            ),
+        byte_size INTEGER NOT NULL
+            CHECK (typeof(byte_size) = 'integer' AND byte_size BETWEEN 0 AND 1048576),
+        body BLOB NOT NULL
+            CHECK (typeof(body) = 'blob' AND length(body) = byte_size),
+        created_at_utc TEXT NOT NULL
+            CHECK (
+                instr(created_at_utc, char(0)) = 0
+                AND length(CAST(created_at_utc AS BLOB)) BETWEEN 1 AND 128
+            ),
+        PRIMARY KEY (workspace_id, body_sha256)
+    ) STRICT
+    """,
+    """
+    CREATE TABLE canonical_messages (
+        workspace_id TEXT NOT NULL
+            CHECK (
+                instr(workspace_id, char(0)) = 0
+                AND length(CAST(workspace_id AS BLOB)) BETWEEN 6 AND 131
+                AND substr(workspace_id, 1, 3) = 'ws_'
+                AND substr(workspace_id, 4, 1) GLOB '[A-Za-z0-9]'
+                AND substr(workspace_id, 4) NOT GLOB '*[^A-Za-z0-9_-]*'
+            ),
+        scope_kind TEXT NOT NULL CHECK (scope_kind IN ('workspace', 'project')),
+        scope_identity TEXT NOT NULL
+            CHECK (
+                instr(scope_identity, char(0)) = 0
+                AND length(CAST(scope_identity AS BLOB)) BETWEEN 1 AND 128
+            ),
+        message_id TEXT NOT NULL
+            CHECK (
+                instr(message_id, char(0)) = 0
+                AND length(CAST(message_id AS BLOB)) = 68
+                AND substr(message_id, 1, 4) = 'msg_'
+                AND substr(message_id, 5) NOT GLOB '*[^0-9a-f]*'
+            ),
+        sender_agent_id TEXT NOT NULL
+            CHECK (
+                instr(sender_agent_id, char(0)) = 0
+                AND length(CAST(sender_agent_id AS BLOB)) BETWEEN 9 AND 134
+                AND substr(sender_agent_id, 1, 6) = 'agent_'
+                AND substr(sender_agent_id, 7, 1) GLOB '[A-Za-z0-9]'
+                AND substr(sender_agent_id, 7) NOT GLOB '*[^A-Za-z0-9_-]*'
+            ),
+        dedupe_key TEXT NOT NULL
+            CHECK (
+                instr(dedupe_key, char(0)) = 0
+                AND length(CAST(dedupe_key AS BLOB)) BETWEEN 1 AND 256
+            ),
+        body_sha256 TEXT NOT NULL
+            CHECK (
+                instr(body_sha256, char(0)) = 0
+                AND length(CAST(body_sha256 AS BLOB)) = 64
+                AND body_sha256 NOT GLOB '*[^0-9a-f]*'
+            ),
+        reply_to_message_id TEXT
+            CHECK (
+                reply_to_message_id IS NULL
+                OR (
+                    instr(reply_to_message_id, char(0)) = 0
+                    AND length(CAST(reply_to_message_id AS BLOB)) = 68
+                    AND substr(reply_to_message_id, 1, 4) = 'msg_'
+                    AND substr(reply_to_message_id, 5) NOT GLOB '*[^0-9a-f]*'
+                )
+            ),
+        ttl_seconds INTEGER NOT NULL
+            CHECK (typeof(ttl_seconds) = 'integer' AND ttl_seconds BETWEEN 0 AND 31536000),
+        ack_policy TEXT NOT NULL CHECK (ack_policy IN ('none', 'required')),
+        title TEXT NOT NULL
+            CHECK (
+                instr(title, char(0)) = 0
+                AND length(CAST(title AS BLOB)) BETWEEN 1 AND 512
+            ),
+        priority TEXT NOT NULL CHECK (priority IN ('low', 'normal', 'high', 'urgent')),
+        chat_link TEXT
+            CHECK (
+                chat_link IS NULL
+                OR (
+                    instr(chat_link, char(0)) = 0
+                    AND length(CAST(chat_link AS BLOB)) BETWEEN 1 AND 256
+                )
+            ),
+        task_link TEXT
+            CHECK (
+                task_link IS NULL
+                OR (
+                    instr(task_link, char(0)) = 0
+                    AND length(CAST(task_link AS BLOB)) BETWEEN 1 AND 256
+                )
+            ),
+        registry_revision TEXT NOT NULL
+            CHECK (
+                instr(registry_revision, char(0)) = 0
+                AND length(CAST(registry_revision AS BLOB)) = 71
+                AND substr(registry_revision, 1, 7) = 'sha256:'
+                AND substr(registry_revision, 8) NOT GLOB '*[^0-9a-f]*'
+            ),
+        project_id TEXT
+            CHECK (
+                project_id IS NULL
+                OR (
+                    instr(project_id, char(0)) = 0
+                    AND length(CAST(project_id AS BLOB)) BETWEEN 1 AND 128
+                    AND substr(project_id, 1, 1) GLOB '[A-Za-z]'
+                    AND project_id NOT GLOB '*[^A-Za-z0-9._-]*'
+                )
+            ),
+        created_at_utc TEXT NOT NULL
+            CHECK (
+                instr(created_at_utc, char(0)) = 0
+                AND length(CAST(created_at_utc AS BLOB)) BETWEEN 1 AND 128
+            ),
+        PRIMARY KEY (workspace_id, scope_kind, scope_identity, message_id),
+        UNIQUE (workspace_id, scope_kind, scope_identity, sender_agent_id, dedupe_key),
+        FOREIGN KEY (workspace_id, body_sha256)
+            REFERENCES canonical_bodies (workspace_id, body_sha256)
+            ON DELETE RESTRICT,
+        FOREIGN KEY (workspace_id, registry_revision)
+            REFERENCES workspace_registry_snapshots (workspace_id, registry_revision)
+            ON DELETE RESTRICT,
+        FOREIGN KEY (workspace_id, project_id, registry_revision)
+            REFERENCES project_registry_snapshots (workspace_id, project_id, registry_revision)
+            ON DELETE RESTRICT,
+        FOREIGN KEY (workspace_id, scope_kind, scope_identity, reply_to_message_id)
+            REFERENCES canonical_messages (workspace_id, scope_kind, scope_identity, message_id)
+            ON DELETE RESTRICT,
+        CHECK (
+            (
+                scope_kind = 'project'
+                AND project_id IS NOT NULL
+                AND scope_identity = project_id
+            )
+            OR
+            (
+                scope_kind = 'workspace'
+                AND project_id IS NULL
+                AND scope_identity = 'workspace'
+            )
+        )
+    ) STRICT
+    """,
+    """
+    CREATE TABLE canonical_message_recipients (
+        workspace_id TEXT NOT NULL,
+        scope_kind TEXT NOT NULL,
+        scope_identity TEXT NOT NULL,
+        message_id TEXT NOT NULL,
+        recipient_agent_id TEXT NOT NULL
+            CHECK (
+                instr(recipient_agent_id, char(0)) = 0
+                AND length(CAST(recipient_agent_id AS BLOB)) BETWEEN 9 AND 134
+                AND substr(recipient_agent_id, 1, 6) = 'agent_'
+                AND substr(recipient_agent_id, 7, 1) GLOB '[A-Za-z0-9]'
+                AND substr(recipient_agent_id, 7) NOT GLOB '*[^A-Za-z0-9_-]*'
+            ),
+        PRIMARY KEY (
+            workspace_id, scope_kind, scope_identity, message_id, recipient_agent_id
+        ),
+        FOREIGN KEY (workspace_id, scope_kind, scope_identity, message_id)
+            REFERENCES canonical_messages (workspace_id, scope_kind, scope_identity, message_id)
+            ON DELETE RESTRICT
+    ) STRICT
+    """,
+    """
+    CREATE TABLE canonical_message_artifacts (
+        workspace_id TEXT NOT NULL,
+        scope_kind TEXT NOT NULL,
+        scope_identity TEXT NOT NULL,
+        message_id TEXT NOT NULL,
+        artifact_kind TEXT NOT NULL
+            CHECK (artifact_kind IN ('chat', 'task', 'repo', 'path', 'branch', 'worktree')),
+        artifact_ref TEXT NOT NULL
+            CHECK (
+                instr(artifact_ref, char(0)) = 0
+                AND length(CAST(artifact_ref AS BLOB)) BETWEEN 1 AND 4096
+            ),
+        PRIMARY KEY (
+            workspace_id, scope_kind, scope_identity, message_id, artifact_kind, artifact_ref
+        ),
+        FOREIGN KEY (workspace_id, scope_kind, scope_identity, message_id)
+            REFERENCES canonical_messages (workspace_id, scope_kind, scope_identity, message_id)
+            ON DELETE RESTRICT
+    ) STRICT
+    """,
+    """
+    CREATE TABLE canonical_message_tags (
+        workspace_id TEXT NOT NULL,
+        scope_kind TEXT NOT NULL,
+        scope_identity TEXT NOT NULL,
+        message_id TEXT NOT NULL,
+        tag TEXT NOT NULL
+            CHECK (
+                instr(tag, char(0)) = 0
+                AND length(CAST(tag AS BLOB)) BETWEEN 1 AND 128
+            ),
+        PRIMARY KEY (workspace_id, scope_kind, scope_identity, message_id, tag),
+        FOREIGN KEY (workspace_id, scope_kind, scope_identity, message_id)
+            REFERENCES canonical_messages (workspace_id, scope_kind, scope_identity, message_id)
+            ON DELETE RESTRICT
+    ) STRICT
+    """,
+    """
+    CREATE TRIGGER canonical_bodies_no_update
+    BEFORE UPDATE ON canonical_bodies
+    BEGIN
+        SELECT RAISE(ABORT, 'canonical bodies are append-only');
+    END
+    """,
+    """
+    CREATE TRIGGER canonical_bodies_no_delete
+    BEFORE DELETE ON canonical_bodies
+    BEGIN
+        SELECT RAISE(ABORT, 'canonical bodies are append-only');
+    END
+    """,
+    """
+    CREATE TRIGGER canonical_messages_no_update
+    BEFORE UPDATE ON canonical_messages
+    BEGIN
+        SELECT RAISE(ABORT, 'canonical messages are append-only');
+    END
+    """,
+    """
+    CREATE TRIGGER canonical_messages_no_delete
+    BEFORE DELETE ON canonical_messages
+    BEGIN
+        SELECT RAISE(ABORT, 'canonical messages are append-only');
+    END
+    """,
+    """
+    CREATE TRIGGER canonical_message_recipients_no_update
+    BEFORE UPDATE ON canonical_message_recipients
+    BEGIN
+        SELECT RAISE(ABORT, 'canonical recipients are append-only');
+    END
+    """,
+    """
+    CREATE TRIGGER canonical_message_recipients_no_delete
+    BEFORE DELETE ON canonical_message_recipients
+    BEGIN
+        SELECT RAISE(ABORT, 'canonical recipients are append-only');
+    END
+    """,
+    """
+    CREATE TRIGGER canonical_message_artifacts_no_update
+    BEFORE UPDATE ON canonical_message_artifacts
+    BEGIN
+        SELECT RAISE(ABORT, 'canonical artifacts are append-only');
+    END
+    """,
+    """
+    CREATE TRIGGER canonical_message_artifacts_no_delete
+    BEFORE DELETE ON canonical_message_artifacts
+    BEGIN
+        SELECT RAISE(ABORT, 'canonical artifacts are append-only');
+    END
+    """,
+    """
+    CREATE TRIGGER canonical_message_tags_no_update
+    BEFORE UPDATE ON canonical_message_tags
+    BEGIN
+        SELECT RAISE(ABORT, 'canonical tags are append-only');
+    END
+    """,
+    """
+    CREATE TRIGGER canonical_message_tags_no_delete
+    BEFORE DELETE ON canonical_message_tags
+    BEGIN
+        SELECT RAISE(ABORT, 'canonical tags are append-only');
+    END
+    """,
+    """
+    CREATE TRIGGER canonical_message_recipients_count_cap
+    BEFORE INSERT ON canonical_message_recipients
+    WHEN (
+        SELECT count(*) FROM canonical_message_recipients
+        WHERE workspace_id = NEW.workspace_id
+          AND scope_kind = NEW.scope_kind
+          AND scope_identity = NEW.scope_identity
+          AND message_id = NEW.message_id
+    ) >= 256
+    BEGIN
+        SELECT RAISE(ABORT, 'canonical recipient count exceeds 256');
+    END
+    """,
+    """
+    CREATE TRIGGER canonical_message_artifacts_count_cap
+    BEFORE INSERT ON canonical_message_artifacts
+    WHEN (
+        SELECT count(*) FROM canonical_message_artifacts
+        WHERE workspace_id = NEW.workspace_id
+          AND scope_kind = NEW.scope_kind
+          AND scope_identity = NEW.scope_identity
+          AND message_id = NEW.message_id
+    ) >= 256
+    BEGIN
+        SELECT RAISE(ABORT, 'canonical artifact count exceeds 256');
+    END
+    """,
+    """
+    CREATE TRIGGER canonical_message_tags_count_cap
+    BEFORE INSERT ON canonical_message_tags
+    WHEN (
+        SELECT count(*) FROM canonical_message_tags
+        WHERE workspace_id = NEW.workspace_id
+          AND scope_kind = NEW.scope_kind
+          AND scope_identity = NEW.scope_identity
+          AND message_id = NEW.message_id
+    ) >= 64
+    BEGIN
+        SELECT RAISE(ABORT, 'canonical tag count exceeds 64');
+    END
+    """,
+    """
+    CREATE TRIGGER schema_migrations_no_nul_insert
+    BEFORE INSERT ON schema_migrations
+    WHEN instr(NEW.migration_checksum, char(0)) != 0
+      OR instr(NEW.applied_at_utc, char(0)) != 0
+      OR instr(NEW.tool_version, char(0)) != 0
+      OR instr(NEW.backup_reference, char(0)) != 0
+    BEGIN
+        SELECT RAISE(ABORT, 'schema migration metadata contains NUL');
+    END
+    """,
+    """
+    CREATE TRIGGER schema_migrations_no_nul_update
+    BEFORE UPDATE ON schema_migrations
+    WHEN instr(NEW.migration_checksum, char(0)) != 0
+      OR instr(NEW.applied_at_utc, char(0)) != 0
+      OR instr(NEW.tool_version, char(0)) != 0
+      OR instr(NEW.backup_reference, char(0)) != 0
+    BEGIN
+        SELECT RAISE(ABORT, 'schema migration metadata contains NUL');
+    END
+    """,
+)
+V4_MIGRATION_CHECKSUM = "sha256:d45b8f84c18a93fe9fe69658794307ab6d451b06edef5245e8d4d7e305d247c6"
+V4_SCHEMA_FINGERPRINT = "sha256:c5ed09f78345ba35338635db76cc6e24c528d19137acab301990a859157febff"
+MIGRATIONS = ((1, V1_SQL), (2, V2_SQL), (3, V3_SQL), (4, V4_SQL))
 
 
 def _migration_checksum(statements: Sequence[str]) -> str:
@@ -426,6 +796,16 @@ def _v3_schema_fingerprint_from_sql() -> str:
     connection = sqlite3.connect(":memory:", isolation_level=None)
     try:
         for statement in (*V1_SQL, *V2_SQL, *V3_SQL):
+            connection.execute(statement)
+        return _schema_fingerprint(connection)
+    finally:
+        connection.close()
+
+
+def _v4_schema_fingerprint_from_sql() -> str:
+    connection = sqlite3.connect(":memory:", isolation_level=None)
+    try:
+        for statement in (*V1_SQL, *V2_SQL, *V3_SQL, *V4_SQL):
             connection.execute(statement)
         return _schema_fingerprint(connection)
     finally:
@@ -782,6 +1162,9 @@ class LedgerStore:
         if claimed == 2:
             cls._validate_released_v2(connection, paths)
             return
+        if claimed == 3:
+            cls._validate_released_v3(connection, paths)
+            return
         cls._validate_schema(connection, paths)
 
     @staticmethod
@@ -815,6 +1198,48 @@ class LedgerStore:
                 raise MigrationError("released v3 migration checksum is incoherent")
             if _v3_schema_fingerprint_from_sql() != V3_SCHEMA_FINGERPRINT:
                 raise MigrationError("released v3 schema fingerprint is incoherent")
+            if _migration_checksum(V4_SQL) != V4_MIGRATION_CHECKSUM:
+                raise MigrationError("released v4 migration checksum is incoherent")
+            if _v4_schema_fingerprint_from_sql() != V4_SCHEMA_FINGERPRINT:
+                raise MigrationError("released v4 schema fingerprint is incoherent")
+            rows = cls._migration_rows(connection)
+            if [row[0] for row in rows] != [1, 2, 3, 4]:
+                raise MigrationError("ledger migration metadata is incoherent")
+            cls._validate_migration_row(rows[0], V1_MIGRATION_CHECKSUM, 0, paths)
+            cls._validate_migration_row(rows[1], V2_MIGRATION_CHECKSUM, 1, paths)
+            cls._validate_migration_row(rows[2], V3_MIGRATION_CHECKSUM, 2, paths)
+            cls._validate_migration_row(rows[3], V4_MIGRATION_CHECKSUM, 3, paths)
+            actual_tables = cls._table_names(connection)
+            if actual_tables != V4_TABLES:
+                raise MigrationError(
+                    "ledger v4 table set is incoherent: "
+                    f"missing={sorted(V4_TABLES - actual_tables)}, "
+                    f"extra={sorted(actual_tables - V4_TABLES)}"
+                )
+            if _schema_fingerprint(connection) != V4_SCHEMA_FINGERPRINT:
+                raise MigrationError("ledger v4 schema fingerprint is incoherent")
+        except sqlite3.DatabaseError as exc:
+            raise MigrationError("ledger schema is corrupt or incoherent") from exc
+
+    @classmethod
+    def _validate_released_v3(
+        cls, connection: sqlite3.Connection, paths: LedgerPaths
+    ) -> None:
+        """Accept only the exact released v3 long enough for a writer migration."""
+        try:
+            cls._validate_database_health(connection)
+            if connection.execute("PRAGMA user_version").fetchone()[0] != 3:
+                raise MigrationError("ledger is not released schema v3")
+            released = (
+                (V1_SQL, V1_MIGRATION_CHECKSUM, V1_SCHEMA_FINGERPRINT, _v1_schema_fingerprint_from_sql),
+                (V2_SQL, V2_MIGRATION_CHECKSUM, V2_SCHEMA_FINGERPRINT, _v2_schema_fingerprint_from_sql),
+                (V3_SQL, V3_MIGRATION_CHECKSUM, V3_SCHEMA_FINGERPRINT, _v3_schema_fingerprint_from_sql),
+            )
+            for statements, checksum, fingerprint, fingerprint_from_sql in released:
+                if _migration_checksum(statements) != checksum:
+                    raise MigrationError("released migration checksum is incoherent")
+                if fingerprint_from_sql() != fingerprint:
+                    raise MigrationError("released schema fingerprint is incoherent")
             rows = cls._migration_rows(connection)
             if [row[0] for row in rows] != [1, 2, 3]:
                 raise MigrationError("ledger migration metadata is incoherent")
@@ -967,6 +1392,7 @@ class LedgerStore:
                     1: V1_MIGRATION_CHECKSUM,
                     2: V2_MIGRATION_CHECKSUM,
                     3: V3_MIGRATION_CHECKSUM,
+                    4: V4_MIGRATION_CHECKSUM,
                 }.get(version)
                 if expected_checksum is None or checksum != expected_checksum:
                     raise MigrationError(f"migration {version} does not match its released checksum")
@@ -984,6 +1410,14 @@ class LedgerStore:
                     raise MigrationError(f"migration {version} failed integrity_check")
                 if self._connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
                     raise MigrationError(f"migration {version} failed foreign_key_check")
+                expected_fingerprint = {
+                    1: V1_SCHEMA_FINGERPRINT,
+                    2: V2_SCHEMA_FINGERPRINT,
+                    3: V3_SCHEMA_FINGERPRINT,
+                    4: V4_SCHEMA_FINGERPRINT,
+                }[version]
+                if _schema_fingerprint(self._connection) != expected_fingerprint:
+                    raise MigrationError(f"migration {version} produced an incoherent schema")
                 self._connection.execute("COMMIT")
             except BaseException as exc:
                 if self._connection.in_transaction:
@@ -1084,6 +1518,253 @@ class LedgerStore:
     def integrity_check(self) -> str:
         self._ensure_thread()
         return self._connection.execute("PRAGMA integrity_check").fetchone()[0]
+
+    def canonical_preflight(self, *, write: bool) -> None:
+        """Reject an unusable canonical operation before normalization or SQL work."""
+        self._ensure_thread()
+        if self._connection.in_transaction:
+            raise RuntimeError("canonical operations require no open transaction")
+        if write and self._read_only:
+            raise PermissionError("query-only readers cannot create canonical messages")
+
+    def read_canonical_message(
+        self,
+        *,
+        workspace_id: str,
+        scope_kind: str,
+        scope_identity: str,
+        message_id: str,
+    ) -> dict[str, object] | None:
+        """Read one message and body only through its exact scope tuple."""
+        self.canonical_preflight(write=False)
+        self._validate_canonical_scope(workspace_id, scope_kind, scope_identity)
+        return self._read_canonical_message(
+            workspace_id, scope_kind, scope_identity, message_id
+        )
+
+    def create_canonical_message(
+        self,
+        *,
+        message: Mapping[str, object],
+        recipients: Sequence[str],
+        artifacts: Sequence[tuple[str, str]],
+        tags: Sequence[str],
+        body: bytes,
+    ) -> bool:
+        """Atomically append one normalized canonical intent, or return its equivalent."""
+        self.canonical_preflight(write=True)
+        workspace_id = str(message["workspace_id"])
+        scope_kind = str(message["scope_kind"])
+        scope_identity = str(message["scope_identity"])
+        message_id = str(message["message_id"])
+        sender_agent_id = str(message["sender_agent_id"])
+        dedupe_key = str(message["dedupe_key"])
+        self._validate_canonical_scope(workspace_id, scope_kind, scope_identity)
+
+        candidate_rows = self._connection.execute(
+            "SELECT workspace_id, scope_kind, scope_identity, message_id "
+            "FROM canonical_messages WHERE workspace_id = ? AND "
+            "(message_id = ? OR (scope_kind = ? AND scope_identity = ? "
+            "AND sender_agent_id = ? AND dedupe_key = ?))",
+            (
+                workspace_id,
+                message_id,
+                scope_kind,
+                scope_identity,
+                sender_agent_id,
+                dedupe_key,
+            ),
+        ).fetchall()
+        equivalent = {
+            "workspace_id": workspace_id,
+            "scope_kind": scope_kind,
+            "scope_identity": scope_identity,
+            "message_id": message_id,
+            "sender_agent_id": sender_agent_id,
+            "dedupe_key": dedupe_key,
+            "body_sha256": message["body_sha256"],
+            "reply_to_message_id": message["reply_to_message_id"],
+            "ttl_seconds": message["ttl_seconds"],
+            "ack_policy": message["ack_policy"],
+            "title": message["title"],
+            "priority": message["priority"],
+            "chat_link": message["chat_link"],
+            "task_link": message["task_link"],
+            "recipients": tuple(recipients),
+            "artifacts": tuple(artifacts),
+            "tags": tuple(tags),
+            "byte_size": len(body),
+            "body": body,
+        }
+        for row in candidate_rows:
+            existing = self._read_canonical_message(*row)
+            if existing is not None and all(
+                existing[key] == value for key, value in equivalent.items()
+            ):
+                return False
+            raise CanonicalConflictError(
+                "canonical message identity or dedupe namespace conflicts with different intent"
+            )
+
+        body_row = self._connection.execute(
+            "SELECT byte_size, body FROM canonical_bodies "
+            "WHERE workspace_id = ? AND body_sha256 = ?",
+            (workspace_id, message["body_sha256"]),
+        ).fetchone()
+        if body_row is not None and body_row != (len(body), body):
+            raise CanonicalConflictError("canonical body hash conflicts with different bytes")
+
+        project_id = message["project_id"]
+        self._connection.execute("BEGIN IMMEDIATE")
+        try:
+            if body_row is None:
+                self._connection.execute(
+                    "INSERT INTO canonical_bodies "
+                    "(workspace_id, body_sha256, byte_size, body, created_at_utc) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (
+                        workspace_id,
+                        message["body_sha256"],
+                        len(body),
+                        body,
+                        message["created_at_utc"],
+                    ),
+                )
+            self._connection.execute(
+                "INSERT INTO canonical_messages "
+                "(workspace_id, scope_kind, scope_identity, message_id, sender_agent_id, "
+                "dedupe_key, body_sha256, reply_to_message_id, ttl_seconds, ack_policy, "
+                "title, priority, chat_link, task_link, registry_revision, project_id, "
+                "created_at_utc) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    workspace_id,
+                    scope_kind,
+                    scope_identity,
+                    message_id,
+                    sender_agent_id,
+                    dedupe_key,
+                    message["body_sha256"],
+                    message["reply_to_message_id"],
+                    message["ttl_seconds"],
+                    message["ack_policy"],
+                    message["title"],
+                    message["priority"],
+                    message["chat_link"],
+                    message["task_link"],
+                    message["registry_revision"],
+                    project_id,
+                    message["created_at_utc"],
+                ),
+            )
+            prefix = (workspace_id, scope_kind, scope_identity, message_id)
+            self._connection.executemany(
+                "INSERT INTO canonical_message_recipients "
+                "(workspace_id, scope_kind, scope_identity, message_id, recipient_agent_id) "
+                "VALUES (?, ?, ?, ?, ?)",
+                ((*prefix, recipient) for recipient in recipients),
+            )
+            self._connection.executemany(
+                "INSERT INTO canonical_message_artifacts "
+                "(workspace_id, scope_kind, scope_identity, message_id, artifact_kind, "
+                "artifact_ref) VALUES (?, ?, ?, ?, ?, ?)",
+                ((*prefix, kind, reference) for kind, reference in artifacts),
+            )
+            self._connection.executemany(
+                "INSERT INTO canonical_message_tags "
+                "(workspace_id, scope_kind, scope_identity, message_id, tag) "
+                "VALUES (?, ?, ?, ?, ?)",
+                ((*prefix, tag) for tag in tags),
+            )
+            self._connection.execute("COMMIT")
+        except BaseException:
+            if self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
+            raise
+        return True
+
+    def _read_canonical_message(
+        self,
+        workspace_id: str,
+        scope_kind: str,
+        scope_identity: str,
+        message_id: str,
+    ) -> dict[str, object] | None:
+        row = self._connection.execute(
+            "SELECT m.workspace_id, m.scope_kind, m.scope_identity, m.message_id, "
+            "m.sender_agent_id, m.dedupe_key, m.body_sha256, m.reply_to_message_id, "
+            "m.ttl_seconds, m.ack_policy, m.title, m.priority, m.chat_link, m.task_link, "
+            "m.registry_revision, m.project_id, m.created_at_utc, b.byte_size, b.body "
+            "FROM canonical_messages AS m JOIN canonical_bodies AS b "
+            "ON b.workspace_id = m.workspace_id AND b.body_sha256 = m.body_sha256 "
+            "WHERE m.workspace_id = ? AND m.scope_kind = ? AND m.scope_identity = ? "
+            "AND m.message_id = ?",
+            (workspace_id, scope_kind, scope_identity, message_id),
+        ).fetchone()
+        if row is None:
+            return None
+        keys = (
+            "workspace_id",
+            "scope_kind",
+            "scope_identity",
+            "message_id",
+            "sender_agent_id",
+            "dedupe_key",
+            "body_sha256",
+            "reply_to_message_id",
+            "ttl_seconds",
+            "ack_policy",
+            "title",
+            "priority",
+            "chat_link",
+            "task_link",
+            "registry_revision",
+            "project_id",
+            "created_at_utc",
+            "byte_size",
+            "body",
+        )
+        result = dict(zip(keys, row))
+        prefix = (workspace_id, scope_kind, scope_identity, message_id)
+        result["recipients"] = tuple(
+            item[0]
+            for item in self._connection.execute(
+                "SELECT recipient_agent_id FROM canonical_message_recipients "
+                "WHERE workspace_id = ? AND scope_kind = ? AND scope_identity = ? "
+                "AND message_id = ? ORDER BY recipient_agent_id",
+                prefix,
+            )
+        )
+        result["artifacts"] = tuple(
+            (item[0], item[1])
+            for item in self._connection.execute(
+                "SELECT artifact_kind, artifact_ref FROM canonical_message_artifacts "
+                "WHERE workspace_id = ? AND scope_kind = ? AND scope_identity = ? "
+                "AND message_id = ? ORDER BY artifact_kind, artifact_ref",
+                prefix,
+            )
+        )
+        result["tags"] = tuple(
+            item[0]
+            for item in self._connection.execute(
+                "SELECT tag FROM canonical_message_tags WHERE workspace_id = ? "
+                "AND scope_kind = ? AND scope_identity = ? AND message_id = ? ORDER BY tag",
+                prefix,
+            )
+        )
+        return result
+
+    def _validate_canonical_scope(
+        self, workspace_id: str, scope_kind: str, scope_identity: str
+    ) -> None:
+        if validate_workspace_id(workspace_id) != self.paths.workspace_id:
+            raise ValueError("workspace_id does not own this ledger")
+        if scope_kind == "workspace":
+            if scope_identity != "workspace":
+                raise ValueError("workspace scope identity must be workspace")
+        elif scope_kind == "project":
+            validate_project_id(scope_identity)
+        else:
+            raise ValueError("scope_kind must be workspace or project")
 
     def record_registry_snapshot(
         self,
