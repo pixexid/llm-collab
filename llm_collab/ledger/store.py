@@ -1596,15 +1596,19 @@ class LedgerStore:
             "byte_size": len(body),
             "body": body,
         }
+        found_conflict = False
         for row in candidate_rows:
             existing = self._read_canonical_message(*row)
-            if existing is not None and all(
-                existing[key] == value for key, value in equivalent.items()
+            if existing is None or any(
+                existing[key] != value for key, value in equivalent.items()
             ):
-                return False
+                found_conflict = True
+        if found_conflict:
             raise CanonicalConflictError(
                 "canonical message identity or dedupe namespace conflicts with different intent"
             )
+        if candidate_rows:
+            return False
 
         body_row = self._connection.execute(
             "SELECT byte_size, body FROM canonical_bodies "

@@ -157,6 +157,49 @@ class CanonicalMessageTest(unittest.TestCase):
                     1,
                 )
 
+    def test_equivalent_candidate_does_not_mask_cross_scope_id_conflict(self) -> None:
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            paths = LedgerPaths.derive(tmp, WORKSPACE)
+            with LedgerStore.open_writer(paths) as store:
+                record_registry(store)
+                message_id, _ = create_or_return_equivalent(store, **intent())
+                body_sha256 = hashlib.sha256(b"hello").hexdigest()
+                store._connection.execute(
+                    "INSERT INTO canonical_messages "
+                    "(workspace_id, scope_kind, scope_identity, message_id, sender_agent_id, "
+                    "dedupe_key, body_sha256, reply_to_message_id, ttl_seconds, ack_policy, "
+                    "title, priority, chat_link, task_link, registry_revision, project_id, "
+                    "created_at_utc) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        WORKSPACE,
+                        "project",
+                        OTHER_PROJECT,
+                        message_id,
+                        "agent_claude",
+                        "cross-scope-collision",
+                        body_sha256,
+                        None,
+                        0,
+                        "none",
+                        "Conflicting intent",
+                        "normal",
+                        None,
+                        None,
+                        REVISION,
+                        OTHER_PROJECT,
+                        NOW,
+                    ),
+                )
+                store._connection.execute(
+                    "INSERT INTO canonical_message_recipients "
+                    "(workspace_id, scope_kind, scope_identity, message_id, recipient_agent_id) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (WORKSPACE, "project", OTHER_PROJECT, message_id, "agent_claude"),
+                )
+
+                with self.assertRaises(CanonicalConflictError):
+                    create_or_return_equivalent(store, **intent())
+
     def test_mutation_10_projection_leak_is_killed_by_required_only_schema(self) -> None:
         schema = json.loads(
             (Path(__file__).parents[1] / "schemas/standalone/v1/message.schema.json").read_text()
