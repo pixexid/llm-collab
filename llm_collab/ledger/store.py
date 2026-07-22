@@ -18,7 +18,7 @@ from pathlib import Path
 from .paths import LedgerPaths, validate_project_id, validate_registry_token, validate_workspace_id
 
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 BUSY_TIMEOUT_MS = 5_000
 SYNCHRONOUS_FULL = 2
 MIGRATION_TOOL_VERSION = "llm-collab-ledger/1"
@@ -57,6 +57,13 @@ V5_TABLES = V4_TABLES | frozenset(
         "canonical_delivery_receipts",
     }
 )
+V6_TABLES = V5_TABLES | frozenset(
+    {
+        "legacy_import_manifests",
+        "legacy_import_manifest_entries",
+        "legacy_import_records",
+    }
+)
 
 
 class SQLiteSafetyError(RuntimeError):
@@ -84,12 +91,17 @@ _CANONICAL_MESSAGE_ID = re.compile(r"msg_[0-9a-f]{64}\Z")
 _CANONICAL_DELIVERY_ID = re.compile(r"delivery_[0-9a-f]{64}\Z")
 _CANONICAL_ATTEMPT_ID = re.compile(r"attempt_[0-9a-f]{64}\Z")
 _CANONICAL_RECEIPT_ID = re.compile(r"receipt_[0-9a-f]{64}\Z")
+_CANONICAL_MANIFEST_ID = re.compile(r"manifest_[A-Za-z0-9][A-Za-z0-9_-]{2,127}\Z")
 _CANONICAL_ENDPOINT_ID = re.compile(r"endpoint_[A-Za-z0-9][A-Za-z0-9_-]{2,127}\Z")
 _CANONICAL_SESSION_REF_ID = re.compile(r"session_[A-Za-z0-9][A-Za-z0-9_-]{2,127}\Z")
 _CANONICAL_REGISTRY_REVISION = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _CANONICAL_TOKEN = re.compile(r"[A-Za-z][A-Za-z0-9._-]{0,127}\Z")
 _CANONICAL_EVIDENCE_ID = re.compile(r"evidence_[A-Za-z0-9][A-Za-z0-9_-]{2,127}\Z")
 _CANONICAL_EXTENSION_KEY = re.compile(r"x_note_[A-Za-z][A-Za-z0-9_-]{0,55}\Z")
+_CANONICAL_PATH = re.compile(
+    r"/(?!/)(?!.*//)(?!.*(?:/\.{1,2})(?:/|$))(?!.*[\x00-\x1f\x7f\x85\u2028\u2029])"
+    r"[^/](?:.*[^/])?\Z"
+)
 _CANONICAL_ACK_POLICIES = frozenset({"none", "required"})
 _CANONICAL_PRIORITIES = frozenset({"low", "normal", "high", "urgent"})
 _CANONICAL_ARTIFACT_KINDS = frozenset(
@@ -203,6 +215,71 @@ def _canonical_receipt_id(value: object, name: str) -> str:
     if not isinstance(value, str) or _CANONICAL_RECEIPT_ID.fullmatch(value) is None:
         raise ValueError(f"{name} must be a canonical receipt_ identifier")
     return value
+
+
+def _canonical_manifest_id(value: object, name: str) -> str:
+    if not isinstance(value, str) or _CANONICAL_MANIFEST_ID.fullmatch(value) is None:
+        raise ValueError(f"{name} must be a manifest_ identifier")
+    return value
+
+
+def _canonical_sha256(value: object, name: str) -> str:
+    if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+        raise ValueError(f"{name} must be 64 lowercase hex characters")
+    return value
+
+
+def _canonical_token(value: object, name: str) -> str:
+    if not isinstance(value, str) or _CANONICAL_TOKEN.fullmatch(value) is None:
+        raise ValueError(f"{name} must be a bounded token")
+    return value
+
+
+def _canonical_registry_revision(value: object, name: str) -> str:
+    if not isinstance(value, str) or _CANONICAL_REGISTRY_REVISION.fullmatch(value) is None:
+        raise ValueError(f"{name} must be sha256:<lowercase hex>")
+    return value
+
+
+def _canonical_path(value: object, name: str) -> str:
+    if not isinstance(value, str) or _CANONICAL_PATH.fullmatch(value) is None:
+        raise ValueError(f"{name} must be a canonical absolute path")
+    return value
+
+
+def _legacy_import_dir_flags() -> int:
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    if nofollow is None:
+        raise ValueError("O_NOFOLLOW is required for legacy v2 import")
+    return (
+        os.O_RDONLY
+        | nofollow
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+
+
+def _legacy_import_file_flags() -> int:
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    nonblock = getattr(os, "O_NONBLOCK", None)
+    if nofollow is None or nonblock is None:
+        raise ValueError("O_NOFOLLOW and O_NONBLOCK are required for legacy v2 import")
+    return os.O_RDONLY | nofollow | nonblock | getattr(os, "O_CLOEXEC", 0)
+
+
+def _legacy_file_identity(status: os.stat_result) -> tuple[int, int, int, int, int, int]:
+    return (
+        status.st_dev,
+        status.st_ino,
+        status.st_mode,
+        status.st_size,
+        status.st_mtime_ns,
+        status.st_ctime_ns,
+    )
+
+
+def _legacy_dir_identity(status: os.stat_result) -> tuple[int, int, int]:
+    return status.st_dev, status.st_ino, status.st_mode
 
 
 def _canonical_endpoint_id(value: object, name: str) -> str:
@@ -440,6 +517,209 @@ def _canonical_json_bytes(value: Mapping[str, object]) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode(
         "utf-8"
     )
+
+
+def _mapping(value: object, name: str) -> Mapping[str, object]:
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{name} must be a mapping")
+    return value
+
+
+def _integrity_without(value: Mapping[str, object], field: str = "integrity") -> str:
+    projection = dict(value)
+    projection.pop(field, None)
+    return hashlib.sha256(_canonical_json_bytes(projection)).hexdigest()
+
+
+def _normalize_manifest_entry(value: object) -> dict[str, object]:
+    entry = dict(_mapping(value, "manifest entry"))
+    locator = _canonical_path(entry.get("canonical_locator"), "canonical_locator")
+    if isinstance(entry.get("byte_size"), bool) or not isinstance(entry.get("byte_size"), int):
+        raise ValueError("byte_size must be an integer")
+    byte_size = int(entry["byte_size"])
+    if not 0 <= byte_size <= 1048576:
+        raise ValueError("byte_size must be between 0 and 1048576")
+    source_boundary = _mapping(entry.get("source_boundary"), "source_boundary")
+    trusted_importer = _mapping(entry.get("trusted_importer"), "trusted_importer")
+    normalized = {
+        **entry,
+        "canonical_locator": locator,
+        "content_hash": _canonical_sha256(entry.get("content_hash"), "content_hash"),
+        "byte_size": byte_size,
+        "evidence_form_version": _canonical_token(entry.get("evidence_form_version"), "evidence_form_version"),
+        "cutoff_policy_revision": _canonical_token(entry.get("cutoff_policy_revision"), "cutoff_policy_revision"),
+        "source_workspace_id": validate_workspace_id(entry.get("source_workspace_id")),  # type: ignore[arg-type]
+        "source_project_id": validate_project_id(entry.get("source_project_id")),  # type: ignore[arg-type]
+        "source_registry_revision": _canonical_registry_revision(
+            entry.get("source_registry_revision"), "source_registry_revision"
+        ),
+        "source_boundary": {
+            "kind": source_boundary.get("kind"),
+            "identity": _canonical_token(source_boundary.get("identity"), "source_boundary.identity"),
+            "immutable": source_boundary.get("immutable"),
+        },
+        "trusted_importer": {
+            "identity": _canonical_token(trusted_importer.get("identity"), "trusted_importer.identity"),
+            "revision": _canonical_token(trusted_importer.get("revision"), "trusted_importer.revision"),
+        },
+        "transaction_id": _canonical_token(entry.get("transaction_id"), "transaction_id"),
+        "provenance_id": _canonical_token(entry.get("provenance_id"), "provenance_id"),
+    }
+    if normalized["source_boundary"]["kind"] not in {
+        "source_snapshot",
+        "ledger_checkpoint",
+        "content_addressed_revision",
+        "sealed_observation",
+    } or normalized["source_boundary"]["immutable"] is not True:
+        raise ValueError("source_boundary must be an immutable closed-kind boundary")
+    expected = _integrity_without(normalized)
+    if entry.get("integrity") != expected:
+        raise CanonicalIntegrityError("manifest entry integrity does not match")
+    normalized["integrity"] = expected
+    return normalized
+
+
+def _normalize_legacy_manifest(value: Mapping[str, object]) -> dict[str, object]:
+    manifest = dict(_mapping(value, "legacy manifest"))
+    publication = dict(_mapping(manifest.get("publication"), "publication"))
+    publisher = _mapping(publication.get("publisher"), "publisher")
+    source_boundary = _mapping(publication.get("source_boundary"), "publication.source_boundary")
+    entries = tuple(_normalize_manifest_entry(entry) for entry in manifest.get("entries", ()))
+    if not 1 <= len(entries) <= 4096:
+        raise ValueError("manifest entries must contain between 1 and 4096 entries")
+    normalized_publication = {
+        **publication,
+        "publisher": {
+            "identity": _canonical_token(publisher.get("identity"), "publisher.identity"),
+            "revision": _canonical_token(publisher.get("revision"), "publisher.revision"),
+        },
+        "publication_transaction_id": _canonical_token(
+            publication.get("publication_transaction_id"), "publication_transaction_id"
+        ),
+        "provenance_id": _canonical_token(publication.get("provenance_id"), "publication.provenance_id"),
+        "workspace_id": validate_workspace_id(publication.get("workspace_id")),  # type: ignore[arg-type]
+        "project_id": validate_project_id(publication.get("project_id")),  # type: ignore[arg-type]
+        "registry_revision": _canonical_registry_revision(
+            publication.get("registry_revision"), "registry_revision"
+        ),
+        "cutoff_policy_revision": _canonical_token(
+            publication.get("cutoff_policy_revision"), "publication.cutoff_policy_revision"
+        ),
+        "source_boundary": {
+            "kind": source_boundary.get("kind"),
+            "identity": _canonical_token(source_boundary.get("identity"), "publication.source_boundary.identity"),
+            "immutable": source_boundary.get("immutable"),
+        },
+    }
+    if normalized_publication["source_boundary"]["kind"] not in {
+        "source_snapshot",
+        "ledger_checkpoint",
+        "content_addressed_revision",
+        "sealed_observation",
+    } or normalized_publication["source_boundary"]["immutable"] is not True:
+        raise ValueError("publication source_boundary must be immutable")
+    expected_publication = _integrity_without(normalized_publication)
+    if publication.get("integrity") != expected_publication:
+        raise CanonicalIntegrityError("publication integrity does not match")
+    normalized_publication["integrity"] = expected_publication
+    if manifest.get("sealed") is not True:
+        raise ValueError("legacy manifest must be sealed")
+    seal_projection = {
+        "manifest_id": _canonical_manifest_id(manifest.get("manifest_id"), "manifest_id"),
+        "cutoff_policy_revision": _canonical_token(manifest.get("cutoff_policy_revision"), "cutoff_policy_revision"),
+        "entries": entries,
+        "publication": normalized_publication,
+    }
+    seal = _mapping(manifest.get("seal"), "seal")
+    if seal.get("algorithm") != "sha256":
+        raise ValueError("legacy manifest seal algorithm must be sha256")
+    expected_seal = hashlib.sha256(_canonical_json_bytes(seal_projection)).hexdigest()
+    if seal.get("value") != expected_seal:
+        raise CanonicalIntegrityError("legacy manifest seal does not match")
+    return {
+        **seal_projection,
+        "sealed": True,
+        "seal": {"algorithm": "sha256", "value": expected_seal},
+    }
+
+
+def _parse_legacy_frontmatter(raw: bytes) -> tuple[dict[str, object], bytes]:
+    if not raw.startswith(b"---\n"):
+        raise ValueError("legacy packet is missing frontmatter")
+    end = raw.find(b"\n---\n", 4)
+    if end == -1:
+        raise ValueError("legacy packet frontmatter is not closed")
+    try:
+        frontmatter_text = raw[4:end].decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError("legacy packet frontmatter is not UTF-8") from exc
+    body = raw[end + 5 :]
+    frontmatter: dict[str, object] = {}
+    for line in frontmatter_text.splitlines():
+        if ":" not in line:
+            continue
+        key, _, value = line.partition(":")
+        key = key.strip()
+        value = value.strip()
+        if value.startswith("[") and value.endswith("]"):
+            try:
+                parsed = json.loads(value)
+            except json.JSONDecodeError:
+                inner = value[1:-1].strip()
+                parsed = [
+                    item.strip().strip('"').strip("'")
+                    for item in inner.split(",")
+                    if item.strip()
+                ] if inner else []
+            if not isinstance(parsed, list):
+                raise ValueError("legacy packet list frontmatter is malformed")
+            frontmatter[key] = parsed
+        elif value.startswith("{") and value.endswith("}"):
+            try:
+                parsed = json.loads(value)
+            except json.JSONDecodeError as exc:
+                raise ValueError("legacy packet object frontmatter is malformed") from exc
+            frontmatter[key] = parsed
+        elif value.lower() == "null" or value == "":
+            frontmatter[key] = None
+        elif value.lower() == "true":
+            frontmatter[key] = True
+        elif value.lower() == "false":
+            frontmatter[key] = False
+        else:
+            try:
+                frontmatter[key] = int(value)
+            except ValueError:
+                frontmatter[key] = value
+    return frontmatter, body
+
+
+def _string_list(value: object, name: str) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+        raise ValueError(f"{name} must be a list of strings")
+    return tuple(value)
+
+
+def _legacy_v2_locator_kind(locator: str) -> str:
+    parts = locator.strip("/").split("/")
+    if len(parts) == 3 and parts[0] == "Chats" and parts[2] == "meta.json":
+        return "chat_meta"
+    if len(parts) == 3 and parts[0] == "Chats" and parts[2].endswith(".md"):
+        return "packet"
+    if len(parts) == 3 and parts[0] == "agents" and parts[2] == "inbox.json":
+        return "inbox_pointer"
+    raise ValueError("legacy manifest locator is outside the closed v2 source set")
+
+
+def _legacy_packet_name_parts(locator: str) -> tuple[str, str, str, str]:
+    name = locator.strip("/").split("/")[-1]
+    match = re.fullmatch(r"(.+)_(to|from)-([A-Za-z0-9_-]+)_(.+)\.md", name)
+    if match is None:
+        raise ValueError("legacy packet filename is malformed")
+    stem, direction, agent, slug = match.groups()
+    return stem, direction, agent, slug
 
 
 def _normalize_evidence(value: Mapping[str, object]) -> tuple[bytes, str, str, str, str]:
@@ -1698,7 +1978,262 @@ V5_SQL = (
 )
 V5_MIGRATION_CHECKSUM = "sha256:d6498cf5728ec3d56c0d1360a065243d72384a0de50af55bead8054881bbd9b9"
 V5_SCHEMA_FINGERPRINT = "sha256:4495eab6339d339b770442d994b5878e0743d011917cc99b370991a793891a99"
-MIGRATIONS = ((1, V1_SQL), (2, V2_SQL), (3, V3_SQL), (4, V4_SQL), (5, V5_SQL))
+V6_SQL = (
+    """
+    CREATE TABLE legacy_import_manifests (
+        workspace_id TEXT NOT NULL
+            CHECK (
+                instr(workspace_id, char(0)) = 0
+                AND length(CAST(workspace_id AS BLOB)) BETWEEN 6 AND 131
+                AND substr(workspace_id, 1, 3) = 'ws_'
+                AND substr(workspace_id, 4, 1) GLOB '[A-Za-z0-9]'
+                AND substr(workspace_id, 4) NOT GLOB '*[^A-Za-z0-9_-]*'
+            ),
+        manifest_id TEXT NOT NULL
+            CHECK (
+                instr(manifest_id, char(0)) = 0
+                AND length(CAST(manifest_id AS BLOB)) BETWEEN 12 AND 137
+                AND substr(manifest_id, 1, 9) = 'manifest_'
+                AND substr(manifest_id, 10, 1) GLOB '[A-Za-z0-9]'
+                AND substr(manifest_id, 10) NOT GLOB '*[^A-Za-z0-9_-]*'
+            ),
+        cutoff_policy_revision TEXT NOT NULL
+            CHECK (
+                instr(cutoff_policy_revision, char(0)) = 0
+                AND length(CAST(cutoff_policy_revision AS BLOB)) BETWEEN 1 AND 128
+            ),
+        entry_count INTEGER NOT NULL
+            CHECK (typeof(entry_count) = 'integer' AND entry_count BETWEEN 1 AND 4096),
+        publisher_identity TEXT NOT NULL
+            CHECK (
+                instr(publisher_identity, char(0)) = 0
+                AND length(CAST(publisher_identity AS BLOB)) BETWEEN 1 AND 128
+            ),
+        publisher_revision TEXT NOT NULL
+            CHECK (
+                instr(publisher_revision, char(0)) = 0
+                AND length(CAST(publisher_revision AS BLOB)) BETWEEN 1 AND 128
+            ),
+        publication_transaction_id TEXT NOT NULL
+            CHECK (
+                instr(publication_transaction_id, char(0)) = 0
+                AND length(CAST(publication_transaction_id AS BLOB)) BETWEEN 1 AND 128
+            ),
+        provenance_id TEXT NOT NULL
+            CHECK (
+                instr(provenance_id, char(0)) = 0
+                AND length(CAST(provenance_id AS BLOB)) BETWEEN 1 AND 128
+            ),
+        source_registry_revision TEXT NOT NULL
+            CHECK (
+                instr(source_registry_revision, char(0)) = 0
+                AND length(CAST(source_registry_revision AS BLOB)) = 71
+                AND substr(source_registry_revision, 1, 7) = 'sha256:'
+                AND substr(source_registry_revision, 8) NOT GLOB '*[^0-9a-f]*'
+            ),
+        source_boundary_kind TEXT NOT NULL
+            CHECK (
+                source_boundary_kind IN (
+                    'source_snapshot', 'ledger_checkpoint',
+                    'content_addressed_revision', 'sealed_observation'
+                )
+            ),
+        source_boundary_identity TEXT NOT NULL
+            CHECK (
+                instr(source_boundary_identity, char(0)) = 0
+                AND length(CAST(source_boundary_identity AS BLOB)) BETWEEN 1 AND 128
+            ),
+        manifest_seal TEXT NOT NULL
+            CHECK (
+                instr(manifest_seal, char(0)) = 0
+                AND length(CAST(manifest_seal AS BLOB)) = 64
+                AND manifest_seal NOT GLOB '*[^0-9a-f]*'
+            ),
+        imported_at_utc TEXT NOT NULL
+            CHECK (
+                instr(imported_at_utc, char(0)) = 0
+                AND length(CAST(imported_at_utc AS BLOB)) BETWEEN 1 AND 128
+            ),
+        PRIMARY KEY (workspace_id, manifest_id),
+        UNIQUE (workspace_id, manifest_seal),
+        FOREIGN KEY (workspace_id, source_registry_revision)
+            REFERENCES workspace_registry_snapshots (workspace_id, registry_revision)
+            ON DELETE RESTRICT
+    ) STRICT
+    """,
+    """
+    CREATE TABLE legacy_import_manifest_entries (
+        workspace_id TEXT NOT NULL,
+        manifest_id TEXT NOT NULL,
+        entry_integrity TEXT NOT NULL
+            CHECK (
+                instr(entry_integrity, char(0)) = 0
+                AND length(CAST(entry_integrity AS BLOB)) = 64
+                AND entry_integrity NOT GLOB '*[^0-9a-f]*'
+            ),
+        canonical_locator TEXT NOT NULL
+            CHECK (
+                instr(canonical_locator, char(0)) = 0
+                AND length(CAST(canonical_locator AS BLOB)) BETWEEN 2 AND 4096
+                AND substr(canonical_locator, 1, 1) = '/'
+                AND substr(canonical_locator, -1, 1) != '/'
+                AND canonical_locator NOT GLOB '*//*'
+                AND canonical_locator NOT GLOB '*/./*'
+                AND canonical_locator NOT GLOB '*/../*'
+                AND canonical_locator NOT GLOB '*/.'
+                AND canonical_locator NOT GLOB '*/..'
+            ),
+        content_hash TEXT NOT NULL
+            CHECK (
+                instr(content_hash, char(0)) = 0
+                AND length(CAST(content_hash AS BLOB)) = 64
+                AND content_hash NOT GLOB '*[^0-9a-f]*'
+            ),
+        byte_size INTEGER NOT NULL
+            CHECK (typeof(byte_size) = 'integer' AND byte_size BETWEEN 0 AND 1048576),
+        evidence_form_version TEXT NOT NULL
+            CHECK (
+                instr(evidence_form_version, char(0)) = 0
+                AND length(CAST(evidence_form_version AS BLOB)) BETWEEN 1 AND 128
+            ),
+        cutoff_policy_revision TEXT NOT NULL
+            CHECK (
+                instr(cutoff_policy_revision, char(0)) = 0
+                AND length(CAST(cutoff_policy_revision AS BLOB)) BETWEEN 1 AND 128
+            ),
+        source_workspace_id TEXT NOT NULL
+            CHECK (
+                instr(source_workspace_id, char(0)) = 0
+                AND length(CAST(source_workspace_id AS BLOB)) BETWEEN 6 AND 131
+                AND substr(source_workspace_id, 1, 3) = 'ws_'
+                AND substr(source_workspace_id, 4, 1) GLOB '[A-Za-z0-9]'
+                AND substr(source_workspace_id, 4) NOT GLOB '*[^A-Za-z0-9_-]*'
+            ),
+        source_project_id TEXT NOT NULL
+            CHECK (
+                instr(source_project_id, char(0)) = 0
+                AND length(CAST(source_project_id AS BLOB)) BETWEEN 1 AND 128
+                AND substr(source_project_id, 1, 1) GLOB '[A-Za-z]'
+                AND source_project_id NOT GLOB '*[^A-Za-z0-9._-]*'
+            ),
+        source_registry_revision TEXT NOT NULL
+            CHECK (
+                instr(source_registry_revision, char(0)) = 0
+                AND length(CAST(source_registry_revision AS BLOB)) = 71
+                AND substr(source_registry_revision, 1, 7) = 'sha256:'
+                AND substr(source_registry_revision, 8) NOT GLOB '*[^0-9a-f]*'
+            ),
+        transaction_id TEXT NOT NULL
+            CHECK (
+                instr(transaction_id, char(0)) = 0
+                AND length(CAST(transaction_id AS BLOB)) BETWEEN 1 AND 128
+            ),
+        provenance_id TEXT NOT NULL
+            CHECK (
+                instr(provenance_id, char(0)) = 0
+                AND length(CAST(provenance_id AS BLOB)) BETWEEN 1 AND 128
+            ),
+        PRIMARY KEY (workspace_id, manifest_id, entry_integrity),
+        FOREIGN KEY (workspace_id, manifest_id)
+            REFERENCES legacy_import_manifests (workspace_id, manifest_id)
+            ON DELETE RESTRICT
+    ) STRICT
+    """,
+    """
+    CREATE TABLE legacy_import_records (
+        workspace_id TEXT NOT NULL,
+        manifest_id TEXT NOT NULL,
+        entry_integrity TEXT NOT NULL,
+        record_kind TEXT NOT NULL CHECK (record_kind IN ('message', 'inbox_pointer')),
+        scope_kind TEXT CHECK (scope_kind IN ('workspace', 'project')),
+        scope_identity TEXT
+            CHECK (
+                scope_identity IS NULL
+                OR (
+                    instr(scope_identity, char(0)) = 0
+                    AND length(CAST(scope_identity AS BLOB)) BETWEEN 1 AND 128
+                )
+            ),
+        message_id TEXT
+            CHECK (
+                message_id IS NULL
+                OR (
+                    instr(message_id, char(0)) = 0
+                    AND length(CAST(message_id AS BLOB)) = 68
+                    AND substr(message_id, 1, 4) = 'msg_'
+                    AND substr(message_id, 5) NOT GLOB '*[^0-9a-f]*'
+                )
+            ),
+        PRIMARY KEY (workspace_id, manifest_id, entry_integrity),
+        FOREIGN KEY (workspace_id, manifest_id, entry_integrity)
+            REFERENCES legacy_import_manifest_entries (workspace_id, manifest_id, entry_integrity)
+            ON DELETE RESTRICT,
+        FOREIGN KEY (workspace_id, scope_kind, scope_identity, message_id)
+            REFERENCES canonical_messages (workspace_id, scope_kind, scope_identity, message_id)
+            ON DELETE RESTRICT,
+        CHECK (
+            (
+                record_kind = 'message'
+                AND message_id IS NOT NULL
+                AND scope_kind IS NOT NULL
+                AND scope_identity IS NOT NULL
+            )
+            OR
+            (
+                record_kind = 'inbox_pointer'
+                AND message_id IS NULL
+                AND scope_kind IS NULL
+                AND scope_identity IS NULL
+            )
+        )
+    ) STRICT
+    """,
+    """
+    CREATE TRIGGER legacy_import_manifests_no_update
+    BEFORE UPDATE ON legacy_import_manifests
+    BEGIN
+        SELECT RAISE(ABORT, 'legacy import manifests are append-only');
+    END
+    """,
+    """
+    CREATE TRIGGER legacy_import_manifests_no_delete
+    BEFORE DELETE ON legacy_import_manifests
+    BEGIN
+        SELECT RAISE(ABORT, 'legacy import manifests are append-only');
+    END
+    """,
+    """
+    CREATE TRIGGER legacy_import_manifest_entries_no_update
+    BEFORE UPDATE ON legacy_import_manifest_entries
+    BEGIN
+        SELECT RAISE(ABORT, 'legacy import manifest entries are append-only');
+    END
+    """,
+    """
+    CREATE TRIGGER legacy_import_manifest_entries_no_delete
+    BEFORE DELETE ON legacy_import_manifest_entries
+    BEGIN
+        SELECT RAISE(ABORT, 'legacy import manifest entries are append-only');
+    END
+    """,
+    """
+    CREATE TRIGGER legacy_import_records_no_update
+    BEFORE UPDATE ON legacy_import_records
+    BEGIN
+        SELECT RAISE(ABORT, 'legacy import records are append-only');
+    END
+    """,
+    """
+    CREATE TRIGGER legacy_import_records_no_delete
+    BEFORE DELETE ON legacy_import_records
+    BEGIN
+        SELECT RAISE(ABORT, 'legacy import records are append-only');
+    END
+    """,
+)
+V6_MIGRATION_CHECKSUM = "sha256:56e7ca2ba9eb0a8eb79079372abdc7a39c024977e71a40931b8b60a6acc33c00"
+V6_SCHEMA_FINGERPRINT = "sha256:eb8bc4ddd4348ce05874b91c63ce963c5bb3653636363b7437e2046900996d60"
+MIGRATIONS = ((1, V1_SQL), (2, V2_SQL), (3, V3_SQL), (4, V4_SQL), (5, V5_SQL), (6, V6_SQL))
 
 
 def _migration_checksum(statements: Sequence[str]) -> str:
@@ -1760,6 +2295,16 @@ def _v5_schema_fingerprint_from_sql() -> str:
     connection = sqlite3.connect(":memory:", isolation_level=None)
     try:
         for statement in (*V1_SQL, *V2_SQL, *V3_SQL, *V4_SQL, *V5_SQL):
+            connection.execute(statement)
+        return _schema_fingerprint(connection)
+    finally:
+        connection.close()
+
+
+def _v6_schema_fingerprint_from_sql() -> str:
+    connection = sqlite3.connect(":memory:", isolation_level=None)
+    try:
+        for statement in (*V1_SQL, *V2_SQL, *V3_SQL, *V4_SQL, *V5_SQL, *V6_SQL):
             connection.execute(statement)
         return _schema_fingerprint(connection)
     finally:
@@ -2122,6 +2667,9 @@ class LedgerStore:
         if claimed == 4:
             cls._validate_released_v4(connection, paths)
             return
+        if claimed == 5:
+            cls._validate_released_v5(connection, paths)
+            return
         cls._validate_schema(connection, paths)
 
     @staticmethod
@@ -2163,6 +2711,52 @@ class LedgerStore:
                 raise MigrationError("released v5 migration checksum is incoherent")
             if _v5_schema_fingerprint_from_sql() != V5_SCHEMA_FINGERPRINT:
                 raise MigrationError("released v5 schema fingerprint is incoherent")
+            if _migration_checksum(V6_SQL) != V6_MIGRATION_CHECKSUM:
+                raise MigrationError("released v6 migration checksum is incoherent")
+            if _v6_schema_fingerprint_from_sql() != V6_SCHEMA_FINGERPRINT:
+                raise MigrationError("released v6 schema fingerprint is incoherent")
+            rows = cls._migration_rows(connection)
+            if [row[0] for row in rows] != [1, 2, 3, 4, 5, 6]:
+                raise MigrationError("ledger migration metadata is incoherent")
+            cls._validate_migration_row(rows[0], V1_MIGRATION_CHECKSUM, 0, paths)
+            cls._validate_migration_row(rows[1], V2_MIGRATION_CHECKSUM, 1, paths)
+            cls._validate_migration_row(rows[2], V3_MIGRATION_CHECKSUM, 2, paths)
+            cls._validate_migration_row(rows[3], V4_MIGRATION_CHECKSUM, 3, paths)
+            cls._validate_migration_row(rows[4], V5_MIGRATION_CHECKSUM, 4, paths)
+            cls._validate_migration_row(rows[5], V6_MIGRATION_CHECKSUM, 5, paths)
+            actual_tables = cls._table_names(connection)
+            if actual_tables != V6_TABLES:
+                raise MigrationError(
+                    "ledger v6 table set is incoherent: "
+                    f"missing={sorted(V6_TABLES - actual_tables)}, "
+                    f"extra={sorted(actual_tables - V6_TABLES)}"
+                )
+            if _schema_fingerprint(connection) != V6_SCHEMA_FINGERPRINT:
+                raise MigrationError("ledger v6 schema fingerprint is incoherent")
+        except sqlite3.DatabaseError as exc:
+            raise MigrationError("ledger schema is corrupt or incoherent") from exc
+
+    @classmethod
+    def _validate_released_v5(
+        cls, connection: sqlite3.Connection, paths: LedgerPaths
+    ) -> None:
+        """Accept only the exact released v5 long enough for a writer migration."""
+        try:
+            cls._validate_database_health(connection)
+            if connection.execute("PRAGMA user_version").fetchone()[0] != 5:
+                raise MigrationError("ledger is not released schema v5")
+            released = (
+                (V1_SQL, V1_MIGRATION_CHECKSUM, V1_SCHEMA_FINGERPRINT, _v1_schema_fingerprint_from_sql),
+                (V2_SQL, V2_MIGRATION_CHECKSUM, V2_SCHEMA_FINGERPRINT, _v2_schema_fingerprint_from_sql),
+                (V3_SQL, V3_MIGRATION_CHECKSUM, V3_SCHEMA_FINGERPRINT, _v3_schema_fingerprint_from_sql),
+                (V4_SQL, V4_MIGRATION_CHECKSUM, V4_SCHEMA_FINGERPRINT, _v4_schema_fingerprint_from_sql),
+                (V5_SQL, V5_MIGRATION_CHECKSUM, V5_SCHEMA_FINGERPRINT, _v5_schema_fingerprint_from_sql),
+            )
+            for statements, checksum, fingerprint, fingerprint_from_sql in released:
+                if _migration_checksum(statements) != checksum:
+                    raise MigrationError("released migration checksum is incoherent")
+                if fingerprint_from_sql() != fingerprint:
+                    raise MigrationError("released schema fingerprint is incoherent")
             rows = cls._migration_rows(connection)
             if [row[0] for row in rows] != [1, 2, 3, 4, 5]:
                 raise MigrationError("ledger migration metadata is incoherent")
@@ -2395,6 +2989,7 @@ class LedgerStore:
                     3: V3_MIGRATION_CHECKSUM,
                     4: V4_MIGRATION_CHECKSUM,
                     5: V5_MIGRATION_CHECKSUM,
+                    6: V6_MIGRATION_CHECKSUM,
                 }.get(version)
                 if expected_checksum is None or checksum != expected_checksum:
                     raise MigrationError(f"migration {version} does not match its released checksum")
@@ -2418,6 +3013,7 @@ class LedgerStore:
                     3: V3_SCHEMA_FINGERPRINT,
                     4: V4_SCHEMA_FINGERPRINT,
                     5: V5_SCHEMA_FINGERPRINT,
+                    6: V6_SCHEMA_FINGERPRINT,
                 }[version]
                 if _schema_fingerprint(self._connection) != expected_fingerprint:
                     raise MigrationError(f"migration {version} produced an incoherent schema")
@@ -2530,6 +3126,545 @@ class LedgerStore:
         if write and self._read_only:
             raise PermissionError("query-only readers cannot create canonical messages")
 
+    def _prepare_legacy_import_rows(
+        self,
+        *,
+        workspace_id: str,
+        normalized: Mapping[str, object],
+        records: Iterable[Mapping[str, object]],
+        imported_at_utc: str,
+        planned_messages: frozenset[tuple[str, str, str]] = frozenset(),
+    ) -> tuple[
+        str,
+        tuple[object, ...],
+        tuple[tuple[object, ...], ...],
+        tuple[tuple[object, ...], ...],
+    ]:
+        publication = normalized["publication"]  # type: ignore[index]
+        if publication["workspace_id"] != workspace_id:  # type: ignore[index]
+            raise ValueError("manifest publication workspace_id must match the ledger workspace")
+        manifest_id = str(normalized["manifest_id"])
+        manifest_seal = str(normalized["seal"]["value"])  # type: ignore[index]
+        entries = normalized["entries"]  # type: ignore[assignment]
+        entry_ids = {str(entry["integrity"]) for entry in entries}  # type: ignore[index]
+        recordless_entry_ids = {
+            str(entry["integrity"])
+            for entry in entries  # type: ignore[union-attr]
+            if entry["evidence_form_version"] == "v2_chat_meta"
+        }
+
+        normalized_records = []
+        for record in records:
+            item = dict(_mapping(record, "legacy import record"))
+            entry_integrity = _canonical_sha256(item.get("entry_integrity"), "entry_integrity")
+            if entry_integrity not in entry_ids:
+                raise ValueError("legacy import record references an unknown manifest entry")
+            kind = item.get("record_kind")
+            if kind == "message":
+                _workspace, scope_kind, scope_identity = _canonical_scope(
+                    workspace_id, item.get("scope_kind"), item.get("scope_identity")
+                )
+                message_id = _canonical_message_id(item.get("message_id"), "message_id")
+                planned = (scope_kind, scope_identity, message_id) in planned_messages
+                if (
+                    not planned
+                    and self._read_canonical_message(workspace_id, scope_kind, scope_identity, message_id) is None
+                ):
+                    raise CanonicalIntegrityError("legacy import record message is missing")
+                normalized_records.append(
+                    (workspace_id, manifest_id, entry_integrity, "message", scope_kind, scope_identity, message_id)
+                )
+            elif kind == "inbox_pointer":
+                if any(item.get(name) is not None for name in ("scope_kind", "scope_identity", "message_id")):
+                    raise ValueError("inbox pointer records must not carry canonical message identity")
+                normalized_records.append(
+                    (workspace_id, manifest_id, entry_integrity, "inbox_pointer", None, None, None)
+                )
+            else:
+                raise ValueError("record_kind must be message or inbox_pointer")
+        normalized_records = tuple(sorted(normalized_records, key=lambda row: row[2]))
+        recorded_entry_ids = {str(row[2]) for row in normalized_records}
+        if len(recorded_entry_ids) != len(normalized_records):
+            raise ValueError("legacy import records must be duplicate-free by entry")
+        if recorded_entry_ids | recordless_entry_ids != entry_ids:
+            raise ValueError("legacy import records must cover every non-meta manifest entry exactly once")
+        if recorded_entry_ids & recordless_entry_ids:
+            raise ValueError("chat meta manifest entries must not carry output records")
+
+        expected_manifest = (
+            workspace_id,
+            manifest_id,
+            str(normalized["cutoff_policy_revision"]),
+            len(entries),
+            publication["publisher"]["identity"],  # type: ignore[index]
+            publication["publisher"]["revision"],  # type: ignore[index]
+            publication["publication_transaction_id"],  # type: ignore[index]
+            publication["provenance_id"],  # type: ignore[index]
+            publication["registry_revision"],  # type: ignore[index]
+            publication["source_boundary"]["kind"],  # type: ignore[index]
+            publication["source_boundary"]["identity"],  # type: ignore[index]
+            manifest_seal,
+            imported_at_utc,
+        )
+        expected_entries = tuple(
+            sorted(
+                (
+                    workspace_id,
+                    manifest_id,
+                    str(entry["integrity"]),
+                    str(entry["canonical_locator"]),
+                    str(entry["content_hash"]),
+                    int(entry["byte_size"]),
+                    str(entry["evidence_form_version"]),
+                    str(entry["cutoff_policy_revision"]),
+                    str(entry["source_workspace_id"]),
+                    str(entry["source_project_id"]),
+                    str(entry["source_registry_revision"]),
+                    str(entry["transaction_id"]),
+                    str(entry["provenance_id"]),
+                )
+                for entry in entries  # type: ignore[union-attr]
+            )
+        )
+        return manifest_seal, expected_manifest, expected_entries, normalized_records
+
+    def _existing_legacy_import_is_identical(
+        self,
+        *,
+        workspace_id: str,
+        manifest_id: str,
+        manifest_seal: str,
+        expected_manifest: tuple[object, ...],
+        expected_entries: tuple[tuple[object, ...], ...],
+        normalized_records: tuple[tuple[object, ...], ...],
+    ) -> bool | None:
+        existing = self._connection.execute(
+            "SELECT manifest_seal FROM legacy_import_manifests "
+            "WHERE workspace_id = ? AND manifest_id = ?",
+            (workspace_id, manifest_id),
+        ).fetchone()
+        if existing is None:
+            return None
+        if existing[0] != manifest_seal:
+            raise CanonicalConflictError("legacy manifest_id conflicts with a different seal")
+        stored_manifest = self._connection.execute(
+            "SELECT workspace_id, manifest_id, cutoff_policy_revision, entry_count, "
+            "publisher_identity, publisher_revision, publication_transaction_id, "
+            "provenance_id, source_registry_revision, source_boundary_kind, "
+            "source_boundary_identity, manifest_seal "
+            "FROM legacy_import_manifests WHERE workspace_id = ? AND manifest_id = ?",
+            (workspace_id, manifest_id),
+        ).fetchone()
+        stored_entries = tuple(
+            self._connection.execute(
+                "SELECT workspace_id, manifest_id, entry_integrity, canonical_locator, "
+                "content_hash, byte_size, evidence_form_version, cutoff_policy_revision, "
+                "source_workspace_id, source_project_id, source_registry_revision, "
+                "transaction_id, provenance_id FROM legacy_import_manifest_entries "
+                "WHERE workspace_id = ? AND manifest_id = ? ORDER BY entry_integrity",
+                (workspace_id, manifest_id),
+            )
+        )
+        stored_records = tuple(
+            self._connection.execute(
+                "SELECT workspace_id, manifest_id, entry_integrity, record_kind, "
+                "scope_kind, scope_identity, message_id FROM legacy_import_records "
+                "WHERE workspace_id = ? AND manifest_id = ? ORDER BY entry_integrity",
+                (workspace_id, manifest_id),
+            )
+        )
+        if (
+            stored_manifest != expected_manifest[:-1]
+            or stored_entries != expected_entries
+            or stored_records != normalized_records
+        ):
+            raise CanonicalConflictError("legacy manifest retry conflicts with different rows")
+        return True
+
+    def _append_legacy_import_rows(
+        self,
+        *,
+        expected_manifest: tuple[object, ...],
+        expected_entries: tuple[tuple[object, ...], ...],
+        normalized_records: tuple[tuple[object, ...], ...],
+    ) -> None:
+        self._connection.execute(
+            "INSERT INTO legacy_import_manifests "
+            "(workspace_id, manifest_id, cutoff_policy_revision, entry_count, "
+            "publisher_identity, publisher_revision, publication_transaction_id, "
+            "provenance_id, source_registry_revision, source_boundary_kind, "
+            "source_boundary_identity, manifest_seal, imported_at_utc) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            expected_manifest,
+        )
+        self._connection.executemany(
+            "INSERT INTO legacy_import_manifest_entries "
+            "(workspace_id, manifest_id, entry_integrity, canonical_locator, "
+            "content_hash, byte_size, evidence_form_version, cutoff_policy_revision, "
+            "source_workspace_id, source_project_id, source_registry_revision, "
+            "transaction_id, provenance_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            expected_entries,
+        )
+        self._connection.executemany(
+            "INSERT INTO legacy_import_records "
+            "(workspace_id, manifest_id, entry_integrity, record_kind, scope_kind, "
+            "scope_identity, message_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            normalized_records,
+        )
+
+    def record_legacy_import_manifest(
+        self,
+        *,
+        workspace_id: str,
+        manifest: Mapping[str, object],
+        records: Iterable[Mapping[str, object]],
+        imported_at_utc: str,
+    ) -> tuple[str, bool]:
+        """Atomically seal one supplied legacy manifest and its import result rows."""
+        self.canonical_preflight(write=True)
+        workspace_id = validate_workspace_id(workspace_id)
+        imported_at_utc = _utc_timestamp(imported_at_utc, "imported_at_utc")
+        normalized = _normalize_legacy_manifest(manifest)
+        manifest_id = str(normalized["manifest_id"])
+        manifest_seal, expected_manifest, expected_entries, normalized_records = (
+            self._prepare_legacy_import_rows(
+                workspace_id=workspace_id,
+                normalized=normalized,
+                records=records,
+                imported_at_utc=imported_at_utc,
+            )
+        )
+
+        existing = self._existing_legacy_import_is_identical(
+            workspace_id=workspace_id,
+            manifest_id=manifest_id,
+            manifest_seal=manifest_seal,
+            expected_manifest=expected_manifest,
+            expected_entries=expected_entries,
+            normalized_records=normalized_records,
+        )
+        if existing:
+            return manifest_seal, False
+
+        if self._connection.execute(
+            "SELECT 1 FROM legacy_import_manifests WHERE workspace_id = ? AND manifest_seal = ?",
+            (workspace_id, manifest_seal),
+        ).fetchone() is not None:
+            raise CanonicalConflictError("legacy manifest seal already belongs to another manifest")
+
+        self._connection.execute("BEGIN IMMEDIATE")
+        try:
+            self._append_legacy_import_rows(
+                expected_manifest=expected_manifest,
+                expected_entries=expected_entries,
+                normalized_records=normalized_records,
+            )
+            self._connection.execute("COMMIT")
+        except BaseException:
+            if self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
+            raise
+        return manifest_seal, True
+
+    def _read_legacy_v2_source_file(self, root_fd: int, locator: str) -> bytes:
+        parts = locator.strip("/").split("/")
+        if not parts or any(part in {"", ".", ".."} or "/" in part or "\x00" in part for part in parts):
+            raise ValueError("legacy locator is unsafe")
+        opened: list[int] = []
+        parent_fd = root_fd
+        try:
+            for part in parts[:-1]:
+                fd = os.open(part, _legacy_import_dir_flags(), dir_fd=parent_fd)
+                opened.append(fd)
+                parent_fd = fd
+            name = parts[-1]
+            fd = os.open(name, _legacy_import_file_flags(), dir_fd=parent_fd)
+            try:
+                before = os.fstat(fd)
+                if not stat.S_ISREG(before.st_mode):
+                    raise ValueError("legacy source is not a regular file")
+                if before.st_size > 1048576:
+                    raise ValueError("legacy source exceeds 1048576 bytes")
+                chunks: list[bytes] = []
+                size = 0
+                while True:
+                    chunk = os.read(fd, min(65_536, 1048577 - size))
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                    size += len(chunk)
+                    if size > 1048576:
+                        raise ValueError("legacy source exceeds 1048576 bytes")
+                after = os.fstat(fd)
+                path_status = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+                if (
+                    _legacy_file_identity(before) != _legacy_file_identity(after)
+                    or _legacy_file_identity(path_status) != _legacy_file_identity(after)
+                    or size != after.st_size
+                ):
+                    raise ValueError("legacy source changed during read")
+                return b"".join(chunks)
+            finally:
+                os.close(fd)
+        except OSError as exc:
+            raise ValueError("refusing unsafe legacy source") from exc
+        finally:
+            for fd in reversed(opened):
+                os.close(fd)
+
+    def _count_legacy_chat_dir_entries(self, root_fd: int, locator: str) -> None:
+        parts = locator.strip("/").split("/")
+        if len(parts) < 2 or parts[0] != "Chats":
+            return
+        opened: list[int] = []
+        parent_fd = root_fd
+        try:
+            for part in parts[:2]:
+                fd = os.open(part, _legacy_import_dir_flags(), dir_fd=parent_fd)
+                opened.append(fd)
+                parent_fd = fd
+            count = 0
+            with os.scandir(parent_fd) as entries:
+                for _entry in entries:
+                    count += 1
+                    if count > 4096:
+                        raise ValueError("legacy chat directory exceeds 4096 entries")
+        except OSError as exc:
+            raise ValueError("refusing unsafe legacy chat directory") from exc
+        finally:
+            for fd in reversed(opened):
+                os.close(fd)
+
+    def _read_legacy_v2_sources(
+        self,
+        *,
+        workspace_root: str | os.PathLike[str],
+        entries: Sequence[Mapping[str, object]],
+    ) -> dict[str, bytes]:
+        root = Path(workspace_root)
+        if not root.is_absolute():
+            raise ValueError("workspace_root must be absolute")
+        root_fd = os.open(root, _legacy_import_dir_flags())
+        try:
+            root_identity = _legacy_dir_identity(os.fstat(root_fd))
+            sources: dict[str, bytes] = {}
+            counted_chat_dirs: set[str] = set()
+            cumulative = 0
+            for entry in entries:
+                locator = str(entry["canonical_locator"])
+                kind = _legacy_v2_locator_kind(locator)
+                expected_form = {
+                    "chat_meta": "v2_chat_meta",
+                    "packet": "v2_packet",
+                    "inbox_pointer": "v2_inbox_index",
+                }[kind]
+                if entry["evidence_form_version"] != expected_form:
+                    raise ValueError("legacy manifest entry evidence_form_version does not match locator kind")
+                chat_dir = "/".join(locator.strip("/").split("/")[:2])
+                if kind in {"chat_meta", "packet"} and chat_dir not in counted_chat_dirs:
+                    self._count_legacy_chat_dir_entries(root_fd, locator)
+                    counted_chat_dirs.add(chat_dir)
+                raw = self._read_legacy_v2_source_file(root_fd, locator)
+                if hashlib.sha256(raw).hexdigest() != entry["content_hash"]:
+                    raise CanonicalIntegrityError("legacy source hash does not match manifest")
+                if len(raw) != entry["byte_size"]:
+                    raise CanonicalIntegrityError("legacy source byte_size does not match manifest")
+                cumulative += len(raw)
+                if cumulative > 67_108_864:
+                    raise ValueError("legacy import exceeds 64 MiB cumulative source bytes")
+                if locator in sources:
+                    raise ValueError("legacy manifest contains duplicate locator")
+                sources[locator] = raw
+            if _legacy_dir_identity(os.fstat(root_fd)) != root_identity:
+                raise ValueError("workspace root identity changed during legacy import")
+            return sources
+        finally:
+            os.close(root_fd)
+
+    def import_legacy_v2_manifest(
+        self,
+        *,
+        workspace_root: str | os.PathLike[str],
+        workspace_id: str,
+        manifest: Mapping[str, object],
+        registry_revision: str,
+        imported_at_utc: str,
+    ) -> tuple[str, bool]:
+        """Read only caller-named v2 sources, then atomically append canonical messages and v6 provenance."""
+        self.canonical_preflight(write=True)
+        workspace_id = validate_workspace_id(workspace_id)
+        if workspace_id != self.paths.workspace_id:
+            raise ValueError("workspace_id does not own this ledger")
+        registry_revision = _canonical_registry_revision(registry_revision, "registry_revision")
+        imported_at_utc = _utc_timestamp(imported_at_utc, "imported_at_utc")
+        if not self.has_registry_snapshot(workspace_id=workspace_id, registry_revision=registry_revision):
+            raise ValueError("registry snapshot is absent")
+        normalized = _normalize_legacy_manifest(manifest)
+        entries = normalized["entries"]  # type: ignore[assignment]
+        sources = self._read_legacy_v2_sources(workspace_root=workspace_root, entries=entries)  # type: ignore[arg-type]
+
+        packet_members: dict[tuple[str, str, str, str, str], dict[str, object]] = {}
+        records: list[dict[str, object]] = []
+        prepared_messages: list[dict[str, object]] = []
+        inbox_pointer_count = 0
+        entry_by_locator = {str(entry["canonical_locator"]): entry for entry in entries}  # type: ignore[union-attr]
+        for locator, raw in sources.items():
+            entry = entry_by_locator[locator]
+            kind = _legacy_v2_locator_kind(locator)
+            if kind == "chat_meta":
+                try:
+                    parsed_meta = json.loads(raw.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                    raise ValueError("legacy chat meta is not valid JSON") from exc
+                if not isinstance(parsed_meta, dict):
+                    raise ValueError("legacy chat meta must be a JSON object")
+                continue
+            if kind == "inbox_pointer":
+                try:
+                    inbox = json.loads(raw.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                    raise ValueError("legacy inbox pointer index is not valid JSON") from exc
+                if not isinstance(inbox, dict):
+                    raise ValueError("legacy inbox pointer index must be a JSON object")
+                for bucket in ("unread", "read"):
+                    pointers = inbox.get(bucket, [])
+                    if not isinstance(pointers, list) or any(not isinstance(item, str) for item in pointers):
+                        raise ValueError("legacy inbox pointer lists must contain only strings")
+                    inbox_pointer_count += len(pointers)
+                    if inbox_pointer_count > 4096:
+                        raise ValueError("legacy import exceeds 4096 inbox pointers")
+                records.append({"entry_integrity": entry["integrity"], "record_kind": "inbox_pointer"})
+                continue
+
+            frontmatter, body = _parse_legacy_frontmatter(raw)
+            stem, direction, filename_agent, slug = _legacy_packet_name_parts(locator)
+            sender = _bounded_text(frontmatter.get("from"), "from", 128)
+            recipient = _bounded_text(frontmatter.get("to"), "to", 128)
+            if direction == "to" and filename_agent != recipient:
+                raise ValueError("legacy packet to-filename disagrees with frontmatter")
+            if direction == "from" and filename_agent != sender:
+                raise ValueError("legacy packet from-filename disagrees with frontmatter")
+            chat_dir = "/".join(locator.strip("/").split("/")[:2])
+            pair_key = (chat_dir, stem, slug, sender, recipient)
+            member = packet_members.setdefault(pair_key, {})
+            if direction in member:
+                raise ValueError("legacy packet pair has duplicate direction")
+            member[direction] = {
+                "locator": locator,
+                "entry_integrity": entry["integrity"],
+                "frontmatter": frontmatter,
+                "body": body,
+                "raw": raw,
+            }
+
+        for pair_key, member in sorted(packet_members.items()):
+            if set(member) != {"to", "from"}:
+                raise ValueError("legacy packet pair is incomplete")
+            to_member = member["to"]  # type: ignore[index]
+            from_member = member["from"]  # type: ignore[index]
+            if to_member["raw"] != from_member["raw"]:  # type: ignore[index]
+                raise ValueError("legacy packet pair members differ")
+            frontmatter = to_member["frontmatter"]  # type: ignore[assignment]
+            body = to_member["body"]  # type: ignore[assignment]
+            project_id = frontmatter.get("project_id")  # type: ignore[union-attr]
+            if project_id is None:
+                scope_kind, scope_identity = "workspace", "workspace"
+            else:
+                project_id = validate_project_id(project_id)  # type: ignore[arg-type]
+                if self.get_project_snapshot(
+                    workspace_id=workspace_id,
+                    project_id=project_id,
+                    registry_revision=registry_revision,
+                ) is None:
+                    raise ValueError("legacy packet references an unknown project")
+                scope_kind, scope_identity = "project", project_id
+            sender_agent_id = _canonical_agent_id("agent_" + str(frontmatter["from"]), "sender_agent_id")  # type: ignore[index]
+            recipient_agent_id = _canonical_agent_id("agent_" + str(frontmatter["to"]), "recipient_agent_id")  # type: ignore[index]
+            artifacts = []
+            artifacts.extend(("repo", value) for value in _string_list(frontmatter.get("repo_targets"), "repo_targets"))  # type: ignore[union-attr]
+            artifacts.extend(("path", value) for value in _string_list(frontmatter.get("path_targets"), "path_targets"))  # type: ignore[union-attr]
+            if isinstance(frontmatter.get("chat_id"), str):  # type: ignore[union-attr]
+                artifacts.append(("chat", frontmatter["chat_id"]))  # type: ignore[index]
+            if isinstance(frontmatter.get("related_task"), str):  # type: ignore[union-attr]
+                artifacts.append(("task", frontmatter["related_task"]))  # type: ignore[index]
+            locator = str(to_member["locator"])  # type: ignore[index]
+            prepared = self._prepare_canonical_message(
+                workspace_id=workspace_id,
+                scope_kind=scope_kind,
+                scope_identity=scope_identity,
+                sender_agent_id=sender_agent_id,
+                dedupe_key="import:" + hashlib.sha256(locator.encode("utf-8")).hexdigest(),
+                body=body,  # type: ignore[arg-type]
+                recipients=(recipient_agent_id,),
+                registry_revision=registry_revision,
+                created_at_utc=frontmatter.get("sent_utc"),  # type: ignore[union-attr]
+                title=frontmatter.get("title"),  # type: ignore[union-attr]
+                ttl_seconds=0,
+                ack_policy="none",
+                artifacts=artifacts,
+                priority=frontmatter.get("priority"),  # type: ignore[union-attr]
+                tags=_string_list(frontmatter.get("tags"), "tags"),  # type: ignore[union-attr]
+                chat_link=frontmatter.get("chat_id"),  # type: ignore[union-attr]
+                task_link=frontmatter.get("related_task"),  # type: ignore[union-attr]
+            )
+            prepared_messages.append(prepared)
+            for direction in ("to", "from"):
+                records.append(
+                    {
+                        "entry_integrity": member[direction]["entry_integrity"],  # type: ignore[index]
+                        "record_kind": "message",
+                        "scope_kind": scope_kind,
+                        "scope_identity": scope_identity,
+                        "message_id": prepared["message_id"],
+                    }
+                )
+
+        planned = frozenset(
+            (str(item["scope_kind"]), str(item["scope_identity"]), str(item["message_id"]))
+            for item in prepared_messages
+        )
+        manifest_id = str(normalized["manifest_id"])
+        manifest_seal, expected_manifest, expected_entries, normalized_records = (
+            self._prepare_legacy_import_rows(
+                workspace_id=workspace_id,
+                normalized=normalized,
+                records=records,
+                imported_at_utc=imported_at_utc,
+                planned_messages=planned,
+            )
+        )
+        existing = self._existing_legacy_import_is_identical(
+            workspace_id=workspace_id,
+            manifest_id=manifest_id,
+            manifest_seal=manifest_seal,
+            expected_manifest=expected_manifest,
+            expected_entries=expected_entries,
+            normalized_records=normalized_records,
+        )
+        if existing:
+            return manifest_seal, False
+        if self._connection.execute(
+            "SELECT 1 FROM legacy_import_manifests WHERE workspace_id = ? AND manifest_seal = ?",
+            (workspace_id, manifest_seal),
+        ).fetchone() is not None:
+            raise CanonicalConflictError("legacy manifest seal already belongs to another manifest")
+
+        self._connection.execute("BEGIN IMMEDIATE")
+        try:
+            for prepared in prepared_messages:
+                self._append_prepared_canonical_message(prepared)
+            self._append_legacy_import_rows(
+                expected_manifest=expected_manifest,
+                expected_entries=expected_entries,
+                normalized_records=normalized_records,
+            )
+            self._connection.execute("COMMIT")
+        except BaseException:
+            if self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
+            raise
+        return manifest_seal, True
+
     def read_canonical_message(
         self,
         *,
@@ -2569,6 +3704,58 @@ class LedgerStore:
     ) -> tuple[str, bool]:
         """Normalize and atomically append one intent, or return its exact equivalent."""
         self.canonical_preflight(write=True)
+        prepared = self._prepare_canonical_message(
+            workspace_id=workspace_id,
+            scope_kind=scope_kind,
+            scope_identity=scope_identity,
+            sender_agent_id=sender_agent_id,
+            dedupe_key=dedupe_key,
+            body=body,
+            recipients=recipients,
+            registry_revision=registry_revision,
+            created_at_utc=created_at_utc,
+            title=title,
+            reply_to_message_id=reply_to_message_id,
+            ttl_seconds=ttl_seconds,
+            ack_policy=ack_policy,
+            artifacts=artifacts,
+            priority=priority,
+            tags=tags,
+            chat_link=chat_link,
+            task_link=task_link,
+        )
+        self._connection.execute("BEGIN IMMEDIATE")
+        try:
+            message_id, created = self._append_prepared_canonical_message(prepared)
+            self._connection.execute("COMMIT")
+        except BaseException:
+            if self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
+            raise
+        return message_id, created
+
+    def _prepare_canonical_message(
+        self,
+        *,
+        workspace_id: str,
+        scope_kind: str,
+        scope_identity: str,
+        sender_agent_id: str,
+        dedupe_key: str,
+        body: bytes,
+        recipients: Iterable[str],
+        registry_revision: str,
+        created_at_utc: str,
+        title: str,
+        reply_to_message_id: str | None = None,
+        ttl_seconds: int = 0,
+        ack_policy: str = "none",
+        artifacts: Iterable[tuple[str, str]] = (),
+        priority: str = "normal",
+        tags: Iterable[str] = (),
+        chat_link: str | None = None,
+        task_link: str | None = None,
+    ) -> dict[str, object]:
         workspace_id, scope_kind, scope_identity = _canonical_scope(
             workspace_id, scope_kind, scope_identity
         )
@@ -2623,7 +3810,42 @@ class LedgerStore:
             chat_link=chat_link,
             task_link=task_link,
         )
+        return {
+            "workspace_id": workspace_id,
+            "scope_kind": scope_kind,
+            "scope_identity": scope_identity,
+            "message_id": message_id,
+            "sender_agent_id": sender_agent_id,
+            "dedupe_key": dedupe_key,
+            "body_sha256": body_sha256,
+            "reply_to_message_id": reply_to_message_id,
+            "ttl_seconds": ttl_seconds,
+            "ack_policy": ack_policy,
+            "title": title,
+            "priority": priority,
+            "chat_link": chat_link,
+            "task_link": task_link,
+            "registry_revision": registry_revision,
+            "created_at_utc": created_at_utc,
+            "recipients": recipients,
+            "artifacts": artifacts,
+            "tags": tags,
+            "byte_size": len(body),
+            "body": body,
+        }
 
+    def _append_prepared_canonical_message(
+        self, prepared: Mapping[str, object]
+    ) -> tuple[str, bool]:
+        workspace_id = str(prepared["workspace_id"])
+        scope_kind = str(prepared["scope_kind"])
+        scope_identity = str(prepared["scope_identity"])
+        message_id = str(prepared["message_id"])
+        sender_agent_id = str(prepared["sender_agent_id"])
+        dedupe_key = str(prepared["dedupe_key"])
+        body_sha256 = str(prepared["body_sha256"])
+        body = prepared["body"]
+        byte_size = int(prepared["byte_size"])
         candidate_rows = self._connection.execute(
             "SELECT workspace_id, scope_kind, scope_identity, message_id "
             "FROM canonical_messages WHERE workspace_id = ? AND "
@@ -2639,25 +3861,28 @@ class LedgerStore:
             ),
         ).fetchall()
         equivalent = {
-            "workspace_id": workspace_id,
-            "scope_kind": scope_kind,
-            "scope_identity": scope_identity,
-            "message_id": message_id,
-            "sender_agent_id": sender_agent_id,
-            "dedupe_key": dedupe_key,
-            "body_sha256": body_sha256,
-            "reply_to_message_id": reply_to_message_id,
-            "ttl_seconds": ttl_seconds,
-            "ack_policy": ack_policy,
-            "title": title,
-            "priority": priority,
-            "chat_link": chat_link,
-            "task_link": task_link,
-            "recipients": recipients,
-            "artifacts": artifacts,
-            "tags": tags,
-            "byte_size": len(body),
-            "body": body,
+            key: prepared[key]
+            for key in (
+                "workspace_id",
+                "scope_kind",
+                "scope_identity",
+                "message_id",
+                "sender_agent_id",
+                "dedupe_key",
+                "body_sha256",
+                "reply_to_message_id",
+                "ttl_seconds",
+                "ack_policy",
+                "title",
+                "priority",
+                "chat_link",
+                "task_link",
+                "recipients",
+                "artifacts",
+                "tags",
+                "byte_size",
+                "body",
+            )
         }
         found_conflict = False
         for row in candidate_rows:
@@ -2682,75 +3907,68 @@ class LedgerStore:
             "WHERE workspace_id = ? AND body_sha256 = ?",
             (workspace_id, body_sha256),
         ).fetchone()
-        if body_row is not None and body_row != (len(body), body):
+        if body_row is not None and body_row != (byte_size, body):
             raise CanonicalConflictError("canonical body hash conflicts with different bytes")
 
         project_id = scope_identity if scope_kind == "project" else None
-        self._connection.execute("BEGIN IMMEDIATE")
-        try:
-            if body_row is None:
-                self._connection.execute(
-                    "INSERT INTO canonical_bodies "
-                    "(workspace_id, body_sha256, byte_size, body, created_at_utc) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    (
-                        workspace_id,
-                        body_sha256,
-                        len(body),
-                        body,
-                        created_at_utc,
-                    ),
-                )
-            prefix = (workspace_id, scope_kind, scope_identity, message_id)
-            self._connection.executemany(
-                "INSERT INTO canonical_message_recipients "
-                "(workspace_id, scope_kind, scope_identity, message_id, recipient_agent_id) "
-                "VALUES (?, ?, ?, ?, ?)",
-                ((*prefix, recipient) for recipient in recipients),
-            )
-            self._connection.executemany(
-                "INSERT INTO canonical_message_artifacts "
-                "(workspace_id, scope_kind, scope_identity, message_id, artifact_kind, "
-                "artifact_ref) VALUES (?, ?, ?, ?, ?, ?)",
-                ((*prefix, kind, reference) for kind, reference in artifacts),
-            )
-            self._connection.executemany(
-                "INSERT INTO canonical_message_tags "
-                "(workspace_id, scope_kind, scope_identity, message_id, tag) "
-                "VALUES (?, ?, ?, ?, ?)",
-                ((*prefix, tag) for tag in tags),
-            )
+        if body_row is None:
             self._connection.execute(
-                "INSERT INTO canonical_messages "
-                "(workspace_id, scope_kind, scope_identity, message_id, sender_agent_id, "
-                "dedupe_key, body_sha256, reply_to_message_id, ttl_seconds, ack_policy, "
-                "title, priority, chat_link, task_link, registry_revision, project_id, "
-                "created_at_utc) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO canonical_bodies "
+                "(workspace_id, body_sha256, byte_size, body, created_at_utc) "
+                "VALUES (?, ?, ?, ?, ?)",
                 (
                     workspace_id,
-                    scope_kind,
-                    scope_identity,
-                    message_id,
-                    sender_agent_id,
-                    dedupe_key,
                     body_sha256,
-                    reply_to_message_id,
-                    ttl_seconds,
-                    ack_policy,
-                    title,
-                    priority,
-                    chat_link,
-                    task_link,
-                    registry_revision,
-                    project_id,
-                    created_at_utc,
+                    byte_size,
+                    body,
+                    prepared["created_at_utc"],
                 ),
             )
-            self._connection.execute("COMMIT")
-        except BaseException:
-            if self._connection.in_transaction:
-                self._connection.execute("ROLLBACK")
-            raise
+        prefix = (workspace_id, scope_kind, scope_identity, message_id)
+        self._connection.executemany(
+            "INSERT INTO canonical_message_recipients "
+            "(workspace_id, scope_kind, scope_identity, message_id, recipient_agent_id) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ((*prefix, recipient) for recipient in prepared["recipients"]),  # type: ignore[union-attr]
+        )
+        self._connection.executemany(
+            "INSERT INTO canonical_message_artifacts "
+            "(workspace_id, scope_kind, scope_identity, message_id, artifact_kind, "
+            "artifact_ref) VALUES (?, ?, ?, ?, ?, ?)",
+            ((*prefix, kind, reference) for kind, reference in prepared["artifacts"]),  # type: ignore[union-attr]
+        )
+        self._connection.executemany(
+            "INSERT INTO canonical_message_tags "
+            "(workspace_id, scope_kind, scope_identity, message_id, tag) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ((*prefix, tag) for tag in prepared["tags"]),  # type: ignore[union-attr]
+        )
+        self._connection.execute(
+            "INSERT INTO canonical_messages "
+            "(workspace_id, scope_kind, scope_identity, message_id, sender_agent_id, "
+            "dedupe_key, body_sha256, reply_to_message_id, ttl_seconds, ack_policy, "
+            "title, priority, chat_link, task_link, registry_revision, project_id, "
+            "created_at_utc) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                workspace_id,
+                scope_kind,
+                scope_identity,
+                message_id,
+                sender_agent_id,
+                dedupe_key,
+                body_sha256,
+                prepared["reply_to_message_id"],
+                prepared["ttl_seconds"],
+                prepared["ack_policy"],
+                prepared["title"],
+                prepared["priority"],
+                prepared["chat_link"],
+                prepared["task_link"],
+                prepared["registry_revision"],
+                project_id,
+                prepared["created_at_utc"],
+            ),
+        )
         return message_id, True
 
     def create_canonical_deliveries(
