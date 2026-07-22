@@ -28,3 +28,7 @@ __all__ = [
     "project_receipt_v1",
     "read_message",
 ]
+
+# P2d compatibility projections intentionally remain under
+# llm_collab.compatibility. Keeping them out of this canonical namespace avoids
+# treating projected v2 shapes as canonical authority.
