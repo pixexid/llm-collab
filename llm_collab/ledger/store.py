@@ -3136,7 +3136,7 @@ class LedgerStore:
         registry_revision: str,
         normalized: Mapping[str, object],
         records: Sequence[tuple[object, ...]],
-        source_project_ids: Mapping[str, object] | None,
+        source_project_ids: Mapping[str, tuple[object, bool]] | None,
     ) -> None:
         publication = normalized["publication"]  # type: ignore[index]
         entries = normalized["entries"]  # type: ignore[assignment]
@@ -3168,9 +3168,18 @@ class LedgerStore:
                 raise ValueError("legacy import message records must match manifest publication project_id")
         if source_project_ids is None:
             return
-        if set(source_project_ids) != entry_ids:
-            raise ValueError("legacy source project_id must cover every manifest entry")
-        for value in source_project_ids.values():
+        required_source_entries = {
+            str(entry["integrity"])
+            for entry in entries  # type: ignore[union-attr]
+            if entry["evidence_form_version"] in {"v2_packet", "v2_chat_meta"}
+        }
+        if not required_source_entries <= set(source_project_ids):
+            raise ValueError("legacy source project_id must cover every project-declaring manifest entry")
+        if not set(source_project_ids) <= entry_ids:
+            raise ValueError("legacy source project_id references an unknown manifest entry")
+        for value, required in source_project_ids.values():
+            if value is None and not required:
+                continue
             try:
                 source_project_id = validate_project_id(value)  # type: ignore[arg-type]
             except ValueError as exc:
@@ -3186,7 +3195,7 @@ class LedgerStore:
         records: Iterable[Mapping[str, object]],
         imported_at_utc: str,
         planned_messages: frozenset[tuple[str, str, str]] = frozenset(),
-        source_project_ids: Mapping[str, object] | None = None,
+        source_project_ids: Mapping[str, tuple[object, bool]] | None = None,
     ) -> tuple[
         str,
         tuple[object, ...],
@@ -3564,7 +3573,7 @@ class LedgerStore:
         packet_members: dict[tuple[str, str, str, str, str], dict[str, object]] = {}
         records: list[dict[str, object]] = []
         prepared_messages: list[dict[str, object]] = []
-        source_project_ids: dict[str, object] = {}
+        source_project_ids: dict[str, tuple[object, bool]] = {}
         inbox_pointer_count = 0
         entry_by_locator = {str(entry["canonical_locator"]): entry for entry in entries}  # type: ignore[union-attr]
         for locator, raw in sources.items():
@@ -3577,7 +3586,7 @@ class LedgerStore:
                     raise ValueError("legacy chat meta is not valid JSON") from exc
                 if not isinstance(parsed_meta, dict):
                     raise ValueError("legacy chat meta must be a JSON object")
-                source_project_ids[str(entry["integrity"])] = parsed_meta.get("project_id")
+                source_project_ids[str(entry["integrity"])] = (parsed_meta.get("project_id"), True)
                 continue
             if kind == "inbox_pointer":
                 try:
@@ -3586,7 +3595,8 @@ class LedgerStore:
                     raise ValueError("legacy inbox pointer index is not valid JSON") from exc
                 if not isinstance(inbox, dict):
                     raise ValueError("legacy inbox pointer index must be a JSON object")
-                source_project_ids[str(entry["integrity"])] = inbox.get("project_id")
+                if "project_id" in inbox:
+                    source_project_ids[str(entry["integrity"])] = (inbox.get("project_id"), False)
                 for bucket in ("unread", "read"):
                     pointers = inbox.get(bucket, [])
                     if not isinstance(pointers, list) or any(not isinstance(item, str) for item in pointers):
@@ -3598,7 +3608,7 @@ class LedgerStore:
                 continue
 
             frontmatter, body = _parse_legacy_frontmatter(raw)
-            source_project_ids[str(entry["integrity"])] = frontmatter.get("project_id")
+            source_project_ids[str(entry["integrity"])] = (frontmatter.get("project_id"), True)
             stem, direction, filename_agent, slug = _legacy_packet_name_parts(locator)
             sender = _bounded_text(frontmatter.get("from"), "from", 128)
             recipient = _bounded_text(frontmatter.get("to"), "to", 128)

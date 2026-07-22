@@ -1079,7 +1079,13 @@ class LedgerStoreTest(unittest.TestCase):
             inbox_locator = "/agents/claude/inbox.json"
             meta = b'{"chat_id":"CHAT-8976EECB","project_id":"amiga"}'
             inbox = json.dumps(
-                {"project_id": AMIGA, "unread": [to_locator.strip("/")], "read": []}
+                {
+                    "agent": "claude",
+                    "queued": [],
+                    "read": [],
+                    "unread": [to_locator.strip("/")],
+                    "updated_utc": FIXED_TIME.isoformat(),
+                }
             ).encode("utf-8")
             for locator, payload in (
                 (to_locator, packet),
@@ -1177,6 +1183,46 @@ class LedgerStoreTest(unittest.TestCase):
                 self.assertEqual(
                     store._connection.execute("SELECT count(*) FROM canonical_messages").fetchone()[0],
                     1,
+                )
+
+    def test_v6_import_legacy_v2_real_shaped_inbox_without_project_imports_null_scope_pointer(self) -> None:
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            root = Path(tmp) / "workspace"
+            root.mkdir()
+            paths = LedgerPaths.derive(Path(tmp) / "ledger", "ws_alpha")
+            inbox_locator = "/agents/claude/inbox.json"
+            inbox = json.dumps(
+                {
+                    "agent": "claude",
+                    "queued": [],
+                    "read": [],
+                    "unread": ["Chats/chat-a/2026-07-22T00-00-00_to-claude_import.md"],
+                    "updated_utc": FIXED_TIME.isoformat(),
+                }
+            ).encode("utf-8")
+            write_source(root, inbox_locator, inbox)
+            entries = [manifest_entry(inbox_locator, inbox, evidence_form_version="v2_inbox_index")]
+            manifest = legacy_manifest(entries)
+            with LedgerStore.open_writer(paths, clock=lambda: FIXED_TIME) as store:
+                record_test_registry(store)
+                seal, imported = store.import_legacy_v2_manifest(
+                    workspace_root=root,
+                    workspace_id="ws_alpha",
+                    manifest=manifest,
+                    registry_revision=REVISION,
+                    imported_at_utc=FIXED_TIME.isoformat(),
+                )
+                self.assertTrue(imported)
+                self.assertEqual(seal, manifest["seal"]["value"])
+                self.assertEqual(
+                    store._connection.execute(
+                        "SELECT record_kind, scope_kind, scope_identity, message_id FROM legacy_import_records"
+                    ).fetchall(),
+                    [("inbox_pointer", None, None, None)],
+                )
+                self.assertEqual(
+                    store._connection.execute("SELECT count(*) FROM canonical_messages").fetchone()[0],
+                    0,
                 )
 
     def test_v6_import_legacy_v2_invalid_priority_aborts_without_rows(self) -> None:
@@ -1606,10 +1652,6 @@ class LedgerStoreTest(unittest.TestCase):
                         "v2_chat_meta",
                     ),
                 ),
-            ),
-            (
-                "inbox_missing_project",
-                (("/agents/claude/inbox.json", b'{"unread":[],"read":[]}', "v2_inbox_index"),),
             ),
             (
                 "inbox_foreign_project",
