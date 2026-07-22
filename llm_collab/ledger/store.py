@@ -3177,9 +3177,7 @@ class LedgerStore:
             raise ValueError("legacy source project_id must cover every project-declaring manifest entry")
         if not set(source_project_ids) <= entry_ids:
             raise ValueError("legacy source project_id references an unknown manifest entry")
-        for value, required in source_project_ids.values():
-            if value is None and not required:
-                continue
+        for value, _required in source_project_ids.values():
             try:
                 source_project_id = validate_project_id(value)  # type: ignore[arg-type]
             except ValueError as exc:

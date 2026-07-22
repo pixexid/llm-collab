@@ -1663,6 +1663,16 @@ class LedgerStoreTest(unittest.TestCase):
                     ),
                 ),
             ),
+            (
+                "inbox_null_project",
+                (
+                    (
+                        "/agents/claude/inbox.json",
+                        b'{"project_id":null,"unread":[],"read":[]}',
+                        "v2_inbox_index",
+                    ),
+                ),
+            ),
         )
         for label, source_items in cases:
             with self.subTest(label=label), TemporaryDirectory(dir="/tmp") as tmp:
