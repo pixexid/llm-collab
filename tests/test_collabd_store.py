@@ -114,6 +114,7 @@ def manifest_entry(
     payload: bytes,
     *,
     evidence_form_version: str = "v2_packet",
+    workspace_id: str = "ws_alpha",
     project_id: str = AMIGA,
 ) -> dict[str, object]:
     return with_integrity(
@@ -123,7 +124,7 @@ def manifest_entry(
             "byte_size": len(payload),
             "evidence_form_version": evidence_form_version,
             "cutoff_policy_revision": "cutoff_v1",
-            "source_workspace_id": "ws_alpha",
+            "source_workspace_id": workspace_id,
             "source_project_id": project_id,
             "source_registry_revision": REVISION,
             "source_boundary": {
@@ -1238,6 +1239,101 @@ class LedgerStoreTest(unittest.TestCase):
                     store._connection.set_trace_callback(counting_trace)
                     try:
                         with self.assertRaisesRegex(ValueError, "source_project_id"):
+                            store.import_legacy_v2_manifest(
+                                workspace_root=root,
+                                workspace_id="ws_alpha",
+                                manifest=manifest,
+                                registry_revision=REVISION,
+                                imported_at_utc=FIXED_TIME.isoformat(),
+                            )
+                    finally:
+                        store._connection.set_trace_callback(None)
+                    self.assertEqual(begin_count, 0)
+                    self.assertEqual(
+                        store._connection.execute("SELECT count(*) FROM canonical_messages").fetchone()[0],
+                        0,
+                    )
+                    self.assertEqual(
+                        store._connection.execute("SELECT count(*) FROM legacy_import_manifests").fetchone()[0],
+                        0,
+                    )
+                    self.assertEqual(
+                        store._connection.execute("SELECT count(*) FROM legacy_import_manifest_entries").fetchone()[0],
+                        0,
+                    )
+                    self.assertEqual(
+                        store._connection.execute("SELECT count(*) FROM legacy_import_records").fetchone()[0],
+                        0,
+                    )
+
+    def test_v6_import_legacy_v2_source_workspace_mismatch_aborts_without_rows(self) -> None:
+        packet = legacy_packet_bytes()
+        cases = (
+            (
+                (
+                    (
+                        "/Chats/chat-a/2026-07-22T00-00-00_to-claude_import.md",
+                        packet,
+                        "v2_packet",
+                    ),
+                    (
+                        "/Chats/chat-a/2026-07-22T00-00-00_from-codex_import.md",
+                        packet,
+                        "v2_packet",
+                    ),
+                ),
+                "packet_pair",
+            ),
+            (
+                (
+                    (
+                        "/Chats/chat-a/meta.json",
+                        b'{"chat_id":"CHAT-8976EECB","project_id":"amiga"}',
+                        "v2_chat_meta",
+                    ),
+                ),
+                "chat_meta",
+            ),
+            (
+                (
+                    (
+                        "/agents/claude/inbox.json",
+                        b'{"unread":[],"read":[]}',
+                        "v2_inbox_index",
+                    ),
+                ),
+                "inbox_pointer",
+            ),
+        )
+        for source_items, label in cases:
+            with self.subTest(kind=label), TemporaryDirectory(dir="/tmp") as tmp:
+                root = Path(tmp) / "workspace"
+                root.mkdir()
+                paths = LedgerPaths.derive(Path(tmp) / "ledger", "ws_alpha")
+                for locator, payload, _evidence_form_version in source_items:
+                    write_source(root, locator, payload)
+                entries = [
+                    manifest_entry(
+                        locator,
+                        payload,
+                        evidence_form_version=evidence_form_version,
+                        workspace_id="ws_other",
+                    )
+                    for locator, payload, evidence_form_version in source_items
+                ]
+                manifest = legacy_manifest(entries)
+                with LedgerStore.open_writer(paths, clock=lambda: FIXED_TIME) as store:
+                    record_test_registry(store)
+                    begin_count = 0
+
+                    def counting_trace(statement: str) -> None:
+                        nonlocal begin_count
+                        if statement == "BEGIN IMMEDIATE":
+                            begin_count += 1
+
+                    store._connection.set_trace_callback(counting_trace)
+                    try:
+                        with self.assertRaisesRegex(ValueError, "source_workspace_id"):
                             store.import_legacy_v2_manifest(
                                 workspace_root=root,
                                 workspace_id="ws_alpha",

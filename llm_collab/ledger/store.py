@@ -625,7 +625,10 @@ def _normalize_legacy_manifest(value: Mapping[str, object]) -> dict[str, object]
     if publication.get("integrity") != expected_publication:
         raise CanonicalIntegrityError("publication integrity does not match")
     normalized_publication["integrity"] = expected_publication
+    publication_workspace_id = normalized_publication["workspace_id"]
     publication_project_id = normalized_publication["project_id"]
+    if any(entry["source_workspace_id"] != publication_workspace_id for entry in entries):
+        raise ValueError("manifest entry source_workspace_id must match publication workspace_id")
     if any(entry["source_project_id"] != publication_project_id for entry in entries):
         raise ValueError("manifest entry source_project_id must match publication project_id")
     if manifest.get("sealed") is not True:
@@ -3506,6 +3509,8 @@ class LedgerStore:
         if not self.has_registry_snapshot(workspace_id=workspace_id, registry_revision=registry_revision):
             raise ValueError("registry snapshot is absent")
         normalized = _normalize_legacy_manifest(manifest)
+        if normalized["publication"]["workspace_id"] != workspace_id:  # type: ignore[index]
+            raise ValueError("manifest publication workspace_id must match the ledger workspace")
         entries = normalized["entries"]  # type: ignore[assignment]
         sources = self._read_legacy_v2_sources(workspace_root=workspace_root, entries=entries)  # type: ignore[arg-type]
 
