@@ -133,6 +133,136 @@ class CanonicalMessageTest(unittest.TestCase):
                         message_id=message_id,
                     )
 
+    def test_store_derives_generated_fields_and_rejects_supplied_values(self) -> None:
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            paths = LedgerPaths.derive(tmp, WORKSPACE)
+            with LedgerStore.open_writer(paths) as store:
+                record_registry(store)
+                supplied_values = {
+                    "body_sha256": "f" * 64,
+                    "message_id": "msg_" + "f" * 64,
+                }
+                for field, value in supplied_values.items():
+                    with self.subTest(field=field), self.assertRaisesRegex(
+                        TypeError, "unexpected keyword argument"
+                    ):
+                        store.create_canonical_message(**intent(), **{field: value})
+                parameters = inspect.signature(
+                    LedgerStore.create_canonical_message
+                ).parameters
+                self.assertNotIn("body_sha256", parameters)
+                self.assertNotIn("message_id", parameters)
+                self.assertNotIn("project_id", parameters)
+                self.assertEqual(
+                    store._connection.execute(
+                        "SELECT count(*) FROM canonical_bodies"
+                    ).fetchone()[0],
+                    0,
+                )
+                self.assertEqual(
+                    store._connection.execute(
+                        "SELECT count(*) FROM canonical_messages"
+                    ).fetchone()[0],
+                    0,
+                )
+
+    def test_store_and_canonical_share_derivation_and_set_normalization(self) -> None:
+        self.assertIs(messages_module._derive_message_id, store_module._derive_message_id)
+        direct_intent = intent(
+            recipients=["agent_codex", "agent_claude", "agent_codex"],
+            artifacts=[
+                ("path", "docs/file.md"),
+                ("chat", "CHAT-1"),
+                ("path", "docs/file.md"),
+            ],
+            tags=["urgent", "review", "urgent"],
+        )
+        canonical_intent = intent(
+            recipients=["agent_claude", "agent_codex"],
+            artifacts=[("chat", "CHAT-1"), ("path", "docs/file.md")],
+            tags=["review", "urgent"],
+        )
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            paths = LedgerPaths.derive(tmp, WORKSPACE)
+            with LedgerStore.open_writer(paths) as store:
+                record_registry(store)
+                direct_id, created = store.create_canonical_message(**direct_intent)
+                self.assertTrue(created)
+                canonical_id, created = create_or_return_equivalent(
+                    store, **canonical_intent
+                )
+                self.assertEqual((canonical_id, created), (direct_id, False))
+                self.assertEqual(
+                    direct_id,
+                    messages_module._derive_message_id(
+                        workspace_id=WORKSPACE,
+                        scope_kind="project",
+                        scope_identity=PROJECT,
+                        sender_agent_id="agent_codex",
+                        dedupe_key="send-one",
+                        body_sha256=hashlib.sha256(b"hello").hexdigest(),
+                        recipients=("agent_claude", "agent_codex"),
+                        reply_to_message_id=None,
+                        ttl_seconds=0,
+                        ack_policy="required",
+                        artifacts=(("chat", "CHAT-1"), ("path", "docs/file.md")),
+                        title="Hello",
+                        priority="high",
+                        tags=("review", "urgent"),
+                        chat_link="CHAT-1",
+                        task_link=None,
+                    ),
+                )
+                loaded = store.read_canonical_message(
+                    workspace_id=WORKSPACE,
+                    scope_kind="project",
+                    scope_identity=PROJECT,
+                    message_id=direct_id,
+                )
+                self.assertEqual(loaded["recipients"], ("agent_claude", "agent_codex"))
+                self.assertEqual(
+                    loaded["artifacts"],
+                    (("chat", "CHAT-1"), ("path", "docs/file.md")),
+                )
+                self.assertEqual(loaded["tags"], ("review", "urgent"))
+
+    def test_store_rejects_invalid_normalized_sets_before_write(self) -> None:
+        invalid_sets = (
+            ("empty recipients", {"recipients": []}),
+            ("recipient type", {"recipients": [object()]}),
+            (
+                "recipient cap",
+                {"recipients": [f"agent_{index:03d}" for index in range(257)]},
+            ),
+            ("artifact shape", {"artifacts": ["not-a-pair"]}),
+            ("artifact reference type", {"artifacts": [("chat", object())]}),
+            (
+                "artifact cap",
+                {"artifacts": [("chat", f"CHAT-{index}") for index in range(257)]},
+            ),
+            ("tag type", {"tags": [object()]}),
+            ("tag cap", {"tags": [f"tag-{index}" for index in range(65)]}),
+        )
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            paths = LedgerPaths.derive(tmp, WORKSPACE)
+            with LedgerStore.open_writer(paths) as store:
+                record_registry(store)
+                for label, changes in invalid_sets:
+                    with self.subTest(label=label), self.assertRaises(ValueError):
+                        store.create_canonical_message(**intent(**changes))
+                self.assertEqual(
+                    store._connection.execute(
+                        "SELECT count(*) FROM canonical_bodies"
+                    ).fetchone()[0],
+                    0,
+                )
+                self.assertEqual(
+                    store._connection.execute(
+                        "SELECT count(*) FROM canonical_messages"
+                    ).fetchone()[0],
+                    0,
+                )
+
     def test_same_dedupe_different_intent_and_cross_scope_reply_fail_closed(self) -> None:
         with TemporaryDirectory(dir="/tmp") as tmp:
             paths = LedgerPaths.derive(tmp, WORKSPACE)
@@ -399,7 +529,13 @@ class CanonicalMessageTest(unittest.TestCase):
                 )
                 for changes in invalid:
                     with self.subTest(changes=changes), self.assertRaises(ValueError):
-                        create_or_return_equivalent(store, **intent(**changes))
+                        store.create_canonical_message(**intent(**changes))
+                self.assertEqual(
+                    store._connection.execute(
+                        "SELECT count(*) FROM canonical_messages"
+                    ).fetchone()[0],
+                    0,
+                )
 
 
 if __name__ == "__main__":
