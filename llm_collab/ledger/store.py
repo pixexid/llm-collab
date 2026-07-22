@@ -67,6 +67,10 @@ class CanonicalConflictError(RuntimeError):
     pass
 
 
+class CanonicalIntegrityError(RuntimeError):
+    pass
+
+
 _CANONICAL_AGENT_ID = re.compile(r"agent_[A-Za-z0-9][A-Za-z0-9_-]{2,127}\Z")
 _CANONICAL_MESSAGE_ID = re.compile(r"msg_[0-9a-f]{64}\Z")
 _CANONICAL_REGISTRY_REVISION = re.compile(r"sha256:[0-9a-f]{64}\Z")
@@ -733,6 +737,7 @@ V4_SQL = (
         FOREIGN KEY (workspace_id, scope_kind, scope_identity, message_id)
             REFERENCES canonical_messages (workspace_id, scope_kind, scope_identity, message_id)
             ON DELETE RESTRICT
+            DEFERRABLE INITIALLY DEFERRED
     ) STRICT
     """,
     """
@@ -754,6 +759,7 @@ V4_SQL = (
         FOREIGN KEY (workspace_id, scope_kind, scope_identity, message_id)
             REFERENCES canonical_messages (workspace_id, scope_kind, scope_identity, message_id)
             ON DELETE RESTRICT
+            DEFERRABLE INITIALLY DEFERRED
     ) STRICT
     """,
     """
@@ -771,6 +777,7 @@ V4_SQL = (
         FOREIGN KEY (workspace_id, scope_kind, scope_identity, message_id)
             REFERENCES canonical_messages (workspace_id, scope_kind, scope_identity, message_id)
             ON DELETE RESTRICT
+            DEFERRABLE INITIALLY DEFERRED
     ) STRICT
     """,
     """
@@ -844,6 +851,48 @@ V4_SQL = (
     END
     """,
     """
+    CREATE TRIGGER canonical_message_recipients_sealed
+    BEFORE INSERT ON canonical_message_recipients
+    WHEN EXISTS (
+        SELECT 1 FROM canonical_messages
+        WHERE workspace_id = NEW.workspace_id
+          AND scope_kind = NEW.scope_kind
+          AND scope_identity = NEW.scope_identity
+          AND message_id = NEW.message_id
+    )
+    BEGIN
+        SELECT RAISE(ABORT, 'canonical recipients are sealed');
+    END
+    """,
+    """
+    CREATE TRIGGER canonical_message_artifacts_sealed
+    BEFORE INSERT ON canonical_message_artifacts
+    WHEN EXISTS (
+        SELECT 1 FROM canonical_messages
+        WHERE workspace_id = NEW.workspace_id
+          AND scope_kind = NEW.scope_kind
+          AND scope_identity = NEW.scope_identity
+          AND message_id = NEW.message_id
+    )
+    BEGIN
+        SELECT RAISE(ABORT, 'canonical artifacts are sealed');
+    END
+    """,
+    """
+    CREATE TRIGGER canonical_message_tags_sealed
+    BEFORE INSERT ON canonical_message_tags
+    WHEN EXISTS (
+        SELECT 1 FROM canonical_messages
+        WHERE workspace_id = NEW.workspace_id
+          AND scope_kind = NEW.scope_kind
+          AND scope_identity = NEW.scope_identity
+          AND message_id = NEW.message_id
+    )
+    BEGIN
+        SELECT RAISE(ABORT, 'canonical tags are sealed');
+    END
+    """,
+    """
     CREATE TRIGGER canonical_message_recipients_count_cap
     BEFORE INSERT ON canonical_message_recipients
     WHEN (
@@ -908,8 +957,8 @@ V4_SQL = (
     END
     """,
 )
-V4_MIGRATION_CHECKSUM = "sha256:d45b8f84c18a93fe9fe69658794307ab6d451b06edef5245e8d4d7e305d247c6"
-V4_SCHEMA_FINGERPRINT = "sha256:c5ed09f78345ba35338635db76cc6e24c528d19137acab301990a859157febff"
+V4_MIGRATION_CHECKSUM = "sha256:63f00990d9c3e01384d14d7613c961856ff48037504b1e0ada1f95b034cedf01"
+V4_SCHEMA_FINGERPRINT = "sha256:665e17152991c6c21cb8756a5d5720e35e3154d13a4a069b4c74440ed425b39e"
 MIGRATIONS = ((1, V1_SQL), (2, V2_SQL), (3, V3_SQL), (4, V4_SQL))
 
 
@@ -1814,7 +1863,11 @@ class LedgerStore:
         }
         found_conflict = False
         for row in candidate_rows:
-            existing = self._read_canonical_message(*row)
+            try:
+                existing = self._read_canonical_message(*row)
+            except CanonicalIntegrityError:
+                found_conflict = True
+                continue
             if existing is None or any(
                 existing[key] != value for key, value in equivalent.items()
             ):
@@ -1850,6 +1903,25 @@ class LedgerStore:
                         created_at_utc,
                     ),
                 )
+            prefix = (workspace_id, scope_kind, scope_identity, message_id)
+            self._connection.executemany(
+                "INSERT INTO canonical_message_recipients "
+                "(workspace_id, scope_kind, scope_identity, message_id, recipient_agent_id) "
+                "VALUES (?, ?, ?, ?, ?)",
+                ((*prefix, recipient) for recipient in recipients),
+            )
+            self._connection.executemany(
+                "INSERT INTO canonical_message_artifacts "
+                "(workspace_id, scope_kind, scope_identity, message_id, artifact_kind, "
+                "artifact_ref) VALUES (?, ?, ?, ?, ?, ?)",
+                ((*prefix, kind, reference) for kind, reference in artifacts),
+            )
+            self._connection.executemany(
+                "INSERT INTO canonical_message_tags "
+                "(workspace_id, scope_kind, scope_identity, message_id, tag) "
+                "VALUES (?, ?, ?, ?, ?)",
+                ((*prefix, tag) for tag in tags),
+            )
             self._connection.execute(
                 "INSERT INTO canonical_messages "
                 "(workspace_id, scope_kind, scope_identity, message_id, sender_agent_id, "
@@ -1875,25 +1947,6 @@ class LedgerStore:
                     project_id,
                     created_at_utc,
                 ),
-            )
-            prefix = (workspace_id, scope_kind, scope_identity, message_id)
-            self._connection.executemany(
-                "INSERT INTO canonical_message_recipients "
-                "(workspace_id, scope_kind, scope_identity, message_id, recipient_agent_id) "
-                "VALUES (?, ?, ?, ?, ?)",
-                ((*prefix, recipient) for recipient in recipients),
-            )
-            self._connection.executemany(
-                "INSERT INTO canonical_message_artifacts "
-                "(workspace_id, scope_kind, scope_identity, message_id, artifact_kind, "
-                "artifact_ref) VALUES (?, ?, ?, ?, ?, ?)",
-                ((*prefix, kind, reference) for kind, reference in artifacts),
-            )
-            self._connection.executemany(
-                "INSERT INTO canonical_message_tags "
-                "(workspace_id, scope_kind, scope_identity, message_id, tag) "
-                "VALUES (?, ?, ?, ?, ?)",
-                ((*prefix, tag) for tag in tags),
             )
             self._connection.execute("COMMIT")
         except BaseException:
@@ -1971,6 +2024,43 @@ class LedgerStore:
                 prefix,
             )
         )
+        body = result["body"]
+        byte_size = result["byte_size"]
+        body_sha256 = result["body_sha256"]
+        if (
+            not isinstance(body, bytes)
+            or not isinstance(byte_size, int)
+            or len(body) != byte_size
+            or hashlib.sha256(body).hexdigest() != body_sha256
+        ):
+            raise CanonicalIntegrityError(
+                "canonical body failed size or SHA-256 verification"
+            )
+        # The seal prevents post-publication appends; this detects a forged whole
+        # message inserted through direct SQL in one transaction. Append-only rows
+        # are never repaired here.
+        derived_message_id = _derive_message_id(
+            workspace_id=str(result["workspace_id"]),
+            scope_kind=str(result["scope_kind"]),
+            scope_identity=str(result["scope_identity"]),
+            sender_agent_id=str(result["sender_agent_id"]),
+            dedupe_key=str(result["dedupe_key"]),
+            body_sha256=str(result["body_sha256"]),
+            recipients=result["recipients"],  # type: ignore[arg-type]
+            reply_to_message_id=result["reply_to_message_id"],  # type: ignore[arg-type]
+            ttl_seconds=result["ttl_seconds"],  # type: ignore[arg-type]
+            ack_policy=str(result["ack_policy"]),
+            artifacts=result["artifacts"],  # type: ignore[arg-type]
+            title=str(result["title"]),
+            priority=str(result["priority"]),
+            tags=result["tags"],  # type: ignore[arg-type]
+            chat_link=result["chat_link"],  # type: ignore[arg-type]
+            task_link=result["task_link"],  # type: ignore[arg-type]
+        )
+        if derived_message_id != result["message_id"]:
+            raise CanonicalIntegrityError(
+                "canonical message_id does not match its normalized immutable intent"
+            )
         return result
 
     def _validate_canonical_scope(

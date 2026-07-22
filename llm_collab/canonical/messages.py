@@ -2,19 +2,15 @@
 
 from __future__ import annotations
 
-import hashlib
 from collections.abc import Iterable
 
 from llm_collab.ledger.store import (
+    CanonicalIntegrityError,
     LedgerStore,
     _canonical_message_id as _message_id,
     _canonical_scope as _scope,
     _derive_message_id,
 )
-
-
-class CanonicalIntegrityError(RuntimeError):
-    pass
 
 
 def create_or_return_equivalent(
@@ -70,7 +66,7 @@ def read_message(
     scope_identity: str,
     message_id: str,
 ) -> dict[str, object]:
-    """Read one exact-scoped message and verify its body bytes every time."""
+    """Read one exact-scoped message through the store's integrity checks."""
     workspace, kind, identity = _scope(workspace_id, scope_kind, scope_identity)
     identifier = _message_id(message_id, "message_id")
     message = store.read_canonical_message(
@@ -81,15 +77,7 @@ def read_message(
     )
     if message is None:
         raise KeyError(identifier)
-    body = message["body"]
     body_sha256 = message["body_sha256"]
-    byte_size = message["byte_size"]
-    if (
-        not isinstance(body, bytes)
-        or len(body) != byte_size
-        or hashlib.sha256(body).hexdigest() != body_sha256
-    ):
-        raise CanonicalIntegrityError("canonical body failed size or SHA-256 verification")
     message["body_ref"] = "body_" + str(body_sha256)
     return message
 

@@ -555,7 +555,7 @@ class LedgerStoreTest(unittest.TestCase):
 
     def test_v4_schema_connection_guards_backups_and_private_permissions(self) -> None:
         self.assertEqual(sum("CREATE TABLE canonical_" in sql for sql in V4_SQL), 5)
-        self.assertEqual(sum("CREATE TRIGGER" in sql for sql in V4_SQL), 15)
+        self.assertEqual(sum("CREATE TRIGGER" in sql for sql in V4_SQL), 18)
         with TemporaryDirectory(dir="/tmp") as tmp:
             state = Path(tmp) / "existing-state"
             state.mkdir(mode=0o755)
@@ -908,6 +908,8 @@ class LedgerStoreTest(unittest.TestCase):
                     dedupe_key="direct-matrix",
                     body=b"body",
                     recipients=["agent_codex"],
+                    artifacts=[("path", "original")],
+                    tags=["original"],
                     registry_revision=REVISION,
                     created_at_utc=FIXED_TIME.isoformat(),
                     title="title",
@@ -1000,34 +1002,36 @@ class LedgerStoreTest(unittest.TestCase):
                 with self.assertRaises(sqlite3.IntegrityError):
                     connection.execute(insert_message, workspace_claim)
 
-                prefix = ("ws_alpha", "project", AMIGA, message_id)
-                connection.executemany(
-                    "INSERT INTO canonical_message_recipients VALUES (?, ?, ?, ?, ?)",
-                    ((*prefix, f"agent_r{number:03d}") for number in range(255)),
-                )
-                with self.assertRaisesRegex(sqlite3.IntegrityError, "exceeds 256"):
-                    connection.execute(
+                cap_cases = (
+                    (
+                        "canonical_message_recipients",
                         "INSERT INTO canonical_message_recipients VALUES (?, ?, ?, ?, ?)",
-                        (*prefix, "agent_over"),
-                    )
-                connection.executemany(
-                    "INSERT INTO canonical_message_artifacts VALUES (?, ?, ?, ?, ?, ?)",
-                    ((*prefix, "path", f"path-{number}") for number in range(256)),
-                )
-                with self.assertRaisesRegex(sqlite3.IntegrityError, "exceeds 256"):
-                    connection.execute(
+                        ((*(("ws_alpha", "project", AMIGA, "msg_" + "a" * 64)), f"agent_r{number:03d}") for number in range(257)),
+                        "canonical recipient count exceeds 256",
+                    ),
+                    (
+                        "canonical_message_artifacts",
                         "INSERT INTO canonical_message_artifacts VALUES (?, ?, ?, ?, ?, ?)",
-                        (*prefix, "path", "path-over"),
-                    )
-                connection.executemany(
-                    "INSERT INTO canonical_message_tags VALUES (?, ?, ?, ?, ?)",
-                    ((*prefix, f"tag-{number}") for number in range(64)),
-                )
-                with self.assertRaisesRegex(sqlite3.IntegrityError, "exceeds 64"):
-                    connection.execute(
+                        ((*(("ws_alpha", "project", AMIGA, "msg_" + "b" * 64)), "path", f"path-{number}") for number in range(257)),
+                        "canonical artifact count exceeds 256",
+                    ),
+                    (
+                        "canonical_message_tags",
                         "INSERT INTO canonical_message_tags VALUES (?, ?, ?, ?, ?)",
-                        (*prefix, "tag-over"),
-                    )
+                        ((*(("ws_alpha", "project", AMIGA, "msg_" + "c" * 64)), f"tag-{number}") for number in range(65)),
+                        "canonical tag count exceeds 64",
+                    ),
+                )
+                for table, statement, rows, reason in cap_cases:
+                    with self.subTest(cap=table):
+                        connection.execute("BEGIN IMMEDIATE")
+                        try:
+                            with self.assertRaisesRegex(sqlite3.IntegrityError, reason):
+                                connection.executemany(statement, rows)
+                        finally:
+                            connection.execute("ROLLBACK")
+
+                prefix = ("ws_alpha", "project", AMIGA, "msg_" + "d" * 64)
                 with self.assertRaises(sqlite3.IntegrityError):
                     connection.execute(
                         "INSERT INTO canonical_message_artifacts VALUES (?, ?, ?, ?, ?, ?)",
@@ -1092,6 +1096,90 @@ class LedgerStoreTest(unittest.TestCase):
                             (100 + index, *values),
                         )
 
+    def test_v4_child_seals_resist_direct_sql_tricks_and_deferred_fk_rejects_orphans(self) -> None:
+        from llm_collab.canonical import create_or_return_equivalent
+
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            with LedgerStore.open_writer(LedgerPaths.derive(tmp, "ws_alpha")) as store:
+                record_test_registry(store)
+                message_id, _ = create_or_return_equivalent(
+                    store,
+                    workspace_id="ws_alpha",
+                    scope_kind="project",
+                    scope_identity=AMIGA,
+                    sender_agent_id="agent_codex",
+                    dedupe_key="sealed",
+                    body=b"body",
+                    recipients=["agent_codex"],
+                    registry_revision=REVISION,
+                    created_at_utc=FIXED_TIME.isoformat(),
+                    title="title",
+                )
+                connection = store._connection
+                prefix = ("ws_alpha", "project", AMIGA, message_id)
+                append_cases = (
+                    (
+                        "INSERT INTO canonical_message_recipients VALUES (?, ?, ?, ?, ?)",
+                        (*prefix, "agent_claude"),
+                        "canonical recipients are sealed",
+                    ),
+                    (
+                        "INSERT INTO canonical_message_artifacts VALUES (?, ?, ?, ?, ?, ?)",
+                        (*prefix, "path", "later"),
+                        "canonical artifacts are sealed",
+                    ),
+                    (
+                        "INSERT INTO canonical_message_tags VALUES (?, ?, ?, ?, ?)",
+                        (*prefix, "later"),
+                        "canonical tags are sealed",
+                    ),
+                )
+                for statement, parameters, reason in append_cases:
+                    with self.subTest(reason=reason), self.assertRaisesRegex(
+                        sqlite3.IntegrityError, reason
+                    ):
+                        connection.execute(statement, parameters)
+
+                with self.assertRaisesRegex(sqlite3.IntegrityError, "recipients are sealed"):
+                    connection.execute(
+                        "INSERT INTO canonical_message_recipients VALUES "
+                        "(?, ?, ?, ?, ?), (?, ?, ?, ?, ?)",
+                        (*prefix, "agent_claude", *prefix, "agent_reviewer"),
+                    )
+                self.assertEqual(
+                    connection.execute(
+                        "SELECT count(*) FROM canonical_message_recipients "
+                        "WHERE workspace_id = ? AND scope_kind = ? AND scope_identity = ? "
+                        "AND message_id = ?",
+                        prefix,
+                    ).fetchone()[0],
+                    1,
+                )
+
+                connection.execute("BEGIN IMMEDIATE")
+                try:
+                    for statement, parameters, reason in append_cases[1:]:
+                        with self.assertRaisesRegex(sqlite3.IntegrityError, reason):
+                            connection.execute(statement, parameters)
+                finally:
+                    connection.execute("ROLLBACK")
+
+                orphan_id = "msg_" + "e" * 64
+                connection.execute("BEGIN IMMEDIATE")
+                connection.execute(
+                    "INSERT INTO canonical_message_tags VALUES (?, ?, ?, ?, ?)",
+                    ("ws_alpha", "project", AMIGA, orphan_id, "orphan"),
+                )
+                with self.assertRaisesRegex(sqlite3.IntegrityError, "FOREIGN KEY"):
+                    connection.execute("COMMIT")
+                connection.execute("ROLLBACK")
+                self.assertEqual(
+                    connection.execute(
+                        "SELECT count(*) FROM canonical_message_tags WHERE message_id = ?",
+                        (orphan_id,),
+                    ).fetchone()[0],
+                    0,
+                )
     def test_v4_ddl_mutations_recompute_metadata_and_break_named_properties(self) -> None:
         from llm_collab.canonical import create_or_return_equivalent
 
@@ -1188,32 +1276,77 @@ class LedgerStoreTest(unittest.TestCase):
             LedgerPaths.derive(tmp, "ws_alpha"), no_count_cap
         ) as store:
             record_test_registry(store)
+            message_id = "msg_" + "d" * 64
+            prefix = ("ws_alpha", "project", AMIGA, message_id)
+            store._connection.execute("BEGIN IMMEDIATE")
+            try:
+                store._connection.executemany(
+                    "INSERT INTO canonical_message_recipients VALUES (?, ?, ?, ?, ?)",
+                    ((*prefix, f"agent_r{number:03d}") for number in range(257)),
+                )
+                self.assertEqual(
+                    store._connection.execute(
+                        "SELECT count(*) FROM canonical_message_recipients WHERE message_id = ?",
+                        (message_id,),
+                    ).fetchone()[0],
+                    257,
+                )
+            finally:
+                store._connection.execute("ROLLBACK")
+            killed.append("05_remove_count_cap_trigger")
+
+        no_seal = tuple(
+            statement
+            for statement in V4_SQL
+            if "CREATE TRIGGER canonical_message_recipients_sealed" not in statement
+        )
+        with TemporaryDirectory(dir="/tmp") as tmp, open_mutated_v4(
+            LedgerPaths.derive(tmp, "ws_alpha"), no_seal
+        ) as store:
+            record_test_registry(store)
             message_id, _ = create_or_return_equivalent(
                 store,
                 workspace_id="ws_alpha",
                 scope_kind="project",
                 scope_identity=AMIGA,
                 sender_agent_id="agent_codex",
-                dedupe_key="over-count",
+                dedupe_key="unsealed",
                 body=b"body",
                 recipients=["agent_codex"],
                 registry_revision=REVISION,
                 created_at_utc=FIXED_TIME.isoformat(),
                 title="one",
             )
-            prefix = ("ws_alpha", "project", AMIGA, message_id)
-            store._connection.executemany(
+            store._connection.execute(
                 "INSERT INTO canonical_message_recipients VALUES (?, ?, ?, ?, ?)",
-                ((*prefix, f"agent_r{number:03d}") for number in range(256)),
+                ("ws_alpha", "project", AMIGA, message_id, "agent_claude"),
             )
-            self.assertEqual(
-                store._connection.execute(
-                    "SELECT count(*) FROM canonical_message_recipients WHERE message_id = ?",
-                    (message_id,),
-                ).fetchone()[0],
-                257,
-            )
-            killed.append("05_remove_count_cap_trigger")
+            killed.append("14_remove_child_seal")
+
+        immediate_recipient_fk = mutate_v4(
+            "ON DELETE RESTRICT\n            DEFERRABLE INITIALLY DEFERRED",
+            "ON DELETE RESTRICT",
+            occurrence=1,
+        )
+        with TemporaryDirectory(dir="/tmp") as tmp, open_mutated_v4(
+            LedgerPaths.derive(tmp, "ws_alpha"), immediate_recipient_fk
+        ) as store:
+            record_test_registry(store)
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "FOREIGN KEY"):
+                create_or_return_equivalent(
+                    store,
+                    workspace_id="ws_alpha",
+                    scope_kind="project",
+                    scope_identity=AMIGA,
+                    sender_agent_id="agent_codex",
+                    dedupe_key="immediate-child-fk",
+                    body=b"body",
+                    recipients=["agent_codex"],
+                    registry_revision=REVISION,
+                    created_at_utc=FIXED_TIME.isoformat(),
+                    title="one",
+                )
+            killed.append("15_remove_deferred_child_fk")
 
         no_migration_nul_guard = tuple(
             statement
@@ -1231,7 +1364,8 @@ class LedgerStoreTest(unittest.TestCase):
 
         child_fk = """FOREIGN KEY (workspace_id, scope_kind, scope_identity, message_id)
             REFERENCES canonical_messages (workspace_id, scope_kind, scope_identity, message_id)
-            ON DELETE RESTRICT"""
+            ON DELETE RESTRICT
+            DEFERRABLE INITIALLY DEFERRED"""
         no_child_fk = mutate_v4(child_fk, "CHECK (1 = 1)", occurrence=1)
         with TemporaryDirectory(dir="/tmp") as tmp, open_mutated_v4(
             LedgerPaths.derive(tmp, "ws_alpha"), no_child_fk
@@ -1250,6 +1384,8 @@ class LedgerStoreTest(unittest.TestCase):
                 "03_nullable_project_uniqueness",
                 "04_remove_append_only_trigger",
                 "05_remove_count_cap_trigger",
+                "14_remove_child_seal",
+                "15_remove_deferred_child_fk",
                 "06_remove_schema_migrations_nul_trigger",
                 "11_drop_scope_tuple_from_child_fk",
             ],

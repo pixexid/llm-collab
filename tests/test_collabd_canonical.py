@@ -294,6 +294,13 @@ class CanonicalMessageTest(unittest.TestCase):
                 record_registry(store)
                 message_id, _ = create_or_return_equivalent(store, **intent())
                 body_sha256 = hashlib.sha256(b"hello").hexdigest()
+                store._connection.execute("BEGIN IMMEDIATE")
+                store._connection.execute(
+                    "INSERT INTO canonical_message_recipients "
+                    "(workspace_id, scope_kind, scope_identity, message_id, recipient_agent_id) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (WORKSPACE, "project", OTHER_PROJECT, message_id, "agent_claude"),
+                )
                 store._connection.execute(
                     "INSERT INTO canonical_messages "
                     "(workspace_id, scope_kind, scope_identity, message_id, sender_agent_id, "
@@ -320,12 +327,7 @@ class CanonicalMessageTest(unittest.TestCase):
                         NOW,
                     ),
                 )
-                store._connection.execute(
-                    "INSERT INTO canonical_message_recipients "
-                    "(workspace_id, scope_kind, scope_identity, message_id, recipient_agent_id) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    (WORKSPACE, "project", OTHER_PROJECT, message_id, "agent_claude"),
-                )
+                store._connection.execute("COMMIT")
 
                 with self.assertRaises(CanonicalConflictError):
                     create_or_return_equivalent(store, **intent())
@@ -361,14 +363,185 @@ class CanonicalMessageTest(unittest.TestCase):
                 store._connection.execute(
                     "UPDATE canonical_bodies SET body = ?", (b"HELLO",)
                 )
-                with self.assertRaises(CanonicalIntegrityError):
-                    read_message(
+                readers = (
+                    (store.read_canonical_message, False),
+                    (read_message, True),
+                    (project_message_v1, True),
+                )
+                for reader, needs_store in readers:
+                    with self.subTest(reader=reader.__name__), self.assertRaisesRegex(
+                        CanonicalIntegrityError, "body failed"
+                    ):
+                        reader(
+                            workspace_id=WORKSPACE,
+                            scope_kind="project",
+                            scope_identity=PROJECT,
+                            message_id=message_id,
+                            **({"store": store} if needs_store else {}),
+                        )
+
+    def test_child_first_publication_and_forged_whole_message_detection(self) -> None:
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            with LedgerStore.open_writer(LedgerPaths.derive(tmp, WORKSPACE)) as store:
+                record_registry(store)
+                statements = []
+                store._connection.set_trace_callback(statements.append)
+                message_id, _ = create_or_return_equivalent(store, **intent())
+                store._connection.set_trace_callback(None)
+                inserts = [
+                    " ".join(statement.split())
+                    for statement in statements
+                    if statement.lstrip().startswith("INSERT INTO canonical_")
+                ]
+                parent_index = next(
+                    index
+                    for index, statement in enumerate(inserts)
+                    if statement.startswith("INSERT INTO canonical_messages ")
+                )
+                for family in (
+                    "canonical_message_recipients",
+                    "canonical_message_artifacts",
+                    "canonical_message_tags",
+                ):
+                    self.assertLess(
+                        next(
+                            index
+                            for index, statement in enumerate(inserts)
+                            if statement.startswith(f"INSERT INTO {family} ")
+                        ),
+                        parent_index,
+                    )
+
+                forged_id = "msg_" + "f" * 64
+                store._connection.execute("BEGIN IMMEDIATE")
+                store._connection.execute(
+                    "INSERT INTO canonical_message_recipients VALUES (?, ?, ?, ?, ?)",
+                    (WORKSPACE, "project", PROJECT, forged_id, "agent_codex"),
+                )
+                store._connection.execute(
+                    "INSERT INTO canonical_messages "
+                    "SELECT workspace_id, scope_kind, scope_identity, ?, sender_agent_id, ?, "
+                    "body_sha256, reply_to_message_id, ttl_seconds, ack_policy, title, priority, "
+                    "chat_link, task_link, registry_revision, project_id, created_at_utc "
+                    "FROM canonical_messages WHERE workspace_id = ? AND scope_kind = ? "
+                    "AND scope_identity = ? AND message_id = ?",
+                    (forged_id, "forged", WORKSPACE, "project", PROJECT, message_id),
+                )
+                store._connection.execute("COMMIT")
+
+                readers = (
+                    (store.read_canonical_message, False),
+                    (read_message, True),
+                    (project_message_v1, True),
+                )
+                for reader, needs_store in readers:
+                    with self.subTest(reader=reader.__name__), self.assertRaisesRegex(
+                        CanonicalIntegrityError, "does not match"
+                    ):
+                        reader(
+                            workspace_id=WORKSPACE,
+                            scope_kind="project",
+                            scope_identity=PROJECT,
+                            message_id=forged_id,
+                            **({"store": store} if needs_store else {}),
+                        )
+
+    def test_mutation_store_body_validation_rejects_self_consistent_false_digest(self) -> None:
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            with LedgerStore.open_writer(LedgerPaths.derive(tmp, WORKSPACE)) as store:
+                record_registry(store)
+                false_digest = "d" * 64
+                false_body = b"forged body bytes"
+                false_digest_id = messages_module._derive_message_id(
+                    workspace_id=WORKSPACE,
+                    scope_kind="project",
+                    scope_identity=PROJECT,
+                    sender_agent_id="agent_codex",
+                    dedupe_key="false-body-digest",
+                    body_sha256=false_digest,
+                    recipients=("agent_codex",),
+                    reply_to_message_id=None,
+                    ttl_seconds=0,
+                    ack_policy="none",
+                    artifacts=(),
+                    title="forged body",
+                    priority="normal",
+                    tags=(),
+                    chat_link=None,
+                    task_link=None,
+                )
+                store._connection.execute("BEGIN IMMEDIATE")
+                store._connection.execute(
+                    "INSERT INTO canonical_bodies VALUES (?, ?, ?, ?, ?)",
+                    (WORKSPACE, false_digest, len(false_body), false_body, NOW),
+                )
+                store._connection.execute(
+                    "INSERT INTO canonical_message_recipients VALUES (?, ?, ?, ?, ?)",
+                    (WORKSPACE, "project", PROJECT, false_digest_id, "agent_codex"),
+                )
+                store._connection.execute(
+                    "INSERT INTO canonical_messages VALUES "
+                    "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        WORKSPACE,
+                        "project",
+                        PROJECT,
+                        false_digest_id,
+                        "agent_codex",
+                        "false-body-digest",
+                        false_digest,
+                        None,
+                        0,
+                        "none",
+                        "forged body",
+                        "normal",
+                        None,
+                        None,
+                        REVISION,
+                        PROJECT,
+                        NOW,
+                    ),
+                )
+                store._connection.execute("COMMIT")
+
+                readers = (
+                    (store.read_canonical_message, False),
+                    (read_message, True),
+                    (project_message_v1, True),
+                )
+                for reader, needs_store in readers:
+                    with self.subTest(
+                        false_digest_reader=reader.__name__
+                    ), self.assertRaisesRegex(CanonicalIntegrityError, "body failed"):
+                        reader(
+                            workspace_id=WORKSPACE,
+                            scope_kind="project",
+                            scope_identity=PROJECT,
+                            message_id=false_digest_id,
+                            **({"store": store} if needs_store else {}),
+                        )
+
+                with self.assertRaises(CanonicalConflictError):
+                    create_or_return_equivalent(
                         store,
                         workspace_id=WORKSPACE,
                         scope_kind="project",
                         scope_identity=PROJECT,
-                        message_id=message_id,
+                        sender_agent_id="agent_codex",
+                        dedupe_key="false-body-digest",
+                        body=false_body,
+                        recipients=["agent_codex"],
+                        registry_revision=REVISION,
+                        created_at_utc=NOW,
+                        title="forged body",
                     )
+                self.assertEqual(
+                    store._connection.execute(
+                        "SELECT count(*) FROM canonical_messages WHERE dedupe_key = ?",
+                        ("false-body-digest",),
+                    ).fetchone()[0],
+                    1,
+                )
 
     def test_preflight_and_atomic_foreign_key_failure(self) -> None:
         with TemporaryDirectory(dir="/tmp") as tmp:
@@ -387,6 +560,17 @@ class CanonicalMessageTest(unittest.TestCase):
                             registry_revision="sha256:" + "f" * 64,
                             body=b"must-roll-back",
                         ),
+                    )
+                for table in (
+                    "canonical_message_recipients",
+                    "canonical_message_artifacts",
+                    "canonical_message_tags",
+                ):
+                    self.assertEqual(
+                        store._connection.execute(
+                            f"SELECT count(*) FROM {table}"
+                        ).fetchone()[0],
+                        0,
                     )
                 self.assertEqual(
                     store._connection.execute(
