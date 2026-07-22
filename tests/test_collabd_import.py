@@ -74,6 +74,37 @@ def resolved_import_targets(source: str, module: str, package: str) -> set[str]:
     return targets
 
 
+def imports_compatibility_importer(source: str, module: str, package: str) -> bool:
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import):
+            if any(alias.name in {
+                "llm_collab.compatibility",
+                "llm_collab.compatibility.importer",
+            } for alias in node.names):
+                return True
+            continue
+        if not isinstance(node, ast.ImportFrom):
+            continue
+        if node.level:
+            package_parts = package.split(".") if package else []
+            ascend = node.level - 1
+            base_parts = package_parts[: len(package_parts) - ascend]
+            if node.module:
+                base_parts.extend(node.module.split("."))
+            base = ".".join(base_parts)
+        else:
+            base = node.module or ""
+        if base == "llm_collab":
+            if any(alias.name == "compatibility" for alias in node.names):
+                return True
+        if base == "llm_collab.compatibility":
+            if any(alias.name in {"importer", "import_current_provenance"} for alias in node.names):
+                return True
+        if base == "llm_collab.compatibility.importer":
+            return True
+    return False
+
+
 def module_identity(path: Path, root: Path) -> tuple[str, str]:
     parts = list(path.relative_to(root).with_suffix("").parts)
     is_package = parts[-1] == "__init__"
@@ -683,13 +714,28 @@ finally:
             ("import llm_collab.compatibility", "bin.command", "bin"),
         )
         for candidate, module, package in examples:
-            self.assertTrue(
-                any(
-                    target == "llm_collab.compatibility"
-                    or target.startswith("llm_collab.compatibility.")
-                    for target in resolved_import_targets(candidate, module, package)
-                )
+            self.assertTrue(imports_compatibility_importer(candidate, module, package))
+        self.assertTrue(
+            imports_compatibility_importer(
+                "import llm_collab.compatibility.importer",
+                "llm_collab.candidate",
+                "llm_collab",
             )
+        )
+        self.assertFalse(
+            imports_compatibility_importer(
+                "from llm_collab.compatibility import projection",
+                "llm_collab.candidate",
+                "llm_collab",
+            )
+        )
+        self.assertFalse(
+            imports_compatibility_importer(
+                "import llm_collab.compatibility.projection",
+                "llm_collab.candidate",
+                "llm_collab",
+            )
+        )
 
         consumers = []
         production_paths = []
@@ -706,14 +752,18 @@ finally:
                 continue
             if path.suffix == ".py":
                 module, package = module_identity(path, root)
-                targets = resolved_import_targets(text, module, package)
-                imports_compatibility = any(
-                    target == "llm_collab.compatibility"
-                    or target.startswith("llm_collab.compatibility.")
-                    for target in targets
+                imports_compatibility = imports_compatibility_importer(
+                    text,
+                    module,
+                    package,
                 )
             else:
-                imports_compatibility = "llm_collab.compatibility" in text
+                imports_compatibility = (
+                    "llm_collab.compatibility.importer" in text
+                    or "llm_collab.compatibility import importer" in text
+                    or "llm_collab.compatibility import import_current_provenance"
+                    in text
+                )
             if imports_compatibility:
                 consumers.append(str(path.relative_to(root)))
         self.assertEqual(consumers, [])
