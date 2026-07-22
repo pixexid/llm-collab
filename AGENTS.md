@@ -104,3 +104,62 @@ Two incidents established this as repo-local policy:
 - PR #198 repeated the same class through the `GH-` autolink; the merge commit
   body put a closing keyword adjacent to the autolinked reference for issue 91,
   and GitHub changed GH-91 to closed.
+
+## Code Review Rules
+
+Path-scoped review rules for Codex Code Review. Only rules matching the changed
+files fire, and findings cite the rule that produced them. This is a seed set of
+three: each encodes a class that was already adjudicated in this repository and
+then rediscovered at review cycle 2-3, where it forced an amendment or a
+retracted CLEAN. Related GH-185.
+
+Keep the set small. Add a rule only after the class has cost a real cycle, and
+remove one that turns noisy.
+
+### SQL text constraints and embedded NUL
+
+Scope: `llm_collab/ledger/`
+
+A byte length/shape predicate can still admit an embedded NUL. `length`, `GLOB`,
+`LIKE`, and `substr` stop at the first NUL, so `length(k) = 64 AND k NOT GLOB
+'*[^0-9a-f]*'` accepts `'a' * 64 || char(0) || <arbitrary>`. Equality, `IN`, and
+`instr` see whole bytes.
+
+Safe path: a new or revised TEXT `CHECK` family built on `length`/`GLOB`/`LIKE`/
+`substr` also rejects `instr(column, char(0)) != 0`.
+
+Exempt: released immutable migration SQL protected by checksum and fingerprint.
+This rule does not ask for V1/V2 to be rewritten (see #176).
+
+### Pin one descriptor chain for correlated reads
+
+Scope: `llm_collab/compatibility/`, `llm_collab/daemon/`
+
+Re-resolving an ancestor chain by pathname on each call leaves every call
+internally consistent while nothing checks that two calls resolved through the
+same root. Per-file identity checks say nothing about ancestor-chain identity
+across calls.
+
+Applies to authority-sensitive traversal, and to any operation batching or
+correlating multiple reads under one workspace root. A one-off unrelated path
+read is not a violation.
+
+Safe path: open the root/ancestor chain once, hold the descriptors, open below
+them `dir_fd`-relative, and remove root-path parameters from helpers so the seam
+cannot be reintroduced. Pathname revalidation is a second layer, never the only
+one.
+
+### Bounded work fails closed and never truncates
+
+Scope: `llm_collab/`
+
+A partial result is indistinguishable from a complete one, so a bound that
+truncates converts a resource limit into a silent correctness bug.
+
+Safe path: begin the budget at the earliest untrusted enumeration or parse
+boundary - for a directory scan, before suffix filtering - keep it cumulative
+across sources within one run, and raise on exceed so the operation aborts with
+no partial state.
+
+Any bounded primitive that proves the same outcome is acceptable; this rule does
+not prescribe one algorithm.
