@@ -625,12 +625,6 @@ def _normalize_legacy_manifest(value: Mapping[str, object]) -> dict[str, object]
     if publication.get("integrity") != expected_publication:
         raise CanonicalIntegrityError("publication integrity does not match")
     normalized_publication["integrity"] = expected_publication
-    publication_workspace_id = normalized_publication["workspace_id"]
-    publication_project_id = normalized_publication["project_id"]
-    if any(entry["source_workspace_id"] != publication_workspace_id for entry in entries):
-        raise ValueError("manifest entry source_workspace_id must match publication workspace_id")
-    if any(entry["source_project_id"] != publication_project_id for entry in entries):
-        raise ValueError("manifest entry source_project_id must match publication project_id")
     if manifest.get("sealed") is not True:
         raise ValueError("legacy manifest must be sealed")
     seal_projection = {
@@ -3135,6 +3129,55 @@ class LedgerStore:
         if write and self._read_only:
             raise PermissionError("query-only readers cannot create canonical messages")
 
+    def _validate_legacy_manifest_provenance(
+        self,
+        *,
+        workspace_id: str,
+        registry_revision: str,
+        normalized: Mapping[str, object],
+        records: Sequence[tuple[object, ...]],
+        source_project_ids: Mapping[str, object] | None,
+    ) -> None:
+        publication = normalized["publication"]  # type: ignore[index]
+        entries = normalized["entries"]  # type: ignore[assignment]
+        publication_workspace_id = str(publication["workspace_id"])  # type: ignore[index]
+        publication_project_id = str(publication["project_id"])  # type: ignore[index]
+        cutoff_policy_revision = str(normalized["cutoff_policy_revision"])
+        if publication_workspace_id != workspace_id:
+            raise ValueError("manifest provenance workspace_id must match the ledger workspace")
+        if self.get_project_snapshot(
+            workspace_id=workspace_id,
+            project_id=publication_project_id,
+            registry_revision=registry_revision,
+        ) is None:
+            raise ValueError("manifest provenance project_id references an unknown project")
+        if str(publication["cutoff_policy_revision"]) != cutoff_policy_revision:  # type: ignore[index]
+            raise ValueError("manifest provenance cutoff_policy_revision must match")
+        entry_ids: set[str] = set()
+        for entry in entries:  # type: ignore[union-attr]
+            entry_id = str(entry["integrity"])
+            entry_ids.add(entry_id)
+            if str(entry["source_workspace_id"]) != publication_workspace_id:
+                raise ValueError("manifest provenance source_workspace_id must match")
+            if str(entry["source_project_id"]) != publication_project_id:
+                raise ValueError("manifest provenance source_project_id must match")
+            if str(entry["cutoff_policy_revision"]) != cutoff_policy_revision:
+                raise ValueError("manifest provenance cutoff_policy_revision must match")
+        for record in records:
+            if record[3] == "message" and (record[4], record[5]) != ("project", publication_project_id):
+                raise ValueError("legacy import message records must match manifest publication project_id")
+        if source_project_ids is None:
+            return
+        if set(source_project_ids) != entry_ids:
+            raise ValueError("legacy source project_id must cover every manifest entry")
+        for value in source_project_ids.values():
+            try:
+                source_project_id = validate_project_id(value)  # type: ignore[arg-type]
+            except ValueError as exc:
+                raise ValueError("legacy source project_id must match manifest provenance") from exc
+            if source_project_id != publication_project_id:
+                raise ValueError("legacy source project_id must match manifest provenance")
+
     def _prepare_legacy_import_rows(
         self,
         *,
@@ -3143,6 +3186,7 @@ class LedgerStore:
         records: Iterable[Mapping[str, object]],
         imported_at_utc: str,
         planned_messages: frozenset[tuple[str, str, str]] = frozenset(),
+        source_project_ids: Mapping[str, object] | None = None,
     ) -> tuple[
         str,
         tuple[object, ...],
@@ -3150,14 +3194,6 @@ class LedgerStore:
         tuple[tuple[object, ...], ...],
     ]:
         publication = normalized["publication"]  # type: ignore[index]
-        if publication["workspace_id"] != workspace_id:  # type: ignore[index]
-            raise ValueError("manifest publication workspace_id must match the ledger workspace")
-        if self.get_project_snapshot(
-            workspace_id=workspace_id,
-            project_id=str(publication["project_id"]),
-            registry_revision=str(publication["registry_revision"]),
-        ) is None:
-            raise ValueError("manifest publication project_id references an unknown project")
         manifest_id = str(normalized["manifest_id"])
         manifest_seal = str(normalized["seal"]["value"])  # type: ignore[index]
         entries = normalized["entries"]  # type: ignore[assignment]
@@ -3205,6 +3241,13 @@ class LedgerStore:
             raise ValueError("legacy import records must cover every non-meta manifest entry exactly once")
         if recorded_entry_ids & recordless_entry_ids:
             raise ValueError("chat meta manifest entries must not carry output records")
+        self._validate_legacy_manifest_provenance(
+            workspace_id=workspace_id,
+            registry_revision=str(publication["registry_revision"]),  # type: ignore[index]
+            normalized=normalized,
+            records=normalized_records,
+            source_project_ids=source_project_ids,
+        )
 
         expected_manifest = (
             workspace_id,
@@ -3515,20 +3558,13 @@ class LedgerStore:
         if not self.has_registry_snapshot(workspace_id=workspace_id, registry_revision=registry_revision):
             raise ValueError("registry snapshot is absent")
         normalized = _normalize_legacy_manifest(manifest)
-        if normalized["publication"]["workspace_id"] != workspace_id:  # type: ignore[index]
-            raise ValueError("manifest publication workspace_id must match the ledger workspace")
-        if self.get_project_snapshot(
-            workspace_id=workspace_id,
-            project_id=str(normalized["publication"]["project_id"]),  # type: ignore[index]
-            registry_revision=registry_revision,
-        ) is None:
-            raise ValueError("manifest publication project_id references an unknown project")
         entries = normalized["entries"]  # type: ignore[assignment]
         sources = self._read_legacy_v2_sources(workspace_root=workspace_root, entries=entries)  # type: ignore[arg-type]
 
         packet_members: dict[tuple[str, str, str, str, str], dict[str, object]] = {}
         records: list[dict[str, object]] = []
         prepared_messages: list[dict[str, object]] = []
+        source_project_ids: dict[str, object] = {}
         inbox_pointer_count = 0
         entry_by_locator = {str(entry["canonical_locator"]): entry for entry in entries}  # type: ignore[union-attr]
         for locator, raw in sources.items():
@@ -3541,6 +3577,7 @@ class LedgerStore:
                     raise ValueError("legacy chat meta is not valid JSON") from exc
                 if not isinstance(parsed_meta, dict):
                     raise ValueError("legacy chat meta must be a JSON object")
+                source_project_ids[str(entry["integrity"])] = parsed_meta.get("project_id")
                 continue
             if kind == "inbox_pointer":
                 try:
@@ -3549,6 +3586,7 @@ class LedgerStore:
                     raise ValueError("legacy inbox pointer index is not valid JSON") from exc
                 if not isinstance(inbox, dict):
                     raise ValueError("legacy inbox pointer index must be a JSON object")
+                source_project_ids[str(entry["integrity"])] = inbox.get("project_id")
                 for bucket in ("unread", "read"):
                     pointers = inbox.get(bucket, [])
                     if not isinstance(pointers, list) or any(not isinstance(item, str) for item in pointers):
@@ -3560,6 +3598,7 @@ class LedgerStore:
                 continue
 
             frontmatter, body = _parse_legacy_frontmatter(raw)
+            source_project_ids[str(entry["integrity"])] = frontmatter.get("project_id")
             stem, direction, filename_agent, slug = _legacy_packet_name_parts(locator)
             sender = _bounded_text(frontmatter.get("from"), "from", 128)
             recipient = _bounded_text(frontmatter.get("to"), "to", 128)
@@ -3589,25 +3628,8 @@ class LedgerStore:
                 raise ValueError("legacy packet pair members differ")
             frontmatter = to_member["frontmatter"]  # type: ignore[assignment]
             body = to_member["body"]  # type: ignore[assignment]
-            project_id = frontmatter.get("project_id")  # type: ignore[union-attr]
             publication_project_id = str(normalized["publication"]["project_id"])  # type: ignore[index]
-            entry_project_ids = {
-                str(entry_by_locator[str(member[direction]["locator"])]["source_project_id"])  # type: ignore[index]
-                for direction in ("to", "from")
-            }
-            if project_id is None:
-                raise ValueError("legacy packet project_id must match manifest provenance")
-            else:
-                project_id = validate_project_id(project_id)  # type: ignore[arg-type]
-                if project_id != publication_project_id or entry_project_ids != {project_id}:
-                    raise ValueError("legacy packet project_id must match manifest provenance")
-                if self.get_project_snapshot(
-                    workspace_id=workspace_id,
-                    project_id=project_id,
-                    registry_revision=registry_revision,
-                ) is None:
-                    raise ValueError("legacy packet references an unknown project")
-                scope_kind, scope_identity = "project", project_id
+            scope_kind, scope_identity = "project", publication_project_id
             sender_agent_id = _canonical_agent_id("agent_" + str(frontmatter["from"]), "sender_agent_id")  # type: ignore[index]
             recipient_agent_id = _canonical_agent_id("agent_" + str(frontmatter["to"]), "recipient_agent_id")  # type: ignore[index]
             artifacts = []
@@ -3661,6 +3683,7 @@ class LedgerStore:
                 records=records,
                 imported_at_utc=imported_at_utc,
                 planned_messages=planned,
+                source_project_ids=source_project_ids,
             )
         )
         existing = self._existing_legacy_import_is_identical(
