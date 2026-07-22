@@ -4,6 +4,7 @@ import hashlib
 import ast
 import inspect
 import json
+import os
 import sqlite3
 import unittest
 from pathlib import Path
@@ -13,21 +14,29 @@ from unittest.mock import patch
 from jsonschema import Draft202012Validator
 
 import llm_collab.canonical as canonical
+import llm_collab.canonical.control as control_module
 import llm_collab.canonical.delivery as delivery_module
 import llm_collab.canonical.messages as messages_module
 import llm_collab.compatibility.projection as projection_module
 import llm_collab.ledger.store as store_module
 from llm_collab.canonical import (
+    CanonicalControlError,
     CanonicalConflictError,
     CanonicalIntegrityError,
+    append_acknowledgment_receipt,
+    append_dead_letter_receipt,
     append_receipt,
     create_attempt,
     create_deliveries,
     create_or_return_equivalent,
+    inspect_delivery,
+    inspect_legacy_manifest_provenance,
+    inspect_receipt,
     project_delivery_v1,
     project_message_v1,
     project_receipt_v1,
     read_message,
+    require_canonical_write_gate,
 )
 from llm_collab.compatibility import (
     project_chat_packet_v2,
@@ -60,6 +69,35 @@ def record_registry(store: LedgerStore, revision_hash: str = REVISION_HASH) -> s
         project_snapshots={
             PROJECT: json.dumps({"project_id": PROJECT}),
             OTHER_PROJECT: json.dumps({"project_id": OTHER_PROJECT}),
+        },
+        source_snapshots={PROJECT: {}, OTHER_PROJECT: {}},
+    )
+    return revision
+
+
+def record_registry_for_control(
+    store: LedgerStore,
+    *,
+    project_canonical_writes: object = True,
+    other_canonical_writes: object = False,
+    revision_hash: str = REVISION_HASH,
+) -> str:
+    revision = "sha256:" + revision_hash
+    store.record_registry_snapshot(
+        workspace_id=WORKSPACE,
+        registry_revision=revision,
+        registry_source_sha256=revision_hash,
+        captured_at_utc=NOW,
+        workspace_snapshot_json=json.dumps(
+            {"workspace_id": WORKSPACE, "projects": [PROJECT, OTHER_PROJECT]}
+        ),
+        project_snapshots={
+            PROJECT: json.dumps(
+                {"project_id": PROJECT, "canonical_writes": project_canonical_writes}
+            ),
+            OTHER_PROJECT: json.dumps(
+                {"project_id": OTHER_PROJECT, "canonical_writes": other_canonical_writes}
+            ),
         },
         source_snapshots={PROJECT: {}, OTHER_PROJECT: {}},
     )
@@ -166,6 +204,34 @@ def traced_write_statements(store: LedgerStore) -> list[str]:
 
     store._connection.set_trace_callback(trace)
     return statements
+
+
+def delivery_attempt_fixture(store: LedgerStore) -> tuple[str, str, str]:
+    message_id, _created = create_or_return_equivalent(
+        store, **intent(recipients=["agent_claude"])
+    )
+    ((delivery_id, _created),) = create_deliveries(
+        store,
+        workspace_id=WORKSPACE,
+        scope_kind="project",
+        scope_identity=PROJECT,
+        message_id=message_id,
+        routes=[("agent_claude", "endpoint_claude_desktop")],
+        now_epoch_ms=1_000,
+        created_at_utc=NOW,
+    )
+    attempt_id, _created = create_attempt(
+        store,
+        workspace_id=WORKSPACE,
+        scope_kind="project",
+        scope_identity=PROJECT,
+        message_id=message_id,
+        delivery_id=delivery_id,
+        attempt_index=0,
+        attempt_epoch_ms=1_100,
+        created_at_utc=NOW,
+    )
+    return message_id, delivery_id, attempt_id
 
 
 class CanonicalMessageTest(unittest.TestCase):
@@ -966,6 +1032,368 @@ class CanonicalMessageTest(_CanonicalMessageTestBase):
                         attempt_id=attempt_id,
                         receipt_id=forged_receipt_id,
                     )
+
+    def test_p2e_gate_is_strict_shared_and_fail_closed(self) -> None:
+        self.assertIs(control_module.append_receipt, delivery_module.append_receipt)
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            paths = LedgerPaths.derive(tmp, WORKSPACE)
+            with LedgerStore.open_writer(paths) as store:
+                revision = record_registry_for_control(
+                    store,
+                    project_canonical_writes=True,
+                    other_canonical_writes=True,
+                )
+                message_id, delivery_id, attempt_id = delivery_attempt_fixture(store)
+                evidence = state_evidence(
+                    message_id=message_id,
+                    delivery_id=delivery_id,
+                    attempt_id=attempt_id,
+                    endpoint_id="endpoint_claude_desktop",
+                    state="pull_pending",
+                )
+
+                refusals = (
+                    (
+                        "missing-declaration",
+                        lambda: require_canonical_write_gate(
+                            store,
+                            workspace_id=WORKSPACE,
+                            scope_kind="project",
+                            scope_identity=PROJECT,
+                            registry_revision="sha256:" + "b" * 64,
+                            allow_canonical_write=True,
+                            environ={control_module.CANONICAL_CONTROL_ENV: "enabled"},
+                        ),
+                    ),
+                    (
+                        "invalid-declaration",
+                        lambda: (
+                            record_registry_for_control(
+                                store,
+                                project_canonical_writes="true",
+                                revision_hash="c" * 64,
+                            ),
+                            require_canonical_write_gate(
+                                store,
+                                workspace_id=WORKSPACE,
+                                scope_kind="project",
+                                scope_identity=PROJECT,
+                                registry_revision="sha256:" + "c" * 64,
+                                allow_canonical_write=True,
+                                environ={control_module.CANONICAL_CONTROL_ENV: "enabled"},
+                            ),
+                        ),
+                    ),
+                    (
+                        "wrong-project-filter",
+                        lambda: (
+                            record_registry_for_control(
+                                store,
+                                project_canonical_writes=False,
+                                other_canonical_writes=True,
+                                revision_hash="d" * 64,
+                            ),
+                            require_canonical_write_gate(
+                                store,
+                                workspace_id=WORKSPACE,
+                                scope_kind="project",
+                                scope_identity=PROJECT,
+                                registry_revision="sha256:" + "d" * 64,
+                                allow_canonical_write=True,
+                                environ={control_module.CANONICAL_CONTROL_ENV: "enabled"},
+                            ),
+                        ),
+                    ),
+                    (
+                        "wrong-workspace",
+                        lambda: require_canonical_write_gate(
+                            store,
+                            workspace_id="ws_other",
+                            scope_kind="project",
+                            scope_identity=PROJECT,
+                            registry_revision=revision,
+                            allow_canonical_write=True,
+                            environ={control_module.CANONICAL_CONTROL_ENV: "enabled"},
+                        ),
+                    ),
+                    (
+                        "workspace-scope-fails-closed",
+                        lambda: require_canonical_write_gate(
+                            store,
+                            workspace_id=WORKSPACE,
+                            scope_kind="workspace",
+                            scope_identity="workspace",
+                            registry_revision=revision,
+                            allow_canonical_write=True,
+                            environ={control_module.CANONICAL_CONTROL_ENV: "enabled"},
+                        ),
+                    ),
+                    (
+                        "env-absent",
+                        lambda: require_canonical_write_gate(
+                            store,
+                            workspace_id=WORKSPACE,
+                            scope_kind="project",
+                            scope_identity=PROJECT,
+                            registry_revision=revision,
+                            allow_canonical_write=True,
+                            environ={},
+                        ),
+                    ),
+                    (
+                        "env-invalid",
+                        lambda: require_canonical_write_gate(
+                            store,
+                            workspace_id=WORKSPACE,
+                            scope_kind="project",
+                            scope_identity=PROJECT,
+                            registry_revision=revision,
+                            allow_canonical_write=True,
+                            environ={control_module.CANONICAL_CONTROL_ENV: "1"},
+                        ),
+                    ),
+                    (
+                        "call-opt-in-false",
+                        lambda: require_canonical_write_gate(
+                            store,
+                            workspace_id=WORKSPACE,
+                            scope_kind="project",
+                            scope_identity=PROJECT,
+                            registry_revision=revision,
+                            allow_canonical_write=False,
+                            environ={control_module.CANONICAL_CONTROL_ENV: "enabled"},
+                        ),
+                    ),
+                )
+                for name, action in refusals:
+                    with self.subTest(name=name), self.assertRaises(CanonicalControlError):
+                        action()
+                self.assertEqual(
+                    store._connection.execute(
+                        "SELECT count(*) FROM canonical_delivery_receipts"
+                    ).fetchone()[0],
+                    0,
+                )
+
+                with patch.dict(
+                    os.environ,
+                    {control_module.CANONICAL_CONTROL_ENV: "enabled"},
+                    clear=True,
+                ):
+                    receipt_id, created = append_dead_letter_receipt(
+                        store,
+                        workspace_id=WORKSPACE,
+                        scope_kind="project",
+                        scope_identity=PROJECT,
+                        registry_revision=revision,
+                        allow_canonical_write=True,
+                        message_id=message_id,
+                        delivery_id=delivery_id,
+                        attempt_id=attempt_id,
+                        evidence=evidence,
+                        created_at_utc=NOW,
+                    )
+                self.assertTrue(created)
+                self.assertRegex(receipt_id, r"^receipt_[0-9a-f]{64}$")
+
+    def test_p2e_acknowledgment_dead_letter_and_inspection_are_honest(self) -> None:
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            paths = LedgerPaths.derive(tmp, WORKSPACE)
+            with LedgerStore.open_writer(paths) as store:
+                revision = record_registry_for_control(store)
+                message_id, delivery_id, attempt_id = delivery_attempt_fixture(store)
+                completed = state_evidence(
+                    message_id=message_id,
+                    delivery_id=delivery_id,
+                    attempt_id=attempt_id,
+                    endpoint_id="endpoint_claude_desktop",
+                    state="completed",
+                    session_ref_id="session_claude_alpha",
+                )
+                completed["quality"] = "best_effort"
+                reseal_evidence(completed)
+                with patch.dict(
+                    os.environ,
+                    {control_module.CANONICAL_CONTROL_ENV: "enabled"},
+                    clear=True,
+                ), self.assertRaisesRegex(
+                    CanonicalIntegrityError, "terminal receipt evidence must be authoritative"
+                ):
+                    append_acknowledgment_receipt(
+                        store,
+                        workspace_id=WORKSPACE,
+                        scope_kind="project",
+                        scope_identity=PROJECT,
+                        registry_revision=revision,
+                        allow_canonical_write=True,
+                        message_id=message_id,
+                        delivery_id=delivery_id,
+                        attempt_id=attempt_id,
+                        evidence=completed,
+                        session_ref_id="session_claude_alpha",
+                        created_at_utc=NOW,
+                    )
+                accepted = state_evidence(
+                    message_id=message_id,
+                    delivery_id=delivery_id,
+                    attempt_id=attempt_id,
+                    endpoint_id="endpoint_claude_desktop",
+                    state="accepted",
+                    session_ref_id="session_claude_alpha",
+                    correlation_id="corr_accepted",
+                )
+                with patch.dict(
+                    os.environ,
+                    {control_module.CANONICAL_CONTROL_ENV: "enabled"},
+                    clear=True,
+                ):
+                    receipt_id, created = append_acknowledgment_receipt(
+                        store,
+                        workspace_id=WORKSPACE,
+                        scope_kind="project",
+                        scope_identity=PROJECT,
+                        registry_revision=revision,
+                        allow_canonical_write=True,
+                        message_id=message_id,
+                        delivery_id=delivery_id,
+                        attempt_id=attempt_id,
+                        evidence=accepted,
+                        session_ref_id="session_claude_alpha",
+                        created_at_utc=NOW,
+                    )
+                self.assertTrue(created)
+                self.assertEqual(
+                    inspect_delivery(
+                        store,
+                        workspace_id=WORKSPACE,
+                        scope_kind="project",
+                        scope_identity=PROJECT,
+                        message_id=message_id,
+                        delivery_id=delivery_id,
+                    )["outcome"],
+                    "accepted",
+                )
+                self.assertEqual(
+                    inspect_receipt(
+                        store,
+                        workspace_id=WORKSPACE,
+                        scope_kind="project",
+                        scope_identity=PROJECT,
+                        message_id=message_id,
+                        delivery_id=delivery_id,
+                        attempt_id=attempt_id,
+                        receipt_id=receipt_id,
+                    )["state"],
+                    "accepted",
+                )
+
+    def test_p2e_inspection_rejects_false_evidence_integrity(self) -> None:
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            paths = LedgerPaths.derive(tmp, WORKSPACE)
+            with LedgerStore.open_writer(paths) as store:
+                record_registry_for_control(store)
+                message_id, delivery_id, attempt_id = delivery_attempt_fixture(store)
+                forged = state_evidence(
+                    message_id=message_id,
+                    delivery_id=delivery_id,
+                    attempt_id=attempt_id,
+                    endpoint_id="endpoint_claude_desktop",
+                    state="ambiguous",
+                    correlation_id="corr_false_integrity",
+                )
+                forged["integrity"] = "sha256:" + "0" * 64
+                body = json.dumps(
+                    forged, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+                ).encode("utf-8")
+                evidence_sha256 = hashlib.sha256(body).hexdigest()
+                receipt_id = store_module._derive_receipt_id(
+                    WORKSPACE,
+                    "project",
+                    PROJECT,
+                    message_id,
+                    delivery_id,
+                    attempt_id,
+                    evidence_sha256,
+                )
+                store._connection.execute(
+                    "INSERT INTO canonical_evidence_bodies VALUES (?, ?, ?, ?, ?)",
+                    (WORKSPACE, evidence_sha256, len(body), body, NOW),
+                )
+                store._connection.execute(
+                    "INSERT INTO canonical_delivery_receipts VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        WORKSPACE,
+                        "project",
+                        PROJECT,
+                        message_id,
+                        delivery_id,
+                        attempt_id,
+                        receipt_id,
+                        evidence_sha256,
+                        "ambiguous",
+                        "best_effort",
+                        "native_delivery_state",
+                        None,
+                        NOW,
+                    ),
+                )
+                with self.assertRaisesRegex(
+                    CanonicalIntegrityError, "state evidence integrity does not match"
+                ):
+                    inspect_delivery(
+                        store,
+                        workspace_id=WORKSPACE,
+                        scope_kind="project",
+                        scope_identity=PROJECT,
+                        message_id=message_id,
+                        delivery_id=delivery_id,
+                    )
+
+    def test_p2e_manifest_provenance_label_survives_control_return(self) -> None:
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            paths = LedgerPaths.derive(tmp, WORKSPACE)
+            payload = b'{"agent":"claude","unread":[],"read":[]}'
+            entry = manifest_entry(
+                "/agents/claude/inbox.json",
+                payload,
+                evidence_form_version="v2_inbox_index",
+            )
+            manifest = legacy_manifest([entry])
+            with LedgerStore.open_writer(paths) as store:
+                record_registry(store)
+                store.record_legacy_import_manifest(
+                    workspace_id=WORKSPACE,
+                    manifest=manifest,
+                    records=[
+                        {
+                            "entry_integrity": entry["integrity"],
+                            "record_kind": "inbox_pointer",
+                            "scope_kind": None,
+                            "scope_identity": None,
+                            "message_id": None,
+                        }
+                    ],
+                    imported_at_utc=NOW,
+                )
+            with LedgerStore.open_reader(paths) as reader:
+                statements = traced_write_statements(reader)
+                try:
+                    projected = inspect_legacy_manifest_provenance(
+                        reader,
+                        workspace_id=WORKSPACE,
+                        manifest_id="manifest_alpha",
+                    )
+                finally:
+                    reader._connection.set_trace_callback(None)
+            self.assertEqual(statements, [])
+            self.assertEqual(
+                projected["provenance_label"],
+                projection_module.UNAUTHENTICATED_PROVENANCE,
+            )
+            self.assertEqual(
+                projected["manifest_provenance"]["publication"]["provenance_label"],  # type: ignore[index]
+                projection_module.UNAUTHENTICATED_PROVENANCE,
+            )
 
     def test_receipt_evidence_scope_and_terminal_authority_are_rejected_before_write(self) -> None:
         with TemporaryDirectory(dir="/tmp") as tmp:
@@ -2232,14 +2660,21 @@ class CanonicalMessageTest(_CanonicalMessageTestBase):
             {
                 "CanonicalConflictError",
                 "CanonicalIntegrityError",
+                "CanonicalControlError",
+                "append_acknowledgment_receipt",
+                "append_dead_letter_receipt",
                 "append_receipt",
                 "create_attempt",
                 "create_deliveries",
                 "create_or_return_equivalent",
+                "inspect_delivery",
+                "inspect_legacy_manifest_provenance",
+                "inspect_receipt",
                 "project_delivery_v1",
                 "project_message_v1",
                 "project_receipt_v1",
                 "read_message",
+                "require_canonical_write_gate",
             },
         )
         self.assertFalse([name for name in canonical.__all__ if "body" in name])
@@ -2278,6 +2713,42 @@ class CanonicalMessageTest(_CanonicalMessageTestBase):
                     ):
                         consumers.append((source, resolved))
         self.assertEqual(consumers, [])
+
+        control_exports = {
+            "CanonicalControlError",
+            "append_acknowledgment_receipt",
+            "append_dead_letter_receipt",
+            "inspect_delivery",
+            "inspect_legacy_manifest_provenance",
+            "inspect_receipt",
+            "require_canonical_write_gate",
+        }
+        bin_consumers = []
+        for source in (root / "bin").rglob("*"):
+            if not source.is_file():
+                continue
+            try:
+                parsed = ast.parse(source.read_text())
+            except (SyntaxError, UnicodeDecodeError):
+                continue
+            for node in ast.walk(parsed):
+                if isinstance(node, ast.Import):
+                    for alias in node.names:
+                        if alias.name == "llm_collab.canonical.control" or alias.name.startswith(
+                            "llm_collab.canonical.control."
+                        ):
+                            bin_consumers.append((source, alias.name))
+                elif isinstance(node, ast.ImportFrom):
+                    module = node.module or ""
+                    if module == "llm_collab.canonical.control" or module.startswith(
+                        "llm_collab.canonical.control."
+                    ):
+                        bin_consumers.append((source, module))
+                    if module == "llm_collab.canonical" and any(
+                        alias.name in control_exports for alias in node.names
+                    ):
+                        bin_consumers.append((source, module))
+        self.assertEqual(bin_consumers, [])
 
     def test_trust_boundary_types_utf8_and_timestamps_fail_as_value_errors(self) -> None:
         with TemporaryDirectory(dir="/tmp") as tmp:
