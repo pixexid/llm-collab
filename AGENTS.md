@@ -155,15 +155,23 @@ one.
 
 ### Bounded work fails closed and never truncates
 
-Scope: `llm_collab/`
+Scope: `llm_collab/`, `bin/`, `scripts/`
 
-A partial result is indistinguishable from a complete one, so a bound that
-truncates converts a resource limit into a silent correctness bug.
+A partial result that *claims to be complete* is indistinguishable from a
+complete one, so a bound that silently truncates converts a resource limit into
+a correctness bug. The `bin/` and `scripts/` commands enumerate the same
+untrusted workspace, so they are in scope, not only the library.
 
 Safe path: begin the budget at the earliest untrusted enumeration or parse
 boundary - for a directory scan, before suffix filtering - keep it cumulative
 across sources within one run, and raise on exceed so the operation aborts with
 no partial state.
+
+Exempt: a result that carries its own truncation signal. A capped list returned
+alongside a `*_truncated` flag (or equivalent metadata) is distinguishable from
+a complete one by construction, and its truncation is part of the contract
+rather than a silent loss. The rule targets results that assert completeness,
+not results that declare their own bound.
 
 Any bounded primitive that proves the same outcome is acceptable; this rule does
 not prescribe one algorithm.
