@@ -34,6 +34,105 @@ The process that runs `axsend` must be enabled in
 bin/axsend check        # -> "AX trusted: YES"
 ```
 
+### Recovery after a Claude Code update (GH-135)
+
+Claude Code installs under a version-numbered path
+(`~/Library/Application Support/Claude/claude-code/<version>/claude.app/...`).
+An update deletes the old tree, but the post-update auto-restart deliberately
+keeps background tasks alive — so the surviving process runs from a bundle that
+no longer exists and target app AX calls fail for the rest of that process's
+life. Diagnose by comparing the running path against what is installed, then
+probe Claude itself with a real app-targeted AX read:
+
+```bash
+LLM_COLLAB_ROOT="$(git rev-parse --show-toplevel)"
+ps -eo pid,comm | grep 'claude-code/.*/claude.app'
+ls ~/Library/Application\ Support/Claude/claude-code/
+"$LLM_COLLAB_ROOT/bin/axsend-ensure" tree --app Claude --editable-only
+```
+
+Only a **full quit + reopen** recovers it; a restart cannot, because the
+stranded process is the one it is protecting. Re-approving in System Settings
+is normally unnecessary when controller AX trust is still intact; the target
+app process is the stale part.
+
+Claude cannot perform this recovery itself: quitting the app terminates the
+session issuing the command. So Claude asks Codex, in the durable mailbox
+packet Codex is already waiting on (the doorbell is dead by definition at that
+point, so there is no ring to send), and Codex runs:
+
+```bash
+LLM_COLLAB_ROOT="$(git rev-parse --show-toplevel)"
+osascript -e 'tell application "Claude" to quit'
+while pgrep -f 'claude-code/.*/claude\.app/Contents/MacOS/claude' >/dev/null; do sleep 1; done
+open -a Claude
+sleep 15 && "$LLM_COLLAB_ROOT/bin/axsend-ensure" tree --app Claude --editable-only
+```
+
+Reopening is not the end of the recovery. The app lands on a **new task**
+screen; the old session survives with its thread intact but is not resumed, so
+the lane stalls silently with AX working and nobody driving it. Codex must
+reselect it with computer-use. Select the exact `cliSessionId` named in the
+`AX_BLOCKED` packet; resolve the title only as the on-screen label to click:
+
+```bash
+CLAUDE_CLI_SESSION_ID='<id from AX_BLOCKED packet>' python3 - <<'PY'
+import glob, json, os, sys
+
+target = os.environ["CLAUDE_CLI_SESSION_ID"]
+best = None
+for path in glob.glob(os.path.expanduser(
+        '~/Library/Application Support/Claude/claude-code-sessions/*/*/*.json')):
+    try:
+        data = json.load(open(path))
+    except Exception:
+        continue
+    if data.get('cliSessionId') == target and not data.get('isArchived'):
+        best = data
+        break
+if best is None:
+    sys.exit(f"no unarchived Claude session found for {target}")
+print(best['title'], '|', best['cliSessionId'])
+PY
+# then: computer-use -> click the session row matching that title and id
+```
+
+If the packet lacks a `cliSessionId`, fail closed and ask for a new
+`AX_BLOCKED` packet. Do not fall back to "most recent workspace session"; that
+can select another worker's thread. The title is only the label to click.
+Use the operator-approved UI reselection path for this attended recovery; note
+that screenshot Computer Use may raise the target window and take keyboard
+focus. The AX sidebar-nav used for Codex's own chats does not cover Claude's
+app.
+
+The older workspace-scoped fallback is diagnostic only, useful for identifying
+which Claude sessions exist when preparing a corrected packet:
+
+```bash
+WORKSPACE_CWD="$(pwd)" python3 - <<'PY'
+import json, glob, os
+best = None
+workspace = os.environ["WORKSPACE_CWD"]
+for p in glob.glob(os.path.expanduser(
+        '~/Library/Application Support/Claude/claude-code-sessions/*/*/*.json')):
+    try:
+        d = json.load(open(p))
+    except Exception:
+        continue
+    if d.get('cwd') == workspace and not d.get('isArchived'):
+        if best is None or d.get('lastActivityAt', 0) > best.get('lastActivityAt', 0):
+            best = d
+if best is None:
+    raise SystemExit(f"no unarchived Claude session found for cwd {workspace}")
+print(best['title'], '|', best['cliSessionId'])
+PY
+```
+
+Claude keeps its thread and memory across this, so no state is lost. It still
+states its title and `cliSessionId` in the `AX_BLOCKED` packet so Codex can
+verify it reselected the right window, and Codex still replies into the
+originating chat to hand the lane back.
+
 ## Usage
 
 Before any routine `ring`, prove through readable `AXValue` that the native
