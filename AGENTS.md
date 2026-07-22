@@ -118,7 +118,7 @@ remove one that turns noisy.
 
 ### SQL text constraints and embedded NUL
 
-Scope: `llm_collab/ledger/`
+Scope: `llm_collab/`
 
 A byte length/shape predicate can still admit an embedded NUL. `length`, `GLOB`,
 `LIKE`, and `substr` stop at the first NUL, so `length(k) = 64 AND k NOT GLOB
@@ -127,6 +127,10 @@ A byte length/shape predicate can still admit an embedded NUL. `length`, `GLOB`,
 
 Safe path: a new or revised TEXT `CHECK` family built on `length`/`GLOB`/`LIKE`/
 `substr` also rejects `instr(column, char(0)) != 0`.
+
+A shape predicate must also constrain the shape. `col GLOB '[0-9a-f]*'` matches
+any string whose *first* character is hex; pair a full-string character class
+with an exact length.
 
 Exempt: released immutable migration SQL protected by checksum and fingerprint.
 This rule does not ask for V1/V2 to be rewritten (see #176).
