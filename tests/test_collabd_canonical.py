@@ -15,6 +15,7 @@ from jsonschema import Draft202012Validator
 import llm_collab.canonical as canonical
 import llm_collab.canonical.delivery as delivery_module
 import llm_collab.canonical.messages as messages_module
+import llm_collab.compatibility.projection as projection_module
 import llm_collab.ledger.store as store_module
 from llm_collab.canonical import (
     CanonicalConflictError,
@@ -28,7 +29,13 @@ from llm_collab.canonical import (
     project_receipt_v1,
     read_message,
 )
+from llm_collab.compatibility import (
+    project_chat_packet_v2,
+    project_inbox_pointers_v2,
+    project_legacy_manifest_provenance_v2,
+)
 from llm_collab.ledger import LedgerPaths, LedgerStore
+from tests.test_collabd_store import legacy_manifest, manifest_entry
 
 
 SAFE_VERSION = (3, 51, 3)
@@ -139,6 +146,28 @@ def reseal_evidence(evidence: dict[str, object]) -> dict[str, object]:
     return evidence
 
 
+def assert_no_nulls(testcase: unittest.TestCase, value: object, path: str = "projection") -> None:
+    testcase.assertIsNotNone(value, path)
+    if isinstance(value, dict):
+        for key, item in value.items():
+            assert_no_nulls(testcase, item, f"{path}.{key}")
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            assert_no_nulls(testcase, item, f"{path}[{index}]")
+
+
+def traced_write_statements(store: LedgerStore) -> list[str]:
+    statements: list[str] = []
+
+    def trace(statement: str) -> None:
+        operation = statement.lstrip().split(None, 1)[0].upper() if statement.strip() else ""
+        if operation in {"INSERT", "UPDATE", "DELETE", "REPLACE", "BEGIN", "COMMIT", "ROLLBACK"}:
+            statements.append(statement)
+
+    store._connection.set_trace_callback(trace)
+    return statements
+
+
 class CanonicalMessageTest(unittest.TestCase):
     def setUp(self) -> None:
         linked_version = patch.object(
@@ -227,6 +256,321 @@ class CanonicalMessageTest(unittest.TestCase):
                     ).fetchone()[0],
                     0,
                 )
+
+
+_CanonicalMessageTestBase = CanonicalMessageTest
+
+
+class CompatibilityProjectionTest(unittest.TestCase):
+    def setUp(self) -> None:
+        linked_version = patch.object(
+            store_module, "_linked_sqlite_version_info", return_value=SAFE_VERSION
+        )
+        linked_version.start()
+        self.addCleanup(linked_version.stop)
+
+    def test_p2d_chat_projection_omits_session_keys_and_writes_nothing(self) -> None:
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            paths = LedgerPaths.derive(tmp, WORKSPACE)
+            with LedgerStore.open_writer(paths) as store:
+                record_registry(store)
+                message_id, _created = create_or_return_equivalent(
+                    store,
+                    **intent(
+                        recipients=["agent_claude"],
+                        task_link="TASK-3402EB",
+                    ),
+                )
+            with LedgerStore.open_reader(paths) as reader:
+                statements = traced_write_statements(reader)
+                try:
+                    projected = project_chat_packet_v2(
+                        reader,
+                        workspace_id=WORKSPACE,
+                        project_id=PROJECT,
+                        message_id=message_id,
+                    )
+                finally:
+                    reader._connection.set_trace_callback(None)
+
+            self.assertEqual(statements, [])
+            assert_no_nulls(self, projected)
+            self.assertEqual(projected["body"], "hello")
+            frontmatter = projected["frontmatter"]
+            self.assertEqual(
+                set(frontmatter),
+                {
+                    "canonical_projection",
+                    "chat_id",
+                    "from",
+                    "path_targets",
+                    "priority",
+                    "project_id",
+                    "related_task",
+                    "sender_agent_id",
+                    "sent_utc",
+                    "tags",
+                    "title",
+                    "to",
+                },
+            )
+            self.assertEqual(frontmatter["from"], "codex")
+            self.assertEqual(frontmatter["to"], "claude")
+            self.assertNotIn("sender_session_id", frontmatter)
+            self.assertNotIn("target_session_id", frontmatter)
+            self.assertNotIn("supersedes_session_id", frontmatter)
+            self.assertEqual(
+                frontmatter["canonical_projection"]["lossy_fields_omitted"],  # type: ignore[index]
+                [
+                    "sender_session_id",
+                    "target_session_id",
+                    "supersedes_session_id",
+                ],
+            )
+            with LedgerStore.open_reader(paths) as reader:
+                with self.assertRaises(ValueError):
+                    project_chat_packet_v2(
+                        reader,
+                        workspace_id=WORKSPACE,
+                        project_id=None,  # type: ignore[arg-type]
+                        message_id=message_id,
+                    )
+                with self.assertRaises(KeyError):
+                    project_chat_packet_v2(
+                        reader,
+                        workspace_id=WORKSPACE,
+                        project_id=OTHER_PROJECT,
+                        message_id=message_id,
+                    )
+
+    def test_p2d_inbox_projection_filters_exact_project_and_claims_no_read_state(self) -> None:
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            paths = LedgerPaths.derive(tmp, WORKSPACE)
+            with LedgerStore.open_writer(paths) as store:
+                record_registry(store)
+                message_id, _created = create_or_return_equivalent(
+                    store, **intent(recipients=["agent_claude"])
+                )
+                ((delivery_id, _created),) = create_deliveries(
+                    store,
+                    workspace_id=WORKSPACE,
+                    scope_kind="project",
+                    scope_identity=PROJECT,
+                    message_id=message_id,
+                    routes=[("agent_claude", "endpoint_claude_desktop")],
+                    now_epoch_ms=1_000,
+                    created_at_utc=NOW,
+                )
+                foreign_id, _created = create_or_return_equivalent(
+                    store,
+                    **intent(
+                        scope_identity=OTHER_PROJECT,
+                        dedupe_key="foreign",
+                        recipients=["agent_claude"],
+                        chat_link="CHAT-FOREIGN",
+                    ),
+                )
+                create_deliveries(
+                    store,
+                    workspace_id=WORKSPACE,
+                    scope_kind="project",
+                    scope_identity=OTHER_PROJECT,
+                    message_id=foreign_id,
+                    routes=[("agent_claude", "endpoint_foreign")],
+                    now_epoch_ms=1_000,
+                    created_at_utc=NOW,
+                )
+            with LedgerStore.open_reader(paths) as reader:
+                statements = traced_write_statements(reader)
+                try:
+                    projected = project_inbox_pointers_v2(
+                        reader,
+                        workspace_id=WORKSPACE,
+                        project_id=PROJECT,
+                        recipient_agent_id="agent_claude",
+                    )
+                finally:
+                    reader._connection.set_trace_callback(None)
+
+            self.assertEqual(statements, [])
+            assert_no_nulls(self, projected)
+            self.assertNotIn("read", projected)
+            self.assertNotIn("unread", projected)
+            self.assertEqual(projected["read_state_authority"], "not_projected")
+            self.assertEqual(projected["acknowledgment_authority"], "not_inferred")
+            self.assertEqual(len(projected["pointers"]), 1)
+            pointer = projected["pointers"][0]  # type: ignore[index]
+            self.assertEqual(pointer["message_id"], message_id)
+            self.assertEqual(pointer["delivery_id"], delivery_id)
+            self.assertEqual(pointer["read_state"], "not_projected")
+            self.assertEqual(pointer["acknowledgment"], "not_inferred")
+            self.assertNotIn(OTHER_PROJECT, pointer["locator"])
+            with LedgerStore.open_reader(paths) as reader:
+                with self.assertRaises(ValueError):
+                    project_inbox_pointers_v2(
+                        reader,
+                        workspace_id=WORKSPACE,
+                        project_id=None,  # type: ignore[arg-type]
+                        recipient_agent_id="agent_claude",
+                    )
+
+    def test_p2d_manifest_provenance_is_labelled_and_omits_null_record_fields(self) -> None:
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            paths = LedgerPaths.derive(tmp, WORKSPACE)
+            payload = b'{"agent":"claude","unread":[],"read":[]}'
+            entry = manifest_entry(
+                "/agents/claude/inbox.json",
+                payload,
+                evidence_form_version="v2_inbox_index",
+            )
+            manifest = legacy_manifest([entry])
+            with LedgerStore.open_writer(paths) as store:
+                record_registry(store)
+                store.record_legacy_import_manifest(
+                    workspace_id=WORKSPACE,
+                    manifest=manifest,
+                    records=[
+                        {
+                            "entry_integrity": entry["integrity"],
+                            "record_kind": "inbox_pointer",
+                            "scope_kind": None,
+                            "scope_identity": None,
+                            "message_id": None,
+                        }
+                    ],
+                    imported_at_utc=NOW,
+                )
+            with LedgerStore.open_reader(paths) as reader:
+                statements = traced_write_statements(reader)
+                try:
+                    projected = project_legacy_manifest_provenance_v2(
+                        reader,
+                        workspace_id=WORKSPACE,
+                        manifest_id="manifest_alpha",
+                    )
+                finally:
+                    reader._connection.set_trace_callback(None)
+
+            self.assertEqual(statements, [])
+            assert_no_nulls(self, projected)
+            self.assertEqual(
+                projected["publication"]["provenance_label"],  # type: ignore[index]
+                projection_module.UNAUTHENTICATED_PROVENANCE,
+            )
+            self.assertEqual(
+                projected["publication"]["publisher"]["provenance_label"],  # type: ignore[index]
+                projection_module.UNAUTHENTICATED_PROVENANCE,
+            )
+            self.assertEqual(
+                projected["publication"]["source_boundary"]["provenance_label"],  # type: ignore[index]
+                projection_module.UNAUTHENTICATED_PROVENANCE,
+            )
+            self.assertEqual(
+                projected["entries"][0]["provenance_label"],  # type: ignore[index]
+                projection_module.UNAUTHENTICATED_PROVENANCE,
+            )
+            self.assertEqual(projected["records"], [{"entry_integrity": entry["integrity"], "record_kind": "inbox_pointer"}])
+
+    def test_p2d_schema_sql_hashes_remain_at_p2c_base(self) -> None:
+        expected = {
+            "V1_SQL": "d3d65de464559984dc166a2ba5b9d0585f6831ae73843cd5adb7681a9d60bcfc",
+            "V2_SQL": "cb64959d0173e133f5ccfdaa0b085fc0d89c22128e81188f5ad72733b51cdc00",
+            "V3_SQL": "7dd6f8a09ad1caf4ee41134006526b7d9188e3a4ab4c9fb598f85c93a1d6f087",
+            "V4_SQL": "fc9de2db3e4e3340b7a8bbd51121c534d8717a6b6ce5c102cef341b11c9dddaf",
+            "V5_SQL": "eae06938359660ded4c99531b46e2de2cc29b8785feb36bcc8bc0fd47a9247be",
+            "V6_SQL": "225ece18916fa29ceb40bb72543bf499c42a31a3cd0d38114be0def830570b44",
+        }
+        self.assertEqual(store_module.SCHEMA_VERSION, 6)
+        self.assertEqual(
+            {
+                name: hashlib.sha256("\n".join(getattr(store_module, name)).encode()).hexdigest()
+                for name in expected
+            },
+            expected,
+        )
+        self.assertEqual(
+            (
+                store_module.V1_MIGRATION_CHECKSUM,
+                store_module.V2_MIGRATION_CHECKSUM,
+                store_module.V3_MIGRATION_CHECKSUM,
+                store_module.V4_MIGRATION_CHECKSUM,
+                store_module.V5_MIGRATION_CHECKSUM,
+                store_module.V6_MIGRATION_CHECKSUM,
+                store_module.V1_SCHEMA_FINGERPRINT,
+                store_module.V2_SCHEMA_FINGERPRINT,
+                store_module.V3_SCHEMA_FINGERPRINT,
+                store_module.V4_SCHEMA_FINGERPRINT,
+                store_module.V5_SCHEMA_FINGERPRINT,
+                store_module.V6_SCHEMA_FINGERPRINT,
+            ),
+            (
+                "sha256:ce236daff444f736e01f3666ed44baf1c3ba17e81215fedb638276aff76b01c7",
+                "sha256:338a5d526b6fdea47af667c469897fd38d97a4a2dc8caf90dc5d62c067610e36",
+                "sha256:1b8380593b73695bf8824425b58eda7c94f51fc0937f07dbcbd1786a6e5d467b",
+                "sha256:63f00990d9c3e01384d14d7613c961856ff48037504b1e0ada1f95b034cedf01",
+                "sha256:d6498cf5728ec3d56c0d1360a065243d72384a0de50af55bead8054881bbd9b9",
+                "sha256:56e7ca2ba9eb0a8eb79079372abdc7a39c024977e71a40931b8b60a6acc33c00",
+                "sha256:26a856329406e45d22a8fbecdbd769d9c632acae3652d8c72438d228de7cfca2",
+                "sha256:805aa5ae43c31d85dbe9a84590050b701ddc69cfe1dd225e9c6e67afbd889a7c",
+                "sha256:88e59c9be91df366c03985f99f8b3db1c68382b4846612c0334fd15cc505e673",
+                "sha256:665e17152991c6c21cb8756a5d5720e35e3154d13a4a069b4c74440ed425b39e",
+                "sha256:4495eab6339d339b770442d994b5878e0743d011917cc99b370991a793891a99",
+                "sha256:eb8bc4ddd4348ce05874b91c63ce963c5bb3653636363b7437e2046900996d60",
+            ),
+        )
+
+    def test_p2d_ast_import_graph_has_no_bin_path_to_projection(self) -> None:
+        root = Path(__file__).parents[1]
+        modules: dict[str, Path] = {}
+        for base in (root / "bin", root / "llm_collab"):
+            for source in base.rglob("*.py"):
+                relative = source.relative_to(root).with_suffix("")
+                if relative.parts[-1] == "__init__":
+                    module = ".".join(relative.parts[:-1])
+                else:
+                    module = ".".join(relative.parts)
+                modules[module] = source
+
+        graph: dict[str, set[str]] = {module: set() for module in modules}
+
+        def resolve_relative(module: str, level: int, tail: str | None) -> str:
+            parts = module.split(".")
+            package = parts[:-1]
+            prefix = package[: len(package) - level + 1]
+            return ".".join((*prefix, *((tail or "").split(".") if tail else ())))
+
+        for module, source in modules.items():
+            tree = ast.parse(source.read_text())
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    for alias in node.names:
+                        graph[module].add(alias.name)
+                elif isinstance(node, ast.ImportFrom):
+                    imported = resolve_relative(module, node.level, node.module) if node.level else (node.module or "")
+                    if imported:
+                        graph[module].add(imported)
+                        for alias in node.names:
+                            graph[module].add(f"{imported}.{alias.name}")
+
+        targets = {"llm_collab.compatibility.projection"}
+        reached: list[tuple[str, str]] = []
+        for start in sorted(module for module in modules if module.startswith("bin.")):
+            stack = [(start, start)]
+            seen = set()
+            while stack:
+                node, path = stack.pop()
+                if node in seen:
+                    continue
+                seen.add(node)
+                if node in targets or any(node.startswith(target + ".") for target in targets):
+                    reached.append((start, path))
+                    break
+                for child in graph.get(node, ()):
+                    stack.append((child, f"{path} -> {child}"))
+        self.assertEqual(reached, [])
+
+
+class CanonicalMessageTest(_CanonicalMessageTestBase):
 
     def test_store_and_canonical_share_derivation_and_set_normalization(self) -> None:
         self.assertIs(messages_module._derive_message_id, store_module._derive_message_id)
@@ -1957,6 +2301,9 @@ class CanonicalMessageTest(unittest.TestCase):
                     ).fetchone()[0],
                     0,
                 )
+
+
+del _CanonicalMessageTestBase
 
 
 if __name__ == "__main__":
