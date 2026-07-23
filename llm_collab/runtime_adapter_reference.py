@@ -298,6 +298,10 @@ class ReferenceAdapter:
         session_ref = params["session_ref"]
         if not isinstance(session_ref, dict):
             return self._error(request_id, "INVALID_PARAMS")
+        try:
+            session_ref = validate_session_ref_v1(session_ref)
+        except Exception:
+            return self._error(request_id, "INVALID_PARAMS")
         if not self._valid_session_ref(session_ref):
             return self._error(request_id, "INVALID_SESSION_REF")
         if not _is_request_id(params["original_request_id"]):
@@ -323,10 +327,7 @@ class ReferenceAdapter:
         )
 
     def _valid_session_ref(self, value: Mapping[str, Any]) -> bool:
-        try:
-            document = validate_session_ref_v1(value)
-        except Exception:
-            return False
+        document = value
         if document["workspace_id"] != self._identity.workspace_id:
             return False
         if document["scope"] != self._identity.endpoint()["scope"]:
