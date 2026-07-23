@@ -8,7 +8,10 @@ import hashlib
 import inspect
 import io
 import json
+import os
 import sys
+import threading
+import time
 import unittest
 from pathlib import Path
 from types import MappingProxyType
@@ -1021,8 +1024,15 @@ class RuntimeAdapterReferenceTests(unittest.TestCase):
         handshake = json.loads(adapter.handle_text(initialize_frame("initialize-after-shutdown")) or "{}")
         self.assertEqual(handshake["error"]["data"]["name"], "SHUTDOWN_IN_PROGRESS")
 
-    def test_serve_exits_after_shutdown_ack(self) -> None:
-        payload = (initialize_frame() + "\n" + frame("runtime.shutdown", {}, "shutdown-1") + "\n").encode("utf-8")
+    def test_serve_refuses_later_work_after_shutdown_ack(self) -> None:
+        payload = (
+            initialize_frame()
+            + "\n"
+            + frame("runtime.shutdown", {}, "shutdown-1")
+            + "\n"
+            + frame("runtime.health", {}, "health-after-shutdown")
+            + "\n"
+        ).encode("utf-8")
         stdout = io.BytesIO()
         result = serve(
             adapter=ReferenceAdapter(),
@@ -1033,6 +1043,44 @@ class RuntimeAdapterReferenceTests(unittest.TestCase):
         responses = [json.loads(line) for line in stdout.getvalue().decode("utf-8").splitlines()]
 
         self.assertEqual(result, 0)
+        self.assertEqual(
+            [response["id"] for response in responses],
+            ["initialize-1", "shutdown-1", "health-after-shutdown"],
+        )
+        self.assertEqual(responses[1]["result"], {"status": "shutdown_started"})
+        self.assertEqual(responses[2]["error"]["data"]["name"], "SHUTDOWN_IN_PROGRESS")
+
+    def test_serve_exits_after_shutdown_drain_when_host_keeps_pipe_open(self) -> None:
+        read_fd, write_fd = os.pipe()
+        stdout = io.BytesIO()
+        result: list[int] = []
+        started_at = time.monotonic()
+
+        def run() -> None:
+            with os.fdopen(read_fd, "rb", buffering=0) as stdin:
+                result.append(
+                    serve(
+                        adapter=ReferenceAdapter(),
+                        stdin=stdin,
+                        stdout=stdout,
+                        stderr=io.BytesIO(),
+                        shutdown_drain_seconds=0.05,
+                    )
+                )
+
+        thread = threading.Thread(target=run)
+        thread.start()
+        try:
+            os.write(write_fd, (initialize_frame() + "\n" + frame("runtime.shutdown", {}, "shutdown-1") + "\n").encode("utf-8"))
+            thread.join(timeout=1)
+        finally:
+            os.close(write_fd)
+            thread.join(timeout=1)
+
+        responses = [json.loads(line) for line in stdout.getvalue().decode("utf-8").splitlines()]
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(result, [0])
+        self.assertGreaterEqual(time.monotonic() - started_at, 0.04)
         self.assertEqual([response["id"] for response in responses], ["initialize-1", "shutdown-1"])
         self.assertEqual(responses[-1]["result"], {"status": "shutdown_started"})
 

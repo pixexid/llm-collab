@@ -674,6 +674,29 @@ FIXTURES: tuple[RuntimeAdapterFixture, ...] = (
         ),
     ),
     RuntimeAdapterFixture(
+        fixture_id="runtime-adapter-post-shutdown-health-refusal",
+        polarity=POLARITY_VIOLATING,
+        clause_refs=(
+            ClauseReference(
+                clause_key="C78f267e558da.2",
+                text_sha256="78f267e558dad3c464eaf76f96525bb7479753d80f728dd67e55ef3f692fa7a8",
+                polarity=POLARITY_VIOLATING,
+            ),
+        ),
+        trace=(
+            *_initialize_trace(),
+            TraceFrame("host", "adapter", _request("runtime.shutdown", {}, "shutdown-before-health")),
+            TraceFrame("host", "adapter", _request("runtime.health", {}, "health-after-shutdown")),
+        ),
+        expectation=ExpectedRefusal(
+            error_name="SHUTDOWN_IN_PROGRESS",
+            error_code=-32016,
+            state_effect=NO_STATE_CHANGE,
+            response_emitted=True,
+            closes_connection=False,
+        ),
+    ),
+    RuntimeAdapterFixture(
         fixture_id="runtime-adapter-shutdown-rejects-session-selector",
         polarity=POLARITY_VIOLATING,
         clause_refs=(
@@ -957,6 +980,26 @@ def _validate_initialize_result(result: Any) -> None:
         raise ConformanceFailure("fixture-conforming-trace", "initialize")
 
 
+def _initialize_result_matches_request(params: Mapping[str, Any], result: Mapping[str, Any]) -> bool:
+    if params.get("requested_protocol_version") != result.get("negotiated_protocol_version"):
+        return False
+    for key in ("adapter_id", "adapter_revision", "manifest_id", "manifest_revision"):
+        if params.get(key) != result.get(key):
+            return False
+    endpoint = result.get("endpoint")
+    capability_set = result.get("capability_set")
+    if not isinstance(endpoint, Mapping) or not isinstance(capability_set, Mapping):
+        return False
+    return (
+        params.get("endpoint") == endpoint
+        and endpoint.get("adapter_name") == result.get("adapter_id")
+        and endpoint.get("adapter_revision") == result.get("adapter_revision")
+        and endpoint.get("workspace_id") == capability_set.get("workspace_id")
+        and endpoint.get("scope") == capability_set.get("scope")
+        and endpoint.get("capability_set_id") == capability_set.get("capability_set_id")
+    )
+
+
 def _validate_session_ref(value: Any) -> None:
     try:
         value = validate_session_ref_v1(value)
@@ -1135,6 +1178,54 @@ def _validate_evidence_integrity(evidence: Mapping[str, Any]) -> None:
         raise ConformanceFailure("fixture-evidence-integrity", "state evidence")
 
 
+def _stateful_post_shutdown_refusal(
+    fixture: RuntimeAdapterFixture,
+    expected: tuple[str, int, bool, bool],
+) -> tuple[str, int, bool, bool] | None:
+    if expected != ("SHUTDOWN_IN_PROGRESS", -32016, True, False):
+        return None
+    if len(fixture.trace) < 4:
+        return None
+    initialize_response = fixture.trace[1]
+    initialize_response_frame = _thaw(initialize_response.frame)
+    host_frames = [
+        _thaw(trace.frame)
+        for trace in fixture.trace
+        if trace.sender == "host" and trace.receiver == "adapter"
+    ]
+    if len(host_frames) < 3:
+        return None
+    shutdown = host_frames[-2]
+    final = host_frames[-1]
+    try:
+        initialize_request_id, initialize_method, initialize_params = validate_request(host_frames[0])
+        if initialize_method != "initialize":
+            return None
+        if initialize_response.sender != "adapter" or initialize_response.receiver != "host":
+            return None
+        validate_response(initialize_response_frame, initialize_request_id)
+        if "result" not in initialize_response_frame:
+            return None
+        _validate_initialize_result(initialize_response_frame["result"])
+        if not _initialize_result_matches_request(initialize_params, initialize_response_frame["result"]):
+            return None
+        _shutdown_request_id, shutdown_method, shutdown_params = validate_request(shutdown)
+        if shutdown_method != "runtime.shutdown" or shutdown_params != {}:
+            return None
+        _final_request_id, final_method, final_params = validate_request(final)
+        if final_method != "runtime.health" or final_params != {}:
+            return None
+        if (
+            fixture.trace[-1].sender != "host"
+            or fixture.trace[-1].receiver != "adapter"
+            or _thaw(fixture.trace[-1].frame) != final
+        ):
+            return None
+    except ConformanceFailure:
+        return None
+    return expected
+
+
 def _validate_clause_refs(
     fixture: RuntimeAdapterFixture,
     live_by_key: Mapping[str, Any],
@@ -1180,18 +1271,22 @@ def _validate_expectation(fixture: RuntimeAdapterFixture, error_codes: Mapping[s
         raise ConformanceFailure("fixture-violating-refusal", fixture.fixture_id)
     if error_codes.get(fixture.expectation.error_name) != fixture.expectation.error_code:
         raise ConformanceFailure("fixture-violating-refusal", fixture.fixture_id)
-    if all(_request_would_be_accepted(frame) for frame in fixture.trace):
-        raise ConformanceFailure("fixture-violating-trace", fixture.fixture_id)
-    derived = tuple(
-        item
-        for item in (_derived_refusal(frame, error_codes) for frame in fixture.trace)
-        if item is not None
-    )
     expected = (
         fixture.expectation.error_name,
         fixture.expectation.error_code,
         fixture.expectation.response_emitted,
         fixture.expectation.closes_connection,
+    )
+    stateful_refusal = _stateful_post_shutdown_refusal(fixture, expected)
+    if all(_request_would_be_accepted(frame) for frame in fixture.trace) and stateful_refusal is None:
+        raise ConformanceFailure("fixture-violating-trace", fixture.fixture_id)
+    derived = tuple(
+        item
+        for item in (
+            *(_derived_refusal(frame, error_codes) for frame in fixture.trace),
+            stateful_refusal,
+        )
+        if item is not None
     )
     if not derived or expected not in derived:
         raise ConformanceFailure("fixture-violating-refusal", fixture.fixture_id)

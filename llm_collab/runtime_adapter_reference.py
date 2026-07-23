@@ -10,7 +10,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import select
 import sys
+import time
 from dataclasses import dataclass, field, replace
 from typing import Any, BinaryIO, Mapping
 
@@ -55,6 +57,7 @@ FAULT_INJECTIONS = frozenset(
 
 MAX_MESSAGE_BYTES = 1_048_576
 MAX_STDERR_BYTES_PER_CONNECTION = 65_536
+SHUTDOWN_DRAIN_MS = 10_000
 
 
 @dataclass(frozen=True)
@@ -547,9 +550,15 @@ def serve(
     stdin: BinaryIO,
     stdout: BinaryIO,
     stderr: BinaryIO,
+    shutdown_drain_seconds: float | None = None,
 ) -> int:
+    drain_seconds = SHUTDOWN_DRAIN_MS / 1000 if shutdown_drain_seconds is None else shutdown_drain_seconds
+    shutdown_deadline: float | None = None
     while True:
-        raw = stdin.readline(MAX_MESSAGE_BYTES + 2)
+        raw = _readline_before_deadline(stdin, shutdown_deadline)
+        if raw is None:
+            stdout.flush()
+            return 0
         if raw == b"":
             return 0
         if len(raw) > MAX_MESSAGE_BYTES + 1:
@@ -574,8 +583,25 @@ def serve(
             stdout,
             enforce_bound=adapter.fault_injection not in {FAULT_INVALID_FRAMING, FAULT_OVERSIZED_MESSAGE},
         )
-        if adapter.fault_injection is not None or adapter._shutdown:
+        if adapter.fault_injection is not None:
             return 0
+        if adapter._shutdown and shutdown_deadline is None:
+            shutdown_deadline = time.monotonic() + drain_seconds
+
+
+def _readline_before_deadline(stdin: BinaryIO, deadline: float | None) -> bytes | None:
+    if deadline is None:
+        return stdin.readline(MAX_MESSAGE_BYTES + 2)
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        return None
+    try:
+        readable, _, _ = select.select([stdin], [], [], remaining)
+    except (AttributeError, OSError, ValueError):
+        return stdin.readline(MAX_MESSAGE_BYTES + 2)
+    if not readable:
+        return None
+    return stdin.readline(MAX_MESSAGE_BYTES + 2)
 
 
 def _write_response(response: str | bytes, stdout: BinaryIO, *, enforce_bound: bool = True) -> None:
