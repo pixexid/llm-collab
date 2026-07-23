@@ -246,13 +246,66 @@ matches, and caller-supplied cwd claims are not authoritative session identity.
 An adapter that cannot prove an exact binding MUST expose a weaker route, such
 as `ui_attached` or `pull_only`, rather than invent a `SessionRef`.
 
+### Conversation participant and binding
+
+**Future requirement.** A conversation participant is the durable logical seat
+inside one conversation that may receive, acknowledge, or act on messages. It is
+finer-grained than `agent_id`: one logical `Agent` may have multiple
+participants across conversations or scopes, and a participant may move from
+one native session to another only through an audited binding transition.
+
+Standalone conversation identity reuses the existing durable `chat_id` value as
+`conversation_id`, but `chat_id` is not globally unique. The only authoritative
+address for a participant is the compound key:
+
+```text
+(workspace_id, scope_kind, scope_identity, conversation_id, participant_id)
+```
+
+`conversation_id` alone MUST NOT key a binding, route a delivery, resolve a
+participant, or select a native session. Missing, empty, `null`, display-name,
+"latest", cwd, window, renderer, or sidebar-derived values are not compatible
+fallbacks for any component of the compound key.
+
+`ConversationBindingV1` binds exactly one participant generation to exactly one
+`SessionRefV1`. Its `binding_id` and generation are derived by storage from the
+compound participant key, the exact session reference, the lifecycle-provider
+revision, and the preceding generation; callers never provide either value.
+The lifecycle vocabulary is closed:
+
+- `reserved`
+- `registering`
+- `active`
+- `draining`
+- `unverified`
+- `superseded`
+- `retired`
+- `quarantined`
+
+Storage MUST enforce all binding authority, including:
+
+- at most one active mutation-capable binding for one compound participant key;
+- at most one mutation owner for one exact native session;
+- monotonic generations for a participant;
+- stale generations that never resolve to a newer active binding;
+- restart or unknown liveness downgrading to `unverified` and failing closed.
+
+Delivery-capable routing freezes `(binding_id, generation)` before dispatch.
+A later rebind, handoff, restart, or discovery refresh cannot retarget that
+attempt to a newer binding. Explicit audited rebind/handoff may transfer only
+pending work that has not been attempted and has no possible native acceptance;
+attempted, ambiguous, accepted, or otherwise unresolved work remains owned by
+the predecessor binding until reconciled.
+
 ### Message, Delivery, Receipt, and Acknowledgment
 
 A `Message` is one immutable communication intent with one canonical ID and
 body reference. Fan-out does not duplicate that intent.
 
 A `Delivery` is one route for one message to one endpoint and, when known, one
-exact session. Fan-out creates separate deliveries.
+exact session. Fan-out creates separate deliveries. After the planned
+conversation-binding migration lands, mutation-capable delivery MUST also carry
+the frozen conversation binding and generation selected before dispatch.
 
 A `Receipt` is immutable structured evidence about one delivery or attempt. It
 records source, quality, revision, correlation, and the exact state it proves.

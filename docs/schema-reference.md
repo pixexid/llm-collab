@@ -722,8 +722,8 @@ containment.
 
 ### Implemented ledger versions
 
-The exact current ledger is `PRAGMA user_version = 6`
-(`llm_collab.ledger.store.SCHEMA_VERSION == 6`):
+The exact current ledger is `PRAGMA user_version = 7`
+(`llm_collab.ledger.store.SCHEMA_VERSION == 7`):
 
 | Version | Landed in | Tables, triggers, and constraints |
 |---|---|
@@ -733,6 +733,7 @@ The exact current ledger is `PRAGMA user_version = 6`
 | v4 | P2a merge `5673037` | 5 tables plus 18 triggers: content-addressed `canonical_bodies`, immutable `canonical_messages`, and normalized child tables for recipients, artifacts, and tags. Scope uses `(workspace_id, scope_kind, scope_identity)`, with project rows bound to exact registry snapshots and workspace rows bound to the workspace registry snapshot. Child collections are sealed after parent creation and count-capped. |
 | v5 | P2b merge `1369eaf` | 4 tables plus 12 triggers: `canonical_evidence_bodies`, `canonical_deliveries`, `canonical_delivery_attempts`, and `canonical_delivery_receipts`. Attempts are TTL-bounded; receipts are append-only and carry closed state/evidence vocabularies. Terminal `accepted`/`completed` receipts require authoritative `native_delivery_state` or `exact_session_acknowledgment` evidence plus `session_ref_id`. |
 | v6 | P2c merge `a42585b` | 3 tables plus 6 triggers: `legacy_import_manifests`, `legacy_import_manifest_entries`, and `legacy_import_records`. The import manifest is sealed, idempotent, append-only, and records exact locator/content-hash/source membership for legacy v2 packets and inbox indexes. Its publisher/provenance fields are caller-asserted and unauthenticated; GH-195 remains open. |
+| v7 | GH-179 scheduler merge `62b1839` | 1 table: `observation_scheduler_cursors`. The cursor is keyed by exact workspace and closed source `chats_mailbox`, stores the next project ID for fair per-project observation scheduling, and is bound to the workspace registry snapshot. |
 
 The migration checksums and schema fingerprints are code authority in
 `llm_collab/ledger/store.py` and are verified on open. Current values are:
@@ -745,9 +746,10 @@ The migration checksums and schema fingerprints are code authority in
 | v4 | `sha256:63f00990d9c3e01384d14d7613c961856ff48037504b1e0ada1f95b034cedf01` | `sha256:665e17152991c6c21cb8756a5d5720e35e3154d13a4a069b4c74440ed425b39e` |
 | v5 | `sha256:d6498cf5728ec3d56c0d1360a065243d72384a0de50af55bead8054881bbd9b9` | `sha256:4495eab6339d339b770442d994b5878e0743d011917cc99b370991a793891a99` |
 | v6 | `sha256:56e7ca2ba9eb0a8eb79079372abdc7a39c024977e71a40931b8b60a6acc33c00` | `sha256:eb8bc4ddd4348ce05874b91c63ce963c5bb3653636363b7437e2046900996d60` |
+| v7 | `sha256:2de4a95aaf7f92fb436772b5cf4fede42db485ae464809b9a23f9c8ccc6dda03` | `sha256:3fd3ca002c8571ff90165da045929aedd520d2a891a8b95b2a36ba07569c32e1` |
 
 No subscription, timer, runtime-dispatch lease, fence, retry, or quarantine
-table exists in v1 through v6. Dead-letter and reconciliation outcomes in
+table exists in v1 through v7. Dead-letter and reconciliation outcomes in
 Phase 2 are receipts, not a separate table.
 
 ### Implemented Phase 2 canonical surfaces
@@ -869,7 +871,60 @@ not a process-wide kill switch for direct in-process `LedgerStore` or
 `llm_collab.canonical` library calls. Rollback never performs an in-place schema
 downgrade or destructive cleanup of canonical evidence. A migration failure may
 restore the verified pre-migration backup automatically; an intentional rollback
-keeps v1-v6 evidence intact for later reconciliation.
+keeps v1-v7 evidence intact for later reconciliation.
+
+## Planned Phase 3.5 conversation binding records
+
+Everything in this section is a planned, inert Phase 3.5 contract. Child 1 does
+not add tables, DDL, migrations, runtime code, commands, or production delivery.
+The later storage child must mechanically confirm the next ledger version
+against the current code authority before writing; the expected target is v8 if
+the current store remains v7 at activation time.
+
+Phase 3.5 reuses the existing durable `chat_id` value as `conversation_id`, but
+`chat_id` is not globally unique. The only authoritative participant key is:
+
+```text
+(workspace_id, scope_kind, scope_identity, conversation_id, participant_id)
+```
+
+`conversation_id` alone MUST NOT key a binding, route a delivery, resolve a
+participant, or select a native session. A same-`chat_id` value in two different
+projects or scopes is two different conversation addresses. Missing, empty, or
+`null` scope components never act as wildcards or legacy backfills.
+
+The planned storage shape intentionally has no `conversations` table. Unless a
+later child proves a concrete indexing need, the storage child adds only
+participant and binding records plus the separate lifecycle-provider registry:
+
+- `conversation_participants`, keyed by the compound participant address above;
+- `conversation_bindings`, keyed by the compound participant address plus
+  derived generation and derived `binding_id`;
+- `session_binding_challenges`, for one-time, TTL-bounded attach/start proofs;
+- `lifecycle_provider_registry`, a trusted registry for providers that create,
+  attach, inspect, heartbeat, and retire native sessions.
+
+The lifecycle-provider registry is distinct from runtime-adapter manifests.
+Lifecycle providers establish and verify native session bindings. Runtime
+adapter manifests authorize post-initialize delivery actions. A row from one
+registry cannot substitute for the other.
+
+Storage constraints must enforce:
+
+- one active mutation-capable binding per compound participant key;
+- one mutation owner per exact native session;
+- monotonic generation per participant;
+- storage-derived, never caller-provided `binding_id` and generation;
+- a closed lifecycle vocabulary of `reserved`, `registering`, `active`,
+  `draining`, `unverified`, `superseded`, `retired`, and `quarantined`;
+- restart, missing heartbeat, unknown liveness, or unverifiable native state
+  failing closed as `unverified`;
+- audited rebind/handoff that preserves unresolved evidence and transfers only
+  never-attempted pending work with no possible native acceptance.
+
+Delivery-capable readers must freeze `(binding_id, generation)` before dispatch
+and must refuse stale generations. A stale generation cannot be resolved to the
+newer active binding even if the compound participant key is unchanged.
 
 ## Planned Thread Event Runner records
 
