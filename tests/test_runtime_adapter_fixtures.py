@@ -127,9 +127,11 @@ class RuntimeAdapterFixtureTests(unittest.TestCase):
             "runtime-adapter-reconcile-rejects-stale-binding-evidence": {
                 "C9e388d863ed5.1",
             },
+            "runtime-adapter-reconcile-rejects-session-ref-schema-drift": {
+                "C930c3ccd59a0.1",
+            },
         }
         deferred = {
-            "C930c3ccd59a0.1",
             "C8ed901b43824.1",
             "C8ed901b43824.2",
             "C9a07be32fe6b.1",
@@ -144,8 +146,14 @@ class RuntimeAdapterFixtureTests(unittest.TestCase):
                 self.assertTrue(_replays_fixture(fixture))
                 if fixture.polarity == POLARITY_VIOLATING:
                     self.assertIsInstance(fixture.expectation, ExpectedRefusal)
-                    self.assertEqual(fixture.expectation.error_name, "INVALID_SESSION_REF")
-                    self.assertEqual(fixture.expectation.error_code, -32008)
+                    if fixture_id == "runtime-adapter-reconcile-rejects-session-ref-schema-drift":
+                        self.assertEqual(fixture.expectation.error_name, "INVALID_PARAMS")
+                        self.assertEqual(fixture.expectation.error_code, -32602)
+                        self.assertTrue(fixture.expectation.response_emitted)
+                        self.assertFalse(fixture.expectation.closes_connection)
+                    else:
+                        self.assertEqual(fixture.expectation.error_name, "INVALID_SESSION_REF")
+                        self.assertEqual(fixture.expectation.error_code, -32008)
 
     def test_c07_session_identity_mutations_replay_as_invalid_session_ref(self) -> None:
         base = next(fixture for fixture in FIXTURES if fixture.fixture_id == "runtime-adapter-reconcile-request")
@@ -174,7 +182,13 @@ class RuntimeAdapterFixtureTests(unittest.TestCase):
         result = build_claim(self.protocol)
 
         self.assertIsInstance(result, ClaimFailure)
-        self.assertLess(len(result.gaps), 146)
+        self.assertLess(len(result.gaps), 139)
+        gap_keys = {gap["clause_key"] for gap in result.gaps}
+        self.assertNotIn("C930c3ccd59a0.1", gap_keys)
+        self.assertLessEqual(
+            {"C8ed901b43824.1", "C8ed901b43824.2", "C9a07be32fe6b.1"},
+            gap_keys,
+        )
 
     def test_old_three_key_initialize_endpoint_is_rejected(self) -> None:
         initialize = _thaw(FIXTURES[0].trace[0].frame)
