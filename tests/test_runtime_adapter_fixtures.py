@@ -344,6 +344,82 @@ class RuntimeAdapterFixtureTests(unittest.TestCase):
         self.assertEqual(shutdown.trace[2].frame["method"], "runtime.shutdown")
         self.assertEqual(shutdown.trace[2].frame["id"], "shutdown-1")
 
+    def test_shutdown_success_fixture_covers_only_positive_c15_success_clauses(self) -> None:
+        shutdown = next(
+            fixture
+            for fixture in FIXTURES
+            if fixture.fixture_id == "runtime-adapter-shutdown-success"
+        )
+
+        self.assertEqual(shutdown.polarity, POLARITY_CONFORMING)
+        self.assertEqual(
+            {ref.clause_key for ref in shutdown.clause_refs},
+            {"Ce0c84af21a71.1", "C43b913cc99f1.1", "C78f267e558da.1"},
+        )
+        self.assertNotIn("C78f267e558da.2", {ref.clause_key for ref in shutdown.clause_refs})
+        self.assertIsInstance(shutdown.expectation, ExpectedResult)
+        self.assertEqual(shutdown.expectation.method, "runtime.shutdown")
+        self.assertEqual(_thaw(shutdown.expectation.result), {"status": "shutdown_started"})
+        self.assertEqual(shutdown.trace[0].frame["method"], "initialize")
+        self.assertIn("result", shutdown.trace[1].frame)
+        self.assertEqual(shutdown.trace[2].frame["method"], "runtime.shutdown")
+        self.assertEqual(shutdown.trace[2].frame["params"], {})
+        self.assertTrue(_replays_fixture(shutdown))
+
+    def test_shutdown_success_fixture_reduces_its_own_base_gaps_by_three(self) -> None:
+        result = build_claim(self.protocol)
+        base_result = build_claim(
+            self.protocol,
+            fixtures=tuple(
+                fixture
+                for fixture in FIXTURES
+                if fixture.fixture_id != "runtime-adapter-shutdown-success"
+            ),
+        )
+
+        self.assertIsInstance(result, ClaimFailure)
+        self.assertIsInstance(base_result, ClaimFailure)
+        self.assertEqual(len(base_result.gaps) - len(result.gaps), 3)
+        gap_keys = {gap["clause_key"] for gap in result.gaps}
+        for clause_key in ("Ce0c84af21a71.1", "C43b913cc99f1.1", "C78f267e558da.1"):
+            self.assertNotIn(clause_key, gap_keys)
+        self.assertIn("C78f267e558da.2", gap_keys)
+
+    def test_shutdown_success_fixture_mutations_fail_closed(self) -> None:
+        shutdown = next(
+            fixture
+            for fixture in FIXTURES
+            if fixture.fixture_id == "runtime-adapter-shutdown-success"
+        )
+        request = _thaw(shutdown.trace[2].frame)
+        request["params"] = {"reason": "test"}
+        non_empty_params = replace(shutdown, trace=(*shutdown.trace[:2], TraceFrame("host", "adapter", request)))
+        wrong_status = replace(
+            shutdown,
+            expectation=replace(shutdown.expectation, result={"status": "stopped"}),
+        )
+
+        with self.assertRaisesRegex(ConformanceFailure, "fixture-conforming-trace"):
+            validate_fixtures(self.protocol, (non_empty_params,))
+        with self.assertRaisesRegex(ConformanceFailure, "fixture-result-shape"):
+            validate_fixtures(self.protocol, (wrong_status,))
+
+        for clause_ref in shutdown.clause_refs:
+            with self.subTest(clause=clause_ref.clause_key):
+                removed_ref = replace(
+                    shutdown,
+                    clause_refs=tuple(ref for ref in shutdown.clause_refs if ref != clause_ref),
+                )
+                result = build_claim(
+                    self.protocol,
+                    fixtures=tuple(
+                        removed_ref if fixture.fixture_id == shutdown.fixture_id else fixture
+                        for fixture in FIXTURES
+                    ),
+                )
+                self.assertIsInstance(result, ClaimFailure)
+                self.assertIn(clause_ref.clause_key, {gap["clause_key"] for gap in result.gaps})
+
     def test_violating_fixture_trace_must_really_be_rejected(self) -> None:
         violating = next(fixture for fixture in FIXTURES if fixture.polarity == POLARITY_VIOLATING)
         accepted_trace = (
