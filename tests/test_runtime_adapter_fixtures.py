@@ -108,11 +108,73 @@ class RuntimeAdapterFixtureTests(unittest.TestCase):
                 self.assertEqual(fixture.expectation.closes_connection, closes_connection)
                 self.assertTrue(_replays_fixture(fixture))
 
+    def test_c07_session_binding_fixtures_are_named_and_replay(self) -> None:
+        by_id = {fixture.fixture_id: fixture for fixture in FIXTURES}
+        expected = {
+            "runtime-adapter-reconcile-request": {
+                "C39aa248f4dd8.1",
+                "C5097ad6c480d.1",
+                "C81987c71b9d0.1",
+                "C9e388d863ed5.1",
+            },
+            "runtime-adapter-reconcile-rejects-workspace-mismatch": {
+                "C72337c3bc58e.1",
+                "C72337c3bc58e.2",
+            },
+            "runtime-adapter-reconcile-rejects-workspace-repository-binding": {
+                "C81987c71b9d0.2",
+            },
+            "runtime-adapter-reconcile-rejects-stale-binding-evidence": {
+                "C9e388d863ed5.1",
+            },
+        }
+        deferred = {
+            "C930c3ccd59a0.1",
+            "C8ed901b43824.1",
+            "C8ed901b43824.2",
+            "C9a07be32fe6b.1",
+        }
+        referenced = {ref.clause_key for fixture in FIXTURES for ref in fixture.clause_refs}
+
+        self.assertFalse(deferred & referenced)
+        for fixture_id, clause_keys in expected.items():
+            with self.subTest(fixture=fixture_id):
+                fixture = by_id[fixture_id]
+                self.assertLessEqual(clause_keys, {ref.clause_key for ref in fixture.clause_refs})
+                self.assertTrue(_replays_fixture(fixture))
+                if fixture.polarity == POLARITY_VIOLATING:
+                    self.assertIsInstance(fixture.expectation, ExpectedRefusal)
+                    self.assertEqual(fixture.expectation.error_name, "INVALID_SESSION_REF")
+                    self.assertEqual(fixture.expectation.error_code, -32008)
+
+    def test_c07_session_identity_mutations_replay_as_invalid_session_ref(self) -> None:
+        base = next(fixture for fixture in FIXTURES if fixture.fixture_id == "runtime-adapter-reconcile-request")
+        session = _thaw(base.trace[-1].frame)["params"]["session_ref"]
+        mutations = {
+            "workspace_id": lambda value: value.__setitem__("workspace_id", "ws_other"),
+            "scope": lambda value: value.__setitem__("scope", {"kind": "project", "project_id": "amiga"}),
+            "endpoint_id": lambda value: value.__setitem__("endpoint_id", "endpoint_other"),
+            "native_session_id": lambda value: value.__setitem__("native_session_id", "native-other"),
+            "repository_binding": lambda value: value.__setitem__(
+                "repository_binding",
+                {"project_id": "amiga", "repo_id": "llm-collab", "canonical_cwd": "/repo"},
+            ),
+            "evidence_integrity": lambda value: value["evidence"].__setitem__("integrity", "sha256:" + "0" * 64),
+        }
+
+        for name, mutate in mutations.items():
+            with self.subTest(name=name):
+                changed = _thaw(session)
+                mutate(changed)
+                response = _reconcile_response(changed)
+                self.assertEqual(response["error"]["data"]["name"], "INVALID_SESSION_REF")
+                self.assertEqual(response["error"]["code"], -32008)
+
     def test_fixture_batch_reduces_claim_gap_below_baseline_but_still_fails_closed(self) -> None:
         result = build_claim(self.protocol)
 
         self.assertIsInstance(result, ClaimFailure)
-        self.assertLess(len(result.gaps), 148)
+        self.assertLess(len(result.gaps), 146)
 
     def test_old_three_key_initialize_endpoint_is_rejected(self) -> None:
         initialize = _thaw(FIXTURES[0].trace[0].frame)
@@ -475,10 +537,37 @@ def _replays_fixture(fixture) -> bool:
     responses: list[str | bytes | None] = []
     for trace in host_traces:
         frame = _thaw(trace.frame)
-        responses.append(adapter.handle_text(json.dumps(frame, sort_keys=True, separators=(",", ":"))))
+        response = adapter.handle_text(json.dumps(frame, sort_keys=True, separators=(",", ":")))
+        responses.append(response)
+        if isinstance(fixture.expectation, ExpectedResult) and frame.get("method") == fixture.expectation.method:
+            payload = json.loads(response or "{}")
+            return payload.get("result") == _thaw(fixture.expectation.result)
     if not responses:
         return False
     return _matches_refusal(fixture.expectation, responses[-1])
+
+
+def _reconcile_response(session_ref):
+    adapter = ReferenceAdapter()
+    adapter.handle_text(json.dumps(_thaw(FIXTURES[0].trace[0].frame), sort_keys=True, separators=(",", ":")))
+    response = adapter.handle_text(
+        json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": "reconcile-mutated-session",
+                "method": "runtime.reconcile",
+                "params": {
+                    "session_ref": session_ref,
+                    "original_request_id": "deliver-1",
+                    "delivery_id": "delivery_alpha",
+                    "attempt_id": "attempt_alpha",
+                },
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    )
+    return json.loads(response or "{}")
 
 
 if __name__ == "__main__":
