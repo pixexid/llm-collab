@@ -23,6 +23,7 @@ from llm_collab.runtime_adapter_fixtures import (
     _protocol_error_codes,
     validate_fixtures,
 )
+from llm_collab.runtime_adapter_reference import ReferenceAdapter
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -42,6 +43,40 @@ class RuntimeAdapterFixtureTests(unittest.TestCase):
         self.assertEqual(checked, FIXTURES)
         self.assertTrue(any(fixture.polarity == POLARITY_CONFORMING for fixture in checked))
         self.assertTrue(any(fixture.polarity == POLARITY_VIOLATING for fixture in checked))
+
+    def test_conforming_fixtures_replay_against_reference_adapter(self) -> None:
+        conforming = [fixture for fixture in FIXTURES if fixture.polarity == POLARITY_CONFORMING]
+
+        for fixture in conforming:
+            with self.subTest(fixture=fixture.fixture_id):
+                adapter = ReferenceAdapter()
+                saw_expected = False
+                for trace in fixture.trace:
+                    if trace.sender != "host" or trace.receiver != "adapter":
+                        continue
+                    frame = _thaw(trace.frame)
+                    response = adapter.handle_text(json.dumps(frame, sort_keys=True, separators=(",", ":")))
+                    self.assertIsNotNone(response)
+                    payload = json.loads(response)
+                    self.assertNotIn("error", payload)
+                    if frame["method"] == fixture.expectation.method:
+                        self.assertEqual(payload["result"], _thaw(fixture.expectation.result))
+                        saw_expected = True
+                self.assertTrue(saw_expected)
+
+    def test_old_three_key_initialize_endpoint_is_rejected(self) -> None:
+        initialize = _thaw(FIXTURES[0].trace[0].frame)
+        initialize["params"]["endpoint"] = {
+            "endpoint_id": "endpoint_alpha",
+            "adapter_name": "adapter_alpha",
+            "adapter_revision": "adapter_rev1",
+        }
+
+        response = ReferenceAdapter().handle_text(json.dumps(initialize, sort_keys=True, separators=(",", ":")))
+
+        self.assertIsNotNone(response)
+        payload = json.loads(response)
+        self.assertEqual(payload["error"]["data"]["name"], "INVALID_PARAMS")
 
     def test_unknown_clause_key_fails_closed(self) -> None:
         fixture = replace(
