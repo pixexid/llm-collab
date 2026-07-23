@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import contextlib
 import inspect
 import errno
+import io
 import json
 import os
+import runpy
 import socket
 import stat
 import subprocess
@@ -682,6 +685,32 @@ class DaemonTest(unittest.TestCase):
             self.assertIn("llm-collab:", background_start.stderr)
             self.assertNotIn("usage:", background_start.stderr)
             self.assertNotIn("llm-collabd", background_start.stderr)
+
+    def test_direct_entrypoint_guard_precedes_daemon_import(self) -> None:
+        root = Path(__file__).parents[1]
+        script = root / "bin" / "llm_collabd.py"
+        bin_dir = str(root / "bin")
+        prior_cli = sys.modules.pop("llm_collab.daemon.cli", None)
+        old_path = list(sys.path)
+        try:
+            sys.path.insert(0, bin_dir)
+            import _python_runtime
+
+            stderr = io.StringIO()
+            with patch.object(_python_runtime, "MIN_VERSION", (999, 0)):
+                with contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit) as raised:
+                    runpy.run_path(os.fspath(script), run_name="llm_collabd_guard_reject")
+            self.assertEqual(raised.exception.code, 1)
+            self.assertIn("requires Python 999.0+", stderr.getvalue())
+            self.assertNotIn("llm_collab.daemon.cli", sys.modules)
+
+            namespace = runpy.run_path(os.fspath(script), run_name="llm_collabd_guard_pass")
+            self.assertIn("main", namespace)
+            self.assertIn("llm_collab.daemon.cli", sys.modules)
+        finally:
+            sys.path[:] = old_path
+            if prior_cli is not None:
+                sys.modules["llm_collab.daemon.cli"] = prior_cli
 
     def test_cli_route_is_fixed_and_no_second_flock_exists(self) -> None:
         launcher = (Path(__file__).parents[1] / "bin" / "llm-collab").read_text()
