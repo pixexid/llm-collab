@@ -13,6 +13,7 @@ from llm_collab.runtime_adapter_capability import (
     CapabilityAuthorityError,
     CapabilityDecision,
     EvidenceProfileDecision,
+    OrderedStageAuthorityDecision,
     TrustedCapabilityAuthorityRegistry,
     method_requires_product_capability,
 )
@@ -559,6 +560,155 @@ class RuntimeAdapterCapabilityAuthorityTests(unittest.TestCase):
 
         self.assertEqual(caught.exception.code, CAPABILITY_NOT_DECLARED)
 
+    def test_ordered_stage_protocol_controls_bypass_product_lookup(self) -> None:
+        records = _authority_records(session_action_relations=[], evidence_profiles=[])
+        registry, bound = _bound_authority(records)
+
+        for method in (METHOD_HEALTH, METHOD_SHUTDOWN):
+            with self.subTest(method=method):
+                decision = registry.decide_ordered_stage_authority(bound, method)
+                self.assertEqual(decision, OrderedStageAuthorityDecision(method=method, protocol_control=True))
+        with self.assertRaises(CapabilityAuthorityError) as caught:
+            registry.decide_ordered_stage_authority("not-bound", METHOD_HEALTH)  # type: ignore[arg-type]
+        self.assertEqual(caught.exception.code, CAPABILITY_NOT_DECLARED)
+
+    def test_ordered_stage_refuses_caller_authority_before_any_authorize_decision(self) -> None:
+        records = _authority_records(session_action_relations=[], evidence_profiles=[])
+        registry, bound = _bound_authority(records)
+
+        with self.assertRaises(CapabilityAuthorityError) as caught:
+            registry.decide_ordered_stage_authority(
+                bound,
+                METHOD_DELIVER,
+                caller_authority_fields={"selected_capability": "runtime.deliver.observe_only"},
+            )
+
+        self.assertIn("caller-supplied ordered-stage", str(caught.exception))
+        self.assertEqual(caught.exception.code, CAPABILITY_NOT_DECLARED)
+        with self.assertRaises(CapabilityAuthorityError) as invalid_bound:
+            registry.decide_ordered_stage_authority(
+                "not-bound",  # type: ignore[arg-type]
+                METHOD_HEALTH,
+                caller_authority_fields={"selected_capability": "runtime.deliver.observe_only"},
+            )
+        self.assertIn("caller-supplied ordered-stage", str(invalid_bound.exception))
+
+    def test_ordered_stage_deliver_composes_action_and_two_evidence_profiles(self) -> None:
+        registry, bound = _bound_authority()
+
+        decision = registry.decide_ordered_stage_authority(
+            bound,
+            METHOD_DELIVER,
+            session_ref=_schema_object("exact_session_binding", "evidence_session_alpha"),
+            delivery=_schema_object("native_delivery_state", "evidence_delivery_alpha"),
+        )
+
+        self.assertFalse(decision.protocol_control)
+        self.assertEqual(decision.action, registry.validate_request_authority(bound, METHOD_DELIVER))
+        self.assertEqual(
+            [item.evidence_kind for item in decision.evidence_profiles],
+            ["exact_session_binding", "native_delivery_state"],
+        )
+
+    def test_ordered_stage_cancel_and_reconcile_method_matrix(self) -> None:
+        registry, bound = _bound_authority()
+
+        cancel = registry.decide_ordered_stage_authority(
+            bound,
+            METHOD_CANCEL,
+            session_ref=_schema_object("exact_session_binding", "evidence_session_alpha"),
+        )
+        self.assertEqual(cancel.action.method, METHOD_CANCEL)
+        self.assertEqual([item.evidence_kind for item in cancel.evidence_profiles], ["exact_session_binding"])
+
+        reconcile_without_receipt = registry.decide_ordered_stage_authority(
+            bound,
+            METHOD_RECONCILE,
+            session_ref=_schema_object("exact_session_binding", "evidence_session_alpha"),
+        )
+        self.assertEqual(reconcile_without_receipt.action.method, METHOD_RECONCILE)
+        self.assertEqual(
+            [item.evidence_kind for item in reconcile_without_receipt.evidence_profiles],
+            ["exact_session_binding"],
+        )
+
+        reconcile_with_receipt = registry.decide_ordered_stage_authority(
+            bound,
+            METHOD_RECONCILE,
+            session_ref=_schema_object("exact_session_binding", "evidence_session_alpha"),
+            receipt=_schema_object("exact_session_acknowledgment", "evidence_receipt_alpha"),
+        )
+        self.assertEqual(
+            [item.evidence_kind for item in reconcile_with_receipt.evidence_profiles],
+            ["exact_session_binding", "exact_session_acknowledgment"],
+        )
+
+    def test_ordered_stage_missing_required_inputs_fail_closed(self) -> None:
+        registry, bound = _bound_authority()
+        cases = (
+            (METHOD_DELIVER, {"session_ref": _schema_object("exact_session_binding", "evidence_session_alpha")}),
+            (METHOD_DELIVER, {"delivery": _schema_object("native_delivery_state", "evidence_delivery_alpha")}),
+            (METHOD_CANCEL, {}),
+            (METHOD_RECONCILE, {}),
+            ("runtime.unknown", {}),
+        )
+        for method, kwargs in cases:
+            with self.subTest(method=method, kwargs=kwargs):
+                with self.assertRaises(CapabilityAuthorityError) as caught:
+                    registry.decide_ordered_stage_authority(bound, method, **kwargs)
+                self.assertEqual(caught.exception.code, CAPABILITY_NOT_DECLARED)
+
+    def test_ordered_stage_composes_child_c_relation_guard(self) -> None:
+        records = _authority_records(
+            session_action_relations=[_action_relation(METHOD_DELIVER), _action_relation(METHOD_DELIVER)]
+        )
+        registry, bound = _bound_authority(records)
+
+        with self.assertRaises(CapabilityAuthorityError) as caught:
+            registry.decide_ordered_stage_authority(
+                bound,
+                METHOD_DELIVER,
+                session_ref=_schema_object("exact_session_binding", "evidence_session_alpha"),
+                delivery=_schema_object("native_delivery_state", "evidence_delivery_alpha"),
+            )
+
+        self.assertEqual(caught.exception.code, CAPABILITY_NOT_DECLARED)
+
+    def test_ordered_stage_composes_child_d_profile_guard(self) -> None:
+        records = _authority_records(evidence_profiles=[_evidence_profile(), _evidence_profile()])
+        registry, bound = _bound_authority(records)
+
+        with self.assertRaises(CapabilityAuthorityError) as caught:
+            registry.decide_ordered_stage_authority(
+                bound,
+                METHOD_DELIVER,
+                session_ref=_schema_object("exact_session_binding", "evidence_session_alpha"),
+                delivery=_schema_object("native_delivery_state", "evidence_delivery_alpha"),
+            )
+
+        self.assertEqual(caught.exception.code, CAPABILITY_NOT_DECLARED)
+
+    def test_ordered_stage_preserves_independence_and_p7_boundary(self) -> None:
+        registry, bound = _bound_authority()
+        session_ref = _schema_object("exact_session_binding", "evidence_session_alpha")
+        delivery = _schema_object("native_delivery_state", "evidence_delivery_alpha")
+        session_ref["evidence"]["integrity"] = "sha256:" + ("0" * 64)
+        delivery["evidence"]["integrity"] = "sha256:" + ("0" * 64)
+
+        decision = registry.decide_ordered_stage_authority(
+            bound,
+            METHOD_DELIVER,
+            session_ref=session_ref,
+            delivery=delivery,
+        )
+
+        self.assertEqual(decision.action.selected_capability, "runtime.deliver.observe_only")
+        self.assertEqual({item.capability_profile_id for item in decision.evidence_profiles}, {"runtime_profile"})
+        self.assertNotIn(
+            decision.action.selected_capability,
+            {item.capability_profile_id for item in decision.evidence_profiles},
+        )
+
     def test_capability_module_uses_no_live_runtime_or_evidence_surfaces(self) -> None:
         tree = ast.parse(MODULE_PATH.read_text(encoding="utf-8"))
         forbidden_modules = {
@@ -782,6 +932,10 @@ def _state_evidence(
         "observed_at_utc": "2026-07-23T00:00:00Z",
         "integrity": "sha256:" + ("2" * 64),
     }
+
+
+def _schema_object(evidence_kind: str, evidence_id: str) -> dict[str, object]:
+    return {"evidence": _state_evidence(evidence_kind=evidence_kind, evidence_id=evidence_id)}
 
 
 def _action_relation(
