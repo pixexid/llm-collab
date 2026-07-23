@@ -926,10 +926,24 @@ Storage constraints enforce:
   binding to coexist with a later active generation;
 - NUL-safe byte-length checks on every new text column.
 
+The read-only resolver maps one full participant address to either one current
+active mutation-capable binding reference or one closed non-send reason:
+`waiting_for_session`, `route_ambiguous`, `session_unverified`,
+`adapter_quarantined`, `pull_pending`, or `stale_generation`. It validates the
+compound address before querying and never accepts `conversation_id`,
+`agent_id`, endpoint, native session, window/frontmost/latest/sidebar, or caller
+session values as alternate route authority.
+
+Resolver success is a binding reference only. v8 rows contain exact
+`endpoint_id`, `session_ref_id`, `native_session_id`, provider, runtime
+instance, `binding_id`, and generation fields; they do not contain the evidence,
+authority, runtime-home annotations, or optional repository binding required to
+fabricate a complete `SessionRefV1` document.
+
 Later Phase 3.5 children still own storage-derived write helpers, audited
-rebind/handoff records, active-binding resolvers, dispatch-time
-`(binding_id, generation)` freeze, restart-to-`unverified` transitions, and any
-delivery-capable route consumption.
+rebind/handoff records, dispatch-time `(binding_id, generation)` persistence,
+restart-to-`unverified` transitions, lifecycle-provider evidence assembly, and
+any delivery-capable route consumption.
 
 ## Planned Thread Event Runner records
 

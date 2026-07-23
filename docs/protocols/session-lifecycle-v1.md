@@ -2,10 +2,9 @@
 
 ## Status and authority
 
-This document freezes the planned Session Lifecycle Protocol V1 for Phase 3.5.
-It is a design contract only until the corresponding storage and implementation
-children land. It does not add code, DDL, runtime behavior, delivery authority,
-or production activation.
+This document freezes Session Lifecycle Protocol V1 for Phase 3.5. The v8
+storage foundation and pure read-only binding resolver have landed, but they do
+not add runtime behavior, delivery authority, or production activation.
 
 Session Lifecycle Protocol V1 is orthogonal to
 [Runtime Adapter JSON-RPC Protocol V1](runtime-adapter-jsonrpc-v1.md). Runtime
@@ -107,9 +106,13 @@ native session fails closed.
 ## Dispatch freeze
 
 Before a mutation-capable dispatch, the router resolves and freezes
-`(binding_id, generation)` for the participant. The dispatch attempt stays bound
-to that exact generation. If a rebind or restart occurs before the attempt is
-resolved, the attempt is not retargeted to the newer generation.
+`(binding_id, generation)` for the participant. The pure resolver returns only a
+binding reference and one of the closed non-send reasons
+`waiting_for_session`, `route_ambiguous`, `session_unverified`,
+`adapter_quarantined`, `pull_pending`, or `stale_generation`; it does not
+fabricate `SessionRefV1` evidence from v8 storage rows. The dispatch attempt
+stays bound to that exact generation. If a rebind or restart occurs before the
+attempt is resolved, the attempt is not retargeted to the newer generation.
 
 Pending work may transfer during explicit audited rebind/handoff only when the
 work has not been attempted and no possible native acceptance exists.

@@ -164,6 +164,19 @@ _DELIVERY_OUTCOME_BY_STATE = {
     "routed": (5, "pending"),
     "persisted": (0, "pending"),
 }
+CONVERSATION_BINDING_RESOLUTION_REASONS = frozenset(
+    {
+        "waiting_for_session",
+        "route_ambiguous",
+        "session_unverified",
+        "adapter_quarantined",
+        "pull_pending",
+        "stale_generation",
+    }
+)
+_CONVERSATION_BINDING_WILDCARDS = frozenset(
+    {"*", "latest", "frontmost", "current", "sidebar", "legacy_unscoped"}
+)
 _SAFE_JSON_INTEGER_MIN = -9_007_199_254_740_991
 _SAFE_JSON_INTEGER_MAX = 9_007_199_254_740_991
 _JSON_FORBIDDEN_CODEPOINTS = {0x7F, 0x85, 0x2028, 0x2029}
@@ -316,6 +329,13 @@ def _canonical_scope(
     if scope_kind == "project":
         return workspace, "project", validate_project_id(scope_identity)  # type: ignore[arg-type]
     raise ValueError("scope_kind must be workspace or project")
+
+
+def _conversation_binding_text(value: object, name: str, maximum: int) -> str:
+    text = _bounded_text(value, name, maximum)
+    if text in _CONVERSATION_BINDING_WILDCARDS:
+        raise ValueError(f"{name} must not be a wildcard or legacy selector")
+    return text
 
 
 def _normalized_recipients(values: Iterable[object]) -> tuple[str, ...]:
@@ -5057,6 +5077,184 @@ class LedgerStore:
             validate_project_id(scope_identity)
         else:
             raise ValueError("scope_kind must be workspace or project")
+
+    def resolve_conversation_binding(
+        self,
+        *,
+        workspace_id: str,
+        scope_kind: str,
+        scope_identity: str,
+        conversation_id: str,
+        participant_id: str,
+        expected_binding_id: str | None = None,
+        expected_generation: int | None = None,
+    ) -> dict[str, object]:
+        """Resolve one participant to a current binding reference, or a non-send reason."""
+
+        self._ensure_thread()
+        workspace_id, scope_kind, scope_identity = _canonical_scope(
+            workspace_id, scope_kind, scope_identity
+        )
+        self._validate_canonical_scope(workspace_id, scope_kind, scope_identity)
+        scope_identity = _conversation_binding_text(scope_identity, "scope_identity", 200)
+        conversation_id = _conversation_binding_text(
+            conversation_id, "conversation_id", 128
+        )
+        participant_id = _conversation_binding_text(participant_id, "participant_id", 128)
+        if expected_binding_id is not None:
+            expected_binding_id = _conversation_binding_text(
+                expected_binding_id, "expected_binding_id", 128
+            )
+        if expected_generation is not None and (
+            isinstance(expected_generation, bool)
+            or not isinstance(expected_generation, int)
+            or expected_generation <= 0
+        ):
+            raise ValueError("expected_generation must be a positive integer")
+
+        def unresolved(reason: str) -> dict[str, object]:
+            if reason not in CONVERSATION_BINDING_RESOLUTION_REASONS:
+                raise RuntimeError("unknown conversation binding resolution reason")
+            return {
+                "resolved": False,
+                "reason": reason,
+                "workspace_id": workspace_id,
+                "scope_kind": scope_kind,
+                "scope_identity": scope_identity,
+                "conversation_id": conversation_id,
+                "participant_id": participant_id,
+            }
+
+        participant = self._connection.execute(
+            """
+            SELECT 1 FROM conversation_participants
+            WHERE workspace_id = ? AND scope_kind = ? AND scope_identity = ?
+              AND conversation_id = ? AND participant_id = ?
+            """,
+            (workspace_id, scope_kind, scope_identity, conversation_id, participant_id),
+        ).fetchone()
+        if participant is None:
+            return unresolved("waiting_for_session")
+
+        keys = (
+            "workspace_id",
+            "scope_kind",
+            "scope_identity",
+            "conversation_id",
+            "participant_id",
+            "binding_id",
+            "generation",
+            "state",
+            "mutation_capable",
+            "provider_id",
+            "provider_revision",
+            "endpoint_id",
+            "session_ref_id",
+            "native_session_id",
+            "runtime_instance_id",
+        )
+        rows = [
+            dict(zip(keys, row))
+            for row in self._connection.execute(
+                """
+                SELECT workspace_id, scope_kind, scope_identity, conversation_id,
+                       participant_id, binding_id, generation, state,
+                       mutation_capable, provider_id, provider_revision,
+                       endpoint_id, session_ref_id, native_session_id,
+                       runtime_instance_id
+                FROM conversation_bindings
+                WHERE workspace_id = ? AND scope_kind = ? AND scope_identity = ?
+                  AND conversation_id = ? AND participant_id = ?
+                ORDER BY generation DESC, binding_id
+                """,
+                (
+                    workspace_id,
+                    scope_kind,
+                    scope_identity,
+                    conversation_id,
+                    participant_id,
+                ),
+            )
+        ]
+        if not rows:
+            return unresolved("waiting_for_session")
+
+        active = [
+            row
+            for row in rows
+            if row["state"] == "active" and row["mutation_capable"] == 1
+        ]
+        if len(active) > 1:
+            return unresolved("route_ambiguous")
+        if not active:
+            latest = rows[0]
+            state = latest["state"]
+            if state in {"reserved", "registering"}:
+                return unresolved("waiting_for_session")
+            if state == "unverified":
+                return unresolved("session_unverified")
+            if state == "quarantined":
+                return unresolved("adapter_quarantined")
+            return unresolved("pull_pending")
+
+        binding = active[0]
+        owner_conflict = self._connection.execute(
+            """
+            SELECT binding_id FROM conversation_bindings
+            WHERE workspace_id = ? AND provider_id = ? AND endpoint_id = ?
+              AND session_ref_id = ? AND native_session_id = ?
+              AND runtime_instance_id = ? AND mutation_capable = 1
+              AND state IN ('active', 'draining')
+              AND NOT (
+                  scope_kind = ? AND scope_identity = ? AND conversation_id = ?
+                  AND participant_id = ? AND binding_id = ?
+              )
+            """,
+            (
+                workspace_id,
+                binding["provider_id"],
+                binding["endpoint_id"],
+                binding["session_ref_id"],
+                binding["native_session_id"],
+                binding["runtime_instance_id"],
+                scope_kind,
+                scope_identity,
+                conversation_id,
+                participant_id,
+                binding["binding_id"],
+            ),
+        ).fetchone()
+        if owner_conflict is not None:
+            return unresolved("route_ambiguous")
+
+        if (
+            expected_binding_id is not None
+            and expected_binding_id != binding["binding_id"]
+        ) or (
+            expected_generation is not None
+            and expected_generation != binding["generation"]
+        ):
+            return unresolved("stale_generation")
+
+        return {
+            "resolved": True,
+            "reason": None,
+            "workspace_id": workspace_id,
+            "scope_kind": scope_kind,
+            "scope_identity": scope_identity,
+            "conversation_id": conversation_id,
+            "participant_id": participant_id,
+            "binding_id": binding["binding_id"],
+            "generation": binding["generation"],
+            "state": "active",
+            "mutation_capable": True,
+            "provider_id": binding["provider_id"],
+            "provider_revision": binding["provider_revision"],
+            "endpoint_id": binding["endpoint_id"],
+            "session_ref_id": binding["session_ref_id"],
+            "native_session_id": binding["native_session_id"],
+            "runtime_instance_id": binding["runtime_instance_id"],
+        }
 
     def record_registry_snapshot(
         self,

@@ -7,6 +7,7 @@ import json
 import os
 import sqlite3
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -234,6 +235,37 @@ def insert_v8_challenge(connection: sqlite3.Connection, *, challenge_id: str = "
             None,
         ),
     )
+
+
+def v8_fingerprint_for(statements: tuple[str, ...]) -> str:
+    connection = sqlite3.connect(":memory:")
+    try:
+        for _version, migration in store_module.MIGRATIONS[:-1]:
+            for statement in migration:
+                connection.execute(statement)
+        for statement in statements:
+            connection.execute(statement)
+        return store_module._schema_fingerprint(connection)
+    finally:
+        connection.close()
+
+
+@contextmanager
+def open_store_with_v8(paths: LedgerPaths, statements: tuple[str, ...]):
+    checksum = store_module._migration_checksum(statements)
+    fingerprint = v8_fingerprint_for(statements)
+    migrations = (*store_module.MIGRATIONS[:-1], (8, statements))
+    with (
+        patch.object(store_module, "V8_SQL", statements),
+        patch.object(store_module, "V8_MIGRATION_CHECKSUM", checksum),
+        patch.object(store_module, "V8_SCHEMA_FINGERPRINT", fingerprint),
+        LedgerStore.open_writer(paths, migrations=migrations) as store,
+    ):
+        yield store
+
+
+def v8_without_statement(containing: str) -> tuple[str, ...]:
+    return tuple(statement for statement in store_module.V8_SQL if containing not in statement)
 
 
 def intent(**changes: object) -> dict[str, object]:
@@ -1060,6 +1092,334 @@ class CompatibilityProjectionTest(unittest.TestCase):
                         None,
                     ),
                 )
+
+    def test_resolver_returns_binding_reference_without_writes_or_sessionref_claim(self) -> None:
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            paths = LedgerPaths.derive(tmp, WORKSPACE)
+            with LedgerStore.open_writer(paths) as writer:
+                seed_v8_provider(writer._connection)
+                seed_v8_participant(writer._connection)
+                insert_v8_binding(writer._connection)
+                writes = traced_write_statements(writer)
+                result = writer.resolve_conversation_binding(
+                    workspace_id=WORKSPACE,
+                    scope_kind="project",
+                    scope_identity=PROJECT,
+                    conversation_id="CHAT-SAMEID",
+                    participant_id="participant_codex",
+                    expected_binding_id="binding_one",
+                    expected_generation=1,
+                )
+                writer._connection.set_trace_callback(None)
+                self.assertEqual(writes, [])
+                self.assertEqual(
+                    result,
+                    {
+                        "resolved": True,
+                        "reason": None,
+                        "workspace_id": WORKSPACE,
+                        "scope_kind": "project",
+                        "scope_identity": PROJECT,
+                        "conversation_id": "CHAT-SAMEID",
+                        "participant_id": "participant_codex",
+                        "binding_id": "binding_one",
+                        "generation": 1,
+                        "state": "active",
+                        "mutation_capable": True,
+                        "provider_id": "provider_codex",
+                        "provider_revision": "revision_1",
+                        "endpoint_id": "endpoint_codex",
+                        "session_ref_id": "session_ref_one",
+                        "native_session_id": "native_session_one",
+                        "runtime_instance_id": "runtime_one",
+                    },
+                )
+                self.assertFalse({"evidence", "authority", "extensions", "runtime_home"} & set(result))
+                writer._connection.commit()
+            with LedgerStore.open_reader(paths) as reader:
+                self.assertTrue(
+                    reader.resolve_conversation_binding(
+                        workspace_id=WORKSPACE,
+                        scope_kind="project",
+                        scope_identity=PROJECT,
+                        conversation_id="CHAT-SAMEID",
+                        participant_id="participant_codex",
+                    )["resolved"]
+                )
+
+    def test_resolver_validates_compound_address_before_query(self) -> None:
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            paths = LedgerPaths.derive(tmp, WORKSPACE)
+            with LedgerStore.open_writer(paths) as writer:
+                for field, value in (
+                    ("conversation_id", "CHAT-\x00SAMEID"),
+                    ("conversation_id", "*"),
+                    ("participant_id", "legacy_unscoped"),
+                    ("scope_identity", "*"),
+                    ("expected_binding_id", "latest"),
+                    ("expected_generation", 0),
+                ):
+                    kwargs: dict[str, object] = {
+                        "workspace_id": WORKSPACE,
+                        "scope_kind": "project",
+                        "scope_identity": PROJECT,
+                        "conversation_id": "CHAT-SAMEID",
+                        "participant_id": "participant_codex",
+                    }
+                    kwargs[field] = value
+                    with self.subTest(field=field), self.assertRaises(ValueError):
+                        statements: list[str] = []
+                        writer._connection.set_trace_callback(statements.append)
+                        writer.resolve_conversation_binding(**kwargs)  # type: ignore[arg-type]
+                    writer._connection.set_trace_callback(None)
+                    self.assertEqual(statements, [])
+
+    def test_resolver_uses_full_compound_key_and_participant(self) -> None:
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            paths = LedgerPaths.derive(tmp, WORKSPACE)
+            with LedgerStore.open_writer(paths) as writer:
+                seed_v8_provider(writer._connection)
+                seed_v8_participant(writer._connection, scope_identity=PROJECT, participant_id="participant_codex")
+                seed_v8_participant(
+                    writer._connection,
+                    scope_identity=OTHER_PROJECT,
+                    participant_id="participant_codex",
+                )
+                seed_v8_participant(
+                    writer._connection,
+                    scope_identity=PROJECT,
+                    participant_id="participant_reviewer",
+                    agent_id="agent_codex",
+                )
+                insert_v8_binding(
+                    writer._connection,
+                    scope_identity=PROJECT,
+                    participant_id="participant_codex",
+                    binding_id="binding_amiga",
+                    native_session_id="native_session_amiga",
+                )
+                insert_v8_binding(
+                    writer._connection,
+                    scope_identity=OTHER_PROJECT,
+                    participant_id="participant_codex",
+                    binding_id="binding_nuvyr",
+                    native_session_id="native_session_nuvyr",
+                    session_ref_id="session_ref_nuvyr",
+                    runtime_instance_id="runtime_nuvyr",
+                )
+                insert_v8_binding(
+                    writer._connection,
+                    scope_identity=PROJECT,
+                    participant_id="participant_reviewer",
+                    binding_id="binding_reviewer",
+                    native_session_id="native_session_reviewer",
+                    session_ref_id="session_ref_reviewer",
+                    runtime_instance_id="runtime_reviewer",
+                )
+                self.assertEqual(
+                    writer.resolve_conversation_binding(
+                        workspace_id=WORKSPACE,
+                        scope_kind="project",
+                        scope_identity=PROJECT,
+                        conversation_id="CHAT-SAMEID",
+                        participant_id="participant_codex",
+                    )["binding_id"],
+                    "binding_amiga",
+                )
+                self.assertEqual(
+                    writer.resolve_conversation_binding(
+                        workspace_id=WORKSPACE,
+                        scope_kind="project",
+                        scope_identity=OTHER_PROJECT,
+                        conversation_id="CHAT-SAMEID",
+                        participant_id="participant_codex",
+                    )["binding_id"],
+                    "binding_nuvyr",
+                )
+                self.assertEqual(
+                    writer.resolve_conversation_binding(
+                        workspace_id=WORKSPACE,
+                        scope_kind="project",
+                        scope_identity=PROJECT,
+                        conversation_id="CHAT-SAMEID",
+                        participant_id="participant_reviewer",
+                    )["binding_id"],
+                    "binding_reviewer",
+                )
+
+    def test_resolver_closed_reason_vocabulary_and_states(self) -> None:
+        cases = {
+            "reserved": "waiting_for_session",
+            "registering": "waiting_for_session",
+            "unverified": "session_unverified",
+            "quarantined": "adapter_quarantined",
+            "draining": "pull_pending",
+            "superseded": "pull_pending",
+            "retired": "pull_pending",
+        }
+        self.assertEqual(
+            store_module.CONVERSATION_BINDING_RESOLUTION_REASONS,
+            {
+                "waiting_for_session",
+                "route_ambiguous",
+                "session_unverified",
+                "adapter_quarantined",
+                "pull_pending",
+                "stale_generation",
+            },
+        )
+        for state, reason in cases.items():
+            with self.subTest(state=state), TemporaryDirectory(dir="/tmp") as tmp:
+                paths = LedgerPaths.derive(tmp, WORKSPACE)
+                with LedgerStore.open_writer(paths) as writer:
+                    seed_v8_provider(writer._connection)
+                    seed_v8_participant(writer._connection)
+                    insert_v8_binding(writer._connection, state=state)
+                    result = writer.resolve_conversation_binding(
+                        workspace_id=WORKSPACE,
+                        scope_kind="project",
+                        scope_identity=PROJECT,
+                        conversation_id="CHAT-SAMEID",
+                        participant_id="participant_codex",
+                    )
+                    self.assertEqual(result["reason"], reason)
+                    self.assertFalse(result["resolved"])
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            paths = LedgerPaths.derive(tmp, WORKSPACE)
+            with LedgerStore.open_writer(paths) as writer:
+                seed_v8_provider(writer._connection)
+                seed_v8_participant(writer._connection)
+                insert_v8_binding(writer._connection, state="active", mutation_capable=0)
+                self.assertEqual(
+                    writer.resolve_conversation_binding(
+                        workspace_id=WORKSPACE,
+                        scope_kind="project",
+                        scope_identity=PROJECT,
+                        conversation_id="CHAT-SAMEID",
+                        participant_id="participant_codex",
+                    )["reason"],
+                    "pull_pending",
+                )
+
+    def test_resolver_stale_generation_never_resolves_newer(self) -> None:
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            paths = LedgerPaths.derive(tmp, WORKSPACE)
+            with LedgerStore.open_writer(paths) as writer:
+                seed_v8_provider(writer._connection)
+                seed_v8_participant(writer._connection)
+                insert_v8_binding(writer._connection)
+                writer._connection.execute(
+                    "UPDATE conversation_bindings SET state = 'superseded' WHERE binding_id = 'binding_one'"
+                )
+                insert_v8_binding(writer._connection, binding_id="binding_two", generation=2)
+                self.assertEqual(
+                    writer.resolve_conversation_binding(
+                        workspace_id=WORKSPACE,
+                        scope_kind="project",
+                        scope_identity=PROJECT,
+                        conversation_id="CHAT-SAMEID",
+                        participant_id="participant_codex",
+                    )["binding_id"],
+                    "binding_two",
+                )
+                self.assertEqual(
+                    writer.resolve_conversation_binding(
+                        workspace_id=WORKSPACE,
+                        scope_kind="project",
+                        scope_identity=PROJECT,
+                        conversation_id="CHAT-SAMEID",
+                        participant_id="participant_codex",
+                        expected_binding_id="binding_one",
+                        expected_generation=1,
+                    )["reason"],
+                    "stale_generation",
+                )
+                self.assertEqual(
+                    writer.resolve_conversation_binding(
+                        workspace_id=WORKSPACE,
+                        scope_kind="project",
+                        scope_identity=PROJECT,
+                        conversation_id="CHAT-SAMEID",
+                        participant_id="participant_codex",
+                        expected_binding_id="binding_two",
+                        expected_generation=1,
+                    )["reason"],
+                    "stale_generation",
+                )
+
+    def test_resolver_reports_ambiguity_when_active_unique_index_is_removed(self) -> None:
+        mutated_v8 = v8_without_statement("conversation_bindings_one_active_mutation_binding")
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            paths = LedgerPaths.derive(tmp, WORKSPACE)
+            with open_store_with_v8(paths, mutated_v8) as writer:
+                seed_v8_provider(writer._connection)
+                seed_v8_participant(writer._connection)
+                insert_v8_binding(writer._connection)
+                insert_v8_binding(
+                    writer._connection,
+                    binding_id="binding_two",
+                    generation=2,
+                    endpoint_id="endpoint_two",
+                    session_ref_id="session_ref_two",
+                    native_session_id="native_session_two",
+                    runtime_instance_id="runtime_two",
+                )
+                result = writer.resolve_conversation_binding(
+                    workspace_id=WORKSPACE,
+                    scope_kind="project",
+                    scope_identity=PROJECT,
+                    conversation_id="CHAT-SAMEID",
+                    participant_id="participant_codex",
+                )
+                self.assertEqual(result["reason"], "route_ambiguous")
+                self.assertFalse(result["resolved"])
+
+    def test_resolver_reports_ambiguity_when_native_owner_index_is_removed(self) -> None:
+        mutated_v8 = v8_without_statement(
+            "conversation_bindings_one_mutation_owner_per_native_session"
+        )
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            paths = LedgerPaths.derive(tmp, WORKSPACE)
+            with open_store_with_v8(paths, mutated_v8) as writer:
+                seed_v8_provider(writer._connection)
+                seed_v8_participant(writer._connection, participant_id="participant_codex")
+                seed_v8_participant(
+                    writer._connection,
+                    participant_id="participant_claude",
+                    agent_id="agent_claude",
+                )
+                insert_v8_binding(writer._connection, participant_id="participant_codex")
+                insert_v8_binding(
+                    writer._connection,
+                    participant_id="participant_claude",
+                    binding_id="binding_claude",
+                    generation=1,
+                )
+                result = writer.resolve_conversation_binding(
+                    workspace_id=WORKSPACE,
+                    scope_kind="project",
+                    scope_identity=PROJECT,
+                    conversation_id="CHAT-SAMEID",
+                    participant_id="participant_codex",
+                )
+                self.assertEqual(result["reason"], "route_ambiguous")
+                self.assertFalse(result["resolved"])
+
+    def test_resolver_has_no_runtime_consumers(self) -> None:
+        root = Path(__file__).parents[1]
+        checked_roots = [
+            root / "bin",
+            root / "scripts",
+            root / "llm_collab",
+        ]
+        offenders = []
+        for checked_root in checked_roots:
+            for path in checked_root.rglob("*.py"):
+                if path == root / "llm_collab" / "ledger" / "store.py":
+                    continue
+                if "resolve_conversation_binding" in path.read_text(encoding="utf-8"):
+                    offenders.append(str(path.relative_to(root)))
+        self.assertEqual(offenders, [])
 
     def test_p2d_ast_import_graph_has_no_bin_path_to_projection(self) -> None:
         root = Path(__file__).parents[1]
