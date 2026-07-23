@@ -10,6 +10,7 @@ never starts a process, sleeps, polls, or touches live runtime/project state.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+import json
 import tempfile
 from pathlib import Path
 from types import MappingProxyType
@@ -30,6 +31,7 @@ from llm_collab.runtime_adapter_manifest import (
     TrustedManifestRegistry,
     validate_initialized_identity,
 )
+from llm_collab.runtime_adapter_reference import ReferenceAdapter
 from llm_collab.runtime_adapter_redaction import RedactedDocument, redact_document
 from llm_collab.runtime_adapter_requests import HEALTH_DEADLINE_MS
 
@@ -114,6 +116,17 @@ class RecoveryObservation:
     deferred_recovery_admission_keys: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class ManifestProvenanceObservation:
+    resolve_calls: int
+    initialize_params: Mapping[str, object]
+    caller_identity_ignored: bool
+    same_lookup_identity: bool
+    initialized_identity_valid: bool
+    initialize_notification_rejected: bool
+    deferred_c16_keys: tuple[str, ...]
+
+
 _LIFECYCLE_REFS: tuple[LifecycleClauseRef, ...] = (
     LifecycleClauseRef(
         "C2cd9421b9c86.1",
@@ -174,7 +187,20 @@ _RECOVERY_REFS: tuple[LifecycleClauseRef, ...] = (
         "ea1af958d37a79cc04b6f8b29f3dea966c242dc5784f2870ab563436f753c4f4",
     ),
 )
-_HOST_HARNESS_REFS = _LIFECYCLE_REFS + _RECOVERY_REFS
+_PROVENANCE_REFS: tuple[LifecycleClauseRef, ...] = (
+    LifecycleClauseRef(
+        "C587906f36ba3.1",
+        "587906f36ba3b3092ec6743a2c7d547a155d048fe33ce1fb9167c4845d89ebbf",
+    ),
+    LifecycleClauseRef(
+        "Cd87ad3561bfc.1",
+        "d87ad3561bfc524766bab5ae649be7a9a247e44968baa7ff30f73367331b6276",
+    ),
+)
+_DEFERRED_C16_KEYS = frozenset(
+    ("C1731a3e18c8e.1", "C5bb2ba77ec3b.1", "C9138fb78426f.1", "Cf70f7c633f57.1")
+)
+_HOST_HARNESS_REFS = _LIFECYCLE_REFS + _RECOVERY_REFS + _PROVENANCE_REFS
 
 
 def build_lifecycle_evidence(protocol_text: str) -> Mapping[str, object]:
@@ -183,8 +209,10 @@ def build_lifecycle_evidence(protocol_text: str) -> Mapping[str, object]:
     _validate_clause_refs(protocol_text)
     lifecycle = _lifecycle_observation()
     recovery = _recovery_observation()
+    provenance = _manifest_provenance_observation()
     _validate_lifecycle_observation(lifecycle)
     _validate_recovery_observation(recovery)
+    _validate_manifest_provenance_observation(provenance)
     return {
         "schema_version": 1,
         "protocol": "runtime-adapter-jsonrpc-v1",
@@ -245,6 +273,15 @@ def build_lifecycle_evidence(protocol_text: str) -> Mapping[str, object]:
                 "release_requires_explicit_release_event": recovery.release_requires_explicit_release_event,
                 "redaction_preserves_bounded_stderr_metadata": recovery.redaction_preserves_bounded_stderr_metadata,
                 "deferred_recovery_admission_keys": recovery.deferred_recovery_admission_keys,
+            },
+            "manifest_provenance": {
+                "resolve_calls": provenance.resolve_calls,
+                "initialize_params": _plain_initialize_params(provenance.initialize_params),
+                "caller_identity_ignored": provenance.caller_identity_ignored,
+                "same_lookup_identity": provenance.same_lookup_identity,
+                "initialized_identity_valid": provenance.initialized_identity_valid,
+                "initialize_notification_rejected": provenance.initialize_notification_rejected,
+                "deferred_c16_keys": provenance.deferred_c16_keys,
             },
         },
     }
@@ -489,6 +526,83 @@ def _recovery_observation() -> RecoveryObservation:
     )
 
 
+def _manifest_provenance_observation() -> ManifestProvenanceObservation:
+    registry = _CountingRegistry(TrustedManifestRegistry(_trusted_manifest()))
+    caller_payload = {
+        "adapter_id": "caller_adapter",
+        "adapter_revision": "caller_rev",
+        "manifest_id": "caller_manifest",
+        "manifest_revision": "caller_manifest_rev",
+        "endpoint": {"endpoint_id": "caller_endpoint", "adapter_name": "caller_adapter"},
+    }
+    resolved = registry.resolve(_ADAPTER_ID)
+    params = _initialize_params_from_resolved(resolved, caller_payload)
+    try:
+        validate_initialized_identity(resolved, params)
+    except Exception as error:
+        raise LifecycleEvidenceFailure("initialize params did not validate against the resolved manifest") from error
+    notification = json.dumps(
+        {"jsonrpc": "2.0", "method": "initialize", "params": _plain_initialize_params(params)},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return ManifestProvenanceObservation(
+        resolve_calls=registry.calls,
+        initialize_params=params,
+        caller_identity_ignored=_caller_identity_ignored(params, caller_payload),
+        same_lookup_identity=_params_match_resolved_lookup(params, resolved),
+        initialized_identity_valid=True,
+        initialize_notification_rejected=ReferenceAdapter().handle_text(notification) is None,
+        deferred_c16_keys=tuple(sorted(_DEFERRED_C16_KEYS)),
+    )
+
+
+class _CountingRegistry:
+    def __init__(self, registry: TrustedManifestRegistry):
+        self._registry = registry
+        self.calls = 0
+
+    def resolve(self, adapter_id: str) -> Any:
+        self.calls += 1
+        return self._registry.resolve(adapter_id)
+
+
+def _initialize_params_from_resolved(resolved: Any, caller_payload: Mapping[str, Any]) -> Mapping[str, Any]:
+    return MappingProxyType(
+        {
+            "requested_protocol_version": 1,
+            "adapter_id": resolved.adapter_id,
+            "adapter_revision": resolved.adapter_revision,
+            "manifest_id": resolved.manifest_id,
+            "manifest_revision": resolved.manifest_revision,
+            "endpoint": dict(resolved.endpoint),
+        }
+    )
+
+
+def _caller_identity_ignored(params: Mapping[str, Any], caller_payload: Mapping[str, Any]) -> bool:
+    return all(
+        params[key] != caller_payload[key]
+        for key in ("adapter_id", "adapter_revision", "manifest_id", "manifest_revision")
+    )
+
+
+def _params_match_resolved_lookup(params: Mapping[str, Any], resolved: Any) -> bool:
+    return (
+        params["adapter_id"] == resolved.adapter_id
+        and params["adapter_revision"] == resolved.adapter_revision
+        and params["manifest_id"] == resolved.manifest_id
+        and params["manifest_revision"] == resolved.manifest_revision
+        and dict(params["endpoint"]) == dict(resolved.endpoint)
+    )
+
+
+def _plain_initialize_params(params: Mapping[str, Any]) -> dict[str, Any]:
+    out = dict(params)
+    out["endpoint"] = dict(params["endpoint"])
+    return out
+
+
 def _redacted(payload: Mapping[str, Any], **overrides: Any) -> RedactedDocument:
     document = dict(payload)
     document.update(overrides)
@@ -707,3 +821,28 @@ def _validate_recovery_observation(observation: RecoveryObservation) -> None:
         raise LifecycleEvidenceFailure("redaction did not preserve bounded stderr metadata")
     if frozenset(observation.deferred_recovery_admission_keys) != _RECOVERY_ADMISSION_DEFERRED:
         raise LifecycleEvidenceFailure("recovery admission deferral set drifted")
+
+
+def _validate_manifest_provenance_observation(observation: ManifestProvenanceObservation) -> None:
+    if observation.resolve_calls != 1:
+        raise LifecycleEvidenceFailure("initialize provenance did not use exactly one manifest resolve")
+    if not observation.initialized_identity_valid:
+        raise LifecycleEvidenceFailure("initialize params were not validated against the resolved manifest")
+    if not observation.caller_identity_ignored:
+        raise LifecycleEvidenceFailure("caller payload supplied initialize identity")
+    if not observation.same_lookup_identity:
+        raise LifecycleEvidenceFailure("initialize identity did not come from the same resolved lookup")
+    params = dict(observation.initialize_params)
+    if set(params) != {
+        "requested_protocol_version",
+        "adapter_id",
+        "adapter_revision",
+        "manifest_id",
+        "manifest_revision",
+        "endpoint",
+    }:
+        raise LifecycleEvidenceFailure("initialize params shape drifted")
+    if not observation.initialize_notification_rejected:
+        raise LifecycleEvidenceFailure("initialize notification was not rejected")
+    if frozenset(observation.deferred_c16_keys) != _DEFERRED_C16_KEYS:
+        raise LifecycleEvidenceFailure("deferred C16 set drifted")
