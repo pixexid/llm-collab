@@ -165,6 +165,83 @@ _RECEIPT = MappingProxyType(
         "evidence": _RECEIPT_EVIDENCE,
     }
 )
+_DELIVERY_EVIDENCE = MappingProxyType(
+    {
+        "schema_version": 1,
+        "workspace_id": "ws_alpha",
+        "scope": _SCOPE,
+        "evidence_id": "evidence_delivery_alpha",
+        "evidence_kind": "native_delivery_state",
+        "quality": "best_effort",
+        "state": "routed",
+        "authority": _AUTHORITY,
+        "subject": MappingProxyType(
+            {
+                "message_id": "msg_alpha",
+                "delivery_id": "delivery_alpha",
+                "attempt_id": "attempt_alpha",
+                "endpoint_id": "endpoint_alpha",
+                "session_ref_id": "session_alpha",
+            }
+        ),
+        "correlation_id": "corr_delivery_alpha",
+        "observed_at_utc": "2026-07-22T00:00:00Z",
+        "integrity": "sha256:6b69e9aefda99e4b988d3e0f2cfedbf2795903f131c9d94206559017a9283071",
+    }
+)
+_DELIVERY = MappingProxyType(
+    {
+        "schema_version": 1,
+        "workspace_id": "ws_alpha",
+        "scope": _SCOPE,
+        "delivery_id": "delivery_alpha",
+        "message_id": "msg_alpha",
+        "attempt_id": "attempt_alpha",
+        "endpoint_id": "endpoint_alpha",
+        "session_ref_id": "session_alpha",
+        "outcome": "pending",
+        "evidence": _DELIVERY_EVIDENCE,
+    }
+)
+_DELIVER_RECEIPT_EVIDENCE = MappingProxyType(
+    {
+        "schema_version": 1,
+        "workspace_id": "ws_alpha",
+        "scope": _SCOPE,
+        "evidence_id": "evidence_attempt_alpha",
+        "evidence_kind": "native_delivery_state",
+        "quality": "best_effort",
+        "state": "routed",
+        "authority": _AUTHORITY,
+        "subject": MappingProxyType(
+            {
+                "message_id": "msg_alpha",
+                "delivery_id": "delivery_alpha",
+                "attempt_id": "attempt_alpha",
+                "endpoint_id": "endpoint_alpha",
+                "session_ref_id": "session_alpha",
+            }
+        ),
+        "correlation_id": "corr_attempt_alpha",
+        "observed_at_utc": "2026-07-22T00:00:00Z",
+        "integrity": "sha256:790066985c549ba8471cdd4716f5d1a76f47b81fda70386b3b3c4cb2dc39326d",
+    }
+)
+_DELIVER_RECEIPT = MappingProxyType(
+    {
+        "schema_version": 1,
+        "workspace_id": "ws_alpha",
+        "scope": _SCOPE,
+        "receipt_id": "receipt_attempt_alpha",
+        "message_id": "msg_alpha",
+        "delivery_id": "delivery_alpha",
+        "attempt_id": "attempt_alpha",
+        "endpoint_id": "endpoint_alpha",
+        "session_ref_id": "session_alpha",
+        "state": "routed",
+        "evidence": _DELIVER_RECEIPT_EVIDENCE,
+    }
+)
 _HEALTH_RESULT = MappingProxyType(
     {
         "status": "healthy",
@@ -271,8 +348,33 @@ def _reconcile_trace(session_ref: Mapping[str, Any], request_id: str = "reconcil
     )
 
 
+def _deliver_trace(
+    session_ref: Mapping[str, Any],
+    delivery: Mapping[str, Any],
+    request_id: str = "deliver-envelope",
+) -> TraceFrame:
+    return TraceFrame(
+        "host",
+        "adapter",
+        _request(
+            "runtime.deliver",
+            {
+                "session_ref": session_ref,
+                "delivery": delivery,
+            },
+            request_id,
+        ),
+    )
+
+
 def _session_ref_with(mutator) -> Mapping[str, Any]:
     value = _thaw(_SESSION_REF)
+    mutator(value)
+    return _freeze(value)
+
+
+def _delivery_with(mutator) -> Mapping[str, Any]:
+    value = _thaw(_DELIVERY)
     mutator(value)
     return _freeze(value)
 
@@ -480,6 +582,193 @@ FIXTURES: tuple[RuntimeAdapterFixture, ...] = (
             method="runtime.reconcile",
             result=_RECEIPT,
             state_effect="attempt_reconciled",
+        ),
+    ),
+    RuntimeAdapterFixture(
+        fixture_id="runtime-adapter-deliver-envelope",
+        polarity=POLARITY_CONFORMING,
+        clause_refs=(
+            ClauseReference(
+                clause_key="Cb995426c8ed9.1",
+                text_sha256="b995426c8ed90079ed3b61229a72096df8baa35c9ecda8d1e54af94d505fa70e",
+                polarity=POLARITY_CONFORMING,
+            ),
+            ClauseReference(
+                clause_key="C508d9faea31c.1",
+                text_sha256="508d9faea31caf96baabebac2ec9e664c7b72732bb0305751bb43b6db0c04519",
+                polarity=POLARITY_CONFORMING,
+            ),
+            ClauseReference(
+                clause_key="Ca587a5325269.1",
+                text_sha256="a587a53252697bbf302116194a2d96a464fdfed56a69214b8810c54205df801f",
+                polarity=POLARITY_CONFORMING,
+            ),
+            ClauseReference(
+                clause_key="Ca587a5325269.2",
+                text_sha256="a587a53252697bbf302116194a2d96a464fdfed56a69214b8810c54205df801f",
+                polarity=POLARITY_CONFORMING,
+            ),
+        ),
+        trace=(
+            *_initialize_trace(),
+            _deliver_trace(_SESSION_REF, _DELIVERY),
+        ),
+        expectation=ExpectedResult(
+            method="runtime.deliver",
+            result=_DELIVER_RECEIPT,
+            state_effect="delivery_envelope_routed",
+        ),
+    ),
+    RuntimeAdapterFixture(
+        fixture_id="runtime-adapter-deliver-rejects-missing-param",
+        polarity=POLARITY_VIOLATING,
+        clause_refs=(
+            ClauseReference(
+                clause_key="Cb995426c8ed9.1",
+                text_sha256="b995426c8ed90079ed3b61229a72096df8baa35c9ecda8d1e54af94d505fa70e",
+                polarity=POLARITY_VIOLATING,
+            ),
+        ),
+        trace=(
+            *_initialize_trace(),
+            TraceFrame("host", "adapter", _request("runtime.deliver", {"session_ref": _SESSION_REF}, "deliver-missing-param")),
+        ),
+        expectation=ExpectedRefusal(
+            error_name="INVALID_PARAMS",
+            error_code=-32602,
+            state_effect=NO_STATE_CHANGE,
+            response_emitted=True,
+            closes_connection=False,
+        ),
+    ),
+    RuntimeAdapterFixture(
+        fixture_id="runtime-adapter-deliver-rejects-extra-param",
+        polarity=POLARITY_VIOLATING,
+        clause_refs=(
+            ClauseReference(
+                clause_key="Cb995426c8ed9.1",
+                text_sha256="b995426c8ed90079ed3b61229a72096df8baa35c9ecda8d1e54af94d505fa70e",
+                polarity=POLARITY_VIOLATING,
+            ),
+        ),
+        trace=(
+            *_initialize_trace(),
+            TraceFrame(
+                "host",
+                "adapter",
+                _request(
+                    "runtime.deliver",
+                    {"session_ref": _SESSION_REF, "delivery": _DELIVERY, "adapter_private": True},
+                    "deliver-extra-param",
+                ),
+            ),
+        ),
+        expectation=ExpectedRefusal(
+            error_name="INVALID_PARAMS",
+            error_code=-32602,
+            state_effect=NO_STATE_CHANGE,
+            response_emitted=True,
+            closes_connection=False,
+        ),
+    ),
+    RuntimeAdapterFixture(
+        fixture_id="runtime-adapter-deliver-rejects-wrong-typed-delivery-param",
+        polarity=POLARITY_VIOLATING,
+        clause_refs=(
+            ClauseReference(
+                clause_key="Cb995426c8ed9.1",
+                text_sha256="b995426c8ed90079ed3b61229a72096df8baa35c9ecda8d1e54af94d505fa70e",
+                polarity=POLARITY_VIOLATING,
+            ),
+        ),
+        trace=(
+            *_initialize_trace(),
+            _deliver_trace(_SESSION_REF, _freeze(("not", "a", "delivery")), "deliver-wrong-typed-delivery"),
+        ),
+        expectation=ExpectedRefusal(
+            error_name="INVALID_PARAMS",
+            error_code=-32602,
+            state_effect=NO_STATE_CHANGE,
+            response_emitted=True,
+            closes_connection=False,
+        ),
+    ),
+    RuntimeAdapterFixture(
+        fixture_id="runtime-adapter-deliver-rejects-session-ref-schema-drift",
+        polarity=POLARITY_VIOLATING,
+        clause_refs=(
+            ClauseReference(
+                clause_key="Ca587a5325269.1",
+                text_sha256="a587a53252697bbf302116194a2d96a464fdfed56a69214b8810c54205df801f",
+                polarity=POLARITY_VIOLATING,
+            ),
+        ),
+        trace=(
+            *_initialize_trace(),
+            _deliver_trace(
+                _session_ref_with(lambda value: value.__setitem__("adapter_private", True)),
+                _DELIVERY,
+                "deliver-session-ref-schema-drift",
+            ),
+        ),
+        expectation=ExpectedRefusal(
+            error_name="INVALID_PARAMS",
+            error_code=-32602,
+            state_effect=NO_STATE_CHANGE,
+            response_emitted=True,
+            closes_connection=False,
+        ),
+    ),
+    RuntimeAdapterFixture(
+        fixture_id="runtime-adapter-deliver-rejects-delivery-schema-drift",
+        polarity=POLARITY_VIOLATING,
+        clause_refs=(
+            ClauseReference(
+                clause_key="Ca587a5325269.1",
+                text_sha256="a587a53252697bbf302116194a2d96a464fdfed56a69214b8810c54205df801f",
+                polarity=POLARITY_VIOLATING,
+            ),
+        ),
+        trace=(
+            *_initialize_trace(),
+            _deliver_trace(
+                _SESSION_REF,
+                _delivery_with(lambda value: value.__setitem__("adapter_private", True)),
+                "deliver-delivery-schema-drift",
+            ),
+        ),
+        expectation=ExpectedRefusal(
+            error_name="INVALID_PARAMS",
+            error_code=-32602,
+            state_effect=NO_STATE_CHANGE,
+            response_emitted=True,
+            closes_connection=False,
+        ),
+    ),
+    RuntimeAdapterFixture(
+        fixture_id="runtime-adapter-deliver-rejects-identity-drift",
+        polarity=POLARITY_VIOLATING,
+        clause_refs=(
+            ClauseReference(
+                clause_key="Ca587a5325269.2",
+                text_sha256="a587a53252697bbf302116194a2d96a464fdfed56a69214b8810c54205df801f",
+                polarity=POLARITY_VIOLATING,
+            ),
+        ),
+        trace=(
+            *_initialize_trace(),
+            _deliver_trace(
+                _SESSION_REF,
+                _delivery_with(lambda value: value.__setitem__("endpoint_id", "endpoint_other")),
+                "deliver-identity-drift",
+            ),
+        ),
+        expectation=ExpectedRefusal(
+            error_name="INVALID_DELIVERY",
+            error_code=-32009,
+            state_effect=NO_STATE_CHANGE,
+            response_emitted=True,
+            closes_connection=False,
         ),
     ),
     RuntimeAdapterFixture(
@@ -1047,6 +1336,8 @@ def _derived_refusal(trace: TraceFrame, error_codes: Mapping[str, int]) -> tuple
                 return ("INVALID_REQUEST", error_codes["INVALID_REQUEST"], True, True)
             elif error.clause == "fixture-session-ref-identity":
                 name = "INVALID_SESSION_REF"
+            elif error.clause in {"fixture-delivery-identity", "fixture-evidence-identity"}:
+                name = "INVALID_DELIVERY"
             elif error.clause in {"closed-params", "fixture-request-params", "fixture-session-ref"}:
                 name = "INVALID_PARAMS"
             else:
@@ -1245,6 +1536,9 @@ def _validate_request_params(method: str, params: Mapping[str, Any]) -> None:
             validate_endpoint_v1(params["endpoint"])
         except Exception as error:
             raise ConformanceFailure("fixture-request-params", method) from error
+    if method == "runtime.deliver":
+        _validate_session_ref(params["session_ref"])
+        _validate_delivery(params["delivery"], params["session_ref"])
     if method == "runtime.reconcile":
         _validate_session_ref(params["session_ref"])
     if method in {"runtime.cancel", "runtime.reconcile"}:
@@ -1289,7 +1583,94 @@ def _validate_shutdown_result(result: Mapping[str, Any]) -> None:
         raise ConformanceFailure("fixture-result-shape", "runtime.shutdown")
 
 
-def _validate_receipt_result(result: Mapping[str, Any], params: Mapping[str, Any]) -> None:
+def _validate_delivery(delivery: Any, session_ref: Mapping[str, Any]) -> None:
+    required = {
+        "schema_version",
+        "workspace_id",
+        "scope",
+        "delivery_id",
+        "message_id",
+        "attempt_id",
+        "endpoint_id",
+        "session_ref_id",
+        "outcome",
+        "evidence",
+    }
+    if not _is_closed_mapping(delivery, required):
+        raise ConformanceFailure("fixture-request-params", "runtime.deliver")
+    _validate_schema_version(delivery, "runtime.deliver")
+    if delivery["outcome"] != "pending":
+        raise ConformanceFailure("fixture-request-params", "runtime.deliver")
+    if delivery["workspace_id"] != session_ref["workspace_id"] or delivery["scope"] != session_ref["scope"]:
+        raise ConformanceFailure("fixture-delivery-identity", "runtime.deliver")
+    if delivery["endpoint_id"] != session_ref["endpoint_id"] or delivery["session_ref_id"] != session_ref["session_ref_id"]:
+        raise ConformanceFailure("fixture-delivery-identity", "runtime.deliver")
+    evidence = delivery["evidence"]
+    _validate_delivery_evidence(evidence, delivery, recompute_integrity=False)
+
+
+def _validate_delivery_evidence(
+    evidence: Any,
+    carrier: Mapping[str, Any],
+    *,
+    recompute_integrity: bool,
+) -> None:
+    if not _is_closed_mapping(
+        evidence,
+        {
+            "schema_version",
+            "workspace_id",
+            "scope",
+            "evidence_id",
+            "evidence_kind",
+            "quality",
+            "state",
+            "authority",
+            "subject",
+            "correlation_id",
+            "observed_at_utc",
+            "integrity",
+        },
+    ):
+        raise ConformanceFailure("fixture-evidence-shape", "runtime.deliver")
+    _validate_schema_version(evidence, "runtime.deliver")
+    if (
+        evidence["workspace_id"] != carrier["workspace_id"]
+        or evidence["scope"] != carrier["scope"]
+        or evidence["evidence_kind"] != "native_delivery_state"
+        or evidence["quality"] != "best_effort"
+        or evidence["state"] != "routed"
+        or not _is_nonempty_string(evidence["evidence_id"])
+        or not _is_nonempty_string(evidence["correlation_id"])
+        or not _is_nonempty_string(evidence["observed_at_utc"])
+        or not _is_integrity_value(evidence["integrity"])
+    ):
+        raise ConformanceFailure("fixture-evidence-shape", "runtime.deliver")
+    authority = evidence["authority"]
+    if not _is_closed_mapping(
+        authority,
+        {
+            "authority_kind",
+            "identity",
+            "implementation_revision",
+            "capability_profile_id",
+            "capability_profile_revision",
+        },
+    ):
+        raise ConformanceFailure("fixture-evidence-shape", "runtime.deliver")
+    if authority["authority_kind"] != "trusted_adapter":
+        raise ConformanceFailure("fixture-evidence-shape", "runtime.deliver")
+    subject = evidence["subject"]
+    if not _is_closed_mapping(subject, {"message_id", "delivery_id", "attempt_id", "endpoint_id", "session_ref_id"}):
+        raise ConformanceFailure("fixture-evidence-shape", "runtime.deliver")
+    for key in ("message_id", "delivery_id", "attempt_id", "endpoint_id", "session_ref_id"):
+        if subject[key] != carrier[key]:
+            raise ConformanceFailure("fixture-evidence-identity", "runtime.deliver")
+    if recompute_integrity:
+        _validate_evidence_integrity(evidence)
+
+
+def _validate_receipt_result(result: Mapping[str, Any], params: Mapping[str, Any], method: str) -> None:
     required = {
         "schema_version",
         "workspace_id",
@@ -1304,17 +1685,27 @@ def _validate_receipt_result(result: Mapping[str, Any], params: Mapping[str, Any
         "evidence",
     }
     if not _is_closed_mapping(result, required):
-        raise ConformanceFailure("fixture-result-shape", "runtime.reconcile")
-    _validate_schema_version(result, "runtime.reconcile")
-    if result["state"] not in {"accepted", "completed", "rejected_before_acceptance"}:
-        raise ConformanceFailure("fixture-result-shape", "runtime.reconcile")
+        raise ConformanceFailure("fixture-result-shape", method)
+    _validate_schema_version(result, method)
     session_ref = params["session_ref"]
+    if method == "runtime.deliver":
+        delivery = params["delivery"]
+        if result["state"] != "routed":
+            raise ConformanceFailure("fixture-result-shape", method)
+        if result["message_id"] != delivery["message_id"]:
+            raise ConformanceFailure("fixture-result-identity", method)
+    elif method == "runtime.reconcile":
+        delivery = params
+        if result["state"] not in {"accepted", "completed", "rejected_before_acceptance"}:
+            raise ConformanceFailure("fixture-result-shape", method)
+    else:
+        raise ConformanceFailure("fixture-result-method", method)
     if result["workspace_id"] != session_ref["workspace_id"] or result["scope"] != session_ref["scope"]:
-        raise ConformanceFailure("fixture-result-identity", "runtime.reconcile")
-    if result["delivery_id"] != params["delivery_id"] or result["attempt_id"] != params["attempt_id"]:
-        raise ConformanceFailure("fixture-result-identity", "runtime.reconcile")
+        raise ConformanceFailure("fixture-result-identity", method)
+    if result["delivery_id"] != delivery["delivery_id"] or result["attempt_id"] != delivery["attempt_id"]:
+        raise ConformanceFailure("fixture-result-identity", method)
     if result["endpoint_id"] != session_ref["endpoint_id"] or result["session_ref_id"] != session_ref["session_ref_id"]:
-        raise ConformanceFailure("fixture-result-identity", "runtime.reconcile")
+        raise ConformanceFailure("fixture-result-identity", method)
     evidence = result["evidence"]
     if not _is_closed_mapping(
         evidence,
@@ -1333,17 +1724,21 @@ def _validate_receipt_result(result: Mapping[str, Any], params: Mapping[str, Any
             "integrity",
         },
     ):
-        raise ConformanceFailure("fixture-result-shape", "runtime.reconcile")
-    _validate_schema_version(evidence, "runtime.reconcile")
-    if evidence["quality"] != "authoritative" or evidence["state"] != result["state"]:
-        raise ConformanceFailure("fixture-result-shape", "runtime.reconcile")
+        raise ConformanceFailure("fixture-result-shape", method)
+    _validate_schema_version(evidence, method)
+    expected_quality = "best_effort" if method == "runtime.deliver" else "authoritative"
+    if evidence["quality"] != expected_quality or evidence["state"] != result["state"]:
+        raise ConformanceFailure("fixture-result-shape", method)
     subject = evidence["subject"]
     if not _is_closed_mapping(subject, {"message_id", "delivery_id", "attempt_id", "endpoint_id", "session_ref_id"}):
-        raise ConformanceFailure("fixture-result-shape", "runtime.reconcile")
+        raise ConformanceFailure("fixture-result-shape", method)
     for key in ("message_id", "delivery_id", "attempt_id", "endpoint_id", "session_ref_id"):
         if subject[key] != result[key]:
-            raise ConformanceFailure("fixture-result-identity", "runtime.reconcile")
-    _validate_evidence_integrity(result["evidence"])
+            raise ConformanceFailure("fixture-result-identity", method)
+    if method == "runtime.reconcile":
+        _validate_evidence_integrity(result["evidence"])
+    elif not _is_integrity_value(evidence["integrity"]):
+        raise ConformanceFailure("fixture-result-shape", method)
 
 
 def _validate_result_shape(fixture: RuntimeAdapterFixture, methods: tuple[str, ...]) -> None:
@@ -1358,20 +1753,20 @@ def _validate_result_shape(fixture: RuntimeAdapterFixture, methods: tuple[str, .
         _validate_health_result(expectation.result)
     elif expectation.method == "runtime.shutdown":
         _validate_shutdown_result(expectation.result)
-    elif expectation.method == "runtime.reconcile":
+    elif expectation.method in {"runtime.deliver", "runtime.reconcile"}:
         params = None
         for trace in fixture.trace:
             frame = _thaw(trace.frame)
             if (
                 isinstance(frame, Mapping)
-                and frame.get("method") == "runtime.reconcile"
+                and frame.get("method") == expectation.method
                 and isinstance(frame.get("params"), Mapping)
             ):
                 params = frame["params"]
                 break
         if params is None:
             raise ConformanceFailure("fixture-result-method", fixture.fixture_id)
-        _validate_receipt_result(expectation.result, params)
+        _validate_receipt_result(expectation.result, params, expectation.method)
     else:
         raise ConformanceFailure("fixture-result-method", fixture.fixture_id)
 
@@ -1379,6 +1774,15 @@ def _validate_result_shape(fixture: RuntimeAdapterFixture, methods: tuple[str, .
 def _validate_evidence_integrity(evidence: Mapping[str, Any]) -> None:
     if evidence.get("integrity") != _canonical_digest_without_integrity(evidence):
         raise ConformanceFailure("fixture-evidence-integrity", "state evidence")
+
+
+def _is_integrity_value(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 71
+        and value.startswith("sha256:")
+        and all(ch in "0123456789abcdef" for ch in value[7:])
+    )
 
 
 def _stateful_post_shutdown_refusal(
