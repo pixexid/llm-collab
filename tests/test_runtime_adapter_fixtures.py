@@ -12,6 +12,7 @@ from types import MappingProxyType
 
 import llm_collab.runtime_adapter_conformance as conformance
 from llm_collab.runtime_adapter_conformance import ERROR_CODES, ConformanceFailure, error_response, protocol_error_codes
+from llm_collab.runtime_adapter_claim import ClaimFailure, build_claim
 from llm_collab.runtime_adapter_fixtures import (
     FIXTURES,
     NO_STATE_CHANGE,
@@ -64,6 +65,27 @@ class RuntimeAdapterFixtureTests(unittest.TestCase):
                         self.assertEqual(payload["result"], _thaw(fixture.expectation.result))
                         saw_expected = True
                 self.assertTrue(saw_expected)
+
+    def test_violating_fixtures_replay_against_reference_adapter(self) -> None:
+        violating = [fixture for fixture in FIXTURES if fixture.polarity == POLARITY_VIOLATING]
+
+        for fixture in violating:
+            with self.subTest(fixture=fixture.fixture_id):
+                adapter = ReferenceAdapter()
+                responses: list[str | bytes | None] = []
+                for trace in fixture.trace:
+                    if trace.sender != "host" or trace.receiver != "adapter":
+                        continue
+                    frame = _thaw(trace.frame)
+                    responses.append(adapter.handle_text(json.dumps(frame, sort_keys=True, separators=(",", ":"))))
+                self.assertTrue(responses)
+                self.assertTrue(_matches_refusal(fixture.expectation, responses[-1]))
+
+    def test_fixture_batch_reduces_claim_gap_below_baseline_but_still_fails_closed(self) -> None:
+        result = build_claim(self.protocol)
+
+        self.assertIsInstance(result, ClaimFailure)
+        self.assertLess(len(result.gaps), 150)
 
     def test_old_three_key_initialize_endpoint_is_rejected(self) -> None:
         initialize = _thaw(FIXTURES[0].trace[0].frame)
@@ -406,6 +428,18 @@ def _thaw(value):
     if isinstance(value, tuple):
         return [_thaw(child) for child in value]
     return value
+
+
+def _matches_refusal(expectation, response: str | bytes | None) -> bool:
+    if not isinstance(expectation, ExpectedRefusal):
+        return False
+    if response is None:
+        return not expectation.response_emitted and expectation.closes_connection
+    payload = json.loads(response)
+    error = payload.get("error") if isinstance(payload, dict) else None
+    if not isinstance(error, dict):
+        return False
+    return error.get("code") == expectation.error_code and error.get("message") == expectation.error_name
 
 
 if __name__ == "__main__":
