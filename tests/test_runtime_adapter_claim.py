@@ -126,6 +126,20 @@ class RuntimeAdapterClaimTests(unittest.TestCase):
             EXERCISED_CONFORMING,
         )
 
+    def test_coverage_states_ignore_fixture_refs_outside_selected_clause_subset(self) -> None:
+        selected = ClauseOccurrence("selected", "a" * 64, "MUST do it", "MUST", 1, "C01 Test")
+        fixture = replace(
+            FIXTURES[0],
+            clause_refs=(
+                replace(FIXTURES[0].clause_refs[0], clause_key="selected"),
+                replace(FIXTURES[0].clause_refs[0], clause_key="outside"),
+            ),
+        )
+
+        states = _coverage_states((selected,), (fixture,), {fixture.fixture_id})
+
+        self.assertEqual(states, {"selected": EXERCISED_CONFORMING})
+
     def test_success_claim_writes_only_when_every_clause_is_exercised(self) -> None:
         clause = ClauseOccurrence(
             FIXTURES[0].clause_refs[0].clause_key,

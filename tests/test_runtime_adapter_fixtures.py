@@ -213,6 +213,9 @@ class RuntimeAdapterFixtureTests(unittest.TestCase):
         self.assertNotIn("C8ed901b43824.1", gap_keys)
         self.assertNotIn("C8ed901b43824.2", gap_keys)
         self.assertNotIn("C9a07be32fe6b.1", gap_keys)
+        self.assertNotIn("C358ebcd9608d.1", gap_keys)
+        self.assertNotIn("C358ebcd9608d.2", gap_keys)
+        self.assertNotIn("Cf12ffe8bf4a6.1", gap_keys)
 
     def test_old_three_key_initialize_endpoint_is_rejected(self) -> None:
         initialize = _thaw(FIXTURES[0].trace[0].frame)
@@ -527,6 +530,115 @@ class RuntimeAdapterFixtureTests(unittest.TestCase):
         )
         self.assertIsInstance(result, ClaimFailure)
         self.assertIn("C78f267e558da.2", {gap["clause_key"] for gap in result.gaps})
+
+    def test_c11_health_fixtures_cover_only_replay_proven_shape_and_selector_clauses(self) -> None:
+        by_id = {fixture.fixture_id: fixture for fixture in FIXTURES}
+        health = by_id["runtime-adapter-health-request"]
+        selector = by_id["runtime-adapter-health-rejects-session-selector"]
+
+        self.assertEqual(
+            {ref.clause_key for ref in health.clause_refs},
+            {"C45acb2959726.1", "C358ebcd9608d.1", "C358ebcd9608d.2"},
+        )
+        self.assertIsInstance(health.expectation, ExpectedResult)
+        self.assertEqual(health.expectation.method, "runtime.health")
+        self.assertEqual(_thaw(health.expectation.result)["status"], "healthy")
+        self.assertEqual(_thaw(health.expectation.result)["adapter_id"], "adapter_alpha")
+        self.assertTrue(_replays_fixture(health))
+
+        self.assertEqual(selector.polarity, POLARITY_VIOLATING)
+        self.assertEqual({ref.clause_key for ref in selector.clause_refs}, {"Cf12ffe8bf4a6.1"})
+        self.assertIsInstance(selector.expectation, ExpectedRefusal)
+        self.assertEqual(selector.expectation.error_name, "INVALID_PARAMS")
+        self.assertEqual(selector.expectation.error_code, -32602)
+        self.assertEqual(selector.expectation.state_effect, NO_STATE_CHANGE)
+        self.assertTrue(selector.expectation.response_emitted)
+        self.assertFalse(selector.expectation.closes_connection)
+        self.assertEqual(selector.trace[2].frame["method"], "runtime.health")
+        self.assertIn("session_ref", selector.trace[2].frame["params"])
+        self.assertTrue(_replays_fixture(selector))
+
+    def test_c11_health_slice_reduces_its_own_base_gaps_by_three(self) -> None:
+        result = build_claim(self.protocol)
+        base_result = build_claim(
+            self.protocol,
+            fixtures=tuple(
+                fixture
+                if fixture.fixture_id != "runtime-adapter-health-request"
+                else replace(
+                    fixture,
+                    clause_refs=tuple(ref for ref in fixture.clause_refs if ref.clause_key == "C45acb2959726.1"),
+                )
+                for fixture in FIXTURES
+                if fixture.fixture_id != "runtime-adapter-health-rejects-session-selector"
+            ),
+        )
+
+        self.assertIsInstance(result, ClaimFailure)
+        self.assertIsInstance(base_result, ClaimFailure)
+        self.assertEqual(len(base_result.gaps) - len(result.gaps), 3)
+        gap_keys = {gap["clause_key"] for gap in result.gaps}
+        for clause_key in ("C358ebcd9608d.1", "C358ebcd9608d.2", "Cf12ffe8bf4a6.1"):
+            self.assertNotIn(clause_key, gap_keys)
+        for clause_key in (
+            "C358ebcd9608d.3",
+            "C2cd9421b9c86.1",
+            "Cd5e98b5f64fa.1",
+            "C4696f988cd35.1",
+            "C947f9da5c155.1",
+            "C810ab2059e2a.1",
+            "Cacd7574f8bbf.1",
+        ):
+            self.assertIn(clause_key, gap_keys)
+
+    def test_c11_health_fixture_mutations_fail_closed(self) -> None:
+        health = next(fixture for fixture in FIXTURES if fixture.fixture_id == "runtime-adapter-health-request")
+        selector = next(
+            fixture
+            for fixture in FIXTURES
+            if fixture.fixture_id == "runtime-adapter-health-rejects-session-selector"
+        )
+        bad_shape = _thaw(health.expectation.result)
+        bad_shape.pop("capability_set_revision")
+        accepted_selector = _thaw(selector.trace[2].frame)
+        accepted_selector["params"] = {}
+
+        with self.assertRaisesRegex(ConformanceFailure, "fixture-result-shape"):
+            validate_fixtures(
+                self.protocol,
+                (replace(health, expectation=replace(health.expectation, result=bad_shape)),),
+            )
+        with self.assertRaisesRegex(ConformanceFailure, "fixture-violating-trace"):
+            validate_fixtures(
+                self.protocol,
+                (replace(selector, trace=(*selector.trace[:2], TraceFrame("host", "adapter", accepted_selector))),),
+            )
+        with self.assertRaisesRegex(ConformanceFailure, "fixture-violating-refusal"):
+            validate_fixtures(
+                self.protocol,
+                (replace(selector, expectation=replace(selector.expectation, error_name="INVALID_REQUEST")),),
+            )
+
+        for fixture_id, clause_key in (
+            ("runtime-adapter-health-request", "C358ebcd9608d.1"),
+            ("runtime-adapter-health-request", "C358ebcd9608d.2"),
+            ("runtime-adapter-health-rejects-session-selector", "Cf12ffe8bf4a6.1"),
+        ):
+            with self.subTest(clause=clause_key):
+                fixtures = tuple(fixture for fixture in FIXTURES if fixture.fixture_id != fixture_id)
+                if fixture_id == "runtime-adapter-health-request":
+                    fixtures = tuple(
+                        replace(
+                            fixture,
+                            clause_refs=tuple(ref for ref in fixture.clause_refs if ref.clause_key != clause_key),
+                        )
+                        if fixture.fixture_id == fixture_id
+                        else fixture
+                        for fixture in FIXTURES
+                    )
+                result = build_claim(self.protocol, fixtures=fixtures)
+                self.assertIsInstance(result, ClaimFailure)
+                self.assertIn(clause_key, {gap["clause_key"] for gap in result.gaps})
 
     def test_violating_fixture_trace_must_really_be_rejected(self) -> None:
         violating = next(fixture for fixture in FIXTURES if fixture.polarity == POLARITY_VIOLATING)
