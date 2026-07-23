@@ -6,9 +6,11 @@ import ast
 import importlib
 import unittest
 from pathlib import Path
+from types import MappingProxyType
 from unittest import mock
 
 from llm_collab import runtime_adapter_reference, runtime_adapter_state
+from llm_collab.runtime_adapter_conformance import ERROR_CODES
 from llm_collab.runtime_adapter_admission_evidence import build_admission_evidence
 from llm_collab.runtime_adapter_claim import ClaimFailure, build_claim
 from llm_collab.runtime_adapter_deadline_evidence import build_deadline_evidence
@@ -66,6 +68,16 @@ P7_KEYS = {
     "Ce4dfe2af8d8d.1",
     "C0ed26afcfb8a.1",
 }
+REDACTION_KEYS = {
+    "C5474a371af4f.1",
+    "C542339e0745f.1",
+    "C11985fb69796.1",
+    "C1daaef574b8a.1",
+    "C1daaef574b8a.2",
+    "C1daaef574b8a.3",
+}
+STRUCTURED_ERROR_KEYS = {"C5d3edf690fb2.1", "C5d3edf690fb2.2"}
+DEFERRED_RETRYABILITY_KEYS = {"C1ba88e813bab.1"}
 DEFERRED_RECOVERY_ADMISSION_KEYS = {"Cd830c5efc97b.1", "Cd830c5efc97b.2"}
 DEFERRED_C16_KEYS = {"C1731a3e18c8e.1", "C5bb2ba77ec3b.1", "C9138fb78426f.1", "Cf70f7c633f57.1"}
 DEFERRED_P6_KEYS = {
@@ -98,7 +110,7 @@ DEFERRED_P6_KEYS = {
     "Ce45ac56f0f07.2",
     "Cd849c64f4310.1",
 }
-HOST_HARNESS_KEYS = LIFECYCLE_KEYS | RECOVERY_KEYS | PROVENANCE_KEYS | P7_KEYS
+HOST_HARNESS_KEYS = LIFECYCLE_KEYS | RECOVERY_KEYS | PROVENANCE_KEYS | P7_KEYS | REDACTION_KEYS | STRUCTURED_ERROR_KEYS
 
 
 class RuntimeAdapterLifecycleEvidenceTests(unittest.TestCase):
@@ -119,8 +131,11 @@ class RuntimeAdapterLifecycleEvidenceTests(unittest.TestCase):
         self.assertLessEqual(RECOVERY_KEYS, covered)
         self.assertLessEqual(PROVENANCE_KEYS, covered)
         self.assertLessEqual(P7_KEYS, covered)
+        self.assertLessEqual(REDACTION_KEYS, covered)
+        self.assertLessEqual(STRUCTURED_ERROR_KEYS, covered)
         self.assertFalse(DEFERRED_RECOVERY_ADMISSION_KEYS & covered)
         self.assertFalse(DEFERRED_P6_KEYS & covered)
+        self.assertFalse(DEFERRED_RETRYABILITY_KEYS & covered)
         self.assertTrue(
             all(
                 clause["state"] == HOST_HARNESS_EVIDENCED and clause["evidence"] == ARTIFACT_LABEL
@@ -274,6 +289,39 @@ class RuntimeAdapterLifecycleEvidenceTests(unittest.TestCase):
         self.assertTrue(p7["digest_mismatch_quarantined"])
         self.assertEqual(set(p7["deferred_p6_keys"]), DEFERRED_P6_KEYS)
         self.assertIn("does not re-home P6 authority", p7["deferred_p6_reason"])
+
+    def test_redaction_observation_uses_real_redactor_before_persistence(self) -> None:
+        redaction = build_lifecycle_evidence(self.protocol)["observation"]["redaction"]
+
+        self.assertRegex(redaction["redacted_record_id"], r"^adapter_record_[0-9a-f]{64}$")
+        self.assertTrue(redaction["sensitive_fields_dropped"])
+        self.assertTrue(redaction["schema_identifiers_preserved"])
+        self.assertTrue(redaction["native_identifiers_hashed"])
+        self.assertTrue(redaction["recorder_accepts_only_redacted_document"])
+        self.assertEqual(
+            redaction["persisted_payload"]["stderr"],
+            {"total_bytes": 2048, "retained_bytes": 20, "truncated": True},
+        )
+        self.assertNotIn("prefix", redaction["persisted_payload"]["stderr"])
+        self.assertNotIn("raw_payload", redaction["persisted_payload"])
+        self.assertNotIn("environment", redaction["persisted_payload"])
+        self.assertEqual(redaction["redaction_failure_response_name"], "REDACTION_FAILURE")
+        self.assertEqual(redaction["redaction_failure_response_code"], ERROR_CODES["REDACTION_FAILURE"])
+        self.assertTrue(redaction["redaction_failure_quarantines_adapter"])
+        self.assertFalse(redaction["redaction_failure_wrote_state"])
+        self.assertIn("actual stderr drain remains outside", redaction["evidence_kind_boundary"])
+
+    def test_structured_error_observation_uses_closed_enum_and_no_response(self) -> None:
+        structured = build_lifecycle_evidence(self.protocol)["observation"]["structured_errors"]
+
+        self.assertEqual(structured["adapter_output_fault"], "INVALID_REQUEST")
+        self.assertEqual(structured["adapter_output_code"], ERROR_CODES["INVALID_REQUEST"])
+        self.assertTrue(structured["adapter_output_recorded_locally"])
+        self.assertTrue(structured["adapter_output_quarantined"])
+        self.assertIsNone(structured["adapter_output_response_to_adapter"])
+        self.assertTrue(structured["closed_error_envelope_validates"])
+        self.assertEqual(set(structured["retryability_deferred_keys"]), DEFERRED_RETRYABILITY_KEYS)
+        self.assertEqual(structured["retryability_deferred_reason"], "no real retryability-classification surface")
 
     def test_real_lifecycle_component_mutations_kill_evidence(self) -> None:
         original_initialized = LifecycleState.initialized.__func__
@@ -492,6 +540,78 @@ class RuntimeAdapterLifecycleEvidenceTests(unittest.TestCase):
                 with self.assertRaises(LifecycleEvidenceFailure):
                     build_lifecycle_evidence(self.protocol)
 
+    def test_real_redaction_component_mutations_kill_evidence(self) -> None:
+        original_record_quarantine_opened = runtime_adapter_state.record_quarantine_opened
+        original_error = ReferenceAdapter._error
+
+        def redaction_failure(document):
+            return RedactionFailure("unexpected_redaction_exception")
+
+        def passthrough_redaction(document):
+            return document
+
+        def raw_accepting_record(db_path, redacted):
+            if isinstance(redacted, dict):
+                return "adapter_record_" + ("0" * 64)
+            return original_record_quarantine_opened(db_path, redacted)
+
+        def wrong_redaction_error(self, request_id, name):
+            if name == "REDACTION_FAILURE":
+                return original_error(self, request_id, "INVALID_REQUEST")
+            return original_error(self, request_id, name)
+
+        mutations = (
+            (mock.patch.object(_lifecycle_module(), "redact_document", redaction_failure), "redaction success path"),
+            (mock.patch.object(_lifecycle_module(), "redact_document", passthrough_redaction), "redacted wrapper gate"),
+            (
+                mock.patch.object(runtime_adapter_state, "record_quarantine_opened", raw_accepting_record),
+                "redacted-only recorder",
+            ),
+            (mock.patch.object(ReferenceAdapter, "_error", wrong_redaction_error), "redaction failure response"),
+        )
+        for patcher, name in mutations:
+            with self.subTest(name=name), patcher:
+                with self.assertRaises(LifecycleEvidenceFailure):
+                    build_lifecycle_evidence(self.protocol)
+
+    def test_real_structured_error_component_mutations_kill_evidence(self) -> None:
+        original_validate_response = _lifecycle_module().validate_response
+        original_record_quarantine_opened = runtime_adapter_state.record_quarantine_opened
+        original_error_codes = _lifecycle_module().ERROR_CODES
+        original_error = ReferenceAdapter._error
+
+        def accept_adapter_output(value, request_id):
+            if request_id == "adapter-output-fault":
+                return {"jsonrpc": "2.0", "id": request_id, "result": {}}
+            return original_validate_response(value, request_id)
+
+        def skip_structured_fault_write(db_path, redacted):
+            if hasattr(redacted, "as_dict") and redacted.as_dict().get("request_id") == "adapter-output-fault":
+                return runtime_adapter_state.record_id_for(redacted)
+            return original_record_quarantine_opened(db_path, redacted)
+
+        changed_error_codes = dict(original_error_codes)
+        changed_error_codes["INVALID_REQUEST"] = -32099
+
+        def response_for_adapter_output(self, request_id, name):
+            if request_id == "adapter-output-fault":
+                return original_error(self, request_id, "METHOD_NOT_FOUND")
+            return original_error(self, request_id, name)
+
+        mutations = (
+            (mock.patch.object(_lifecycle_module(), "validate_response", accept_adapter_output), "output validation"),
+            (
+                mock.patch.object(runtime_adapter_state, "record_quarantine_opened", skip_structured_fault_write),
+                "local state record",
+            ),
+            (mock.patch.object(_lifecycle_module(), "ERROR_CODES", MappingProxyType(changed_error_codes)), "closed catalog"),
+            (mock.patch.object(ReferenceAdapter, "_error", response_for_adapter_output), "closed error envelope"),
+        )
+        for patcher, name in mutations:
+            with self.subTest(name=name), patcher:
+                with self.assertRaises(LifecycleEvidenceFailure):
+                    build_lifecycle_evidence(self.protocol)
+
     def test_build_claim_still_gaps_host_harness_rows_and_deferred_cd830(self) -> None:
         result = build_claim(self.protocol)
 
@@ -500,6 +620,7 @@ class RuntimeAdapterLifecycleEvidenceTests(unittest.TestCase):
         self.assertLessEqual(HOST_HARNESS_KEYS, gap_keys)
         self.assertLessEqual(DEFERRED_RECOVERY_ADMISSION_KEYS, gap_keys)
         self.assertLessEqual(DEFERRED_P6_KEYS, gap_keys)
+        self.assertLessEqual(DEFERRED_RETRYABILITY_KEYS, gap_keys)
 
     def test_lifecycle_ledger_is_scoped_disjoint_from_existing_ledgers(self) -> None:
         lifecycle = build_lifecycle_evidence(self.protocol)
@@ -567,6 +688,18 @@ class RuntimeAdapterLifecycleEvidenceTests(unittest.TestCase):
             (
                 "At P6 the `runtime.deliver` action relation, session-binding\n   evidence profile",
                 "At P6 the `runtime.deliver` action relation and session-binding\n   evidence profile",
+            ),
+            (
+                "only\n    redacted bounded diagnostics, byte counts, and a truncation marker may enter\n    the quarantine record",
+                "only\n    bounded diagnostics, byte counts, and a truncation marker may enter\n    the quarantine record",
+            ),
+            (
+                "Every adapter output failure MUST be\n    recorded locally under the same enumeration",
+                "Every adapter output failure MUST be\n    recorded locally under an enumeration",
+            ),
+            (
+                "The host MUST\n    record it and quarantine the adapter rather than guessing retryability",
+                "The host MUST\n    record it rather than guessing retryability",
             ),
         )
         for old, new in replacements:

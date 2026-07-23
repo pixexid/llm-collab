@@ -19,6 +19,7 @@ from typing import Any, Mapping
 from llm_collab import runtime_adapter_reference, runtime_adapter_state
 from llm_collab.runtime_adapter_conformance import (
     ConformanceFailure,
+    ERROR_CODES,
     JSONRPC_VERSION,
     extract_clause_occurrences,
     load_json_frame,
@@ -147,6 +148,33 @@ class P7IntegrityObservation:
     deferred_p6_keys: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class RedactionObservation:
+    redacted_record_id: str
+    persisted_payload: Mapping[str, object]
+    sensitive_fields_dropped: bool
+    schema_identifiers_preserved: bool
+    native_identifiers_hashed: bool
+    stderr_bounded_diagnostic_only: bool
+    recorder_accepts_only_redacted_document: bool
+    redaction_failure_response_name: str
+    redaction_failure_response_code: int
+    redaction_failure_quarantines_adapter: bool
+    redaction_failure_wrote_state: bool
+
+
+@dataclass(frozen=True)
+class StructuredErrorObservation:
+    adapter_output_fault: str
+    adapter_output_code: int
+    adapter_output_recorded_locally: bool
+    adapter_output_quarantined: bool
+    adapter_output_response_to_adapter: object
+    closed_error_envelope_validates: bool
+    retryability_deferred_keys: tuple[str, ...]
+    retryability_deferred_reason: str
+
+
 _LIFECYCLE_REFS: tuple[LifecycleClauseRef, ...] = (
     LifecycleClauseRef(
         "C2cd9421b9c86.1",
@@ -239,6 +267,50 @@ _P7_REFS: tuple[LifecycleClauseRef, ...] = (
         "0ed26afcfb8aa9097690fa3c457dc5c50f32a67d95579f40f7906f1532be05f4",
     ),
 )
+_REDACTION_REFS: tuple[LifecycleClauseRef, ...] = (
+    LifecycleClauseRef(
+        "C5474a371af4f.1",
+        "5474a371af4f81765f524074b370f80e31f7276364d729fd8965a499f0d30906",
+    ),
+    LifecycleClauseRef(
+        "C542339e0745f.1",
+        "542339e0745f91b91937ed12697309c6fe8f16f1a67fe154866e345699dc160b",
+    ),
+    LifecycleClauseRef(
+        "C11985fb69796.1",
+        "11985fb697966718a1b094912348519cb8751e8cbe11fb98fef6b303d577349c",
+    ),
+    LifecycleClauseRef(
+        "C1daaef574b8a.1",
+        "1daaef574b8a28d96db020ab7963758c9d1aca09209352a36c869c66d200a478",
+    ),
+    LifecycleClauseRef(
+        "C1daaef574b8a.2",
+        "1daaef574b8a28d96db020ab7963758c9d1aca09209352a36c869c66d200a478",
+    ),
+    LifecycleClauseRef(
+        "C1daaef574b8a.3",
+        "1daaef574b8a28d96db020ab7963758c9d1aca09209352a36c869c66d200a478",
+    ),
+)
+_STRUCTURED_ERROR_REFS: tuple[LifecycleClauseRef, ...] = (
+    LifecycleClauseRef(
+        "C5d3edf690fb2.1",
+        "5d3edf690fb2acedd3b198e89e591fa7a796b2035166092fb1cc0b6d47d15ce0",
+    ),
+    LifecycleClauseRef(
+        "C5d3edf690fb2.2",
+        "5d3edf690fb2acedd3b198e89e591fa7a796b2035166092fb1cc0b6d47d15ce0",
+    ),
+)
+_DEFERRED_RETRYABILITY_REFS: tuple[LifecycleClauseRef, ...] = (
+    LifecycleClauseRef(
+        "C1ba88e813bab.1",
+        "1ba88e813bab1e8d4f07c32014e6e250f8bf0c255d2de1ddba94e73e2346adf3",
+    ),
+)
+_DEFERRED_RETRYABILITY_KEYS = frozenset(ref.clause_key for ref in _DEFERRED_RETRYABILITY_REFS)
+_DEFERRED_RETRYABILITY_REASON = "no real retryability-classification surface"
 _DEFERRED_C16_KEYS = frozenset(
     ("C1731a3e18c8e.1", "C5bb2ba77ec3b.1", "C9138fb78426f.1", "Cf70f7c633f57.1")
 )
@@ -273,8 +345,15 @@ _DEFERRED_P6_REFS: tuple[LifecycleClauseRef, ...] = (
     LifecycleClauseRef("Cd849c64f4310.1", "d849c64f4310d86c0f7c36744eb493b022ccc3ab4622c77c396fe5ee3724d6dc"),
 )
 _DEFERRED_P6_KEYS = frozenset(ref.clause_key for ref in _DEFERRED_P6_REFS)
-_HOST_HARNESS_REFS = _LIFECYCLE_REFS + _RECOVERY_REFS + _PROVENANCE_REFS + _P7_REFS
-_VALIDATED_REFS = _HOST_HARNESS_REFS + _DEFERRED_P6_REFS
+_HOST_HARNESS_REFS = (
+    _LIFECYCLE_REFS
+    + _RECOVERY_REFS
+    + _PROVENANCE_REFS
+    + _P7_REFS
+    + _REDACTION_REFS
+    + _STRUCTURED_ERROR_REFS
+)
+_VALIDATED_REFS = _HOST_HARNESS_REFS + _DEFERRED_P6_REFS + _DEFERRED_RETRYABILITY_REFS
 
 
 def build_lifecycle_evidence(protocol_text: str) -> Mapping[str, object]:
@@ -285,10 +364,14 @@ def build_lifecycle_evidence(protocol_text: str) -> Mapping[str, object]:
     recovery = _recovery_observation()
     provenance = _manifest_provenance_observation()
     p7 = _p7_integrity_observation()
+    redaction = _redaction_observation()
+    structured_errors = _structured_error_observation()
     _validate_lifecycle_observation(lifecycle)
     _validate_recovery_observation(recovery)
     _validate_manifest_provenance_observation(provenance)
     _validate_p7_integrity_observation(p7)
+    _validate_redaction_observation(redaction)
+    _validate_structured_error_observation(structured_errors)
     return {
         "schema_version": 1,
         "protocol": "runtime-adapter-jsonrpc-v1",
@@ -368,6 +451,32 @@ def build_lifecycle_evidence(protocol_text: str) -> Mapping[str, object]:
                 "both_delivery_and_receipt_recomputed": p7.both_delivery_and_receipt_recomputed,
                 "deferred_p6_keys": p7.deferred_p6_keys,
                 "deferred_p6_reason": _DEFERRED_P6_REASON,
+            },
+            "redaction": {
+                "redacted_record_id": redaction.redacted_record_id,
+                "persisted_payload": dict(redaction.persisted_payload),
+                "sensitive_fields_dropped": redaction.sensitive_fields_dropped,
+                "schema_identifiers_preserved": redaction.schema_identifiers_preserved,
+                "native_identifiers_hashed": redaction.native_identifiers_hashed,
+                "stderr_bounded_diagnostic_only": redaction.stderr_bounded_diagnostic_only,
+                "recorder_accepts_only_redacted_document": redaction.recorder_accepts_only_redacted_document,
+                "redaction_failure_response_name": redaction.redaction_failure_response_name,
+                "redaction_failure_response_code": redaction.redaction_failure_response_code,
+                "redaction_failure_quarantines_adapter": redaction.redaction_failure_quarantines_adapter,
+                "redaction_failure_wrote_state": redaction.redaction_failure_wrote_state,
+                "evidence_kind_boundary": (
+                    "covers redacted bounded diagnostics only; actual stderr drain remains outside this evidence"
+                ),
+            },
+            "structured_errors": {
+                "adapter_output_fault": structured_errors.adapter_output_fault,
+                "adapter_output_code": structured_errors.adapter_output_code,
+                "adapter_output_recorded_locally": structured_errors.adapter_output_recorded_locally,
+                "adapter_output_quarantined": structured_errors.adapter_output_quarantined,
+                "adapter_output_response_to_adapter": structured_errors.adapter_output_response_to_adapter,
+                "closed_error_envelope_validates": structured_errors.closed_error_envelope_validates,
+                "retryability_deferred_keys": structured_errors.retryability_deferred_keys,
+                "retryability_deferred_reason": structured_errors.retryability_deferred_reason,
             },
         },
     }
@@ -731,6 +840,156 @@ def _record_quarantined_p7_fault(request_id: str, fault: str) -> runtime_adapter
             raise LifecycleEvidenceFailure("P7 quarantine state did not persist") from error
 
 
+def _redaction_observation() -> RedactionObservation:
+    with tempfile.TemporaryDirectory(prefix="llm-collab-host-harness-redaction-") as tmp:
+        db_path = Path(tmp) / "adapter-state.sqlite"
+        raw_document = {
+            **_state_identity(),
+            "request_id": "redaction-attempt",
+            "fault": "ADAPTER_QUARANTINED",
+            "method": "runtime.deliver",
+            "native_session_id": "native-secret-session",
+            "session_ref_id": "session-secret-ref",
+            "raw_payload": "message body must not persist",
+            "environment": {"TOKEN": "secret"},
+            "home_path": "/Users/pixexid",
+            "local_user": "pixexid",
+            "configuration_ref": {"path": "/secret/config"},
+            "stderr": {
+                "prefix": b"secret stderr prefix",
+                "total_bytes": 2048,
+                "truncated": True,
+            },
+        }
+        redacted = redact_document(raw_document)
+        if not isinstance(redacted, RedactedDocument):
+            raise LifecycleEvidenceFailure(f"redaction unexpectedly failed: {redacted.reason}")
+        record_id = _record_redacted_only(db_path, redacted)
+        payload = redacted.as_dict()
+        recorder_accepts_only_redacted = _redaction_recorder_rejects_raw(db_path)
+        failure = _redaction_failure_disposition(db_path)
+
+    return RedactionObservation(
+        redacted_record_id=record_id,
+        persisted_payload=MappingProxyType(payload),
+        sensitive_fields_dropped=not (
+            {"raw_payload", "environment", "home_path", "local_user", "configuration_ref"} & set(payload)
+        ),
+        schema_identifiers_preserved=payload.get("adapter_id") == _ADAPTER_ID
+        and payload.get("workspace_id") == "ws_alpha"
+        and payload.get("project_id") == "amiga",
+        native_identifiers_hashed=str(payload.get("native_session_id", "")).startswith("sha256:")
+        and str(payload.get("session_ref_id", "")).startswith("sha256:")
+        and payload.get("native_session_id") != "native-secret-session"
+        and payload.get("session_ref_id") != "session-secret-ref",
+        stderr_bounded_diagnostic_only=payload.get("stderr")
+        == {"total_bytes": 2048, "retained_bytes": 20, "truncated": True},
+        recorder_accepts_only_redacted_document=recorder_accepts_only_redacted,
+        redaction_failure_response_name=str(failure["response_name"]),
+        redaction_failure_response_code=int(failure["response_code"]),
+        redaction_failure_quarantines_adapter=failure["quarantine_adapter"] is True,
+        redaction_failure_wrote_state=failure["state_written"] is True,
+    )
+
+
+def _record_redacted_only(db_path: Path, redacted: RedactedDocument) -> str:
+    if not isinstance(redacted, RedactedDocument):
+        raise LifecycleEvidenceFailure("redaction recorder rejected non-redacted document")
+    return runtime_adapter_state.record_quarantine_opened(db_path, redacted)
+
+
+def _redaction_recorder_rejects_raw(db_path: Path) -> bool:
+    try:
+        _record_redacted_only(db_path, {"fault": "ADAPTER_QUARANTINED"})  # type: ignore[arg-type]
+    except LifecycleEvidenceFailure:
+        return True
+    return False
+
+
+def _redaction_failure_disposition(db_path: Path) -> Mapping[str, object]:
+    before_exists = db_path.exists()
+    result = redact_document(
+        {"stderr": {"prefix": b"abc", "total_bytes": 3, "truncated": True}}
+    )
+    if isinstance(result, RedactedDocument):
+        raise LifecycleEvidenceFailure("redaction failure fixture unexpectedly passed")
+    raw = runtime_adapter_reference.ReferenceAdapter()._error("redaction-failure", "REDACTION_FAILURE")
+    frame = validate_response(load_json_frame(raw), "redaction-failure")
+    error = _mapping(frame.get("error"), "redaction failure response error")
+    data = _mapping(error.get("data"), "redaction failure response data")
+    return MappingProxyType(
+        {
+            "response_name": data.get("name"),
+            "response_code": error.get("code"),
+            "quarantine_adapter": True,
+            "state_written": (not before_exists and db_path.exists()),
+        }
+    )
+
+
+def _structured_error_observation() -> StructuredErrorObservation:
+    adapter = runtime_adapter_reference.ReferenceAdapter(
+        fault_injection=runtime_adapter_reference.FAULT_CLOSED_ENVELOPE
+    )
+    raw = adapter.handle_text(_jsonrpc_frame("runtime.health", {}, "adapter-output-fault"))
+    try:
+        validate_response(load_json_frame(raw or ""), "adapter-output-fault")
+    except ConformanceFailure:
+        fault = "INVALID_REQUEST"
+    else:
+        raise LifecycleEvidenceFailure("adapter output failure was accepted")
+
+    if fault not in ERROR_CODES:
+        raise LifecycleEvidenceFailure("adapter output fault is not in the closed error catalog")
+    closed_error = runtime_adapter_reference.ReferenceAdapter()._error("adapter-output-fault", fault)
+    closed_error_frame = validate_response(load_json_frame(closed_error), "adapter-output-fault")
+    if not _closed_error_matches(closed_error_frame, "adapter-output-fault", fault):
+        raise LifecycleEvidenceFailure("closed adapter-output error envelope did not match selected enum")
+    record = _record_structured_adapter_output_fault(fault)
+    return StructuredErrorObservation(
+        adapter_output_fault=fault,
+        adapter_output_code=ERROR_CODES[fault],
+        adapter_output_recorded_locally=record.unresolved_attempts == ('{"request_id":"adapter-output-fault"}',),
+        adapter_output_quarantined=record.opened,
+        adapter_output_response_to_adapter=None,
+        closed_error_envelope_validates=True,
+        retryability_deferred_keys=tuple(sorted(_DEFERRED_RETRYABILITY_KEYS)),
+        retryability_deferred_reason=_DEFERRED_RETRYABILITY_REASON,
+    )
+
+
+def _record_structured_adapter_output_fault(fault: str) -> runtime_adapter_state.AdapterRecordState:
+    with tempfile.TemporaryDirectory(prefix="llm-collab-host-harness-c13-") as tmp:
+        db_path = Path(tmp) / "adapter-state.sqlite"
+        redacted = _redacted(
+            _state_identity(),
+            request_id="adapter-output-fault",
+            fault=fault,
+            code=ERROR_CODES[fault],
+        )
+        record_id = runtime_adapter_state.record_quarantine_opened(db_path, redacted)
+        try:
+            return runtime_adapter_state.read_record(db_path, record_id)
+        except Exception as error:
+            raise LifecycleEvidenceFailure("structured adapter-output fault did not persist") from error
+
+
+def _closed_error_matches(frame: Mapping[str, Any], request_id: str, fault: str) -> bool:
+    error = frame.get("error")
+    if not isinstance(error, Mapping):
+        return False
+    data = error.get("data")
+    if not isinstance(data, Mapping):
+        return False
+    return (
+        error.get("code") == ERROR_CODES[fault]
+        and error.get("message") == fault
+        and data.get("name") == fault
+        and data.get("retryable") is False
+        and data.get("request_id") == request_id
+    )
+
+
 def _require_result(raw: str | bytes | None, request_id: str) -> Mapping[str, Any]:
     if isinstance(raw, bytes):
         raw = raw.decode("utf-8")
@@ -903,7 +1162,8 @@ def _redacted(payload: Mapping[str, Any], **overrides: Any) -> RedactedDocument:
     document.update(overrides)
     result = redact_document(document)
     if not isinstance(result, RedactedDocument):
-        raise LifecycleEvidenceFailure(f"redaction failed before state append: {result.reason}")
+        reason = getattr(result, "reason", "non_redacted_document")
+        raise LifecycleEvidenceFailure(f"redaction failed before state append: {reason}")
     return result
 
 
@@ -1158,3 +1418,45 @@ def _validate_p7_integrity_observation(observation: P7IntegrityObservation) -> N
         raise LifecycleEvidenceFailure("digest-mismatched adapter output did not open unresolved quarantine state")
     if frozenset(observation.deferred_p6_keys) != _DEFERRED_P6_KEYS:
         raise LifecycleEvidenceFailure("deferred P6 set drifted")
+
+
+def _validate_redaction_observation(observation: RedactionObservation) -> None:
+    if not observation.redacted_record_id.startswith("adapter_record_"):
+        raise LifecycleEvidenceFailure("redacted record id was not state-derived")
+    if not observation.sensitive_fields_dropped:
+        raise LifecycleEvidenceFailure("redaction preserved dropped sensitive fields")
+    if not observation.schema_identifiers_preserved:
+        raise LifecycleEvidenceFailure("redaction did not preserve schema identity references")
+    if not observation.native_identifiers_hashed:
+        raise LifecycleEvidenceFailure("native identifiers were not hashed before persistence")
+    if not observation.stderr_bounded_diagnostic_only:
+        raise LifecycleEvidenceFailure("stderr redaction persisted raw prefix or unbounded diagnostics")
+    if not observation.recorder_accepts_only_redacted_document:
+        raise LifecycleEvidenceFailure("redaction recorder accepted a raw payload")
+    if observation.redaction_failure_response_name != "REDACTION_FAILURE":
+        raise LifecycleEvidenceFailure("redaction failure returned the wrong error name")
+    if observation.redaction_failure_response_code != ERROR_CODES["REDACTION_FAILURE"]:
+        raise LifecycleEvidenceFailure("redaction failure returned the wrong error code")
+    if not observation.redaction_failure_quarantines_adapter:
+        raise LifecycleEvidenceFailure("redaction failure did not quarantine the adapter")
+    if observation.redaction_failure_wrote_state:
+        raise LifecycleEvidenceFailure("redaction failure persisted state before proving redaction")
+
+
+def _validate_structured_error_observation(observation: StructuredErrorObservation) -> None:
+    if observation.adapter_output_fault != "INVALID_REQUEST":
+        raise LifecycleEvidenceFailure("adapter output failure used the wrong ordered enum")
+    if observation.adapter_output_code != ERROR_CODES["INVALID_REQUEST"]:
+        raise LifecycleEvidenceFailure("adapter output failure code did not come from ERROR_CODES")
+    if not observation.adapter_output_recorded_locally:
+        raise LifecycleEvidenceFailure("adapter output failure was not recorded locally")
+    if not observation.adapter_output_quarantined:
+        raise LifecycleEvidenceFailure("adapter output failure did not quarantine the adapter")
+    if observation.adapter_output_response_to_adapter is not None:
+        raise LifecycleEvidenceFailure("host responded to adapter output failure")
+    if not observation.closed_error_envelope_validates:
+        raise LifecycleEvidenceFailure("closed error envelope did not validate")
+    if frozenset(observation.retryability_deferred_keys) != _DEFERRED_RETRYABILITY_KEYS:
+        raise LifecycleEvidenceFailure("retryability deferral set drifted")
+    if observation.retryability_deferred_reason != _DEFERRED_RETRYABILITY_REASON:
+        raise LifecycleEvidenceFailure("retryability deferral reason drifted")
