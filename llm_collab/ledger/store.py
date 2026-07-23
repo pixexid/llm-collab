@@ -5542,6 +5542,66 @@ class LedgerStore:
                 self._connection.execute("ROLLBACK")
             raise
 
+    def prune_observation_audit(
+        self,
+        *,
+        workspace_id: str,
+        project_id: str,
+        source_id: str,
+        keep_latest: int,
+        limit: int = 500,
+    ) -> int:
+        """Delete old audit rows beyond one project/source newest-N tail.
+
+        This is intentionally not audited: writing an audit row for audit
+        compaction would recreate the unbounded growth this retention policy
+        exists to stop. Callers charge one maintenance unit per deleted row.
+        """
+        self._ensure_thread()
+        if self._read_only:
+            raise PermissionError("query-only readers cannot prune observation audit")
+        if validate_workspace_id(workspace_id) != self.paths.workspace_id:
+            raise ValueError("workspace_id does not own this ledger")
+        validate_project_id(project_id)
+        if source_id != "chats_mailbox":
+            raise ValueError("source_id must be chats_mailbox")
+        if (
+            isinstance(keep_latest, bool)
+            or not isinstance(keep_latest, int)
+            or not 1 <= keep_latest <= 200
+        ):
+            raise ValueError("audit retention tail must be between 1 and 200 rows")
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 500:
+            raise ValueError("audit retention prune limit must be between 1 and 500")
+        self._connection.execute("BEGIN IMMEDIATE")
+        try:
+            removed = self._connection.execute(
+                "DELETE FROM observation_audit WHERE rowid IN ("
+                "SELECT rowid FROM observation_audit WHERE workspace_id = ? "
+                "AND project_id = ? AND source_id = ? "
+                "AND rowid NOT IN ("
+                "SELECT rowid FROM observation_audit WHERE workspace_id = ? "
+                "AND project_id = ? AND source_id = ? "
+                "ORDER BY audit_id DESC, registry_revision DESC, rowid DESC LIMIT ?) "
+                "ORDER BY audit_id ASC, registry_revision ASC, rowid ASC LIMIT ?)",
+                (
+                    workspace_id,
+                    project_id,
+                    source_id,
+                    workspace_id,
+                    project_id,
+                    source_id,
+                    keep_latest,
+                    limit,
+                ),
+            ).rowcount
+            self._connection.execute("COMMIT")
+            return removed
+        except BaseException:
+            if self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
+            raise
+
     def observation_diagnostics(
         self,
         *,
@@ -5697,7 +5757,7 @@ class LedgerStore:
             "result, occurred_at_utc, detail_json) "
             "SELECT ?, ?, ?, ?, coalesce(max(audit_id), 0) + 1, ?, 'committed', ?, ? "
             "FROM observation_audit WHERE workspace_id = ? AND project_id = ? "
-            "AND source_id = ? AND registry_revision = ?",
+            "AND source_id = ?",
             (
                 workspace_id,
                 project_id,
@@ -5709,7 +5769,6 @@ class LedgerStore:
                 workspace_id,
                 project_id,
                 source_id,
-                registry_revision,
             ),
         )
 

@@ -25,6 +25,7 @@ SCAN_LIMIT = 2_000
 WRITE_LIMIT = 500
 MAINTENANCE_LIMIT = 500
 RETENTION_DAYS = 30
+AUDIT_RETENTION_LIMIT = 200
 DIAGNOSTIC_GROUP_LIMIT = 50
 DIAGNOSTIC_AUDIT_LIMIT = 200
 MAX_SOURCE_BYTES = 16 * 1024 * 1024
@@ -1136,12 +1137,23 @@ class ObservationEngine:
                         limit=prune_limit,
                     )
                     maintenance_remaining -= removed + 1
+                audit_removed = 0
+                if maintenance_remaining > 0:
+                    audit_removed = store.prune_observation_audit(
+                        workspace_id=self.workspace_id,
+                        project_id=project_id,
+                        source_id=SOURCE_ID,
+                        keep_latest=AUDIT_RETENTION_LIMIT,
+                        limit=maintenance_remaining,
+                    )
+                    maintenance_remaining -= audit_removed
                 if index < 50:
                     results[project_id] = {
                         "scanned": result["scanned"],
                         "written": result["written"],
                         "incomplete": bool(result["cursor"]),
                         "pruned": removed,
+                        "audit_pruned": audit_removed,
                     }
         finally:
             authority.close()
