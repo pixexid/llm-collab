@@ -75,6 +75,16 @@ class RuntimeAdapterClaimTests(unittest.TestCase):
         prohibition = ClauseOccurrence("neg", "b" * 64, "MUST NOT do it", "MUST NOT", 2, "C01 Test")
         conforming_positive = replace(FIXTURES[0], clause_refs=(replace(FIXTURES[0].clause_refs[0], clause_key="pos"),))
         conforming_negative = replace(FIXTURES[0], clause_refs=(replace(FIXTURES[0].clause_refs[0], clause_key="neg"),))
+        non_classifying_negative = replace(
+            FIXTURES[0],
+            clause_refs=(
+                replace(
+                    FIXTURES[0].clause_refs[0],
+                    clause_key="neg",
+                    non_classifying=True,
+                ),
+            ),
+        )
         violating_negative = replace(
             FIXTURES[-1],
             fixture_id="violating-negative",
@@ -95,6 +105,14 @@ class RuntimeAdapterClaimTests(unittest.TestCase):
         self.assertEqual(states["pos"], EXERCISED_CONFORMING)
         self.assertEqual(states["neg"], UNREFERENCED)
         self.assertEqual(states["none"], UNREFERENCED)
+        self.assertEqual(
+            _coverage_states(
+                (prohibition,),
+                (non_classifying_negative,),
+                {"runtime-adapter-health-request"},
+            )["neg"],
+            EXERCISED_CONFORMING,
+        )
         self.assertEqual(
             _coverage_states((prohibition,), (violating_negative,), {"violating-negative"})["neg"],
             EXERCISED_CONFORMING,
