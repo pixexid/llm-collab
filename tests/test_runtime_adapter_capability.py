@@ -8,8 +8,10 @@ import unittest
 from pathlib import Path
 
 from llm_collab.runtime_adapter_capability import (
+    BoundCapabilityContext,
     CAPABILITY_NOT_DECLARED,
     CapabilityAuthorityError,
+    CapabilityDecision,
     TrustedCapabilityAuthorityRegistry,
     method_requires_product_capability,
 )
@@ -199,6 +201,157 @@ class RuntimeAdapterCapabilityAuthorityTests(unittest.TestCase):
         with self.assertRaises(CapabilityAuthorityError):
             TrustedCapabilityAuthorityRegistry(bad_records)
 
+    def test_validate_request_authority_derives_exact_action_decision(self) -> None:
+        registry, bound = _bound_authority()
+
+        decision = registry.validate_request_authority(bound, METHOD_DELIVER)
+
+        self.assertEqual(
+            decision,
+            CapabilityDecision(
+                method=METHOD_DELIVER,
+                selected_capability="runtime.deliver.observe_only",
+                selected_quality="authoritative",
+            ),
+        )
+        with self.assertRaises(Exception):
+            decision.selected_capability = "runtime.other"  # type: ignore[misc]
+
+    def test_request_authority_rejects_relation_schema_drift(self) -> None:
+        cases = (
+            ("unknown field", lambda relation: relation.__setitem__("caller_relation", True)),
+            ("missing field", lambda relation: relation.pop("selected_capability")),
+            ("bad capability-set id", lambda relation: relation.__setitem__("capability_set_id", "")),
+            ("bad method", lambda relation: relation.__setitem__("method", METHOD_HEALTH)),
+            ("bad relation type", lambda _relation: []),
+        )
+        for name, mutate in cases:
+            records = _authority_records()
+            if name == "bad relation type":
+                records["adapter_alpha"]["session_action_relations"][0] = []
+            else:
+                mutate(records["adapter_alpha"]["session_action_relations"][0])
+            with self.subTest(name=name):
+                with self.assertRaises(CapabilityAuthorityError) as caught:
+                    TrustedCapabilityAuthorityRegistry(records)
+                self.assertEqual(caught.exception.code, CAPABILITY_NOT_DECLARED)
+
+    def test_request_authority_relation_cardinality_and_key_fail_closed(self) -> None:
+        cases = (
+            ("zero", []),
+            ("duplicate", [_action_relation(METHOD_DELIVER), _action_relation(METHOD_DELIVER)]),
+            ("stale set", [_action_relation(METHOD_DELIVER, capability_set_id="caps_other")]),
+            ("stale revision", [_action_relation(METHOD_DELIVER, capability_set_revision="cap_rev_other")]),
+            ("wrong method", [_action_relation(METHOD_RECONCILE)]),
+        )
+        for name, relations in cases:
+            records = _authority_records(session_action_relations=relations)
+            registry, bound = _bound_authority(records)
+            with self.subTest(name=name):
+                with self.assertRaises(CapabilityAuthorityError) as caught:
+                    registry.validate_request_authority(bound, METHOD_DELIVER)
+                self.assertEqual(caught.exception.code, CAPABILITY_NOT_DECLARED)
+
+    def test_request_authority_rejects_controls_and_caller_supplied_authority(self) -> None:
+        registry, bound = _bound_authority()
+
+        for method in (METHOD_HEALTH, METHOD_SHUTDOWN, "runtime.unknown"):
+            with self.subTest(method=method):
+                with self.assertRaises(CapabilityAuthorityError) as caught:
+                    registry.validate_request_authority(bound, method)
+                self.assertEqual(caught.exception.code, CAPABILITY_NOT_DECLARED)
+
+        with self.assertRaises(CapabilityAuthorityError) as caught:
+            registry.validate_request_authority(
+                bound,
+                METHOD_DELIVER,
+                caller_authority_fields={"selected_capability": "runtime.deliver.observe_only"},
+            )
+        self.assertEqual(caught.exception.code, CAPABILITY_NOT_DECLARED)
+
+    def test_request_authority_selected_capability_guards_are_independent(self) -> None:
+        cases = (
+            (
+                "absent selected token",
+                lambda records: records["adapter_alpha"]["session_action_relations"][0].__setitem__(
+                    "selected_capability", "runtime.absent"
+                ),
+            ),
+            (
+                "duplicate selected token",
+                lambda records: records["adapter_alpha"]["capability_set"]["capabilities"].append(
+                    copy.deepcopy(records["adapter_alpha"]["capability_set"]["capabilities"][0])
+                ),
+            ),
+            (
+                "quality mismatch",
+                lambda records: records["adapter_alpha"]["session_action_relations"][0].__setitem__(
+                    "required_quality", "best_effort"
+                ),
+            ),
+        )
+        for name, mutate in cases:
+            records = _authority_records()
+            mutate(records)
+            registry, bound = _bound_authority(records)
+            with self.subTest(name=name):
+                with self.assertRaises(CapabilityAuthorityError) as caught:
+                    registry.validate_request_authority(bound, METHOD_DELIVER)
+                self.assertEqual(caught.exception.code, CAPABILITY_NOT_DECLARED)
+
+    def test_request_authority_rejects_unsupported_selected_capability_quality(self) -> None:
+        records = _authority_records()
+        records["adapter_alpha"]["session_action_relations"][0]["selected_capability"] = "runtime.disabled"
+        records["adapter_alpha"]["session_action_relations"][0]["required_quality"] = "unsupported"
+        registry, bound = _bound_authority(records)
+        forged_capability_set = _thaw(bound.capability_set)
+        unsupported = _capability("runtime.disabled")
+        unsupported["quality"] = "unsupported"
+        forged_capability_set["capabilities"].append(unsupported)
+        forged_bound = BoundCapabilityContext(
+            adapter_id=bound.adapter_id,
+            adapter_revision=bound.adapter_revision,
+            manifest_id=bound.manifest_id,
+            manifest_revision=bound.manifest_revision,
+            endpoint=bound.endpoint,
+            capability_set=forged_capability_set,
+        )
+
+        with self.assertRaises(CapabilityAuthorityError) as caught:
+            registry.validate_request_authority(forged_bound, METHOD_DELIVER)
+
+        self.assertEqual(caught.exception.code, CAPABILITY_NOT_DECLARED)
+
+    def test_request_authority_revalidates_selected_attestation_on_bound_context(self) -> None:
+        registry, bound = _bound_authority()
+        forged_capability_set = _thaw(bound.capability_set)
+        forged_entries = [copy.deepcopy(entry) for entry in forged_capability_set["capabilities"]]
+        forged_entries[0]["evidence"]["source_id"] = "adapter_other"
+        forged_capability_set["capabilities"] = forged_entries
+        forged_bound = BoundCapabilityContext(
+            adapter_id=bound.adapter_id,
+            adapter_revision=bound.adapter_revision,
+            manifest_id=bound.manifest_id,
+            manifest_revision=bound.manifest_revision,
+            endpoint=bound.endpoint,
+            capability_set=forged_capability_set,
+        )
+
+        with self.assertRaises(CapabilityAuthorityError) as caught:
+            registry.validate_request_authority(forged_bound, METHOD_DELIVER)
+
+        self.assertEqual(caught.exception.code, CAPABILITY_NOT_DECLARED)
+
+    def test_request_authority_has_no_method_or_prefix_fallback(self) -> None:
+        records = _authority_records(session_action_relations=[])
+        records["adapter_alpha"]["capability_set"]["capabilities"].append(_capability(METHOD_DELIVER))
+        registry, bound = _bound_authority(records)
+
+        with self.assertRaises(CapabilityAuthorityError) as caught:
+            registry.validate_request_authority(bound, METHOD_DELIVER)
+
+        self.assertEqual(caught.exception.code, CAPABILITY_NOT_DECLARED)
+
     def test_capability_module_uses_no_live_runtime_or_evidence_surfaces(self) -> None:
         tree = ast.parse(MODULE_PATH.read_text(encoding="utf-8"))
         forbidden_modules = {
@@ -236,6 +389,7 @@ def _authority_records(
     capability_set_revision: str = "cap_rev1",
     scope: dict[str, object] | None = None,
     endpoint_id: str = "endpoint_alpha",
+    session_action_relations: list[dict[str, object]] | None = None,
 ) -> dict[str, dict[str, object]]:
     active_scope = scope or {"kind": "workspace"}
     return {
@@ -243,6 +397,15 @@ def _authority_records(
             "adapter_id": "adapter_alpha",
             "endpoint": _endpoint(scope=active_scope, endpoint_id=endpoint_id),
             "capability_set": _capability_set(revision=capability_set_revision, scope=active_scope),
+            "session_action_relations": copy.deepcopy(
+                session_action_relations
+                if session_action_relations is not None
+                else [
+                    _action_relation(METHOD_DELIVER),
+                    _action_relation(METHOD_CANCEL, selected_capability="runtime.cancel.observe_only"),
+                    _action_relation(METHOD_RECONCILE, selected_capability="runtime.reconcile.observe_only"),
+                ]
+            ),
         }
     }
 
@@ -335,6 +498,7 @@ def _capability_set(*, revision: str, scope: dict[str, object]) -> dict[str, obj
         "revision": revision,
         "capabilities": [
             _capability("runtime.deliver.observe_only"),
+            _capability("runtime.cancel.observe_only"),
             _capability("runtime.reconcile.observe_only"),
         ],
     }
@@ -352,6 +516,43 @@ def _capability(token: str) -> dict[str, object]:
             "integrity": "sha256:" + ("1" * 64),
         },
     }
+
+
+def _action_relation(
+    method: str,
+    *,
+    selected_capability: str = "runtime.deliver.observe_only",
+    capability_set_id: str = "caps_alpha",
+    capability_set_revision: str = "cap_rev1",
+    required_quality: str = "authoritative",
+) -> dict[str, object]:
+    return {
+        "capability_set_id": capability_set_id,
+        "capability_set_revision": capability_set_revision,
+        "method": method,
+        "selected_capability": selected_capability,
+        "required_quality": required_quality,
+    }
+
+
+def _bound_authority(records: dict[str, dict[str, object]] | None = None):
+    active_records = records or _authority_records()
+    registry = TrustedCapabilityAuthorityRegistry(active_records)
+    bound = registry.bind_initialized(
+        resolved=_resolved_adapter(),
+        initialized=_initialized_result_from_record(active_records),
+    )
+    return registry, bound
+
+
+def _thaw(value):
+    if isinstance(value, dict):
+        return {key: _thaw(item) for key, item in value.items()}
+    if hasattr(value, "items"):
+        return {key: _thaw(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_thaw(item) for item in value]
+    return value
 
 
 def _set_nested(document, path, value) -> None:
