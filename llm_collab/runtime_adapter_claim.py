@@ -97,6 +97,7 @@ def _coverage_states(
             keyword = keywords[ref.clause_key]
             relevant = (
                 (keyword == "MUST NOT" and ref.polarity == "violating")
+                or (keyword == "MUST NOT" and ref.non_classifying)
                 or keyword != "MUST NOT"
             )
             if exercised and relevant:

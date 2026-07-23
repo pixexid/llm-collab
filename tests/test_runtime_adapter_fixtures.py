@@ -117,6 +117,9 @@ class RuntimeAdapterFixtureTests(unittest.TestCase):
                 "C81987c71b9d0.1",
                 "C9e388d863ed5.1",
             },
+            "runtime-adapter-reconcile-accepts-varied-binding-capability-profile": {
+                "C9a07be32fe6b.1",
+            },
             "runtime-adapter-reconcile-rejects-workspace-mismatch": {
                 "C72337c3bc58e.1",
                 "C72337c3bc58e.2",
@@ -141,9 +144,7 @@ class RuntimeAdapterFixtureTests(unittest.TestCase):
                 "C8ed901b43824.2",
             },
         }
-        deferred = {
-            "C9a07be32fe6b.1",
-        }
+        deferred = set()
         referenced = {ref.clause_key for fixture in FIXTURES for ref in fixture.clause_refs}
 
         self.assertFalse(deferred & referenced)
@@ -162,6 +163,21 @@ class RuntimeAdapterFixtureTests(unittest.TestCase):
                     else:
                         self.assertEqual(fixture.expectation.error_name, "INVALID_SESSION_REF")
                         self.assertEqual(fixture.expectation.error_code, -32008)
+
+    def test_c07_capability_profile_must_not_fixture_differs_from_initialized_profile(self) -> None:
+        fixture = next(
+            fixture
+            for fixture in FIXTURES
+            if fixture.fixture_id == "runtime-adapter-reconcile-accepts-varied-binding-capability-profile"
+        )
+        initialize = _thaw(fixture.trace[1].frame)["result"]
+        session_ref = _thaw(fixture.trace[-1].frame)["params"]["session_ref"]
+        authority = session_ref["evidence"]["authority"]
+
+        self.assertEqual(initialize["capability_set"]["revision"], "cap_rev1")
+        self.assertNotEqual(authority["capability_profile_id"], "runtime_profile")
+        self.assertNotEqual(authority["capability_profile_revision"], initialize["capability_set"]["revision"])
+        self.assertTrue(_replays_fixture(fixture))
 
     def test_c07_session_identity_mutations_replay_as_invalid_session_ref(self) -> None:
         base = next(fixture for fixture in FIXTURES if fixture.fixture_id == "runtime-adapter-reconcile-request")
@@ -195,7 +211,7 @@ class RuntimeAdapterFixtureTests(unittest.TestCase):
         self.assertNotIn("C930c3ccd59a0.1", gap_keys)
         self.assertNotIn("C8ed901b43824.1", gap_keys)
         self.assertNotIn("C8ed901b43824.2", gap_keys)
-        self.assertIn("C9a07be32fe6b.1", gap_keys)
+        self.assertNotIn("C9a07be32fe6b.1", gap_keys)
 
     def test_old_three_key_initialize_endpoint_is_rejected(self) -> None:
         initialize = _thaw(FIXTURES[0].trace[0].frame)
@@ -243,6 +259,27 @@ class RuntimeAdapterFixtureTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ConformanceFailure, "fixture-polarity-ref"):
             validate_fixtures(self.protocol, (fixture,))
+
+    def test_non_classifying_marker_is_only_for_conforming_must_not_refs(self) -> None:
+        c9 = next(
+            fixture
+            for fixture in FIXTURES
+            if fixture.fixture_id == "runtime-adapter-reconcile-accepts-varied-binding-capability-profile"
+        )
+        non_must_not = replace(
+            FIXTURES[0],
+            clause_refs=(replace(FIXTURES[0].clause_refs[0], non_classifying=True),),
+        )
+        violating_marker = replace(
+            c9,
+            polarity=POLARITY_VIOLATING,
+            clause_refs=(replace(c9.clause_refs[0], polarity=POLARITY_VIOLATING),),
+        )
+
+        with self.assertRaisesRegex(ConformanceFailure, "fixture-non-classifying-keyword"):
+            validate_fixtures(self.protocol, (non_must_not,))
+        with self.assertRaisesRegex(ConformanceFailure, "fixture-non-classifying-polarity"):
+            validate_fixtures(self.protocol, (violating_marker,))
 
     def test_violating_fixture_requires_exact_refusal(self) -> None:
         violating = next(fixture for fixture in FIXTURES if fixture.polarity == POLARITY_VIOLATING)

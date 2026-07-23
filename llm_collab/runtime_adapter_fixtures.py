@@ -187,6 +187,7 @@ class ClauseReference:
     clause_key: str
     text_sha256: str
     polarity: str
+    non_classifying: bool = False
 
 
 @dataclass(frozen=True)
@@ -272,6 +273,18 @@ def _reconcile_trace(session_ref: Mapping[str, Any], request_id: str = "reconcil
 def _session_ref_with(mutator) -> Mapping[str, Any]:
     value = _thaw(_SESSION_REF)
     mutator(value)
+    return _freeze(value)
+
+
+def _session_ref_with_binding_capability_profile(
+    capability_profile_id: str = "runtime_profile_other",
+    capability_profile_revision: str = "cap_rev_other",
+) -> Mapping[str, Any]:
+    value = _thaw(_SESSION_REF)
+    authority = value["evidence"]["authority"]
+    authority["capability_profile_id"] = capability_profile_id
+    authority["capability_profile_revision"] = capability_profile_revision
+    value["evidence"] = _with_integrity(value["evidence"])
     return _freeze(value)
 
 
@@ -413,6 +426,30 @@ FIXTURES: tuple[RuntimeAdapterFixture, ...] = (
         trace=(
             *_initialize_trace(),
             _reconcile_trace(_SESSION_REF),
+        ),
+        expectation=ExpectedResult(
+            method="runtime.reconcile",
+            result=_RECEIPT,
+            state_effect="attempt_reconciled",
+        ),
+    ),
+    RuntimeAdapterFixture(
+        fixture_id="runtime-adapter-reconcile-accepts-varied-binding-capability-profile",
+        polarity=POLARITY_CONFORMING,
+        clause_refs=(
+            ClauseReference(
+                clause_key="C9a07be32fe6b.1",
+                text_sha256="9a07be32fe6bcbd721ebbaca64ce1aa6fa1c3987550b78c411e840f56fe0fa06",
+                polarity=POLARITY_CONFORMING,
+                non_classifying=True,
+            ),
+        ),
+        trace=(
+            *_initialize_trace(),
+            _reconcile_trace(
+                _session_ref_with_binding_capability_profile(),
+                "reconcile-varied-binding-capability-profile",
+            ),
         ),
         expectation=ExpectedResult(
             method="runtime.reconcile",
@@ -1074,6 +1111,10 @@ def _validate_clause_refs(
         live = live_by_key.get(ref.clause_key)
         if live is None:
             raise ConformanceFailure("fixture-clause-key", ref.clause_key)
+        if ref.non_classifying and ref.polarity != POLARITY_CONFORMING:
+            raise ConformanceFailure("fixture-non-classifying-polarity", fixture.fixture_id)
+        if ref.non_classifying and live.keyword != "MUST NOT":
+            raise ConformanceFailure("fixture-non-classifying-keyword", ref.clause_key)
         if ref.text_sha256 != live.text_sha256:
             raise ConformanceFailure("fixture-text-hash", ref.clause_key)
 
