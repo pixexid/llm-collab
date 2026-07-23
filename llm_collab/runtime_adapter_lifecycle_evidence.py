@@ -9,6 +9,7 @@ never starts a process, sleeps, polls, or touches live runtime/project state.
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass, replace
 import json
 import tempfile
@@ -26,6 +27,12 @@ from llm_collab.runtime_adapter_conformance import (
     load_json_frame,
     validate_response,
 )
+from llm_collab.runtime_adapter_capability import (
+    CAPABILITY_NOT_DECLARED,
+    CapabilityAuthorityError,
+    TrustedCapabilityAuthorityRegistry,
+    method_requires_product_capability,
+)
 from llm_collab.runtime_adapter_lifecycle import (
     ADAPTER_UNHEALTHY,
     HEALTH_FAILURE_THRESHOLD,
@@ -39,11 +46,19 @@ from llm_collab.runtime_adapter_lifecycle import (
     LifecycleState,
 )
 from llm_collab.runtime_adapter_manifest import (
+    ResolvedAdapter,
     TrustedManifestRegistry,
     validate_initialized_identity,
 )
 from llm_collab.runtime_adapter_redaction import RedactedDocument, redact_document
-from llm_collab.runtime_adapter_requests import HEALTH_DEADLINE_MS, METHOD_HEALTH, METHOD_SHUTDOWN
+from llm_collab.runtime_adapter_requests import (
+    HEALTH_DEADLINE_MS,
+    METHOD_CANCEL,
+    METHOD_DELIVER,
+    METHOD_HEALTH,
+    METHOD_RECONCILE,
+    METHOD_SHUTDOWN,
+)
 
 
 ARTIFACT_LABEL = "host_lifecycle_harness"
@@ -56,8 +71,8 @@ _PROTOCOL_HEALTH_INTERVAL_MS = 10_000
 _PROTOCOL_HEALTH_DEADLINE_MS = 5_000
 _RECOVERY_ADMISSION_DEFERRED = frozenset(("Cd830c5efc97b.1", "Cd830c5efc97b.2"))
 _DEFERRED_P6_REASON = (
-    "P6 capability/relation/evidence-profile ordering is proven by the separate "
-    "P6 authority layer; this P7 evidence child does not re-home P6 authority"
+    "pure P6 validators do not prove these remaining integration or compound "
+    "cross-stage clauses end-to-end"
 )
 _ADAPTER_ID = "adapter_a"
 
@@ -150,6 +165,29 @@ class P7IntegrityObservation:
     digest_mismatch_quarantined: bool
     both_delivery_and_receipt_recomputed: bool
     deferred_p6_keys: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class P6AuthorityObservation:
+    covered_p6_keys: tuple[str, ...]
+    deferred_p6_keys: tuple[str, ...]
+    validator_mapping: Mapping[str, tuple[str, ...]]
+    bound_workspace_exact: bool
+    bound_project_exact: bool
+    workspace_scope_omits_project: bool
+    project_scope_requires_same_project: bool
+    initialized_revalidation_failures: tuple[str, ...]
+    action_methods_authorized: Mapping[str, str]
+    unsupported_method_initializes_but_fails_invocation: bool
+    action_rejection_cases: tuple[str, ...]
+    evidence_profiles_authorized: Mapping[str, str]
+    evidence_rejection_cases: tuple[str, ...]
+    deliver_components_independent: bool
+    cancel_ordered_stage_independent: bool
+    reconcile_components_independent: bool
+    caller_authority_rejections: tuple[str, ...]
+    no_fallback_rejections: tuple[str, ...]
+    protocol_controls_not_product_capabilities: bool
 
 
 @dataclass(frozen=True)
@@ -455,10 +493,8 @@ _DEFERRED_C01_LIVE_REFS: tuple[LifecycleClauseRef, ...] = (
 )
 _DEFERRED_C01_LIVE_KEYS = frozenset(ref.clause_key for ref in _DEFERRED_C01_LIVE_REFS)
 _DEFERRED_C01_LIVE_REASON = "live stream drain and scheduler supervision remain outside deterministic local evidence"
-_DEFERRED_C16_KEYS = frozenset(
-    ("C1731a3e18c8e.1", "C5bb2ba77ec3b.1", "C9138fb78426f.1", "Cf70f7c633f57.1")
-)
-_DEFERRED_P6_REFS: tuple[LifecycleClauseRef, ...] = (
+_DEFERRED_C16_KEYS = frozenset(("C1731a3e18c8e.1", "C9138fb78426f.1", "Cf70f7c633f57.1"))
+_P6_AUTHORITY_REFS: tuple[LifecycleClauseRef, ...] = (
     LifecycleClauseRef("C01d5a7107389.1", "01d5a71073894ddb534c3674e6936fab236b60edab465fa5b1c9cbf4522d2488"),
     LifecycleClauseRef("C05530aaf0297.1", "05530aaf02977c0ac7d2e0c249bd575db9fbf24ed7a31a36f9348f5a699532bd"),
     LifecycleClauseRef("C44a06b005f56.1", "44a06b005f5662e7f4fa46d1cf383b8417bc3a836ba1c9070d59a64af6fe0afe"),
@@ -479,15 +515,18 @@ _DEFERRED_P6_REFS: tuple[LifecycleClauseRef, ...] = (
     LifecycleClauseRef("Cbc69b8dc81fc.4", "bc69b8dc81fcea144e51a5270bcdb29c2eb0c433452f5f82562dd6e645640fff"),
     LifecycleClauseRef("Cfb24d181976b.1", "fb24d181976beafaddaa3154d7817d7b03000c52f19a1c833f364d34a927d888"),
     LifecycleClauseRef("C41a1a5829726.1", "41a1a5829726cdb3a662114c0e3a61d41f189bd77a27edc18e8506c271a2ff57"),
-    LifecycleClauseRef("C1731a3e18c8e.1", "1731a3e18c8ee1db25836644fe5fc773d4d4fb6431f8f0c650a8050873958024"),
     LifecycleClauseRef("C5bb2ba77ec3b.1", "5bb2ba77ec3ba5c9b332c3038a6440ec717e3041b3f595c54539050028ec75b6"),
-    LifecycleClauseRef("Cf70f7c633f57.1", "f70f7c633f5763d7f0ec9c4988a446f483a0de93898808321223cb96a99b10ce"),
-    LifecycleClauseRef("C9138fb78426f.1", "9138fb78426f2115fbe7b89e931ee608d883c6719e740b06b679d98b4422a1fd"),
     LifecycleClauseRef("Cddf6725ddfa4.1", "ddf6725ddfa4c852fddc3e23a18ec7284f4ed5937d2d1e39987ce56f5bd177c9"),
     LifecycleClauseRef("Ce45ac56f0f07.1", "e45ac56f0f07fd2baeb3ee641bd724b9232db5788d8e56cdaabbaa9ad1e603c6"),
     LifecycleClauseRef("Ce45ac56f0f07.2", "e45ac56f0f07fd2baeb3ee641bd724b9232db5788d8e56cdaabbaa9ad1e603c6"),
+)
+_DEFERRED_P6_REFS: tuple[LifecycleClauseRef, ...] = (
+    LifecycleClauseRef("C1731a3e18c8e.1", "1731a3e18c8ee1db25836644fe5fc773d4d4fb6431f8f0c650a8050873958024"),
+    LifecycleClauseRef("Cf70f7c633f57.1", "f70f7c633f5763d7f0ec9c4988a446f483a0de93898808321223cb96a99b10ce"),
+    LifecycleClauseRef("C9138fb78426f.1", "9138fb78426f2115fbe7b89e931ee608d883c6719e740b06b679d98b4422a1fd"),
     LifecycleClauseRef("Cd849c64f4310.1", "d849c64f4310d86c0f7c36744eb493b022ccc3ab4622c77c396fe5ee3724d6dc"),
 )
+_P6_AUTHORITY_KEYS = frozenset(ref.clause_key for ref in _P6_AUTHORITY_REFS)
 _DEFERRED_P6_KEYS = frozenset(ref.clause_key for ref in _DEFERRED_P6_REFS)
 _HOST_HARNESS_REFS = (
     _LIFECYCLE_REFS
@@ -498,6 +537,7 @@ _HOST_HARNESS_REFS = (
     + _STRUCTURED_ERROR_REFS
     + _SHUTDOWN_REFS
     + _C01_LOCAL_FAULT_REFS
+    + _P6_AUTHORITY_REFS
 )
 _VALIDATED_REFS = (
     _HOST_HARNESS_REFS
@@ -516,6 +556,7 @@ def build_lifecycle_evidence(protocol_text: str) -> Mapping[str, object]:
     recovery = _recovery_observation()
     provenance = _manifest_provenance_observation()
     p7 = _p7_integrity_observation()
+    p6 = _p6_authority_observation()
     redaction = _redaction_observation()
     structured_errors = _structured_error_observation()
     shutdown = _shutdown_observation()
@@ -524,6 +565,7 @@ def build_lifecycle_evidence(protocol_text: str) -> Mapping[str, object]:
     _validate_recovery_observation(recovery)
     _validate_manifest_provenance_observation(provenance)
     _validate_p7_integrity_observation(p7)
+    _validate_p6_authority_observation(p6)
     _validate_redaction_observation(redaction)
     _validate_structured_error_observation(structured_errors)
     _validate_shutdown_observation(shutdown)
@@ -607,6 +649,32 @@ def build_lifecycle_evidence(protocol_text: str) -> Mapping[str, object]:
                 "both_delivery_and_receipt_recomputed": p7.both_delivery_and_receipt_recomputed,
                 "deferred_p6_keys": p7.deferred_p6_keys,
                 "deferred_p6_reason": _DEFERRED_P6_REASON,
+            },
+            "p6_authority": {
+                "covered_p6_keys": p6.covered_p6_keys,
+                "deferred_p6_keys": p6.deferred_p6_keys,
+                "deferred_p6_reason": _DEFERRED_P6_REASON,
+                "validator_mapping": {
+                    key: value for key, value in sorted(p6.validator_mapping.items())
+                },
+                "bound_workspace_exact": p6.bound_workspace_exact,
+                "bound_project_exact": p6.bound_project_exact,
+                "workspace_scope_omits_project": p6.workspace_scope_omits_project,
+                "project_scope_requires_same_project": p6.project_scope_requires_same_project,
+                "initialized_revalidation_failures": p6.initialized_revalidation_failures,
+                "action_methods_authorized": dict(p6.action_methods_authorized),
+                "unsupported_method_initializes_but_fails_invocation": (
+                    p6.unsupported_method_initializes_but_fails_invocation
+                ),
+                "action_rejection_cases": p6.action_rejection_cases,
+                "evidence_profiles_authorized": dict(p6.evidence_profiles_authorized),
+                "evidence_rejection_cases": p6.evidence_rejection_cases,
+                "deliver_components_independent": p6.deliver_components_independent,
+                "cancel_ordered_stage_independent": p6.cancel_ordered_stage_independent,
+                "reconcile_components_independent": p6.reconcile_components_independent,
+                "caller_authority_rejections": p6.caller_authority_rejections,
+                "no_fallback_rejections": p6.no_fallback_rejections,
+                "protocol_controls_not_product_capabilities": p6.protocol_controls_not_product_capabilities,
             },
             "redaction": {
                 "redacted_record_id": redaction.redacted_record_id,
@@ -977,6 +1045,484 @@ def _p7_integrity_observation() -> P7IntegrityObservation:
         both_delivery_and_receipt_recomputed=adapter_rejects_delivery and host_accepts_receipt and host_rejects_receipt,
         deferred_p6_keys=tuple(sorted(_DEFERRED_P6_KEYS)),
     )
+
+
+def _p6_authority_observation() -> P6AuthorityObservation:
+    registry = TrustedCapabilityAuthorityRegistry({"adapter_alpha": _p6_authority_record()})
+    resolved = _p6_resolved_adapter()
+    initialized = _p6_initialized()
+    bound = registry.bind_initialized(resolved=resolved, initialized=initialized)
+    project_registry = TrustedCapabilityAuthorityRegistry(
+        {"adapter_alpha": _p6_authority_record(scope={"kind": "project", "project_id": "amiga"})}
+    )
+    project_bound = project_registry.bind_initialized(
+        resolved=_p6_resolved_adapter(scope={"kind": "project", "project_id": "amiga"}),
+        initialized=_p6_initialized(scope={"kind": "project", "project_id": "amiga"}),
+    )
+
+    action_methods = {
+        method: registry.validate_request_authority(bound, method).selected_capability
+        for method in (METHOD_DELIVER, METHOD_CANCEL, METHOD_RECONCILE)
+    }
+    action_failures = tuple(
+        _p6_rejects(registry, resolved, initialized, "validate_request_authority", mutation, METHOD_CANCEL)
+        for mutation in (
+            "zero_relation",
+            "duplicate_relation",
+            "absent_token",
+            "duplicate_token",
+            "unsupported_entry",
+            "quality_mismatch",
+            "attestation_source_mismatch",
+        )
+    )
+    unsupported_method_initializes = (
+        _p6_rejects(registry, resolved, initialized, "validate_request_authority", "control_method", METHOD_HEALTH)
+        == "control_method"
+    )
+
+    session_ref = _p6_session_ref()
+    delivery = _p6_delivery()
+    receipt = _p6_receipt()
+    session_decision = registry.validate_evidence_profile_authority(bound, _evidence_document(session_ref))
+    delivery_decision = registry.validate_evidence_profile_authority(bound, _evidence_document(delivery))
+    receipt_decision = registry.validate_evidence_profile_authority(bound, _evidence_document(receipt))
+    evidence_profiles = {
+        "session_ref": session_decision.capability_profile_id,
+        "delivery": delivery_decision.capability_profile_id,
+        "receipt": receipt_decision.capability_profile_id,
+    }
+    evidence_failures = tuple(
+        _p6_rejects(
+            registry,
+            resolved,
+            initialized,
+            "validate_evidence_profile_authority",
+            mutation,
+            _evidence_document(session_ref),
+        )
+        for mutation in (
+            "unregistered_profile",
+            "stale_profile_revision",
+            "unsupported_profile_entry",
+            "quality_ceiling",
+            "attestation_revision_mismatch",
+        )
+    )
+    deliver_action = registry.validate_request_authority(bound, METHOD_DELIVER)
+    cancel_stage = registry.decide_ordered_stage_authority(bound, METHOD_CANCEL, session_ref=session_ref)
+    reconcile_stage = registry.decide_ordered_stage_authority(
+        bound,
+        METHOD_RECONCILE,
+        session_ref=session_ref,
+        receipt=receipt,
+    )
+    caller_rejections = tuple(
+        _p6_expect_capability_error(label, operation)
+        for label, operation in (
+            (
+                "session_action_relation",
+                lambda: registry.validate_request_authority(
+                    bound,
+                    METHOD_DELIVER,
+                    caller_authority_fields={"session_action_relation": "caller_supplied"},
+                ),
+            ),
+            (
+                "evidence_profile_registration",
+                lambda: registry.validate_evidence_profile_authority(
+                    bound,
+                    _evidence_document(session_ref),
+                    caller_authority_fields={"capability_profile_id": "caller_profile"},
+                ),
+            ),
+            (
+                "ordered_stage_selected_token",
+                lambda: registry.decide_ordered_stage_authority(
+                    bound,
+                    METHOD_CANCEL,
+                    session_ref=session_ref,
+                    caller_authority_fields={"selected_capability": "caller_token"},
+                ),
+            ),
+        )
+    )
+    no_fallback = tuple(
+        _p6_rejects(registry, resolved, initialized, validator, mutation, argument)
+        for validator, mutation, argument in (
+            ("bind_initialized", "cross_workspace_set", None),
+            ("validate_request_authority", "unknown_method", "runtime.unknown"),
+            ("validate_request_authority", "relation_cross_set", METHOD_DELIVER),
+            ("validate_evidence_profile_authority", "profile_cross_set", _evidence_document(session_ref)),
+        )
+    )
+    revalidation_failures = tuple(
+        _p6_rejects(registry, resolved, initialized, "bind_initialized", mutation, None)
+        for mutation in (
+            "initialized_adapter_revision",
+            "capability_set_revision",
+            "capability_set_missing_constraints",
+            "project_scope_mismatch",
+        )
+    )
+
+    return P6AuthorityObservation(
+        covered_p6_keys=tuple(sorted(_P6_AUTHORITY_KEYS)),
+        deferred_p6_keys=tuple(sorted(_DEFERRED_P6_KEYS)),
+        validator_mapping=_p6_validator_mapping(),
+        bound_workspace_exact=(
+            bound.adapter_id == "adapter_alpha"
+            and bound.endpoint["capability_set_id"] == "caps_alpha"
+            and bound.capability_set["revision"] == "cap_rev1"
+        ),
+        bound_project_exact=(
+            project_bound.endpoint["scope"] == {"kind": "project", "project_id": "amiga"}
+            and project_bound.capability_set["scope"] == {"kind": "project", "project_id": "amiga"}
+        ),
+        workspace_scope_omits_project=set(bound.endpoint["scope"]) == {"kind"}
+        and set(bound.capability_set["scope"]) == {"kind"},
+        project_scope_requires_same_project="project_scope_mismatch" in revalidation_failures,
+        initialized_revalidation_failures=revalidation_failures,
+        action_methods_authorized=MappingProxyType(action_methods),
+        unsupported_method_initializes_but_fails_invocation=unsupported_method_initializes,
+        action_rejection_cases=action_failures,
+        evidence_profiles_authorized=MappingProxyType(evidence_profiles),
+        evidence_rejection_cases=evidence_failures,
+        deliver_components_independent=(
+            deliver_action.selected_capability == "runtime.deliver.observe_only"
+            and session_decision.capability_profile_id == "runtime.session_binding.profile"
+            and delivery_decision.capability_profile_id == "runtime.delivery.profile"
+            and receipt_decision.capability_profile_id == "runtime.receipt.profile"
+            and len(
+                {
+                    deliver_action.selected_capability,
+                    session_decision.capability_profile_id,
+                    delivery_decision.capability_profile_id,
+                    receipt_decision.capability_profile_id,
+                }
+            )
+            == 4
+        ),
+        cancel_ordered_stage_independent=(
+            cancel_stage.action is not None
+            and cancel_stage.action.selected_capability == "runtime.cancel.observe_only"
+            and tuple(decision.capability_profile_id for decision in cancel_stage.evidence_profiles)
+            == ("runtime.session_binding.profile",)
+        ),
+        reconcile_components_independent=(
+            reconcile_stage.action is not None
+            and reconcile_stage.action.selected_capability == "runtime.reconcile.observe_only"
+            and tuple(decision.capability_profile_id for decision in reconcile_stage.evidence_profiles)
+            == ("runtime.session_binding.profile", "runtime.receipt.profile")
+        ),
+        caller_authority_rejections=caller_rejections,
+        no_fallback_rejections=no_fallback,
+        protocol_controls_not_product_capabilities=(
+            not method_requires_product_capability(METHOD_HEALTH)
+            and not method_requires_product_capability(METHOD_SHUTDOWN)
+            and registry.decide_ordered_stage_authority(bound, METHOD_HEALTH).protocol_control
+            and registry.decide_ordered_stage_authority(bound, METHOD_SHUTDOWN).protocol_control
+        ),
+    )
+
+
+def _p6_validator_mapping() -> Mapping[str, tuple[str, ...]]:
+    return MappingProxyType(
+        {
+            "C4d3e4e331f8e.1": ("TrustedCapabilityAuthorityRegistry.bind_initialized",),
+            "C507960193aaf.1": ("TrustedCapabilityAuthorityRegistry.bind_initialized",),
+            "Ca7d929aaf1c6.1": ("TrustedCapabilityAuthorityRegistry.bind_initialized",),
+            "Ca7d929aaf1c6.2": ("TrustedCapabilityAuthorityRegistry.bind_initialized",),
+            "Cfb24d181976b.1": ("TrustedCapabilityAuthorityRegistry.bind_initialized",),
+            "C5203ae51498d.1": ("TrustedCapabilityAuthorityRegistry.bind_initialized",),
+            "C44a06b005f56.1": ("TrustedCapabilityAuthorityRegistry.validate_request_authority",),
+            "C8665d49fe212.1": ("TrustedCapabilityAuthorityRegistry.validate_request_authority",),
+            "C8665d49fe212.2": ("TrustedCapabilityAuthorityRegistry.validate_request_authority",),
+            "C8665d49fe212.3": ("TrustedCapabilityAuthorityRegistry.validate_request_authority",),
+            "C01d5a7107389.1": ("TrustedCapabilityAuthorityRegistry.validate_request_authority",),
+            "C05530aaf0297.1": ("TrustedCapabilityAuthorityRegistry.validate_request_authority",),
+            "C991a6ee55456.1": ("TrustedCapabilityAuthorityRegistry.validate_evidence_profile_authority",),
+            "Cbc69b8dc81fc.1": ("TrustedCapabilityAuthorityRegistry.validate_evidence_profile_authority",),
+            "Cbc69b8dc81fc.2": ("TrustedCapabilityAuthorityRegistry.validate_evidence_profile_authority",),
+            "Cbc69b8dc81fc.3": ("TrustedCapabilityAuthorityRegistry.validate_evidence_profile_authority",),
+            "Cbc69b8dc81fc.4": ("TrustedCapabilityAuthorityRegistry.validate_evidence_profile_authority",),
+            "C60fb22117077.1": ("TrustedCapabilityAuthorityRegistry.validate_evidence_profile_authority",),
+            "C468b7316502d.1": (
+                "TrustedCapabilityAuthorityRegistry.validate_request_authority",
+                "TrustedCapabilityAuthorityRegistry.validate_evidence_profile_authority",
+            ),
+            "Cddf6725ddfa4.1": (
+                "TrustedCapabilityAuthorityRegistry.validate_request_authority",
+                "TrustedCapabilityAuthorityRegistry.validate_evidence_profile_authority",
+            ),
+            "C41a1a5829726.1": ("TrustedCapabilityAuthorityRegistry.decide_ordered_stage_authority",),
+            "Ce45ac56f0f07.1": ("TrustedCapabilityAuthorityRegistry.decide_ordered_stage_authority",),
+            "Ce45ac56f0f07.2": ("TrustedCapabilityAuthorityRegistry.decide_ordered_stage_authority",),
+            "C5bb2ba77ec3b.1": (
+                "TrustedCapabilityAuthorityRegistry.validate_request_authority",
+                "TrustedCapabilityAuthorityRegistry.validate_evidence_profile_authority",
+                "TrustedCapabilityAuthorityRegistry.decide_ordered_stage_authority",
+            ),
+        }
+    )
+
+
+def _p6_expect_capability_error(label: str, operation: Any) -> str:
+    try:
+        operation()
+    except CapabilityAuthorityError as error:
+        if getattr(error, "code", None) == CAPABILITY_NOT_DECLARED:
+            return label
+        raise LifecycleEvidenceFailure(f"P6 case {label} used the wrong error code") from error
+    raise LifecycleEvidenceFailure(f"P6 case {label} unexpectedly succeeded")
+
+
+def _p6_rejects(
+    registry: TrustedCapabilityAuthorityRegistry,
+    resolved: ResolvedAdapter,
+    initialized: Mapping[str, Any],
+    validator: str,
+    mutation: str,
+    argument: Any,
+) -> str:
+    record = _p6_mutated_record(mutation)
+    local_registry = TrustedCapabilityAuthorityRegistry({"adapter_alpha": record})
+    local_resolved = resolved
+    local_initialized = copy.deepcopy(dict(initialized))
+    if mutation == "initialized_adapter_revision":
+        local_initialized["adapter_revision"] = "adapter_rev_other"
+    elif mutation == "capability_set_revision":
+        capability_set = dict(_mapping(local_initialized["capability_set"], "initialized capability set"))
+        capability_set["revision"] = "cap_rev_other"
+        local_initialized["capability_set"] = capability_set
+    elif mutation == "capability_set_missing_constraints":
+        capability_set = dict(_mapping(local_initialized["capability_set"], "initialized capability set"))
+        entries = [dict(entry) for entry in capability_set["capabilities"]]
+        del entries[0]["constraints"]
+        capability_set["capabilities"] = entries
+        local_initialized["capability_set"] = capability_set
+    elif mutation == "project_scope_mismatch":
+        local_resolved = _p6_resolved_adapter(scope={"kind": "project", "project_id": "amiga"})
+        local_initialized = _p6_initialized(scope={"kind": "project", "project_id": "nuvyr"})
+    try:
+        bound = local_registry.bind_initialized(resolved=local_resolved, initialized=local_initialized)
+        if validator == "bind_initialized":
+            raise LifecycleEvidenceFailure(f"P6 mutation {mutation} unexpectedly bound")
+        if validator == "validate_request_authority":
+            local_registry.validate_request_authority(bound, argument)
+        elif validator == "validate_evidence_profile_authority":
+            local_registry.validate_evidence_profile_authority(bound, argument)
+        else:
+            raise LifecycleEvidenceFailure(f"unknown P6 validator: {validator}")
+    except CapabilityAuthorityError as error:
+        if getattr(error, "code", None) == CAPABILITY_NOT_DECLARED:
+            return mutation
+        raise LifecycleEvidenceFailure(f"P6 mutation {mutation} used the wrong error code") from error
+    raise LifecycleEvidenceFailure(f"P6 mutation {mutation} unexpectedly succeeded")
+
+
+def _p6_mutated_record(mutation: str) -> Mapping[str, Any]:
+    record = copy.deepcopy(_p6_authority_record())
+    if mutation == "zero_relation":
+        record["session_action_relations"] = [
+            relation for relation in record["session_action_relations"] if relation["method"] != METHOD_CANCEL
+        ]
+    elif mutation == "duplicate_relation":
+        record["session_action_relations"] = list(record["session_action_relations"]) + [
+            dict(record["session_action_relations"][1])
+        ]
+    elif mutation == "relation_cross_set":
+        record["session_action_relations"][0]["capability_set_id"] = "caps_other"
+    elif mutation == "absent_token":
+        record["session_action_relations"][1]["selected_capability"] = "runtime.missing.observe_only"
+    elif mutation == "duplicate_token":
+        record["capability_set"]["capabilities"].append(dict(record["capability_set"]["capabilities"][1]))
+    elif mutation == "unsupported_entry":
+        record["capability_set"]["capabilities"][1] = {
+            "capability": "runtime.cancel.observe_only",
+            "quality": "unsupported",
+        }
+    elif mutation == "quality_mismatch":
+        record["session_action_relations"][1]["required_quality"] = "best_effort"
+    elif mutation == "attestation_source_mismatch":
+        record["capability_set"]["capabilities"][1]["evidence"]["source_id"] = "adapter_other"
+    elif mutation == "attestation_revision_mismatch":
+        record["capability_set"]["capabilities"][3]["evidence"]["source_revision"] = "adapter_rev_other"
+    elif mutation == "unregistered_profile":
+        record["evidence_profiles"] = [
+            profile
+            for profile in record["evidence_profiles"]
+            if profile["capability_profile_id"] != "runtime.session_binding.profile"
+        ]
+    elif mutation == "stale_profile_revision":
+        record["evidence_profiles"][0]["capability_profile_revision"] = "cap_rev_other"
+    elif mutation == "unsupported_profile_entry":
+        record["capability_set"]["capabilities"][3] = {
+            "capability": "runtime.session_binding.profile",
+            "quality": "unsupported",
+        }
+    elif mutation == "quality_ceiling":
+        record["capability_set"]["capabilities"][3]["quality"] = "best_effort"
+    elif mutation == "profile_cross_set":
+        record["evidence_profiles"][0]["capability_profile_revision"] = "cap_rev_other"
+    elif mutation == "cross_workspace_set":
+        record["capability_set"]["workspace_id"] = "ws_other"
+    elif mutation in {
+        "control_method",
+        "unknown_method",
+        "initialized_adapter_revision",
+        "capability_set_revision",
+        "capability_set_missing_constraints",
+        "project_scope_mismatch",
+    }:
+        pass
+    else:
+        raise LifecycleEvidenceFailure(f"unknown P6 mutation: {mutation}")
+    return record
+
+
+def _p6_authority_record(*, scope: Mapping[str, Any] | None = None) -> Mapping[str, Any]:
+    return {
+        "adapter_id": "adapter_alpha",
+        "endpoint": _p6_endpoint(scope=scope),
+        "capability_set": _p6_capability_set(scope=scope),
+        "session_action_relations": [
+            _p6_relation(METHOD_DELIVER, "runtime.deliver.observe_only"),
+            _p6_relation(METHOD_CANCEL, "runtime.cancel.observe_only"),
+            _p6_relation(METHOD_RECONCILE, "runtime.reconcile.observe_only"),
+        ],
+        "evidence_profiles": [
+            _p6_profile("runtime.session_binding.profile"),
+            _p6_profile("runtime.delivery.profile"),
+            _p6_profile("runtime.receipt.profile"),
+        ],
+    }
+
+
+def _p6_resolved_adapter(*, scope: Mapping[str, Any] | None = None) -> ResolvedAdapter:
+    return ResolvedAdapter(
+        adapter_id="adapter_alpha",
+        adapter_revision="adapter_rev1",
+        manifest_id="manifest_alpha",
+        manifest_revision="manifest_rev1",
+        endpoint=_p6_endpoint(scope=scope),
+        executable="/opt/llm-collab/adapter-alpha",
+        argv=("--serve",),
+        working_directory="/opt/llm-collab",
+        environment={},
+    )
+
+
+def _p6_initialized(*, scope: Mapping[str, Any] | None = None) -> Mapping[str, Any]:
+    return {
+        "adapter_id": "adapter_alpha",
+        "adapter_revision": "adapter_rev1",
+        "manifest_id": "manifest_alpha",
+        "manifest_revision": "manifest_rev1",
+        "endpoint": _p6_endpoint(scope=scope),
+        "capability_set": _p6_capability_set(scope=scope),
+    }
+
+
+def _p6_endpoint(*, scope: Mapping[str, Any] | None = None) -> Mapping[str, Any]:
+    return {
+        "schema_version": 1,
+        "workspace_id": "ws_alpha",
+        "scope": dict(scope or {"kind": "workspace"}),
+        "endpoint_id": "endpoint_alpha",
+        "agent_id": "agent_codex",
+        "adapter_name": "adapter_alpha",
+        "adapter_revision": "adapter_rev1",
+        "trust_class": "trusted",
+        "capability_set_id": "caps_alpha",
+        "platform": {"os": "darwin"},
+        "configuration_ref": {"kind": "local"},
+    }
+
+
+def _p6_capability_set(*, scope: Mapping[str, Any] | None = None) -> Mapping[str, Any]:
+    return {
+        "schema_version": 1,
+        "workspace_id": "ws_alpha",
+        "scope": dict(scope or {"kind": "workspace"}),
+        "capability_set_id": "caps_alpha",
+        "revision": "cap_rev1",
+        "capabilities": [
+            _p6_capability("runtime.deliver.observe_only", "authoritative"),
+            _p6_capability("runtime.cancel.observe_only", "authoritative"),
+            _p6_capability("runtime.reconcile.observe_only", "authoritative"),
+            _p6_capability("runtime.session_binding.profile", "authoritative"),
+            _p6_capability("runtime.delivery.profile", "best_effort"),
+            _p6_capability("runtime.receipt.profile", "authoritative"),
+            {"capability": "runtime.experimental.unsupported", "quality": "unsupported"},
+        ],
+    }
+
+
+def _p6_capability(token: str, quality: str) -> Mapping[str, Any]:
+    return {
+        "capability": token,
+        "quality": quality,
+        "constraints": {"scope": "exact", "no_fallback": True},
+        "evidence": {
+            "evidence_kind": "profile_attestation",
+            "source_id": "adapter_alpha",
+            "source_revision": "adapter_rev1",
+            "integrity": "sha256:" + ("a" * 64),
+        },
+    }
+
+
+def _p6_relation(method: str, capability: str) -> Mapping[str, str]:
+    return {
+        "capability_set_id": "caps_alpha",
+        "capability_set_revision": "cap_rev1",
+        "method": method,
+        "selected_capability": capability,
+        "required_quality": "authoritative",
+    }
+
+
+def _p6_profile(capability_profile_id: str) -> Mapping[str, str]:
+    return {
+        "capability_profile_id": capability_profile_id,
+        "capability_profile_revision": "cap_rev1",
+    }
+
+
+def _p6_session_ref() -> Mapping[str, Any]:
+    return {"evidence": _p6_state_evidence("exact_session_binding", "runtime.session_binding.profile", "authoritative")}
+
+
+def _p6_delivery() -> Mapping[str, Any]:
+    return {"evidence": _p6_state_evidence("native_delivery_state", "runtime.delivery.profile", "best_effort")}
+
+
+def _p6_receipt() -> Mapping[str, Any]:
+    return {"evidence": _p6_state_evidence("exact_session_acknowledgment", "runtime.receipt.profile", "authoritative")}
+
+
+def _p6_state_evidence(evidence_kind: str, profile_id: str, quality: str) -> Mapping[str, Any]:
+    return {
+        "schema_version": 1,
+        "workspace_id": "ws_alpha",
+        "scope": {"kind": "workspace"},
+        "evidence_id": f"{profile_id}.evidence",
+        "evidence_kind": evidence_kind,
+        "quality": quality,
+        "state": "observed",
+        "authority": {
+            "authority_kind": "trusted_adapter",
+            "identity": "adapter_alpha",
+            "implementation_revision": "adapter_rev1",
+            "capability_profile_id": profile_id,
+            "capability_profile_revision": "cap_rev1",
+        },
+    }
+
+
+def _evidence_document(container: Mapping[str, Any]) -> Mapping[str, Any]:
+    return _mapping(container.get("evidence"), "P6 evidence document")
 
 
 def _deliver_receipt(session_ref: Mapping[str, Any], delivery: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -1765,6 +2311,90 @@ def _validate_p7_integrity_observation(observation: P7IntegrityObservation) -> N
         raise LifecycleEvidenceFailure("digest-mismatched adapter output did not open unresolved quarantine state")
     if frozenset(observation.deferred_p6_keys) != _DEFERRED_P6_KEYS:
         raise LifecycleEvidenceFailure("deferred P6 set drifted")
+
+
+def _validate_p6_authority_observation(observation: P6AuthorityObservation) -> None:
+    if frozenset(observation.covered_p6_keys) != _P6_AUTHORITY_KEYS:
+        raise LifecycleEvidenceFailure("covered P6 authority set drifted")
+    if frozenset(observation.deferred_p6_keys) != _DEFERRED_P6_KEYS:
+        raise LifecycleEvidenceFailure("deferred P6 integration set drifted")
+    if set(observation.validator_mapping) != _P6_AUTHORITY_KEYS:
+        raise LifecycleEvidenceFailure("P6 validator mapping does not enumerate exactly the covered rows")
+    if not all(observation.validator_mapping[key] for key in observation.validator_mapping):
+        raise LifecycleEvidenceFailure("P6 validator mapping contains an empty validator list")
+    if not observation.bound_workspace_exact:
+        raise LifecycleEvidenceFailure("P6 did not bind exact workspace-scoped capability authority")
+    if not observation.bound_project_exact:
+        raise LifecycleEvidenceFailure("P6 did not bind exact project-scoped capability authority")
+    if not observation.workspace_scope_omits_project:
+        raise LifecycleEvidenceFailure("P6 workspace scope did not omit project_id")
+    if not observation.project_scope_requires_same_project:
+        raise LifecycleEvidenceFailure("P6 project scope did not require matching project_id")
+    expected_revalidation = {
+        "initialized_adapter_revision",
+        "capability_set_revision",
+        "capability_set_missing_constraints",
+        "project_scope_mismatch",
+    }
+    if frozenset(observation.initialized_revalidation_failures) != expected_revalidation:
+        raise LifecycleEvidenceFailure("P6 initialized revalidation matrix drifted")
+    expected_actions = {
+        METHOD_DELIVER: "runtime.deliver.observe_only",
+        METHOD_CANCEL: "runtime.cancel.observe_only",
+        METHOD_RECONCILE: "runtime.reconcile.observe_only",
+    }
+    if dict(observation.action_methods_authorized) != expected_actions:
+        raise LifecycleEvidenceFailure("P6 action relation mapping drifted")
+    if not observation.unsupported_method_initializes_but_fails_invocation:
+        raise LifecycleEvidenceFailure("P6 unsupported method did not initialize but fail invocation")
+    expected_action_failures = {
+        "zero_relation",
+        "duplicate_relation",
+        "absent_token",
+        "duplicate_token",
+        "unsupported_entry",
+        "quality_mismatch",
+        "attestation_source_mismatch",
+    }
+    if frozenset(observation.action_rejection_cases) != expected_action_failures:
+        raise LifecycleEvidenceFailure("P6 action rejection matrix drifted")
+    expected_profiles = {
+        "session_ref": "runtime.session_binding.profile",
+        "delivery": "runtime.delivery.profile",
+        "receipt": "runtime.receipt.profile",
+    }
+    if dict(observation.evidence_profiles_authorized) != expected_profiles:
+        raise LifecycleEvidenceFailure("P6 evidence-profile mapping drifted")
+    expected_evidence_failures = {
+        "unregistered_profile",
+        "stale_profile_revision",
+        "unsupported_profile_entry",
+        "quality_ceiling",
+        "attestation_revision_mismatch",
+    }
+    if frozenset(observation.evidence_rejection_cases) != expected_evidence_failures:
+        raise LifecycleEvidenceFailure("P6 evidence-profile rejection matrix drifted")
+    if not observation.deliver_components_independent:
+        raise LifecycleEvidenceFailure("P6 deliver action/session/delivery/receipt components were not independent")
+    if not observation.cancel_ordered_stage_independent:
+        raise LifecycleEvidenceFailure("P6 cancel ordered-stage authority drifted")
+    if not observation.reconcile_components_independent:
+        raise LifecycleEvidenceFailure("P6 reconcile ordered-stage authority drifted")
+    if frozenset(observation.caller_authority_rejections) != {
+        "session_action_relation",
+        "evidence_profile_registration",
+        "ordered_stage_selected_token",
+    }:
+        raise LifecycleEvidenceFailure("P6 caller authority rejection matrix drifted")
+    if frozenset(observation.no_fallback_rejections) != {
+        "cross_workspace_set",
+        "unknown_method",
+        "relation_cross_set",
+        "profile_cross_set",
+    }:
+        raise LifecycleEvidenceFailure("P6 no-fallback rejection matrix drifted")
+    if not observation.protocol_controls_not_product_capabilities:
+        raise LifecycleEvidenceFailure("P6 protocol controls were treated as product capabilities")
 
 
 def _validate_redaction_observation(observation: RedactionObservation) -> None:

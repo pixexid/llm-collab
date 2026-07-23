@@ -6,7 +6,7 @@ import ast
 import importlib
 import unittest
 from pathlib import Path
-from types import MappingProxyType
+from types import MappingProxyType, SimpleNamespace
 from unittest import mock
 
 from llm_collab import runtime_adapter_reference, runtime_adapter_state
@@ -109,8 +109,8 @@ DEFERRED_RETRYABILITY_KEYS = {"C1ba88e813bab.1"}
 DEFERRED_SHUTDOWN_KEYS = {"C377978e26502.1", "C94617a1d5cde.1"}
 DEFERRED_C01_LIVE_KEYS = {"C241df3117a06.1", "Cde2847524a58.1", "Cde2847524a58.2"}
 DEFERRED_RECOVERY_ADMISSION_KEYS = {"Cd830c5efc97b.1", "Cd830c5efc97b.2"}
-DEFERRED_C16_KEYS = {"C1731a3e18c8e.1", "C5bb2ba77ec3b.1", "C9138fb78426f.1", "Cf70f7c633f57.1"}
-DEFERRED_P6_KEYS = {
+DEFERRED_C16_KEYS = {"C1731a3e18c8e.1", "C9138fb78426f.1", "Cf70f7c633f57.1"}
+P6_AUTHORITY_KEYS = {
     "C01d5a7107389.1",
     "C05530aaf0297.1",
     "C44a06b005f56.1",
@@ -131,13 +131,15 @@ DEFERRED_P6_KEYS = {
     "Cbc69b8dc81fc.4",
     "Cfb24d181976b.1",
     "C41a1a5829726.1",
-    "C1731a3e18c8e.1",
     "C5bb2ba77ec3b.1",
-    "Cf70f7c633f57.1",
-    "C9138fb78426f.1",
     "Cddf6725ddfa4.1",
     "Ce45ac56f0f07.1",
     "Ce45ac56f0f07.2",
+}
+DEFERRED_P6_KEYS = {
+    "C1731a3e18c8e.1",
+    "Cf70f7c633f57.1",
+    "C9138fb78426f.1",
     "Cd849c64f4310.1",
 }
 HOST_HARNESS_KEYS = (
@@ -149,6 +151,7 @@ HOST_HARNESS_KEYS = (
     | STRUCTURED_ERROR_KEYS
     | SHUTDOWN_KEYS
     | C01_LOCAL_FAULT_KEYS
+    | P6_AUTHORITY_KEYS
 )
 
 
@@ -174,6 +177,7 @@ class RuntimeAdapterLifecycleEvidenceTests(unittest.TestCase):
         self.assertLessEqual(STRUCTURED_ERROR_KEYS, covered)
         self.assertLessEqual(SHUTDOWN_KEYS, covered)
         self.assertLessEqual(C01_LOCAL_FAULT_KEYS, covered)
+        self.assertLessEqual(P6_AUTHORITY_KEYS, covered)
         self.assertFalse(DEFERRED_RECOVERY_ADMISSION_KEYS & covered)
         self.assertFalse(DEFERRED_P6_KEYS & covered)
         self.assertFalse(DEFERRED_RETRYABILITY_KEYS & covered)
@@ -331,7 +335,170 @@ class RuntimeAdapterLifecycleEvidenceTests(unittest.TestCase):
         self.assertTrue(p7["invalid_adapter_output_quarantined"])
         self.assertTrue(p7["digest_mismatch_quarantined"])
         self.assertEqual(set(p7["deferred_p6_keys"]), DEFERRED_P6_KEYS)
-        self.assertIn("does not re-home P6 authority", p7["deferred_p6_reason"])
+        self.assertIn("integration or compound cross-stage", p7["deferred_p6_reason"])
+
+    def test_p6_authority_uses_real_validators_and_honest_deferrals(self) -> None:
+        p6 = build_lifecycle_evidence(self.protocol)["observation"]["p6_authority"]
+
+        self.assertEqual(set(p6["covered_p6_keys"]), P6_AUTHORITY_KEYS)
+        self.assertEqual(set(p6["deferred_p6_keys"]), DEFERRED_P6_KEYS)
+        self.assertEqual(set(p6["validator_mapping"]), P6_AUTHORITY_KEYS)
+        self.assertTrue(p6["bound_workspace_exact"])
+        self.assertTrue(p6["bound_project_exact"])
+        self.assertTrue(p6["workspace_scope_omits_project"])
+        self.assertTrue(p6["project_scope_requires_same_project"])
+        self.assertEqual(
+            set(p6["initialized_revalidation_failures"]),
+            {
+                "initialized_adapter_revision",
+                "capability_set_revision",
+                "capability_set_missing_constraints",
+                "project_scope_mismatch",
+            },
+        )
+        self.assertEqual(
+            p6["action_methods_authorized"],
+            {
+                "runtime.deliver": "runtime.deliver.observe_only",
+                "runtime.cancel": "runtime.cancel.observe_only",
+                "runtime.reconcile": "runtime.reconcile.observe_only",
+            },
+        )
+        self.assertTrue(p6["unsupported_method_initializes_but_fails_invocation"])
+        self.assertEqual(
+            set(p6["action_rejection_cases"]),
+            {
+                "zero_relation",
+                "duplicate_relation",
+                "absent_token",
+                "duplicate_token",
+                "unsupported_entry",
+                "quality_mismatch",
+                "attestation_source_mismatch",
+            },
+        )
+        self.assertEqual(
+            p6["evidence_profiles_authorized"],
+            {
+                "session_ref": "runtime.session_binding.profile",
+                "delivery": "runtime.delivery.profile",
+                "receipt": "runtime.receipt.profile",
+            },
+        )
+        self.assertEqual(
+            set(p6["evidence_rejection_cases"]),
+            {
+                "unregistered_profile",
+                "stale_profile_revision",
+                "unsupported_profile_entry",
+                "quality_ceiling",
+                "attestation_revision_mismatch",
+            },
+        )
+        self.assertTrue(p6["deliver_components_independent"])
+        self.assertTrue(p6["cancel_ordered_stage_independent"])
+        self.assertTrue(p6["reconcile_components_independent"])
+        self.assertEqual(
+            set(p6["caller_authority_rejections"]),
+            {"session_action_relation", "evidence_profile_registration", "ordered_stage_selected_token"},
+        )
+        self.assertEqual(
+            set(p6["no_fallback_rejections"]),
+            {"cross_workspace_set", "unknown_method", "relation_cross_set", "profile_cross_set"},
+        )
+        self.assertTrue(p6["protocol_controls_not_product_capabilities"])
+        self.assertIn("integration or compound cross-stage", p6["deferred_p6_reason"])
+
+    def test_real_p6_authority_validator_mutations_kill_evidence(self) -> None:
+        authority = _lifecycle_module().TrustedCapabilityAuthorityRegistry
+        original_bind = authority.bind_initialized
+        original_request = authority.validate_request_authority
+        original_profile = authority.validate_evidence_profile_authority
+        original_stage = authority.decide_ordered_stage_authority
+
+        def fail_open_bind(self, *, resolved, initialized):
+            try:
+                return original_bind(self, resolved=resolved, initialized=initialized)
+            except Exception:
+                return original_bind(
+                    self,
+                    resolved=_lifecycle_module()._p6_resolved_adapter(),
+                    initialized=_lifecycle_module()._p6_initialized(),
+                )
+
+        def fail_open_request(self, bound, method, *, caller_authority_fields=None):
+            try:
+                return original_request(self, bound, method, caller_authority_fields=caller_authority_fields)
+            except Exception:
+                return SimpleNamespace(
+                    method=method,
+                    selected_capability="runtime.cancel.observe_only",
+                    selected_quality="authoritative",
+                )
+
+        def fail_open_profile(self, bound, evidence, *, caller_authority_fields=None):
+            try:
+                return original_profile(self, bound, evidence, caller_authority_fields=caller_authority_fields)
+            except Exception:
+                return SimpleNamespace(
+                    capability_profile_id="runtime.session_binding.profile",
+                    capability_profile_revision="cap_rev1",
+                    evidence_kind="exact_session_binding",
+                    evidence_quality="authoritative",
+                )
+
+        def fail_open_stage(
+            self,
+            bound,
+            method,
+            *,
+            session_ref=None,
+            delivery=None,
+            receipt=None,
+            caller_authority_fields=None,
+        ):
+            try:
+                return original_stage(
+                    self,
+                    bound,
+                    method,
+                    session_ref=session_ref,
+                    delivery=delivery,
+                    receipt=receipt,
+                    caller_authority_fields=caller_authority_fields,
+                )
+            except Exception:
+                return SimpleNamespace(
+                    method=method,
+                    protocol_control=False,
+                    action=SimpleNamespace(
+                        method=method,
+                        selected_capability="runtime.cancel.observe_only",
+                        selected_quality="authoritative",
+                    ),
+                    evidence_profiles=(
+                        SimpleNamespace(
+                            capability_profile_id="runtime.session_binding.profile",
+                            capability_profile_revision="cap_rev1",
+                            evidence_kind="exact_session_binding",
+                            evidence_quality="authoritative",
+                        ),
+                    ),
+                )
+
+        mutations = (
+            (mock.patch.object(authority, "bind_initialized", fail_open_bind), "bind_initialized"),
+            (mock.patch.object(authority, "validate_request_authority", fail_open_request), "request authority"),
+            (
+                mock.patch.object(authority, "validate_evidence_profile_authority", fail_open_profile),
+                "evidence profile authority",
+            ),
+            (mock.patch.object(authority, "decide_ordered_stage_authority", fail_open_stage), "ordered stage"),
+        )
+        for patcher, name in mutations:
+            with self.subTest(name=name), patcher:
+                with self.assertRaises(LifecycleEvidenceFailure):
+                    build_lifecycle_evidence(self.protocol)
 
     def test_redaction_observation_uses_real_redactor_before_persistence(self) -> None:
         redaction = build_lifecycle_evidence(self.protocol)["observation"]["redaction"]
@@ -842,6 +1009,7 @@ class RuntimeAdapterLifecycleEvidenceTests(unittest.TestCase):
         gap_keys = {gap["clause_key"] for gap in result.gaps}
         self.assertLessEqual(HOST_HARNESS_KEYS - WIRE_COVERED_C15_KEYS, gap_keys)
         self.assertLessEqual(DEFERRED_RECOVERY_ADMISSION_KEYS, gap_keys)
+        self.assertLessEqual(P6_AUTHORITY_KEYS, gap_keys)
         self.assertLessEqual(DEFERRED_P6_KEYS, gap_keys)
         self.assertLessEqual(DEFERRED_RETRYABILITY_KEYS, gap_keys)
         self.assertLessEqual(DEFERRED_SHUTDOWN_KEYS, gap_keys)
@@ -913,6 +1081,22 @@ class RuntimeAdapterLifecycleEvidenceTests(unittest.TestCase):
             (
                 "At P6 the `runtime.deliver` action relation, session-binding\n   evidence profile",
                 "At P6 the `runtime.deliver` action relation and session-binding\n   evidence profile",
+            ),
+            (
+                "The adapter MUST declare its\n   capabilities in the initialization `CapabilitySetV1`",
+                "The adapter MUST publish its\n   capabilities in the initialization `CapabilitySetV1`",
+            ),
+            (
+                "P6 MUST fail as `CAPABILITY_NOT_DECLARED` before action when the exact key",
+                "P6 MUST fail before action when the exact key",
+            ),
+            (
+                "session, relation row, or evidence profile.",
+                "session or evidence profile.",
+            ),
+            (
+                "`CAPABILITY_NOT_DECLARED` at P6. Only after P6 succeeds MUST the host",
+                "`CAPABILITY_NOT_DECLARED` at P6. After P6 succeeds the host MUST",
             ),
             (
                 "only\n    redacted bounded diagnostics, byte counts, and a truncation marker may enter\n    the quarantine record",
