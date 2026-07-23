@@ -63,6 +63,7 @@ def _open_workspace_file(
     relative_path: str,
     *,
     maximum_bytes: int = MAX_SOURCE_BYTES,
+    workspace_fd: int | None = None,
 ) -> tuple[bytes, os.stat_result]:
     """Open every component relative to one held, no-follow workspace directory."""
     relative_path = _safe_relative(relative_path)
@@ -73,16 +74,18 @@ def _open_workspace_file(
     directory_flags |= getattr(os, "O_CLOEXEC", 0)
     final_flags = os.O_RDONLY | nofollow | getattr(os, "O_CLOEXEC", 0)
     final_flags |= getattr(os, "O_NONBLOCK", 0)
-    owned = [os.open(workspace_root, directory_flags)]
+    owned = [] if workspace_fd is not None else [os.open(workspace_root, directory_flags)]
+    parent_fd = workspace_fd if workspace_fd is not None else owned[-1]
     try:
         components = relative_path.split("/")
         for component in components[:-1]:
-            child = os.open(component, directory_flags, dir_fd=owned[-1])
+            child = os.open(component, directory_flags, dir_fd=parent_fd)
             if not stat.S_ISDIR(os.fstat(child).st_mode):
                 os.close(child)
                 raise ObservationError("mailbox path contains a non-directory component")
             owned.append(child)
-        fd = os.open(components[-1], final_flags, dir_fd=owned[-1])
+            parent_fd = child
+        fd = os.open(components[-1], final_flags, dir_fd=parent_fd)
         try:
             before = os.fstat(fd)
             if not stat.S_ISREG(before.st_mode) or before.st_size > maximum_bytes:
@@ -289,11 +292,16 @@ class _ScanBudget:
         self.used += 1
 
     def read(
-        self, workspace_root: Path, path: str, maximum_bytes: int = MAX_SOURCE_BYTES
+        self,
+        workspace_root: Path,
+        path: str,
+        maximum_bytes: int = MAX_SOURCE_BYTES,
+        *,
+        workspace_fd: int | None = None,
     ) -> tuple[bytes, os.stat_result]:
         self.charge()
         return _open_workspace_file(
-            workspace_root, path, maximum_bytes=maximum_bytes
+            workspace_root, path, maximum_bytes=maximum_bytes, workspace_fd=workspace_fd
         )
 
 
@@ -304,6 +312,42 @@ _DIRECTORY_FLAGS = (
     | getattr(os, "O_NOFOLLOW", 0)
     | getattr(os, "O_CLOEXEC", 0)
 )
+
+
+class _WorkspaceAuthority:
+    def __init__(self, fd: int) -> None:
+        self.fd = fd
+        status = os.fstat(fd)
+        if not stat.S_ISDIR(status.st_mode):
+            raise ObservationError("workspace root is not a directory")
+        self.identity = (status.st_dev, status.st_ino)
+
+    @classmethod
+    def open(cls, workspace_root: Path) -> "_WorkspaceAuthority":
+        if getattr(os, "O_NOFOLLOW", None) is None:
+            raise ObservationError("O_NOFOLLOW is required for mailbox observation")
+        try:
+            fd = os.open(workspace_root, _DIRECTORY_FLAGS)
+        except OSError as exc:
+            raise ObservationError("workspace root cannot be opened safely") from exc
+        try:
+            return cls(fd)
+        except BaseException:
+            os.close(fd)
+            raise
+
+    def revalidate(self) -> None:
+        status = os.fstat(self.fd)
+        if (
+            not stat.S_ISDIR(status.st_mode)
+            or (status.st_dev, status.st_ino) != self.identity
+        ):
+            raise ObservationError("workspace root identity changed during reconciliation")
+
+    def close(self) -> None:
+        fd, self.fd = self.fd, -1
+        if fd >= 0:
+            os.close(fd)
 
 
 def _pack_names(names: list[bytes]) -> str:
@@ -539,12 +583,17 @@ def _encode_walk_cursor(
 
 
 class _SourceWalker:
-    def __init__(self, workspace_root: Path, budget: _ScanBudget, cursor: str) -> None:
+    def __init__(
+        self,
+        workspace_fd: int,
+        budget: _ScanBudget,
+        cursor: str,
+    ) -> None:
         nofollow = getattr(os, "O_NOFOLLOW", None)
         if nofollow is None:
             raise ObservationError("O_NOFOLLOW is required for mailbox observation")
         self.saved = _decode_walk_cursor(cursor)
-        self.workspace_fd = os.open(workspace_root, _DIRECTORY_FLAGS)
+        self.workspace_fd = workspace_fd
         self.budget = budget
         self.phase = "c" if self.saved is None else str(self.saved["p"])
         self.root: _DirectoryReader | None = None
@@ -745,9 +794,7 @@ class _SourceWalker:
         if self.root is not None:
             self.root.close()
             self.root = None
-        fd, self.workspace_fd = self.workspace_fd, -1
-        if fd >= 0:
-            os.close(fd)
+        self.workspace_fd = -1
 
 
 def scan_mailbox(
@@ -756,96 +803,116 @@ def scan_mailbox(
     project_id: str,
     registry_revision: str,
     cursor: str,
+    workspace_fd: int | None = None,
 ) -> tuple[list[dict[str, object]], str, int]:
     if re.fullmatch(r"sha256:[0-9a-f]{64}", registry_revision) is None:
         raise ObservationError("registry revision is invalid")
+    _decode_walk_cursor(cursor)
     budget = _ScanBudget()
     candidates: list[dict[str, object]] = []
+    authority = (
+        None if workspace_fd is not None else _WorkspaceAuthority.open(workspace_root)
+    )
+    active_workspace_fd = workspace_fd if workspace_fd is not None else authority.fd
 
     def read(path: str, maximum_bytes: int = MAX_SOURCE_BYTES):
-        return budget.read(workspace_root, path, maximum_bytes)
+        return budget.read(
+            workspace_root, path, maximum_bytes, workspace_fd=active_workspace_fd
+        )
 
-    walker = _SourceWalker(workspace_root, budget, cursor)
-    last_cursor = walker.cursor
     try:
-        while True:
-            try:
-                entry = walker.next()
-            except _BudgetExhausted:
-                return candidates, walker.cursor, budget.used
-            if entry is None:
-                return candidates, "", budget.used
-            relative_path = str(entry["path"])
-            last_cursor = str(entry["before"])
-            try:
-                raw, status = read(relative_path)
-                if relative_path.startswith("Chats/"):
-                    if _packet_project(read, relative_path, raw) == project_id:
-                        next_cursor = str(entry["after"])
-                        candidates.append(
-                            _candidate(
-                                relative_path,
-                                raw,
-                                status,
-                                scan_cursor=next_cursor,
-                                scan_count=budget.used,
-                            )
-                        )
-                    last_cursor = str(entry["after"])
-                    continue
-
-                pointers = _parse_inbox(raw)
-                if pointers is None:
-                    last_cursor = str(entry["after"])
-                    continue
-                agent = str(entry["agent"])
-                expected = entry["file_identity"]
-                actual = (status.st_dev, status.st_ino, status.st_size, status.st_mtime_ns)
-                start_pointer = int(entry["pointer"]) if expected == actual else 0
-                for index in range(start_pointer, len(pointers)):
-                    last_cursor = walker.inbox_cursor(
-                        agent=agent, pointer=index, status=status
-                    )
-                    budget.charge()
-                    bucket, value = pointers[index]
-                    next_cursor = walker.inbox_cursor(
-                        agent=agent, pointer=index + 1, status=status
-                    )
-                    pointer = _fixed_packet_pointer(value)
-                    if pointer is not None:
-                        try:
-                            packet_raw, _packet_status = read(pointer)
-                            if _packet_project(read, pointer, packet_raw) == project_id:
-                                content = json.dumps(
-                                    {
-                                        "agent": agent,
-                                        "bucket": bucket,
-                                        "pointer": pointer,
-                                        "project_id": project_id,
-                                    },
-                                    ensure_ascii=True,
-                                    separators=(",", ":"),
-                                    sort_keys=True,
-                                ).encode("utf-8")
-                                candidates.append(
-                                    _candidate(
-                                        relative_path,
-                                        content,
-                                        status,
-                                        scan_cursor=next_cursor,
-                                        scan_count=budget.used,
-                                    )
+        walker = _SourceWalker(active_workspace_fd, budget, cursor)
+        last_cursor = walker.cursor
+        try:
+            while True:
+                try:
+                    entry = walker.next()
+                except _BudgetExhausted:
+                    return candidates, walker.cursor, budget.used
+                if entry is None:
+                    return candidates, "", budget.used
+                relative_path = str(entry["path"])
+                last_cursor = str(entry["before"])
+                try:
+                    raw, status = read(relative_path)
+                    if relative_path.startswith("Chats/"):
+                        if _packet_project(read, relative_path, raw) == project_id:
+                            next_cursor = str(entry["after"])
+                            candidates.append(
+                                _candidate(
+                                    relative_path,
+                                    raw,
+                                    status,
+                                    scan_cursor=next_cursor,
+                                    scan_count=budget.used,
                                 )
-                        except ObservationError:
-                            pass
-                    last_cursor = next_cursor
-                last_cursor = str(entry["after"])
-            except _BudgetExhausted:
-                return candidates, last_cursor, budget.used
-            except ObservationError:
-                last_cursor = str(entry["after"])
+                            )
+                        last_cursor = str(entry["after"])
+                        continue
+
+                    pointers = _parse_inbox(raw)
+                    if pointers is None:
+                        last_cursor = str(entry["after"])
+                        continue
+                    agent = str(entry["agent"])
+                    expected = entry["file_identity"]
+                    actual = (
+                        status.st_dev,
+                        status.st_ino,
+                        status.st_size,
+                        status.st_mtime_ns,
+                    )
+                    start_pointer = int(entry["pointer"]) if expected == actual else 0
+                    for index in range(start_pointer, len(pointers)):
+                        last_cursor = walker.inbox_cursor(
+                            agent=agent, pointer=index, status=status
+                        )
+                        budget.charge()
+                        bucket, value = pointers[index]
+                        next_cursor = walker.inbox_cursor(
+                            agent=agent, pointer=index + 1, status=status
+                        )
+                        pointer = _fixed_packet_pointer(value)
+                        if pointer is not None:
+                            try:
+                                packet_raw, _packet_status = read(pointer)
+                                if (
+                                    _packet_project(read, pointer, packet_raw)
+                                    == project_id
+                                ):
+                                    content = json.dumps(
+                                        {
+                                            "agent": agent,
+                                            "bucket": bucket,
+                                            "pointer": pointer,
+                                            "project_id": project_id,
+                                        },
+                                        ensure_ascii=True,
+                                        separators=(",", ":"),
+                                        sort_keys=True,
+                                    ).encode("utf-8")
+                                    candidates.append(
+                                        _candidate(
+                                            relative_path,
+                                            content,
+                                            status,
+                                            scan_cursor=next_cursor,
+                                            scan_count=budget.used,
+                                        )
+                                    )
+                            except ObservationError:
+                                pass
+                        last_cursor = next_cursor
+                    last_cursor = str(entry["after"])
+                except _BudgetExhausted:
+                    return candidates, last_cursor, budget.used
+                except ObservationError:
+                    last_cursor = str(entry["after"])
+        finally:
+            walker.close()
     finally:
-        walker.close()
+        if authority is not None:
+            authority.close()
 
 
 def _load_watchdog() -> tuple[type[object], type[object]]:
@@ -960,46 +1027,53 @@ class ObservationEngine:
         observed_at = now.isoformat()
         cutoff = (now - timedelta(days=RETENTION_DAYS)).isoformat()
         results: dict[str, object] = {}
-        for index, project_id in enumerate(snapshot.project_ids):
-            cursor = store.observation_checkpoint_cursor(
-                workspace_id=self.workspace_id,
-                project_id=project_id,
-                source_id=SOURCE_ID,
-                registry_revision=snapshot.registry_revision,
-            )
-            candidates, next_cursor, scanned_count = scan_mailbox(
-                self.workspace_root,
-                project_id=project_id,
-                registry_revision=snapshot.registry_revision,
-                cursor=cursor,
-            )
-            result = store.reconcile_observations(
-                workspace_id=self.workspace_id,
-                project_id=project_id,
-                source_id=SOURCE_ID,
-                registry_revision=snapshot.registry_revision,
-                candidates=candidates,
-                next_cursor=next_cursor,
-                scanned_count=scanned_count,
-                observed_at_utc=observed_at,
-                write_limit=WRITE_LIMIT,
-            )
-            removed = store.prune_resolved_observations(
-                workspace_id=self.workspace_id,
-                project_id=project_id,
-                source_id=SOURCE_ID,
-                registry_revision=snapshot.registry_revision,
-                resolved_before_utc=cutoff,
-                occurred_at_utc=observed_at,
-                limit=WRITE_LIMIT,
-            )
-            if index < 50:
-                results[project_id] = {
-                    "scanned": result["scanned"],
-                    "written": result["written"],
-                    "incomplete": bool(result["cursor"]),
-                    "pruned": removed,
-                }
+        authority = _WorkspaceAuthority.open(self.workspace_root)
+        try:
+            for index, project_id in enumerate(snapshot.project_ids):
+                cursor = store.observation_checkpoint_cursor(
+                    workspace_id=self.workspace_id,
+                    project_id=project_id,
+                    source_id=SOURCE_ID,
+                    registry_revision=snapshot.registry_revision,
+                )
+                candidates, next_cursor, scanned_count = scan_mailbox(
+                    self.workspace_root,
+                    project_id=project_id,
+                    registry_revision=snapshot.registry_revision,
+                    cursor=cursor,
+                    workspace_fd=authority.fd,
+                )
+                authority.revalidate()
+                result = store.reconcile_observations(
+                    workspace_id=self.workspace_id,
+                    project_id=project_id,
+                    source_id=SOURCE_ID,
+                    registry_revision=snapshot.registry_revision,
+                    candidates=candidates,
+                    next_cursor=next_cursor,
+                    scanned_count=scanned_count,
+                    observed_at_utc=observed_at,
+                    write_limit=WRITE_LIMIT,
+                )
+                authority.revalidate()
+                removed = store.prune_resolved_observations(
+                    workspace_id=self.workspace_id,
+                    project_id=project_id,
+                    source_id=SOURCE_ID,
+                    registry_revision=snapshot.registry_revision,
+                    resolved_before_utc=cutoff,
+                    occurred_at_utc=observed_at,
+                    limit=WRITE_LIMIT,
+                )
+                if index < 50:
+                    results[project_id] = {
+                        "scanned": result["scanned"],
+                        "written": result["written"],
+                        "incomplete": bool(result["cursor"]),
+                        "pruned": removed,
+                    }
+        finally:
+            authority.close()
         project_count = len(snapshot.project_ids)
         return {
             "projects": results,
