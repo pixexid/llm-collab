@@ -252,6 +252,29 @@ def _response(request_id: str, result: Mapping[str, Any]) -> Mapping[str, Any]:
     return _freeze({"jsonrpc": "2.0", "id": request_id, "result": result})
 
 
+def _reconcile_trace(session_ref: Mapping[str, Any], request_id: str = "reconcile-1") -> TraceFrame:
+    return TraceFrame(
+        "host",
+        "adapter",
+        _request(
+            "runtime.reconcile",
+            {
+                "session_ref": session_ref,
+                "original_request_id": "deliver-1",
+                "delivery_id": "delivery_alpha",
+                "attempt_id": "attempt_alpha",
+            },
+            request_id,
+        ),
+    )
+
+
+def _session_ref_with(mutator) -> Mapping[str, Any]:
+    value = _thaw(_SESSION_REF)
+    mutator(value)
+    return _freeze(value)
+
+
 def _initialize_trace() -> tuple[TraceFrame, TraceFrame]:
     return (
         TraceFrame("host", "adapter", _request("initialize", _INITIALIZE_PARAMS, "initialize-1")),
@@ -294,28 +317,120 @@ FIXTURES: tuple[RuntimeAdapterFixture, ...] = (
                 text_sha256="f346f21afa1bb5c9410cfcb2c4eabcc032a97ba7a1df5e3c5fca24fc2dda884e",
                 polarity=POLARITY_CONFORMING,
             ),
+            ClauseReference(
+                clause_key="C39aa248f4dd8.1",
+                text_sha256="39aa248f4dd89bd10348302ffac0f507163e35506fa5d581189692a942985426",
+                polarity=POLARITY_CONFORMING,
+            ),
+            ClauseReference(
+                clause_key="C5097ad6c480d.1",
+                text_sha256="5097ad6c480d38de824999d4fe41c22204b4e35dc46b366b95649e7691ff6039",
+                polarity=POLARITY_CONFORMING,
+            ),
+            ClauseReference(
+                clause_key="C81987c71b9d0.1",
+                text_sha256="81987c71b9d07010e889ecf4a4799aa761d83b71d2230a3d6dff1bbd8ed9e040",
+                polarity=POLARITY_CONFORMING,
+            ),
+            ClauseReference(
+                clause_key="C9e388d863ed5.1",
+                text_sha256="9e388d863ed5b5506df04fcc0fc29e0bb29dc85fc4bc2954bf0eccbbaa56b2ff",
+                polarity=POLARITY_CONFORMING,
+            ),
         ),
         trace=(
             *_initialize_trace(),
-            TraceFrame(
-                "host",
-                "adapter",
-                _request(
-                    "runtime.reconcile",
-                    {
-                        "session_ref": _SESSION_REF,
-                        "original_request_id": "deliver-1",
-                        "delivery_id": "delivery_alpha",
-                        "attempt_id": "attempt_alpha",
-                    },
-                    "reconcile-1",
-                ),
-            ),
+            _reconcile_trace(_SESSION_REF),
         ),
         expectation=ExpectedResult(
             method="runtime.reconcile",
             result=_RECEIPT,
             state_effect="attempt_reconciled",
+        ),
+    ),
+    RuntimeAdapterFixture(
+        fixture_id="runtime-adapter-reconcile-rejects-workspace-mismatch",
+        polarity=POLARITY_VIOLATING,
+        clause_refs=(
+            ClauseReference(
+                clause_key="C72337c3bc58e.1",
+                text_sha256="72337c3bc58e165f1cbf09a77ed0f9aa1d67e29f19ded1286522b16a8d2e5fed",
+                polarity=POLARITY_VIOLATING,
+            ),
+            ClauseReference(
+                clause_key="C72337c3bc58e.2",
+                text_sha256="72337c3bc58e165f1cbf09a77ed0f9aa1d67e29f19ded1286522b16a8d2e5fed",
+                polarity=POLARITY_VIOLATING,
+            ),
+        ),
+        trace=(
+            *_initialize_trace(),
+            _reconcile_trace(
+                _session_ref_with(lambda value: value.__setitem__("workspace_id", "ws_other")),
+                "reconcile-workspace-mismatch",
+            ),
+        ),
+        expectation=ExpectedRefusal(
+            error_name="INVALID_SESSION_REF",
+            error_code=-32008,
+            state_effect=NO_STATE_CHANGE,
+            response_emitted=True,
+            closes_connection=False,
+        ),
+    ),
+    RuntimeAdapterFixture(
+        fixture_id="runtime-adapter-reconcile-rejects-workspace-repository-binding",
+        polarity=POLARITY_VIOLATING,
+        clause_refs=(
+            ClauseReference(
+                clause_key="C81987c71b9d0.2",
+                text_sha256="81987c71b9d07010e889ecf4a4799aa761d83b71d2230a3d6dff1bbd8ed9e040",
+                polarity=POLARITY_VIOLATING,
+            ),
+        ),
+        trace=(
+            *_initialize_trace(),
+            _reconcile_trace(
+                _session_ref_with(
+                    lambda value: value.__setitem__(
+                        "repository_binding",
+                        {"project_id": "amiga", "repo_id": "llm-collab", "canonical_cwd": "/repo"},
+                    )
+                ),
+                "reconcile-repository-binding",
+            ),
+        ),
+        expectation=ExpectedRefusal(
+            error_name="INVALID_SESSION_REF",
+            error_code=-32008,
+            state_effect=NO_STATE_CHANGE,
+            response_emitted=True,
+            closes_connection=False,
+        ),
+    ),
+    RuntimeAdapterFixture(
+        fixture_id="runtime-adapter-reconcile-rejects-stale-binding-evidence",
+        polarity=POLARITY_VIOLATING,
+        clause_refs=(
+            ClauseReference(
+                clause_key="C9e388d863ed5.1",
+                text_sha256="9e388d863ed5b5506df04fcc0fc29e0bb29dc85fc4bc2954bf0eccbbaa56b2ff",
+                polarity=POLARITY_VIOLATING,
+            ),
+        ),
+        trace=(
+            *_initialize_trace(),
+            _reconcile_trace(
+                _session_ref_with(lambda value: value["evidence"].__setitem__("integrity", "sha256:" + "0" * 64)),
+                "reconcile-stale-evidence",
+            ),
+        ),
+        expectation=ExpectedRefusal(
+            error_name="INVALID_SESSION_REF",
+            error_code=-32008,
+            state_effect=NO_STATE_CHANGE,
+            response_emitted=True,
+            closes_connection=False,
         ),
     ),
     RuntimeAdapterFixture(
@@ -475,6 +590,8 @@ def _derived_refusal(trace: TraceFrame, error_codes: Mapping[str, int]) -> tuple
                 return ("INVALID_REQUEST", error_codes["INVALID_REQUEST"], False, True)
             elif error.clause == "request-id":
                 return ("INVALID_REQUEST", error_codes["INVALID_REQUEST"], True, True)
+            elif error.clause == "fixture-session-ref-identity":
+                name = "INVALID_SESSION_REF"
             elif error.clause in {"closed-params", "fixture-request-params", "fixture-session-ref"}:
                 name = "INVALID_PARAMS"
             else:
@@ -594,17 +711,28 @@ def _validate_session_ref(value: Any) -> None:
         value = validate_session_ref_v1(value)
     except Exception as error:
         raise ConformanceFailure("fixture-session-ref", "session_ref") from error
+    if value["workspace_id"] != _ENDPOINT["workspace_id"]:
+        raise ConformanceFailure("fixture-session-ref-identity", "workspace")
+    if value["scope"] != _ENDPOINT["scope"]:
+        raise ConformanceFailure("fixture-session-ref-identity", "scope")
+    if "repository_binding" in value:
+        raise ConformanceFailure("fixture-session-ref-identity", "repository_binding")
+    if value["endpoint_id"] != _ENDPOINT["endpoint_id"]:
+        raise ConformanceFailure("fixture-session-ref-identity", "endpoint")
     evidence = value["evidence"]
     if evidence["evidence_kind"] != "exact_session_binding" or evidence["quality"] != "authoritative":
-        raise ConformanceFailure("fixture-session-ref", "session evidence")
+        raise ConformanceFailure("fixture-session-ref-identity", "session evidence")
     subject = evidence["subject"]
     if not _is_closed_mapping(subject, {"endpoint_id", "session_ref_id", "native_session_id"}):
-        raise ConformanceFailure("fixture-session-ref", "session subject")
+        raise ConformanceFailure("fixture-session-ref-identity", "session subject")
     if subject["endpoint_id"] != value["endpoint_id"] or subject["session_ref_id"] != value["session_ref_id"]:
-        raise ConformanceFailure("fixture-session-ref", "session subject mismatch")
+        raise ConformanceFailure("fixture-session-ref-identity", "session subject mismatch")
     if subject["native_session_id"] != value["native_session_id"]:
-        raise ConformanceFailure("fixture-session-ref", "native session mismatch")
-    _validate_evidence_integrity(evidence)
+        raise ConformanceFailure("fixture-session-ref-identity", "native session mismatch")
+    try:
+        _validate_evidence_integrity(evidence)
+    except ConformanceFailure as error:
+        raise ConformanceFailure("fixture-session-ref-identity", "session evidence integrity") from error
 
 
 def _validate_request_params(method: str, params: Mapping[str, Any]) -> None:
