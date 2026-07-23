@@ -524,7 +524,7 @@ class RuntimeAdapterReferenceTests(unittest.TestCase):
             or "{}"
         )
 
-        self.assertEqual(response["error"]["data"]["name"], "INVALID_SESSION_REF")
+        self.assertEqual(response["error"]["data"]["name"], "INVALID_PARAMS")
 
     def test_reconcile_accepts_safe_integer_original_request_id(self) -> None:
         adapter = ReferenceAdapter()
@@ -662,10 +662,36 @@ class RuntimeAdapterReferenceTests(unittest.TestCase):
             )
             or "{}"
         )
-        self.assertEqual(response["error"]["data"]["name"], "INVALID_SESSION_REF")
-        self.assertEqual(response["error"]["code"], -32008)
+        self.assertEqual(response["error"]["data"]["name"], "INVALID_PARAMS")
+        self.assertEqual(response["error"]["code"], -32602)
         health = json.loads(adapter.handle_text(frame("runtime.health", {}, "health-1")) or "{}")
         self.assertEqual(health["result"]["scope_kind"], "workspace")
+
+    def test_reconcile_rejects_wrong_workspace_value_as_session_identity(self) -> None:
+        adapter = ReferenceAdapter()
+        adapter.handle_text(initialize_frame())
+        wrong_workspace = session_ref()
+        wrong_workspace["workspace_id"] = "ws_other"
+        wrong_workspace["evidence"]["workspace_id"] = "ws_other"
+        wrong_workspace["evidence"]["integrity"] = canonical_digest(wrong_workspace["evidence"])
+        response = json.loads(
+            adapter.handle_text(
+                frame(
+                    "runtime.reconcile",
+                    {
+                        "session_ref": wrong_workspace,
+                        "original_request_id": "deliver-1",
+                        "delivery_id": "delivery_alpha",
+                        "attempt_id": "attempt_alpha",
+                    },
+                    "reconcile-wrong-workspace",
+                )
+            )
+            or "{}"
+        )
+
+        self.assertEqual(response["error"]["data"]["name"], "INVALID_SESSION_REF")
+        self.assertEqual(response["error"]["code"], -32008)
 
     def test_reconcile_rejects_project_scope_for_workspace_endpoint(self) -> None:
         adapter = ReferenceAdapter()
@@ -694,6 +720,31 @@ class RuntimeAdapterReferenceTests(unittest.TestCase):
         health = json.loads(adapter.handle_text(frame("runtime.health", {}, "health-1")) or "{}")
         self.assertEqual(health["result"]["scope_kind"], "workspace")
 
+    def test_reconcile_rejects_wrong_endpoint_value_as_session_identity(self) -> None:
+        adapter = ReferenceAdapter()
+        adapter.handle_text(initialize_frame())
+        wrong_endpoint = session_ref()
+        wrong_endpoint["endpoint_id"] = "endpoint_other"
+        wrong_endpoint["evidence"]["subject"]["endpoint_id"] = "endpoint_other"
+        wrong_endpoint["evidence"]["integrity"] = canonical_digest(wrong_endpoint["evidence"])
+        response = json.loads(
+            adapter.handle_text(
+                frame(
+                    "runtime.reconcile",
+                    {
+                        "session_ref": wrong_endpoint,
+                        "original_request_id": "deliver-1",
+                        "delivery_id": "delivery_alpha",
+                        "attempt_id": "attempt_alpha",
+                    },
+                    "reconcile-wrong-endpoint",
+                )
+            )
+            or "{}"
+        )
+
+        self.assertEqual(response["error"]["data"]["name"], "INVALID_SESSION_REF")
+
     def test_reconcile_rejects_malformed_session_evidence_tokens_before_receipt(self) -> None:
         adapter = ReferenceAdapter()
         adapter.handle_text(initialize_frame())
@@ -716,9 +767,56 @@ class RuntimeAdapterReferenceTests(unittest.TestCase):
             or "{}"
         )
 
+        self.assertEqual(response["error"]["data"]["name"], "INVALID_PARAMS")
+
+    def test_reconcile_rejects_bad_correlation_prefix_as_session_identity(self) -> None:
+        adapter = ReferenceAdapter()
+        adapter.handle_text(initialize_frame())
+        bad_correlation = session_ref()
+        bad_correlation["evidence"]["correlation_id"] = "bad_session_alpha"
+        bad_correlation["evidence"]["integrity"] = canonical_digest(bad_correlation["evidence"])
+        response = json.loads(
+            adapter.handle_text(
+                frame(
+                    "runtime.reconcile",
+                    {
+                        "session_ref": bad_correlation,
+                        "original_request_id": "deliver-1",
+                        "delivery_id": "delivery_alpha",
+                        "attempt_id": "attempt_alpha",
+                    },
+                    "reconcile-bad-correlation",
+                )
+            )
+            or "{}"
+        )
+
         self.assertEqual(response["error"]["data"]["name"], "INVALID_SESSION_REF")
 
-    def test_reconcile_rejects_repository_binding_on_workspace_endpoint_as_session_identity(self) -> None:
+    def test_reconcile_rejects_stale_session_evidence_integrity(self) -> None:
+        adapter = ReferenceAdapter()
+        adapter.handle_text(initialize_frame())
+        stale = session_ref()
+        stale["evidence"]["integrity"] = "sha256:" + "0" * 64
+        response = json.loads(
+            adapter.handle_text(
+                frame(
+                    "runtime.reconcile",
+                    {
+                        "session_ref": stale,
+                        "original_request_id": "deliver-1",
+                        "delivery_id": "delivery_alpha",
+                        "attempt_id": "attempt_alpha",
+                    },
+                    "reconcile-stale-integrity",
+                )
+            )
+            or "{}"
+        )
+
+        self.assertEqual(response["error"]["data"]["name"], "INVALID_SESSION_REF")
+
+    def test_reconcile_rejects_malformed_repository_binding_as_invalid_params(self) -> None:
         adapter = ReferenceAdapter()
         adapter.handle_text(initialize_frame())
         bound = session_ref()
@@ -734,6 +832,33 @@ class RuntimeAdapterReferenceTests(unittest.TestCase):
                         "attempt_id": "attempt_alpha",
                     },
                     "reconcile-1",
+                )
+            )
+            or "{}"
+        )
+
+        self.assertEqual(response["error"]["data"]["name"], "INVALID_PARAMS")
+
+    def test_reconcile_rejects_well_formed_repository_binding_as_session_identity(self) -> None:
+        adapter = ReferenceAdapter()
+        adapter.handle_text(initialize_frame())
+        bound = session_ref()
+        bound["repository_binding"] = {
+            "project_id": "other_project",
+            "repo_id": "repo_alpha",
+            "canonical_cwd": "/repo",
+        }
+        response = json.loads(
+            adapter.handle_text(
+                frame(
+                    "runtime.reconcile",
+                    {
+                        "session_ref": bound,
+                        "original_request_id": "deliver-1",
+                        "delivery_id": "delivery_alpha",
+                        "attempt_id": "attempt_alpha",
+                    },
+                    "reconcile-repository-binding",
                 )
             )
             or "{}"
