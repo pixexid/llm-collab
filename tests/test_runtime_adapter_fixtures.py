@@ -547,7 +547,7 @@ class RuntimeAdapterFixtureTests(unittest.TestCase):
         self.assertTrue(_replays_fixture(health))
 
         self.assertEqual(selector.polarity, POLARITY_VIOLATING)
-        self.assertEqual({ref.clause_key for ref in selector.clause_refs}, {"Cf12ffe8bf4a6.1"})
+        self.assertIn("Cf12ffe8bf4a6.1", {ref.clause_key for ref in selector.clause_refs})
         self.assertIsInstance(selector.expectation, ExpectedRefusal)
         self.assertEqual(selector.expectation.error_name, "INVALID_PARAMS")
         self.assertEqual(selector.expectation.error_code, -32602)
@@ -559,6 +559,11 @@ class RuntimeAdapterFixtureTests(unittest.TestCase):
         self.assertTrue(_replays_fixture(selector))
 
     def test_c11_health_slice_reduces_its_own_base_gaps_by_three(self) -> None:
+        selector = next(
+            fixture
+            for fixture in FIXTURES
+            if fixture.fixture_id == "runtime-adapter-health-rejects-session-selector"
+        )
         result = build_claim(self.protocol)
         base_result = build_claim(
             self.protocol,
@@ -571,6 +576,14 @@ class RuntimeAdapterFixtureTests(unittest.TestCase):
                 )
                 for fixture in FIXTURES
                 if fixture.fixture_id != "runtime-adapter-health-rejects-session-selector"
+            )
+            + (
+                replace(
+                    selector,
+                    clause_refs=tuple(
+                        ref for ref in selector.clause_refs if ref.clause_key != "Cf12ffe8bf4a6.1"
+                    ),
+                ),
             ),
         )
 
@@ -625,20 +638,103 @@ class RuntimeAdapterFixtureTests(unittest.TestCase):
             ("runtime-adapter-health-rejects-session-selector", "Cf12ffe8bf4a6.1"),
         ):
             with self.subTest(clause=clause_key):
-                fixtures = tuple(fixture for fixture in FIXTURES if fixture.fixture_id != fixture_id)
-                if fixture_id == "runtime-adapter-health-request":
-                    fixtures = tuple(
-                        replace(
-                            fixture,
-                            clause_refs=tuple(ref for ref in fixture.clause_refs if ref.clause_key != clause_key),
-                        )
-                        if fixture.fixture_id == fixture_id
-                        else fixture
-                        for fixture in FIXTURES
+                fixtures = tuple(
+                    replace(
+                        fixture,
+                        clause_refs=tuple(ref for ref in fixture.clause_refs if ref.clause_key != clause_key),
                     )
+                    if fixture.fixture_id == fixture_id
+                    else fixture
+                    for fixture in FIXTURES
+                )
                 result = build_claim(self.protocol, fixtures=fixtures)
                 self.assertIsInstance(result, ClaimFailure)
                 self.assertIn(clause_key, {gap["clause_key"] for gap in result.gaps})
+
+    def test_c13_returned_error_envelopes_are_closed_for_every_response_refusal(self) -> None:
+        retryable_by_name = _protocol_retryable_by_name(self.protocol)
+        response_refusals = [
+            fixture
+            for fixture in FIXTURES
+            if fixture.polarity == POLARITY_VIOLATING
+            and isinstance(fixture.expectation, ExpectedRefusal)
+            and fixture.expectation.response_emitted
+        ]
+
+        self.assertGreater(len(response_refusals), 1)
+        for fixture in response_refusals:
+            with self.subTest(fixture=fixture.fixture_id):
+                response = _last_replay_response(fixture)
+                self.assertIsInstance(response, str)
+                _assert_closed_error_envelope(
+                    self,
+                    json.loads(response),
+                    fixture.expectation,
+                    retryable_by_name,
+                )
+
+    def test_c13_returned_error_slice_reduces_its_own_base_gaps_by_three(self) -> None:
+        c13_keys = {"C6b6763d6addb.1", "Cd75a8b8bc595.1", "C1cef357011ab.1"}
+        host_local_keys = {"C5d3edf690fb2.1", "C5d3edf690fb2.2", "C1ba88e813bab.1"}
+        result = build_claim(self.protocol)
+        base_result = build_claim(
+            self.protocol,
+            fixtures=tuple(
+                replace(
+                    fixture,
+                    clause_refs=tuple(ref for ref in fixture.clause_refs if ref.clause_key not in c13_keys),
+                )
+                if fixture.fixture_id == "runtime-adapter-health-rejects-session-selector"
+                else fixture
+                for fixture in FIXTURES
+            ),
+        )
+
+        self.assertIsInstance(result, ClaimFailure)
+        self.assertIsInstance(base_result, ClaimFailure)
+        self.assertEqual(len(base_result.gaps) - len(result.gaps), 3)
+        gap_keys = {gap["clause_key"] for gap in result.gaps}
+        self.assertFalse(c13_keys & gap_keys)
+        self.assertLessEqual(host_local_keys, gap_keys)
+
+    def test_c13_returned_error_envelope_mutations_fail_closed(self) -> None:
+        fixture = next(
+            fixture
+            for fixture in FIXTURES
+            if fixture.fixture_id == "runtime-adapter-health-rejects-session-selector"
+        )
+        payload = json.loads(_last_replay_response(fixture) or "{}")
+        retryable_by_name = _protocol_retryable_by_name(self.protocol)
+        mutations = {
+            "wrong-message": lambda value: value["error"].__setitem__("message", "INVALID_REQUEST"),
+            "wrong-name": lambda value: value["error"]["data"].__setitem__("name", "INVALID_REQUEST"),
+            "string-retryable": lambda value: value["error"]["data"].__setitem__("retryable", "false"),
+            "missing-data": lambda value: value["error"].pop("data"),
+            "extra-error-member": lambda value: value["error"].__setitem__("extra", True),
+            "mismatched-request-id": lambda value: value["error"]["data"].__setitem__("request_id", "other"),
+        }
+
+        for name, mutate in mutations.items():
+            with self.subTest(name=name):
+                changed = json.loads(json.dumps(payload))
+                mutate(changed)
+                with self.assertRaises(AssertionError):
+                    _assert_closed_error_envelope(self, changed, fixture.expectation, retryable_by_name)
+
+        result = build_claim(
+            self.protocol,
+            fixtures=tuple(
+                replace(
+                    candidate,
+                    clause_refs=tuple(ref for ref in candidate.clause_refs if ref.clause_key != "C6b6763d6addb.1"),
+                )
+                if candidate.fixture_id == fixture.fixture_id
+                else candidate
+                for candidate in FIXTURES
+            ),
+        )
+        self.assertIsInstance(result, ClaimFailure)
+        self.assertIn("C6b6763d6addb.1", {gap["clause_key"] for gap in result.gaps})
 
     def test_violating_fixture_trace_must_really_be_rejected(self) -> None:
         violating = next(fixture for fixture in FIXTURES if fixture.polarity == POLARITY_VIOLATING)
@@ -886,6 +982,16 @@ def _matches_refusal(expectation, response: str | bytes | None) -> bool:
 
 
 def _replays_fixture(fixture) -> bool:
+    response = _last_replay_response(fixture)
+    if isinstance(fixture.expectation, ExpectedResult):
+        if response is None:
+            return False
+        payload = json.loads(response or "{}")
+        return payload.get("result") == _thaw(fixture.expectation.result)
+    return _matches_refusal(fixture.expectation, response)
+
+
+def _last_replay_response(fixture):
     adapter = ReferenceAdapter()
     host_traces = [trace for trace in fixture.trace if trace.sender == "host" and trace.receiver == "adapter"]
     responses: list[str | bytes | None] = []
@@ -893,12 +999,34 @@ def _replays_fixture(fixture) -> bool:
         frame = _thaw(trace.frame)
         response = adapter.handle_text(json.dumps(frame, sort_keys=True, separators=(",", ":")))
         responses.append(response)
-        if isinstance(fixture.expectation, ExpectedResult) and frame.get("method") == fixture.expectation.method:
-            payload = json.loads(response or "{}")
-            return payload.get("result") == _thaw(fixture.expectation.result)
     if not responses:
-        return False
-    return _matches_refusal(fixture.expectation, responses[-1])
+        return None
+    return responses[-1]
+
+
+def _protocol_retryable_by_name(protocol: str) -> dict[str, bool]:
+    rows: dict[str, bool] = {}
+    for line in protocol.splitlines():
+        parts = [part.strip() for part in line.strip().strip("|").split("|")]
+        if len(parts) != 3 or not parts[0].startswith("-") or not parts[1].startswith("`"):
+            continue
+        rows[parts[1].strip("`")] = parts[2].strip("`") == "true"
+    return rows
+
+
+def _assert_closed_error_envelope(testcase, payload, expectation, retryable_by_name) -> None:
+    testcase.assertIsInstance(expectation, ExpectedRefusal)
+    testcase.assertEqual(set(payload), {"jsonrpc", "id", "error"})
+    testcase.assertEqual(payload["jsonrpc"], "2.0")
+    error = payload["error"]
+    testcase.assertEqual(set(error), {"code", "message", "data"})
+    testcase.assertEqual(error["code"], expectation.error_code)
+    testcase.assertEqual(error["message"], expectation.error_name)
+    data = error["data"]
+    testcase.assertEqual(set(data), {"name", "retryable", "request_id"})
+    testcase.assertEqual(data["name"], expectation.error_name)
+    testcase.assertIs(data["retryable"], retryable_by_name[expectation.error_name])
+    testcase.assertEqual(data["request_id"], payload["id"])
 
 
 def _serves_fixture(fixture) -> bool:
