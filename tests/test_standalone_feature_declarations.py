@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import unittest
 from pathlib import Path
@@ -32,6 +33,7 @@ SANCTIONED_CONSUMERS = {
     "tests/test_collabd_canonical.py",
     "tests/test_collabd_gate.py",
 }
+THREAD_EVENT_RUNNER_RFC = ROOT / "docs" / "workflows" / "thread-event-runner-rfc.md"
 
 
 def reject_json_constant(value: str) -> None:
@@ -120,6 +122,19 @@ class StandaloneFeatureDeclarationTests(unittest.TestCase):
     def test_every_committed_feature_is_boolean_false(self) -> None:
         features = load_declaration()["features"]
         self.assertTrue(all(value is False for value in features.values()))
+
+    def test_runtime_dispatch_rollout_step_requires_both_gates(self) -> None:
+        rfc = THREAD_EVENT_RUNNER_RFC.read_text(encoding="utf-8")
+        step = re.search(
+            r"(?ms)^4\. Return the test flag to off,.*?(?=^Before the isolated dispatch/fault matrix)",
+            rfc,
+        )
+        self.assertIsNotNone(step)
+        step_text = step.group(0)
+        self.assertIn("runtime_dispatch", step_text)
+        self.assertIn("THREAD_EVENT_RUNNER_DISPATCH_EXACT_THREAD=1", step_text)
+        self.assertIn("explicitly approved project pilot", step_text)
+        self.assertIn("one exact", step_text)
 
     def test_tracked_runtime_paths_have_no_unapproved_consumers(self) -> None:
         self.assertEqual(
