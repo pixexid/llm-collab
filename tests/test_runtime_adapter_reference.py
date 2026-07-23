@@ -59,6 +59,8 @@ MODULE_PATH = ROOT / "llm_collab" / "runtime_adapter_reference.py"
 PROTOCOL_PATH = ROOT / "docs" / "protocols" / "runtime-adapter-jsonrpc-v1.md"
 SCHEMA_DIR = ROOT / "schemas" / "standalone" / "v1"
 CAPABILITY_SET_SCHEMA_ID = "https://llm-collab.dev/schemas/standalone/v1/capability-set.schema.json"
+DELIVERY_SCHEMA_ID = "https://llm-collab.dev/schemas/standalone/v1/delivery.schema.json"
+RECEIPT_SCHEMA_ID = "https://llm-collab.dev/schemas/standalone/v1/receipt.schema.json"
 ENDPOINT = {
     "schema_version": 1,
     "workspace_id": "ws_alpha",
@@ -86,7 +88,7 @@ def load_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def capability_set_validator():
+def standalone_validator(schema_id: str):
     catalog = load_json(SCHEMA_DIR / "index.json")
     schemas = [load_json(path) for path in SCHEMA_DIR.glob("*.schema.json")]
     resources = [(schema["$id"], Resource.from_contents(schema)) for schema in schemas]
@@ -97,9 +99,13 @@ def capability_set_validator():
         )
     )
     registry = Registry(retrieve=no_network).with_resources(resources)
-    schema = registry.contents(CAPABILITY_SET_SCHEMA_ID)
+    schema = registry.contents(schema_id)
     Draft202012Validator.check_schema(schema)
     return Draft202012Validator(schema, registry=registry, format_checker=FormatChecker())
+
+
+def capability_set_validator():
+    return standalone_validator(CAPABILITY_SET_SCHEMA_ID)
 
 
 def capability_set_errors(value: dict) -> list[str]:
@@ -197,6 +203,47 @@ def session_ref() -> dict:
         "session_ref_id": "session_alpha",
         "endpoint_id": "endpoint_alpha",
         "native_session_id": "native-session-alpha",
+        "evidence": evidence,
+    }
+
+
+def delivery() -> dict:
+    evidence = {
+        "schema_version": 1,
+        "workspace_id": "ws_alpha",
+        "scope": {"kind": "workspace"},
+        "evidence_id": "evidence_delivery_alpha",
+        "evidence_kind": "native_delivery_state",
+        "quality": "best_effort",
+        "state": "routed",
+        "authority": {
+            "authority_kind": "trusted_adapter",
+            "identity": "adapter_alpha",
+            "implementation_revision": "adapter_rev1",
+            "capability_profile_id": "runtime_profile",
+            "capability_profile_revision": "cap_rev1",
+        },
+        "subject": {
+            "message_id": "msg_alpha",
+            "delivery_id": "delivery_alpha",
+            "attempt_id": "attempt_alpha",
+            "endpoint_id": "endpoint_alpha",
+            "session_ref_id": "session_alpha",
+        },
+        "correlation_id": "corr_delivery_alpha",
+        "observed_at_utc": "2026-07-22T00:00:00Z",
+    }
+    evidence["integrity"] = canonical_digest(evidence)
+    return {
+        "schema_version": 1,
+        "workspace_id": "ws_alpha",
+        "scope": {"kind": "workspace"},
+        "delivery_id": "delivery_alpha",
+        "message_id": "msg_alpha",
+        "attempt_id": "attempt_alpha",
+        "endpoint_id": "endpoint_alpha",
+        "session_ref_id": "session_alpha",
+        "outcome": "pending",
         "evidence": evidence,
     }
 
@@ -693,6 +740,134 @@ class RuntimeAdapterReferenceTests(unittest.TestCase):
         )
 
         self.assertEqual(response["result"]["message_id"], "msg_numeric")
+
+    def test_deliver_returns_direct_inert_identity_bound_receipt(self) -> None:
+        adapter = ReferenceAdapter()
+        adapter.handle_text(initialize_frame())
+        deliver = delivery()
+        standalone_validator(DELIVERY_SCHEMA_ID).validate(deliver)
+        response = json.loads(
+            adapter.handle_text(
+                frame("runtime.deliver", {"session_ref": session_ref(), "delivery": deliver}, "deliver-envelope")
+            )
+            or "{}"
+        )
+
+        self.assertEqual(set(response), {"jsonrpc", "id", "result"})
+        receipt = response["result"]
+        standalone_validator(RECEIPT_SCHEMA_ID).validate(receipt)
+        self.assertEqual(receipt["state"], "routed")
+        self.assertEqual(receipt["evidence"]["quality"], "best_effort")
+        self.assertEqual(receipt["evidence"]["state"], receipt["state"])
+        self.assertEqual(receipt["workspace_id"], deliver["workspace_id"])
+        self.assertEqual(receipt["scope"], deliver["scope"])
+        self.assertEqual(receipt["message_id"], deliver["message_id"])
+        self.assertEqual(receipt["delivery_id"], deliver["delivery_id"])
+        self.assertEqual(receipt["attempt_id"], deliver["attempt_id"])
+        self.assertEqual(receipt["endpoint_id"], deliver["endpoint_id"])
+        self.assertEqual(receipt["session_ref_id"], deliver["session_ref_id"])
+        self.assertLessEqual({"message_id", "delivery_id", "attempt_id", "endpoint_id", "session_ref_id"}, set(receipt["evidence"]["subject"]))
+
+    def test_deliver_keeps_cancel_rejected(self) -> None:
+        adapter = ReferenceAdapter()
+        adapter.handle_text(initialize_frame())
+        response = json.loads(
+            adapter.handle_text(
+                frame(
+                    "runtime.cancel",
+                    {
+                        "session_ref": session_ref(),
+                        "original_request_id": "deliver-1",
+                        "delivery_id": "delivery_alpha",
+                        "attempt_id": "attempt_alpha",
+                    },
+                    "cancel-still-rejected",
+                )
+            )
+            or "{}"
+        )
+
+        self.assertEqual(response["error"]["data"]["name"], "INVALID_PARAMS")
+
+    def test_deliver_rejects_closed_param_violations(self) -> None:
+        cases = {
+            "missing": {"session_ref": session_ref()},
+            "extra": {"session_ref": session_ref(), "delivery": delivery(), "adapter_private": True},
+            "wrong_typed_session_ref": {"session_ref": [], "delivery": delivery()},
+            "wrong_typed_delivery": {"session_ref": session_ref(), "delivery": []},
+        }
+
+        for name, params in cases.items():
+            with self.subTest(name=name):
+                adapter = ReferenceAdapter()
+                adapter.handle_text(initialize_frame())
+                response = json.loads(adapter.handle_text(frame("runtime.deliver", params, f"deliver-{name}")) or "{}")
+                self.assertEqual(response["error"]["data"]["name"], "INVALID_PARAMS")
+
+    def test_deliver_rejects_embedded_schema_drift(self) -> None:
+        cases = {
+            "session_extra": lambda params: params["session_ref"].__setitem__("adapter_private", True),
+            "session_removed": lambda params: params["session_ref"].pop("native_session_id"),
+            "delivery_extra": lambda params: params["delivery"].__setitem__("adapter_private", True),
+            "delivery_removed": lambda params: params["delivery"].pop("message_id"),
+            "delivery_renamed": lambda params: params["delivery"].__setitem__("message", params["delivery"].pop("message_id")),
+            "evidence_extra": lambda params: params["delivery"]["evidence"].__setitem__("adapter_private", True),
+        }
+
+        for name, mutate in cases.items():
+            with self.subTest(name=name):
+                params = {"session_ref": session_ref(), "delivery": delivery()}
+                mutate(params)
+                adapter = ReferenceAdapter()
+                adapter.handle_text(initialize_frame())
+                response = json.loads(adapter.handle_text(frame("runtime.deliver", params, f"deliver-{name}")) or "{}")
+                self.assertEqual(response["error"]["data"]["name"], "INVALID_PARAMS")
+
+    def test_deliver_rejects_each_identity_dimension_drift(self) -> None:
+        cases = {
+            "workspace": lambda value: value.__setitem__("workspace_id", "ws_other"),
+            "scope": lambda value: value.__setitem__("scope", {"kind": "project", "project_id": "project_alpha"}),
+            "message": lambda value: value.__setitem__("message_id", "msg_other"),
+            "delivery": lambda value: value.__setitem__("delivery_id", "delivery_other"),
+            "attempt": lambda value: value.__setitem__("attempt_id", "attempt_other"),
+            "endpoint": lambda value: value.__setitem__("endpoint_id", "endpoint_other"),
+            "session": lambda value: value.__setitem__("session_ref_id", "session_other"),
+            "evidence_workspace": lambda value: value["evidence"].__setitem__("workspace_id", "ws_other"),
+            "evidence_scope": lambda value: value["evidence"].__setitem__("scope", {"kind": "project", "project_id": "project_alpha"}),
+            "evidence_message": lambda value: value["evidence"]["subject"].__setitem__("message_id", "msg_other"),
+            "evidence_delivery": lambda value: value["evidence"]["subject"].__setitem__("delivery_id", "delivery_other"),
+            "evidence_attempt": lambda value: value["evidence"]["subject"].__setitem__("attempt_id", "attempt_other"),
+            "evidence_endpoint": lambda value: value["evidence"]["subject"].__setitem__("endpoint_id", "endpoint_other"),
+            "evidence_session": lambda value: value["evidence"]["subject"].__setitem__("session_ref_id", "session_other"),
+        }
+
+        for name, mutate in cases.items():
+            with self.subTest(name=name):
+                changed = delivery()
+                mutate(changed)
+                adapter = ReferenceAdapter()
+                adapter.handle_text(initialize_frame())
+                response = json.loads(
+                    adapter.handle_text(
+                        frame("runtime.deliver", {"session_ref": session_ref(), "delivery": changed}, f"deliver-{name}")
+                    )
+                    or "{}"
+                )
+                self.assertEqual(response["error"]["data"]["name"], "INVALID_DELIVERY")
+
+    def test_deliver_carries_but_does_not_recompute_delivery_integrity(self) -> None:
+        adapter = ReferenceAdapter()
+        adapter.handle_text(initialize_frame())
+        deliver = delivery()
+        deliver["evidence"]["integrity"] = "sha256:" + "0" * 64
+        response = json.loads(
+            adapter.handle_text(
+                frame("runtime.deliver", {"session_ref": session_ref(), "delivery": deliver}, "deliver-carried-integrity")
+            )
+            or "{}"
+        )
+
+        self.assertEqual(response["result"]["state"], "routed")
 
     def test_reconcile_refuses_unknown_original_request_instead_of_fabricating_message_id(self) -> None:
         adapter = ReferenceAdapter()

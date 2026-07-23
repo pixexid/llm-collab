@@ -250,9 +250,11 @@ class ReferenceAdapter:
             return self._handle_health(request_id, params)
         if method == METHOD_RECONCILE:
             return self._handle_reconcile(request_id, params)
+        if method == METHOD_DELIVER:
+            return self._handle_deliver(request_id, params)
         if method == METHOD_SHUTDOWN:
             return self._handle_shutdown(request_id, params)
-        if method in {METHOD_DELIVER, METHOD_CANCEL}:
+        if method == METHOD_CANCEL:
             return self._error(request_id, "INVALID_PARAMS")
         return self._error(request_id, "METHOD_NOT_FOUND")
 
@@ -331,6 +333,27 @@ class ReferenceAdapter:
         self._scope = session_ref["scope"]
         receipt = self._receipt(params)
         return self._result(request_id, receipt)
+
+    def _handle_deliver(self, request_id: Any, params: Mapping[str, Any]) -> str:
+        if set(params) != {"session_ref", "delivery"}:
+            return self._error(request_id, "INVALID_PARAMS")
+        session_ref = params["session_ref"]
+        delivery = params["delivery"]
+        if not isinstance(session_ref, dict) or not isinstance(delivery, dict):
+            return self._error(request_id, "INVALID_PARAMS")
+        try:
+            session_ref = validate_session_ref_v1(session_ref)
+        except Exception:
+            return self._error(request_id, "INVALID_PARAMS")
+        if not self._valid_session_ref(session_ref):
+            return self._error(request_id, "INVALID_SESSION_REF")
+        delivery_status = self._delivery_validation_status(delivery, session_ref)
+        if delivery_status == "schema":
+            return self._error(request_id, "INVALID_PARAMS")
+        if delivery_status == "identity":
+            return self._error(request_id, "INVALID_DELIVERY")
+        self._scope = session_ref["scope"]
+        return self._result(request_id, self._deliver_receipt(session_ref, delivery))
 
     def _session_matches_delivery(self, session_ref: Mapping[str, Any], delivery: Mapping[str, Any]) -> bool:
         return all(
@@ -442,6 +465,142 @@ class ReferenceAdapter:
         evidence["integrity"] = _canonical_digest(evidence)
         return {**receipt, "evidence": evidence}
 
+    def _delivery_validation_status(self, delivery: Mapping[str, Any], session_ref: Mapping[str, Any]) -> str | None:
+        required = {
+            "schema_version",
+            "workspace_id",
+            "scope",
+            "delivery_id",
+            "message_id",
+            "attempt_id",
+            "endpoint_id",
+            "session_ref_id",
+            "outcome",
+            "evidence",
+        }
+        if set(delivery) != required:
+            return "schema"
+        if delivery["schema_version"] != 1 or delivery["outcome"] != "pending":
+            return "schema"
+        token_prefixes = {
+            "workspace_id": "ws_",
+            "delivery_id": "delivery_",
+            "message_id": "msg_",
+            "attempt_id": "attempt_",
+            "endpoint_id": "endpoint_",
+            "session_ref_id": "session_",
+        }
+        for key, prefix in token_prefixes.items():
+            if not _is_token(delivery[key], prefix=prefix):
+                return "schema"
+        if not isinstance(delivery["scope"], Mapping):
+            return "schema"
+        evidence = delivery["evidence"]
+        if not isinstance(evidence, Mapping):
+            return "schema"
+        if set(evidence) != {
+            "schema_version",
+            "workspace_id",
+            "scope",
+            "evidence_id",
+            "evidence_kind",
+            "quality",
+            "state",
+            "authority",
+            "subject",
+            "correlation_id",
+            "observed_at_utc",
+            "integrity",
+        }:
+            return "schema"
+        if (
+            evidence["schema_version"] != 1
+            or evidence["evidence_kind"] != "native_delivery_state"
+            or evidence["quality"] != "best_effort"
+            or evidence["state"] != "routed"
+            or not _is_token(evidence["evidence_id"], prefix="evidence_")
+            or not _is_token(evidence["correlation_id"], prefix="corr_")
+            or not isinstance(evidence["observed_at_utc"], str)
+            or not evidence["observed_at_utc"]
+            or not _is_integrity(evidence["integrity"])
+        ):
+            return "schema"
+        authority = evidence["authority"]
+        if not isinstance(authority, Mapping) or set(authority) != {
+            "authority_kind",
+            "identity",
+            "implementation_revision",
+            "capability_profile_id",
+            "capability_profile_revision",
+        }:
+            return "schema"
+        if (
+            authority["authority_kind"] != "trusted_adapter"
+            or authority["identity"] != self._identity.adapter_id
+            or authority["implementation_revision"] != self._identity.adapter_revision
+        ):
+            return "schema"
+        subject = evidence["subject"]
+        if not isinstance(subject, Mapping) or set(subject) != {
+            "message_id",
+            "delivery_id",
+            "attempt_id",
+            "endpoint_id",
+            "session_ref_id",
+        }:
+            return "schema"
+        if delivery["workspace_id"] != session_ref["workspace_id"] or delivery["scope"] != session_ref["scope"]:
+            return "identity"
+        if delivery["endpoint_id"] != session_ref["endpoint_id"] or delivery["session_ref_id"] != session_ref["session_ref_id"]:
+            return "identity"
+        if evidence["workspace_id"] != delivery["workspace_id"] or evidence["scope"] != delivery["scope"]:
+            return "identity"
+        for key in ("message_id", "delivery_id", "attempt_id", "endpoint_id", "session_ref_id"):
+            if subject[key] != delivery[key]:
+                return "identity"
+        return None
+
+    def _deliver_receipt(self, session_ref: Mapping[str, Any], delivery: Mapping[str, Any]) -> Mapping[str, Any]:
+        receipt = {
+            "schema_version": 1,
+            "workspace_id": session_ref["workspace_id"],
+            "scope": session_ref["scope"],
+            "receipt_id": f"receipt_{delivery['attempt_id']}",
+            "message_id": delivery["message_id"],
+            "delivery_id": delivery["delivery_id"],
+            "attempt_id": delivery["attempt_id"],
+            "endpoint_id": session_ref["endpoint_id"],
+            "session_ref_id": session_ref["session_ref_id"],
+            "state": "routed",
+        }
+        evidence = {
+            "schema_version": 1,
+            "workspace_id": receipt["workspace_id"],
+            "scope": receipt["scope"],
+            "evidence_id": f"evidence_{delivery['attempt_id']}",
+            "evidence_kind": "native_delivery_state",
+            "quality": "best_effort",
+            "state": "routed",
+            "authority": {
+                "authority_kind": "trusted_adapter",
+                "identity": self._identity.adapter_id,
+                "implementation_revision": self._identity.adapter_revision,
+                "capability_profile_id": "runtime_profile",
+                "capability_profile_revision": self._identity.capability_set_revision,
+            },
+            "subject": {
+                "message_id": receipt["message_id"],
+                "delivery_id": receipt["delivery_id"],
+                "attempt_id": receipt["attempt_id"],
+                "endpoint_id": receipt["endpoint_id"],
+                "session_ref_id": receipt["session_ref_id"],
+            },
+            "correlation_id": f"corr_{delivery['attempt_id']}",
+            "observed_at_utc": "2026-07-22T00:00:00Z",
+        }
+        evidence["integrity"] = _canonical_digest(evidence)
+        return {**receipt, "evidence": evidence}
+
     def _injected_output(self) -> str | bytes | None:
         fault = self._fault_injection
         if fault is None:
@@ -504,6 +663,15 @@ def _is_token(value: Any, *, prefix: str | None) -> bool:
     if prefix is not None:
         return value.startswith(prefix) and len(value) > len(prefix)
     return True
+
+
+def _is_integrity(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 71
+        and value.startswith("sha256:")
+        and all(ch in "0123456789abcdef" for ch in value[7:])
+    )
 
 
 def _dump(value: Mapping[str, Any]) -> str:

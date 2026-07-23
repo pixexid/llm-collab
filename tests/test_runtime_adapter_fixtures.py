@@ -289,6 +289,97 @@ class RuntimeAdapterFixtureTests(unittest.TestCase):
         self.assertIsInstance(result, ClaimFailure)
         self.assertIn("C94e8b1a261f1.1", {gap["clause_key"] for gap in result.gaps})
 
+    def test_c08_deliver_envelope_fixture_is_inert_and_identity_bound(self) -> None:
+        fixture = next(fixture for fixture in FIXTURES if fixture.fixture_id == "runtime-adapter-deliver-envelope")
+        self.assertEqual(
+            {ref.clause_key for ref in fixture.clause_refs},
+            {"Cb995426c8ed9.1", "C508d9faea31c.1", "Ca587a5325269.1", "Ca587a5325269.2"},
+        )
+        payload = json.loads(_last_replay_response(fixture) or "{}")
+        receipt = payload["result"]
+        params = _thaw(fixture.trace[-1].frame)["params"]
+        session_ref = params["session_ref"]
+        delivery = params["delivery"]
+        evidence = receipt["evidence"]
+
+        self.assertEqual(receipt["state"], "routed")
+        self.assertEqual(evidence["quality"], "best_effort")
+        self.assertEqual(evidence["state"], receipt["state"])
+        self.assertEqual(receipt["workspace_id"], session_ref["workspace_id"])
+        self.assertEqual(receipt["scope"], session_ref["scope"])
+        self.assertEqual(receipt["message_id"], delivery["message_id"])
+        self.assertEqual(receipt["delivery_id"], delivery["delivery_id"])
+        self.assertEqual(receipt["attempt_id"], delivery["attempt_id"])
+        self.assertEqual(receipt["endpoint_id"], session_ref["endpoint_id"])
+        self.assertEqual(receipt["session_ref_id"], session_ref["session_ref_id"])
+        for key in ("message_id", "delivery_id", "attempt_id", "endpoint_id", "session_ref_id"):
+            self.assertEqual(evidence["subject"][key], receipt[key])
+        self.assertTrue(_replays_fixture(fixture))
+
+    def test_c08_deliver_oracle_violating_fixtures_replay(self) -> None:
+        expected = {
+            "runtime-adapter-deliver-rejects-missing-param": "INVALID_PARAMS",
+            "runtime-adapter-deliver-rejects-extra-param": "INVALID_PARAMS",
+            "runtime-adapter-deliver-rejects-wrong-typed-delivery-param": "INVALID_PARAMS",
+            "runtime-adapter-deliver-rejects-session-ref-schema-drift": "INVALID_PARAMS",
+            "runtime-adapter-deliver-rejects-delivery-schema-drift": "INVALID_PARAMS",
+            "runtime-adapter-deliver-rejects-identity-drift": "INVALID_DELIVERY",
+        }
+
+        for fixture_id, error_name in expected.items():
+            with self.subTest(fixture=fixture_id):
+                fixture = next(fixture for fixture in FIXTURES if fixture.fixture_id == fixture_id)
+                self.assertEqual(fixture.polarity, POLARITY_VIOLATING)
+                self.assertIsInstance(fixture.expectation, ExpectedRefusal)
+                self.assertEqual(fixture.expectation.error_name, error_name)
+                self.assertTrue(_replays_fixture(fixture))
+
+    def test_c08_deliver_slice_reduces_its_own_base_gaps_by_four(self) -> None:
+        c08_keys = {"Cb995426c8ed9.1", "C508d9faea31c.1", "Ca587a5325269.1", "Ca587a5325269.2"}
+        deferred_keys = {
+            "Cddf6725ddfa4.1",
+            "Cbfa7351a2ba5.1",
+            "Cbfa7351a2ba5.2",
+            "C3db5b5acb8d7.1",
+            "Ce4dfe2af8d8d.1",
+        }
+        result = build_claim(self.protocol)
+        base_result = build_claim(self.protocol, fixtures=_fixtures_without_clause_keys(c08_keys))
+
+        self.assertIsInstance(result, ClaimFailure)
+        self.assertIsInstance(base_result, ClaimFailure)
+        self.assertEqual(len(base_result.gaps) - len(result.gaps), 4)
+        gap_keys = {gap["clause_key"] for gap in result.gaps}
+        self.assertFalse(c08_keys & gap_keys)
+        self.assertLessEqual(deferred_keys, gap_keys)
+
+    def test_c08_deliver_result_mutations_fail_closed(self) -> None:
+        fixture = next(fixture for fixture in FIXTURES if fixture.fixture_id == "runtime-adapter-deliver-envelope")
+        self.assertIsInstance(fixture.expectation, ExpectedResult)
+
+        wrapped = {"receipt": _thaw(fixture.expectation.result)}
+        with self.assertRaisesRegex(ConformanceFailure, "fixture-result-shape"):
+            validate_fixtures(
+                self.protocol,
+                (replace(fixture, expectation=replace(fixture.expectation, result=wrapped)),),
+            )
+
+        completed = _thaw(fixture.expectation.result)
+        completed["state"] = "completed"
+        completed["evidence"]["state"] = "completed"
+        completed["evidence"]["quality"] = "authoritative"
+        with self.assertRaisesRegex(ConformanceFailure, "fixture-result-shape"):
+            validate_fixtures(
+                self.protocol,
+                (replace(fixture, expectation=replace(fixture.expectation, result=completed)),),
+            )
+
+        for clause_key in {"Cb995426c8ed9.1", "C508d9faea31c.1", "Ca587a5325269.1", "Ca587a5325269.2"}:
+            with self.subTest(clause=clause_key):
+                result = build_claim(self.protocol, fixtures=_fixtures_without_clause_keys({clause_key}))
+                self.assertIsInstance(result, ClaimFailure)
+                self.assertIn(clause_key, {gap["clause_key"] for gap in result.gaps})
+
     def test_fixture_batch_reduces_claim_gap_below_baseline_but_still_fails_closed(self) -> None:
         result = build_claim(self.protocol)
 
@@ -1438,6 +1529,15 @@ def _fixtures_without_ref(fixture_id: str, clause_key: str) -> tuple[RuntimeAdap
         else fixture
         for fixture in FIXTURES
     )
+
+
+def _fixtures_without_clause_keys(clause_keys: set[str]) -> tuple[RuntimeAdapterFixture, ...]:
+    stripped: list[RuntimeAdapterFixture] = []
+    for fixture in FIXTURES:
+        refs = tuple(ref for ref in fixture.clause_refs if ref.clause_key not in clause_keys)
+        if refs:
+            stripped.append(replace(fixture, clause_refs=refs))
+    return tuple(stripped)
 
 
 def _last_replay_response(fixture):
