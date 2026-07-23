@@ -104,3 +104,74 @@ Two incidents established this as repo-local policy:
 - PR #198 repeated the same class through the `GH-` autolink; the merge commit
   body put a closing keyword adjacent to the autolinked reference for issue 91,
   and GitHub changed GH-91 to closed.
+
+## Code Review Rules
+
+Path-scoped review rules for Codex Code Review. Only rules matching the changed
+files fire, and findings cite the rule that produced them. This is a seed set of
+three: each encodes a class that was already adjudicated in this repository and
+then rediscovered at review cycle 2-3, where it forced an amendment or a
+retracted CLEAN. Related GH-185.
+
+Keep the set small. Add a rule only after the class has cost a real cycle, and
+remove one that turns noisy.
+
+### SQL text constraints and embedded NUL
+
+Scope: `llm_collab/`
+
+A byte length/shape predicate can still admit an embedded NUL. `length`, `GLOB`,
+`LIKE`, and `substr` stop at the first NUL, so `length(k) = 64 AND k NOT GLOB
+'*[^0-9a-f]*'` accepts `'a' * 64 || char(0) || <arbitrary>`. Equality, `IN`, and
+`instr` see whole bytes.
+
+Safe path: a new or revised TEXT `CHECK` family built on `length`/`GLOB`/`LIKE`/
+`substr` also rejects `instr(column, char(0)) != 0`.
+
+A shape predicate must also constrain the shape. `col GLOB '[0-9a-f]*'` matches
+any string whose *first* character is hex; pair a full-string character class
+with an exact length.
+
+Exempt: released immutable migration SQL protected by checksum and fingerprint.
+This rule does not ask for V1/V2 to be rewritten (see #176).
+
+### Pin one descriptor chain for correlated reads
+
+Scope: `llm_collab/compatibility/`, `llm_collab/daemon/`
+
+Re-resolving an ancestor chain by pathname on each call leaves every call
+internally consistent while nothing checks that two calls resolved through the
+same root. Per-file identity checks say nothing about ancestor-chain identity
+across calls.
+
+Applies to authority-sensitive traversal, and to any operation batching or
+correlating multiple reads under one workspace root. A one-off unrelated path
+read is not a violation.
+
+Safe path: open the root/ancestor chain once, hold the descriptors, open below
+them `dir_fd`-relative, and remove root-path parameters from helpers so the seam
+cannot be reintroduced. Pathname revalidation is a second layer, never the only
+one.
+
+### Bounded work fails closed and never truncates
+
+Scope: `llm_collab/`, `bin/`, `scripts/`
+
+A partial result that *claims to be complete* is indistinguishable from a
+complete one, so a bound that silently truncates converts a resource limit into
+a correctness bug. The `bin/` and `scripts/` commands enumerate the same
+untrusted workspace, so they are in scope, not only the library.
+
+Safe path: begin the budget at the earliest untrusted enumeration or parse
+boundary - for a directory scan, before suffix filtering - keep it cumulative
+across sources within one run, and raise on exceed so the operation aborts with
+no partial state.
+
+Exempt: a result that carries its own truncation signal. A capped list returned
+alongside a `*_truncated` flag (or equivalent metadata) is distinguishable from
+a complete one by construction, and its truncation is part of the contract
+rather than a silent loss. The rule targets results that assert completeness,
+not results that declare their own bound.
+
+Any bounded primitive that proves the same outcome is acceptable; this rule does
+not prescribe one algorithm.
