@@ -17,8 +17,11 @@ Recommended read order:
 4. `thread-event-runner-rfc.md` — Phase 1 architecture/threat contract for a
    planned durable event runner; no runner or exact-thread dispatcher is
    implemented by this RFC
-5. `task-intake-and-delegation.md`
-6. `review-and-handoff.md`
-7. `isolated-worktrees.md`
-8. `commit-push-prs.md`
-9. `github-projects.md`
+5. `observation-global-cadence-rfc.md` — design contract for the GH-179 global
+   observation cadence budget, GH-183 pinned-root precondition, and GH-181 audit
+   accounting before scheduler implementation
+6. `task-intake-and-delegation.md`
+7. `review-and-handoff.md`
+8. `isolated-worktrees.md`
+9. `commit-push-prs.md`
+10. `github-projects.md`
