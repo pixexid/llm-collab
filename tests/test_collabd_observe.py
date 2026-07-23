@@ -743,6 +743,118 @@ class ObservationTest(unittest.TestCase):
             )
             self.assertTrue(first_packet.exists())
 
+    def test_reconcile_opens_one_workspace_root_for_multi_project_cadence(self) -> None:
+        self.make_chat("single-root", "amiga.md", packet("amiga"))
+        self.make_chat("single-root", "nuvyr.md", packet("nuvyr"))
+        real_open = os.open
+        root_opens: list[str] = []
+
+        def tracked_open(path, flags, *args, **kwargs):
+            if os.fspath(path) == os.fspath(self.root) and "dir_fd" not in kwargs:
+                root_opens.append(os.fspath(path))
+            return real_open(path, flags, *args, **kwargs)
+
+        with patch.object(observe_module.os, "open", side_effect=tracked_open):
+            with LedgerStore.open_writer(self.paths) as store:
+                engine = ObservationEngine(
+                    workspace_root=self.root,
+                    workspace_id="ws_alpha",
+                    projects_path=self.projects,
+                )
+                engine.reconcile(store)
+                counts = dict(
+                    store._connection.execute(
+                        "SELECT project_id, count(*) FROM observations GROUP BY project_id"
+                    ).fetchall()
+                )
+
+        self.assertEqual(root_opens[1:], [os.fspath(self.root)])
+        self.assertEqual(counts, {"amiga": 1, "nuvyr": 1})
+
+    def test_reconcile_uses_pinned_root_after_pathname_swap(self) -> None:
+        self.make_chat("old-root", "amiga.md", packet("amiga"))
+        old_root = self.root.with_name("workspace-old")
+        real_open = os.open
+        swapped = False
+
+        def tracked_open(path, flags, *args, **kwargs):
+            nonlocal swapped
+            is_root_open = os.fspath(path) == os.fspath(self.root) and "dir_fd" not in kwargs
+            fd = real_open(path, flags, *args, **kwargs)
+            if is_root_open and not swapped and getattr(tracked_open, "root_opens", 0) == 1:
+                self.root.rename(old_root)
+                self.root.mkdir()
+                (self.root / "Chats").mkdir()
+                (self.root / "agents").mkdir()
+                new_chat = self.root / "Chats" / "new-root"
+                new_chat.mkdir()
+                (new_chat / "nuvyr.md").write_bytes(packet("nuvyr"))
+                swapped = True
+            if is_root_open:
+                tracked_open.root_opens = getattr(tracked_open, "root_opens", 0) + 1
+            return fd
+
+        with patch.object(observe_module.os, "open", side_effect=tracked_open):
+            with LedgerStore.open_writer(self.paths) as store:
+                engine = ObservationEngine(
+                    workspace_root=self.root,
+                    workspace_id="ws_alpha",
+                    projects_path=self.projects,
+                )
+                engine.reconcile(store)
+                rows = store._connection.execute(
+                    "SELECT project_id, path FROM observations ORDER BY project_id, path"
+                ).fetchall()
+
+        self.assertTrue(swapped)
+        self.assertEqual(rows, [("amiga", "Chats/old-root/amiga.md")])
+
+    def test_reconcile_revalidates_pinned_root_before_writing(self) -> None:
+        self.make_chat("revalidate", "amiga.md", packet("amiga"))
+        with LedgerStore.open_writer(self.paths) as store:
+            engine = ObservationEngine(
+                workspace_root=self.root,
+                workspace_id="ws_alpha",
+                projects_path=self.projects,
+            )
+            with patch.object(
+                observe_module._WorkspaceAuthority,
+                "revalidate",
+                side_effect=ObservationError("workspace root identity changed"),
+            ), self.assertRaisesRegex(ObservationError, "workspace root identity changed"):
+                engine.reconcile(store)
+            self.assertEqual(
+                store._connection.execute("SELECT count(*) FROM observations").fetchone()[0],
+                0,
+            )
+
+    def test_reconcile_fails_closed_when_workspace_root_is_not_safe_directory(self) -> None:
+        for name, bad_root in (
+            ("symlink", self.root.with_name("workspace-link")),
+            ("file", self.root.with_name("workspace-file")),
+        ):
+            if name == "symlink":
+                bad_root.symlink_to(self.root, target_is_directory=True)
+            else:
+                bad_root.write_text("not a directory")
+            with self.subTest(name=name):
+                with LedgerStore.open_writer(self.paths) as store:
+                    engine = ObservationEngine(
+                        workspace_root=bad_root,
+                        workspace_id="ws_alpha",
+                        projects_path=self.projects,
+                    )
+                    with self.assertRaisesRegex(
+                        ObservationError, "workspace root cannot be opened safely"
+                    ):
+                        engine.reconcile(store)
+                    self.assertEqual(
+                        store._connection.execute(
+                            "SELECT count(*) FROM observations"
+                        ).fetchone()[0],
+                        0,
+                    )
+
     def test_watchdog_is_hint_only_and_failure_does_not_disable_reconciliation(self) -> None:
         clock = MutableClock()
         engine = ObservationEngine(
