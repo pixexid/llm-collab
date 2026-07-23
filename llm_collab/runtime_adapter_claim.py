@@ -93,6 +93,8 @@ def _coverage_states(
     keywords = {clause.clause_key: clause.keyword for clause in clauses}
     for fixture in fixtures:
         for ref in fixture.clause_refs:
+            if ref.clause_key not in keywords:
+                continue
             exercised = fixture.fixture_id in exercised_fixture_ids
             keyword = keywords[ref.clause_key]
             relevant = (

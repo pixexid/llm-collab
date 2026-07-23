@@ -378,6 +378,16 @@ FIXTURES: tuple[RuntimeAdapterFixture, ...] = (
                 text_sha256="45acb2959726b90f0cb7cc42d2825e8d80971c663143653f0db0bc8673ed9d18",
                 polarity=POLARITY_CONFORMING,
             ),
+            ClauseReference(
+                clause_key="C358ebcd9608d.1",
+                text_sha256="358ebcd9608d20248aecaac1e5a9c0b2d26235e510aa26167249004863daea87",
+                polarity=POLARITY_CONFORMING,
+            ),
+            ClauseReference(
+                clause_key="C358ebcd9608d.2",
+                text_sha256="358ebcd9608d20248aecaac1e5a9c0b2d26235e510aa26167249004863daea87",
+                polarity=POLARITY_CONFORMING,
+            ),
         ),
         trace=(
             *_initialize_trace(),
@@ -715,6 +725,36 @@ FIXTURES: tuple[RuntimeAdapterFixture, ...] = (
                     "runtime.shutdown",
                     {"session_ref": {"session_ref_id": "session-1"}},
                     "shutdown-1",
+                ),
+            ),
+        ),
+        expectation=ExpectedRefusal(
+            error_name="INVALID_PARAMS",
+            error_code=-32602,
+            state_effect=NO_STATE_CHANGE,
+            response_emitted=True,
+            closes_connection=False,
+        ),
+    ),
+    RuntimeAdapterFixture(
+        fixture_id="runtime-adapter-health-rejects-session-selector",
+        polarity=POLARITY_VIOLATING,
+        clause_refs=(
+            ClauseReference(
+                clause_key="Cf12ffe8bf4a6.1",
+                text_sha256="f12ffe8bf4a61b8db401e6b7548a16572295912cc5f8c2b0aac864d0db99c42f",
+                polarity=POLARITY_VIOLATING,
+            ),
+        ),
+        trace=(
+            *_initialize_trace(),
+            TraceFrame(
+                "host",
+                "adapter",
+                _request(
+                    "runtime.health",
+                    {"session_ref": _SESSION_REF},
+                    "health-selector",
                 ),
             ),
         ),
