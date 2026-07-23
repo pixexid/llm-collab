@@ -41,7 +41,6 @@ ADMISSION_KEYS = {
     "Ca135a0f3d7e4.2",
     "Ca135a0f3d7e4.3",
 }
-BYTE_LENGTH_KEYS = {"C9614292c6ab1.1", "C3dc535246440.1"}
 
 
 def _delivery(index: int) -> DeliveryRef:
@@ -157,10 +156,10 @@ class RuntimeAdapterAdmissionEvidenceTests(unittest.TestCase):
         self.assertIsInstance(result, ClaimFailure)
         self.assertLessEqual(ADMISSION_KEYS, {gap["clause_key"] for gap in result.gaps})
 
-    def test_transport_evidence_still_covers_only_byte_length_rows(self) -> None:
+    def test_transport_evidence_stays_disjoint_from_admission_rows(self) -> None:
         transport = build_transport_evidence(self.protocol)
 
-        self.assertEqual({clause["clause_key"] for clause in transport["clauses"]}, BYTE_LENGTH_KEYS)
+        self.assertFalse(ADMISSION_KEYS & {clause["clause_key"] for clause in transport["clauses"]})
 
     def test_clause_text_drift_fails_closed(self) -> None:
         changed = self.protocol.replace(

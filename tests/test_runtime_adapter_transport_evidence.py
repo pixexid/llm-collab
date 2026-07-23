@@ -23,7 +23,9 @@ ROOT = Path(__file__).resolve().parents[1]
 MODULE_PATH = ROOT / "llm_collab" / "runtime_adapter_transport_evidence.py"
 CLAIM_PATH = ROOT / "llm_collab" / "runtime_adapter_claim.py"
 PROTOCOL_PATH = ROOT / "docs" / "protocols" / "runtime-adapter-jsonrpc-v1.md"
-BYTE_LENGTH_KEYS = {"C9614292c6ab1.1", "C3dc535246440.1"}
+BOUNDED_READ_KEYS = {"C9614292c6ab1.1", "C3dc535246440.1"}
+STREAM_SEPARATION_KEYS = {"C00951376f21f.1", "C27e614c40ce1.1"}
+TRANSPORT_KEYS = BOUNDED_READ_KEYS | STREAM_SEPARATION_KEYS
 
 
 class RuntimeAdapterTransportEvidenceTests(unittest.TestCase):
@@ -31,14 +33,14 @@ class RuntimeAdapterTransportEvidenceTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.protocol = PROTOCOL_PATH.read_text(encoding="utf-8")
 
-    def test_transport_evidence_is_distinct_and_covers_only_byte_length_rows(self) -> None:
+    def test_transport_evidence_is_distinct_and_covers_its_rows(self) -> None:
         artifact = build_transport_evidence(self.protocol)
 
         self.assertEqual(artifact["artifact_label"], ARTIFACT_LABEL)
         self.assertEqual(artifact["evidence_kind"], "transport_raw_reader")
         self.assertEqual(artifact["claim"], TRANSPORT_EVIDENCED)
         self.assertNotEqual(artifact["claim"], "exercised_conforming")
-        self.assertEqual({clause["clause_key"] for clause in artifact["clauses"]}, BYTE_LENGTH_KEYS)
+        self.assertEqual({clause["clause_key"] for clause in artifact["clauses"]}, TRANSPORT_KEYS)
         self.assertTrue(
             all(clause["state"] == TRANSPORT_EVIDENCED and clause["evidence"] == ARTIFACT_LABEL for clause in artifact["clauses"])
         )
@@ -52,6 +54,16 @@ class RuntimeAdapterTransportEvidenceTests(unittest.TestCase):
         self.assertLessEqual(observation["consumed_bytes"], MAX_MESSAGE_BYTES + 2)
         self.assertEqual(observation["stdout_error_name"], "MESSAGE_TOO_LARGE")
         self.assertEqual(observation["stdout_error_code"], -32001)
+
+    def test_stream_separation_probe_is_non_vacuous(self) -> None:
+        artifact = build_transport_evidence(self.protocol)
+        observation = artifact["observation"]
+
+        self.assertGreaterEqual(observation["normal_stdout_frames"], 2)
+        self.assertGreaterEqual(observation["normal_stdout_successes"], 1)
+        self.assertGreaterEqual(observation["normal_stdout_errors"], 1)
+        self.assertEqual(observation["fault_stdout_frames"], 1)
+        self.assertGreater(observation["fault_stderr_bytes"], 0)
 
     def test_unbounded_readline_control_consumes_the_same_dwarf_input(self) -> None:
         raw = b"x" * (MAX_MESSAGE_BYTES * 4)
@@ -78,11 +90,12 @@ class RuntimeAdapterTransportEvidenceTests(unittest.TestCase):
         response = json.loads(stdout.getvalue().decode("utf-8"))
         self.assertEqual(response["error"]["data"]["name"], "MESSAGE_TOO_LARGE")
 
-    def test_build_claim_still_gaps_transport_byte_length_rows(self) -> None:
+    def test_build_claim_still_gaps_transport_rows(self) -> None:
         result = build_claim(self.protocol)
 
         self.assertIsInstance(result, ClaimFailure)
-        self.assertLessEqual(BYTE_LENGTH_KEYS, {gap["clause_key"] for gap in result.gaps})
+        self.assertEqual(len(result.gaps), 110)
+        self.assertLessEqual(TRANSPORT_KEYS, {gap["clause_key"] for gap in result.gaps})
 
     def test_clause_text_drift_fails_closed(self) -> None:
         changed = self.protocol.replace(
@@ -92,6 +105,23 @@ class RuntimeAdapterTransportEvidenceTests(unittest.TestCase):
 
         with self.assertRaisesRegex(TransportEvidenceFailure, "missing transport clause|stale transport clause"):
             build_transport_evidence(changed)
+
+    def test_stream_separation_clause_text_drift_fails_closed(self) -> None:
+        replacements = (
+            (
+                "Standard output MUST contain protocol frames only.",
+                "Standard output MUST contain only protocol frames.",
+            ),
+            (
+                "Standard error is for\n   diagnostics only and MUST NOT contain protocol responses.",
+                "Standard error is for\n   diagnostics only and MUST NOT carry protocol responses.",
+            ),
+        )
+        for old, new in replacements:
+            with self.subTest(old=old):
+                changed = self.protocol.replace(old, new)
+                with self.assertRaisesRegex(TransportEvidenceFailure, "missing transport clause|stale transport clause"):
+                    build_transport_evidence(changed)
 
     def test_transport_module_and_claim_module_remain_disjoint(self) -> None:
         transport_tree = ast.parse(MODULE_PATH.read_text(encoding="utf-8"))
