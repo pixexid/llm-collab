@@ -452,6 +452,126 @@ class RuntimeAdapterFixtureTests(unittest.TestCase):
                 self.assertIsInstance(result, ClaimFailure)
                 self.assertIn(clause_key, {gap["clause_key"] for gap in result.gaps})
 
+    def test_c06_initialize_identity_and_control_methods_are_replay_proven(self) -> None:
+        by_id = {fixture.fixture_id: fixture for fixture in FIXTURES}
+        health = by_id["runtime-adapter-health-request"]
+        shutdown = by_id["runtime-adapter-shutdown-success"]
+        refs = {ref.clause_key: ref for ref in health.clause_refs}
+
+        self.assertFalse(refs["Ca25026199e82.1"].non_classifying)
+        self.assertTrue(refs["Cfdd95bba6e3a.1"].non_classifying)
+        self.assertTrue(refs["C741f42c5aa1e.1"].non_classifying)
+        _assert_c06_initialize_identity_controls(self, health, shutdown)
+
+    def test_c06_init_identity_slice_reduces_its_own_base_gaps_by_three(self) -> None:
+        c06_keys = {"Ca25026199e82.1", "Cfdd95bba6e3a.1", "C741f42c5aa1e.1"}
+        deferred = {
+            "C4d3e4e331f8e.1",
+            "C507960193aaf.1",
+            "C5203ae51498d.1",
+            "C05530aaf0297.1",
+            "C44a06b005f56.1",
+            "C8665d49fe212.1",
+            "C8665d49fe212.2",
+            "C8665d49fe212.3",
+            "Cbc69b8dc81fc.1",
+            "Cbc69b8dc81fc.2",
+            "Cbc69b8dc81fc.3",
+            "Cbc69b8dc81fc.4",
+            "C991a6ee55456.1",
+            "C468b7316502d.1",
+            "C60fb22117077.1",
+            "C13e20170473c.1",
+            "C01d5a7107389.1",
+            "Ca7d929aaf1c6.1",
+            "Ca7d929aaf1c6.2",
+            "Cfb24d181976b.1",
+        }
+        result = build_claim(self.protocol)
+        base_result = build_claim(
+            self.protocol,
+            fixtures=tuple(
+                replace(
+                    fixture,
+                    clause_refs=tuple(ref for ref in fixture.clause_refs if ref.clause_key not in c06_keys),
+                )
+                if fixture.fixture_id == "runtime-adapter-health-request"
+                else fixture
+                for fixture in FIXTURES
+            ),
+        )
+
+        self.assertIsInstance(result, ClaimFailure)
+        self.assertIsInstance(base_result, ClaimFailure)
+        self.assertEqual(len(base_result.gaps) - len(result.gaps), 3)
+        gap_keys = {gap["clause_key"] for gap in result.gaps}
+        self.assertFalse(c06_keys & gap_keys)
+        self.assertLessEqual(deferred, gap_keys)
+
+    def test_c06_init_identity_mutations_fail_closed(self) -> None:
+        by_id = {fixture.fixture_id: fixture for fixture in FIXTURES}
+        health = by_id["runtime-adapter-health-request"]
+        shutdown = by_id["runtime-adapter-shutdown-success"]
+
+        for clause_key in ("Cfdd95bba6e3a.1", "C741f42c5aa1e.1"):
+            with self.subTest(marker=clause_key):
+                fixtures = tuple(
+                    replace(
+                        fixture,
+                        clause_refs=tuple(
+                            replace(ref, non_classifying=False) if ref.clause_key == clause_key else ref
+                            for ref in fixture.clause_refs
+                        ),
+                    )
+                    if fixture.fixture_id == "runtime-adapter-health-request"
+                    else fixture
+                    for fixture in FIXTURES
+                )
+                result = build_claim(self.protocol, fixtures=fixtures)
+                self.assertIsInstance(result, ClaimFailure)
+                self.assertIn(clause_key, {gap["clause_key"] for gap in result.gaps})
+
+        equal_revision = _thaw(health.trace[1].frame)
+        equal_revision["result"]["capability_set"]["revision"] = equal_revision["result"]["adapter_revision"]
+        with self.assertRaises(AssertionError):
+            _assert_c06_initialize_identity_controls(
+                self,
+                replace(health, trace=(health.trace[0], TraceFrame("adapter", "host", equal_revision), health.trace[2])),
+                shutdown,
+            )
+
+        health_supported = _thaw(health.trace[1].frame)
+        health_supported["result"]["capability_set"]["capabilities"][0]["quality"] = "authoritative"
+        with self.assertRaises(AssertionError):
+            _assert_c06_initialize_identity_controls(
+                self,
+                replace(
+                    health,
+                    trace=(health.trace[0], TraceFrame("adapter", "host", health_supported), health.trace[2]),
+                ),
+                shutdown,
+            )
+
+        shutdown_added = _thaw(health.trace[1].frame)
+        shutdown_added["result"]["capability_set"]["capabilities"].append(
+            {"capability": "runtime.shutdown", "quality": "authoritative"}
+        )
+        with self.assertRaises(AssertionError):
+            _assert_c06_initialize_identity_controls(
+                self,
+                replace(health, trace=(health.trace[0], TraceFrame("adapter", "host", shutdown_added), health.trace[2])),
+                shutdown,
+            )
+
+        for clause_key in ("Ca25026199e82.1", "Cfdd95bba6e3a.1", "C741f42c5aa1e.1"):
+            with self.subTest(removed=clause_key):
+                result = build_claim(
+                    self.protocol,
+                    fixtures=_fixtures_without_ref("runtime-adapter-health-request", clause_key),
+                )
+                self.assertIsInstance(result, ClaimFailure)
+                self.assertIn(clause_key, {gap["clause_key"] for gap in result.gaps})
+
     def test_unknown_clause_key_fails_closed(self) -> None:
         fixture = replace(
             FIXTURES[0],
@@ -757,15 +877,9 @@ class RuntimeAdapterFixtureTests(unittest.TestCase):
         health = by_id["runtime-adapter-health-request"]
         selector = by_id["runtime-adapter-health-rejects-session-selector"]
 
-        self.assertEqual(
+        self.assertLessEqual(
+            {"C45acb2959726.1", "C358ebcd9608d.1", "C358ebcd9608d.2"},
             {ref.clause_key for ref in health.clause_refs},
-            {
-                "C6e51fab4b16d.1",
-                "C1c1a8c844fde.1",
-                "C45acb2959726.1",
-                "C358ebcd9608d.1",
-                "C358ebcd9608d.2",
-            },
         )
         self.assertIsInstance(health.expectation, ExpectedResult)
         self.assertEqual(health.expectation.method, "runtime.health")
@@ -786,6 +900,7 @@ class RuntimeAdapterFixtureTests(unittest.TestCase):
         self.assertTrue(_replays_fixture(selector))
 
     def test_c11_health_slice_reduces_its_own_base_gaps_by_three(self) -> None:
+        c11_keys = {"C358ebcd9608d.1", "C358ebcd9608d.2", "Cf12ffe8bf4a6.1"}
         selector = next(
             fixture
             for fixture in FIXTURES
@@ -802,12 +917,7 @@ class RuntimeAdapterFixtureTests(unittest.TestCase):
                     clause_refs=tuple(
                         ref
                         for ref in fixture.clause_refs
-                        if ref.clause_key
-                        in {
-                            "C6e51fab4b16d.1",
-                            "C1c1a8c844fde.1",
-                            "C45acb2959726.1",
-                        }
+                        if ref.clause_key not in c11_keys
                     ),
                 )
                 for fixture in FIXTURES
@@ -1252,6 +1362,22 @@ def _assert_initialize_result_echoes_request(testcase, fixture) -> None:
     testcase.assertEqual(result["endpoint"]["capability_set_id"], result["capability_set"]["capability_set_id"])
     testcase.assertEqual(result["endpoint"]["workspace_id"], result["capability_set"]["workspace_id"])
     testcase.assertEqual(result["endpoint"]["scope"], result["capability_set"]["scope"])
+
+
+def _assert_c06_initialize_identity_controls(testcase, health_fixture, shutdown_fixture) -> None:
+    _assert_initialize_result_echoes_request(testcase, health_fixture)
+    initialize = _thaw(health_fixture.trace[1].frame)["result"]
+    endpoint = initialize["endpoint"]
+    capability_set = initialize["capability_set"]
+    capabilities = {entry["capability"]: entry for entry in capability_set["capabilities"]}
+
+    testcase.assertEqual(initialize["adapter_id"], endpoint["adapter_name"])
+    testcase.assertEqual(initialize["adapter_revision"], endpoint["adapter_revision"])
+    testcase.assertNotEqual(capability_set["revision"], initialize["adapter_revision"])
+    testcase.assertEqual(capabilities["runtime.health"]["quality"], "unsupported")
+    testcase.assertNotIn("runtime.shutdown", capabilities)
+    testcase.assertTrue(_replays_fixture(health_fixture))
+    testcase.assertTrue(_replays_fixture(shutdown_fixture))
 
 
 def _assert_initialize_success(testcase, payload) -> None:
