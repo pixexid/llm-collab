@@ -81,11 +81,38 @@ class RuntimeAdapterFixtureTests(unittest.TestCase):
                 self.assertTrue(responses)
                 self.assertTrue(_matches_refusal(fixture.expectation, responses[-1]))
 
+    def test_c01_request_id_fixtures_are_named_and_replay(self) -> None:
+        by_id = {fixture.fixture_id: fixture for fixture in FIXTURES}
+        expected = {
+            "runtime-adapter-absent-id-runtime-request-closes": (
+                "C27ebf7697043.1",
+                False,
+                True,
+            ),
+            "runtime-adapter-null-id-runtime-request-refuses": (
+                "C8f215da97f3e.1",
+                True,
+                True,
+            ),
+        }
+
+        for fixture_id, (clause_key, response_emitted, closes_connection) in expected.items():
+            with self.subTest(fixture=fixture_id):
+                fixture = by_id[fixture_id]
+                self.assertEqual({ref.clause_key for ref in fixture.clause_refs}, {clause_key})
+                self.assertIsInstance(fixture.expectation, ExpectedRefusal)
+                self.assertEqual(fixture.expectation.error_name, "INVALID_REQUEST")
+                self.assertEqual(fixture.expectation.error_code, -32600)
+                self.assertEqual(fixture.expectation.state_effect, NO_STATE_CHANGE)
+                self.assertEqual(fixture.expectation.response_emitted, response_emitted)
+                self.assertEqual(fixture.expectation.closes_connection, closes_connection)
+                self.assertTrue(_replays_fixture(fixture))
+
     def test_fixture_batch_reduces_claim_gap_below_baseline_but_still_fails_closed(self) -> None:
         result = build_claim(self.protocol)
 
         self.assertIsInstance(result, ClaimFailure)
-        self.assertLess(len(result.gaps), 150)
+        self.assertLess(len(result.gaps), 148)
 
     def test_old_three_key_initialize_endpoint_is_rejected(self) -> None:
         initialize = _thaw(FIXTURES[0].trace[0].frame)
@@ -440,6 +467,18 @@ def _matches_refusal(expectation, response: str | bytes | None) -> bool:
     if not isinstance(error, dict):
         return False
     return error.get("code") == expectation.error_code and error.get("message") == expectation.error_name
+
+
+def _replays_fixture(fixture) -> bool:
+    adapter = ReferenceAdapter()
+    host_traces = [trace for trace in fixture.trace if trace.sender == "host" and trace.receiver == "adapter"]
+    responses: list[str | bytes | None] = []
+    for trace in host_traces:
+        frame = _thaw(trace.frame)
+        responses.append(adapter.handle_text(json.dumps(frame, sort_keys=True, separators=(",", ":"))))
+    if not responses:
+        return False
+    return _matches_refusal(fixture.expectation, responses[-1])
 
 
 if __name__ == "__main__":

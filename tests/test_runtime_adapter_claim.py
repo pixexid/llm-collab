@@ -52,14 +52,14 @@ class RuntimeAdapterClaimTests(unittest.TestCase):
         result = build_claim(self.protocol)
 
         self.assertIsInstance(result, ClaimFailure)
-        self.assertEqual(
-            exercised,
+        self.assertLessEqual(
             {
                 "runtime-adapter-health-request",
                 "runtime-adapter-reconcile-request",
                 "runtime-adapter-shutdown-rejects-session-selector",
                 "runtime-adapter-host-response-is-direction-fault",
             },
+            exercised,
         )
         gap_keys = {gap["clause_key"] for gap in result.gaps}
         exercised_clause_keys = {

@@ -372,6 +372,50 @@ FIXTURES: tuple[RuntimeAdapterFixture, ...] = (
             closes_connection=True,
         ),
     ),
+    RuntimeAdapterFixture(
+        fixture_id="runtime-adapter-absent-id-runtime-request-closes",
+        polarity=POLARITY_VIOLATING,
+        clause_refs=(
+            ClauseReference(
+                clause_key="C27ebf7697043.1",
+                text_sha256="27ebf76970432d441d1de1e3bf8ea83cc85e8e665c881bd87cae217fb09c3d5a",
+                polarity=POLARITY_VIOLATING,
+            ),
+        ),
+        trace=(
+            *_initialize_trace(),
+            TraceFrame("host", "adapter", _freeze({"jsonrpc": "2.0", "method": "runtime.health", "params": {}})),
+        ),
+        expectation=ExpectedRefusal(
+            error_name="INVALID_REQUEST",
+            error_code=-32600,
+            state_effect=NO_STATE_CHANGE,
+            response_emitted=False,
+            closes_connection=True,
+        ),
+    ),
+    RuntimeAdapterFixture(
+        fixture_id="runtime-adapter-null-id-runtime-request-refuses",
+        polarity=POLARITY_VIOLATING,
+        clause_refs=(
+            ClauseReference(
+                clause_key="C8f215da97f3e.1",
+                text_sha256="8f215da97f3e799ba14db5c115c0badf29445a9a098a5782ec5c681f32ba4e47",
+                polarity=POLARITY_VIOLATING,
+            ),
+        ),
+        trace=(
+            *_initialize_trace(),
+            TraceFrame("host", "adapter", _freeze({"jsonrpc": "2.0", "id": None, "method": "runtime.health", "params": {}})),
+        ),
+        expectation=ExpectedRefusal(
+            error_name="INVALID_REQUEST",
+            error_code=-32600,
+            state_effect=NO_STATE_CHANGE,
+            response_emitted=True,
+            closes_connection=True,
+        ),
+    ),
 )
 
 
@@ -427,6 +471,10 @@ def _derived_refusal(trace: TraceFrame, error_codes: Mapping[str, int]) -> tuple
         except ConformanceFailure as error:
             if error.clause == "closed-method-set":
                 name = "METHOD_NOT_FOUND"
+            elif error.clause == "notification-rejected":
+                return ("INVALID_REQUEST", error_codes["INVALID_REQUEST"], False, True)
+            elif error.clause == "request-id":
+                return ("INVALID_REQUEST", error_codes["INVALID_REQUEST"], True, True)
             elif error.clause in {"closed-params", "fixture-request-params", "fixture-session-ref"}:
                 name = "INVALID_PARAMS"
             else:
