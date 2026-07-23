@@ -147,16 +147,26 @@ class ReferenceAdapter:
         self._terminal = False
         self._shutdown = False
         self._scope: Mapping[str, Any] = {"kind": "workspace"}
-        self._deliveries: Mapping[Any, Mapping[str, str]] = {
+        self._deliveries: Mapping[Any, Mapping[str, Any]] = {
             "deliver-1": {
                 "message_id": "msg_alpha",
                 "delivery_id": "delivery_alpha",
                 "attempt_id": "attempt_alpha",
+                "workspace_id": "ws_alpha",
+                "scope": {"kind": "workspace"},
+                "endpoint_id": "endpoint_alpha",
+                "session_ref_id": "session_alpha",
+                "native_session_id": "native-session-alpha",
             },
             42: {
                 "message_id": "msg_numeric",
                 "delivery_id": "delivery_numeric",
                 "attempt_id": "attempt_numeric",
+                "workspace_id": "ws_alpha",
+                "scope": {"kind": "workspace"},
+                "endpoint_id": "endpoint_alpha",
+                "session_ref_id": "session_alpha",
+                "native_session_id": "native-session-alpha",
             }
         }
 
@@ -282,11 +292,19 @@ class ReferenceAdapter:
         delivery = self._deliveries.get(params["original_request_id"])
         if delivery is None:
             return self._error(request_id, "INVALID_PARAMS")
+        if not self._session_matches_delivery(session_ref, delivery):
+            return self._error(request_id, "INVALID_SESSION_REF")
         if delivery["delivery_id"] != params["delivery_id"] or delivery["attempt_id"] != params["attempt_id"]:
-            return self._error(request_id, "INVALID_PARAMS")
+            return self._error(request_id, "INVALID_DELIVERY")
         self._scope = session_ref["scope"]
         receipt = self._receipt(params)
         return self._result(request_id, receipt)
+
+    def _session_matches_delivery(self, session_ref: Mapping[str, Any], delivery: Mapping[str, Any]) -> bool:
+        return all(
+            session_ref[key] == delivery[key]
+            for key in ("workspace_id", "scope", "endpoint_id", "session_ref_id", "native_session_id")
+        )
 
     def _valid_session_ref(self, value: Mapping[str, Any]) -> bool:
         try:

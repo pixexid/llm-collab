@@ -521,7 +521,57 @@ class RuntimeAdapterReferenceTests(unittest.TestCase):
                     adapter.handle_text(frame("runtime.reconcile", params, f"reconcile-{field}")) or "{}"
                 )
 
-                self.assertEqual(response["error"]["data"]["name"], "INVALID_PARAMS")
+                self.assertEqual(response["error"]["data"]["name"], "INVALID_DELIVERY")
+                self.assertEqual(response["error"]["code"], -32009)
+
+    def test_reconcile_keeps_malformed_delivery_identity_as_invalid_params(self) -> None:
+        adapter = ReferenceAdapter()
+        adapter.handle_text(initialize_frame())
+        response = json.loads(
+            adapter.handle_text(
+                frame(
+                    "runtime.reconcile",
+                    {
+                        "session_ref": session_ref(),
+                        "original_request_id": "deliver-1",
+                        "delivery_id": [],
+                        "attempt_id": "attempt_alpha",
+                    },
+                    "reconcile-malformed-delivery",
+                )
+            )
+            or "{}"
+        )
+
+        self.assertEqual(response["error"]["data"]["name"], "INVALID_PARAMS")
+
+    def test_reconcile_rejects_known_original_with_mismatched_session_identity(self) -> None:
+        adapter = ReferenceAdapter()
+        adapter.handle_text(initialize_frame())
+        mismatched = session_ref()
+        mismatched["session_ref_id"] = "session_beta"
+        mismatched["native_session_id"] = "native-session-beta"
+        mismatched["evidence"]["subject"]["session_ref_id"] = "session_beta"
+        mismatched["evidence"]["subject"]["native_session_id"] = "native-session-beta"
+        mismatched["evidence"]["integrity"] = canonical_digest(mismatched["evidence"])
+        response = json.loads(
+            adapter.handle_text(
+                frame(
+                    "runtime.reconcile",
+                    {
+                        "session_ref": mismatched,
+                        "original_request_id": "deliver-1",
+                        "delivery_id": "delivery_alpha",
+                        "attempt_id": "attempt_alpha",
+                    },
+                    "reconcile-session-mismatch",
+                )
+            )
+            or "{}"
+        )
+
+        self.assertEqual(response["error"]["data"]["name"], "INVALID_SESSION_REF")
+        self.assertEqual(response["error"]["code"], -32008)
 
     def test_reconcile_rejects_incomplete_session_ref_without_scope_mutation(self) -> None:
         adapter = ReferenceAdapter()
