@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from llm_collab import runtime_adapter_state
+from llm_collab import runtime_adapter_reference, runtime_adapter_state
 from llm_collab.runtime_adapter_admission_evidence import build_admission_evidence
 from llm_collab.runtime_adapter_claim import ClaimFailure, build_claim
 from llm_collab.runtime_adapter_deadline_evidence import build_deadline_evidence
@@ -59,9 +59,46 @@ RECOVERY_KEYS = {
     "Cea1af958d37a.1",
 }
 PROVENANCE_KEYS = {"C587906f36ba3.1", "Cd87ad3561bfc.1"}
+P7_KEYS = {
+    "C3db5b5acb8d7.1",
+    "Cbfa7351a2ba5.1",
+    "Cbfa7351a2ba5.2",
+    "Ce4dfe2af8d8d.1",
+    "C0ed26afcfb8a.1",
+}
 DEFERRED_RECOVERY_ADMISSION_KEYS = {"Cd830c5efc97b.1", "Cd830c5efc97b.2"}
 DEFERRED_C16_KEYS = {"C1731a3e18c8e.1", "C5bb2ba77ec3b.1", "C9138fb78426f.1", "Cf70f7c633f57.1"}
-HOST_HARNESS_KEYS = LIFECYCLE_KEYS | RECOVERY_KEYS | PROVENANCE_KEYS
+DEFERRED_P6_KEYS = {
+    "C01d5a7107389.1",
+    "C05530aaf0297.1",
+    "C44a06b005f56.1",
+    "C468b7316502d.1",
+    "C4d3e4e331f8e.1",
+    "C507960193aaf.1",
+    "C5203ae51498d.1",
+    "C60fb22117077.1",
+    "C8665d49fe212.1",
+    "C8665d49fe212.2",
+    "C8665d49fe212.3",
+    "C991a6ee55456.1",
+    "Ca7d929aaf1c6.1",
+    "Ca7d929aaf1c6.2",
+    "Cbc69b8dc81fc.1",
+    "Cbc69b8dc81fc.2",
+    "Cbc69b8dc81fc.3",
+    "Cbc69b8dc81fc.4",
+    "Cfb24d181976b.1",
+    "C41a1a5829726.1",
+    "C1731a3e18c8e.1",
+    "C5bb2ba77ec3b.1",
+    "Cf70f7c633f57.1",
+    "C9138fb78426f.1",
+    "Cddf6725ddfa4.1",
+    "Ce45ac56f0f07.1",
+    "Ce45ac56f0f07.2",
+    "Cd849c64f4310.1",
+}
+HOST_HARNESS_KEYS = LIFECYCLE_KEYS | RECOVERY_KEYS | PROVENANCE_KEYS | P7_KEYS
 
 
 class RuntimeAdapterLifecycleEvidenceTests(unittest.TestCase):
@@ -81,8 +118,9 @@ class RuntimeAdapterLifecycleEvidenceTests(unittest.TestCase):
         self.assertLessEqual(LIFECYCLE_KEYS, covered)
         self.assertLessEqual(RECOVERY_KEYS, covered)
         self.assertLessEqual(PROVENANCE_KEYS, covered)
+        self.assertLessEqual(P7_KEYS, covered)
         self.assertFalse(DEFERRED_RECOVERY_ADMISSION_KEYS & covered)
-        self.assertFalse(DEFERRED_C16_KEYS & covered)
+        self.assertFalse(DEFERRED_P6_KEYS & covered)
         self.assertTrue(
             all(
                 clause["state"] == HOST_HARNESS_EVIDENCED and clause["evidence"] == ARTIFACT_LABEL
@@ -224,6 +262,18 @@ class RuntimeAdapterLifecycleEvidenceTests(unittest.TestCase):
                 },
             },
         )
+
+    def test_p7_integrity_uses_real_adapter_digest_and_state_quarantine(self) -> None:
+        p7 = build_lifecycle_evidence(self.protocol)["observation"]["p7_integrity"]
+
+        self.assertTrue(p7["adapter_rejects_delivery_digest_mismatch"])
+        self.assertTrue(p7["host_accepts_receipt_digest_match"])
+        self.assertTrue(p7["host_rejects_receipt_digest_mismatch"])
+        self.assertTrue(p7["both_delivery_and_receipt_recomputed"])
+        self.assertTrue(p7["invalid_adapter_output_quarantined"])
+        self.assertTrue(p7["digest_mismatch_quarantined"])
+        self.assertEqual(set(p7["deferred_p6_keys"]), DEFERRED_P6_KEYS)
+        self.assertIn("does not re-home P6 authority", p7["deferred_p6_reason"])
 
     def test_real_lifecycle_component_mutations_kill_evidence(self) -> None:
         original_initialized = LifecycleState.initialized.__func__
@@ -411,6 +461,37 @@ class RuntimeAdapterLifecycleEvidenceTests(unittest.TestCase):
                 with self.assertRaises(LifecycleEvidenceFailure):
                     build_lifecycle_evidence(self.protocol)
 
+    def test_real_p7_component_mutations_kill_evidence(self) -> None:
+        original_digest = runtime_adapter_reference._canonical_digest
+        original_record_quarantine_opened = runtime_adapter_state.record_quarantine_opened
+
+        def trust_existing_integrity(value):
+            if isinstance(value, dict) and isinstance(value.get("integrity"), str):
+                return value["integrity"]
+            return original_digest(value)
+
+        def skip_quarantine_write(db_path, redacted):
+            if not hasattr(redacted, "as_dict"):
+                return original_record_quarantine_opened(db_path, redacted)
+            if redacted.as_dict().get("request_id") not in {"invalid-output", "digest-mismatch"}:
+                return original_record_quarantine_opened(db_path, redacted)
+            return runtime_adapter_state.record_id_for(redacted)
+
+        mutations = (
+            (
+                mock.patch.object(runtime_adapter_reference, "_canonical_digest", trust_existing_integrity),
+                "real canonical digest recomputation",
+            ),
+            (
+                mock.patch.object(runtime_adapter_state, "record_quarantine_opened", skip_quarantine_write),
+                "real adapter-state quarantine append",
+            ),
+        )
+        for patcher, name in mutations:
+            with self.subTest(name=name), patcher:
+                with self.assertRaises(LifecycleEvidenceFailure):
+                    build_lifecycle_evidence(self.protocol)
+
     def test_build_claim_still_gaps_host_harness_rows_and_deferred_cd830(self) -> None:
         result = build_claim(self.protocol)
 
@@ -418,7 +499,7 @@ class RuntimeAdapterLifecycleEvidenceTests(unittest.TestCase):
         gap_keys = {gap["clause_key"] for gap in result.gaps}
         self.assertLessEqual(HOST_HARNESS_KEYS, gap_keys)
         self.assertLessEqual(DEFERRED_RECOVERY_ADMISSION_KEYS, gap_keys)
-        self.assertLessEqual(DEFERRED_C16_KEYS, gap_keys)
+        self.assertLessEqual(DEFERRED_P6_KEYS, gap_keys)
 
     def test_lifecycle_ledger_is_scoped_disjoint_from_existing_ledgers(self) -> None:
         lifecycle = build_lifecycle_evidence(self.protocol)
@@ -478,6 +559,14 @@ class RuntimeAdapterLifecycleEvidenceTests(unittest.TestCase):
             (
                 "The `initialize` adapter and manifest identity/revision members MUST come from\n   that same lookup",
                 "The `initialize` adapter and manifest identity/revision members MUST come from\n   a matching lookup",
+            ),
+            (
+                "At P7 the adapter MUST recompute\n   and verify the exact frozen `StateEvidenceV1.integrity`",
+                "At P7 the adapter MUST verify\n   the exact frozen `StateEvidenceV1.integrity`",
+            ),
+            (
+                "At P6 the `runtime.deliver` action relation, session-binding\n   evidence profile",
+                "At P6 the `runtime.deliver` action relation and session-binding\n   evidence profile",
             ),
         )
         for old, new in replacements:
