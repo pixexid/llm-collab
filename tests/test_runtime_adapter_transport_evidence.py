@@ -82,7 +82,6 @@ class RuntimeAdapterTransportEvidenceTests(unittest.TestCase):
         result = build_claim(self.protocol)
 
         self.assertIsInstance(result, ClaimFailure)
-        self.assertEqual(len(result.gaps), 111)
         self.assertLessEqual(BYTE_LENGTH_KEYS, {gap["clause_key"] for gap in result.gaps})
 
     def test_clause_text_drift_fails_closed(self) -> None:

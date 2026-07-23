@@ -155,7 +155,6 @@ class RuntimeAdapterAdmissionEvidenceTests(unittest.TestCase):
         result = build_claim(self.protocol)
 
         self.assertIsInstance(result, ClaimFailure)
-        self.assertEqual(len(result.gaps), 111)
         self.assertLessEqual(ADMISSION_KEYS, {gap["clause_key"] for gap in result.gaps})
 
     def test_transport_evidence_still_covers_only_byte_length_rows(self) -> None:

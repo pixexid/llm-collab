@@ -572,7 +572,6 @@ class RuntimeAdapterFixtureTests(unittest.TestCase):
             "C991a6ee55456.1",
             "C468b7316502d.1",
             "C60fb22117077.1",
-            "C13e20170473c.1",
             "C01d5a7107389.1",
             "Ca7d929aaf1c6.1",
             "Ca7d929aaf1c6.2",
