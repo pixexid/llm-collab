@@ -180,6 +180,7 @@ _HEALTH_RESULT = MappingProxyType(
         "capability_set_revision": "cap_rev1",
     }
 )
+_SHUTDOWN_RESULT = MappingProxyType({"status": "shutdown_started"})
 
 
 @dataclass(frozen=True)
@@ -643,6 +644,36 @@ FIXTURES: tuple[RuntimeAdapterFixture, ...] = (
         ),
     ),
     RuntimeAdapterFixture(
+        fixture_id="runtime-adapter-shutdown-success",
+        polarity=POLARITY_CONFORMING,
+        clause_refs=(
+            ClauseReference(
+                clause_key="Ce0c84af21a71.1",
+                text_sha256="e0c84af21a718d576bf429d33d11b9f67216b1def5f1613fde168a1cdd6baf81",
+                polarity=POLARITY_CONFORMING,
+            ),
+            ClauseReference(
+                clause_key="C43b913cc99f1.1",
+                text_sha256="43b913cc99f16fbc7c95db683f62d6592ab081445ef00375ff36ca85f3d2b017",
+                polarity=POLARITY_CONFORMING,
+            ),
+            ClauseReference(
+                clause_key="C78f267e558da.1",
+                text_sha256="78f267e558dad3c464eaf76f96525bb7479753d80f728dd67e55ef3f692fa7a8",
+                polarity=POLARITY_CONFORMING,
+            ),
+        ),
+        trace=(
+            *_initialize_trace(),
+            TraceFrame("host", "adapter", _request("runtime.shutdown", {}, "shutdown-success")),
+        ),
+        expectation=ExpectedResult(
+            method="runtime.shutdown",
+            result=_SHUTDOWN_RESULT,
+            state_effect="shutdown_started",
+        ),
+    ),
+    RuntimeAdapterFixture(
         fixture_id="runtime-adapter-shutdown-rejects-session-selector",
         polarity=POLARITY_VIOLATING,
         clause_refs=(
@@ -1007,6 +1038,11 @@ def _validate_health_result(result: Mapping[str, Any]) -> None:
         raise ConformanceFailure("fixture-result-shape", "runtime.health")
 
 
+def _validate_shutdown_result(result: Mapping[str, Any]) -> None:
+    if not _is_closed_mapping(result, {"status"}) or result["status"] != "shutdown_started":
+        raise ConformanceFailure("fixture-result-shape", "runtime.shutdown")
+
+
 def _validate_receipt_result(result: Mapping[str, Any], params: Mapping[str, Any]) -> None:
     required = {
         "schema_version",
@@ -1074,6 +1110,8 @@ def _validate_result_shape(fixture: RuntimeAdapterFixture, methods: tuple[str, .
         raise ConformanceFailure("fixture-result-shape", expectation.method)
     if expectation.method == "runtime.health":
         _validate_health_result(expectation.result)
+    elif expectation.method == "runtime.shutdown":
+        _validate_shutdown_result(expectation.result)
     elif expectation.method == "runtime.reconcile":
         params = None
         for trace in fixture.trace:
