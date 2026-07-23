@@ -7,10 +7,13 @@ runtime state, or touches canonical/ledger/inbox surfaces.
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass
 import hashlib
 import json
+from pathlib import Path
 import re
+from types import MappingProxyType
 from typing import Any, Iterable, Mapping
 
 
@@ -65,12 +68,39 @@ _REQUEST_PARAM_KEYS: Mapping[str, frozenset[str]] = {
     "runtime.shutdown": frozenset(),
 }
 
-_ERROR_CODES = {
-    "PARSE_ERROR": -32700,
-    "INVALID_REQUEST": -32600,
-    "METHOD_NOT_FOUND": -32601,
-    "INVALID_PARAMS": -32602,
-}
+ERROR_CODES = MappingProxyType(
+    {
+        "PARSE_ERROR": -32700,
+        "INVALID_REQUEST": -32600,
+        "METHOD_NOT_FOUND": -32601,
+        "INVALID_PARAMS": -32602,
+        "INTERNAL_ERROR": -32603,
+        "INVALID_FRAMING": -32000,
+        "MESSAGE_TOO_LARGE": -32001,
+        "TOO_MANY_IN_FLIGHT": -32002,
+        "HANDSHAKE_TIMEOUT": -32003,
+        "UNSUPPORTED_PROTOCOL_VERSION": -32004,
+        "INITIALIZE_REQUIRED": -32005,
+        "UNTRUSTED_MANIFEST_INPUT": -32006,
+        "CAPABILITY_NOT_DECLARED": -32007,
+        "INVALID_SESSION_REF": -32008,
+        "INVALID_DELIVERY": -32009,
+        "REQUEST_TIMEOUT": -32010,
+        "REQUEST_CANCELLED": -32011,
+        "RECONCILIATION_REQUIRED": -32012,
+        "ADAPTER_UNHEALTHY": -32013,
+        "ADAPTER_QUARANTINED": -32014,
+        "REDACTION_FAILURE": -32015,
+        "SHUTDOWN_IN_PROGRESS": -32016,
+        "STDERR_LIMIT_EXCEEDED": -32017,
+    }
+)
+
+ENDPOINT_SCHEMA_ID = "https://llm-collab.dev/schemas/standalone/v1/endpoint.schema.json"
+SESSION_REF_SCHEMA_ID = "https://llm-collab.dev/schemas/standalone/v1/session-ref.schema.json"
+CATALOG_ID = "https://llm-collab.dev/schemas/standalone/v1/index.json"
+SCHEMA_DIR = Path(__file__).resolve().parents[1] / "schemas" / "standalone" / "v1"
+_SCHEMA_VALIDATORS: dict[str, Any] = {}
 
 
 class ConformanceFailure(AssertionError):
@@ -238,8 +268,63 @@ def validate_response(obj: Any, request_id: Any) -> Mapping[str, Any]:
     raise ConformanceFailure("closed-response", "response envelope has extra members")
 
 
+def protocol_error_codes(protocol_text: str) -> Mapping[str, int]:
+    """Validate the protocol markdown table against the shared error catalog."""
+
+    rows: dict[str, int] = {}
+    for line in protocol_text.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("|") or "`" not in stripped:
+            continue
+        parts = [part.strip() for part in stripped.strip("|").split("|")]
+        if len(parts) != 3:
+            continue
+        raw_code, raw_name, _raw_retryable = parts
+        if not raw_code.startswith("-") or not (raw_name.startswith("`") and raw_name.endswith("`")):
+            continue
+        try:
+            code = int(raw_code)
+        except ValueError:
+            continue
+        name = raw_name.strip("`")
+        if name in rows:
+            raise ConformanceFailure("protocol-error-codes", f"duplicate error {name}")
+        rows[name] = code
+    if rows != dict(ERROR_CODES):
+        missing = sorted(set(ERROR_CODES) - set(rows))
+        extra = sorted(set(rows) - set(ERROR_CODES))
+        mismatched = sorted(name for name in set(rows) & set(ERROR_CODES) if rows[name] != ERROR_CODES[name])
+        raise ConformanceFailure(
+            "protocol-error-codes",
+            f"catalog mismatch missing={missing} extra={extra} mismatched={mismatched}",
+        )
+    return ERROR_CODES
+
+
+def validate_endpoint_v1(value: Any) -> Mapping[str, Any]:
+    """Validate common EndpointV1 JSON Schema shape through the offline registry."""
+
+    document = _closed_schema_mapping(value, "EndpointV1")
+    _schema_validator(ENDPOINT_SCHEMA_ID).validate(document)
+    return document
+
+
+def validate_session_ref_v1(value: Any) -> Mapping[str, Any]:
+    """Validate common SessionRefV1 JSON Schema shape through the offline registry."""
+
+    # Runtime-adapter shared shape authority only. The Codex SessionRef producer
+    # validator in codex_session_ref.py remains a separate follow-up boundary.
+    document = _closed_schema_mapping(value, "SessionRefV1")
+    _schema_validator(SESSION_REF_SCHEMA_ID).validate(document)
+    return document
+
+
+def error_code(name: str) -> int:
+    return ERROR_CODES[name]
+
+
 def error_response(request_id: Any, name: str) -> str:
-    code = _ERROR_CODES.get(name, -32000)
+    code = ERROR_CODES.get(name, -32000)
     return dumps_frame(
         {
             "jsonrpc": JSONRPC_VERSION,
@@ -255,6 +340,55 @@ def error_response(request_id: Any, name: str) -> str:
             },
         }
     )
+
+
+def _schema_validator(schema_id: str):
+    validator = _SCHEMA_VALIDATORS.get(schema_id)
+    if validator is not None:
+        return validator
+    try:
+        from jsonschema import Draft202012Validator, FormatChecker
+        from referencing import Registry, Resource
+        from referencing.jsonschema import DRAFT202012
+    except ImportError as error:
+        raise ConformanceFailure("standalone-schema-validator", "JSON Schema validator unavailable") from error
+
+    try:
+        catalog = _load_json(SCHEMA_DIR / "index.json")
+        schemas = [_load_json(path) for path in SCHEMA_DIR.glob("*.schema.json")]
+        resources = [(schema["$id"], Resource.from_contents(schema)) for schema in schemas]
+        resources.append(
+            (
+                catalog["catalog_id"],
+                Resource.from_contents(catalog, default_specification=DRAFT202012),
+            )
+        )
+        registry = Registry(retrieve=_no_network).with_resources(resources)
+        schema = registry.contents(schema_id)
+        Draft202012Validator.check_schema(schema)
+        validator = Draft202012Validator(schema, registry=registry, format_checker=FormatChecker())
+    except Exception as error:
+        raise ConformanceFailure("standalone-schema-validator", f"failed to load {schema_id}") from error
+    _SCHEMA_VALIDATORS[schema_id] = validator
+    return validator
+
+
+def _no_network(uri: str):
+    raise LookupError(f"offline standalone schema registry has no resource for {uri}")
+
+
+def _load_json(path: Path) -> Mapping[str, Any]:
+    with path.open("r", encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def _closed_schema_mapping(value: Any, label: str) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ConformanceFailure("standalone-schema-shape", f"{label} must be an object")
+    try:
+        return deepcopy(dict(value))
+    except (RecursionError, TypeError) as error:
+        raise ConformanceFailure("standalone-schema-shape", f"{label} must be a finite object") from error
 
 
 class FakeAdapter:

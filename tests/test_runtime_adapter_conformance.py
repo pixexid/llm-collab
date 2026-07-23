@@ -9,6 +9,7 @@ import unittest
 from pathlib import Path
 
 from llm_collab.runtime_adapter_conformance import (
+    ERROR_CODES,
     ConformanceFailure,
     FakeAdapter,
     LedgerRow,
@@ -17,9 +18,12 @@ from llm_collab.runtime_adapter_conformance import (
     dumps_frame,
     extract_clause_occurrences,
     load_json_frame,
+    protocol_error_codes,
     validate_clause_ledger,
+    validate_endpoint_v1,
     validate_request,
     validate_response,
+    validate_session_ref_v1,
 )
 
 
@@ -238,6 +242,81 @@ class RuntimeAdapterConformanceTests(unittest.TestCase):
                 "r1",
             )
 
+    def test_protocol_error_catalog_matches_spec_and_fails_on_drift(self) -> None:
+        codes = protocol_error_codes(self.protocol)
+
+        self.assertIs(codes, ERROR_CODES)
+        self.assertEqual(len(codes), 23)
+        self.assertEqual(codes["INITIALIZE_REQUIRED"], -32005)
+        with self.assertRaisesRegex(ConformanceFailure, "protocol-error-codes"):
+            protocol_error_codes(self.protocol.replace("| -32015 | `REDACTION_FAILURE` | `false` |", ""))
+
+    def test_endpoint_and_session_ref_schema_validators_are_shared_and_fail_closed(self) -> None:
+        endpoint = {
+            "schema_version": 1,
+            "workspace_id": "ws_alpha",
+            "scope": {"kind": "workspace"},
+            "endpoint_id": "endpoint_alpha",
+            "agent_id": "agent_alpha",
+            "adapter_name": "adapter_alpha",
+            "adapter_revision": "adapter_rev1",
+            "trust_class": "managed",
+            "capability_set_id": "caps_alpha",
+            "platform": {"os": "other", "architecture": "test"},
+            "configuration_ref": {
+                "registry_id": "registry_alpha",
+                "revision": "registry_rev1",
+                "reference": "reference_alpha",
+            },
+        }
+        evidence = {
+            "schema_version": 1,
+            "workspace_id": "ws_alpha",
+            "scope": {"kind": "workspace"},
+            "evidence_id": "evidence_session_alpha",
+            "evidence_kind": "exact_session_binding",
+            "quality": "authoritative",
+            "state": "visible",
+            "authority": {
+                "authority_kind": "trusted_adapter",
+                "identity": "adapter_alpha",
+                "implementation_revision": "adapter_rev1",
+                "capability_profile_id": "runtime_profile",
+                "capability_profile_revision": "cap_rev1",
+            },
+            "subject": {
+                "endpoint_id": "endpoint_alpha",
+                "session_ref_id": "session_alpha",
+                "native_session_id": "native-session-alpha",
+            },
+            "correlation_id": "corr_session_alpha",
+            "observed_at_utc": "2026-07-22T00:00:00Z",
+            "integrity": "sha256:" + ("0" * 64),
+        }
+        session_ref = {
+            "schema_version": 1,
+            "workspace_id": "ws_alpha",
+            "scope": {"kind": "workspace"},
+            "session_ref_id": "session_alpha",
+            "endpoint_id": "endpoint_alpha",
+            "native_session_id": "native-session-alpha",
+            "evidence": evidence,
+            "extensions": {"x_note_trace": "optional", "x_note_count": 1, "x_note_flag": True, "x_note_nil": None},
+        }
+
+        self.assertEqual(validate_endpoint_v1(endpoint), endpoint)
+        self.assertEqual(validate_session_ref_v1(session_ref), session_ref)
+
+        drifted_endpoint = copy.deepcopy(endpoint)
+        drifted_endpoint["unknown"] = True
+        with self.assertRaises(Exception):
+            validate_endpoint_v1(drifted_endpoint)
+
+        drifted_session = copy.deepcopy(session_ref)
+        drifted_session["extensions"] = {"trace": "optional"}
+        with self.assertRaises(Exception):
+            validate_session_ref_v1(drifted_session)
+
     def test_fake_adapter_is_deterministic_and_table_driven(self) -> None:
         adapter = FakeAdapter({"runtime.health": {"status": "healthy"}})
         frame = request("runtime.health", {})
@@ -279,7 +358,6 @@ class RuntimeAdapterConformanceTests(unittest.TestCase):
             "threading",
             "random",
             "socket",
-            "pathlib",
         }
         forbidden_llm_collab = {
             "canonical",

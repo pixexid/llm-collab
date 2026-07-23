@@ -10,11 +10,15 @@ import json
 import sys
 import unittest
 from pathlib import Path
+from types import MappingProxyType
 
+import llm_collab.runtime_adapter_conformance as conformance
 from llm_collab.runtime_adapter_conformance import (
+    ERROR_CODES,
     ConformanceFailure,
     classify_direction,
     load_json_frame,
+    protocol_error_codes,
     validate_response,
 )
 from llm_collab.runtime_adapter_manifest import TrustedManifestRegistry
@@ -28,7 +32,6 @@ from llm_collab.runtime_adapter_reference import (
     FAULT_RESULT_SHAPE,
     FAULT_STDERR_OVERFLOW,
     ReferenceAdapter,
-    ERROR_CODES,
     MAX_MESSAGE_BYTES,
     main,
     serve,
@@ -103,28 +106,6 @@ def initialize_frame(request_id: str = "initialize-1") -> str:
         },
         request_id,
     )
-
-
-def _protocol_error_codes(protocol_text: str) -> dict[str, int]:
-    rows: dict[str, int] = {}
-    for line in protocol_text.splitlines():
-        stripped = line.strip()
-        if not stripped.startswith("|") or "`" not in stripped:
-            continue
-        parts = [part.strip() for part in stripped.strip("|").split("|")]
-        if len(parts) != 3:
-            continue
-        raw_code, raw_name, _raw_retryable = parts
-        if not raw_code.startswith("-") or not (raw_name.startswith("`") and raw_name.endswith("`")):
-            continue
-        code = int(raw_code)
-        name = raw_name.strip("`")
-        if name in rows:
-            raise AssertionError(f"duplicate protocol error row: {name}")
-        rows[name] = code
-    if len(rows) != 23:
-        raise AssertionError(f"expected 23 protocol error rows, got {len(rows)}")
-    return rows
 
 
 def canonical_digest(value: dict) -> str:
@@ -243,12 +224,25 @@ class RuntimeAdapterReferenceTests(unittest.TestCase):
         self.assertEqual(response["error"]["code"], -32601)
 
     def test_error_codes_match_protocol_table(self) -> None:
-        protocol_codes = _protocol_error_codes(PROTOCOL_PATH.read_text(encoding="utf-8"))
+        protocol_codes = protocol_error_codes(PROTOCOL_PATH.read_text(encoding="utf-8"))
 
         self.assertEqual(len(protocol_codes), 23)
-        for name, code in ERROR_CODES.items():
-            self.assertEqual(code, protocol_codes[name], name)
+        self.assertIs(ERROR_CODES, protocol_codes)
         self.assertEqual(ERROR_CODES["INITIALIZE_REQUIRED"], -32005)
+
+    def test_reference_error_lookup_uses_shared_catalog_at_call_time(self) -> None:
+        original = conformance.ERROR_CODES
+        changed = dict(original)
+        changed["INITIALIZE_REQUIRED"] = -32099
+        conformance.ERROR_CODES = MappingProxyType(changed)
+        try:
+            adapter = ReferenceAdapter()
+            response = json.loads(adapter.handle_text(frame("runtime.health", {}, "health-1")) or "{}")
+        finally:
+            conformance.ERROR_CODES = original
+
+        self.assertEqual(response["error"]["data"]["name"], "INITIALIZE_REQUIRED")
+        self.assertEqual(response["error"]["code"], -32099)
 
     def test_duplicate_bearing_input_returns_parse_error_without_initializing(self) -> None:
         adapter = ReferenceAdapter()
@@ -424,7 +418,7 @@ class RuntimeAdapterReferenceTests(unittest.TestCase):
         adapter = ReferenceAdapter()
         adapter.handle_text(initialize_frame())
         extended = session_ref()
-        extended["extensions"] = {"trace": "optional"}
+        extended["extensions"] = {"x_note_trace": "optional"}
         response = json.loads(
             adapter.handle_text(
                 frame(
@@ -442,6 +436,29 @@ class RuntimeAdapterReferenceTests(unittest.TestCase):
         )
 
         self.assertEqual(response["result"]["message_id"], "msg_alpha")
+
+    def test_reconcile_rejects_session_ref_extension_schema_drift(self) -> None:
+        adapter = ReferenceAdapter()
+        adapter.handle_text(initialize_frame())
+        extended = session_ref()
+        extended["extensions"] = {"trace": "optional"}
+        response = json.loads(
+            adapter.handle_text(
+                frame(
+                    "runtime.reconcile",
+                    {
+                        "session_ref": extended,
+                        "original_request_id": "deliver-1",
+                        "delivery_id": "delivery_alpha",
+                        "attempt_id": "attempt_alpha",
+                    },
+                    "reconcile-1",
+                )
+            )
+            or "{}"
+        )
+
+        self.assertEqual(response["error"]["data"]["name"], "INVALID_SESSION_REF")
 
     def test_reconcile_accepts_safe_integer_original_request_id(self) -> None:
         adapter = ReferenceAdapter()
@@ -690,8 +707,12 @@ class RuntimeAdapterReferenceTests(unittest.TestCase):
     def test_adapter_imports_only_allowed_protocol_constants_from_host_modules(self) -> None:
         allowed_from = {
             "llm_collab.runtime_adapter_conformance": {
+                "ERROR_CODES",
                 "JSONRPC_VERSION",
                 "NEGOTIATED_PROTOCOL_VERSION",
+                "error_code",
+                "validate_endpoint_v1",
+                "validate_session_ref_v1",
             },
             "llm_collab.runtime_adapter_requests": {
                 "METHOD_CANCEL",
