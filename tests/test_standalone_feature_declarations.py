@@ -59,8 +59,18 @@ def load_declaration() -> dict[str, object]:
     )
 
 
+def git_paths(*args: str) -> tuple[str, ...]:
+    raw_paths = subprocess.run(
+        ["git", "ls-files", "-z", *args],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+    ).stdout.split(b"\0")
+    return tuple(raw_path.decode("utf-8") for raw_path in raw_paths if raw_path)
+
+
 def feature_declaration_matches(
-    tracked_paths: tuple[str, ...],
+    working_tree_paths: tuple[str, ...],
     content_by_path: dict[str, bytes],
 ) -> list[str]:
     needles = {
@@ -70,7 +80,7 @@ def feature_declaration_matches(
     }
     matches: list[str] = []
 
-    for relative_path in tracked_paths:
+    for relative_path in working_tree_paths:
         if (
             not relative_path.startswith(RUNTIME_ROOTS)
             or relative_path == THIS_TEST
@@ -136,7 +146,7 @@ class StandaloneFeatureDeclarationTests(unittest.TestCase):
         self.assertIn("explicitly approved project pilot", step_text)
         self.assertIn("one exact", step_text)
 
-    def test_tracked_runtime_paths_have_no_unapproved_consumers(self) -> None:
+    def test_working_tree_runtime_paths_have_no_unapproved_consumers(self) -> None:
         self.assertEqual(
             RUNTIME_ROOTS,
             ("bin/", "scripts/", "tools/", "pm2/", "llm_collab/", "tests/"),
@@ -154,18 +164,51 @@ class StandaloneFeatureDeclarationTests(unittest.TestCase):
             DECLARATION_ID,
             (ROOT / "llm_collab" / "daemon" / "gate.py").read_text(),
         )
-        tracked = subprocess.run(
-            ["git", "ls-files", "-z"],
-            cwd=ROOT,
-            check=True,
-            capture_output=True,
-        ).stdout.split(b"\0")
         matches = feature_declaration_matches(
-            tuple(raw_path.decode("utf-8") for raw_path in tracked if raw_path),
+            git_paths("--cached", "--others", "--exclude-standard"),
             {},
         )
 
         self.assertEqual(matches, [], "standalone declaration gained an unapproved consumer")
+
+    def test_untracked_runtime_feature_consumer_fails_guard(self) -> None:
+        probe = ROOT / "llm_collab" / "_gh177_untracked_feature_consumer_probe.py"
+        relative_probe = "llm_collab/_gh177_untracked_feature_consumer_probe.py"
+        self.assertFalse(probe.exists())
+        self.addCleanup(probe.unlink, missing_ok=True)
+        try:
+            probe.write_text("runtime_dispatch = True\n", encoding="utf-8")
+            self.assertNotIn(relative_probe, git_paths())
+            self.assertIn(
+                f"{relative_probe}: feature runtime_dispatch",
+                feature_declaration_matches(
+                    git_paths("--cached", "--others", "--exclude-standard"),
+                    {},
+                ),
+            )
+        finally:
+            probe.unlink(missing_ok=True)
+
+    def test_untracked_excluded_area_feature_mention_stays_outside_guard(self) -> None:
+        probe = ROOT / "docs" / "protocols" / "_gh177_excluded_feature_mention_probe.py"
+        relative_probe = "docs/protocols/_gh177_excluded_feature_mention_probe.py"
+        self.assertFalse(probe.exists())
+        self.addCleanup(probe.unlink, missing_ok=True)
+        try:
+            probe.write_text("runtime_dispatch = True\n", encoding="utf-8")
+            self.assertIn(
+                relative_probe,
+                git_paths("--cached", "--others", "--exclude-standard"),
+            )
+            self.assertEqual(
+                feature_declaration_matches(
+                    git_paths("--cached", "--others", "--exclude-standard"),
+                    {},
+                ),
+                [],
+            )
+        finally:
+            probe.unlink(missing_ok=True)
 
     def test_unsanctioned_feature_consumer_still_fails_guard(self) -> None:
         matches = feature_declaration_matches(
