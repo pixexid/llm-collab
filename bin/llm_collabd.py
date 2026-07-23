@@ -4,7 +4,14 @@
 from pathlib import Path
 import sys
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+BIN_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(BIN_DIR))
+
+from _python_runtime import require_python
+
+require_python()
+
+sys.path.insert(0, str(BIN_DIR.parent))
 
 from llm_collab.daemon.cli import main
 
