@@ -262,11 +262,12 @@ implemented outcomes at the exact rebaseline, not a closed issue snapshot.
 | [#90](https://github.com/pixexid/llm-collab/issues/90) | P1 | #88, Amiga #1571, and Amiga #1572 settled | Observation-only daemon and ledger implemented through P1d; P1e release/closure pending. |
 | [#91](https://github.com/pixexid/llm-collab/issues/91) | P2 | P1 merged; #88 schemas/protocols frozen | Canonical messages/receipts and v2 importer/projections. |
 | [#92](https://github.com/pixexid/llm-collab/issues/92) | P3 | P2 merged; runtime-adapter V1 frozen | Adapter supervisor, SDK, and conformance kit. |
-| [#93](https://github.com/pixexid/llm-collab/issues/93) | P4A | P3 merged | Managed Codex read-only/session adapter. |
-| [#94](https://github.com/pixexid/llm-collab/issues/94) | P4B | P4A merged; P1 ledger proof gates complete | Feature-gated exact Codex delivery and reconciliation. |
-| [#95](https://github.com/pixexid/llm-collab/issues/95) | P5A | #92 merged | Claude native attached-session adapter. |
-| [#96](https://github.com/pixexid/llm-collab/issues/96) | P5B | #92 merged | pi native attached-session adapter. |
-| [#97](https://github.com/pixexid/llm-collab/issues/97) | P5C | #92 merged | OpenCode native attached-session adapter. |
+| [#271](https://github.com/pixexid/llm-collab/issues/271) | P3.5 | #92 merged | Conversation participants, exact session bindings, and Session Lifecycle Protocol V1. |
+| [#93](https://github.com/pixexid/llm-collab/issues/93) | P4A | P3 merged; #271 design boundary known | Managed Codex read-only/session adapter; no route authority by itself. |
+| [#94](https://github.com/pixexid/llm-collab/issues/94) | P4B | P4A merged; #271 binding resolver merged; P1 ledger proof gates complete | Feature-gated exact Codex delivery and reconciliation. |
+| [#95](https://github.com/pixexid/llm-collab/issues/95) | P5A | #92 and #271 merged | Claude native attached-session adapter. |
+| [#96](https://github.com/pixexid/llm-collab/issues/96) | P5B | #92 and #271 merged | pi native attached-session adapter. |
+| [#97](https://github.com/pixexid/llm-collab/issues/97) | P5C | #92 and #271 merged | OpenCode native attached-session adapter. |
 | [#98](https://github.com/pixexid/llm-collab/issues/98) | P6 | #91 and #92 merged; #77 safety frozen | AX Doorbell v2 profiles and honest evidence. |
 | [#99](https://github.com/pixexid/llm-collab/issues/99) | P7 | #91 and #92 merged | Optional encrypted remote transport. |
 | [#100](https://github.com/pixexid/llm-collab/issues/100) | P8A | #91 merged; canonical message contracts stable | Generic task/workflow pack boundary. |
@@ -282,10 +283,11 @@ GH-88 S1 -> S2 -> S3
                   |
                 GH-90 -> GH-91 -> GH-92
                   |        |        |
-                  |        |        +-> GH-93 -> GH-94
-                  |        |        +-> GH-95
-                  |        |        +-> GH-96
-                  |        |        +-> GH-97
+                  |        |        +-> GH-271 -> GH-94
+                  |        |        |      \----> GH-95
+                  |        |        |      \----> GH-96
+                  |        |        |      \----> GH-97
+                  |        |        +-> GH-93 ------^
                   |        +----------> GH-100 -> GH-101
                   |                         \----> GH-102
                   +-------------+-------> GH-103
@@ -423,6 +425,91 @@ acceptance, timeout, crash, duplicate event, session disappearance, and version
 mismatch. A bad adapter cannot corrupt canonical intent or widen authority.
 Rollback disables the adapter/supervisor and leaves messages pull-pending.
 
+## Phase 3.5 — conversation participants and session lifecycle
+
+**Issue:** GH-271
+
+**Goal:** introduce an inert, storage-enforced session-binding contract between
+the closed Runtime Adapter JSON-RPC V1 surface and the later mutation-capable
+managed/native adapters.
+
+Phase 3.5 owns conversation participants, exact binding generations, audited
+rebind/handoff, and the Session Lifecycle Protocol V1. It does not reopen
+Runtime Adapter JSON-RPC V1 and does not add a delivery method to that protocol.
+
+### Child 1 — design contract
+
+Child 1 is documentation only. It freezes:
+
+- `chat_id` reused as `conversation_id`, while explicitly rejecting
+  `conversation_id` as a globally unique key;
+- `(workspace_id, scope_kind, scope_identity, conversation_id, participant_id)`
+  as the only participant addressing form;
+- `ConversationBindingV1` with storage-derived `binding_id` and monotonic
+  generation, never caller-provided;
+- the closed binding lifecycle: `reserved`, `registering`, `active`,
+  `draining`, `unverified`, `superseded`, `retired`, and `quarantined`;
+- one active mutation binding per compound participant key;
+- one mutation owner per exact native session;
+- dispatch-time freeze of `(binding_id, generation)` so stale generations never
+  resolve newer bindings;
+- restart and unknown liveness as `unverified` and fail-closed;
+- explicit audited rebind/handoff, transferring only never-attempted work with
+  no possible native acceptance;
+- a separate lifecycle-provider registry. Lifecycle providers create or attach
+  sessions; runtime-adapter manifests authorize post-initialize delivery.
+
+Child 1 also records the GitHub issue amendments that require operator approval
+before public issue edits: #94 becomes blocked on #271 for route authority; #93
+is split between read-only session observation and route authority; #98 remains
+best-effort AX evidence and never session authority; #141 remains the narrow
+mailbox cross-talk fix.
+
+Exact proposed public issue text, held for operator approval before posting:
+
+- #94: "This delivery lane depends on #271 for participant identity, active
+  binding resolution, dispatch-time binding-generation freeze, restart-to-
+  unverified behavior, and audited rebind/handoff. P4B must not route by
+  `conversation_id`, `chat_id`, cwd, renderer state, window identity, or
+  `SessionRefV1` alone."
+- #93: "This issue covers read-only managed Codex observation and exact
+  `SessionRefV1` production only. It does not grant conversation-to-session
+  mutation authority. Any route-authority work belongs to #271 plus the later
+  P4B delivery lane."
+- #98: "AX remains best-effort UI evidence and profile selection. It never
+  mints a conversation binding, selects a binding generation, repairs ambiguous
+  native identity, or substitutes for a lifecycle-provider proof."
+- #141: "The mailbox cross-talk issue remains scoped to project/repo-target
+  discrimination for shared packet directories. It does not become a session
+  lifecycle, route-authority, or AX-delivery issue."
+
+### Later Phase 3.5 children
+
+Later children are separately stamped and reviewed. They must:
+
+- confirm the next storage version mechanically against current migration
+  guards before writing; the expected target is v8 if current code authority is
+  still v7 at activation time;
+- add participant and binding storage without adding a conversation table unless
+  a later child proves a concrete indexing need;
+- enforce the same-`chat_id`-across-projects regression in storage;
+- add the lifecycle-provider registry as a distinct authority from runtime
+  adapter manifests;
+- add resolver, freeze, stale-generation, restart, rebind, rollback, and
+  migration tests before any delivery-capable route consumes the binding.
+
+### Acceptance and rollback
+
+Phase 3.5 acceptance requires a storage-backed proof that `conversation_id`
+alone cannot select a binding, one participant cannot have two active mutation
+bindings, one exact native session cannot have two mutation owners, stale
+generations fail closed, restart enters `unverified`, and rebind/handoff is
+audited and non-lossy for unresolved work.
+
+Rollback disables new binding resolution first, preserves canonical messages,
+receipts, pending work, and binding audit records, and returns delivery-capable
+routes to pull/manual without retargeting an in-flight attempt.
+
 ## Phase 4 — managed Codex
 
 ### P4A read-only/session adapter
@@ -437,7 +524,10 @@ loaded-session discovery, approvals/errors/background state, and authoritative
 cwd/project evidence in exact `SessionRef` objects.
 
 P4A does not claim co-presence with a separately owned Codex TUI/Desktop
-renderer and does not deliver a message.
+renderer and does not deliver a message. P4A also does not create
+conversation-to-session route authority. Any managed Codex route that can mutate
+a native session must consume the Phase 3.5 active binding resolver and freeze
+the selected binding generation before dispatch.
 
 ### P4B exact delivery and reconciliation
 
@@ -456,7 +546,8 @@ import-and-retirement input. P4B must prove there is one lease/fence owner after
 cutover.
 
 Production delivery remains off until supported-version tests prove exact
-runtime home/project/session binding, authoritative busy, request
+runtime home/project/session binding, Phase 3.5 conversation-binding freeze,
+authoritative busy, request
 acceptance/rejection, idempotency or queryable reconciliation, and no duplicate
 turn after restart. Ambiguous acceptance remains quarantined without retry.
 
@@ -475,6 +566,11 @@ injection, and host state. Portable inbox following remains core/transport
 behavior. Each adapter must support version probing, exact session mapping,
 message-ID acknowledgment, clean disable/removal, drift quarantine, and the
 shared conformance suite.
+
+Native attached-session adapters depend on Phase 3.5 for conversation
+participant identity, binding generation, restart handling, and audited
+rebind/handoff. A native hook may prove a `SessionRef`, but it does not by
+itself select which conversation participant may mutate through that session.
 
 Unsupported Codex CLI, Antigravity, Copilot, or another host remains
 `pull_pending` until a supported hook exists. No adapter may infer a hook from a
@@ -510,6 +606,11 @@ verification identity. It does not create a second selector/profile mechanism.
 AX evidence is never native session authority. Recipient busy, a submitted UI
 action, or generic exit zero cannot become exact acceptance without native or
 exact-session acknowledgment evidence.
+
+AX profiles remain selectors and observation/evidence helpers only. AX may not
+mint a `ConversationBindingV1`, choose a binding generation, repair ambiguous
+native identity, or act as a fallback when a managed/native route cannot prove
+the exact Phase 3.5 binding.
 
 Rollback quarantines the changed profile and returns work to pull/manual; it
 does not discard the durable packet or re-ring an ambiguous attempt.
@@ -626,6 +727,8 @@ ambiguity preserved across upgrade and restore.
 - schema/catalog/reference integrity;
 - invalid IDs and unknown semantic fields;
 - scope/project/repository/session mismatch;
+- same `conversation_id` across different workspace/project scopes;
+- stale conversation-binding generation and restart-to-unverified behavior;
 - typed relationship missing/ambiguous/stale lookup;
 - sealed legacy-manifest provenance and hash mismatch;
 - state transitions and capability/evidence contradictions;
