@@ -10,7 +10,7 @@ from types import MappingProxyType
 from unittest import mock
 
 from llm_collab import runtime_adapter_reference, runtime_adapter_state
-from llm_collab.runtime_adapter_conformance import ERROR_CODES
+from llm_collab.runtime_adapter_conformance import DirectionOutcome, ERROR_CODES
 from llm_collab.runtime_adapter_admission_evidence import build_admission_evidence
 from llm_collab.runtime_adapter_claim import ClaimFailure, build_claim
 from llm_collab.runtime_adapter_deadline_evidence import build_deadline_evidence
@@ -92,6 +92,12 @@ SHUTDOWN_KEYS = {
     "Cc41b106e96ee.2",
     "C27be44c9a8a8.1",
 }
+C01_LOCAL_FAULT_KEYS = {
+    "C960a0d4410e2.1",
+    "Cf38671c0af86.1",
+    "C5366af19013d.1",
+    "C5366af19013d.2",
+}
 WIRE_COVERED_C15_KEYS = {
     "Ce0c84af21a71.1",
     "Ce0c84af21a71.2",
@@ -101,6 +107,7 @@ WIRE_COVERED_C15_KEYS = {
 }
 DEFERRED_RETRYABILITY_KEYS = {"C1ba88e813bab.1"}
 DEFERRED_SHUTDOWN_KEYS = {"C377978e26502.1", "C94617a1d5cde.1"}
+DEFERRED_C01_LIVE_KEYS = {"C241df3117a06.1", "Cde2847524a58.1", "Cde2847524a58.2"}
 DEFERRED_RECOVERY_ADMISSION_KEYS = {"Cd830c5efc97b.1", "Cd830c5efc97b.2"}
 DEFERRED_C16_KEYS = {"C1731a3e18c8e.1", "C5bb2ba77ec3b.1", "C9138fb78426f.1", "Cf70f7c633f57.1"}
 DEFERRED_P6_KEYS = {
@@ -141,6 +148,7 @@ HOST_HARNESS_KEYS = (
     | REDACTION_KEYS
     | STRUCTURED_ERROR_KEYS
     | SHUTDOWN_KEYS
+    | C01_LOCAL_FAULT_KEYS
 )
 
 
@@ -165,10 +173,12 @@ class RuntimeAdapterLifecycleEvidenceTests(unittest.TestCase):
         self.assertLessEqual(REDACTION_KEYS, covered)
         self.assertLessEqual(STRUCTURED_ERROR_KEYS, covered)
         self.assertLessEqual(SHUTDOWN_KEYS, covered)
+        self.assertLessEqual(C01_LOCAL_FAULT_KEYS, covered)
         self.assertFalse(DEFERRED_RECOVERY_ADMISSION_KEYS & covered)
         self.assertFalse(DEFERRED_P6_KEYS & covered)
         self.assertFalse(DEFERRED_RETRYABILITY_KEYS & covered)
         self.assertFalse(DEFERRED_SHUTDOWN_KEYS & covered)
+        self.assertFalse(DEFERRED_C01_LIVE_KEYS & covered)
         self.assertTrue(
             all(
                 clause["state"] == HOST_HARNESS_EVIDENCED and clause["evidence"] == ARTIFACT_LABEL
@@ -384,6 +394,26 @@ class RuntimeAdapterLifecycleEvidenceTests(unittest.TestCase):
             "no real production invalid-shutdown-result validator",
             shutdown["deferred_shutdown_reasons"]["C94617a1d5cde.1"],
         )
+
+    def test_c01_local_fault_observation_uses_real_components_and_honest_live_deferrals(self) -> None:
+        c01 = build_lifecycle_evidence(self.protocol)["observation"]["c01_local_fault"]
+
+        self.assertEqual(c01["adapter_request_fault"], "INVALID_REQUEST")
+        self.assertTrue(c01["adapter_request_no_response"])
+        self.assertTrue(c01["adapter_request_quarantined"])
+        self.assertTrue(c01["adapter_request_recorded_locally"])
+        self.assertTrue(c01["adapter_request_no_state_advance"])
+        self.assertTrue(c01["host_response_closed_without_response"])
+        self.assertTrue(c01["host_response_subsequent_input_refused"])
+        self.assertTrue(c01["host_response_recorded_locally"])
+        self.assertTrue(c01["host_response_not_quarantined"])
+        self.assertTrue(c01["host_response_no_operator_release"])
+        self.assertEqual(c01["malformed_adapter_output_fault"], "PARSE_ERROR")
+        self.assertTrue(c01["malformed_adapter_output_no_response"])
+        self.assertTrue(c01["malformed_adapter_output_quarantined"])
+        self.assertTrue(c01["malformed_adapter_output_recorded_locally"])
+        self.assertEqual(set(c01["deferred_live_c01_keys"]), DEFERRED_C01_LIVE_KEYS)
+        self.assertIn("live stream drain", c01["deferred_live_c01_reason"])
 
     def test_real_lifecycle_component_mutations_kill_evidence(self) -> None:
         original_initialized = LifecycleState.initialized.__func__
@@ -754,6 +784,57 @@ class RuntimeAdapterLifecycleEvidenceTests(unittest.TestCase):
                 with self.assertRaises(LifecycleEvidenceFailure):
                     build_lifecycle_evidence(self.protocol)
 
+    def test_real_c01_local_fault_component_mutations_kill_evidence(self) -> None:
+        original_classify_direction = _lifecycle_module().classify_direction
+        original_record_quarantine_opened = runtime_adapter_state.record_quarantine_opened
+        original_handle_text = ReferenceAdapter.handle_text
+        original_load_json_frame = _lifecycle_module().load_json_frame
+
+        def fail_open_adapter_request(sender, receiver, payload):
+            outcome = original_classify_direction(sender, receiver, payload)
+            if sender == "adapter" and receiver == "host" and outcome.form == "request":
+                return DirectionOutcome(
+                    direction_valid=True,
+                    form=outcome.form,
+                    fault=None,
+                    should_close=False,
+                    should_quarantine=False,
+                    send_response=True,
+                )
+            return outcome
+
+        def skip_c01_quarantine_write(db_path, redacted):
+            if hasattr(redacted, "as_dict") and redacted.as_dict().get("request_id") in {
+                "adapter-request",
+                "malformed-output",
+            }:
+                return runtime_adapter_state.record_id_for(redacted)
+            return original_record_quarantine_opened(db_path, redacted)
+
+        def accept_host_response(self, raw):
+            if '"result":{}' in raw and '"method"' not in raw:
+                return self._result("host-response", {"status": "accepted"})
+            return original_handle_text(self, raw)
+
+        def accept_duplicate_adapter_output(raw):
+            if '"result":{},"result":{}' in raw:
+                return {"jsonrpc": "2.0", "id": "fault", "result": {}}
+            return original_load_json_frame(raw)
+
+        mutations = (
+            (mock.patch.object(_lifecycle_module(), "classify_direction", fail_open_adapter_request), "direction classifier"),
+            (
+                mock.patch.object(runtime_adapter_state, "record_quarantine_opened", skip_c01_quarantine_write),
+                "quarantine state append",
+            ),
+            (mock.patch.object(ReferenceAdapter, "handle_text", accept_host_response), "host response close"),
+            (mock.patch.object(_lifecycle_module(), "load_json_frame", accept_duplicate_adapter_output), "malformed output parser"),
+        )
+        for patcher, name in mutations:
+            with self.subTest(name=name), patcher:
+                with self.assertRaises(LifecycleEvidenceFailure):
+                    build_lifecycle_evidence(self.protocol)
+
     def test_build_claim_still_gaps_host_harness_rows_and_deferred_cd830(self) -> None:
         result = build_claim(self.protocol)
 
@@ -764,6 +845,7 @@ class RuntimeAdapterLifecycleEvidenceTests(unittest.TestCase):
         self.assertLessEqual(DEFERRED_P6_KEYS, gap_keys)
         self.assertLessEqual(DEFERRED_RETRYABILITY_KEYS, gap_keys)
         self.assertLessEqual(DEFERRED_SHUTDOWN_KEYS, gap_keys)
+        self.assertLessEqual(DEFERRED_C01_LIVE_KEYS, gap_keys)
 
     def test_lifecycle_ledger_is_scoped_disjoint_from_existing_ledgers(self) -> None:
         lifecycle = build_lifecycle_evidence(self.protocol)
@@ -859,6 +941,22 @@ class RuntimeAdapterLifecycleEvidenceTests(unittest.TestCase):
             (
                 "A missing, additional, or\n    mistyped shutdown result member is host-local `INVALID_REQUEST` at P3",
                 "A missing, additional, or\n    mistyped shutdown result member is `INVALID_REQUEST` at P3",
+            ),
+            (
+                "The host MUST classify it only as host-local P2 `INVALID_REQUEST`,\n   send no JSON-RPC response",
+                "The host MUST classify it as host-local P2 `INVALID_REQUEST`,\n   send no JSON-RPC response",
+            ),
+            (
+                "The receiver MUST NOT reinterpret stderr, concatenate\n   adjacent lines, or answer malformed adapter output",
+                "The receiver MUST NOT reinterpret stderr, join\n   adjacent lines, or answer malformed adapter output",
+            ),
+            (
+                "The host MUST treat the resulting close as\n   its own outbound protocol fault and MUST NOT quarantine",
+                "The host MUST treat the resulting close as\n   an outbound protocol fault and MUST NOT quarantine",
+            ),
+            (
+                "The host MUST continuously drain stderr,\n   independently of stdout and request processing",
+                "The host MUST drain stderr,\n   independently of stdout and request processing",
             ),
         )
         for old, new in replacements:
