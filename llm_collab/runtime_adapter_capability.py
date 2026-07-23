@@ -97,6 +97,14 @@ class EvidenceProfileDecision:
     evidence_quality: str
 
 
+@dataclass(frozen=True)
+class OrderedStageAuthorityDecision:
+    method: str
+    protocol_control: bool
+    action: CapabilityDecision | None = None
+    evidence_profiles: tuple[EvidenceProfileDecision, ...] = ()
+
+
 class TrustedCapabilityAuthorityRegistry:
     """Host-reviewed P6 authority records, keyed by exact adapter id."""
 
@@ -215,6 +223,46 @@ class TrustedCapabilityAuthorityRegistry:
             evidence_quality=evidence_quality,
         )
 
+    def decide_ordered_stage_authority(
+        self,
+        bound: BoundCapabilityContext,
+        method: str,
+        *,
+        session_ref: Mapping[str, Any] | None = None,
+        delivery: Mapping[str, Any] | None = None,
+        receipt: Mapping[str, Any] | None = None,
+        caller_authority_fields: Mapping[str, Any] | None = None,
+    ) -> OrderedStageAuthorityDecision:
+        """Compose P6 validators after P3/P5 and before P7/admission/action."""
+
+        if caller_authority_fields is not None:
+            _reject("caller-supplied ordered-stage authority fields are not trusted")
+        if not isinstance(bound, BoundCapabilityContext):
+            _reject("bound capability context is required")
+        if method in PROTOCOL_CONTROL_METHODS:
+            return OrderedStageAuthorityDecision(method=method, protocol_control=True)
+        if method not in SESSION_METHODS:
+            _reject("method is not a P6-authorized session method")
+
+        action = self.validate_request_authority(bound, method)
+        evidence_decisions = [
+            self.validate_evidence_profile_authority(bound, _evidence(session_ref, "session_ref"))
+        ]
+        if method == METHOD_DELIVER:
+            evidence_decisions.append(
+                self.validate_evidence_profile_authority(bound, _evidence(delivery, "delivery"))
+            )
+        elif method == METHOD_RECONCILE and receipt is not None:
+            evidence_decisions.append(
+                self.validate_evidence_profile_authority(bound, _evidence(receipt, "receipt"))
+            )
+        return OrderedStageAuthorityDecision(
+            method=method,
+            protocol_control=False,
+            action=action,
+            evidence_profiles=tuple(evidence_decisions),
+        )
+
     def _record(self, adapter_id: str) -> Mapping[str, Any]:
         try:
             return self._records[adapter_id]
@@ -241,6 +289,12 @@ def _mapping(value: Any, name: str) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
         _reject(f"{name} must be a mapping")
     return value
+
+
+def _evidence(value: Mapping[str, Any] | None, name: str) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping):
+        _reject(f"{name} must be a mapping")
+    return _mapping(value.get("evidence"), f"{name} evidence")
 
 
 def _validate_authority_record(adapter_id: str, record: Any) -> None:
