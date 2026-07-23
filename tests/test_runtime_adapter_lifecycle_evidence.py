@@ -29,6 +29,7 @@ from llm_collab.runtime_adapter_lifecycle_evidence import (
 )
 from llm_collab.runtime_adapter_manifest import ManifestResolutionError
 from llm_collab.runtime_adapter_manifest_evidence import build_manifest_evidence
+from llm_collab.runtime_adapter_reference import ReferenceAdapter
 from llm_collab.runtime_adapter_redaction import RedactionFailure
 from llm_collab.runtime_adapter_request_policy_evidence import build_request_policy_cancellation_evidence
 from llm_collab.runtime_adapter_requests import HEALTH_DEADLINE_MS
@@ -57,8 +58,10 @@ RECOVERY_KEYS = {
     "C99c6e25a17cd.1",
     "Cea1af958d37a.1",
 }
+PROVENANCE_KEYS = {"C587906f36ba3.1", "Cd87ad3561bfc.1"}
 DEFERRED_RECOVERY_ADMISSION_KEYS = {"Cd830c5efc97b.1", "Cd830c5efc97b.2"}
-HOST_HARNESS_KEYS = LIFECYCLE_KEYS | RECOVERY_KEYS
+DEFERRED_C16_KEYS = {"C1731a3e18c8e.1", "C5bb2ba77ec3b.1", "C9138fb78426f.1", "Cf70f7c633f57.1"}
+HOST_HARNESS_KEYS = LIFECYCLE_KEYS | RECOVERY_KEYS | PROVENANCE_KEYS
 
 
 class RuntimeAdapterLifecycleEvidenceTests(unittest.TestCase):
@@ -77,7 +80,9 @@ class RuntimeAdapterLifecycleEvidenceTests(unittest.TestCase):
         self.assertEqual(covered, HOST_HARNESS_KEYS)
         self.assertLessEqual(LIFECYCLE_KEYS, covered)
         self.assertLessEqual(RECOVERY_KEYS, covered)
+        self.assertLessEqual(PROVENANCE_KEYS, covered)
         self.assertFalse(DEFERRED_RECOVERY_ADMISSION_KEYS & covered)
+        self.assertFalse(DEFERRED_C16_KEYS & covered)
         self.assertTrue(
             all(
                 clause["state"] == HOST_HARNESS_EVIDENCED and clause["evidence"] == ARTIFACT_LABEL
@@ -194,6 +199,31 @@ class RuntimeAdapterLifecycleEvidenceTests(unittest.TestCase):
         self.assertTrue(recovery["release_requires_explicit_release_event"])
         self.assertTrue(recovery["redaction_preserves_bounded_stderr_metadata"])
         self.assertEqual(set(recovery["deferred_recovery_admission_keys"]), DEFERRED_RECOVERY_ADMISSION_KEYS)
+
+    def test_manifest_provenance_uses_one_resolve_and_ignores_caller_identity(self) -> None:
+        provenance = build_lifecycle_evidence(self.protocol)["observation"]["manifest_provenance"]
+
+        self.assertEqual(provenance["resolve_calls"], 1)
+        self.assertTrue(provenance["caller_identity_ignored"])
+        self.assertTrue(provenance["same_lookup_identity"])
+        self.assertTrue(provenance["initialized_identity_valid"])
+        self.assertTrue(provenance["initialize_notification_rejected"])
+        self.assertEqual(set(provenance["deferred_c16_keys"]), DEFERRED_C16_KEYS)
+        self.assertEqual(
+            provenance["initialize_params"],
+            {
+                "requested_protocol_version": 1,
+                "adapter_id": "adapter_a",
+                "adapter_revision": "adapter_rev_1",
+                "manifest_id": "manifest_a",
+                "manifest_revision": "manifest_rev_1",
+                "endpoint": {
+                    "endpoint_id": "endpoint_a",
+                    "adapter_name": "adapter_a",
+                    "adapter_revision": "adapter_rev_1",
+                },
+            },
+        )
 
     def test_real_lifecycle_component_mutations_kill_evidence(self) -> None:
         original_initialized = LifecycleState.initialized.__func__
@@ -341,6 +371,46 @@ class RuntimeAdapterLifecycleEvidenceTests(unittest.TestCase):
                 with self.assertRaises(LifecycleEvidenceFailure):
                     build_lifecycle_evidence(self.protocol)
 
+    def test_real_manifest_provenance_component_mutations_kill_evidence(self) -> None:
+        original_resolve = _lifecycle_module()._CountingRegistry.resolve
+        original_validate = _lifecycle_module().validate_initialized_identity
+        original_initialize_params = _lifecycle_module()._initialize_params_from_resolved
+        original_handle_text = ReferenceAdapter.handle_text
+
+        def double_resolve(self, adapter_id):
+            original_resolve(self, adapter_id)
+            return original_resolve(self, adapter_id)
+
+        def reject_valid_identity(resolved, initialized):
+            raise ManifestResolutionError("valid identity rejected")
+
+        def caller_sourced_params(resolved, caller_payload):
+            params = dict(original_initialize_params(resolved, caller_payload))
+            params["adapter_id"] = caller_payload["adapter_id"]
+            return params
+
+        def accept_initialize_notification(self, raw):
+            if '"method":"initialize"' in raw and '"id"' not in raw:
+                return "{}"
+            return original_handle_text(self, raw)
+
+        mutations = (
+            (mock.patch.object(_lifecycle_module()._CountingRegistry, "resolve", double_resolve), "one resolve"),
+            (
+                mock.patch.object(_lifecycle_module(), "validate_initialized_identity", reject_valid_identity),
+                "identity validation",
+            ),
+            (
+                mock.patch.object(_lifecycle_module(), "_initialize_params_from_resolved", caller_sourced_params),
+                "single-source provenance",
+            ),
+            (mock.patch.object(ReferenceAdapter, "handle_text", accept_initialize_notification), "notification reject"),
+        )
+        for patcher, name in mutations:
+            with self.subTest(name=name), patcher:
+                with self.assertRaises(LifecycleEvidenceFailure):
+                    build_lifecycle_evidence(self.protocol)
+
     def test_build_claim_still_gaps_host_harness_rows_and_deferred_cd830(self) -> None:
         result = build_claim(self.protocol)
 
@@ -348,6 +418,7 @@ class RuntimeAdapterLifecycleEvidenceTests(unittest.TestCase):
         gap_keys = {gap["clause_key"] for gap in result.gaps}
         self.assertLessEqual(HOST_HARNESS_KEYS, gap_keys)
         self.assertLessEqual(DEFERRED_RECOVERY_ADMISSION_KEYS, gap_keys)
+        self.assertLessEqual(DEFERRED_C16_KEYS, gap_keys)
 
     def test_lifecycle_ledger_is_scoped_disjoint_from_existing_ledgers(self) -> None:
         lifecycle = build_lifecycle_evidence(self.protocol)
@@ -399,6 +470,14 @@ class RuntimeAdapterLifecycleEvidenceTests(unittest.TestCase):
             (
                 "The host MUST record its own\n    outbound protocol fault",
                 "The host MUST record an\n    outbound protocol fault",
+            ),
+            (
+                "The host MUST\n   construct its params only after trusted manifest and exact registry lookup",
+                "The host MUST\n   construct its params after trusted manifest and exact registry lookup",
+            ),
+            (
+                "The `initialize` adapter and manifest identity/revision members MUST come from\n   that same lookup",
+                "The `initialize` adapter and manifest identity/revision members MUST come from\n   a matching lookup",
             ),
         )
         for old, new in replacements:
