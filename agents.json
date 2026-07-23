@@ -68,6 +68,17 @@
         "ax_app": "ZCode",
         "ax_attended_only": true
       }
+    },
+    {
+      "id": "kimi",
+      "display_name": "Kimi",
+      "role": "implementation",
+      "notes": "Implementation for nuvyr; pairs with zcode. K3 model (Kimi Mac app).",
+      "activation": {
+        "type": "cli_session",
+        "watcher_enabled": true,
+        "ax_app": "Kimi"
+      }
     }
   ]
 }
