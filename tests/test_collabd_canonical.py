@@ -104,6 +104,138 @@ def record_registry_for_control(
     return revision
 
 
+def open_v8_memory(*, foreign_keys: bool = True) -> sqlite3.Connection:
+    connection = sqlite3.connect(":memory:")
+    connection.execute(f"PRAGMA foreign_keys = {'ON' if foreign_keys else 'OFF'}")
+    for _version, statements in store_module.MIGRATIONS:
+        for statement in statements:
+            connection.execute(statement)
+    return connection
+
+
+def seed_v8_participant(
+    connection: sqlite3.Connection,
+    *,
+    workspace_id: str = WORKSPACE,
+    scope_kind: str = "project",
+    scope_identity: str = PROJECT,
+    conversation_id: str = "CHAT-SAMEID",
+    participant_id: str = "participant_codex",
+    agent_id: str = "agent_codex",
+) -> None:
+    connection.execute(
+        """
+        INSERT INTO conversation_participants
+        (workspace_id, scope_kind, scope_identity, conversation_id, participant_id, agent_id, created_at_utc)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (workspace_id, scope_kind, scope_identity, conversation_id, participant_id, agent_id, NOW),
+    )
+
+
+def seed_v8_provider(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        INSERT INTO lifecycle_provider_registry
+        (
+            workspace_id, provider_id, provider_revision, trust_class,
+            supported_operations_json, challenge_algorithm, challenge_ttl_seconds, created_at_utc
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            WORKSPACE,
+            "provider_codex",
+            "revision_1",
+            "managed",
+            '["attach","heartbeat","retire"]',
+            "sha256",
+            60,
+            NOW,
+        ),
+    )
+
+
+def insert_v8_binding(
+    connection: sqlite3.Connection,
+    *,
+    scope_identity: str = PROJECT,
+    participant_id: str = "participant_codex",
+    binding_id: str = "binding_one",
+    generation: int = 1,
+    state: str = "active",
+    endpoint_id: str = "endpoint_codex",
+    session_ref_id: str = "session_ref_one",
+    native_session_id: str = "native_session_one",
+    runtime_instance_id: str = "runtime_one",
+    mutation_capable: int = 1,
+) -> None:
+    connection.execute(
+        """
+        INSERT INTO conversation_bindings
+        (
+            workspace_id, scope_kind, scope_identity, conversation_id, participant_id,
+            binding_id, generation, state, mutation_capable, provider_id,
+            provider_revision, endpoint_id, session_ref_id, native_session_id,
+            runtime_instance_id, registered_at_utc
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            WORKSPACE,
+            "project",
+            scope_identity,
+            "CHAT-SAMEID",
+            participant_id,
+            binding_id,
+            generation,
+            state,
+            mutation_capable,
+            "provider_codex",
+            "revision_1",
+            endpoint_id,
+            session_ref_id,
+            native_session_id,
+            runtime_instance_id,
+            NOW,
+        ),
+    )
+
+
+def insert_v8_challenge(connection: sqlite3.Connection, *, challenge_id: str = "challenge_one") -> None:
+    connection.execute(
+        """
+        INSERT INTO session_binding_challenges
+        (
+            workspace_id, scope_kind, scope_identity, conversation_id, participant_id,
+            challenge_id, challenge_state, provider_id, provider_revision, endpoint_id,
+            session_ref_id, native_session_id, runtime_instance_id, challenge_token_sha256,
+            expires_at_utc, created_at_utc, consumed_at_utc
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            WORKSPACE,
+            "project",
+            PROJECT,
+            "CHAT-SAMEID",
+            "participant_codex",
+            challenge_id,
+            "pending",
+            "provider_codex",
+            "revision_1",
+            "endpoint_codex",
+            "session_ref_one",
+            "native_session_one",
+            "runtime_one",
+            "a" * 64,
+            "2026-07-23T23:59:00+00:00",
+            NOW,
+            None,
+        ),
+    )
+
+
 def intent(**changes: object) -> dict[str, object]:
     result: dict[str, object] = {
         "workspace_id": WORKSPACE,
@@ -546,8 +678,9 @@ class CompatibilityProjectionTest(unittest.TestCase):
             "V5_SQL": "eae06938359660ded4c99531b46e2de2cc29b8785feb36bcc8bc0fd47a9247be",
             "V6_SQL": "225ece18916fa29ceb40bb72543bf499c42a31a3cd0d38114be0def830570b44",
             "V7_SQL": "2de4a95aaf7f92fb436772b5cf4fede42db485ae464809b9a23f9c8ccc6dda03",
+            "V8_SQL": "21f2d8971cad7428b0da108df3b64f7f05e3f92ad05ac53cba2209cb13ae63cd",
         }
-        self.assertEqual(store_module.SCHEMA_VERSION, 7)
+        self.assertEqual(store_module.SCHEMA_VERSION, 8)
         self.assertEqual(
             {
                 name: hashlib.sha256("\n".join(getattr(store_module, name)).encode()).hexdigest()
@@ -564,6 +697,7 @@ class CompatibilityProjectionTest(unittest.TestCase):
                 store_module.V5_MIGRATION_CHECKSUM,
                 store_module.V6_MIGRATION_CHECKSUM,
                 store_module.V7_MIGRATION_CHECKSUM,
+                store_module.V8_MIGRATION_CHECKSUM,
                 store_module.V1_SCHEMA_FINGERPRINT,
                 store_module.V2_SCHEMA_FINGERPRINT,
                 store_module.V3_SCHEMA_FINGERPRINT,
@@ -571,6 +705,7 @@ class CompatibilityProjectionTest(unittest.TestCase):
                 store_module.V5_SCHEMA_FINGERPRINT,
                 store_module.V6_SCHEMA_FINGERPRINT,
                 store_module.V7_SCHEMA_FINGERPRINT,
+                store_module.V8_SCHEMA_FINGERPRINT,
             ),
             (
                 "sha256:ce236daff444f736e01f3666ed44baf1c3ba17e81215fedb638276aff76b01c7",
@@ -580,6 +715,7 @@ class CompatibilityProjectionTest(unittest.TestCase):
                 "sha256:d6498cf5728ec3d56c0d1360a065243d72384a0de50af55bead8054881bbd9b9",
                 "sha256:56e7ca2ba9eb0a8eb79079372abdc7a39c024977e71a40931b8b60a6acc33c00",
                 "sha256:2de4a95aaf7f92fb436772b5cf4fede42db485ae464809b9a23f9c8ccc6dda03",
+                "sha256:437fe52450978b246b2a62fd5a0a0f08ddbf4f3f97501dafda0eb999e48580ff",
                 "sha256:26a856329406e45d22a8fbecdbd769d9c632acae3652d8c72438d228de7cfca2",
                 "sha256:805aa5ae43c31d85dbe9a84590050b701ddc69cfe1dd225e9c6e67afbd889a7c",
                 "sha256:88e59c9be91df366c03985f99f8b3db1c68382b4846612c0334fd15cc505e673",
@@ -587,8 +723,343 @@ class CompatibilityProjectionTest(unittest.TestCase):
                 "sha256:4495eab6339d339b770442d994b5878e0743d011917cc99b370991a793891a99",
                 "sha256:eb8bc4ddd4348ce05874b91c63ce963c5bb3653636363b7437e2046900996d60",
                 "sha256:3fd3ca002c8571ff90165da045929aedd520d2a891a8b95b2a36ba07569c32e1",
+                "sha256:9aefd9f214307d6645358444485b632dcbfc8c1a809a0c3708c369909abdaf3f",
             ),
         )
+
+    def test_v8_has_no_conversation_table(self) -> None:
+        with open_v8_memory() as connection:
+            self.assertNotIn(
+                "conversations",
+                {
+                    row[0]
+                    for row in connection.execute(
+                        "SELECT name FROM sqlite_schema WHERE type = 'table'"
+                    )
+                },
+            )
+
+    def test_v8_rejects_nul_in_every_new_text_column(self) -> None:
+        nul = "a" * 32 + "\x00" + "junk"
+
+        def assert_rejects(
+            table: str, columns: list[str], values: list[object], text_columns: list[str]
+        ) -> None:
+            placeholders = ", ".join("?" for _ in columns)
+            sql = f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({placeholders})"
+            for column in text_columns:
+                mutated = list(values)
+                mutated[columns.index(column)] = nul
+                with self.subTest(table=table, column=column), open_v8_memory(
+                    foreign_keys=False
+                ) as connection, self.assertRaises(sqlite3.IntegrityError):
+                    connection.execute(sql, mutated)
+
+        participant_columns = [
+            "workspace_id",
+            "scope_kind",
+            "scope_identity",
+            "conversation_id",
+            "participant_id",
+            "agent_id",
+            "created_at_utc",
+        ]
+        assert_rejects(
+            "conversation_participants",
+            participant_columns,
+            [WORKSPACE, "project", PROJECT, "CHAT-SAMEID", "participant_codex", "agent_codex", NOW],
+            participant_columns,
+        )
+
+        provider_columns = [
+            "workspace_id",
+            "provider_id",
+            "provider_revision",
+            "trust_class",
+            "supported_operations_json",
+            "challenge_algorithm",
+            "challenge_ttl_seconds",
+            "created_at_utc",
+        ]
+        assert_rejects(
+            "lifecycle_provider_registry",
+            provider_columns,
+            [WORKSPACE, "provider_codex", "revision_1", "managed", '["attach"]', "sha256", 60, NOW],
+            [column for column in provider_columns if column != "challenge_ttl_seconds"],
+        )
+
+        binding_columns = [
+            "workspace_id",
+            "scope_kind",
+            "scope_identity",
+            "conversation_id",
+            "participant_id",
+            "binding_id",
+            "generation",
+            "state",
+            "mutation_capable",
+            "provider_id",
+            "provider_revision",
+            "endpoint_id",
+            "session_ref_id",
+            "native_session_id",
+            "runtime_instance_id",
+            "registered_at_utc",
+        ]
+        assert_rejects(
+            "conversation_bindings",
+            binding_columns,
+            [
+                WORKSPACE,
+                "project",
+                PROJECT,
+                "CHAT-SAMEID",
+                "participant_codex",
+                "binding_one",
+                1,
+                "active",
+                1,
+                "provider_codex",
+                "revision_1",
+                "endpoint_codex",
+                "session_ref_one",
+                "native_session_one",
+                "runtime_one",
+                NOW,
+            ],
+            [
+                column
+                for column in binding_columns
+                if column not in {"generation", "mutation_capable"}
+            ],
+        )
+
+        challenge_columns = [
+            "workspace_id",
+            "scope_kind",
+            "scope_identity",
+            "conversation_id",
+            "participant_id",
+            "challenge_id",
+            "challenge_state",
+            "provider_id",
+            "provider_revision",
+            "endpoint_id",
+            "session_ref_id",
+            "native_session_id",
+            "runtime_instance_id",
+            "challenge_token_sha256",
+            "expires_at_utc",
+            "created_at_utc",
+            "consumed_at_utc",
+        ]
+        assert_rejects(
+            "session_binding_challenges",
+            challenge_columns,
+            [
+                WORKSPACE,
+                "project",
+                PROJECT,
+                "CHAT-SAMEID",
+                "participant_codex",
+                "challenge_one",
+                "pending",
+                "provider_codex",
+                "revision_1",
+                "endpoint_codex",
+                "session_ref_one",
+                "native_session_one",
+                "runtime_one",
+                "a" * 64,
+                "2026-07-23T23:59:00+00:00",
+                NOW,
+                None,
+            ],
+            [column for column in challenge_columns if column != "consumed_at_utc"],
+        )
+
+    def test_v8_same_chat_id_across_projects_is_distinct(self) -> None:
+        with open_v8_memory() as connection:
+            seed_v8_provider(connection)
+            seed_v8_participant(connection, scope_identity=PROJECT, participant_id="participant_codex")
+            seed_v8_participant(
+                connection,
+                scope_identity=OTHER_PROJECT,
+                participant_id="participant_codex",
+                agent_id="agent_codex",
+            )
+            insert_v8_binding(
+                connection,
+                scope_identity=PROJECT,
+                participant_id="participant_codex",
+                binding_id="binding_amiga",
+                native_session_id="native_session_amiga",
+            )
+            insert_v8_binding(
+                connection,
+                scope_identity=OTHER_PROJECT,
+                participant_id="participant_codex",
+                binding_id="binding_nuvyr",
+                native_session_id="native_session_nuvyr",
+                generation=1,
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT count(*) FROM conversation_bindings WHERE conversation_id = ?",
+                    ("CHAT-SAMEID",),
+                ).fetchone()[0],
+                2,
+            )
+
+    def test_v8_active_binding_uniqueness_allows_rebind_after_supersede(self) -> None:
+        with open_v8_memory() as connection:
+            seed_v8_provider(connection)
+            seed_v8_participant(connection)
+            insert_v8_binding(connection)
+            with self.assertRaises(sqlite3.IntegrityError):
+                insert_v8_binding(
+                    connection,
+                    binding_id="binding_two",
+                    generation=2,
+                    native_session_id="native_session_two",
+                    session_ref_id="session_ref_two",
+                    runtime_instance_id="runtime_two",
+                )
+            connection.execute(
+                "UPDATE conversation_bindings SET state = 'superseded' WHERE binding_id = 'binding_one'"
+            )
+            insert_v8_binding(connection, binding_id="binding_two", generation=2)
+            self.assertEqual(
+                connection.execute(
+                    "SELECT binding_id FROM conversation_bindings WHERE state = 'active'"
+                ).fetchall(),
+                [("binding_two",)],
+            )
+
+    def test_v8_native_session_owner_tuple_is_exact_both_directions(self) -> None:
+        with open_v8_memory() as connection:
+            seed_v8_provider(connection)
+            seed_v8_participant(connection, participant_id="participant_codex")
+            seed_v8_participant(connection, participant_id="participant_claude", agent_id="agent_claude")
+            insert_v8_binding(connection, participant_id="participant_codex")
+            with self.assertRaises(sqlite3.IntegrityError):
+                insert_v8_binding(
+                    connection,
+                    participant_id="participant_claude",
+                    binding_id="binding_claude",
+                    generation=1,
+                )
+            insert_v8_binding(
+                connection,
+                participant_id="participant_claude",
+                binding_id="binding_claude_other_native",
+                generation=1,
+                endpoint_id="endpoint_claude",
+                session_ref_id="session_ref_two",
+                native_session_id="native_session_two",
+                runtime_instance_id="runtime_two",
+            )
+            self.assertEqual(
+                connection.execute("SELECT count(*) FROM conversation_bindings").fetchone()[0],
+                2,
+            )
+
+    def test_v8_generation_trigger_and_stale_current_lookup(self) -> None:
+        with open_v8_memory() as connection:
+            seed_v8_provider(connection)
+            seed_v8_participant(connection)
+            insert_v8_binding(connection)
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "monotonic"):
+                insert_v8_binding(
+                    connection,
+                    binding_id="binding_equal_generation",
+                    generation=1,
+                    state="retired",
+                    mutation_capable=0,
+                    native_session_id="native_session_two",
+                    session_ref_id="session_ref_two",
+                    runtime_instance_id="runtime_two",
+                )
+            connection.execute(
+                "UPDATE conversation_bindings SET state = 'superseded' WHERE binding_id = 'binding_one'"
+            )
+            insert_v8_binding(connection, binding_id="binding_two", generation=2)
+            self.assertEqual(
+                connection.execute(
+                    """
+                    SELECT binding_id FROM conversation_bindings
+                    WHERE workspace_id = ? AND scope_kind = ? AND scope_identity = ?
+                      AND conversation_id = ? AND participant_id = ?
+                      AND generation = ? AND state = 'active'
+                    """,
+                    (WORKSPACE, "project", PROJECT, "CHAT-SAMEID", "participant_codex", 1),
+                ).fetchall(),
+                [],
+            )
+            self.assertEqual(
+                connection.execute(
+                    """
+                    SELECT binding_id FROM conversation_bindings
+                    WHERE workspace_id = ? AND scope_kind = ? AND scope_identity = ?
+                      AND conversation_id = ? AND participant_id = ?
+                      AND generation = ? AND state = 'active'
+                    """,
+                    (WORKSPACE, "project", PROJECT, "CHAT-SAMEID", "participant_codex", 2),
+                ).fetchall(),
+                [("binding_two",)],
+            )
+
+    def test_v8_unverified_binding_is_not_current_mutation_owner(self) -> None:
+        with open_v8_memory() as connection:
+            seed_v8_provider(connection)
+            seed_v8_participant(connection)
+            insert_v8_binding(connection, state="unverified")
+            self.assertEqual(
+                connection.execute(
+                    "SELECT binding_id FROM conversation_bindings WHERE mutation_capable = 1 AND state IN ('active', 'draining')"
+                ).fetchall(),
+                [],
+            )
+
+    def test_v8_challenge_shape_is_bounded_and_one_time(self) -> None:
+        with open_v8_memory() as connection:
+            seed_v8_provider(connection)
+            seed_v8_participant(connection)
+            insert_v8_challenge(connection)
+            with self.assertRaises(sqlite3.IntegrityError):
+                insert_v8_challenge(connection)
+            with self.assertRaises(sqlite3.IntegrityError):
+                connection.execute(
+                    """
+                    INSERT INTO session_binding_challenges
+                    (
+                        workspace_id, scope_kind, scope_identity, conversation_id, participant_id,
+                        challenge_id, challenge_state, provider_id, provider_revision, endpoint_id,
+                        session_ref_id, native_session_id, runtime_instance_id, challenge_token_sha256,
+                        expires_at_utc, created_at_utc, consumed_at_utc
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        WORKSPACE,
+                        "project",
+                        PROJECT,
+                        "CHAT-SAMEID",
+                        "participant_codex",
+                        "challenge_consumed_without_time",
+                        "consumed",
+                        "provider_codex",
+                        "revision_1",
+                        "endpoint_codex",
+                        "session_ref_one",
+                        "native_session_one",
+                        "runtime_one",
+                        "a" * 64,
+                        "2026-07-23T23:59:00+00:00",
+                        NOW,
+                        None,
+                    ),
+                )
 
     def test_p2d_ast_import_graph_has_no_bin_path_to_projection(self) -> None:
         root = Path(__file__).parents[1]

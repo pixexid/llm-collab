@@ -18,7 +18,7 @@ from pathlib import Path
 from .paths import LedgerPaths, validate_project_id, validate_registry_token, validate_workspace_id
 
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 BUSY_TIMEOUT_MS = 5_000
 SYNCHRONOUS_FULL = 2
 MIGRATION_TOOL_VERSION = "llm-collab-ledger/1"
@@ -65,6 +65,14 @@ V6_TABLES = V5_TABLES | frozenset(
     }
 )
 V7_TABLES = V6_TABLES | frozenset({"observation_scheduler_cursors"})
+V8_TABLES = V7_TABLES | frozenset(
+    {
+        "conversation_participants",
+        "lifecycle_provider_registry",
+        "conversation_bindings",
+        "session_binding_challenges",
+    }
+)
 
 
 class SQLiteSafetyError(RuntimeError):
@@ -2263,6 +2271,207 @@ V7_SQL = (
 )
 V7_MIGRATION_CHECKSUM = "sha256:2de4a95aaf7f92fb436772b5cf4fede42db485ae464809b9a23f9c8ccc6dda03"
 V7_SCHEMA_FINGERPRINT = "sha256:3fd3ca002c8571ff90165da045929aedd520d2a891a8b95b2a36ba07569c32e1"
+V8_SQL = (
+    """
+    CREATE TABLE conversation_participants (
+        workspace_id TEXT NOT NULL
+            CHECK (instr(workspace_id, char(0)) = 0 AND length(CAST(workspace_id AS BLOB)) BETWEEN 3 AND 131),
+        scope_kind TEXT NOT NULL
+            CHECK (
+                instr(scope_kind, char(0)) = 0
+                AND length(CAST(scope_kind AS BLOB)) BETWEEN 7 AND 9
+                AND scope_kind IN ('project', 'workspace')
+            ),
+        scope_identity TEXT NOT NULL
+            CHECK (instr(scope_identity, char(0)) = 0 AND length(CAST(scope_identity AS BLOB)) BETWEEN 1 AND 200),
+        conversation_id TEXT NOT NULL
+            CHECK (instr(conversation_id, char(0)) = 0 AND length(CAST(conversation_id AS BLOB)) BETWEEN 6 AND 128),
+        participant_id TEXT NOT NULL
+            CHECK (instr(participant_id, char(0)) = 0 AND length(CAST(participant_id AS BLOB)) BETWEEN 3 AND 128),
+        agent_id TEXT NOT NULL
+            CHECK (instr(agent_id, char(0)) = 0 AND length(CAST(agent_id AS BLOB)) BETWEEN 3 AND 128),
+        created_at_utc TEXT NOT NULL
+            CHECK (instr(created_at_utc, char(0)) = 0 AND length(CAST(created_at_utc AS BLOB)) BETWEEN 1 AND 64),
+        PRIMARY KEY (workspace_id, scope_kind, scope_identity, conversation_id, participant_id)
+    ) STRICT
+    """,
+    """
+    CREATE TABLE lifecycle_provider_registry (
+        workspace_id TEXT NOT NULL
+            CHECK (instr(workspace_id, char(0)) = 0 AND length(CAST(workspace_id AS BLOB)) BETWEEN 3 AND 131),
+        provider_id TEXT NOT NULL
+            CHECK (instr(provider_id, char(0)) = 0 AND length(CAST(provider_id AS BLOB)) BETWEEN 3 AND 128),
+        provider_revision TEXT NOT NULL
+            CHECK (instr(provider_revision, char(0)) = 0 AND length(CAST(provider_revision AS BLOB)) BETWEEN 8 AND 128),
+        trust_class TEXT NOT NULL
+            CHECK (
+                instr(trust_class, char(0)) = 0
+                AND length(CAST(trust_class AS BLOB)) BETWEEN 6 AND 32
+                AND trust_class IN ('managed', 'native_attached', 'ui_attached', 'pull_only', 'human')
+            ),
+        supported_operations_json TEXT NOT NULL
+            CHECK (instr(supported_operations_json, char(0)) = 0 AND length(CAST(supported_operations_json AS BLOB)) BETWEEN 2 AND 4096),
+        challenge_algorithm TEXT NOT NULL
+            CHECK (instr(challenge_algorithm, char(0)) = 0 AND length(CAST(challenge_algorithm AS BLOB)) BETWEEN 3 AND 64),
+        challenge_ttl_seconds INTEGER NOT NULL
+            CHECK (typeof(challenge_ttl_seconds) = 'integer' AND challenge_ttl_seconds BETWEEN 1 AND 3600),
+        created_at_utc TEXT NOT NULL
+            CHECK (instr(created_at_utc, char(0)) = 0 AND length(CAST(created_at_utc AS BLOB)) BETWEEN 1 AND 64),
+        PRIMARY KEY (workspace_id, provider_id, provider_revision)
+    ) STRICT
+    """,
+    """
+    CREATE TABLE conversation_bindings (
+        workspace_id TEXT NOT NULL
+            CHECK (instr(workspace_id, char(0)) = 0 AND length(CAST(workspace_id AS BLOB)) BETWEEN 3 AND 131),
+        scope_kind TEXT NOT NULL
+            CHECK (
+                instr(scope_kind, char(0)) = 0
+                AND length(CAST(scope_kind AS BLOB)) BETWEEN 7 AND 9
+                AND scope_kind IN ('project', 'workspace')
+            ),
+        scope_identity TEXT NOT NULL
+            CHECK (instr(scope_identity, char(0)) = 0 AND length(CAST(scope_identity AS BLOB)) BETWEEN 1 AND 200),
+        conversation_id TEXT NOT NULL
+            CHECK (instr(conversation_id, char(0)) = 0 AND length(CAST(conversation_id AS BLOB)) BETWEEN 6 AND 128),
+        participant_id TEXT NOT NULL
+            CHECK (instr(participant_id, char(0)) = 0 AND length(CAST(participant_id AS BLOB)) BETWEEN 3 AND 128),
+        binding_id TEXT NOT NULL
+            CHECK (instr(binding_id, char(0)) = 0 AND length(CAST(binding_id AS BLOB)) BETWEEN 8 AND 128),
+        generation INTEGER NOT NULL
+            CHECK (typeof(generation) = 'integer' AND generation > 0),
+        state TEXT NOT NULL
+            CHECK (
+                instr(state, char(0)) = 0
+                AND length(CAST(state AS BLOB)) BETWEEN 6 AND 12
+                AND state IN ('reserved', 'registering', 'active', 'draining', 'unverified', 'superseded', 'retired', 'quarantined')
+            ),
+        mutation_capable INTEGER NOT NULL
+            CHECK (mutation_capable IN (0, 1)),
+        provider_id TEXT NOT NULL
+            CHECK (instr(provider_id, char(0)) = 0 AND length(CAST(provider_id AS BLOB)) BETWEEN 3 AND 128),
+        provider_revision TEXT NOT NULL
+            CHECK (instr(provider_revision, char(0)) = 0 AND length(CAST(provider_revision AS BLOB)) BETWEEN 8 AND 128),
+        endpoint_id TEXT NOT NULL
+            CHECK (instr(endpoint_id, char(0)) = 0 AND length(CAST(endpoint_id AS BLOB)) BETWEEN 3 AND 128),
+        session_ref_id TEXT NOT NULL
+            CHECK (instr(session_ref_id, char(0)) = 0 AND length(CAST(session_ref_id AS BLOB)) BETWEEN 3 AND 128),
+        native_session_id TEXT NOT NULL
+            CHECK (instr(native_session_id, char(0)) = 0 AND length(CAST(native_session_id AS BLOB)) BETWEEN 3 AND 256),
+        runtime_instance_id TEXT NOT NULL
+            CHECK (instr(runtime_instance_id, char(0)) = 0 AND length(CAST(runtime_instance_id AS BLOB)) BETWEEN 3 AND 128),
+        registered_at_utc TEXT NOT NULL
+            CHECK (instr(registered_at_utc, char(0)) = 0 AND length(CAST(registered_at_utc AS BLOB)) BETWEEN 1 AND 64),
+        PRIMARY KEY (workspace_id, binding_id),
+        FOREIGN KEY (workspace_id, scope_kind, scope_identity, conversation_id, participant_id)
+            REFERENCES conversation_participants
+                (workspace_id, scope_kind, scope_identity, conversation_id, participant_id)
+            ON DELETE RESTRICT,
+        FOREIGN KEY (workspace_id, provider_id, provider_revision)
+            REFERENCES lifecycle_provider_registry
+                (workspace_id, provider_id, provider_revision)
+            ON DELETE RESTRICT
+    ) STRICT
+    """,
+    """
+    CREATE UNIQUE INDEX conversation_bindings_one_active_mutation_binding
+    ON conversation_bindings (
+        workspace_id, scope_kind, scope_identity, conversation_id, participant_id
+    )
+    WHERE mutation_capable = 1 AND state IN ('active', 'draining')
+    """,
+    """
+    CREATE UNIQUE INDEX conversation_bindings_one_mutation_owner_per_native_session
+    ON conversation_bindings (
+        workspace_id, provider_id, endpoint_id, session_ref_id, native_session_id, runtime_instance_id
+    )
+    WHERE mutation_capable = 1 AND state IN ('active', 'draining')
+    """,
+    """
+    CREATE TRIGGER conversation_bindings_generation_monotonic
+    BEFORE INSERT ON conversation_bindings
+    WHEN EXISTS (
+        SELECT 1
+        FROM conversation_bindings
+        WHERE workspace_id = NEW.workspace_id
+          AND scope_kind = NEW.scope_kind
+          AND scope_identity = NEW.scope_identity
+          AND conversation_id = NEW.conversation_id
+          AND participant_id = NEW.participant_id
+          AND generation >= NEW.generation
+    )
+    BEGIN
+        SELECT RAISE(ABORT, 'conversation binding generation must be monotonic');
+    END
+    """,
+    """
+    CREATE TABLE session_binding_challenges (
+        workspace_id TEXT NOT NULL
+            CHECK (instr(workspace_id, char(0)) = 0 AND length(CAST(workspace_id AS BLOB)) BETWEEN 3 AND 131),
+        scope_kind TEXT NOT NULL
+            CHECK (
+                instr(scope_kind, char(0)) = 0
+                AND length(CAST(scope_kind AS BLOB)) BETWEEN 7 AND 9
+                AND scope_kind IN ('project', 'workspace')
+            ),
+        scope_identity TEXT NOT NULL
+            CHECK (instr(scope_identity, char(0)) = 0 AND length(CAST(scope_identity AS BLOB)) BETWEEN 1 AND 200),
+        conversation_id TEXT NOT NULL
+            CHECK (instr(conversation_id, char(0)) = 0 AND length(CAST(conversation_id AS BLOB)) BETWEEN 6 AND 128),
+        participant_id TEXT NOT NULL
+            CHECK (instr(participant_id, char(0)) = 0 AND length(CAST(participant_id AS BLOB)) BETWEEN 3 AND 128),
+        challenge_id TEXT NOT NULL
+            CHECK (instr(challenge_id, char(0)) = 0 AND length(CAST(challenge_id AS BLOB)) BETWEEN 8 AND 128),
+        challenge_state TEXT NOT NULL
+            CHECK (
+                instr(challenge_state, char(0)) = 0
+                AND length(CAST(challenge_state AS BLOB)) BETWEEN 6 AND 8
+                AND challenge_state IN ('pending', 'consumed', 'expired')
+            ),
+        provider_id TEXT NOT NULL
+            CHECK (instr(provider_id, char(0)) = 0 AND length(CAST(provider_id AS BLOB)) BETWEEN 3 AND 128),
+        provider_revision TEXT NOT NULL
+            CHECK (instr(provider_revision, char(0)) = 0 AND length(CAST(provider_revision AS BLOB)) BETWEEN 8 AND 128),
+        endpoint_id TEXT NOT NULL
+            CHECK (instr(endpoint_id, char(0)) = 0 AND length(CAST(endpoint_id AS BLOB)) BETWEEN 3 AND 128),
+        session_ref_id TEXT NOT NULL
+            CHECK (instr(session_ref_id, char(0)) = 0 AND length(CAST(session_ref_id AS BLOB)) BETWEEN 3 AND 128),
+        native_session_id TEXT NOT NULL
+            CHECK (instr(native_session_id, char(0)) = 0 AND length(CAST(native_session_id AS BLOB)) BETWEEN 3 AND 256),
+        runtime_instance_id TEXT NOT NULL
+            CHECK (instr(runtime_instance_id, char(0)) = 0 AND length(CAST(runtime_instance_id AS BLOB)) BETWEEN 3 AND 128),
+        challenge_token_sha256 TEXT NOT NULL
+            CHECK (instr(challenge_token_sha256, char(0)) = 0 AND length(CAST(challenge_token_sha256 AS BLOB)) = 64),
+        expires_at_utc TEXT NOT NULL
+            CHECK (instr(expires_at_utc, char(0)) = 0 AND length(CAST(expires_at_utc AS BLOB)) BETWEEN 1 AND 64),
+        created_at_utc TEXT NOT NULL
+            CHECK (instr(created_at_utc, char(0)) = 0 AND length(CAST(created_at_utc AS BLOB)) BETWEEN 1 AND 64),
+        consumed_at_utc TEXT
+            CHECK (
+                consumed_at_utc IS NULL
+                OR (
+                    instr(consumed_at_utc, char(0)) = 0
+                    AND length(CAST(consumed_at_utc AS BLOB)) BETWEEN 1 AND 64
+                )
+            ),
+        PRIMARY KEY (workspace_id, challenge_id),
+        FOREIGN KEY (workspace_id, scope_kind, scope_identity, conversation_id, participant_id)
+            REFERENCES conversation_participants
+                (workspace_id, scope_kind, scope_identity, conversation_id, participant_id)
+            ON DELETE RESTRICT,
+        FOREIGN KEY (workspace_id, provider_id, provider_revision)
+            REFERENCES lifecycle_provider_registry
+                (workspace_id, provider_id, provider_revision)
+            ON DELETE RESTRICT,
+        CHECK (
+            (challenge_state = 'consumed' AND consumed_at_utc IS NOT NULL)
+            OR (challenge_state IN ('pending', 'expired') AND consumed_at_utc IS NULL)
+        )
+    ) STRICT
+    """,
+)
+V8_MIGRATION_CHECKSUM = "sha256:437fe52450978b246b2a62fd5a0a0f08ddbf4f3f97501dafda0eb999e48580ff"
+V8_SCHEMA_FINGERPRINT = "sha256:9aefd9f214307d6645358444485b632dcbfc8c1a809a0c3708c369909abdaf3f"
 MIGRATIONS = (
     (1, V1_SQL),
     (2, V2_SQL),
@@ -2271,6 +2480,7 @@ MIGRATIONS = (
     (5, V5_SQL),
     (6, V6_SQL),
     (7, V7_SQL),
+    (8, V8_SQL),
 )
 
 
@@ -2353,6 +2563,25 @@ def _v7_schema_fingerprint_from_sql() -> str:
     connection = sqlite3.connect(":memory:", isolation_level=None)
     try:
         for statement in (*V1_SQL, *V2_SQL, *V3_SQL, *V4_SQL, *V5_SQL, *V6_SQL, *V7_SQL):
+            connection.execute(statement)
+        return _schema_fingerprint(connection)
+    finally:
+        connection.close()
+
+
+def _v8_schema_fingerprint_from_sql() -> str:
+    connection = sqlite3.connect(":memory:", isolation_level=None)
+    try:
+        for statement in (
+            *V1_SQL,
+            *V2_SQL,
+            *V3_SQL,
+            *V4_SQL,
+            *V5_SQL,
+            *V6_SQL,
+            *V7_SQL,
+            *V8_SQL,
+        ):
             connection.execute(statement)
         return _schema_fingerprint(connection)
     finally:
@@ -2770,8 +2999,12 @@ class LedgerStore:
                 raise MigrationError("released v7 migration checksum is incoherent")
             if _v7_schema_fingerprint_from_sql() != V7_SCHEMA_FINGERPRINT:
                 raise MigrationError("released v7 schema fingerprint is incoherent")
+            if _migration_checksum(V8_SQL) != V8_MIGRATION_CHECKSUM:
+                raise MigrationError("released v8 migration checksum is incoherent")
+            if _v8_schema_fingerprint_from_sql() != V8_SCHEMA_FINGERPRINT:
+                raise MigrationError("released v8 schema fingerprint is incoherent")
             rows = cls._migration_rows(connection)
-            if [row[0] for row in rows] != [1, 2, 3, 4, 5, 6, 7]:
+            if [row[0] for row in rows] != [1, 2, 3, 4, 5, 6, 7, 8]:
                 raise MigrationError("ledger migration metadata is incoherent")
             cls._validate_migration_row(rows[0], V1_MIGRATION_CHECKSUM, 0, paths)
             cls._validate_migration_row(rows[1], V2_MIGRATION_CHECKSUM, 1, paths)
@@ -2780,15 +3013,16 @@ class LedgerStore:
             cls._validate_migration_row(rows[4], V5_MIGRATION_CHECKSUM, 4, paths)
             cls._validate_migration_row(rows[5], V6_MIGRATION_CHECKSUM, 5, paths)
             cls._validate_migration_row(rows[6], V7_MIGRATION_CHECKSUM, 6, paths)
+            cls._validate_migration_row(rows[7], V8_MIGRATION_CHECKSUM, 7, paths)
             actual_tables = cls._table_names(connection)
-            if actual_tables != V7_TABLES:
+            if actual_tables != V8_TABLES:
                 raise MigrationError(
-                    "ledger v7 table set is incoherent: "
-                    f"missing={sorted(V7_TABLES - actual_tables)}, "
-                    f"extra={sorted(actual_tables - V7_TABLES)}"
+                    "ledger v8 table set is incoherent: "
+                    f"missing={sorted(V8_TABLES - actual_tables)}, "
+                    f"extra={sorted(actual_tables - V8_TABLES)}"
                 )
-            if _schema_fingerprint(connection) != V7_SCHEMA_FINGERPRINT:
-                raise MigrationError("ledger v7 schema fingerprint is incoherent")
+            if _schema_fingerprint(connection) != V8_SCHEMA_FINGERPRINT:
+                raise MigrationError("ledger v8 schema fingerprint is incoherent")
         except sqlite3.DatabaseError as exc:
             raise MigrationError("ledger schema is corrupt or incoherent") from exc
 
@@ -3068,6 +3302,7 @@ class LedgerStore:
                     5: V5_MIGRATION_CHECKSUM,
                     6: V6_MIGRATION_CHECKSUM,
                     7: V7_MIGRATION_CHECKSUM,
+                    8: V8_MIGRATION_CHECKSUM,
                 }.get(version)
                 if expected_checksum is None or checksum != expected_checksum:
                     raise MigrationError(f"migration {version} does not match its released checksum")
@@ -3093,6 +3328,7 @@ class LedgerStore:
                     5: V5_SCHEMA_FINGERPRINT,
                     6: V6_SCHEMA_FINGERPRINT,
                     7: V7_SCHEMA_FINGERPRINT,
+                    8: V8_SCHEMA_FINGERPRINT,
                 }[version]
                 if _schema_fingerprint(self._connection) != expected_fingerprint:
                     raise MigrationError(f"migration {version} produced an incoherent schema")
