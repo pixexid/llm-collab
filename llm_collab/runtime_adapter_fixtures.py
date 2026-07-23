@@ -434,6 +434,31 @@ FIXTURES: tuple[RuntimeAdapterFixture, ...] = (
         ),
     ),
     RuntimeAdapterFixture(
+        fixture_id="runtime-adapter-reconcile-rejects-session-ref-schema-drift",
+        polarity=POLARITY_VIOLATING,
+        clause_refs=(
+            ClauseReference(
+                clause_key="C930c3ccd59a0.1",
+                text_sha256="930c3ccd59a0f29e02b46317f30aa3130821fbc53ade72e31aeee680e80a5fd3",
+                polarity=POLARITY_VIOLATING,
+            ),
+        ),
+        trace=(
+            *_initialize_trace(),
+            _reconcile_trace(
+                _session_ref_with(lambda value: value.__setitem__("extensions", {"trace": "optional"})),
+                "reconcile-session-ref-schema-drift",
+            ),
+        ),
+        expectation=ExpectedRefusal(
+            error_name="INVALID_PARAMS",
+            error_code=-32602,
+            state_effect=NO_STATE_CHANGE,
+            response_emitted=True,
+            closes_connection=False,
+        ),
+    ),
+    RuntimeAdapterFixture(
         fixture_id="runtime-adapter-shutdown-rejects-session-selector",
         polarity=POLARITY_VIOLATING,
         clause_refs=(
