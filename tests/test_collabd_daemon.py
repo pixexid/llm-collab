@@ -93,6 +93,13 @@ class DaemonTest(unittest.TestCase):
         self.assertTrue(self.paths.socket.exists())
         return server, thread
 
+    def wait_for_log(self) -> Path:
+        deadline = time.monotonic() + 2
+        while not self.paths.log.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertTrue(self.paths.log.exists(), "daemon started log was not written")
+        return self.paths.log
+
     def request(self, value: bytes) -> dict:
         client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
@@ -118,10 +125,11 @@ class DaemonTest(unittest.TestCase):
     def test_lifecycle_writer_lock_modes_and_restart(self) -> None:
         _server, active = self.start()
         try:
+            log = self.wait_for_log()
             self.assertEqual(self.paths.socket.stat().st_mode & 0o777, 0o600)
             self.assertEqual(self.paths.workspace_root.stat().st_mode & 0o777, 0o700)
             self.assertEqual(self.paths.logs.stat().st_mode & 0o777, 0o700)
-            for artifact in (self.paths.ledger, self.paths.lock, self.paths.log):
+            for artifact in (self.paths.ledger, self.paths.lock, log):
                 self.assertEqual(artifact.stat().st_mode & 0o777, 0o600)
             self.assertTrue(self.request(b'{"version":1,"op":"status"}')["running"])
             with self.assertRaises(Exception):
@@ -135,6 +143,27 @@ class DaemonTest(unittest.TestCase):
         finally:
             if active.is_alive():
                 self.stop(active)
+
+    def test_status_readiness_does_not_require_started_log_artifact(self) -> None:
+        original_write_log = DaemonServer._write_log
+        skipped_started_log = threading.Event()
+
+        def write_log(server: DaemonServer, event: dict[str, object]) -> None:
+            if event.get("event") == "started":
+                skipped_started_log.set()
+                return
+            original_write_log(server, event)
+
+        with patch.object(DaemonServer, "_write_log", autospec=True, side_effect=write_log):
+            _server, active = self.start()
+            try:
+                self.assertTrue(skipped_started_log.wait(1))
+                self.assertFalse(self.paths.log.exists())
+                self.assertTrue(self.request(b'{"version":1,"op":"status"}')["running"])
+                self.assertEqual(self.request(b'{"version":1,"op":"logs"}')["logs"], [])
+            finally:
+                if active.is_alive():
+                    self.stop(active)
 
     def test_gated_off_holds_the_same_lock_without_opening_or_creating_a_ledger(self) -> None:
         self.declaration.write_text(declaration(False))
