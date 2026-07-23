@@ -87,6 +87,22 @@ class AdapterIdentity:
             },
         }
 
+    def _capability_evidence(self) -> Mapping[str, Any]:
+        evidence = {
+            "evidence_kind": "profile_attestation",
+            "source_id": self.adapter_id,
+            "source_revision": self.adapter_revision,
+        }
+        return {**evidence, "integrity": _canonical_digest(evidence)}
+
+    def _authoritative_capability(self, capability: str) -> Mapping[str, Any]:
+        return {
+            "capability": capability,
+            "quality": "authoritative",
+            "constraints": {"access_mode": "observe_only"},
+            "evidence": self._capability_evidence(),
+        }
+
     def initialize_result(self) -> Mapping[str, Any]:
         return {
             "negotiated_protocol_version": NEGOTIATED_PROTOCOL_VERSION,
@@ -103,8 +119,8 @@ class AdapterIdentity:
                 "revision": self.capability_set_revision,
                 "capabilities": (
                     {"capability": "runtime.health", "quality": "unsupported"},
-                    {"capability": "runtime.reconcile", "quality": "authoritative"},
-                    {"capability": "runtime_profile", "quality": "authoritative"},
+                    self._authoritative_capability("runtime.reconcile"),
+                    self._authoritative_capability("runtime_profile"),
                 ),
             },
         }

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import copy
 import hashlib
 import inspect
 import io
@@ -11,6 +12,16 @@ import sys
 import unittest
 from pathlib import Path
 from types import MappingProxyType
+
+try:
+    from jsonschema import Draft202012Validator, FormatChecker
+    from referencing import Registry, Resource
+    from referencing.jsonschema import DRAFT202012
+except ImportError as exc:  # canonical acceptance must fail, never skip
+    raise RuntimeError(
+        "Runtime adapter reference tests require jsonschema and referencing; "
+        "run `pip install -r requirements-dev.txt`."
+    ) from exc
 
 import llm_collab.runtime_adapter_conformance as conformance
 from llm_collab.runtime_adapter_conformance import (
@@ -42,6 +53,8 @@ from llm_collab.runtime_adapter_supervisor import StdioSupervisor
 ROOT = Path(__file__).resolve().parents[1]
 MODULE_PATH = ROOT / "llm_collab" / "runtime_adapter_reference.py"
 PROTOCOL_PATH = ROOT / "docs" / "protocols" / "runtime-adapter-jsonrpc-v1.md"
+SCHEMA_DIR = ROOT / "schemas" / "standalone" / "v1"
+CAPABILITY_SET_SCHEMA_ID = "https://llm-collab.dev/schemas/standalone/v1/capability-set.schema.json"
 ENDPOINT = {
     "schema_version": 1,
     "workspace_id": "ws_alpha",
@@ -59,6 +72,34 @@ ENDPOINT = {
         "reference": "reference_alpha",
     },
 }
+
+
+def no_network(uri: str):
+    raise LookupError(f"offline standalone schema registry has no resource for {uri}")
+
+
+def load_json(path: Path) -> dict:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def capability_set_validator():
+    catalog = load_json(SCHEMA_DIR / "index.json")
+    schemas = [load_json(path) for path in SCHEMA_DIR.glob("*.schema.json")]
+    resources = [(schema["$id"], Resource.from_contents(schema)) for schema in schemas]
+    resources.append(
+        (
+            catalog["catalog_id"],
+            Resource.from_contents(catalog, default_specification=DRAFT202012),
+        )
+    )
+    registry = Registry(retrieve=no_network).with_resources(resources)
+    schema = registry.contents(CAPABILITY_SET_SCHEMA_ID)
+    Draft202012Validator.check_schema(schema)
+    return Draft202012Validator(schema, registry=registry, format_checker=FormatChecker())
+
+
+def capability_set_errors(value: dict) -> list[str]:
+    return sorted(error.message for error in capability_set_validator().iter_errors(value))
 
 
 def manifest(*, inject: str | None = None) -> dict:
@@ -162,20 +203,27 @@ class RuntimeAdapterReferenceTests(unittest.TestCase):
             validate_response(init_obj, "initialize-1")
             self.assertEqual(init_obj["result"]["negotiated_protocol_version"], "1.0")
             self.assertEqual(init_obj["result"]["endpoint"]["endpoint_id"], "endpoint_alpha")
+            self.assertEqual([], capability_set_errors(init_obj["result"]["capability_set"]))
             self.assertEqual(
                 set(init_obj["result"]["capability_set"]),
                 {"schema_version", "workspace_id", "scope", "capability_set_id", "revision", "capabilities"},
             )
-            self.assertEqual(init_obj["result"]["capability_set"]["capability_set_id"], "caps_alpha")
-            self.assertEqual(init_obj["result"]["capability_set"]["capabilities"][0]["quality"], "unsupported")
-            self.assertIn(
-                {"capability": "runtime_profile", "quality": "authoritative"},
-                init_obj["result"]["capability_set"]["capabilities"],
-            )
-            self.assertIn(
-                {"capability": "runtime.reconcile", "quality": "authoritative"},
-                init_obj["result"]["capability_set"]["capabilities"],
-            )
+            capability_set = init_obj["result"]["capability_set"]
+            self.assertEqual(capability_set["capability_set_id"], "caps_alpha")
+            capabilities = {item["capability"]: item for item in capability_set["capabilities"]}
+            self.assertEqual(set(capabilities), {"runtime.health", "runtime.reconcile", "runtime_profile"})
+            self.assertEqual(capabilities["runtime.health"], {"capability": "runtime.health", "quality": "unsupported"})
+            for name in ("runtime.reconcile", "runtime_profile"):
+                with self.subTest(capability=name):
+                    row = capabilities[name]
+                    self.assertEqual(row["quality"], "authoritative")
+                    self.assertEqual(row["constraints"], {"access_mode": "observe_only"})
+                    self.assertEqual(
+                        row["evidence"]["evidence_kind"],
+                        "profile_attestation",
+                    )
+                    self.assertEqual(row["evidence"]["source_id"], "adapter_alpha")
+                    self.assertEqual(row["evidence"]["source_revision"], "adapter_rev1")
 
             health = supervisor.request(frame("runtime.health", {}, "health-1"), timeout_seconds=5)
             self.assertIsNone(health.fault)
@@ -198,6 +246,24 @@ class RuntimeAdapterReferenceTests(unittest.TestCase):
                 },
             )
             self.assertEqual(health_obj["result"]["status"], "healthy")
+
+    def test_initialize_capability_set_requires_authoritative_constraints(self) -> None:
+        capability_set = json.loads(json.dumps(ReferenceAdapter()._identity.initialize_result()["capability_set"]))
+        for row in capability_set["capabilities"]:
+            if row["capability"] == "runtime.reconcile":
+                row.pop("constraints")
+                break
+
+        self.assertNotEqual([], capability_set_errors(capability_set))
+
+    def test_initialize_capability_set_forbids_unsupported_authority_fields(self) -> None:
+        capability_set = json.loads(json.dumps(ReferenceAdapter()._identity.initialize_result()["capability_set"]))
+        authoritative = next(row for row in capability_set["capabilities"] if row["quality"] == "authoritative")
+        unsupported = next(row for row in capability_set["capabilities"] if row["quality"] == "unsupported")
+        unsupported["constraints"] = copy.deepcopy(authoritative["constraints"])
+        unsupported["evidence"] = copy.deepcopy(authoritative["evidence"])
+
+        self.assertNotEqual([], capability_set_errors(capability_set))
 
     def test_default_adapter_rejects_post_initialize_method_before_successful_initialize(self) -> None:
         adapter = ReferenceAdapter()
