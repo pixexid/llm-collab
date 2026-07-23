@@ -633,6 +633,56 @@ class DaemonTest(unittest.TestCase):
             self.assertEqual(cli.main(["daemon", "doctor"]), 2)
             self.assertEqual(cli.main(["doctor"]), 0)
 
+    def test_public_wrapper_reports_shipped_daemon_usage(self) -> None:
+        wrapper = Path(__file__).parents[1] / "bin" / "llm-collab"
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            invalid_verb = subprocess.run(
+                [os.fspath(wrapper), "daemon", "restart"],
+                cwd=tmp,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(invalid_verb.returncode, 2)
+            self.assertIn("bin/llm-collab daemon <start|stop|status|logs>", invalid_verb.stderr)
+            self.assertIn("bin/llm-collab doctor", invalid_verb.stderr)
+            self.assertNotIn("llm-collabd", invalid_verb.stderr)
+
+            nested_doctor = subprocess.run(
+                [os.fspath(wrapper), "daemon", "doctor"],
+                cwd=tmp,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(nested_doctor.returncode, 2)
+            self.assertIn("bin/llm-collab doctor", nested_doctor.stderr)
+            self.assertNotIn("llm-collabd", nested_doctor.stderr)
+
+            top_level_doctor = subprocess.run(
+                [os.fspath(wrapper), "doctor"],
+                cwd=tmp,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(top_level_doctor.returncode, 1)
+            self.assertIn("llm-collab:", top_level_doctor.stderr)
+            self.assertNotIn("usage:", top_level_doctor.stderr)
+            self.assertNotIn("llm-collabd", top_level_doctor.stderr)
+
+            background_start = subprocess.run(
+                [os.fspath(wrapper), "daemon", "start", "--background"],
+                cwd=tmp,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(background_start.returncode, 1)
+            self.assertIn("llm-collab:", background_start.stderr)
+            self.assertNotIn("usage:", background_start.stderr)
+            self.assertNotIn("llm-collabd", background_start.stderr)
+
     def test_cli_route_is_fixed_and_no_second_flock_exists(self) -> None:
         launcher = (Path(__file__).parents[1] / "bin" / "llm-collab").read_text()
         source = inspect.getsource(DaemonServer)
