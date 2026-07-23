@@ -559,6 +559,58 @@ class ActivationLeaseTest(unittest.TestCase):
         self.assertEqual("owner_pid_not_live", refused["reason"])
         self.assertEqual([], self.lease_records(root))
 
+    def test_runtime_claim_refuses_unknown_positive_owner_pid(self):
+        def claim_with_liveness(owner_pid: int | None, alive: dict[int, bool | None]) -> dict:
+            root = self.make_workspace()
+            self.register_session(root, "SESSION-A", runtime_id="runtime-a")
+            identity = lease_lib.lease_identity(
+                {
+                    "project": "amiga",
+                    "chat": "CHAT-TEST0001",
+                    "task": "TASK-TEST01",
+                    "worktree": str(self.worktree),
+                    "branch": "codex/gh-1571-test",
+                    "target_agent": "claude",
+                }
+            )
+            with (
+                patch.object(
+                    session_autobridge_lib,
+                    "SESSIONS_DIR",
+                    root / "State" / "session_autobridge" / "sessions",
+                ),
+                patch.object(
+                    lease_lib,
+                    "ACTIVATION_LEASES_DIR",
+                    root / "State" / "session_autobridge" / "activation_leases",
+                ),
+                patch.object(
+                    lease_lib,
+                    "ACTIVATION_GRANT_LOCK",
+                    root / "State" / "session_autobridge" / "activation_leases" / ".claim-grant.lock",
+                ),
+                patch.object(lease_lib, "process_alive", side_effect=lambda pid: alive.get(pid)),
+            ):
+                return lease_lib.claim_lease(
+                    identity,
+                    owner_session_id="SESSION-A",
+                    owner_pid=owner_pid,
+                    claimant_runtime_id="runtime-a",
+                    takeover=True,
+                )
+
+        with self.assertRaises(lease_lib.LeaseRefused) as ctx:
+            claim_with_liveness(999999, {999999: None})
+        self.assertEqual("owner_pid_not_live", ctx.exception.reason)
+
+        runtime_only = claim_with_liveness(None, {})
+        self.assertIsNone(runtime_only["owner_pid"])
+        self.assertEqual("runtime-a", runtime_only["owner_runtime_session_id"])
+
+        live_pid = claim_with_liveness(999999, {999999: True})
+        self.assertEqual(999999, live_pid["owner_pid"])
+        self.assertEqual("runtime-a", live_pid["owner_runtime_session_id"])
+
     def test_session_identity_must_match_activation_identity(self):
         root = self.make_workspace()
         self.add_agent(root, "codex")
@@ -1142,7 +1194,7 @@ class ActivationLeaseTest(unittest.TestCase):
 
     def test_malformed_active_alias_lease_fields_fail_closed_without_mutation(self):
         cases = []
-        for field in ("worktree_realpath", "lease_key", "owner_session_id", "status"):
+        for field in ("worktree_realpath", "lease_key", "owner_session_id", "status", "lease_expires_utc"):
             cases.extend(
                 (
                     (field, "missing", object()),
@@ -1150,6 +1202,7 @@ class ActivationLeaseTest(unittest.TestCase):
                     (field, "wrong_type", 123),
                 )
             )
+        cases.append(("lease_expires_utc", "malformed", "not-a-timestamp"))
         for field, reason, value in cases:
             with self.subTest(field=field, reason=reason):
                 root = self.make_workspace()
@@ -1203,6 +1256,35 @@ class ActivationLeaseTest(unittest.TestCase):
                 )
                 after = {path.name: path.read_text() for path in lease_dir.glob("*.json")}
                 self.assertEqual(before, after)
+
+    def test_released_alias_lease_with_malformed_expiry_does_not_block_reclaim(self):
+        root = self.make_workspace()
+        self.register_session(root, "SESSION-A", runtime_id="runtime-a")
+        self.register_session(root, "SESSION-B", runtime_id="runtime-b")
+        claimed, code = self.claim(root, "SESSION-A", "--claimant-runtime-id", "runtime-a")
+        self.assertEqual(0, code, claimed)
+        released, code = self.run_cli(
+            root,
+            "lease-release",
+            *self.identity_args(),
+            "--session",
+            "SESSION-A",
+            "--fence-token",
+            str(claimed["lease"]["fence_token"]),
+            "--claimant-runtime-id",
+            "runtime-a",
+        )
+        self.assertEqual(0, code, released)
+        lease_file = next((root / "State" / "session_autobridge" / "activation_leases").glob("*.json"))
+        payload = json.loads(lease_file.read_text())
+        payload["lease_expires_utc"] = "not-a-timestamp"
+        write_json(lease_file, payload)
+
+        reclaimed, code = self.claim(root, "SESSION-B", "--claimant-runtime-id", "runtime-b")
+
+        self.assertEqual(0, code, reclaimed)
+        self.assertEqual("active", reclaimed["lease"]["status"])
+        self.assertEqual("SESSION-B", reclaimed["lease"]["owner_session_id"])
 
     def test_active_alias_lease_filename_payload_binding_fails_closed_without_mutation(self):
         cases = (
@@ -1386,7 +1468,7 @@ class ActivationLeaseTest(unittest.TestCase):
 
     def test_assert_and_release_validate_loaded_lease_structure_without_mutation(self):
         cases = []
-        for field in ("worktree_realpath", "lease_key", "owner_session_id", "status"):
+        for field in ("worktree_realpath", "lease_key", "owner_session_id", "status", "lease_expires_utc"):
             cases.extend(
                 (
                     (field, "missing", object()),
@@ -1394,6 +1476,7 @@ class ActivationLeaseTest(unittest.TestCase):
                     (field, "wrong_type", 123),
                 )
             )
+        cases.append(("lease_expires_utc", "malformed", "not-a-timestamp"))
         for command in ("lease-assert", "lease-release"):
             for field, reason, value in cases:
                 with self.subTest(command=command, field=field, reason=reason):

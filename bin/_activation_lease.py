@@ -107,7 +107,7 @@ def _validate_active_lease_state(
         if lease_is_expired(payload):
             return
         raise _malformed_lease_state(path, "status", status_problem)
-    if payload["status"] != "active" or lease_is_expired(payload):
+    if payload["status"] != "active" or _active_lease_expired_or_corrupt(payload, path):
         return
     for field in ("worktree_realpath", "lease_key", "owner_session_id"):
         problem = _field_problem(payload, field)
@@ -186,7 +186,7 @@ def validate_lease_and_claimant(
     )
     if fence_token is not None and int(lease.get("fence_token", -1)) != int(fence_token):
         raise LeaseRefused("stale_fence_token", owner_summary(lease))
-    if lease_is_expired(lease):
+    if _active_lease_expired_or_corrupt(lease, lease_path(identity)):
         raise LeaseRefused("lease_expired", owner_summary(lease))
     return lease
 
@@ -373,6 +373,16 @@ def lease_is_expired(lease: dict[str, Any]) -> bool:
     return expires_at is not None and expires_at <= _now()
 
 
+def _active_lease_expired_or_corrupt(lease: dict[str, Any], path: Path) -> bool:
+    problem = _field_problem(lease, "lease_expires_utc")
+    if problem is not None:
+        raise _malformed_lease_state(path, "lease_expires_utc", problem)
+    expires_at = parse_iso8601(lease["lease_expires_utc"])
+    if expires_at is None:
+        raise _malformed_lease_state(path, "lease_expires_utc", "malformed")
+    return expires_at <= _now()
+
+
 def owner_summary(lease: dict[str, Any]) -> dict[str, Any]:
     return {
         "lease_key": lease.get("lease_key"),
@@ -400,7 +410,7 @@ def _resolve_claimant(
             {"detail": "--owner-pid must be a positive process id"},
         )
     pid_live = process_alive(pid)
-    if pid is not None and pid_live is False:
+    if pid is not None and pid_live is not True:
         raise LeaseRefused(
             "owner_pid_not_live",
             {"detail": "--owner-pid must name a live process"},
