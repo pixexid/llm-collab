@@ -350,7 +350,7 @@ class ReferenceAdapter:
         delivery_status = self._delivery_validation_status(delivery, session_ref)
         if delivery_status == "schema":
             return self._error(request_id, "INVALID_PARAMS")
-        if delivery_status == "identity":
+        if delivery_status in {"identity", "integrity"}:
             return self._error(request_id, "INVALID_DELIVERY")
         self._scope = session_ref["scope"]
         return self._result(request_id, self._deliver_receipt(session_ref, delivery))
@@ -540,6 +540,8 @@ class ReferenceAdapter:
             or authority["implementation_revision"] != self._identity.adapter_revision
         ):
             return "schema"
+        if evidence["integrity"] != _canonical_digest(evidence):
+            return "integrity"
         subject = evidence["subject"]
         if not isinstance(subject, Mapping) or set(subject) != {
             "message_id",

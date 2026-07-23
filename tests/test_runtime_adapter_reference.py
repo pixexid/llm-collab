@@ -855,7 +855,7 @@ class RuntimeAdapterReferenceTests(unittest.TestCase):
                 )
                 self.assertEqual(response["error"]["data"]["name"], "INVALID_DELIVERY")
 
-    def test_deliver_carries_but_does_not_recompute_delivery_integrity(self) -> None:
+    def test_deliver_recomputes_delivery_integrity_before_accepting(self) -> None:
         adapter = ReferenceAdapter()
         adapter.handle_text(initialize_frame())
         deliver = delivery()
@@ -867,7 +867,7 @@ class RuntimeAdapterReferenceTests(unittest.TestCase):
             or "{}"
         )
 
-        self.assertEqual(response["result"]["state"], "routed")
+        self.assertEqual(response["error"]["data"]["name"], "INVALID_DELIVERY")
 
     def test_reconcile_refuses_unknown_original_request_instead_of_fabricating_message_id(self) -> None:
         adapter = ReferenceAdapter()
