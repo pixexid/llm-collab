@@ -368,11 +368,27 @@ def _initialize_trace() -> tuple[TraceFrame, TraceFrame]:
     )
 
 
+def _initialize_params_with(mutator) -> Mapping[str, Any]:
+    params = _thaw(_INITIALIZE_PARAMS)
+    mutator(params)
+    return _freeze(params)
+
+
 FIXTURES: tuple[RuntimeAdapterFixture, ...] = (
     RuntimeAdapterFixture(
         fixture_id="runtime-adapter-health-request",
         polarity=POLARITY_CONFORMING,
         clause_refs=(
+            ClauseReference(
+                clause_key="C6e51fab4b16d.1",
+                text_sha256="6e51fab4b16da068bc9dd50ac48ea851bd842dc34323065cdaa0dd859afce7e6",
+                polarity=POLARITY_CONFORMING,
+            ),
+            ClauseReference(
+                clause_key="C1c1a8c844fde.1",
+                text_sha256="1c1a8c844fdefa0d250b1cd4bc77cacf87e2dacb5c436ccbb460db19e7e87efa",
+                polarity=POLARITY_CONFORMING,
+            ),
             ClauseReference(
                 clause_key="C45acb2959726.1",
                 text_sha256="45acb2959726b90f0cb7cc42d2825e8d80971c663143653f0db0bc8673ed9d18",
@@ -782,6 +798,98 @@ FIXTURES: tuple[RuntimeAdapterFixture, ...] = (
         ),
     ),
     RuntimeAdapterFixture(
+        fixture_id="runtime-adapter-initialize-rejects-bad-params",
+        polarity=POLARITY_VIOLATING,
+        clause_refs=(
+            ClauseReference(
+                clause_key="C35ad6e99e97c.1",
+                text_sha256="35ad6e99e97c28d50e38ca1d0add9f44758f7be0483a20f402512340a0587369",
+                polarity=POLARITY_VIOLATING,
+            ),
+            ClauseReference(
+                clause_key="Cc1f582727d06.1",
+                text_sha256="c1f582727d063a14d6384cc788f9b7be332235f122c6d4be0e967b2917e11a85",
+                polarity=POLARITY_VIOLATING,
+            ),
+        ),
+        trace=(
+            TraceFrame(
+                "host",
+                "adapter",
+                _request(
+                    "initialize",
+                    _initialize_params_with(lambda params: params.pop("manifest_revision")),
+                    "initialize-bad-params",
+                ),
+            ),
+        ),
+        expectation=ExpectedRefusal(
+            error_name="INVALID_PARAMS",
+            error_code=-32602,
+            state_effect=NO_STATE_CHANGE,
+            response_emitted=True,
+            closes_connection=False,
+        ),
+    ),
+    RuntimeAdapterFixture(
+        fixture_id="runtime-adapter-initialize-rejects-unsupported-version",
+        polarity=POLARITY_VIOLATING,
+        clause_refs=(
+            ClauseReference(
+                clause_key="Cd29f1b437866.1",
+                text_sha256="d29f1b4378669ee5251ae89c496627de0e8e2f518e5594dfeddada4f37148d96",
+                polarity=POLARITY_VIOLATING,
+            ),
+            ClauseReference(
+                clause_key="Cc1f582727d06.1",
+                text_sha256="c1f582727d063a14d6384cc788f9b7be332235f122c6d4be0e967b2917e11a85",
+                polarity=POLARITY_VIOLATING,
+            ),
+        ),
+        trace=(
+            TraceFrame(
+                "host",
+                "adapter",
+                _request(
+                    "initialize",
+                    _initialize_params_with(lambda params: params.__setitem__("requested_protocol_version", "2.0")),
+                    "initialize-bad-version",
+                ),
+            ),
+        ),
+        expectation=ExpectedRefusal(
+            error_name="UNSUPPORTED_PROTOCOL_VERSION",
+            error_code=-32004,
+            state_effect=NO_STATE_CHANGE,
+            response_emitted=True,
+            closes_connection=True,
+        ),
+    ),
+    RuntimeAdapterFixture(
+        fixture_id="runtime-adapter-non-initialize-first-method-refuses",
+        polarity=POLARITY_VIOLATING,
+        clause_refs=(
+            ClauseReference(
+                clause_key="Cd29f1b437866.2",
+                text_sha256="d29f1b4378669ee5251ae89c496627de0e8e2f518e5594dfeddada4f37148d96",
+                polarity=POLARITY_VIOLATING,
+            ),
+            ClauseReference(
+                clause_key="Cc1f582727d06.1",
+                text_sha256="c1f582727d063a14d6384cc788f9b7be332235f122c6d4be0e967b2917e11a85",
+                polarity=POLARITY_VIOLATING,
+            ),
+        ),
+        trace=(TraceFrame("host", "adapter", _request("runtime.health", {}, "health-before-initialize")),),
+        expectation=ExpectedRefusal(
+            error_name="INITIALIZE_REQUIRED",
+            error_code=-32005,
+            state_effect=NO_STATE_CHANGE,
+            response_emitted=True,
+            closes_connection=True,
+        ),
+    ),
+    RuntimeAdapterFixture(
         fixture_id="runtime-adapter-host-response-is-direction-fault",
         polarity=POLARITY_VIOLATING,
         clause_refs=(
@@ -900,6 +1008,13 @@ def _derived_refusal(trace: TraceFrame, error_codes: Mapping[str, int]) -> tuple
     if trace.sender == "host" and trace.receiver == "adapter":
         try:
             _request_id, method, params = validate_request(frame)
+            if method == "initialize" and params.get("requested_protocol_version") != "1.0":
+                return (
+                    "UNSUPPORTED_PROTOCOL_VERSION",
+                    error_codes["UNSUPPORTED_PROTOCOL_VERSION"],
+                    True,
+                    True,
+                )
             _validate_request_params(method, params)
         except ConformanceFailure as error:
             if error.clause == "closed-method-set":
@@ -924,6 +1039,7 @@ def _validate_conforming_trace(fixture: RuntimeAdapterFixture) -> tuple[str, ...
     methods: list[str] = []
     initialized = False
     initialize_request_id: Any | None = None
+    initialize_params: Mapping[str, Any] | None = None
     for trace in fixture.trace:
         frame = _thaw(trace.frame)
         try:
@@ -936,6 +1052,7 @@ def _validate_conforming_trace(fixture: RuntimeAdapterFixture) -> tuple[str, ...
                     if methods:
                         raise ConformanceFailure("fixture-conforming-trace", fixture.fixture_id)
                     initialize_request_id = request_id
+                    initialize_params = params
                 elif not initialized:
                     raise ConformanceFailure("fixture-conforming-trace", fixture.fixture_id)
                 _validate_request_params(method, params)
@@ -950,6 +1067,8 @@ def _validate_conforming_trace(fixture: RuntimeAdapterFixture) -> tuple[str, ...
                     if "result" not in frame:
                         raise ConformanceFailure("fixture-conforming-trace", fixture.fixture_id)
                     _validate_initialize_result(frame["result"])
+                    if initialize_params is None or not _initialize_result_matches_request(initialize_params, frame["result"]):
+                        raise ConformanceFailure("fixture-conforming-trace", fixture.fixture_id)
                     initialized = True
         except ConformanceFailure as error:
             raise ConformanceFailure("fixture-conforming-trace", fixture.fixture_id) from error
@@ -1097,6 +1216,13 @@ def _validate_session_ref(value: Any) -> None:
 
 
 def _validate_request_params(method: str, params: Mapping[str, Any]) -> None:
+    if method == "initialize":
+        if params.get("requested_protocol_version") != "1.0":
+            raise ConformanceFailure("fixture-unsupported-version", method)
+        try:
+            validate_endpoint_v1(params["endpoint"])
+        except Exception as error:
+            raise ConformanceFailure("fixture-request-params", method) from error
     if method == "runtime.reconcile":
         _validate_session_ref(params["session_ref"])
     if method in {"runtime.cancel", "runtime.reconcile"}:
@@ -1281,6 +1407,25 @@ def _stateful_post_shutdown_refusal(
     return expected
 
 
+def _pre_initialize_refusal(
+    fixture: RuntimeAdapterFixture,
+    expected: tuple[str, int, bool, bool],
+) -> tuple[str, int, bool, bool] | None:
+    if expected != ("INITIALIZE_REQUIRED", -32005, True, True) or len(fixture.trace) != 1:
+        return None
+    trace = fixture.trace[0]
+    if trace.sender != "host" or trace.receiver != "adapter":
+        return None
+    try:
+        _request_id, method, params = validate_request(_thaw(trace.frame))
+        _validate_request_params(method, params)
+    except ConformanceFailure:
+        return None
+    if method == "initialize":
+        return None
+    return expected
+
+
 def _validate_clause_refs(
     fixture: RuntimeAdapterFixture,
     live_by_key: Mapping[str, Any],
@@ -1333,13 +1478,15 @@ def _validate_expectation(fixture: RuntimeAdapterFixture, error_codes: Mapping[s
         fixture.expectation.closes_connection,
     )
     stateful_refusal = _stateful_post_shutdown_refusal(fixture, expected)
-    if all(_request_would_be_accepted(frame) for frame in fixture.trace) and stateful_refusal is None:
+    pre_initialize_refusal = _pre_initialize_refusal(fixture, expected)
+    if all(_request_would_be_accepted(frame) for frame in fixture.trace) and stateful_refusal is None and pre_initialize_refusal is None:
         raise ConformanceFailure("fixture-violating-trace", fixture.fixture_id)
     derived = tuple(
         item
         for item in (
             *(_derived_refusal(frame, error_codes) for frame in fixture.trace),
             stateful_refusal,
+            pre_initialize_refusal,
         )
         if item is not None
     )
