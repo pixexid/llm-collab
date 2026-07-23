@@ -16,8 +16,14 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Mapping
 
-from llm_collab import runtime_adapter_state
-from llm_collab.runtime_adapter_conformance import extract_clause_occurrences
+from llm_collab import runtime_adapter_reference, runtime_adapter_state
+from llm_collab.runtime_adapter_conformance import (
+    ConformanceFailure,
+    JSONRPC_VERSION,
+    extract_clause_occurrences,
+    load_json_frame,
+    validate_response,
+)
 from llm_collab.runtime_adapter_lifecycle import (
     ADAPTER_UNHEALTHY,
     HEALTH_FAILURE_THRESHOLD,
@@ -31,7 +37,6 @@ from llm_collab.runtime_adapter_manifest import (
     TrustedManifestRegistry,
     validate_initialized_identity,
 )
-from llm_collab.runtime_adapter_reference import ReferenceAdapter
 from llm_collab.runtime_adapter_redaction import RedactedDocument, redact_document
 from llm_collab.runtime_adapter_requests import HEALTH_DEADLINE_MS
 
@@ -45,6 +50,10 @@ _RECOVERY_HEALTH_REQUEST_ID = "health-recovery"
 _PROTOCOL_HEALTH_INTERVAL_MS = 10_000
 _PROTOCOL_HEALTH_DEADLINE_MS = 5_000
 _RECOVERY_ADMISSION_DEFERRED = frozenset(("Cd830c5efc97b.1", "Cd830c5efc97b.2"))
+_DEFERRED_P6_REASON = (
+    "P6 capability/relation/evidence-profile ordering is proven by the separate "
+    "P6 authority layer; this P7 evidence child does not re-home P6 authority"
+)
 _ADAPTER_ID = "adapter_a"
 
 
@@ -127,6 +136,17 @@ class ManifestProvenanceObservation:
     deferred_c16_keys: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class P7IntegrityObservation:
+    adapter_rejects_delivery_digest_mismatch: bool
+    host_accepts_receipt_digest_match: bool
+    host_rejects_receipt_digest_mismatch: bool
+    invalid_adapter_output_quarantined: bool
+    digest_mismatch_quarantined: bool
+    both_delivery_and_receipt_recomputed: bool
+    deferred_p6_keys: tuple[str, ...]
+
+
 _LIFECYCLE_REFS: tuple[LifecycleClauseRef, ...] = (
     LifecycleClauseRef(
         "C2cd9421b9c86.1",
@@ -197,10 +217,64 @@ _PROVENANCE_REFS: tuple[LifecycleClauseRef, ...] = (
         "d87ad3561bfc524766bab5ae649be7a9a247e44968baa7ff30f73367331b6276",
     ),
 )
+_P7_REFS: tuple[LifecycleClauseRef, ...] = (
+    LifecycleClauseRef(
+        "C3db5b5acb8d7.1",
+        "3db5b5acb8d755ff7dc016825d2610d808894c045a0010ab19f5264a40eb563d",
+    ),
+    LifecycleClauseRef(
+        "Cbfa7351a2ba5.1",
+        "bfa7351a2ba5217f8317ff3e60b6107bac17f5984f6298bf55e3d96132739dec",
+    ),
+    LifecycleClauseRef(
+        "Cbfa7351a2ba5.2",
+        "bfa7351a2ba5217f8317ff3e60b6107bac17f5984f6298bf55e3d96132739dec",
+    ),
+    LifecycleClauseRef(
+        "Ce4dfe2af8d8d.1",
+        "e4dfe2af8d8d27981b22285ae598084b645d835c680f1ffd89bef9f32793ead7",
+    ),
+    LifecycleClauseRef(
+        "C0ed26afcfb8a.1",
+        "0ed26afcfb8aa9097690fa3c457dc5c50f32a67d95579f40f7906f1532be05f4",
+    ),
+)
 _DEFERRED_C16_KEYS = frozenset(
     ("C1731a3e18c8e.1", "C5bb2ba77ec3b.1", "C9138fb78426f.1", "Cf70f7c633f57.1")
 )
-_HOST_HARNESS_REFS = _LIFECYCLE_REFS + _RECOVERY_REFS + _PROVENANCE_REFS
+_DEFERRED_P6_REFS: tuple[LifecycleClauseRef, ...] = (
+    LifecycleClauseRef("C01d5a7107389.1", "01d5a71073894ddb534c3674e6936fab236b60edab465fa5b1c9cbf4522d2488"),
+    LifecycleClauseRef("C05530aaf0297.1", "05530aaf02977c0ac7d2e0c249bd575db9fbf24ed7a31a36f9348f5a699532bd"),
+    LifecycleClauseRef("C44a06b005f56.1", "44a06b005f5662e7f4fa46d1cf383b8417bc3a836ba1c9070d59a64af6fe0afe"),
+    LifecycleClauseRef("C468b7316502d.1", "468b7316502d0f2cefb597ef29cc0c6916a582f502e31afd16dcb14c39fe6597"),
+    LifecycleClauseRef("C4d3e4e331f8e.1", "4d3e4e331f8e53ecd604f1c2cff136e8936d61a52a6f3ea041adbeda1889d7c6"),
+    LifecycleClauseRef("C507960193aaf.1", "507960193aaf79c1ccc9c56b0d126c7aeadbef2d041d4e2c44a7338b2c7baa18"),
+    LifecycleClauseRef("C5203ae51498d.1", "5203ae51498d581ff10cfcc6a47efc2993b43b64faa821137b817c98e6ffe09c"),
+    LifecycleClauseRef("C60fb22117077.1", "60fb221170775d8f714b315a6b57c530b12407fa09518ea007fa9e096049d89e"),
+    LifecycleClauseRef("C8665d49fe212.1", "8665d49fe212552210f70c3a0533073be213d8098dbd424aa4ca5b2dd2d38cdc"),
+    LifecycleClauseRef("C8665d49fe212.2", "8665d49fe212552210f70c3a0533073be213d8098dbd424aa4ca5b2dd2d38cdc"),
+    LifecycleClauseRef("C8665d49fe212.3", "8665d49fe212552210f70c3a0533073be213d8098dbd424aa4ca5b2dd2d38cdc"),
+    LifecycleClauseRef("C991a6ee55456.1", "991a6ee5545671bb502dda700d3e91943c795f3c66f8e9eb845c2be3e98d616d"),
+    LifecycleClauseRef("Ca7d929aaf1c6.1", "a7d929aaf1c63b429198f409791e5c7d24ffb7d36608238ca35d2ba5f7887e8a"),
+    LifecycleClauseRef("Ca7d929aaf1c6.2", "a7d929aaf1c63b429198f409791e5c7d24ffb7d36608238ca35d2ba5f7887e8a"),
+    LifecycleClauseRef("Cbc69b8dc81fc.1", "bc69b8dc81fcea144e51a5270bcdb29c2eb0c433452f5f82562dd6e645640fff"),
+    LifecycleClauseRef("Cbc69b8dc81fc.2", "bc69b8dc81fcea144e51a5270bcdb29c2eb0c433452f5f82562dd6e645640fff"),
+    LifecycleClauseRef("Cbc69b8dc81fc.3", "bc69b8dc81fcea144e51a5270bcdb29c2eb0c433452f5f82562dd6e645640fff"),
+    LifecycleClauseRef("Cbc69b8dc81fc.4", "bc69b8dc81fcea144e51a5270bcdb29c2eb0c433452f5f82562dd6e645640fff"),
+    LifecycleClauseRef("Cfb24d181976b.1", "fb24d181976beafaddaa3154d7817d7b03000c52f19a1c833f364d34a927d888"),
+    LifecycleClauseRef("C41a1a5829726.1", "41a1a5829726cdb3a662114c0e3a61d41f189bd77a27edc18e8506c271a2ff57"),
+    LifecycleClauseRef("C1731a3e18c8e.1", "1731a3e18c8ee1db25836644fe5fc773d4d4fb6431f8f0c650a8050873958024"),
+    LifecycleClauseRef("C5bb2ba77ec3b.1", "5bb2ba77ec3ba5c9b332c3038a6440ec717e3041b3f595c54539050028ec75b6"),
+    LifecycleClauseRef("Cf70f7c633f57.1", "f70f7c633f5763d7f0ec9c4988a446f483a0de93898808321223cb96a99b10ce"),
+    LifecycleClauseRef("C9138fb78426f.1", "9138fb78426f2115fbe7b89e931ee608d883c6719e740b06b679d98b4422a1fd"),
+    LifecycleClauseRef("Cddf6725ddfa4.1", "ddf6725ddfa4c852fddc3e23a18ec7284f4ed5937d2d1e39987ce56f5bd177c9"),
+    LifecycleClauseRef("Ce45ac56f0f07.1", "e45ac56f0f07fd2baeb3ee641bd724b9232db5788d8e56cdaabbaa9ad1e603c6"),
+    LifecycleClauseRef("Ce45ac56f0f07.2", "e45ac56f0f07fd2baeb3ee641bd724b9232db5788d8e56cdaabbaa9ad1e603c6"),
+    LifecycleClauseRef("Cd849c64f4310.1", "d849c64f4310d86c0f7c36744eb493b022ccc3ab4622c77c396fe5ee3724d6dc"),
+)
+_DEFERRED_P6_KEYS = frozenset(ref.clause_key for ref in _DEFERRED_P6_REFS)
+_HOST_HARNESS_REFS = _LIFECYCLE_REFS + _RECOVERY_REFS + _PROVENANCE_REFS + _P7_REFS
+_VALIDATED_REFS = _HOST_HARNESS_REFS + _DEFERRED_P6_REFS
 
 
 def build_lifecycle_evidence(protocol_text: str) -> Mapping[str, object]:
@@ -210,9 +284,11 @@ def build_lifecycle_evidence(protocol_text: str) -> Mapping[str, object]:
     lifecycle = _lifecycle_observation()
     recovery = _recovery_observation()
     provenance = _manifest_provenance_observation()
+    p7 = _p7_integrity_observation()
     _validate_lifecycle_observation(lifecycle)
     _validate_recovery_observation(recovery)
     _validate_manifest_provenance_observation(provenance)
+    _validate_p7_integrity_observation(p7)
     return {
         "schema_version": 1,
         "protocol": "runtime-adapter-jsonrpc-v1",
@@ -283,13 +359,23 @@ def build_lifecycle_evidence(protocol_text: str) -> Mapping[str, object]:
                 "initialize_notification_rejected": provenance.initialize_notification_rejected,
                 "deferred_c16_keys": provenance.deferred_c16_keys,
             },
+            "p7_integrity": {
+                "adapter_rejects_delivery_digest_mismatch": p7.adapter_rejects_delivery_digest_mismatch,
+                "host_accepts_receipt_digest_match": p7.host_accepts_receipt_digest_match,
+                "host_rejects_receipt_digest_mismatch": p7.host_rejects_receipt_digest_mismatch,
+                "invalid_adapter_output_quarantined": p7.invalid_adapter_output_quarantined,
+                "digest_mismatch_quarantined": p7.digest_mismatch_quarantined,
+                "both_delivery_and_receipt_recomputed": p7.both_delivery_and_receipt_recomputed,
+                "deferred_p6_keys": p7.deferred_p6_keys,
+                "deferred_p6_reason": _DEFERRED_P6_REASON,
+            },
         },
     }
 
 
 def _validate_clause_refs(protocol_text: str) -> None:
     live = {clause.clause_key: clause for clause in extract_clause_occurrences(protocol_text)}
-    for ref in _HOST_HARNESS_REFS:
+    for ref in _VALIDATED_REFS:
         clause = live.get(ref.clause_key)
         if clause is None:
             raise LifecycleEvidenceFailure(f"missing lifecycle clause: {ref.clause_key}")
@@ -552,9 +638,218 @@ def _manifest_provenance_observation() -> ManifestProvenanceObservation:
         caller_identity_ignored=_caller_identity_ignored(params, caller_payload),
         same_lookup_identity=_params_match_resolved_lookup(params, resolved),
         initialized_identity_valid=True,
-        initialize_notification_rejected=ReferenceAdapter().handle_text(notification) is None,
+        initialize_notification_rejected=runtime_adapter_reference.ReferenceAdapter().handle_text(notification) is None,
         deferred_c16_keys=tuple(sorted(_DEFERRED_C16_KEYS)),
     )
+
+
+def _p7_integrity_observation() -> P7IntegrityObservation:
+    session = _session_ref()
+    delivery = _delivery()
+    receipt = _deliver_receipt(session, delivery)
+    tampered_delivery = _with_integrity(delivery, "sha256:" + ("0" * 64))
+    tampered_receipt = _with_integrity(receipt, "sha256:" + ("0" * 64))
+
+    adapter_rejects_delivery = _adapter_error_for_deliver(session, tampered_delivery) == "INVALID_DELIVERY"
+    host_accepts_receipt = _host_receipt_integrity_valid(receipt)
+    host_rejects_receipt = not _host_receipt_integrity_valid(tampered_receipt)
+    invalid_output = _record_invalid_adapter_output()
+    digest_mismatch = _record_digest_mismatch(tampered_receipt)
+
+    return P7IntegrityObservation(
+        adapter_rejects_delivery_digest_mismatch=adapter_rejects_delivery,
+        host_accepts_receipt_digest_match=host_accepts_receipt,
+        host_rejects_receipt_digest_mismatch=host_rejects_receipt,
+        invalid_adapter_output_quarantined=invalid_output.opened and invalid_output.unresolved_attempts == (
+            '{"request_id":"invalid-output"}',
+        ),
+        digest_mismatch_quarantined=digest_mismatch.opened and digest_mismatch.unresolved_attempts == (
+            '{"request_id":"digest-mismatch"}',
+        ),
+        both_delivery_and_receipt_recomputed=adapter_rejects_delivery and host_accepts_receipt and host_rejects_receipt,
+        deferred_p6_keys=tuple(sorted(_DEFERRED_P6_KEYS)),
+    )
+
+
+def _deliver_receipt(session_ref: Mapping[str, Any], delivery: Mapping[str, Any]) -> Mapping[str, Any]:
+    adapter = runtime_adapter_reference.ReferenceAdapter()
+    initialized = adapter.handle_text(_jsonrpc_frame("initialize", _initialize_params(), "init"))
+    _require_result(initialized, "init")
+    response = adapter.handle_text(
+        _jsonrpc_frame("runtime.deliver", {"session_ref": dict(session_ref), "delivery": dict(delivery)}, "deliver")
+    )
+    return _require_result(response, "deliver")
+
+
+def _adapter_error_for_deliver(session_ref: Mapping[str, Any], delivery: Mapping[str, Any]) -> str | None:
+    adapter = runtime_adapter_reference.ReferenceAdapter()
+    _require_result(adapter.handle_text(_jsonrpc_frame("initialize", _initialize_params(), "init")), "init")
+    raw = adapter.handle_text(
+        _jsonrpc_frame("runtime.deliver", {"session_ref": dict(session_ref), "delivery": dict(delivery)}, "deliver")
+    )
+    frame = load_json_frame(raw or "")
+    error = frame.get("error") if isinstance(frame, Mapping) else None
+    data = error.get("data") if isinstance(error, Mapping) else None
+    name = data.get("name") if isinstance(data, Mapping) else None
+    return name if isinstance(name, str) else None
+
+
+def _host_receipt_integrity_valid(receipt: Mapping[str, Any]) -> bool:
+    evidence = receipt.get("evidence")
+    return (
+        isinstance(evidence, Mapping)
+        and evidence.get("integrity") == runtime_adapter_reference._canonical_digest(evidence)
+    )
+
+
+def _record_invalid_adapter_output() -> runtime_adapter_state.AdapterRecordState:
+    adapter = runtime_adapter_reference.ReferenceAdapter(
+        fault_injection=runtime_adapter_reference.FAULT_CLOSED_ENVELOPE
+    )
+    raw = adapter.handle_text(_jsonrpc_frame("runtime.health", {}, "invalid-output"))
+    try:
+        validate_response(load_json_frame(raw or ""), "invalid-output")
+    except ConformanceFailure:
+        return _record_quarantined_p7_fault("invalid-output", "INVALID_OUTPUT")
+    raise LifecycleEvidenceFailure("invalid adapter output was accepted")
+
+
+def _record_digest_mismatch(receipt: Mapping[str, Any]) -> runtime_adapter_state.AdapterRecordState:
+    if not _host_receipt_integrity_valid(receipt):
+        return _record_quarantined_p7_fault("digest-mismatch", "INVALID_DELIVERY")
+    raise LifecycleEvidenceFailure("digest-mismatched adapter output was accepted")
+
+
+def _record_quarantined_p7_fault(request_id: str, fault: str) -> runtime_adapter_state.AdapterRecordState:
+    with tempfile.TemporaryDirectory(prefix="llm-collab-host-harness-p7-") as tmp:
+        db_path = Path(tmp) / "adapter-state.sqlite"
+        redacted = _redacted(_state_identity(), request_id=request_id, fault=fault)
+        record_id = runtime_adapter_state.record_quarantine_opened(db_path, redacted)
+        try:
+            return runtime_adapter_state.read_record(db_path, record_id)
+        except Exception as error:
+            raise LifecycleEvidenceFailure("P7 quarantine state did not persist") from error
+
+
+def _require_result(raw: str | bytes | None, request_id: str) -> Mapping[str, Any]:
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8")
+    frame = validate_response(load_json_frame(raw or ""), request_id)
+    result = frame.get("result")
+    if not isinstance(result, Mapping):
+        raise LifecycleEvidenceFailure("adapter response did not contain an object result")
+    return result
+
+
+def _jsonrpc_frame(method: str, params: Mapping[str, Any], request_id: str) -> str:
+    return json.dumps(
+        {"jsonrpc": JSONRPC_VERSION, "id": request_id, "method": method, "params": params},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _initialize_params() -> Mapping[str, Any]:
+    identity = runtime_adapter_reference.AdapterIdentity()
+    return {
+        "requested_protocol_version": "1.0",
+        "adapter_id": identity.adapter_id,
+        "adapter_revision": identity.adapter_revision,
+        "manifest_id": identity.manifest_id,
+        "manifest_revision": identity.manifest_revision,
+        "endpoint": identity.endpoint(),
+    }
+
+
+def _session_ref() -> Mapping[str, Any]:
+    evidence = {
+        "schema_version": 1,
+        "workspace_id": "ws_alpha",
+        "scope": {"kind": "workspace"},
+        "evidence_id": "evidence_session_alpha",
+        "evidence_kind": "exact_session_binding",
+        "quality": "authoritative",
+        "state": "visible",
+        "authority": {
+            "authority_kind": "trusted_adapter",
+            "identity": "adapter_alpha",
+            "implementation_revision": "adapter_rev1",
+            "capability_profile_id": "runtime_profile",
+            "capability_profile_revision": "cap_rev1",
+        },
+        "subject": {
+            "endpoint_id": "endpoint_alpha",
+            "session_ref_id": "session_alpha",
+            "native_session_id": "native-session-alpha",
+        },
+        "correlation_id": "corr_session_alpha",
+        "observed_at_utc": "2026-07-22T00:00:00Z",
+    }
+    evidence["integrity"] = runtime_adapter_reference._canonical_digest(evidence)
+    return {
+        "schema_version": 1,
+        "workspace_id": "ws_alpha",
+        "scope": {"kind": "workspace"},
+        "session_ref_id": "session_alpha",
+        "endpoint_id": "endpoint_alpha",
+        "native_session_id": "native-session-alpha",
+        "evidence": evidence,
+    }
+
+
+def _delivery() -> Mapping[str, Any]:
+    evidence = {
+        "schema_version": 1,
+        "workspace_id": "ws_alpha",
+        "scope": {"kind": "workspace"},
+        "evidence_id": "evidence_delivery_alpha",
+        "evidence_kind": "native_delivery_state",
+        "quality": "best_effort",
+        "state": "routed",
+        "authority": {
+            "authority_kind": "trusted_adapter",
+            "identity": "adapter_alpha",
+            "implementation_revision": "adapter_rev1",
+            "capability_profile_id": "runtime_profile",
+            "capability_profile_revision": "cap_rev1",
+        },
+        "subject": {
+            "message_id": "msg_alpha",
+            "delivery_id": "delivery_alpha",
+            "attempt_id": "attempt_alpha",
+            "endpoint_id": "endpoint_alpha",
+            "session_ref_id": "session_alpha",
+        },
+        "correlation_id": "corr_delivery_alpha",
+        "observed_at_utc": "2026-07-22T00:00:00Z",
+    }
+    evidence["integrity"] = runtime_adapter_reference._canonical_digest(evidence)
+    return {
+        "schema_version": 1,
+        "workspace_id": "ws_alpha",
+        "scope": {"kind": "workspace"},
+        "delivery_id": "delivery_alpha",
+        "message_id": "msg_alpha",
+        "attempt_id": "attempt_alpha",
+        "endpoint_id": "endpoint_alpha",
+        "session_ref_id": "session_alpha",
+        "outcome": "pending",
+        "evidence": evidence,
+    }
+
+
+def _with_integrity(document: Mapping[str, Any], integrity: str) -> Mapping[str, Any]:
+    out = dict(document)
+    evidence = dict(_mapping(out.get("evidence"), "document evidence"))
+    evidence["integrity"] = integrity
+    out["evidence"] = evidence
+    return out
+
+
+def _mapping(value: Any, name: str) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping):
+        raise LifecycleEvidenceFailure(f"{name} must be a mapping")
+    return value
 
 
 class _CountingRegistry:
@@ -846,3 +1141,20 @@ def _validate_manifest_provenance_observation(observation: ManifestProvenanceObs
         raise LifecycleEvidenceFailure("initialize notification was not rejected")
     if frozenset(observation.deferred_c16_keys) != _DEFERRED_C16_KEYS:
         raise LifecycleEvidenceFailure("deferred C16 set drifted")
+
+
+def _validate_p7_integrity_observation(observation: P7IntegrityObservation) -> None:
+    if not observation.adapter_rejects_delivery_digest_mismatch:
+        raise LifecycleEvidenceFailure("adapter-side DeliveryV1 digest recomputation was not enforced")
+    if not observation.host_accepts_receipt_digest_match:
+        raise LifecycleEvidenceFailure("host rejected a digest-correct ReceiptV1")
+    if not observation.host_rejects_receipt_digest_mismatch:
+        raise LifecycleEvidenceFailure("host accepted a digest-mismatched ReceiptV1")
+    if not observation.both_delivery_and_receipt_recomputed:
+        raise LifecycleEvidenceFailure("delivery and receipt recomputation were not both proven")
+    if not observation.invalid_adapter_output_quarantined:
+        raise LifecycleEvidenceFailure("invalid adapter output did not open unresolved quarantine state")
+    if not observation.digest_mismatch_quarantined:
+        raise LifecycleEvidenceFailure("digest-mismatched adapter output did not open unresolved quarantine state")
+    if frozenset(observation.deferred_p6_keys) != _DEFERRED_P6_KEYS:
+        raise LifecycleEvidenceFailure("deferred P6 set drifted")
