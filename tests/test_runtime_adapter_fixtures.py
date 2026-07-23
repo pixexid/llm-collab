@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 from dataclasses import fields, replace
 import inspect
+import io
 import json
 import unittest
 from pathlib import Path
@@ -25,7 +26,7 @@ from llm_collab.runtime_adapter_fixtures import (
     TraceFrame,
     validate_fixtures,
 )
-from llm_collab.runtime_adapter_reference import ReferenceAdapter
+from llm_collab.runtime_adapter_reference import ReferenceAdapter, serve
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -367,12 +368,17 @@ class RuntimeAdapterFixtureTests(unittest.TestCase):
         self.assertTrue(_replays_fixture(shutdown))
 
     def test_shutdown_success_fixture_reduces_its_own_base_gaps_by_three(self) -> None:
-        result = build_claim(self.protocol)
+        fixtures_without_post_shutdown = tuple(
+            fixture
+            for fixture in FIXTURES
+            if fixture.fixture_id != "runtime-adapter-post-shutdown-health-refusal"
+        )
+        result = build_claim(self.protocol, fixtures=fixtures_without_post_shutdown)
         base_result = build_claim(
             self.protocol,
             fixtures=tuple(
                 fixture
-                for fixture in FIXTURES
+                for fixture in fixtures_without_post_shutdown
                 if fixture.fixture_id != "runtime-adapter-shutdown-success"
             ),
         )
@@ -419,6 +425,108 @@ class RuntimeAdapterFixtureTests(unittest.TestCase):
                 )
                 self.assertIsInstance(result, ClaimFailure)
                 self.assertIn(clause_ref.clause_key, {gap["clause_key"] for gap in result.gaps})
+
+    def test_post_shutdown_refusal_fixture_covers_only_later_work_clause(self) -> None:
+        fixture = next(
+            fixture
+            for fixture in FIXTURES
+            if fixture.fixture_id == "runtime-adapter-post-shutdown-health-refusal"
+        )
+
+        self.assertEqual(fixture.polarity, POLARITY_VIOLATING)
+        self.assertEqual({ref.clause_key for ref in fixture.clause_refs}, {"C78f267e558da.2"})
+        self.assertIsInstance(fixture.expectation, ExpectedRefusal)
+        self.assertEqual(fixture.expectation.error_name, "SHUTDOWN_IN_PROGRESS")
+        self.assertEqual(fixture.expectation.error_code, -32016)
+        self.assertEqual(fixture.expectation.state_effect, NO_STATE_CHANGE)
+        self.assertTrue(fixture.expectation.response_emitted)
+        self.assertFalse(fixture.expectation.closes_connection)
+        self.assertEqual(fixture.trace[0].frame["method"], "initialize")
+        self.assertIn("result", fixture.trace[1].frame)
+        self.assertEqual(fixture.trace[2].frame["method"], "runtime.shutdown")
+        self.assertEqual(fixture.trace[2].frame["params"], {})
+        self.assertEqual(fixture.trace[3].frame["method"], "runtime.health")
+        self.assertEqual(fixture.trace[3].frame["params"], {})
+        self.assertTrue(_replays_fixture(fixture))
+        self.assertTrue(_serves_fixture(fixture))
+
+    def test_post_shutdown_refusal_fixture_reduces_its_own_base_gaps_by_one(self) -> None:
+        result = build_claim(self.protocol)
+        base_result = build_claim(
+            self.protocol,
+            fixtures=tuple(
+                fixture
+                for fixture in FIXTURES
+                if fixture.fixture_id != "runtime-adapter-post-shutdown-health-refusal"
+            ),
+        )
+
+        self.assertIsInstance(result, ClaimFailure)
+        self.assertIsInstance(base_result, ClaimFailure)
+        self.assertEqual(len(base_result.gaps) - len(result.gaps), 1)
+        gap_keys = {gap["clause_key"] for gap in result.gaps}
+        self.assertNotIn("C78f267e558da.2", gap_keys)
+        for clause_key in ("Ce0c84af21a71.1", "C43b913cc99f1.1", "C78f267e558da.1"):
+            self.assertNotIn(clause_key, gap_keys)
+
+    def test_post_shutdown_refusal_fixture_mutations_fail_closed(self) -> None:
+        fixture = next(
+            fixture
+            for fixture in FIXTURES
+            if fixture.fixture_id == "runtime-adapter-post-shutdown-health-refusal"
+        )
+        malformed_initialize_response = _thaw(fixture.trace[1].frame)
+        malformed_initialize_response["result"] = {"status": "anything"}
+        bad_initialize_response = replace(
+            fixture,
+            trace=(
+                fixture.trace[0],
+                TraceFrame("adapter", "host", malformed_initialize_response),
+                *fixture.trace[2:],
+            ),
+        )
+        mismatched_initialize_request = _thaw(fixture.trace[0].frame)
+        mismatched_initialize_request["params"]["adapter_id"] = "adapter_other"
+        bad_initialize_binding = replace(
+            fixture,
+            trace=(
+                TraceFrame("host", "adapter", mismatched_initialize_request),
+                *fixture.trace[1:],
+            ),
+        )
+        without_shutdown = replace(fixture, trace=(*fixture.trace[:2], fixture.trace[3]))
+        malformed_later = _thaw(fixture.trace[3].frame)
+        malformed_later["params"] = {"unexpected": True}
+        bad_later_params = replace(
+            fixture,
+            trace=(*fixture.trace[:3], TraceFrame("host", "adapter", malformed_later)),
+        )
+        peer_later_request = replace(
+            fixture,
+            trace=(*fixture.trace[:3], TraceFrame("adapter", "host", _thaw(fixture.trace[3].frame))),
+        )
+
+        with self.assertRaisesRegex(ConformanceFailure, "fixture-violating-trace"):
+            validate_fixtures(self.protocol, (bad_initialize_response,))
+        with self.assertRaisesRegex(ConformanceFailure, "fixture-violating-trace"):
+            validate_fixtures(self.protocol, (bad_initialize_binding,))
+        with self.assertRaisesRegex(ConformanceFailure, "fixture-violating-trace"):
+            validate_fixtures(self.protocol, (without_shutdown,))
+        with self.assertRaisesRegex(ConformanceFailure, "fixture-violating"):
+            validate_fixtures(self.protocol, (peer_later_request,))
+        with self.assertRaisesRegex(ConformanceFailure, "fixture-violating-refusal"):
+            validate_fixtures(self.protocol, (bad_later_params,))
+
+        result = build_claim(
+            self.protocol,
+            fixtures=tuple(
+                candidate
+                for candidate in FIXTURES
+                if candidate.fixture_id != fixture.fixture_id
+            ),
+        )
+        self.assertIsInstance(result, ClaimFailure)
+        self.assertIn("C78f267e558da.2", {gap["clause_key"] for gap in result.gaps})
 
     def test_violating_fixture_trace_must_really_be_rejected(self) -> None:
         violating = next(fixture for fixture in FIXTURES if fixture.polarity == POLARITY_VIOLATING)
@@ -676,6 +784,27 @@ def _replays_fixture(fixture) -> bool:
         if isinstance(fixture.expectation, ExpectedResult) and frame.get("method") == fixture.expectation.method:
             payload = json.loads(response or "{}")
             return payload.get("result") == _thaw(fixture.expectation.result)
+    if not responses:
+        return False
+    return _matches_refusal(fixture.expectation, responses[-1])
+
+
+def _serves_fixture(fixture) -> bool:
+    payload = b"\n".join(
+        json.dumps(_thaw(trace.frame), sort_keys=True, separators=(",", ":")).encode("utf-8")
+        for trace in fixture.trace
+        if trace.sender == "host" and trace.receiver == "adapter"
+    )
+    stdout = io.BytesIO()
+    result = serve(
+        adapter=ReferenceAdapter(),
+        stdin=io.BytesIO(payload + b"\n"),
+        stdout=stdout,
+        stderr=io.BytesIO(),
+    )
+    if result != 0:
+        return False
+    responses = [line for line in stdout.getvalue().splitlines()]
     if not responses:
         return False
     return _matches_refusal(fixture.expectation, responses[-1])
