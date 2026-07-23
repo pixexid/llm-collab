@@ -95,6 +95,36 @@ class ObservationTest(unittest.TestCase):
             scan_count=1,
         )
 
+    def set_projects(self, *project_ids: str) -> None:
+        self.projects.write_text(
+            json.dumps({"projects": [{"id": project_id} for project_id in project_ids]})
+        )
+
+    def scheduler_candidate(
+        self, project_id: str, serial: str, *, scan_count: int
+    ) -> dict[str, object]:
+        return _candidate(
+            f"Chats/{project_id}/{serial}.md",
+            f"{project_id}:{serial}".encode(),
+            SimpleNamespace(st_mtime_ns=scan_count),
+            scan_cursor=f"{project_id}:{serial}:cursor",
+            scan_count=scan_count,
+        )
+
+    def observation_counts(self, store: LedgerStore) -> dict[str, int]:
+        return dict(
+            store._connection.execute(
+                "SELECT project_id, count(*) FROM observations GROUP BY project_id"
+            ).fetchall()
+        )
+
+    def audit_counts(self, store: LedgerStore) -> dict[str, int]:
+        return dict(
+            store._connection.execute(
+                "SELECT action, count(*) FROM observation_audit GROUP BY action"
+            ).fetchall()
+        )
+
     def test_fixed_sources_filter_exact_project_and_store_hash_metadata_only(self) -> None:
         amiga = self.make_chat("chat-a", "amiga.md", packet("amiga", "AMIGA-RAW-SECRET"))
         self.make_chat("chat-a", "nuvyr.md", packet("nuvyr", "NUVYR-RAW-SECRET"))
@@ -854,6 +884,259 @@ class ObservationTest(unittest.TestCase):
                         ).fetchone()[0],
                         0,
                     )
+
+    def test_scheduler_enforces_aggregate_scan_write_and_maintenance_bounds(self) -> None:
+        self.set_projects("amiga", "nuvyr", "zcode")
+        calls: list[tuple[str, int]] = []
+
+        def fake_scan(_root, *, project_id, scan_limit, **_kwargs):
+            calls.append((project_id, scan_limit))
+            candidates = [
+                self.scheduler_candidate(project_id, f"{index:03d}", scan_count=index + 1)
+                for index in range(500)
+            ]
+            return candidates, "remaining", 2000
+
+        with LedgerStore.open_writer(self.paths) as store, patch.object(
+            observe_module, "scan_mailbox", side_effect=fake_scan
+        ):
+            engine = ObservationEngine(
+                workspace_root=self.root,
+                workspace_id="ws_alpha",
+                projects_path=self.projects,
+            )
+            result = engine.reconcile(store)
+            self.assertEqual(calls, [("amiga", 2000)])
+            self.assertEqual(self.observation_counts(store), {"amiga": 500})
+            self.assertEqual(self.audit_counts(store), {"reconcile": 1, "retention": 1})
+            self.assertEqual(
+                store.observation_scheduler_cursor(
+                    workspace_id="ws_alpha", source_id=SOURCE_ID
+                ),
+                "nuvyr",
+            )
+            self.assertEqual(result["budget"]["scan_remaining"], 0)
+            self.assertEqual(result["budget"]["write_remaining"], 0)
+            self.assertEqual(result["budget"]["maintenance_remaining"], 496)
+
+    def test_scheduler_stops_before_scan_when_minimum_maintenance_is_unavailable(self) -> None:
+        self.set_projects("amiga", "nuvyr")
+        with LedgerStore.open_writer(self.paths) as store, patch.object(
+            observe_module, "MAINTENANCE_LIMIT", 2
+        ), patch.object(observe_module, "scan_mailbox") as scan:
+            engine = ObservationEngine(
+                workspace_root=self.root,
+                workspace_id="ws_alpha",
+                projects_path=self.projects,
+            )
+            result = engine.reconcile(store)
+            scan.assert_not_called()
+            self.assertEqual(self.observation_counts(store), {})
+            self.assertIsNone(
+                store.observation_scheduler_cursor(
+                    workspace_id="ws_alpha", source_id=SOURCE_ID
+                )
+            )
+            self.assertEqual(result["projects"], {})
+            self.assertEqual(result["budget"]["maintenance_remaining"], 2)
+
+    def test_scheduler_rotates_start_and_eventually_attempts_every_project(self) -> None:
+        self.set_projects("amiga", "nuvyr", "zcode")
+        attempted: list[str] = []
+
+        def fake_scan(_root, *, project_id, scan_limit, **_kwargs):
+            attempted.append(project_id)
+            return [self.scheduler_candidate(project_id, str(len(attempted)), scan_count=1)], "", 2000
+
+        with LedgerStore.open_writer(self.paths) as store, patch.object(
+            observe_module, "scan_mailbox", side_effect=fake_scan
+        ):
+            engine = ObservationEngine(
+                workspace_root=self.root,
+                workspace_id="ws_alpha",
+                projects_path=self.projects,
+            )
+            for _ in range(3):
+                engine.reconcile(store)
+            self.assertEqual(attempted, ["amiga", "nuvyr", "zcode"])
+            self.assertEqual(self.observation_counts(store), {"amiga": 1, "nuvyr": 1, "zcode": 1})
+            self.assertEqual(
+                store.observation_scheduler_cursor(
+                    workspace_id="ws_alpha", source_id=SOURCE_ID
+                ),
+                "amiga",
+            )
+
+    def test_scheduler_reconciles_cursor_by_project_id_across_add_remove_and_reorder(self) -> None:
+        self.set_projects("amiga", "nuvyr", "zcode")
+        with LedgerStore.open_writer(self.paths) as store:
+            snapshot = self.snapshot(store)
+            store.advance_observation_scheduler_cursor(
+                workspace_id="ws_alpha",
+                source_id=SOURCE_ID,
+                registry_revision=snapshot.registry_revision,
+                next_project_id="nuvyr",
+                updated_at_utc=START.isoformat(),
+            )
+        self.set_projects("zcode", "amiga", "omega")
+        attempted: list[str] = []
+
+        def fake_scan(_root, *, project_id, **_kwargs):
+            attempted.append(project_id)
+            return [self.scheduler_candidate(project_id, str(len(attempted)), scan_count=1)], "", 1
+
+        with LedgerStore.open_writer(self.paths) as store, patch.object(
+            observe_module, "scan_mailbox", side_effect=fake_scan
+        ):
+            engine = ObservationEngine(
+                workspace_root=self.root,
+                workspace_id="ws_alpha",
+                projects_path=self.projects,
+            )
+            engine.reconcile(store)
+            self.assertEqual(attempted, ["omega", "zcode", "amiga"])
+            self.assertEqual(
+                store.observation_scheduler_cursor(
+                    workspace_id="ws_alpha", source_id=SOURCE_ID
+                ),
+                "omega",
+            )
+
+    def test_scheduler_deletes_cursor_only_for_fully_empty_snapshot(self) -> None:
+        with LedgerStore.open_writer(self.paths) as store:
+            snapshot = self.snapshot(store)
+            store.advance_observation_scheduler_cursor(
+                workspace_id="ws_alpha",
+                source_id=SOURCE_ID,
+                registry_revision=snapshot.registry_revision,
+                next_project_id="nuvyr",
+                updated_at_utc=START.isoformat(),
+            )
+            empty_snapshot = SimpleNamespace(
+                project_ids=[],
+                registry_revision=snapshot.registry_revision,
+                record=lambda store: None,
+            )
+            engine = ObservationEngine(
+                workspace_root=self.root,
+                workspace_id="ws_alpha",
+                projects_path=self.projects,
+            )
+            with patch.object(
+                observe_module, "read_registry_snapshot", return_value=empty_snapshot
+            ):
+                result = engine.reconcile(store)
+            self.assertEqual(result["project_count"], 0)
+            self.assertIsNone(
+                store.observation_scheduler_cursor(
+                    workspace_id="ws_alpha", source_id=SOURCE_ID
+                )
+            )
+
+    def test_scheduler_crash_after_project_commit_before_cursor_advance_repeats_without_duplicate(self) -> None:
+        self.set_projects("amiga")
+
+        def fake_scan(_root, *, project_id, **_kwargs):
+            return [self.scheduler_candidate(project_id, "same", scan_count=1)], "", 1
+
+        with LedgerStore.open_writer(self.paths) as store, patch.object(
+            observe_module, "scan_mailbox", side_effect=fake_scan
+        ):
+            engine = ObservationEngine(
+                workspace_root=self.root,
+                workspace_id="ws_alpha",
+                projects_path=self.projects,
+            )
+            with patch.object(
+                store,
+                "advance_observation_scheduler_cursor",
+                side_effect=RuntimeError("simulated crash"),
+            ), self.assertRaisesRegex(RuntimeError, "simulated crash"):
+                engine.reconcile(store)
+            self.assertEqual(self.observation_counts(store), {"amiga": 1})
+            self.assertIsNone(
+                store.observation_scheduler_cursor(
+                    workspace_id="ws_alpha", source_id=SOURCE_ID
+                )
+            )
+            engine.reconcile(store)
+            self.assertEqual(self.observation_counts(store), {"amiga": 1})
+            self.assertEqual(
+                store.observation_scheduler_cursor(
+                    workspace_id="ws_alpha", source_id=SOURCE_ID
+                ),
+                "amiga",
+            )
+
+    def test_scheduler_preserves_committed_projects_and_does_not_advance_failed_project(self) -> None:
+        self.set_projects("amiga", "nuvyr")
+
+        def fake_scan(_root, *, project_id, **_kwargs):
+            if project_id == "nuvyr":
+                raise ObservationError("project scan failed")
+            return [self.scheduler_candidate(project_id, "ok", scan_count=1)], "", 1
+
+        with LedgerStore.open_writer(self.paths) as store, patch.object(
+            observe_module, "scan_mailbox", side_effect=fake_scan
+        ):
+            engine = ObservationEngine(
+                workspace_root=self.root,
+                workspace_id="ws_alpha",
+                projects_path=self.projects,
+            )
+            with self.assertRaisesRegex(ObservationError, "project scan failed"):
+                engine.reconcile(store)
+            self.assertEqual(self.observation_counts(store), {"amiga": 1})
+            self.assertEqual(
+                store.observation_scheduler_cursor(
+                    workspace_id="ws_alpha", source_id=SOURCE_ID
+                ),
+                "nuvyr",
+            )
+
+    def test_scheduler_counts_retention_prune_rows_inside_maintenance_budget(self) -> None:
+        self.set_projects("amiga")
+        with LedgerStore.open_writer(self.paths) as store:
+            snapshot = self.snapshot(store)
+            candidate = self.scheduler_candidate("amiga", "resolved", scan_count=1)
+            store.reconcile_observations(
+                workspace_id="ws_alpha",
+                project_id="amiga",
+                source_id=SOURCE_ID,
+                registry_revision=snapshot.registry_revision,
+                candidates=[candidate],
+                next_cursor="",
+                scanned_count=1,
+                observed_at_utc=START.isoformat(),
+            )
+            store.resolve_observation(
+                workspace_id="ws_alpha",
+                project_id="amiga",
+                source_id=SOURCE_ID,
+                registry_revision=snapshot.registry_revision,
+                dedupe_key=str(candidate["dedupe_key"]),
+                resolved_at_utc=(START + timedelta(days=1)).isoformat(),
+            )
+
+            def fake_scan(_root, *, project_id, **_kwargs):
+                return [], "", 1
+
+            with patch.object(observe_module, "scan_mailbox", side_effect=fake_scan):
+                engine = ObservationEngine(
+                    workspace_root=self.root,
+                    workspace_id="ws_alpha",
+                    projects_path=self.projects,
+                    wall_clock=lambda: START + timedelta(days=40),
+                )
+                result = engine.reconcile(store)
+            self.assertEqual(result["projects"]["amiga"]["pruned"], 1)
+            self.assertEqual(result["budget"]["maintenance_remaining"], 495)
+            self.assertEqual(
+                store._connection.execute(
+                    "SELECT count(*) FROM observations WHERE resolution_state = 'resolved'"
+                ).fetchone()[0],
+                0,
+            )
 
     def test_watchdog_is_hint_only_and_failure_does_not_disable_reconciliation(self) -> None:
         clock = MutableClock()

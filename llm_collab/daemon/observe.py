@@ -23,6 +23,7 @@ RECONCILIATION_SECONDS = 30
 DEBOUNCE_SECONDS = 1
 SCAN_LIMIT = 2_000
 WRITE_LIMIT = 500
+MAINTENANCE_LIMIT = 500
 RETENTION_DAYS = 30
 DIAGNOSTIC_GROUP_LIMIT = 50
 DIAGNOSTIC_AUDIT_LIMIT = 200
@@ -283,11 +284,14 @@ class _BudgetExhausted(Exception):
 
 
 class _ScanBudget:
-    def __init__(self) -> None:
+    def __init__(self, limit: int = SCAN_LIMIT) -> None:
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 0 <= limit <= SCAN_LIMIT:
+            raise ObservationError("scan limit is invalid")
+        self.limit = limit
         self.used = 0
 
     def charge(self) -> None:
-        if self.used == SCAN_LIMIT:
+        if self.used == self.limit:
             raise _BudgetExhausted
         self.used += 1
 
@@ -803,12 +807,13 @@ def scan_mailbox(
     project_id: str,
     registry_revision: str,
     cursor: str,
+    scan_limit: int = SCAN_LIMIT,
     workspace_fd: int | None = None,
 ) -> tuple[list[dict[str, object]], str, int]:
     if re.fullmatch(r"sha256:[0-9a-f]{64}", registry_revision) is None:
         raise ObservationError("registry revision is invalid")
     _decode_walk_cursor(cursor)
-    budget = _ScanBudget()
+    budget = _ScanBudget(scan_limit)
     candidates: list[dict[str, object]] = []
     authority = (
         None if workspace_fd is not None else _WorkspaceAuthority.open(workspace_root)
@@ -922,6 +927,25 @@ def _load_watchdog() -> tuple[type[object], type[object]]:
     return FileSystemEventHandler, Observer
 
 
+def _scheduler_order(project_ids: list[str], cursor: str | None) -> list[str]:
+    ordered = sorted(project_ids)
+    if not ordered:
+        return []
+    if cursor is None:
+        start = 0
+    elif cursor in ordered:
+        start = ordered.index(cursor)
+    else:
+        start = 0
+        for index, project_id in enumerate(ordered):
+            if project_id > cursor:
+                start = index
+                break
+        else:
+            start = 0
+    return ordered[start:] + ordered[:start]
+
+
 class ObservationEngine:
     """Run reconciliation on the daemon thread; watchdog callbacks only mark dirty."""
 
@@ -1027,9 +1051,39 @@ class ObservationEngine:
         observed_at = now.isoformat()
         cutoff = (now - timedelta(days=RETENTION_DAYS)).isoformat()
         results: dict[str, object] = {}
+        project_ids = sorted(snapshot.project_ids)
+        scan_remaining = SCAN_LIMIT
+        write_remaining = WRITE_LIMIT
+        maintenance_remaining = MAINTENANCE_LIMIT
+        if not project_ids:
+            store.clear_observation_scheduler_cursor(
+                workspace_id=self.workspace_id,
+                source_id=SOURCE_ID,
+            )
+            return {
+                "projects": {},
+                "project_count": 0,
+                "truncated_projects": 0,
+                "budget": {
+                    "scan_remaining": scan_remaining,
+                    "write_remaining": write_remaining,
+                    "maintenance_remaining": maintenance_remaining,
+                },
+            }
+        start_cursor = store.observation_scheduler_cursor(
+            workspace_id=self.workspace_id,
+            source_id=SOURCE_ID,
+        )
+        scheduled = _scheduler_order(project_ids, start_cursor)
         authority = _WorkspaceAuthority.open(self.workspace_root)
         try:
-            for index, project_id in enumerate(snapshot.project_ids):
+            for index, project_id in enumerate(scheduled):
+                if (
+                    scan_remaining <= 0
+                    or write_remaining <= 0
+                    or maintenance_remaining < 3
+                ):
+                    break
                 cursor = store.observation_checkpoint_cursor(
                     workspace_id=self.workspace_id,
                     project_id=project_id,
@@ -1041,8 +1095,10 @@ class ObservationEngine:
                     project_id=project_id,
                     registry_revision=snapshot.registry_revision,
                     cursor=cursor,
+                    scan_limit=scan_remaining,
                     workspace_fd=authority.fd,
                 )
+                scan_remaining -= scanned_count
                 authority.revalidate()
                 result = store.reconcile_observations(
                     workspace_id=self.workspace_id,
@@ -1053,18 +1109,33 @@ class ObservationEngine:
                     next_cursor=next_cursor,
                     scanned_count=scanned_count,
                     observed_at_utc=observed_at,
-                    write_limit=WRITE_LIMIT,
+                    write_limit=write_remaining,
                 )
-                authority.revalidate()
-                removed = store.prune_resolved_observations(
+                maintenance_remaining -= 2
+                write_remaining -= int(result["written"])
+                next_project_id = scheduled[(index + 1) % len(scheduled)]
+                store.advance_observation_scheduler_cursor(
                     workspace_id=self.workspace_id,
-                    project_id=project_id,
                     source_id=SOURCE_ID,
                     registry_revision=snapshot.registry_revision,
-                    resolved_before_utc=cutoff,
-                    occurred_at_utc=observed_at,
-                    limit=WRITE_LIMIT,
+                    next_project_id=next_project_id,
+                    updated_at_utc=observed_at,
                 )
+                maintenance_remaining -= 1
+                authority.revalidate()
+                removed = 0
+                if maintenance_remaining >= 2:
+                    prune_limit = min(WRITE_LIMIT, maintenance_remaining - 1)
+                    removed = store.prune_resolved_observations(
+                        workspace_id=self.workspace_id,
+                        project_id=project_id,
+                        source_id=SOURCE_ID,
+                        registry_revision=snapshot.registry_revision,
+                        resolved_before_utc=cutoff,
+                        occurred_at_utc=observed_at,
+                        limit=prune_limit,
+                    )
+                    maintenance_remaining -= removed + 1
                 if index < 50:
                     results[project_id] = {
                         "scanned": result["scanned"],
@@ -1074,11 +1145,16 @@ class ObservationEngine:
                     }
         finally:
             authority.close()
-        project_count = len(snapshot.project_ids)
+        project_count = len(project_ids)
         return {
             "projects": results,
             "project_count": project_count,
             "truncated_projects": max(0, project_count - 50),
+            "budget": {
+                "scan_remaining": scan_remaining,
+                "write_remaining": write_remaining,
+                "maintenance_remaining": maintenance_remaining,
+            },
         }
 
     def diagnostics(
