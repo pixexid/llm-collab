@@ -1059,6 +1059,7 @@ Phase 3 validation order is mandatory:
    same test-only flag and inspect its full ledger/quarantine lifecycle.
 4. Return the test flag to off, complete Phase 4 hardening, and only then
    consider one explicitly approved project pilot with
+   a valid declaration whose `runtime_dispatch` feature is true and
    `THREAD_EVENT_RUNNER_DISPATCH_EXACT_THREAD=1` scoped to one exact
    subscription.
 
