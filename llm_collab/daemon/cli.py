@@ -134,7 +134,11 @@ def main(argv: list[str] | None = None) -> int:
         or (daemon_subcommand and command == "doctor")
         or (argv and not background)
     ):
-        print("usage: llm-collabd daemon <start|stop|status|logs> | doctor", file=sys.stderr)
+        print(
+            "usage: bin/llm-collab daemon <start|stop|status|logs>\n"
+            "       bin/llm-collab doctor",
+            file=sys.stderr,
+        )
         return 2
     try:
         paths = _paths()
@@ -150,5 +154,5 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(response, separators=(",", ":")))
         return 0
     except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
-        print(f"llm-collabd: {exc}", file=sys.stderr)
+        print(f"llm-collab: {exc}", file=sys.stderr)
         return 1
