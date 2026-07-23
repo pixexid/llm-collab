@@ -19,6 +19,9 @@ from llm_collab.runtime_adapter_lifecycle import (
     HEALTH_FAILURE_THRESHOLD,
     HEALTH_INTERVAL_MS,
     HEALTH_TIMEOUT,
+    SHUTDOWN_DRAIN_MS,
+    SHUTDOWN_HARD_KILL_MS,
+    SHUTDOWN_IN_PROGRESS,
     EndpointIdentity,
     LifecycleState,
 )
@@ -34,7 +37,7 @@ from llm_collab.runtime_adapter_manifest_evidence import build_manifest_evidence
 from llm_collab.runtime_adapter_reference import ReferenceAdapter
 from llm_collab.runtime_adapter_redaction import RedactionFailure
 from llm_collab.runtime_adapter_request_policy_evidence import build_request_policy_cancellation_evidence
-from llm_collab.runtime_adapter_requests import HEALTH_DEADLINE_MS
+from llm_collab.runtime_adapter_requests import HEALTH_DEADLINE_MS, METHOD_SHUTDOWN
 from llm_collab.runtime_adapter_transport_evidence import build_transport_evidence
 
 
@@ -77,7 +80,27 @@ REDACTION_KEYS = {
     "C1daaef574b8a.3",
 }
 STRUCTURED_ERROR_KEYS = {"C5d3edf690fb2.1", "C5d3edf690fb2.2"}
+SHUTDOWN_KEYS = {
+    "Ce0c84af21a71.1",
+    "Ce0c84af21a71.2",
+    "C43b913cc99f1.1",
+    "C78f267e558da.1",
+    "C78f267e558da.2",
+    "Cc90269b4844b.1",
+    "C4f1f0f86f6df.1",
+    "Cc41b106e96ee.1",
+    "Cc41b106e96ee.2",
+    "C27be44c9a8a8.1",
+}
+WIRE_COVERED_C15_KEYS = {
+    "Ce0c84af21a71.1",
+    "Ce0c84af21a71.2",
+    "C43b913cc99f1.1",
+    "C78f267e558da.1",
+    "C78f267e558da.2",
+}
 DEFERRED_RETRYABILITY_KEYS = {"C1ba88e813bab.1"}
+DEFERRED_SHUTDOWN_KEYS = {"C377978e26502.1", "C94617a1d5cde.1"}
 DEFERRED_RECOVERY_ADMISSION_KEYS = {"Cd830c5efc97b.1", "Cd830c5efc97b.2"}
 DEFERRED_C16_KEYS = {"C1731a3e18c8e.1", "C5bb2ba77ec3b.1", "C9138fb78426f.1", "Cf70f7c633f57.1"}
 DEFERRED_P6_KEYS = {
@@ -110,7 +133,15 @@ DEFERRED_P6_KEYS = {
     "Ce45ac56f0f07.2",
     "Cd849c64f4310.1",
 }
-HOST_HARNESS_KEYS = LIFECYCLE_KEYS | RECOVERY_KEYS | PROVENANCE_KEYS | P7_KEYS | REDACTION_KEYS | STRUCTURED_ERROR_KEYS
+HOST_HARNESS_KEYS = (
+    LIFECYCLE_KEYS
+    | RECOVERY_KEYS
+    | PROVENANCE_KEYS
+    | P7_KEYS
+    | REDACTION_KEYS
+    | STRUCTURED_ERROR_KEYS
+    | SHUTDOWN_KEYS
+)
 
 
 class RuntimeAdapterLifecycleEvidenceTests(unittest.TestCase):
@@ -133,9 +164,11 @@ class RuntimeAdapterLifecycleEvidenceTests(unittest.TestCase):
         self.assertLessEqual(P7_KEYS, covered)
         self.assertLessEqual(REDACTION_KEYS, covered)
         self.assertLessEqual(STRUCTURED_ERROR_KEYS, covered)
+        self.assertLessEqual(SHUTDOWN_KEYS, covered)
         self.assertFalse(DEFERRED_RECOVERY_ADMISSION_KEYS & covered)
         self.assertFalse(DEFERRED_P6_KEYS & covered)
         self.assertFalse(DEFERRED_RETRYABILITY_KEYS & covered)
+        self.assertFalse(DEFERRED_SHUTDOWN_KEYS & covered)
         self.assertTrue(
             all(
                 clause["state"] == HOST_HARNESS_EVIDENCED and clause["evidence"] == ARTIFACT_LABEL
@@ -322,6 +355,35 @@ class RuntimeAdapterLifecycleEvidenceTests(unittest.TestCase):
         self.assertTrue(structured["closed_error_envelope_validates"])
         self.assertEqual(set(structured["retryability_deferred_keys"]), DEFERRED_RETRYABILITY_KEYS)
         self.assertEqual(structured["retryability_deferred_reason"], "no real retryability-classification surface")
+
+    def test_shutdown_observation_uses_real_adapter_lifecycle_and_result_validator(self) -> None:
+        shutdown = build_lifecycle_evidence(self.protocol)["observation"]["shutdown"]
+
+        self.assertEqual(shutdown["shutdown_success_result"], {"status": "shutdown_started"})
+        self.assertTrue(shutdown["shutdown_request_connection_scoped"])
+        self.assertTrue(shutdown["shutdown_rejects_session_selector"])
+        self.assertEqual(shutdown["invalid_params_fault"], "INVALID_PARAMS")
+        self.assertTrue(shutdown["invalid_params_did_not_begin_shutdown"])
+        self.assertTrue(shutdown["adapter_enters_shutdown_before_success"])
+        self.assertEqual(shutdown["adapter_refuses_later_work_fault"], SHUTDOWN_IN_PROGRESS)
+        self.assertEqual(shutdown["lifecycle_shutdown_actions"], ("stop_admitting_new_work",))
+        self.assertEqual(shutdown["lifecycle_drain_deadline_ms"], 2_000 + SHUTDOWN_DRAIN_MS)
+        self.assertEqual(shutdown["lifecycle_hard_kill_deadline_ms"], 2_000 + SHUTDOWN_HARD_KILL_MS)
+        self.assertEqual(shutdown["lifecycle_refuses_later_work_fault"], SHUTDOWN_IN_PROGRESS)
+        self.assertTrue(shutdown["second_shutdown_delegated_to_capacity_policy"])
+        self.assertEqual(shutdown["drain_actions"], ("continue_drain_without_outcome",))
+        self.assertEqual(shutdown["drain_unresolved_attempts"], ("attempt-1", "attempt-2"))
+        self.assertFalse(shutdown["drain_authoritative_outcome"])
+        self.assertEqual(shutdown["hard_kill_actions"], ("hard_kill_process", "continue_stderr_drain"))
+        self.assertEqual(shutdown["hard_kill_unresolved_attempts"], ("attempt-1", "attempt-2"))
+        self.assertFalse(shutdown["hard_kill_authoritative_outcome"])
+        self.assertIn("live protocol-output flush", shutdown["covered_flush_boundary"])
+        self.assertEqual(set(shutdown["deferred_shutdown_keys"]), DEFERRED_SHUTDOWN_KEYS)
+        self.assertIn("stderr drain-to-EOF", shutdown["deferred_shutdown_reasons"]["C377978e26502.1"])
+        self.assertIn(
+            "no real production invalid-shutdown-result validator",
+            shutdown["deferred_shutdown_reasons"]["C94617a1d5cde.1"],
+        )
 
     def test_real_lifecycle_component_mutations_kill_evidence(self) -> None:
         original_initialized = LifecycleState.initialized.__func__
@@ -612,15 +674,96 @@ class RuntimeAdapterLifecycleEvidenceTests(unittest.TestCase):
                 with self.assertRaises(LifecycleEvidenceFailure):
                     build_lifecycle_evidence(self.protocol)
 
+    def test_real_shutdown_component_mutations_kill_evidence(self) -> None:
+        original_begin_shutdown = LifecycleState.begin_shutdown
+        original_classify_later_work = LifecycleState.classify_later_work
+        original_classify_shutdown_progress = LifecycleState.classify_shutdown_progress
+        original_handle_shutdown = ReferenceAdapter._handle_shutdown
+
+        def wrong_shutdown_result(self, request_id, params):
+            if not params:
+                self._shutdown = True
+                return self._result(request_id, {"status": "stopped"})
+            return original_handle_shutdown(self, request_id, params)
+
+        def no_inert_shutdown_state(self, request_id, params):
+            if not params:
+                return self._result(request_id, {"status": "shutdown_started"})
+            return original_handle_shutdown(self, request_id, params)
+
+        def accept_session_selector(self, request_id, params):
+            if params:
+                self._shutdown = True
+                return self._result(request_id, {"status": "shutdown_started"})
+            return original_handle_shutdown(self, request_id, params)
+
+        def late_shutdown_deadlines(self, **kwargs):
+            transition = original_begin_shutdown(self, **kwargs)
+            if transition.decision.kind != "shutdown_started":
+                return transition
+            return transition.__class__(
+                transition.state,
+                transition.decision.__class__(
+                    transition.decision.kind,
+                    actions=transition.decision.actions,
+                    fault=transition.decision.fault,
+                    next_health_due_ms=transition.decision.next_health_due_ms,
+                    drain_deadline_ms=(transition.decision.drain_deadline_ms or 0) + 1,
+                    hard_kill_deadline_ms=transition.decision.hard_kill_deadline_ms,
+                    unhealthy=transition.decision.unhealthy,
+                    unresolved_attempts=transition.decision.unresolved_attempts,
+                    authoritative_outcome=transition.decision.authoritative_outcome,
+                ),
+            )
+
+        def admit_later_shutdown_work(self, **kwargs):
+            decision = original_classify_later_work(self, **kwargs)
+            if decision.fault == SHUTDOWN_IN_PROGRESS:
+                return decision.__class__("admission_open")
+            return decision
+
+        def resolved_hard_kill(self, **kwargs):
+            decision = original_classify_shutdown_progress(self, **kwargs)
+            if decision.kind == "hard_kill_due":
+                return decision.__class__(
+                    decision.kind,
+                    actions=decision.actions,
+                    fault=decision.fault,
+                    next_health_due_ms=decision.next_health_due_ms,
+                    drain_deadline_ms=decision.drain_deadline_ms,
+                    hard_kill_deadline_ms=decision.hard_kill_deadline_ms,
+                    unhealthy=decision.unhealthy,
+                    unresolved_attempts=(),
+                    authoritative_outcome=True,
+                )
+            return decision
+
+        mutations = (
+            (mock.patch.object(ReferenceAdapter, "_handle_shutdown", wrong_shutdown_result), "success result shape"),
+            (mock.patch.object(ReferenceAdapter, "_handle_shutdown", no_inert_shutdown_state), "adapter inert state"),
+            (mock.patch.object(ReferenceAdapter, "_handle_shutdown", accept_session_selector), "invalid params refusal"),
+            (mock.patch.object(LifecycleState, "begin_shutdown", late_shutdown_deadlines), "deadline constants"),
+            (mock.patch.object(LifecycleState, "classify_later_work", admit_later_shutdown_work), "later-work refusal"),
+            (
+                mock.patch.object(LifecycleState, "classify_shutdown_progress", resolved_hard_kill),
+                "uncertain attempts stay unresolved",
+            ),
+        )
+        for patcher, name in mutations:
+            with self.subTest(name=name), patcher:
+                with self.assertRaises(LifecycleEvidenceFailure):
+                    build_lifecycle_evidence(self.protocol)
+
     def test_build_claim_still_gaps_host_harness_rows_and_deferred_cd830(self) -> None:
         result = build_claim(self.protocol)
 
         self.assertIsInstance(result, ClaimFailure)
         gap_keys = {gap["clause_key"] for gap in result.gaps}
-        self.assertLessEqual(HOST_HARNESS_KEYS, gap_keys)
+        self.assertLessEqual(HOST_HARNESS_KEYS - WIRE_COVERED_C15_KEYS, gap_keys)
         self.assertLessEqual(DEFERRED_RECOVERY_ADMISSION_KEYS, gap_keys)
         self.assertLessEqual(DEFERRED_P6_KEYS, gap_keys)
         self.assertLessEqual(DEFERRED_RETRYABILITY_KEYS, gap_keys)
+        self.assertLessEqual(DEFERRED_SHUTDOWN_KEYS, gap_keys)
 
     def test_lifecycle_ledger_is_scoped_disjoint_from_existing_ledgers(self) -> None:
         lifecycle = build_lifecycle_evidence(self.protocol)
@@ -700,6 +843,22 @@ class RuntimeAdapterLifecycleEvidenceTests(unittest.TestCase):
             (
                 "The host MUST\n    record it and quarantine the adapter rather than guessing retryability",
                 "The host MUST\n    record it rather than guessing retryability",
+            ),
+            (
+                "`runtime.shutdown` is connection-scoped, MUST use\n    the request id required by Clause 1",
+                "`runtime.shutdown` is connection-scoped, MUST use\n    a request id required by Clause 1",
+            ),
+            (
+                "MUST enter shutdown before returning exactly\n    `{\"status\":\"shutdown_started\"}`",
+                "MUST enter shutdown before returning\n    `{\"status\":\"shutdown_started\"}`",
+            ),
+            (
+                "At `SHUTDOWN_HARD_KILL_MS = 15,000` from shutdown start, the host\n    MUST terminate a still-running process",
+                "At `SHUTDOWN_HARD_KILL_MS = 15,000` from shutdown start, the host\n    MUST stop a still-running process",
+            ),
+            (
+                "A missing, additional, or\n    mistyped shutdown result member is host-local `INVALID_REQUEST` at P3",
+                "A missing, additional, or\n    mistyped shutdown result member is `INVALID_REQUEST` at P3",
             ),
         )
         for old, new in replacements:

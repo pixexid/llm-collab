@@ -30,6 +30,9 @@ from llm_collab.runtime_adapter_lifecycle import (
     HEALTH_FAILURE_THRESHOLD,
     HEALTH_INTERVAL_MS,
     HEALTH_TIMEOUT,
+    SHUTDOWN_DRAIN_MS,
+    SHUTDOWN_HARD_KILL_MS,
+    SHUTDOWN_IN_PROGRESS,
     EndpointIdentity,
     HealthRequest,
     LifecycleState,
@@ -39,7 +42,7 @@ from llm_collab.runtime_adapter_manifest import (
     validate_initialized_identity,
 )
 from llm_collab.runtime_adapter_redaction import RedactedDocument, redact_document
-from llm_collab.runtime_adapter_requests import HEALTH_DEADLINE_MS
+from llm_collab.runtime_adapter_requests import HEALTH_DEADLINE_MS, METHOD_HEALTH, METHOD_SHUTDOWN
 
 
 ARTIFACT_LABEL = "host_lifecycle_harness"
@@ -175,6 +178,31 @@ class StructuredErrorObservation:
     retryability_deferred_reason: str
 
 
+@dataclass(frozen=True)
+class ShutdownObservation:
+    shutdown_success_result: Mapping[str, object]
+    shutdown_request_connection_scoped: bool
+    shutdown_rejects_session_selector: bool
+    invalid_params_fault: str
+    invalid_params_did_not_begin_shutdown: bool
+    adapter_enters_shutdown_before_success: bool
+    adapter_refuses_later_work_fault: str
+    lifecycle_shutdown_actions: tuple[str, ...]
+    lifecycle_drain_deadline_ms: int
+    lifecycle_hard_kill_deadline_ms: int
+    lifecycle_refuses_later_work_fault: str
+    second_shutdown_delegated_to_capacity_policy: bool
+    drain_actions: tuple[str, ...]
+    drain_unresolved_attempts: tuple[str, ...]
+    drain_authoritative_outcome: bool
+    hard_kill_actions: tuple[str, ...]
+    hard_kill_unresolved_attempts: tuple[str, ...]
+    hard_kill_authoritative_outcome: bool
+    covered_flush_boundary: str
+    deferred_shutdown_keys: tuple[str, ...]
+    deferred_shutdown_reasons: Mapping[str, str]
+
+
 _LIFECYCLE_REFS: tuple[LifecycleClauseRef, ...] = (
     LifecycleClauseRef(
         "C2cd9421b9c86.1",
@@ -303,6 +331,48 @@ _STRUCTURED_ERROR_REFS: tuple[LifecycleClauseRef, ...] = (
         "5d3edf690fb2acedd3b198e89e591fa7a796b2035166092fb1cc0b6d47d15ce0",
     ),
 )
+_SHUTDOWN_REFS: tuple[LifecycleClauseRef, ...] = (
+    LifecycleClauseRef(
+        "Ce0c84af21a71.1",
+        "e0c84af21a718d576bf429d33d11b9f67216b1def5f1613fde168a1cdd6baf81",
+    ),
+    LifecycleClauseRef(
+        "Ce0c84af21a71.2",
+        "e0c84af21a718d576bf429d33d11b9f67216b1def5f1613fde168a1cdd6baf81",
+    ),
+    LifecycleClauseRef(
+        "C43b913cc99f1.1",
+        "43b913cc99f16fbc7c95db683f62d6592ab081445ef00375ff36ca85f3d2b017",
+    ),
+    LifecycleClauseRef(
+        "C78f267e558da.1",
+        "78f267e558dad3c464eaf76f96525bb7479753d80f728dd67e55ef3f692fa7a8",
+    ),
+    LifecycleClauseRef(
+        "C78f267e558da.2",
+        "78f267e558dad3c464eaf76f96525bb7479753d80f728dd67e55ef3f692fa7a8",
+    ),
+    LifecycleClauseRef(
+        "Cc90269b4844b.1",
+        "c90269b4844ba0745b8443973ebfeff98a6df6d49a156b1ddd858f81b1afea28",
+    ),
+    LifecycleClauseRef(
+        "C4f1f0f86f6df.1",
+        "4f1f0f86f6df37a33da87edaa66feaf532f37341c5c5e3931cc3a5d300f40829",
+    ),
+    LifecycleClauseRef(
+        "Cc41b106e96ee.1",
+        "c41b106e96ee53dfe08e8fc9118c699a7c8d28f46b8f8eb4bc30ed6b615a762c",
+    ),
+    LifecycleClauseRef(
+        "Cc41b106e96ee.2",
+        "c41b106e96ee53dfe08e8fc9118c699a7c8d28f46b8f8eb4bc30ed6b615a762c",
+    ),
+    LifecycleClauseRef(
+        "C27be44c9a8a8.1",
+        "27be44c9a8a81ce260e998290357c65b7607b101bac26ef9a7100ed66b35e880",
+    ),
+)
 _DEFERRED_RETRYABILITY_REFS: tuple[LifecycleClauseRef, ...] = (
     LifecycleClauseRef(
         "C1ba88e813bab.1",
@@ -311,6 +381,26 @@ _DEFERRED_RETRYABILITY_REFS: tuple[LifecycleClauseRef, ...] = (
 )
 _DEFERRED_RETRYABILITY_KEYS = frozenset(ref.clause_key for ref in _DEFERRED_RETRYABILITY_REFS)
 _DEFERRED_RETRYABILITY_REASON = "no real retryability-classification surface"
+_DEFERRED_SHUTDOWN_REFS: tuple[LifecycleClauseRef, ...] = (
+    LifecycleClauseRef(
+        "C377978e26502.1",
+        "377978e26502388e3590cc03ede4c899b92041baf7b63e07e7257c247212544c",
+    ),
+    LifecycleClauseRef(
+        "C94617a1d5cde.1",
+        "94617a1d5cde31dd2ca8c5a683c59d73d6ad6b9228d2721f1ceed0fb1a0dcba6",
+    ),
+)
+_DEFERRED_SHUTDOWN_KEYS = frozenset(ref.clause_key for ref in _DEFERRED_SHUTDOWN_REFS)
+_DEFERRED_SHUTDOWN_REASONS = MappingProxyType(
+    {
+        "C377978e26502.1": "live process termination plus stderr drain-to-EOF requires OS scheduler evidence",
+        "C94617a1d5cde.1": (
+            "no real production invalid-shutdown-result validator; only fixture _validate_shutdown_result "
+            "(fixture-expectation logic) exists"
+        ),
+    }
+)
 _DEFERRED_C16_KEYS = frozenset(
     ("C1731a3e18c8e.1", "C5bb2ba77ec3b.1", "C9138fb78426f.1", "Cf70f7c633f57.1")
 )
@@ -352,8 +442,11 @@ _HOST_HARNESS_REFS = (
     + _P7_REFS
     + _REDACTION_REFS
     + _STRUCTURED_ERROR_REFS
+    + _SHUTDOWN_REFS
 )
-_VALIDATED_REFS = _HOST_HARNESS_REFS + _DEFERRED_P6_REFS + _DEFERRED_RETRYABILITY_REFS
+_VALIDATED_REFS = (
+    _HOST_HARNESS_REFS + _DEFERRED_P6_REFS + _DEFERRED_RETRYABILITY_REFS + _DEFERRED_SHUTDOWN_REFS
+)
 
 
 def build_lifecycle_evidence(protocol_text: str) -> Mapping[str, object]:
@@ -366,12 +459,14 @@ def build_lifecycle_evidence(protocol_text: str) -> Mapping[str, object]:
     p7 = _p7_integrity_observation()
     redaction = _redaction_observation()
     structured_errors = _structured_error_observation()
+    shutdown = _shutdown_observation()
     _validate_lifecycle_observation(lifecycle)
     _validate_recovery_observation(recovery)
     _validate_manifest_provenance_observation(provenance)
     _validate_p7_integrity_observation(p7)
     _validate_redaction_observation(redaction)
     _validate_structured_error_observation(structured_errors)
+    _validate_shutdown_observation(shutdown)
     return {
         "schema_version": 1,
         "protocol": "runtime-adapter-jsonrpc-v1",
@@ -477,6 +572,31 @@ def build_lifecycle_evidence(protocol_text: str) -> Mapping[str, object]:
                 "closed_error_envelope_validates": structured_errors.closed_error_envelope_validates,
                 "retryability_deferred_keys": structured_errors.retryability_deferred_keys,
                 "retryability_deferred_reason": structured_errors.retryability_deferred_reason,
+            },
+            "shutdown": {
+                "shutdown_success_result": dict(shutdown.shutdown_success_result),
+                "shutdown_request_connection_scoped": shutdown.shutdown_request_connection_scoped,
+                "shutdown_rejects_session_selector": shutdown.shutdown_rejects_session_selector,
+                "invalid_params_fault": shutdown.invalid_params_fault,
+                "invalid_params_did_not_begin_shutdown": shutdown.invalid_params_did_not_begin_shutdown,
+                "adapter_enters_shutdown_before_success": shutdown.adapter_enters_shutdown_before_success,
+                "adapter_refuses_later_work_fault": shutdown.adapter_refuses_later_work_fault,
+                "lifecycle_shutdown_actions": shutdown.lifecycle_shutdown_actions,
+                "lifecycle_drain_deadline_ms": shutdown.lifecycle_drain_deadline_ms,
+                "lifecycle_hard_kill_deadline_ms": shutdown.lifecycle_hard_kill_deadline_ms,
+                "lifecycle_refuses_later_work_fault": shutdown.lifecycle_refuses_later_work_fault,
+                "second_shutdown_delegated_to_capacity_policy": (
+                    shutdown.second_shutdown_delegated_to_capacity_policy
+                ),
+                "drain_actions": shutdown.drain_actions,
+                "drain_unresolved_attempts": shutdown.drain_unresolved_attempts,
+                "drain_authoritative_outcome": shutdown.drain_authoritative_outcome,
+                "hard_kill_actions": shutdown.hard_kill_actions,
+                "hard_kill_unresolved_attempts": shutdown.hard_kill_unresolved_attempts,
+                "hard_kill_authoritative_outcome": shutdown.hard_kill_authoritative_outcome,
+                "covered_flush_boundary": shutdown.covered_flush_boundary,
+                "deferred_shutdown_keys": shutdown.deferred_shutdown_keys,
+                "deferred_shutdown_reasons": dict(shutdown.deferred_shutdown_reasons),
             },
         },
     }
@@ -990,6 +1110,91 @@ def _closed_error_matches(frame: Mapping[str, Any], request_id: str, fault: str)
     )
 
 
+def _shutdown_observation() -> ShutdownObservation:
+    adapter = runtime_adapter_reference.ReferenceAdapter()
+    _require_result(adapter.handle_text(_jsonrpc_frame("initialize", _initialize_params(), "init-shutdown")), "init-shutdown")
+    success = _require_result(adapter.handle_text(_jsonrpc_frame(METHOD_SHUTDOWN, {}, "shutdown-success")), "shutdown-success")
+    later_fault = _require_error(
+        adapter.handle_text(_jsonrpc_frame(METHOD_HEALTH, {}, "health-after-shutdown")),
+        "health-after-shutdown",
+    )
+
+    invalid_params_adapter = runtime_adapter_reference.ReferenceAdapter()
+    _require_result(
+        invalid_params_adapter.handle_text(_jsonrpc_frame("initialize", _initialize_params(), "init-invalid")),
+        "init-invalid",
+    )
+    invalid_params_fault = _require_error(
+        invalid_params_adapter.handle_text(
+            _jsonrpc_frame(METHOD_SHUTDOWN, {"session_ref": {"session_ref_id": "session-1"}}, "shutdown-bad")
+        ),
+        "shutdown-bad",
+    )
+    after_invalid = _require_result(
+        invalid_params_adapter.handle_text(_jsonrpc_frame(METHOD_HEALTH, {}, "health-after-invalid-shutdown")),
+        "health-after-invalid-shutdown",
+    )
+
+    shutdown_started_at_ms = 2_000
+    uncertain_attempts = ("attempt-1", "attempt-2")
+    shutdown = LifecycleState.initialized(
+        identity=_identity(),
+        initialized_at_ms=_INITIALIZED_AT_MS,
+        possibly_accepted_attempts=uncertain_attempts,
+    ).begin_shutdown(now_ms=shutdown_started_at_ms)
+    later_work = shutdown.state.classify_later_work(method=METHOD_HEALTH)
+    second_shutdown = shutdown.state.classify_later_work(method=METHOD_SHUTDOWN)
+    drain = shutdown.state.classify_shutdown_progress(
+        now_ms=shutdown_started_at_ms + SHUTDOWN_DRAIN_MS,
+        process_running=True,
+    )
+    hard_kill = shutdown.state.classify_shutdown_progress(
+        now_ms=shutdown_started_at_ms + SHUTDOWN_HARD_KILL_MS,
+        process_running=True,
+    )
+
+    return ShutdownObservation(
+        shutdown_success_result=success,
+        shutdown_request_connection_scoped=True,
+        shutdown_rejects_session_selector=invalid_params_fault == "INVALID_PARAMS",
+        invalid_params_fault=invalid_params_fault,
+        invalid_params_did_not_begin_shutdown=after_invalid.get("status") == "healthy",
+        adapter_enters_shutdown_before_success=later_fault == SHUTDOWN_IN_PROGRESS,
+        adapter_refuses_later_work_fault=later_fault,
+        lifecycle_shutdown_actions=shutdown.decision.actions,
+        lifecycle_drain_deadline_ms=shutdown.decision.drain_deadline_ms or 0,
+        lifecycle_hard_kill_deadline_ms=shutdown.decision.hard_kill_deadline_ms or 0,
+        lifecycle_refuses_later_work_fault=later_work.fault or "",
+        second_shutdown_delegated_to_capacity_policy=second_shutdown.kind == "defer_shutdown_capacity_to_request_policy",
+        drain_actions=drain.actions,
+        drain_unresolved_attempts=drain.unresolved_attempts,
+        drain_authoritative_outcome=bool(drain.authoritative_outcome),
+        hard_kill_actions=hard_kill.actions,
+        hard_kill_unresolved_attempts=hard_kill.unresolved_attempts,
+        hard_kill_authoritative_outcome=bool(hard_kill.authoritative_outcome),
+        covered_flush_boundary=(
+            "covers in-process shutdown success and inert refusal state only; "
+            "live protocol-output flush, process exit, and stderr EOF drain remain deferred"
+        ),
+        deferred_shutdown_keys=tuple(sorted(_DEFERRED_SHUTDOWN_KEYS)),
+        deferred_shutdown_reasons=_DEFERRED_SHUTDOWN_REASONS,
+    )
+
+
+def _require_error(raw: str | bytes | None, request_id: str) -> str:
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8")
+    frame = validate_response(load_json_frame(raw or ""), request_id)
+    error = _mapping(frame.get("error"), "adapter response error")
+    data = _mapping(error.get("data"), "adapter response error data")
+    name = data.get("name")
+    if not isinstance(name, str) or name not in ERROR_CODES:
+        raise LifecycleEvidenceFailure("adapter response did not contain a closed error name")
+    if error.get("code") != ERROR_CODES[name]:
+        raise LifecycleEvidenceFailure("adapter response error code did not match ERROR_CODES")
+    return name
+
+
 def _require_result(raw: str | bytes | None, request_id: str) -> Mapping[str, Any]:
     if isinstance(raw, bytes):
         raw = raw.decode("utf-8")
@@ -1460,3 +1665,48 @@ def _validate_structured_error_observation(observation: StructuredErrorObservati
         raise LifecycleEvidenceFailure("retryability deferral set drifted")
     if observation.retryability_deferred_reason != _DEFERRED_RETRYABILITY_REASON:
         raise LifecycleEvidenceFailure("retryability deferral reason drifted")
+
+
+def _validate_shutdown_observation(observation: ShutdownObservation) -> None:
+    if dict(observation.shutdown_success_result) != {"status": "shutdown_started"}:
+        raise LifecycleEvidenceFailure("shutdown success result was not exact")
+    if not observation.shutdown_request_connection_scoped:
+        raise LifecycleEvidenceFailure("shutdown was not modeled as connection-scoped")
+    if not observation.shutdown_rejects_session_selector:
+        raise LifecycleEvidenceFailure("shutdown accepted a session selector")
+    if observation.invalid_params_fault != "INVALID_PARAMS":
+        raise LifecycleEvidenceFailure("invalid shutdown params did not return INVALID_PARAMS")
+    if not observation.invalid_params_did_not_begin_shutdown:
+        raise LifecycleEvidenceFailure("invalid shutdown params began shutdown")
+    if not observation.adapter_enters_shutdown_before_success:
+        raise LifecycleEvidenceFailure("adapter did not enter inert shutdown state before success was trusted")
+    if observation.adapter_refuses_later_work_fault != SHUTDOWN_IN_PROGRESS:
+        raise LifecycleEvidenceFailure("adapter later-work refusal was not SHUTDOWN_IN_PROGRESS")
+    if observation.lifecycle_shutdown_actions != ("stop_admitting_new_work",):
+        raise LifecycleEvidenceFailure("shutdown lifecycle did not stop admitting new work")
+    if observation.lifecycle_drain_deadline_ms != 2_000 + SHUTDOWN_DRAIN_MS:
+        raise LifecycleEvidenceFailure("shutdown drain deadline drifted")
+    if observation.lifecycle_hard_kill_deadline_ms != 2_000 + SHUTDOWN_HARD_KILL_MS:
+        raise LifecycleEvidenceFailure("shutdown hard-kill deadline drifted")
+    if observation.lifecycle_refuses_later_work_fault != SHUTDOWN_IN_PROGRESS:
+        raise LifecycleEvidenceFailure("lifecycle later-work refusal drifted")
+    if not observation.second_shutdown_delegated_to_capacity_policy:
+        raise LifecycleEvidenceFailure("second shutdown capacity exception drifted")
+    if observation.drain_actions != ("continue_drain_without_outcome",):
+        raise LifecycleEvidenceFailure("drain deadline action drifted")
+    if observation.drain_unresolved_attempts != ("attempt-1", "attempt-2"):
+        raise LifecycleEvidenceFailure("drain did not preserve uncertain attempts")
+    if observation.drain_authoritative_outcome:
+        raise LifecycleEvidenceFailure("drain produced authoritative outcome without evidence")
+    if observation.hard_kill_actions != ("hard_kill_process", "continue_stderr_drain"):
+        raise LifecycleEvidenceFailure("hard-kill disposition drifted")
+    if observation.hard_kill_unresolved_attempts != ("attempt-1", "attempt-2"):
+        raise LifecycleEvidenceFailure("hard kill did not preserve uncertain attempts")
+    if observation.hard_kill_authoritative_outcome:
+        raise LifecycleEvidenceFailure("hard kill produced authoritative outcome without evidence")
+    if "live protocol-output flush" not in observation.covered_flush_boundary:
+        raise LifecycleEvidenceFailure("shutdown flush/exit boundary was not explicit")
+    if frozenset(observation.deferred_shutdown_keys) != _DEFERRED_SHUTDOWN_KEYS:
+        raise LifecycleEvidenceFailure("shutdown deferral set drifted")
+    if dict(observation.deferred_shutdown_reasons) != dict(_DEFERRED_SHUTDOWN_REASONS):
+        raise LifecycleEvidenceFailure("shutdown deferral reasons drifted")
