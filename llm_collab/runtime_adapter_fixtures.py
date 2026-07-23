@@ -72,7 +72,7 @@ _RECEIPT_EVIDENCE = MappingProxyType(
         "schema_version": 1,
         "workspace_id": "ws_alpha",
         "scope": _SCOPE,
-        "evidence_id": "evidence_receipt_completed",
+        "evidence_id": "evidence_attempt_alpha",
         "evidence_kind": "native_delivery_state",
         "quality": "authoritative",
         "state": "completed",
@@ -86,22 +86,44 @@ _RECEIPT_EVIDENCE = MappingProxyType(
                 "session_ref_id": "session_alpha",
             }
         ),
-        "correlation_id": "corr_receipt",
-        "observed_at_utc": "2026-07-22T00:00:01Z",
-        "integrity": "sha256:682e4e10be6fd773a370bc51f73b73995d40588a87a729d9f13a857fd53b9ddc",
+        "correlation_id": "corr_attempt_alpha",
+        "observed_at_utc": "2026-07-22T00:00:00Z",
+        "integrity": "sha256:33180ea9457e5e05bf9f13d2ae76275cc8abe10da89ba955ed942305ad0a3f90",
     }
 )
 _ENDPOINT = MappingProxyType(
     {
+        "schema_version": 1,
+        "workspace_id": "ws_alpha",
+        "scope": _SCOPE,
         "endpoint_id": "endpoint_alpha",
+        "agent_id": "agent_alpha",
         "adapter_name": "adapter_alpha",
         "adapter_revision": "adapter_rev1",
+        "trust_class": "managed",
+        "capability_set_id": "caps_alpha",
+        "platform": MappingProxyType({"os": "other", "architecture": "test"}),
+        "configuration_ref": MappingProxyType(
+            {
+                "registry_id": "registry_alpha",
+                "revision": "registry_rev1",
+                "reference": "reference_alpha",
+            }
+        ),
     }
 )
 _CAPABILITY_SET = MappingProxyType(
     {
-        "capability_set_id": "capability_set_alpha",
+        "schema_version": 1,
+        "workspace_id": "ws_alpha",
+        "scope": _SCOPE,
+        "capability_set_id": "caps_alpha",
         "revision": "cap_rev1",
+        "capabilities": (
+            MappingProxyType({"capability": "runtime.health", "quality": "unsupported"}),
+            MappingProxyType({"capability": "runtime.reconcile", "quality": "authoritative"}),
+            MappingProxyType({"capability": "runtime_profile", "quality": "authoritative"}),
+        ),
     }
 )
 _INITIALIZE_PARAMS = MappingProxyType(
@@ -130,7 +152,7 @@ _RECEIPT = MappingProxyType(
         "schema_version": 1,
         "workspace_id": "ws_alpha",
         "scope": _SCOPE,
-        "receipt_id": "receipt_alpha",
+        "receipt_id": "receipt_attempt_alpha",
         "message_id": "msg_alpha",
         "delivery_id": "delivery_alpha",
         "attempt_id": "attempt_alpha",
@@ -151,7 +173,7 @@ _HEALTH_RESULT = MappingProxyType(
         "endpoint_id": "endpoint_alpha",
         "workspace_id": "ws_alpha",
         "scope_kind": "workspace",
-        "capability_set_id": "capability_set_alpha",
+        "capability_set_id": "caps_alpha",
         "capability_set_revision": "cap_rev1",
     }
 )
@@ -469,17 +491,55 @@ def _validate_initialize_result(result: Any) -> None:
         if not _is_nonempty_string(result[key]):
             raise ConformanceFailure("fixture-conforming-trace", "initialize")
     endpoint = result["endpoint"]
-    if not _is_closed_mapping(endpoint, {"endpoint_id", "adapter_name", "adapter_revision"}):
+    if not _is_closed_mapping(
+        endpoint,
+        {
+            "schema_version",
+            "workspace_id",
+            "scope",
+            "endpoint_id",
+            "agent_id",
+            "adapter_name",
+            "adapter_revision",
+            "trust_class",
+            "capability_set_id",
+            "platform",
+            "configuration_ref",
+        },
+    ):
         raise ConformanceFailure("fixture-conforming-trace", "initialize")
-    for key in ("endpoint_id", "adapter_name", "adapter_revision"):
+    _validate_schema_version(endpoint, "initialize")
+    for key in (
+        "workspace_id",
+        "endpoint_id",
+        "agent_id",
+        "adapter_name",
+        "adapter_revision",
+        "trust_class",
+        "capability_set_id",
+    ):
         if not _is_nonempty_string(endpoint[key]):
             raise ConformanceFailure("fixture-conforming-trace", "initialize")
-    capability_set = result["capability_set"]
-    if not _is_closed_mapping(capability_set, {"capability_set_id", "revision"}):
+    if not _is_closed_mapping(endpoint["scope"], {"kind"}) or endpoint["scope"]["kind"] not in {"workspace", "project"}:
         raise ConformanceFailure("fixture-conforming-trace", "initialize")
-    for key in ("capability_set_id", "revision"):
+    if not _is_closed_mapping(endpoint["platform"], {"os", "architecture"}):
+        raise ConformanceFailure("fixture-conforming-trace", "initialize")
+    if not _is_closed_mapping(endpoint["configuration_ref"], {"registry_id", "revision", "reference"}):
+        raise ConformanceFailure("fixture-conforming-trace", "initialize")
+    capability_set = result["capability_set"]
+    if not _is_closed_mapping(
+        capability_set,
+        {"schema_version", "workspace_id", "scope", "capability_set_id", "revision", "capabilities"},
+    ):
+        raise ConformanceFailure("fixture-conforming-trace", "initialize")
+    _validate_schema_version(capability_set, "initialize")
+    for key in ("workspace_id", "capability_set_id", "revision"):
         if not _is_nonempty_string(capability_set[key]):
             raise ConformanceFailure("fixture-conforming-trace", "initialize")
+    if not _is_closed_mapping(capability_set["scope"], {"kind"}):
+        raise ConformanceFailure("fixture-conforming-trace", "initialize")
+    if not isinstance(capability_set["capabilities"], (list, tuple)) or not capability_set["capabilities"]:
+        raise ConformanceFailure("fixture-conforming-trace", "initialize")
 
 
 def _validate_session_ref(value: Any) -> None:
