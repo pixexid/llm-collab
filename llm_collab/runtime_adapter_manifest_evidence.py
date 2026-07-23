@@ -20,6 +20,7 @@ from llm_collab.runtime_adapter_manifest import (
     ResolvedAdapter,
     TrustedManifestRegistry,
     UNTRUSTED_MANIFEST_INPUT,
+    validate_initialized_identity,
 )
 
 
@@ -60,6 +61,9 @@ class ManifestObservation:
     unknown_adapter_fault: str
     rejected_field_faults: Mapping[str, str]
     rejection_outputs_resolved_adapter: bool
+    initialized_identity_valid: bool
+    initialized_identity_mismatch_faults: Mapping[str, str]
+    initialized_identity_mismatch_mutated_source: bool
     supervisor_spawn: SupervisorSpawnObservation
 
 
@@ -83,6 +87,18 @@ _MANIFEST_REFS: tuple[ManifestClauseRef, ...] = (
     ManifestClauseRef(
         "Ca183987f3efe.2",
         "a183987f3efe736c00a8ebc2a2b089fde5504479cea407b896b84a52cd51d241",
+    ),
+    ManifestClauseRef(
+        "C4c2db37e63d2.1",
+        "4c2db37e63d2c71f9bc6f2123d64741fece054c235018c50cbc6b465dbf687df",
+    ),
+    ManifestClauseRef(
+        "C4c2db37e63d2.2",
+        "4c2db37e63d2c71f9bc6f2123d64741fece054c235018c50cbc6b465dbf687df",
+    ),
+    ManifestClauseRef(
+        "C4c2db37e63d2.3",
+        "4c2db37e63d2c71f9bc6f2123d64741fece054c235018c50cbc6b465dbf687df",
     ),
 )
 
@@ -120,6 +136,9 @@ def build_manifest_evidence(protocol_text: str) -> Mapping[str, object]:
             "unknown_adapter_fault": observation.unknown_adapter_fault,
             "rejected_field_faults": dict(observation.rejected_field_faults),
             "rejection_outputs_resolved_adapter": observation.rejection_outputs_resolved_adapter,
+            "initialized_identity_valid": observation.initialized_identity_valid,
+            "initialized_identity_mismatch_faults": dict(observation.initialized_identity_mismatch_faults),
+            "initialized_identity_mismatch_mutated_source": observation.initialized_identity_mismatch_mutated_source,
             "supervisor_spawn": {
                 "popen_call_count": observation.supervisor_spawn.popen_call_count,
                 "shell_keyword_false": observation.supervisor_spawn.shell_keyword_false,
@@ -145,6 +164,8 @@ def _manifest_observation() -> ManifestObservation:
     resolved = TrustedManifestRegistry(_trusted_manifest()).resolve(_ADAPTER_ID)
     unknown_adapter_fault = _rejection_fault(lambda: TrustedManifestRegistry(_trusted_manifest()).resolve("adapter_missing"))
     rejected_field_faults = {name: _rejection_fault(probe) for name, probe in _rejection_probes().items()}
+    initialized_identity_valid = _valid_initialized_identity_passes(resolved)
+    mismatch_faults, mismatch_mutated_source = _initialized_identity_mismatch_faults(resolved)
     return ManifestObservation(
         resolved_adapter_id=resolved.adapter_id,
         resolved_adapter_revision=resolved.adapter_revision,
@@ -157,6 +178,9 @@ def _manifest_observation() -> ManifestObservation:
         unknown_adapter_fault=unknown_adapter_fault,
         rejected_field_faults=rejected_field_faults,
         rejection_outputs_resolved_adapter=False,
+        initialized_identity_valid=initialized_identity_valid,
+        initialized_identity_mismatch_faults=mismatch_faults,
+        initialized_identity_mismatch_mutated_source=mismatch_mutated_source,
         supervisor_spawn=_supervisor_spawn_observation(),
     )
 
@@ -206,7 +230,7 @@ def _resolve_changed(mutate: Callable[[dict[str, dict[str, Any]]], None]) -> Res
     return TrustedManifestRegistry(manifest).resolve(_ADAPTER_ID)
 
 
-def _rejection_fault(operation: Callable[[], ResolvedAdapter]) -> str:
+def _rejection_fault(operation: Callable[[], object]) -> str:
     try:
         resolved = operation()
     except ManifestResolutionError as error:
@@ -214,6 +238,46 @@ def _rejection_fault(operation: Callable[[], ResolvedAdapter]) -> str:
             raise ManifestEvidenceFailure("manifest rejection used the wrong fault code") from error
         return error.code
     raise ManifestEvidenceFailure(f"manifest rejection produced a ResolvedAdapter: {resolved!r}")
+
+
+def _matching_initialized_identity() -> dict[str, Any]:
+    manifest = _trusted_manifest()[_ADAPTER_ID]
+    return {
+        "adapter_id": manifest["adapter_id"],
+        "adapter_revision": manifest["adapter_revision"],
+        "manifest_id": manifest["manifest_id"],
+        "manifest_revision": manifest["manifest_revision"],
+        "endpoint": copy.deepcopy(manifest["endpoint"]),
+    }
+
+
+def _valid_initialized_identity_passes(resolved: ResolvedAdapter) -> bool:
+    validate_initialized_identity(resolved, _matching_initialized_identity())
+    return True
+
+
+def _initialized_identity_mismatch_faults(resolved: ResolvedAdapter) -> tuple[Mapping[str, str], bool]:
+    faults: dict[str, str] = {}
+    mutated_source = False
+    for name, mutate in _initialized_identity_mismatch_mutations().items():
+        initialized = _matching_initialized_identity()
+        mutate(initialized)
+        before = copy.deepcopy(initialized)
+        faults[name] = _rejection_fault(lambda initialized=initialized: validate_initialized_identity(resolved, initialized))
+        if initialized != before:
+            mutated_source = True
+    return faults, mutated_source
+
+
+def _initialized_identity_mismatch_mutations() -> Mapping[str, Callable[[dict[str, Any]], None]]:
+    return {
+        "adapter_id": lambda initialized: initialized.__setitem__("adapter_id", "adapter_alias"),
+        "adapter_revision": lambda initialized: initialized.__setitem__("adapter_revision", "rev_2"),
+        "manifest_id": lambda initialized: initialized.__setitem__("manifest_id", "manifest_b"),
+        "manifest_revision": lambda initialized: initialized.__setitem__("manifest_revision", "manifest_rev_2"),
+        "endpoint.adapter_name": lambda initialized: initialized["endpoint"].__setitem__("adapter_name", "adapter_alias"),
+        "endpoint.adapter_revision": lambda initialized: initialized["endpoint"].__setitem__("adapter_revision", "rev_2"),
+    }
 
 
 def _supervisor_spawn_observation() -> SupervisorSpawnObservation:
@@ -315,6 +379,14 @@ def _validate_observation(observation: ManifestObservation) -> None:
         raise ManifestEvidenceFailure("manifest field-class rejection used the wrong fault")
     if observation.rejection_outputs_resolved_adapter:
         raise ManifestEvidenceFailure("manifest rejection produced a resolved adapter")
+    if not observation.initialized_identity_valid:
+        raise ManifestEvidenceFailure("matching initialized identity did not validate")
+    if set(observation.initialized_identity_mismatch_faults) != set(_initialized_identity_mismatch_mutations()):
+        raise ManifestEvidenceFailure("initialized identity mismatch coverage drifted")
+    if any(fault != UNTRUSTED_MANIFEST_INPUT for fault in observation.initialized_identity_mismatch_faults.values()):
+        raise ManifestEvidenceFailure("initialized identity mismatch used the wrong fault")
+    if observation.initialized_identity_mismatch_mutated_source:
+        raise ManifestEvidenceFailure("initialized identity mismatch validation mutated the source")
     spawn = observation.supervisor_spawn
     if spawn.popen_call_count != 1:
         raise ManifestEvidenceFailure("supervisor Popen count drifted")

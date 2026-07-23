@@ -8,6 +8,7 @@ from pathlib import Path
 
 from llm_collab.runtime_adapter_admission_evidence import build_admission_evidence
 from llm_collab.runtime_adapter_claim import ClaimFailure, build_claim
+from llm_collab.runtime_adapter_deadline_evidence import build_deadline_evidence
 from llm_collab.runtime_adapter_manifest import UNTRUSTED_MANIFEST_INPUT
 from llm_collab.runtime_adapter_manifest_evidence import (
     ARTIFACT_LABEL,
@@ -15,6 +16,7 @@ from llm_collab.runtime_adapter_manifest_evidence import (
     ManifestEvidenceFailure,
     build_manifest_evidence,
 )
+from llm_collab.runtime_adapter_request_policy_evidence import build_request_policy_cancellation_evidence
 from llm_collab.runtime_adapter_transport_evidence import build_transport_evidence
 
 
@@ -29,8 +31,11 @@ MANIFEST_KEYS = {
     "Cc02b8dfb1bfa.2",
     "Ca183987f3efe.1",
     "Ca183987f3efe.2",
+    "C4c2db37e63d2.1",
+    "C4c2db37e63d2.2",
+    "C4c2db37e63d2.3",
 }
-GROUP_B_KEYS = {"Cd87ad3561bfc.1", "C4c2db37e63d2.1", "C4c2db37e63d2.2", "C4c2db37e63d2.3"}
+PROVENANCE_KEY = "Cd87ad3561bfc.1"
 
 
 class RuntimeAdapterManifestEvidenceTests(unittest.TestCase):
@@ -38,7 +43,7 @@ class RuntimeAdapterManifestEvidenceTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.protocol = PROTOCOL_PATH.read_text(encoding="utf-8")
 
-    def test_manifest_evidence_is_distinct_and_covers_only_group_a_rows(self) -> None:
+    def test_manifest_evidence_is_distinct_and_covers_launch_security_and_equality_rows(self) -> None:
         artifact = build_manifest_evidence(self.protocol)
 
         self.assertEqual(artifact["artifact_label"], ARTIFACT_LABEL)
@@ -47,7 +52,7 @@ class RuntimeAdapterManifestEvidenceTests(unittest.TestCase):
         self.assertNotEqual(artifact["claim"], "exercised_conforming")
         covered = {clause["clause_key"] for clause in artifact["clauses"]}
         self.assertEqual(covered, MANIFEST_KEYS)
-        self.assertFalse(covered & GROUP_B_KEYS)
+        self.assertNotIn(PROVENANCE_KEY, covered)
         self.assertTrue(
             all(
                 clause["state"] == MANIFEST_SECURITY_EVIDENCED and clause["evidence"] == ARTIFACT_LABEL
@@ -67,6 +72,23 @@ class RuntimeAdapterManifestEvidenceTests(unittest.TestCase):
         self.assertEqual(observation["resolved_working_directory"], "/trusted/work")
         self.assertEqual(observation["resolved_environment"], {"SAFE": "1"})
         self.assertEqual(observation["unknown_adapter_fault"], UNTRUSTED_MANIFEST_INPUT)
+
+    def test_initialized_identity_equality_is_non_vacuous_and_fails_closed(self) -> None:
+        observation = build_manifest_evidence(self.protocol)["observation"]
+
+        self.assertTrue(observation["initialized_identity_valid"])
+        self.assertEqual(
+            observation["initialized_identity_mismatch_faults"],
+            {
+                "adapter_id": UNTRUSTED_MANIFEST_INPUT,
+                "adapter_revision": UNTRUSTED_MANIFEST_INPUT,
+                "manifest_id": UNTRUSTED_MANIFEST_INPUT,
+                "manifest_revision": UNTRUSTED_MANIFEST_INPUT,
+                "endpoint.adapter_name": UNTRUSTED_MANIFEST_INPUT,
+                "endpoint.adapter_revision": UNTRUSTED_MANIFEST_INPUT,
+            },
+        )
+        self.assertFalse(observation["initialized_identity_mismatch_mutated_source"])
 
     def test_each_untrusted_manifest_input_class_fails_closed_before_resolution(self) -> None:
         observation = build_manifest_evidence(self.protocol)["observation"]
@@ -117,20 +139,28 @@ class RuntimeAdapterManifestEvidenceTests(unittest.TestCase):
         result = build_claim(self.protocol)
 
         self.assertIsInstance(result, ClaimFailure)
-        self.assertLessEqual(MANIFEST_KEYS, {gap["clause_key"] for gap in result.gaps})
+        gap_keys = {gap["clause_key"] for gap in result.gaps}
+        self.assertLessEqual(MANIFEST_KEYS, gap_keys)
+        self.assertIn(PROVENANCE_KEY, gap_keys)
 
-    def test_manifest_ledger_is_scoped_disjoint_from_transport_and_admission_ledgers(self) -> None:
+    def test_manifest_ledger_is_scoped_disjoint_from_other_side_ledgers(self) -> None:
         manifest = build_manifest_evidence(self.protocol)
         transport = build_transport_evidence(self.protocol)
         admission = build_admission_evidence(self.protocol)
+        cancellation = build_request_policy_cancellation_evidence(self.protocol)
+        deadline = build_deadline_evidence(self.protocol)
 
         manifest_keys = {clause["clause_key"] for clause in manifest["clauses"]}
-        transport_keys = {clause["clause_key"] for clause in transport["clauses"]}
-        admission_keys = {clause["clause_key"] for clause in admission["clauses"]}
-        self.assertFalse(manifest_keys & transport_keys)
-        self.assertFalse(transport_keys & manifest_keys)
-        self.assertFalse(manifest_keys & admission_keys)
-        self.assertFalse(admission_keys & manifest_keys)
+        for name, artifact in {
+            "transport": transport,
+            "admission": admission,
+            "cancellation": cancellation,
+            "deadline": deadline,
+        }.items():
+            with self.subTest(name=name):
+                other_keys = {clause["clause_key"] for clause in artifact["clauses"]}
+                self.assertFalse(manifest_keys & other_keys)
+                self.assertFalse(other_keys & manifest_keys)
 
     def test_clause_text_drift_fails_closed_for_all_manifest_groups(self) -> None:
         replacements = (
@@ -145,6 +175,10 @@ class RuntimeAdapterManifestEvidenceTests(unittest.TestCase):
             (
                 "A caller-\n   supplied executable path",
                 "A caller-\n   provided executable path",
+            ),
+            (
+                "adapter_id` MUST equal the trusted manifest key",
+                "adapter_id` MUST match the trusted manifest key",
             ),
         )
         for old, new in replacements:
