@@ -8,8 +8,10 @@ import inspect
 import json
 import unittest
 from pathlib import Path
+from types import MappingProxyType
 
-from llm_collab.runtime_adapter_conformance import ConformanceFailure, error_response
+import llm_collab.runtime_adapter_conformance as conformance
+from llm_collab.runtime_adapter_conformance import ERROR_CODES, ConformanceFailure, error_response, protocol_error_codes
 from llm_collab.runtime_adapter_fixtures import (
     FIXTURES,
     NO_STATE_CHANGE,
@@ -20,7 +22,6 @@ from llm_collab.runtime_adapter_fixtures import (
     ExpectedResult,
     RuntimeAdapterFixture,
     TraceFrame,
-    _protocol_error_codes,
     validate_fixtures,
 )
 from llm_collab.runtime_adapter_reference import ReferenceAdapter
@@ -281,9 +282,10 @@ class RuntimeAdapterFixtureTests(unittest.TestCase):
                 validate_fixtures(self.protocol, (fixture,))
 
     def test_refusal_codes_are_derived_from_protocol_table(self) -> None:
-        codes = _protocol_error_codes(self.protocol)
+        codes = protocol_error_codes(self.protocol)
 
         self.assertEqual(len(codes), 23)
+        self.assertIs(codes, ERROR_CODES)
         self.assertEqual(codes["REDACTION_FAILURE"], -32015)
         self.assertEqual(codes["TOO_MANY_IN_FLIGHT"], -32002)
         self.assertEqual(codes["ADAPTER_QUARANTINED"], -32014)
@@ -303,7 +305,18 @@ class RuntimeAdapterFixtureTests(unittest.TestCase):
         without_table = self.protocol.replace("| -32015 | `REDACTION_FAILURE` | `false` |", "")
 
         with self.assertRaisesRegex(ConformanceFailure, "fixture-error-codes"):
-            _protocol_error_codes(without_table)
+            validate_fixtures(without_table)
+
+    def test_catalog_drift_breaks_fixture_validation(self) -> None:
+        original = conformance.ERROR_CODES
+        changed = dict(original)
+        changed["INVALID_FRAMING"] = -32099
+        conformance.ERROR_CODES = MappingProxyType(changed)
+        try:
+            with self.assertRaisesRegex(ConformanceFailure, "fixture-error-codes"):
+                validate_fixtures(self.protocol)
+        finally:
+            conformance.ERROR_CODES = original
 
     def test_no_human_text_expectation_field_exists(self) -> None:
         for expectation_type in (ExpectedRefusal,):

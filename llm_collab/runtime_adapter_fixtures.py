@@ -15,8 +15,11 @@ from llm_collab.runtime_adapter_conformance import (
     ConformanceFailure,
     classify_direction,
     extract_clause_occurrences,
+    protocol_error_codes,
+    validate_endpoint_v1,
     validate_request,
     validate_response,
+    validate_session_ref_v1,
 )
 
 
@@ -491,24 +494,10 @@ def _validate_initialize_result(result: Any) -> None:
         if not _is_nonempty_string(result[key]):
             raise ConformanceFailure("fixture-conforming-trace", "initialize")
     endpoint = result["endpoint"]
-    if not _is_closed_mapping(
-        endpoint,
-        {
-            "schema_version",
-            "workspace_id",
-            "scope",
-            "endpoint_id",
-            "agent_id",
-            "adapter_name",
-            "adapter_revision",
-            "trust_class",
-            "capability_set_id",
-            "platform",
-            "configuration_ref",
-        },
-    ):
-        raise ConformanceFailure("fixture-conforming-trace", "initialize")
-    _validate_schema_version(endpoint, "initialize")
+    try:
+        validate_endpoint_v1(endpoint)
+    except Exception as error:
+        raise ConformanceFailure("fixture-conforming-trace", "initialize") from error
     for key in (
         "workspace_id",
         "endpoint_id",
@@ -543,38 +532,11 @@ def _validate_initialize_result(result: Any) -> None:
 
 
 def _validate_session_ref(value: Any) -> None:
-    required = {
-        "schema_version",
-        "workspace_id",
-        "scope",
-        "session_ref_id",
-        "endpoint_id",
-        "native_session_id",
-        "evidence",
-    }
-    if not _is_closed_mapping(value, required):
-        raise ConformanceFailure("fixture-session-ref", "session_ref")
-    _validate_schema_version(value, "session_ref")
+    try:
+        value = validate_session_ref_v1(value)
+    except Exception as error:
+        raise ConformanceFailure("fixture-session-ref", "session_ref") from error
     evidence = value["evidence"]
-    if not _is_closed_mapping(
-        evidence,
-        {
-            "schema_version",
-            "workspace_id",
-            "scope",
-            "evidence_id",
-            "evidence_kind",
-            "quality",
-            "state",
-            "authority",
-            "subject",
-            "correlation_id",
-            "observed_at_utc",
-            "integrity",
-        },
-    ):
-        raise ConformanceFailure("fixture-session-ref", "session evidence")
-    _validate_schema_version(evidence, "session evidence")
     if evidence["evidence_kind"] != "exact_session_binding" or evidence["quality"] != "authoritative":
         raise ConformanceFailure("fixture-session-ref", "session evidence")
     subject = evidence["subject"]
@@ -712,31 +674,6 @@ def _validate_result_shape(fixture: RuntimeAdapterFixture, methods: tuple[str, .
         raise ConformanceFailure("fixture-result-method", fixture.fixture_id)
 
 
-def _protocol_error_codes(protocol_text: str) -> Mapping[str, int]:
-    rows: dict[str, int] = {}
-    for line in protocol_text.splitlines():
-        stripped = line.strip()
-        if not stripped.startswith("|") or "`" not in stripped:
-            continue
-        parts = [part.strip() for part in stripped.strip("|").split("|")]
-        if len(parts) != 3:
-            continue
-        raw_code, raw_name, _raw_retryable = parts
-        if not raw_code.startswith("-") or not (raw_name.startswith("`") and raw_name.endswith("`")):
-            continue
-        try:
-            code = int(raw_code)
-        except ValueError:
-            continue
-        name = raw_name.strip("`")
-        if name in rows:
-            raise ConformanceFailure("fixture-error-codes", f"duplicate error {name}")
-        rows[name] = code
-    if len(rows) != 23:
-        raise ConformanceFailure("fixture-error-codes", f"expected 23 protocol errors, got {len(rows)}")
-    return MappingProxyType(rows)
-
-
 def _canonical_digest_without_integrity(value: Mapping[str, Any]) -> str:
     import hashlib
     import json
@@ -817,7 +754,10 @@ def validate_fixtures(
     """Validate replay fixtures against the live protocol extractor."""
 
     live_by_key = {clause.clause_key: clause for clause in extract_clause_occurrences(protocol_text)}
-    error_codes = _protocol_error_codes(protocol_text)
+    try:
+        error_codes = protocol_error_codes(protocol_text)
+    except ConformanceFailure as error:
+        raise ConformanceFailure("fixture-error-codes", error.message) from error
     checked = tuple(fixtures)
     if not checked:
         raise ConformanceFailure("fixture-empty", "no fixtures")

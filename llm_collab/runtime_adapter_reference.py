@@ -14,7 +14,14 @@ import sys
 from dataclasses import dataclass
 from typing import Any, BinaryIO, Mapping
 
-from llm_collab.runtime_adapter_conformance import JSONRPC_VERSION, NEGOTIATED_PROTOCOL_VERSION
+from llm_collab.runtime_adapter_conformance import (
+    ERROR_CODES,
+    JSONRPC_VERSION,
+    NEGOTIATED_PROTOCOL_VERSION,
+    error_code,
+    validate_endpoint_v1,
+    validate_session_ref_v1,
+)
 from llm_collab.runtime_adapter_requests import (
     METHOD_CANCEL,
     METHOD_DELIVER,
@@ -46,18 +53,6 @@ FAULT_INJECTIONS = frozenset(
     )
 )
 
-ERROR_CODES = {
-    "PARSE_ERROR": -32700,
-    "INVALID_REQUEST": -32600,
-    "METHOD_NOT_FOUND": -32601,
-    "INVALID_PARAMS": -32602,
-    "INITIALIZE_REQUIRED": -32005,
-    "UNSUPPORTED_PROTOCOL_VERSION": -32004,
-    "INVALID_FRAMING": -32000,
-    "MESSAGE_TOO_LARGE": -32001,
-    "INVALID_SESSION_REF": -32008,
-    "SHUTDOWN_IN_PROGRESS": -32016,
-}
 MAX_MESSAGE_BYTES = 1_048_576
 MAX_STDERR_BYTES_PER_CONNECTION = 65_536
 
@@ -243,7 +238,11 @@ class ReferenceAdapter:
             return self._error(request_id, "UNSUPPORTED_PROTOCOL_VERSION")
         expected = self._identity
         endpoint = params.get("endpoint")
-        if not isinstance(endpoint, dict) or endpoint != expected.endpoint():
+        try:
+            valid_endpoint = validate_endpoint_v1(endpoint)
+        except Exception:
+            return self._error(request_id, "INVALID_PARAMS")
+        if valid_endpoint != expected.endpoint():
             return self._error(request_id, "INVALID_PARAMS")
         if (
             params.get("adapter_id") != expected.adapter_id
@@ -290,55 +289,19 @@ class ReferenceAdapter:
         return self._result(request_id, receipt)
 
     def _valid_session_ref(self, value: Mapping[str, Any]) -> bool:
-        required = {
-            "schema_version",
-            "workspace_id",
-            "scope",
-            "session_ref_id",
-            "endpoint_id",
-            "native_session_id",
-            "evidence",
-        }
-        if not required <= set(value) <= required | {"repository_binding", "extensions"}:
+        try:
+            document = validate_session_ref_v1(value)
+        except Exception:
             return False
-        if value["schema_version"] != 1 or value["workspace_id"] != self._identity.workspace_id:
+        if document["workspace_id"] != self._identity.workspace_id:
             return False
-        if value["scope"] != self._identity.endpoint()["scope"]:
+        if document["scope"] != self._identity.endpoint()["scope"]:
             return False
-        if "repository_binding" in value:
+        if "repository_binding" in document:
             return False
-        if "extensions" in value and not isinstance(value["extensions"], Mapping):
+        if document["endpoint_id"] != self._identity.endpoint_id:
             return False
-        if not _is_token(value["session_ref_id"], prefix="session_"):
-            return False
-        if value["endpoint_id"] != self._identity.endpoint_id:
-            return False
-        if not isinstance(value["native_session_id"], str) or not value["native_session_id"]:
-            return False
-        evidence = value["evidence"]
-        if not isinstance(evidence, Mapping):
-            return False
-        if set(evidence) != {
-            "schema_version",
-            "workspace_id",
-            "scope",
-            "evidence_id",
-            "evidence_kind",
-            "quality",
-            "state",
-            "authority",
-            "subject",
-            "correlation_id",
-            "observed_at_utc",
-            "integrity",
-        }:
-            return False
-        if evidence["schema_version"] != 1 or evidence["workspace_id"] != value["workspace_id"]:
-            return False
-        if evidence["scope"] != value["scope"]:
-            return False
-        if evidence["evidence_kind"] != "exact_session_binding" or evidence["quality"] != "authoritative":
-            return False
+        evidence = document["evidence"]
         if evidence["state"] != "visible" or not _is_token(evidence["evidence_id"], prefix="evidence_"):
             return False
         if not _is_token(evidence["correlation_id"], prefix="corr_"):
@@ -448,7 +411,7 @@ class ReferenceAdapter:
                 "jsonrpc": JSONRPC_VERSION,
                 "id": request_id,
                 "error": {
-                    "code": ERROR_CODES[name],
+                    "code": error_code(name),
                     "message": name,
                     "data": {
                         "name": name,
