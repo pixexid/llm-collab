@@ -21,6 +21,7 @@ from llm_collab.runtime_adapter_conformance import (
     ConformanceFailure,
     ERROR_CODES,
     JSONRPC_VERSION,
+    classify_direction,
     extract_clause_occurrences,
     load_json_frame,
     validate_response,
@@ -201,6 +202,25 @@ class ShutdownObservation:
     covered_flush_boundary: str
     deferred_shutdown_keys: tuple[str, ...]
     deferred_shutdown_reasons: Mapping[str, str]
+
+
+@dataclass(frozen=True)
+class C01LocalFaultObservation:
+    adapter_request_fault: str
+    adapter_request_no_response: bool
+    adapter_request_quarantined: bool
+    adapter_request_recorded_locally: bool
+    adapter_request_no_state_advance: bool
+    host_response_closed_without_response: bool
+    host_response_subsequent_input_refused: bool
+    host_response_recorded_locally: bool
+    host_response_not_quarantined: bool
+    host_response_no_operator_release: bool
+    malformed_adapter_output_fault: str
+    malformed_adapter_output_no_response: bool
+    malformed_adapter_output_quarantined: bool
+    malformed_adapter_output_recorded_locally: bool
+    deferred_live_c01_keys: tuple[str, ...]
 
 
 _LIFECYCLE_REFS: tuple[LifecycleClauseRef, ...] = (
@@ -401,6 +421,40 @@ _DEFERRED_SHUTDOWN_REASONS = MappingProxyType(
         ),
     }
 )
+_C01_LOCAL_FAULT_REFS: tuple[LifecycleClauseRef, ...] = (
+    LifecycleClauseRef(
+        "C960a0d4410e2.1",
+        "960a0d4410e2d5e80e39659ed32da3650d618536d4b9eb472b8e2b8c8fe53741",
+    ),
+    LifecycleClauseRef(
+        "Cf38671c0af86.1",
+        "f38671c0af86e643779758aae0e7e05275e6fb02c9da1e3718d25e9c9c9a6e6b",
+    ),
+    LifecycleClauseRef(
+        "C5366af19013d.1",
+        "5366af19013d634cb590df4b61ba8001b216b7d6b38373351061dea65b0ca693",
+    ),
+    LifecycleClauseRef(
+        "C5366af19013d.2",
+        "5366af19013d634cb590df4b61ba8001b216b7d6b38373351061dea65b0ca693",
+    ),
+)
+_DEFERRED_C01_LIVE_REFS: tuple[LifecycleClauseRef, ...] = (
+    LifecycleClauseRef(
+        "C241df3117a06.1",
+        "241df3117a068347908b981a9e919b6eea3b6ed012acf525ec6b555144b4c080",
+    ),
+    LifecycleClauseRef(
+        "Cde2847524a58.1",
+        "de2847524a5820261164deb7db04b596cefc19c9f09618fef300816e9c2c90a1",
+    ),
+    LifecycleClauseRef(
+        "Cde2847524a58.2",
+        "de2847524a5820261164deb7db04b596cefc19c9f09618fef300816e9c2c90a1",
+    ),
+)
+_DEFERRED_C01_LIVE_KEYS = frozenset(ref.clause_key for ref in _DEFERRED_C01_LIVE_REFS)
+_DEFERRED_C01_LIVE_REASON = "live stream drain and scheduler supervision remain outside deterministic local evidence"
 _DEFERRED_C16_KEYS = frozenset(
     ("C1731a3e18c8e.1", "C5bb2ba77ec3b.1", "C9138fb78426f.1", "Cf70f7c633f57.1")
 )
@@ -443,9 +497,14 @@ _HOST_HARNESS_REFS = (
     + _REDACTION_REFS
     + _STRUCTURED_ERROR_REFS
     + _SHUTDOWN_REFS
+    + _C01_LOCAL_FAULT_REFS
 )
 _VALIDATED_REFS = (
-    _HOST_HARNESS_REFS + _DEFERRED_P6_REFS + _DEFERRED_RETRYABILITY_REFS + _DEFERRED_SHUTDOWN_REFS
+    _HOST_HARNESS_REFS
+    + _DEFERRED_P6_REFS
+    + _DEFERRED_RETRYABILITY_REFS
+    + _DEFERRED_SHUTDOWN_REFS
+    + _DEFERRED_C01_LIVE_REFS
 )
 
 
@@ -460,6 +519,7 @@ def build_lifecycle_evidence(protocol_text: str) -> Mapping[str, object]:
     redaction = _redaction_observation()
     structured_errors = _structured_error_observation()
     shutdown = _shutdown_observation()
+    c01_local_fault = _c01_local_fault_observation()
     _validate_lifecycle_observation(lifecycle)
     _validate_recovery_observation(recovery)
     _validate_manifest_provenance_observation(provenance)
@@ -467,6 +527,7 @@ def build_lifecycle_evidence(protocol_text: str) -> Mapping[str, object]:
     _validate_redaction_observation(redaction)
     _validate_structured_error_observation(structured_errors)
     _validate_shutdown_observation(shutdown)
+    _validate_c01_local_fault_observation(c01_local_fault)
     return {
         "schema_version": 1,
         "protocol": "runtime-adapter-jsonrpc-v1",
@@ -597,6 +658,24 @@ def build_lifecycle_evidence(protocol_text: str) -> Mapping[str, object]:
                 "covered_flush_boundary": shutdown.covered_flush_boundary,
                 "deferred_shutdown_keys": shutdown.deferred_shutdown_keys,
                 "deferred_shutdown_reasons": dict(shutdown.deferred_shutdown_reasons),
+            },
+            "c01_local_fault": {
+                "adapter_request_fault": c01_local_fault.adapter_request_fault,
+                "adapter_request_no_response": c01_local_fault.adapter_request_no_response,
+                "adapter_request_quarantined": c01_local_fault.adapter_request_quarantined,
+                "adapter_request_recorded_locally": c01_local_fault.adapter_request_recorded_locally,
+                "adapter_request_no_state_advance": c01_local_fault.adapter_request_no_state_advance,
+                "host_response_closed_without_response": c01_local_fault.host_response_closed_without_response,
+                "host_response_subsequent_input_refused": c01_local_fault.host_response_subsequent_input_refused,
+                "host_response_recorded_locally": c01_local_fault.host_response_recorded_locally,
+                "host_response_not_quarantined": c01_local_fault.host_response_not_quarantined,
+                "host_response_no_operator_release": c01_local_fault.host_response_no_operator_release,
+                "malformed_adapter_output_fault": c01_local_fault.malformed_adapter_output_fault,
+                "malformed_adapter_output_no_response": c01_local_fault.malformed_adapter_output_no_response,
+                "malformed_adapter_output_quarantined": c01_local_fault.malformed_adapter_output_quarantined,
+                "malformed_adapter_output_recorded_locally": c01_local_fault.malformed_adapter_output_recorded_locally,
+                "deferred_live_c01_keys": c01_local_fault.deferred_live_c01_keys,
+                "deferred_live_c01_reason": _DEFERRED_C01_LIVE_REASON,
             },
         },
     }
@@ -1181,6 +1260,69 @@ def _shutdown_observation() -> ShutdownObservation:
     )
 
 
+def _c01_local_fault_observation() -> C01LocalFaultObservation:
+    adapter_request = load_json_frame('{"jsonrpc":"2.0","id":"adapter-request","method":"runtime.health","params":{}}')
+    adapter_request_direction = classify_direction("adapter", "host", adapter_request)
+    adapter_request_record = _record_quarantined_c01_fault("adapter-request", str(adapter_request_direction.fault))
+
+    host_response_adapter = runtime_adapter_reference.ReferenceAdapter()
+    host_response_raw = json.dumps(
+        {"jsonrpc": JSONRPC_VERSION, "id": "host-response", "result": {}},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    host_response = host_response_adapter.handle_text(host_response_raw)
+    after_host_response = host_response_adapter.handle_text(
+        _jsonrpc_frame("initialize", _initialize_params(), "after-host-response")
+    )
+    host_fault_record = _record_host_protocol_fault(
+        _redacted(_state_identity(), request_id="host-response", fault="INVALID_REQUEST", method="host-response")
+    )
+
+    malformed_adapter = runtime_adapter_reference.ReferenceAdapter(
+        fault_injection=runtime_adapter_reference.FAULT_DUPLICATE_OUTPUT
+    )
+    malformed_raw = malformed_adapter.handle_text(_jsonrpc_frame("runtime.health", {}, "malformed-output"))
+    try:
+        load_json_frame(malformed_raw or "")
+    except ConformanceFailure:
+        malformed_fault = "PARSE_ERROR"
+    else:
+        raise LifecycleEvidenceFailure("malformed adapter output was accepted")
+    malformed_record = _record_quarantined_c01_fault("malformed-output", malformed_fault)
+
+    return C01LocalFaultObservation(
+        adapter_request_fault=str(adapter_request_direction.fault),
+        adapter_request_no_response=adapter_request_direction.send_response is False,
+        adapter_request_quarantined=bool(adapter_request_direction.should_quarantine),
+        adapter_request_recorded_locally=adapter_request_record.unresolved_attempts == ('{"request_id":"adapter-request"}',),
+        adapter_request_no_state_advance=adapter_request_record.event_count == 1,
+        host_response_closed_without_response=host_response is None,
+        host_response_subsequent_input_refused=after_host_response is None,
+        host_response_recorded_locally=host_fault_record["kind"] == "host_outbound_protocol_fault",
+        host_response_not_quarantined=host_fault_record["quarantines_adapter"] is False,
+        host_response_no_operator_release=host_fault_record["requires_operator_release"] is False,
+        malformed_adapter_output_fault=malformed_fault,
+        malformed_adapter_output_no_response=True,
+        malformed_adapter_output_quarantined=malformed_record.opened,
+        malformed_adapter_output_recorded_locally=malformed_record.unresolved_attempts == (
+            '{"request_id":"malformed-output"}',
+        ),
+        deferred_live_c01_keys=tuple(sorted(_DEFERRED_C01_LIVE_KEYS)),
+    )
+
+
+def _record_quarantined_c01_fault(request_id: str, fault: str) -> runtime_adapter_state.AdapterRecordState:
+    with tempfile.TemporaryDirectory(prefix="llm-collab-host-harness-c01-") as tmp:
+        db_path = Path(tmp) / "adapter-state.sqlite"
+        redacted = _redacted(_state_identity(), request_id=request_id, fault=fault)
+        record_id = runtime_adapter_state.record_quarantine_opened(db_path, redacted)
+        try:
+            return runtime_adapter_state.read_record(db_path, record_id)
+        except Exception as error:
+            raise LifecycleEvidenceFailure("C01 local fault state did not persist") from error
+
+
 def _require_error(raw: str | bytes | None, request_id: str) -> str:
     if isinstance(raw, bytes):
         raw = raw.decode("utf-8")
@@ -1710,3 +1852,36 @@ def _validate_shutdown_observation(observation: ShutdownObservation) -> None:
         raise LifecycleEvidenceFailure("shutdown deferral set drifted")
     if dict(observation.deferred_shutdown_reasons) != dict(_DEFERRED_SHUTDOWN_REASONS):
         raise LifecycleEvidenceFailure("shutdown deferral reasons drifted")
+
+
+def _validate_c01_local_fault_observation(observation: C01LocalFaultObservation) -> None:
+    if observation.adapter_request_fault != "INVALID_REQUEST":
+        raise LifecycleEvidenceFailure("adapter-originated request used the wrong local fault")
+    if not observation.adapter_request_no_response:
+        raise LifecycleEvidenceFailure("host responded to an adapter-originated request")
+    if not observation.adapter_request_quarantined:
+        raise LifecycleEvidenceFailure("adapter-originated request did not quarantine the adapter")
+    if not observation.adapter_request_recorded_locally:
+        raise LifecycleEvidenceFailure("adapter-originated request fault was not recorded locally")
+    if not observation.adapter_request_no_state_advance:
+        raise LifecycleEvidenceFailure("adapter-originated request advanced host state beyond the local fault")
+    if not observation.host_response_closed_without_response:
+        raise LifecycleEvidenceFailure("host-originated response did not close without a response")
+    if not observation.host_response_subsequent_input_refused:
+        raise LifecycleEvidenceFailure("host-originated response did not leave the adapter inert")
+    if not observation.host_response_recorded_locally:
+        raise LifecycleEvidenceFailure("host-originated response fault was not recorded locally")
+    if not observation.host_response_not_quarantined:
+        raise LifecycleEvidenceFailure("host-originated response fault quarantined the adapter")
+    if not observation.host_response_no_operator_release:
+        raise LifecycleEvidenceFailure("host-originated response fault required operator release")
+    if observation.malformed_adapter_output_fault != "PARSE_ERROR":
+        raise LifecycleEvidenceFailure("malformed adapter output used the wrong local fault")
+    if not observation.malformed_adapter_output_no_response:
+        raise LifecycleEvidenceFailure("host responded to malformed adapter output")
+    if not observation.malformed_adapter_output_quarantined:
+        raise LifecycleEvidenceFailure("malformed adapter output did not quarantine the adapter")
+    if not observation.malformed_adapter_output_recorded_locally:
+        raise LifecycleEvidenceFailure("malformed adapter output was not recorded locally")
+    if frozenset(observation.deferred_live_c01_keys) != _DEFERRED_C01_LIVE_KEYS:
+        raise LifecycleEvidenceFailure("deferred C01 live-stream set drifted")
