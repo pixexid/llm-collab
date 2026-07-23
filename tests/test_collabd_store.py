@@ -2909,6 +2909,164 @@ class LedgerStoreTest(unittest.TestCase):
                         workspace_id="ws_alpha", source_id="chats_mailbox"
                     )
 
+    def test_prune_observation_audit_keeps_newest_tail_without_audit_of_audit(self) -> None:
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            paths = LedgerPaths.derive(tmp, "ws_alpha")
+            with LedgerStore.open_writer(paths, clock=lambda: FIXED_TIME) as store:
+                record_test_registry(store)
+                old_hash = "b" * 64
+                old_revision = f"sha256:{old_hash}"
+                store.record_registry_snapshot(
+                    workspace_id="ws_alpha",
+                    registry_revision=old_revision,
+                    registry_source_sha256=old_hash,
+                    captured_at_utc=FIXED_TIME.isoformat(),
+                    workspace_snapshot_json=json.dumps(
+                        {"workspace_id": "ws_alpha", "projects": [AMIGA, NUVYR]}
+                    ),
+                    project_snapshots={
+                        AMIGA: json.dumps({"project_id": AMIGA}),
+                        NUVYR: json.dumps({"project_id": NUVYR}),
+                    },
+                    source_snapshots={
+                        AMIGA: {"chats_mailbox": "{}"},
+                        NUVYR: {"chats_mailbox": "{}"},
+                    },
+                )
+                store._connection.executemany(
+                    "INSERT INTO observation_source_registry_snapshots "
+                    "(workspace_id, project_id, source_id, registry_revision, snapshot_json) "
+                    "VALUES ('ws_alpha', ?, 'chats_mailbox', ?, '{}')",
+                    ((AMIGA, REVISION), (NUVYR, REVISION)),
+                )
+                for index in range(1, 151):
+                    store._insert_observation_audit(
+                        workspace_id="ws_alpha",
+                        project_id=AMIGA,
+                        source_id="chats_mailbox",
+                        registry_revision=REVISION,
+                        action="retention",
+                        occurred_at_utc=f"2026-07-21T08:05:{index:03d}+00:00",
+                        detail={"removed": 0},
+                    )
+                for index in range(1, 57):
+                    store._insert_observation_audit(
+                        workspace_id="ws_alpha",
+                        project_id=AMIGA,
+                        source_id="chats_mailbox",
+                        registry_revision=old_revision,
+                        action="retention",
+                        occurred_at_utc=f"2026-07-20T08:05:{index:03d}+00:00",
+                        detail={"removed": 0},
+                    )
+                for index in range(1, 6):
+                    store._insert_observation_audit(
+                        workspace_id="ws_alpha",
+                        project_id=NUVYR,
+                        source_id="chats_mailbox",
+                        registry_revision=REVISION,
+                        action="reconcile",
+                        occurred_at_utc=f"2026-07-21T09:05:{index:03d}+00:00",
+                        detail={
+                            "cursor_bytes": 0,
+                            "cursor_incomplete": False,
+                            "cursor_sha256": hashlib.sha256(b"").hexdigest(),
+                            "scanned": 0,
+                            "written": 0,
+                        },
+                    )
+
+                removed = store.prune_observation_audit(
+                    workspace_id="ws_alpha",
+                    project_id=AMIGA,
+                    source_id="chats_mailbox",
+                    keep_latest=200,
+                    limit=3,
+                )
+                self.assertEqual(removed, 3)
+                self.assertEqual(
+                    store._connection.execute(
+                        "SELECT min(audit_id), max(audit_id), count(*) FROM observation_audit "
+                        "WHERE workspace_id = 'ws_alpha' AND project_id = ? "
+                        "AND source_id = 'chats_mailbox'",
+                        (AMIGA,),
+                    ).fetchone(),
+                    (4, 206, 203),
+                )
+                self.assertEqual(
+                    store._connection.execute(
+                        "SELECT min(audit_id), max(audit_id), count(*) FROM observation_audit "
+                        "WHERE workspace_id = 'ws_alpha' AND project_id = ?",
+                        (NUVYR,),
+                    ).fetchone(),
+                    (1, 5, 5),
+                )
+                self.assertEqual(
+                    store._connection.execute(
+                        "SELECT action, count(*) FROM observation_audit GROUP BY action"
+                    ).fetchall(),
+                    [("reconcile", 5), ("retention", 203)],
+                )
+
+                removed = store.prune_observation_audit(
+                    workspace_id="ws_alpha",
+                    project_id=AMIGA,
+                    source_id="chats_mailbox",
+                    keep_latest=200,
+                    limit=500,
+                )
+                self.assertEqual(removed, 3)
+                self.assertEqual(
+                    store._connection.execute(
+                        "SELECT min(audit_id), max(audit_id), count(*) FROM observation_audit "
+                        "WHERE workspace_id = 'ws_alpha' AND project_id = ? "
+                        "AND source_id = 'chats_mailbox'",
+                        (AMIGA,),
+                    ).fetchone(),
+                    (7, 206, 200),
+                )
+
+                for kwargs in (
+                    {"keep_latest": 0, "limit": 1},
+                    {"keep_latest": 201, "limit": 1},
+                    {"keep_latest": 200, "limit": 0},
+                    {"keep_latest": True, "limit": 1},
+                    {"keep_latest": 200, "limit": False},
+                ):
+                    with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+                        store.prune_observation_audit(
+                            workspace_id="ws_alpha",
+                            project_id=AMIGA,
+                            source_id="chats_mailbox",
+                            **kwargs,
+                        )
+                with self.assertRaises(ValueError):
+                    store.prune_observation_audit(
+                        workspace_id="ws_other",
+                        project_id=AMIGA,
+                        source_id="chats_mailbox",
+                        keep_latest=200,
+                        limit=1,
+                    )
+                with self.assertRaises(ValueError):
+                    store.prune_observation_audit(
+                        workspace_id="ws_alpha",
+                        project_id=AMIGA,
+                        source_id="other_source",
+                        keep_latest=200,
+                        limit=1,
+                    )
+
+            with LedgerStore.open_reader(paths) as reader:
+                with self.assertRaises(PermissionError):
+                    reader.prune_observation_audit(
+                        workspace_id="ws_alpha",
+                        project_id=AMIGA,
+                        source_id="chats_mailbox",
+                        keep_latest=200,
+                        limit=1,
+                    )
+
     def test_v7_scheduler_cursor_schema_rejects_malformed_direct_rows(self) -> None:
         with TemporaryDirectory(dir="/tmp") as tmp:
             paths = LedgerPaths.derive(tmp, "ws_alpha")

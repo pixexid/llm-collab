@@ -1138,6 +1138,210 @@ class ObservationTest(unittest.TestCase):
                 0,
             )
 
+    def test_scheduler_bounds_audit_tail_without_audit_of_audit(self) -> None:
+        self.set_projects("amiga")
+
+        def fake_scan(_root, *, project_id, **_kwargs):
+            return [], "", 1
+
+        with LedgerStore.open_writer(self.paths) as store, patch.object(
+            observe_module, "AUDIT_RETENTION_LIMIT", 3
+        ), patch.object(observe_module, "scan_mailbox", side_effect=fake_scan):
+            engine = ObservationEngine(
+                workspace_root=self.root,
+                workspace_id="ws_alpha",
+                projects_path=self.projects,
+            )
+            for _ in range(8):
+                result = engine.reconcile(store)
+
+            self.assertLessEqual(
+                store._connection.execute(
+                    "SELECT count(*) FROM observation_audit WHERE workspace_id = 'ws_alpha' "
+                    "AND project_id = 'amiga' AND source_id = ?",
+                    (SOURCE_ID,),
+                ).fetchone()[0],
+                3,
+            )
+            self.assertGreater(result["projects"]["amiga"]["audit_pruned"], 0)
+            self.assertEqual(
+                {
+                    action
+                    for (action,) in store._connection.execute(
+                        "SELECT DISTINCT action FROM observation_audit"
+                    ).fetchall()
+                },
+                {"reconcile", "retention"},
+            )
+
+    def test_scheduler_charges_audit_prune_to_maintenance_budget_and_defers(self) -> None:
+        self.set_projects("amiga")
+
+        def fake_scan(_root, *, project_id, **_kwargs):
+            return [], "", 1
+
+        with LedgerStore.open_writer(self.paths) as store:
+            snapshot = self.snapshot(store)
+            for index in range(5):
+                store._insert_observation_audit(
+                    workspace_id="ws_alpha",
+                    project_id="amiga",
+                    source_id=SOURCE_ID,
+                    registry_revision=snapshot.registry_revision,
+                    action="retention",
+                    occurred_at_utc=(START + timedelta(seconds=index)).isoformat(),
+                    detail={"removed": 0},
+                )
+
+            with patch.object(observe_module, "AUDIT_RETENTION_LIMIT", 2), patch.object(
+                observe_module, "MAINTENANCE_LIMIT", 5
+            ), patch.object(observe_module, "scan_mailbox", side_effect=fake_scan):
+                engine = ObservationEngine(
+                    workspace_root=self.root,
+                    workspace_id="ws_alpha",
+                    projects_path=self.projects,
+                )
+                result = engine.reconcile(store)
+
+            self.assertEqual(result["projects"]["amiga"]["audit_pruned"], 1)
+            self.assertEqual(result["budget"]["maintenance_remaining"], 0)
+            self.assertEqual(
+                store._connection.execute(
+                    "SELECT count(*) FROM observation_audit WHERE workspace_id = 'ws_alpha' "
+                    "AND project_id = 'amiga' AND source_id = ?",
+                    (SOURCE_ID,),
+                ).fetchone()[0],
+                6,
+            )
+            self.assertEqual(
+                store.observation_scheduler_cursor(
+                    workspace_id="ws_alpha", source_id=SOURCE_ID
+                ),
+                "amiga",
+            )
+
+    def test_scheduler_prunes_small_superseded_revision_when_total_exceeds_tail(self) -> None:
+        self.set_projects("amiga")
+
+        def fake_scan(_root, *, project_id, **_kwargs):
+            return [], "", 1
+
+        with LedgerStore.open_writer(self.paths) as store:
+            current = self.snapshot(store)
+            old_hash = "b" * 64
+            old_revision = f"sha256:{old_hash}"
+            store.record_registry_snapshot(
+                workspace_id="ws_alpha",
+                registry_revision=old_revision,
+                registry_source_sha256=old_hash,
+                captured_at_utc=START.isoformat(),
+                workspace_snapshot_json=json.dumps(
+                    {"workspace_id": "ws_alpha", "projects": ["amiga"]}
+                ),
+                project_snapshots={"amiga": json.dumps({"project_id": "amiga"})},
+                source_snapshots={"amiga": {SOURCE_ID: "{}"}},
+            )
+            store._insert_observation_audit(
+                workspace_id="ws_alpha",
+                project_id="amiga",
+                source_id=SOURCE_ID,
+                registry_revision=old_revision,
+                action="retention",
+                occurred_at_utc=(START - timedelta(days=1)).isoformat(),
+                detail={"removed": 0},
+            )
+
+            with patch.object(observe_module, "AUDIT_RETENTION_LIMIT", 2), patch.object(
+                observe_module, "scan_mailbox", side_effect=fake_scan
+            ):
+                engine = ObservationEngine(
+                    workspace_root=self.root,
+                    workspace_id="ws_alpha",
+                    projects_path=self.projects,
+                )
+                result = engine.reconcile(store)
+
+            self.assertEqual(result["projects"]["amiga"]["audit_pruned"], 1)
+            self.assertEqual(
+                store._connection.execute(
+                    "SELECT count(*) FROM observation_audit WHERE workspace_id = 'ws_alpha' "
+                    "AND project_id = 'amiga' AND source_id = ? AND registry_revision = ?",
+                    (SOURCE_ID, old_revision),
+                ).fetchone()[0],
+                0,
+            )
+            self.assertEqual(
+                store._connection.execute(
+                    "SELECT count(*) FROM observation_audit WHERE workspace_id = 'ws_alpha' "
+                    "AND project_id = 'amiga' AND source_id = ? AND registry_revision = ?",
+                    (SOURCE_ID, current.registry_revision),
+                ).fetchone()[0],
+                2,
+            )
+
+    def test_scheduler_audit_prune_preserves_observations_checkpoint_and_cursor(self) -> None:
+        self.set_projects("amiga")
+
+        def fake_scan(_root, *, project_id, **_kwargs):
+            return [], "checkpoint-after-empty-scan", 1
+
+        with LedgerStore.open_writer(self.paths) as store:
+            snapshot = self.snapshot(store)
+            candidate = self.scheduler_candidate("amiga", "unresolved", scan_count=1)
+            store.reconcile_observations(
+                workspace_id="ws_alpha",
+                project_id="amiga",
+                source_id=SOURCE_ID,
+                registry_revision=snapshot.registry_revision,
+                candidates=[candidate],
+                next_cursor="checkpoint-before-prune",
+                scanned_count=1,
+                observed_at_utc=START.isoformat(),
+            )
+            for index in range(5):
+                store._insert_observation_audit(
+                    workspace_id="ws_alpha",
+                    project_id="amiga",
+                    source_id=SOURCE_ID,
+                    registry_revision=snapshot.registry_revision,
+                    action="retention",
+                    occurred_at_utc=(START + timedelta(seconds=10 + index)).isoformat(),
+                    detail={"removed": 0},
+                )
+
+            with patch.object(observe_module, "AUDIT_RETENTION_LIMIT", 2), patch.object(
+                observe_module, "scan_mailbox", side_effect=fake_scan
+            ):
+                engine = ObservationEngine(
+                    workspace_root=self.root,
+                    workspace_id="ws_alpha",
+                    projects_path=self.projects,
+                )
+                engine.reconcile(store)
+
+            self.assertEqual(
+                store._connection.execute(
+                    "SELECT resolution_state FROM observations WHERE workspace_id = 'ws_alpha' "
+                    "AND project_id = 'amiga'"
+                ).fetchall(),
+                [("unresolved",)],
+            )
+            self.assertEqual(
+                store.observation_checkpoint_cursor(
+                    workspace_id="ws_alpha",
+                    project_id="amiga",
+                    source_id=SOURCE_ID,
+                    registry_revision=snapshot.registry_revision,
+                ),
+                "checkpoint-after-empty-scan",
+            )
+            self.assertEqual(
+                store.observation_scheduler_cursor(
+                    workspace_id="ws_alpha", source_id=SOURCE_ID
+                ),
+                "amiga",
+            )
+
     def test_watchdog_is_hint_only_and_failure_does_not_disable_reconciliation(self) -> None:
         clock = MutableClock()
         engine = ObservationEngine(
