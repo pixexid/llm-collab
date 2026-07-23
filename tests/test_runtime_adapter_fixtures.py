@@ -130,10 +130,18 @@ class RuntimeAdapterFixtureTests(unittest.TestCase):
             "runtime-adapter-reconcile-rejects-session-ref-schema-drift": {
                 "C930c3ccd59a0.1",
             },
+            "runtime-adapter-project-reconcile-request": {
+                "C8ed901b43824.1",
+                "C8ed901b43824.2",
+            },
+            "runtime-adapter-project-reconcile-rejects-scope-mismatch": {
+                "C8ed901b43824.1",
+            },
+            "runtime-adapter-project-reconcile-rejects-repository-project-mismatch": {
+                "C8ed901b43824.2",
+            },
         }
         deferred = {
-            "C8ed901b43824.1",
-            "C8ed901b43824.2",
             "C9a07be32fe6b.1",
         }
         referenced = {ref.clause_key for fixture in FIXTURES for ref in fixture.clause_refs}
@@ -182,13 +190,12 @@ class RuntimeAdapterFixtureTests(unittest.TestCase):
         result = build_claim(self.protocol)
 
         self.assertIsInstance(result, ClaimFailure)
-        self.assertLess(len(result.gaps), 139)
+        self.assertLess(len(result.gaps), 137)
         gap_keys = {gap["clause_key"] for gap in result.gaps}
         self.assertNotIn("C930c3ccd59a0.1", gap_keys)
-        self.assertLessEqual(
-            {"C8ed901b43824.1", "C8ed901b43824.2", "C9a07be32fe6b.1"},
-            gap_keys,
-        )
+        self.assertNotIn("C8ed901b43824.1", gap_keys)
+        self.assertNotIn("C8ed901b43824.2", gap_keys)
+        self.assertIn("C9a07be32fe6b.1", gap_keys)
 
     def test_old_three_key_initialize_endpoint_is_rejected(self) -> None:
         initialize = _thaw(FIXTURES[0].trace[0].frame)
