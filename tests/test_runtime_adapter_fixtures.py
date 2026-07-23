@@ -16,6 +16,7 @@ from llm_collab.runtime_adapter_conformance import ERROR_CODES, ConformanceFailu
 from llm_collab.runtime_adapter_claim import ClaimFailure, build_claim
 from llm_collab.runtime_adapter_fixtures import (
     FIXTURES,
+    _INITIALIZE_PARAMS,
     NO_STATE_CHANGE,
     POLARITY_CONFORMING,
     POLARITY_VIOLATING,
@@ -230,6 +231,141 @@ class RuntimeAdapterFixtureTests(unittest.TestCase):
         self.assertIsNotNone(response)
         payload = json.loads(response)
         self.assertEqual(payload["error"]["data"]["name"], "INVALID_PARAMS")
+
+    def test_c04_handshake_fixtures_cover_only_static_replayable_clauses(self) -> None:
+        by_id = {fixture.fixture_id: fixture for fixture in FIXTURES}
+        health = by_id["runtime-adapter-health-request"]
+        expected = {
+            "runtime-adapter-initialize-rejects-bad-params": ("C35ad6e99e97c.1", "INVALID_PARAMS", -32602, False),
+            "runtime-adapter-initialize-rejects-unsupported-version": (
+                "Cd29f1b437866.1",
+                "UNSUPPORTED_PROTOCOL_VERSION",
+                -32004,
+                True,
+            ),
+            "runtime-adapter-non-initialize-first-method-refuses": (
+                "Cd29f1b437866.2",
+                "INITIALIZE_REQUIRED",
+                -32005,
+                True,
+            ),
+        }
+        referenced = {ref.clause_key for fixture in FIXTURES for ref in fixture.clause_refs}
+
+        self.assertLessEqual({"C6e51fab4b16d.1", "C1c1a8c844fde.1"}, {ref.clause_key for ref in health.clause_refs})
+        self.assertTrue(_replays_fixture(health))
+        _assert_initialize_result_echoes_request(self, health)
+        for fixture_id, (clause_key, error_name, error_code, closes) in expected.items():
+            with self.subTest(fixture=fixture_id):
+                fixture = by_id[fixture_id]
+                self.assertEqual(fixture.polarity, POLARITY_VIOLATING)
+                self.assertIn(clause_key, {ref.clause_key for ref in fixture.clause_refs})
+                self.assertIn("Cc1f582727d06.1", {ref.clause_key for ref in fixture.clause_refs})
+                self.assertIsInstance(fixture.expectation, ExpectedRefusal)
+                self.assertEqual(fixture.expectation.error_name, error_name)
+                self.assertEqual(fixture.expectation.error_code, error_code)
+                self.assertTrue(fixture.expectation.response_emitted)
+                self.assertEqual(fixture.expectation.closes_connection, closes)
+                self.assertTrue(_replays_fixture(fixture))
+        self.assertNotIn("C587906f36ba3.1", referenced)
+        self.assertNotIn("C1be9d6c85a83.1", referenced)
+
+    def test_c04_handshake_no_partial_binding_and_termination_split(self) -> None:
+        for name, frame, later_initialize_response in _handshake_failure_cases():
+            with self.subTest(name=name):
+                adapter = ReferenceAdapter()
+                first_response = adapter.handle_text(json.dumps(frame, sort_keys=True, separators=(",", ":")))
+                self.assertIsNotNone(first_response)
+                first_payload = json.loads(first_response or "{}")
+                second_response = adapter.handle_text(_valid_initialize_json("initialize-after-failure"))
+
+                if name == "bad-params":
+                    self.assertEqual(first_payload["error"]["data"]["name"], "INVALID_PARAMS")
+                    self.assertIsInstance(second_response, str)
+                    _assert_initialize_success(self, json.loads(second_response or "{}"))
+                else:
+                    self.assertEqual(first_payload["error"]["data"]["name"], later_initialize_response)
+                    self.assertIsNone(second_response)
+
+    def test_c04_handshake_slice_reduces_its_own_base_gaps_by_six(self) -> None:
+        c04_keys = {
+            "C6e51fab4b16d.1",
+            "C1c1a8c844fde.1",
+            "C35ad6e99e97c.1",
+            "Cd29f1b437866.1",
+            "Cd29f1b437866.2",
+            "Cc1f582727d06.1",
+        }
+        deferred = {"C587906f36ba3.1", "C1be9d6c85a83.1"}
+        result = build_claim(self.protocol)
+        base_result = build_claim(
+            self.protocol,
+            fixtures=tuple(
+                replace(
+                    fixture,
+                    clause_refs=tuple(ref for ref in fixture.clause_refs if ref.clause_key not in c04_keys),
+                )
+                if fixture.fixture_id == "runtime-adapter-health-request"
+                else fixture
+                for fixture in FIXTURES
+                if not fixture.fixture_id.startswith("runtime-adapter-initialize-rejects-")
+                and fixture.fixture_id != "runtime-adapter-non-initialize-first-method-refuses"
+            ),
+        )
+
+        self.assertIsInstance(result, ClaimFailure)
+        self.assertIsInstance(base_result, ClaimFailure)
+        self.assertEqual(len(base_result.gaps) - len(result.gaps), 6)
+        gap_keys = {gap["clause_key"] for gap in result.gaps}
+        self.assertFalse(c04_keys & gap_keys)
+        self.assertLessEqual(deferred, gap_keys)
+
+    def test_c04_handshake_mutations_fail_closed(self) -> None:
+        health = next(fixture for fixture in FIXTURES if fixture.fixture_id == "runtime-adapter-health-request")
+        drifted_response = _thaw(health.trace[1].frame)
+        drifted_response["result"]["adapter_id"] = "adapter_other"
+
+        with self.assertRaisesRegex(ConformanceFailure, "fixture-conforming-trace"):
+            validate_fixtures(
+                self.protocol,
+                (replace(health, trace=(health.trace[0], TraceFrame("adapter", "host", drifted_response))),),
+            )
+
+        for name, mutate in _bad_initialize_param_mutations().items():
+            with self.subTest(name=name):
+                params = _thaw(_INITIALIZE_PARAMS)
+                mutate(params)
+                response = ReferenceAdapter().handle_text(
+                    json.dumps(
+                        {"jsonrpc": "2.0", "id": f"initialize-{name}", "method": "initialize", "params": params},
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                )
+                self.assertIsNotNone(response)
+                self.assertEqual(json.loads(response or "{}")["error"]["data"]["name"], "INVALID_PARAMS")
+
+        for fixture_id, clause_key in (
+            ("runtime-adapter-health-request", "C6e51fab4b16d.1"),
+            ("runtime-adapter-health-request", "C1c1a8c844fde.1"),
+            ("runtime-adapter-initialize-rejects-bad-params", "C35ad6e99e97c.1"),
+            ("runtime-adapter-initialize-rejects-unsupported-version", "Cd29f1b437866.1"),
+            ("runtime-adapter-non-initialize-first-method-refuses", "Cd29f1b437866.2"),
+            ("runtime-adapter-initialize-rejects-bad-params", "Cc1f582727d06.1"),
+        ):
+            with self.subTest(clause=clause_key):
+                fixtures = tuple(
+                    replace(
+                        fixture,
+                        clause_refs=tuple(ref for ref in fixture.clause_refs if ref.clause_key != clause_key),
+                    )
+                    if fixture.fixture_id == fixture_id or clause_key == "Cc1f582727d06.1"
+                    else fixture
+                    for fixture in FIXTURES
+                )
+                result = build_claim(self.protocol, fixtures=fixtures)
+                self.assertIsInstance(result, ClaimFailure)
+                self.assertIn(clause_key, {gap["clause_key"] for gap in result.gaps})
 
     def test_unknown_clause_key_fails_closed(self) -> None:
         fixture = replace(
@@ -538,7 +674,13 @@ class RuntimeAdapterFixtureTests(unittest.TestCase):
 
         self.assertEqual(
             {ref.clause_key for ref in health.clause_refs},
-            {"C45acb2959726.1", "C358ebcd9608d.1", "C358ebcd9608d.2"},
+            {
+                "C6e51fab4b16d.1",
+                "C1c1a8c844fde.1",
+                "C45acb2959726.1",
+                "C358ebcd9608d.1",
+                "C358ebcd9608d.2",
+            },
         )
         self.assertIsInstance(health.expectation, ExpectedResult)
         self.assertEqual(health.expectation.method, "runtime.health")
@@ -572,7 +714,16 @@ class RuntimeAdapterFixtureTests(unittest.TestCase):
                 if fixture.fixture_id != "runtime-adapter-health-request"
                 else replace(
                     fixture,
-                    clause_refs=tuple(ref for ref in fixture.clause_refs if ref.clause_key == "C45acb2959726.1"),
+                    clause_refs=tuple(
+                        ref
+                        for ref in fixture.clause_refs
+                        if ref.clause_key
+                        in {
+                            "C6e51fab4b16d.1",
+                            "C1c1a8c844fde.1",
+                            "C45acb2959726.1",
+                        }
+                    ),
                 )
                 for fixture in FIXTURES
                 if fixture.fixture_id != "runtime-adapter-health-rejects-session-selector"
@@ -959,6 +1110,81 @@ def _module_imports(path: Path) -> set[str]:
                 if module == "llm_collab":
                     imports.add(f"llm_collab.{alias.name}")
     return imports
+
+
+def _valid_initialize_json(request_id: str) -> str:
+    return json.dumps(
+        {"jsonrpc": "2.0", "id": request_id, "method": "initialize", "params": _thaw(_INITIALIZE_PARAMS)},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _bad_initialize_param_mutations():
+    return {
+        "missing": lambda params: params.pop("manifest_revision"),
+        "extra": lambda params: params.__setitem__("extra", True),
+        "mistyped": lambda params: params.__setitem__("endpoint", {"endpoint_id": "endpoint_alpha"}),
+    }
+
+
+def _handshake_failure_cases():
+    bad_params = _thaw(_INITIALIZE_PARAMS)
+    bad_params.pop("manifest_revision")
+    bad_version = _thaw(_INITIALIZE_PARAMS)
+    bad_version["requested_protocol_version"] = "2.0"
+    return (
+        (
+            "bad-params",
+            {"jsonrpc": "2.0", "id": "initialize-bad-params", "method": "initialize", "params": bad_params},
+            "INVALID_PARAMS",
+        ),
+        (
+            "bad-version",
+            {"jsonrpc": "2.0", "id": "initialize-bad-version", "method": "initialize", "params": bad_version},
+            "UNSUPPORTED_PROTOCOL_VERSION",
+        ),
+        (
+            "non-init-first",
+            {"jsonrpc": "2.0", "id": "health-before-initialize", "method": "runtime.health", "params": {}},
+            "INITIALIZE_REQUIRED",
+        ),
+    )
+
+
+def _assert_initialize_result_echoes_request(testcase, fixture) -> None:
+    request = _thaw(fixture.trace[0].frame)
+    response = _thaw(fixture.trace[1].frame)
+    testcase.assertEqual(request["method"], "initialize")
+    testcase.assertEqual(response["id"], request["id"])
+    _assert_initialize_success(testcase, response)
+    result = response["result"]
+    params = request["params"]
+    testcase.assertEqual(result["negotiated_protocol_version"], params["requested_protocol_version"])
+    for key in ("adapter_id", "adapter_revision", "manifest_id", "manifest_revision"):
+        testcase.assertEqual(result[key], params[key])
+    testcase.assertEqual(result["endpoint"], params["endpoint"])
+    testcase.assertEqual(result["endpoint"]["capability_set_id"], result["capability_set"]["capability_set_id"])
+    testcase.assertEqual(result["endpoint"]["workspace_id"], result["capability_set"]["workspace_id"])
+    testcase.assertEqual(result["endpoint"]["scope"], result["capability_set"]["scope"])
+
+
+def _assert_initialize_success(testcase, payload) -> None:
+    testcase.assertEqual(set(payload), {"jsonrpc", "id", "result"})
+    result = payload["result"]
+    testcase.assertEqual(
+        set(result),
+        {
+            "negotiated_protocol_version",
+            "adapter_id",
+            "adapter_revision",
+            "manifest_id",
+            "manifest_revision",
+            "endpoint",
+            "capability_set",
+        },
+    )
+    testcase.assertEqual(result["negotiated_protocol_version"], "1.0")
 
 
 def _thaw(value):
