@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import ast
+import importlib
 import unittest
 from pathlib import Path
 from unittest import mock
 
+from llm_collab import runtime_adapter_state
 from llm_collab.runtime_adapter_admission_evidence import build_admission_evidence
 from llm_collab.runtime_adapter_claim import ClaimFailure, build_claim
 from llm_collab.runtime_adapter_deadline_evidence import build_deadline_evidence
@@ -25,7 +27,9 @@ from llm_collab.runtime_adapter_lifecycle_evidence import (
     LifecycleEvidenceFailure,
     build_lifecycle_evidence,
 )
+from llm_collab.runtime_adapter_manifest import ManifestResolutionError
 from llm_collab.runtime_adapter_manifest_evidence import build_manifest_evidence
+from llm_collab.runtime_adapter_redaction import RedactionFailure
 from llm_collab.runtime_adapter_request_policy_evidence import build_request_policy_cancellation_evidence
 from llm_collab.runtime_adapter_requests import HEALTH_DEADLINE_MS
 from llm_collab.runtime_adapter_transport_evidence import build_transport_evidence
@@ -44,6 +48,17 @@ LIFECYCLE_KEYS = {
     "Cacd7574f8bbf.1",
     "Cd5e98b5f64fa.1",
 }
+RECOVERY_KEYS = {
+    "C1be9d6c85a83.1",
+    "C34441dafd7b4.1",
+    "C4988d4d49cef.1",
+    "C4988d4d49cef.2",
+    "C5a32e1fc6c14.1",
+    "C99c6e25a17cd.1",
+    "Cea1af958d37a.1",
+}
+DEFERRED_RECOVERY_ADMISSION_KEYS = {"Cd830c5efc97b.1", "Cd830c5efc97b.2"}
+HOST_HARNESS_KEYS = LIFECYCLE_KEYS | RECOVERY_KEYS
 
 
 class RuntimeAdapterLifecycleEvidenceTests(unittest.TestCase):
@@ -51,7 +66,7 @@ class RuntimeAdapterLifecycleEvidenceTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.protocol = PROTOCOL_PATH.read_text(encoding="utf-8")
 
-    def test_lifecycle_evidence_is_distinct_and_covers_c11_rows(self) -> None:
+    def test_lifecycle_evidence_is_distinct_and_covers_c11_and_c12_rows(self) -> None:
         artifact = build_lifecycle_evidence(self.protocol)
 
         self.assertEqual(artifact["artifact_label"], ARTIFACT_LABEL)
@@ -59,7 +74,10 @@ class RuntimeAdapterLifecycleEvidenceTests(unittest.TestCase):
         self.assertEqual(artifact["claim"], HOST_HARNESS_EVIDENCED)
         self.assertNotEqual(artifact["claim"], "exercised_conforming")
         covered = {clause["clause_key"] for clause in artifact["clauses"]}
-        self.assertEqual(covered, LIFECYCLE_KEYS)
+        self.assertEqual(covered, HOST_HARNESS_KEYS)
+        self.assertLessEqual(LIFECYCLE_KEYS, covered)
+        self.assertLessEqual(RECOVERY_KEYS, covered)
+        self.assertFalse(DEFERRED_RECOVERY_ADMISSION_KEYS & covered)
         self.assertTrue(
             all(
                 clause["state"] == HOST_HARNESS_EVIDENCED and clause["evidence"] == ARTIFACT_LABEL
@@ -142,6 +160,40 @@ class RuntimeAdapterLifecycleEvidenceTests(unittest.TestCase):
         self.assertTrue(observation["normal_work_refused_while_unhealthy"])
         self.assertTrue(observation["recovery_health_does_not_clear_unhealthy"])
         self.assertTrue(observation["replacement_deferred_while_unhealthy"])
+
+    def test_recovery_state_observation_uses_real_state_redaction_and_handshake(self) -> None:
+        recovery = build_lifecycle_evidence(self.protocol)["observation"]["recovery_state"]
+
+        self.assertTrue(recovery["trusted_handshake_valid"])
+        self.assertEqual(recovery["trusted_handshake_mismatch_fault"], "UNTRUSTED_MANIFEST_INPUT")
+        self.assertEqual(recovery["quarantined_faults"], ("ADAPTER_UNHEALTHY", "INVALID_SESSION_REF"))
+        self.assertRegex(recovery["quarantine_record_id"], r"^adapter_record_[0-9a-f]{64}$")
+        self.assertTrue(recovery["quarantine_record_opened"])
+        self.assertEqual(
+            recovery["quarantine_record_identity"],
+            {
+                "adapter_id": "adapter_a",
+                "adapter_revision": "adapter_rev_1",
+                "manifest_id": "manifest_a",
+                "manifest_revision": "manifest_rev_1",
+                "profile_id": "profile_a",
+                "endpoint_id": "endpoint_a",
+                "workspace_id": "ws_alpha",
+                "scope_identity": "workspace:ws_alpha|project:amiga",
+                "project_id": "amiga",
+                "request_id": "attempt-1",
+            },
+        )
+        self.assertTrue(recovery["quarantine_record_redacted_before_state_append"])
+        self.assertTrue(recovery["raw_state_write_rejected"])
+        self.assertTrue(recovery["host_protocol_fault_recorded"])
+        self.assertTrue(recovery["host_protocol_fault_not_quarantined"])
+        self.assertTrue(recovery["host_protocol_fault_not_released"])
+        self.assertTrue(recovery["no_auto_clear_on_recovery_sequence"])
+        self.assertTrue(recovery["recovery_sequence_preserves_unresolved_attempt"])
+        self.assertTrue(recovery["release_requires_explicit_release_event"])
+        self.assertTrue(recovery["redaction_preserves_bounded_stderr_metadata"])
+        self.assertEqual(set(recovery["deferred_recovery_admission_keys"]), DEFERRED_RECOVERY_ADMISSION_KEYS)
 
     def test_real_lifecycle_component_mutations_kill_evidence(self) -> None:
         original_initialized = LifecycleState.initialized.__func__
@@ -243,12 +295,59 @@ class RuntimeAdapterLifecycleEvidenceTests(unittest.TestCase):
                 with self.assertRaises(LifecycleEvidenceFailure):
                     build_lifecycle_evidence(self.protocol)
 
-    def test_build_claim_still_gaps_lifecycle_rows(self) -> None:
+    def test_real_recovery_component_mutations_kill_evidence(self) -> None:
+        original_record_quarantine_opened = runtime_adapter_state.record_quarantine_opened
+        original_fold = runtime_adapter_state._fold
+
+        def redaction_failure(document):
+            return RedactionFailure("unexpected_redaction_exception")
+
+        def raw_accepting_record(db_path, redacted):
+            if isinstance(redacted, dict):
+                return "adapter_record_" + ("0" * 64)
+            return original_record_quarantine_opened(db_path, redacted)
+
+        def auto_clear_fold(record_id, rows):
+            current = original_fold(record_id, rows)
+            if current.opened and not current.release_event_seen:
+                return current.__class__(
+                    current.record_id,
+                    opened=False,
+                    recovery_authorized=current.recovery_authorized,
+                    unresolved_attempts=current.unresolved_attempts,
+                    reconciled_attempts=current.reconciled_attempts,
+                    fresh_handshake=current.fresh_handshake,
+                    valid_health_count=current.valid_health_count,
+                    release_event_seen=current.release_event_seen,
+                    released=True,
+                    event_count=current.event_count,
+                )
+            return current
+
+        def reject_valid_handshake(resolved, initialized):
+            raise ManifestResolutionError("valid identity rejected")
+
+        mutations = (
+            (mock.patch.object(_lifecycle_module(), "redact_document", redaction_failure), "redaction before append"),
+            (mock.patch.object(runtime_adapter_state, "record_quarantine_opened", raw_accepting_record), "raw payload rejection"),
+            (mock.patch.object(runtime_adapter_state, "_fold", auto_clear_fold), "no auto clear"),
+            (
+                mock.patch.object(_lifecycle_module(), "validate_initialized_identity", reject_valid_handshake),
+                "trusted handshake",
+            ),
+        )
+        for patcher, name in mutations:
+            with self.subTest(name=name), patcher:
+                with self.assertRaises(LifecycleEvidenceFailure):
+                    build_lifecycle_evidence(self.protocol)
+
+    def test_build_claim_still_gaps_host_harness_rows_and_deferred_cd830(self) -> None:
         result = build_claim(self.protocol)
 
         self.assertIsInstance(result, ClaimFailure)
         gap_keys = {gap["clause_key"] for gap in result.gaps}
-        self.assertLessEqual(LIFECYCLE_KEYS, gap_keys)
+        self.assertLessEqual(HOST_HARNESS_KEYS, gap_keys)
+        self.assertLessEqual(DEFERRED_RECOVERY_ADMISSION_KEYS, gap_keys)
 
     def test_lifecycle_ledger_is_scoped_disjoint_from_existing_ledgers(self) -> None:
         lifecycle = build_lifecycle_evidence(self.protocol)
@@ -271,7 +370,7 @@ class RuntimeAdapterLifecycleEvidenceTests(unittest.TestCase):
                 self.assertFalse(lifecycle_keys & other_keys)
                 self.assertFalse(other_keys & lifecycle_keys)
 
-    def test_clause_text_drift_fails_closed_for_health_rows(self) -> None:
+    def test_clause_text_drift_fails_closed_for_health_and_recovery_rows(self) -> None:
         replacements = (
             (
                 "first `runtime.health` call\n    `HEALTH_INTERVAL_MS`",
@@ -288,6 +387,18 @@ class RuntimeAdapterLifecycleEvidenceTests(unittest.TestCase):
             (
                 "MUST NOT automatically clear unhealthy\n    or quarantine state",
                 "MUST not automatically clear unhealthy\n    or quarantine state",
+            ),
+            (
+                "operator-authorized recovery connection under Clause 12 MUST perform this\n   same exact trusted handshake",
+                "operator-authorized recovery connection under Clause 12 MUST perform this\n   trusted handshake",
+            ),
+            (
+                "Quarantine MUST\n    create an operator-visible record",
+                "Quarantine MUST\n    create a visible record",
+            ),
+            (
+                "The host MUST record its own\n    outbound protocol fault",
+                "The host MUST record an\n    outbound protocol fault",
             ),
         )
         for old, new in replacements:
@@ -332,7 +443,6 @@ class RuntimeAdapterLifecycleEvidenceTests(unittest.TestCase):
             "llm_collab.project_issue_queue",
             "llm_collab.registry",
             "llm_collab.runtime_adapter_claim",
-            "llm_collab.runtime_adapter_state",
             "llm_collab.runtime_adapter_supervisor",
         }
         forbidden_calls = {"Popen", "run", "sleep", "Thread", "terminate", "kill"}
@@ -346,6 +456,10 @@ class RuntimeAdapterLifecycleEvidenceTests(unittest.TestCase):
                 self.assertNotIn(node.func.id, forbidden_calls)
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
                 self.assertNotIn(node.func.attr, forbidden_calls)
+
+
+def _lifecycle_module():
+    return importlib.import_module("llm_collab.runtime_adapter_lifecycle_evidence")
 
 
 if __name__ == "__main__":
