@@ -204,6 +204,91 @@ class RuntimeAdapterFixtureTests(unittest.TestCase):
                 self.assertEqual(response["error"]["data"]["name"], "INVALID_SESSION_REF")
                 self.assertEqual(response["error"]["code"], -32008)
 
+    def test_c10_reconcile_receipt_fixture_resolves_with_authoritative_evidence(self) -> None:
+        resolving_states = {"accepted", "completed", "rejected_before_acceptance"}
+        fixture = next(fixture for fixture in FIXTURES if fixture.fixture_id == "runtime-adapter-reconcile-request")
+        self.assertIn("C94e8b1a261f1.1", {ref.clause_key for ref in fixture.clause_refs})
+
+        payload = json.loads(_last_replay_response(fixture) or "{}")
+        receipt = payload["result"]
+        evidence = receipt["evidence"]
+        params = _thaw(fixture.trace[-1].frame)["params"]
+        session_ref = params["session_ref"]
+
+        self.assertIn(receipt["state"], resolving_states)
+        self.assertEqual(evidence["quality"], "authoritative")
+        self.assertEqual(evidence["state"], receipt["state"])
+        self.assertEqual(receipt["workspace_id"], session_ref["workspace_id"])
+        self.assertEqual(receipt["scope"], session_ref["scope"])
+        self.assertEqual(receipt["delivery_id"], params["delivery_id"])
+        self.assertEqual(receipt["attempt_id"], params["attempt_id"])
+        self.assertEqual(receipt["endpoint_id"], session_ref["endpoint_id"])
+        self.assertEqual(receipt["session_ref_id"], session_ref["session_ref_id"])
+        self.assertEqual(evidence["subject"]["message_id"], receipt["message_id"])
+        self.assertEqual(evidence["subject"]["delivery_id"], receipt["delivery_id"])
+        self.assertEqual(evidence["subject"]["attempt_id"], receipt["attempt_id"])
+        self.assertEqual(evidence["subject"]["endpoint_id"], receipt["endpoint_id"])
+        self.assertEqual(evidence["subject"]["session_ref_id"], receipt["session_ref_id"])
+        self.assertTrue(_replays_fixture(fixture))
+
+    def test_c10_receipt_slice_reduces_its_own_base_gaps_by_one(self) -> None:
+        covered_key = "C94e8b1a261f1.1"
+        deferred_keys = {
+            "Ce45ac56f0f07.1",
+            "Ce45ac56f0f07.2",
+            "Cd849c64f4310.1",
+            "C0ed26afcfb8a.1",
+        }
+        result = build_claim(self.protocol)
+        base_result = build_claim(
+            self.protocol,
+            fixtures=_fixtures_without_ref("runtime-adapter-reconcile-request", covered_key),
+        )
+
+        self.assertIsInstance(result, ClaimFailure)
+        self.assertIsInstance(base_result, ClaimFailure)
+        self.assertEqual(len(base_result.gaps) - len(result.gaps), 1)
+        gap_keys = {gap["clause_key"] for gap in result.gaps}
+        self.assertNotIn(covered_key, gap_keys)
+        self.assertLessEqual(deferred_keys, gap_keys)
+
+    def test_c10_receipt_resolution_mutations_fail_closed(self) -> None:
+        fixture = next(fixture for fixture in FIXTURES if fixture.fixture_id == "runtime-adapter-reconcile-request")
+        self.assertIsInstance(fixture.expectation, ExpectedResult)
+
+        state_mutations = ("ambiguous", "pull_pending", "deferred_busy")
+        for state in state_mutations:
+            with self.subTest(state=state):
+                receipt = _thaw(fixture.expectation.result)
+                receipt["state"] = state
+                receipt["evidence"]["state"] = state
+                mutated = replace(fixture, expectation=replace(fixture.expectation, result=receipt))
+                with self.assertRaisesRegex(ConformanceFailure, "fixture-result-shape"):
+                    validate_fixtures(self.protocol, (mutated,))
+
+        non_authoritative = _thaw(fixture.expectation.result)
+        non_authoritative["evidence"]["quality"] = "observed"
+        with self.assertRaisesRegex(ConformanceFailure, "fixture-result-shape"):
+            validate_fixtures(
+                self.protocol,
+                (replace(fixture, expectation=replace(fixture.expectation, result=non_authoritative)),),
+            )
+
+        mismatched_evidence_state = _thaw(fixture.expectation.result)
+        mismatched_evidence_state["evidence"]["state"] = "accepted"
+        with self.assertRaisesRegex(ConformanceFailure, "fixture-result-shape"):
+            validate_fixtures(
+                self.protocol,
+                (replace(fixture, expectation=replace(fixture.expectation, result=mismatched_evidence_state)),),
+            )
+
+        result = build_claim(
+            self.protocol,
+            fixtures=_fixtures_without_ref("runtime-adapter-reconcile-request", "C94e8b1a261f1.1"),
+        )
+        self.assertIsInstance(result, ClaimFailure)
+        self.assertIn("C94e8b1a261f1.1", {gap["clause_key"] for gap in result.gaps})
+
     def test_fixture_batch_reduces_claim_gap_below_baseline_but_still_fails_closed(self) -> None:
         result = build_claim(self.protocol)
 
@@ -1215,6 +1300,18 @@ def _replays_fixture(fixture) -> bool:
         payload = json.loads(response or "{}")
         return payload.get("result") == _thaw(fixture.expectation.result)
     return _matches_refusal(fixture.expectation, response)
+
+
+def _fixtures_without_ref(fixture_id: str, clause_key: str) -> tuple[RuntimeAdapterFixture, ...]:
+    return tuple(
+        replace(
+            fixture,
+            clause_refs=tuple(ref for ref in fixture.clause_refs if ref.clause_key != clause_key),
+        )
+        if fixture.fixture_id == fixture_id
+        else fixture
+        for fixture in FIXTURES
+    )
 
 
 def _last_replay_response(fixture):
