@@ -545,8 +545,9 @@ class CompatibilityProjectionTest(unittest.TestCase):
             "V4_SQL": "fc9de2db3e4e3340b7a8bbd51121c534d8717a6b6ce5c102cef341b11c9dddaf",
             "V5_SQL": "eae06938359660ded4c99531b46e2de2cc29b8785feb36bcc8bc0fd47a9247be",
             "V6_SQL": "225ece18916fa29ceb40bb72543bf499c42a31a3cd0d38114be0def830570b44",
+            "V7_SQL": "2de4a95aaf7f92fb436772b5cf4fede42db485ae464809b9a23f9c8ccc6dda03",
         }
-        self.assertEqual(store_module.SCHEMA_VERSION, 6)
+        self.assertEqual(store_module.SCHEMA_VERSION, 7)
         self.assertEqual(
             {
                 name: hashlib.sha256("\n".join(getattr(store_module, name)).encode()).hexdigest()
@@ -562,12 +563,14 @@ class CompatibilityProjectionTest(unittest.TestCase):
                 store_module.V4_MIGRATION_CHECKSUM,
                 store_module.V5_MIGRATION_CHECKSUM,
                 store_module.V6_MIGRATION_CHECKSUM,
+                store_module.V7_MIGRATION_CHECKSUM,
                 store_module.V1_SCHEMA_FINGERPRINT,
                 store_module.V2_SCHEMA_FINGERPRINT,
                 store_module.V3_SCHEMA_FINGERPRINT,
                 store_module.V4_SCHEMA_FINGERPRINT,
                 store_module.V5_SCHEMA_FINGERPRINT,
                 store_module.V6_SCHEMA_FINGERPRINT,
+                store_module.V7_SCHEMA_FINGERPRINT,
             ),
             (
                 "sha256:ce236daff444f736e01f3666ed44baf1c3ba17e81215fedb638276aff76b01c7",
@@ -576,12 +579,14 @@ class CompatibilityProjectionTest(unittest.TestCase):
                 "sha256:63f00990d9c3e01384d14d7613c961856ff48037504b1e0ada1f95b034cedf01",
                 "sha256:d6498cf5728ec3d56c0d1360a065243d72384a0de50af55bead8054881bbd9b9",
                 "sha256:56e7ca2ba9eb0a8eb79079372abdc7a39c024977e71a40931b8b60a6acc33c00",
+                "sha256:2de4a95aaf7f92fb436772b5cf4fede42db485ae464809b9a23f9c8ccc6dda03",
                 "sha256:26a856329406e45d22a8fbecdbd769d9c632acae3652d8c72438d228de7cfca2",
                 "sha256:805aa5ae43c31d85dbe9a84590050b701ddc69cfe1dd225e9c6e67afbd889a7c",
                 "sha256:88e59c9be91df366c03985f99f8b3db1c68382b4846612c0334fd15cc505e673",
                 "sha256:665e17152991c6c21cb8756a5d5720e35e3154d13a4a069b4c74440ed425b39e",
                 "sha256:4495eab6339d339b770442d994b5878e0743d011917cc99b370991a793891a99",
                 "sha256:eb8bc4ddd4348ce05874b91c63ce963c5bb3653636363b7437e2046900996d60",
+                "sha256:3fd3ca002c8571ff90165da045929aedd520d2a891a8b95b2a36ba07569c32e1",
             ),
         )
 

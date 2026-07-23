@@ -18,7 +18,7 @@ from pathlib import Path
 from .paths import LedgerPaths, validate_project_id, validate_registry_token, validate_workspace_id
 
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 BUSY_TIMEOUT_MS = 5_000
 SYNCHRONOUS_FULL = 2
 MIGRATION_TOOL_VERSION = "llm-collab-ledger/1"
@@ -64,6 +64,7 @@ V6_TABLES = V5_TABLES | frozenset(
         "legacy_import_records",
     }
 )
+V7_TABLES = V6_TABLES | frozenset({"observation_scheduler_cursors"})
 
 
 class SQLiteSafetyError(RuntimeError):
@@ -2236,7 +2237,41 @@ V6_SQL = (
 )
 V6_MIGRATION_CHECKSUM = "sha256:56e7ca2ba9eb0a8eb79079372abdc7a39c024977e71a40931b8b60a6acc33c00"
 V6_SCHEMA_FINGERPRINT = "sha256:eb8bc4ddd4348ce05874b91c63ce963c5bb3653636363b7437e2046900996d60"
-MIGRATIONS = ((1, V1_SQL), (2, V2_SQL), (3, V3_SQL), (4, V4_SQL), (5, V5_SQL), (6, V6_SQL))
+V7_SQL = (
+    """
+    CREATE TABLE observation_scheduler_cursors (
+        workspace_id TEXT NOT NULL,
+        source_id TEXT NOT NULL CHECK (source_id = 'chats_mailbox'),
+        registry_revision TEXT NOT NULL,
+        next_project_id TEXT NOT NULL
+            CHECK (
+                instr(next_project_id, char(0)) = 0
+                AND length(CAST(next_project_id AS BLOB)) BETWEEN 1 AND 200
+            ),
+        updated_at_utc TEXT NOT NULL
+            CHECK (
+                instr(updated_at_utc, char(0)) = 0
+                AND length(CAST(updated_at_utc AS BLOB)) > 0
+            ),
+        PRIMARY KEY (workspace_id, source_id),
+        FOREIGN KEY (workspace_id, registry_revision)
+            REFERENCES workspace_registry_snapshots
+                (workspace_id, registry_revision)
+            ON DELETE RESTRICT
+    ) STRICT
+    """,
+)
+V7_MIGRATION_CHECKSUM = "sha256:2de4a95aaf7f92fb436772b5cf4fede42db485ae464809b9a23f9c8ccc6dda03"
+V7_SCHEMA_FINGERPRINT = "sha256:3fd3ca002c8571ff90165da045929aedd520d2a891a8b95b2a36ba07569c32e1"
+MIGRATIONS = (
+    (1, V1_SQL),
+    (2, V2_SQL),
+    (3, V3_SQL),
+    (4, V4_SQL),
+    (5, V5_SQL),
+    (6, V6_SQL),
+    (7, V7_SQL),
+)
 
 
 def _migration_checksum(statements: Sequence[str]) -> str:
@@ -2308,6 +2343,16 @@ def _v6_schema_fingerprint_from_sql() -> str:
     connection = sqlite3.connect(":memory:", isolation_level=None)
     try:
         for statement in (*V1_SQL, *V2_SQL, *V3_SQL, *V4_SQL, *V5_SQL, *V6_SQL):
+            connection.execute(statement)
+        return _schema_fingerprint(connection)
+    finally:
+        connection.close()
+
+
+def _v7_schema_fingerprint_from_sql() -> str:
+    connection = sqlite3.connect(":memory:", isolation_level=None)
+    try:
+        for statement in (*V1_SQL, *V2_SQL, *V3_SQL, *V4_SQL, *V5_SQL, *V6_SQL, *V7_SQL):
             connection.execute(statement)
         return _schema_fingerprint(connection)
     finally:
@@ -2673,6 +2718,9 @@ class LedgerStore:
         if claimed == 5:
             cls._validate_released_v5(connection, paths)
             return
+        if claimed == 6:
+            cls._validate_released_v6(connection, paths)
+            return
         cls._validate_schema(connection, paths)
 
     @staticmethod
@@ -2718,8 +2766,12 @@ class LedgerStore:
                 raise MigrationError("released v6 migration checksum is incoherent")
             if _v6_schema_fingerprint_from_sql() != V6_SCHEMA_FINGERPRINT:
                 raise MigrationError("released v6 schema fingerprint is incoherent")
+            if _migration_checksum(V7_SQL) != V7_MIGRATION_CHECKSUM:
+                raise MigrationError("released v7 migration checksum is incoherent")
+            if _v7_schema_fingerprint_from_sql() != V7_SCHEMA_FINGERPRINT:
+                raise MigrationError("released v7 schema fingerprint is incoherent")
             rows = cls._migration_rows(connection)
-            if [row[0] for row in rows] != [1, 2, 3, 4, 5, 6]:
+            if [row[0] for row in rows] != [1, 2, 3, 4, 5, 6, 7]:
                 raise MigrationError("ledger migration metadata is incoherent")
             cls._validate_migration_row(rows[0], V1_MIGRATION_CHECKSUM, 0, paths)
             cls._validate_migration_row(rows[1], V2_MIGRATION_CHECKSUM, 1, paths)
@@ -2727,17 +2779,39 @@ class LedgerStore:
             cls._validate_migration_row(rows[3], V4_MIGRATION_CHECKSUM, 3, paths)
             cls._validate_migration_row(rows[4], V5_MIGRATION_CHECKSUM, 4, paths)
             cls._validate_migration_row(rows[5], V6_MIGRATION_CHECKSUM, 5, paths)
+            cls._validate_migration_row(rows[6], V7_MIGRATION_CHECKSUM, 6, paths)
             actual_tables = cls._table_names(connection)
-            if actual_tables != V6_TABLES:
+            if actual_tables != V7_TABLES:
                 raise MigrationError(
-                    "ledger v6 table set is incoherent: "
-                    f"missing={sorted(V6_TABLES - actual_tables)}, "
-                    f"extra={sorted(actual_tables - V6_TABLES)}"
+                    "ledger v7 table set is incoherent: "
+                    f"missing={sorted(V7_TABLES - actual_tables)}, "
+                    f"extra={sorted(actual_tables - V7_TABLES)}"
                 )
-            if _schema_fingerprint(connection) != V6_SCHEMA_FINGERPRINT:
-                raise MigrationError("ledger v6 schema fingerprint is incoherent")
+            if _schema_fingerprint(connection) != V7_SCHEMA_FINGERPRINT:
+                raise MigrationError("ledger v7 schema fingerprint is incoherent")
         except sqlite3.DatabaseError as exc:
             raise MigrationError("ledger schema is corrupt or incoherent") from exc
+
+    @classmethod
+    def _validate_released_v6(
+        cls, connection: sqlite3.Connection, paths: LedgerPaths
+    ) -> None:
+        cls._validate_database_health(connection)
+        if connection.execute("PRAGMA user_version").fetchone()[0] != 6:
+            raise MigrationError("released v6 ledger has an incoherent user_version")
+        if cls._table_names(connection) != V6_TABLES:
+            raise MigrationError("released v6 ledger table set is incoherent")
+        if _schema_fingerprint(connection) != V6_SCHEMA_FINGERPRINT:
+            raise MigrationError("released v6 ledger schema fingerprint is incoherent")
+        rows = cls._migration_rows(connection)
+        if [row[0] for row in rows] != [1, 2, 3, 4, 5, 6]:
+            raise MigrationError("released v6 migration metadata is incoherent")
+        cls._validate_migration_row(rows[0], V1_MIGRATION_CHECKSUM, 0, paths)
+        cls._validate_migration_row(rows[1], V2_MIGRATION_CHECKSUM, 1, paths)
+        cls._validate_migration_row(rows[2], V3_MIGRATION_CHECKSUM, 2, paths)
+        cls._validate_migration_row(rows[3], V4_MIGRATION_CHECKSUM, 3, paths)
+        cls._validate_migration_row(rows[4], V5_MIGRATION_CHECKSUM, 4, paths)
+        cls._validate_migration_row(rows[5], V6_MIGRATION_CHECKSUM, 5, paths)
 
     @classmethod
     def _validate_released_v5(
@@ -2993,6 +3067,7 @@ class LedgerStore:
                     4: V4_MIGRATION_CHECKSUM,
                     5: V5_MIGRATION_CHECKSUM,
                     6: V6_MIGRATION_CHECKSUM,
+                    7: V7_MIGRATION_CHECKSUM,
                 }.get(version)
                 if expected_checksum is None or checksum != expected_checksum:
                     raise MigrationError(f"migration {version} does not match its released checksum")
@@ -3017,6 +3092,7 @@ class LedgerStore:
                     4: V4_SCHEMA_FINGERPRINT,
                     5: V5_SCHEMA_FINGERPRINT,
                     6: V6_SCHEMA_FINGERPRINT,
+                    7: V7_SCHEMA_FINGERPRINT,
                 }[version]
                 if _schema_fingerprint(self._connection) != expected_fingerprint:
                     raise MigrationError(f"migration {version} produced an incoherent schema")
@@ -5136,6 +5212,95 @@ class LedgerStore:
             (workspace_id, project_id, source_id, registry_revision),
         ).fetchone()
         return "" if row is None else row[0]
+
+    def observation_scheduler_cursor(self, *, workspace_id: str, source_id: str) -> str | None:
+        self._ensure_thread()
+        if validate_workspace_id(workspace_id) != self.paths.workspace_id:
+            raise ValueError("workspace_id does not own this ledger")
+        if source_id != "chats_mailbox":
+            raise ValueError("source_id must be chats_mailbox")
+        row = self._connection.execute(
+            "SELECT next_project_id FROM observation_scheduler_cursors "
+            "WHERE workspace_id = ? AND source_id = ?",
+            (workspace_id, source_id),
+        ).fetchone()
+        return None if row is None else row[0]
+
+    def advance_observation_scheduler_cursor(
+        self,
+        *,
+        workspace_id: str,
+        source_id: str,
+        registry_revision: str,
+        next_project_id: str,
+        updated_at_utc: str,
+    ) -> None:
+        self._ensure_thread()
+        if self._read_only:
+            raise PermissionError("query-only readers cannot advance observation scheduler")
+        if validate_workspace_id(workspace_id) != self.paths.workspace_id:
+            raise ValueError("workspace_id does not own this ledger")
+        if source_id != "chats_mailbox":
+            raise ValueError("source_id must be chats_mailbox")
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", registry_revision):
+            raise ValueError("registry_revision must be sha256:<lowercase hex>")
+        validate_project_id(next_project_id)
+        if (
+            not isinstance(updated_at_utc, str)
+            or not updated_at_utc
+            or "\x00" in updated_at_utc
+        ):
+            raise ValueError("updated_at_utc is required")
+        if not self.has_registry_snapshot(
+            workspace_id=workspace_id, registry_revision=registry_revision
+        ):
+            raise ValueError("registry snapshot is absent")
+        self._connection.execute("BEGIN IMMEDIATE")
+        try:
+            self._connection.execute(
+                "INSERT INTO observation_scheduler_cursors "
+                "(workspace_id, source_id, registry_revision, next_project_id, updated_at_utc) "
+                "VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT (workspace_id, source_id) DO UPDATE SET "
+                "registry_revision = excluded.registry_revision, "
+                "next_project_id = excluded.next_project_id, "
+                "updated_at_utc = excluded.updated_at_utc",
+                (
+                    workspace_id,
+                    source_id,
+                    registry_revision,
+                    next_project_id,
+                    updated_at_utc,
+                ),
+            )
+            self._connection.execute("COMMIT")
+        except BaseException:
+            if self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
+            raise
+
+    def clear_observation_scheduler_cursor(
+        self, *, workspace_id: str, source_id: str
+    ) -> None:
+        self._ensure_thread()
+        if self._read_only:
+            raise PermissionError("query-only readers cannot clear observation scheduler")
+        if validate_workspace_id(workspace_id) != self.paths.workspace_id:
+            raise ValueError("workspace_id does not own this ledger")
+        if source_id != "chats_mailbox":
+            raise ValueError("source_id must be chats_mailbox")
+        self._connection.execute("BEGIN IMMEDIATE")
+        try:
+            self._connection.execute(
+                "DELETE FROM observation_scheduler_cursors "
+                "WHERE workspace_id = ? AND source_id = ?",
+                (workspace_id, source_id),
+            )
+            self._connection.execute("COMMIT")
+        except BaseException:
+            if self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
+            raise
 
     def reconcile_observations(
         self,
