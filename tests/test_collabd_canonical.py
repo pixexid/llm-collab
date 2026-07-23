@@ -846,6 +846,50 @@ class CanonicalMessageTest(_CanonicalMessageTestBase):
                     (2_000, NOW),
                 )
 
+    def test_delivery_retry_rejects_existing_row_with_conflicting_route_identity(self) -> None:
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            paths = LedgerPaths.derive(tmp, WORKSPACE)
+            with LedgerStore.open_writer(paths) as store:
+                record_registry(store)
+                message_id, _created = create_or_return_equivalent(store, **intent())
+                delivery_id = store_module._derive_delivery_id(
+                    WORKSPACE,
+                    "project",
+                    PROJECT,
+                    message_id,
+                    "agent_claude",
+                    "endpoint_claude_desktop",
+                )
+                store._connection.execute(
+                    "INSERT INTO canonical_deliveries VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        WORKSPACE,
+                        "project",
+                        PROJECT,
+                        message_id,
+                        delivery_id,
+                        "agent_codex",
+                        "endpoint_forged_route",
+                        0,
+                        NOW,
+                    ),
+                )
+
+                with self.assertRaisesRegex(
+                    CanonicalIntegrityError,
+                    "canonical delivery_id conflicts with different route identity",
+                ):
+                    create_deliveries(
+                        store,
+                        workspace_id=WORKSPACE,
+                        scope_kind="project",
+                        scope_identity=PROJECT,
+                        message_id=message_id,
+                        routes=[("agent_claude", "endpoint_claude_desktop")],
+                        now_epoch_ms=9_000,
+                        created_at_utc="2026-07-22T00:00:09+00:00",
+                    )
+
     def test_delivery_receipt_fold_integrity_projection_and_derivation_are_shared(self) -> None:
         self.assertIs(delivery_module._derive_delivery_id, store_module._derive_delivery_id)
         self.assertIs(delivery_module._derive_attempt_id, store_module._derive_attempt_id)
@@ -1661,6 +1705,99 @@ class CanonicalMessageTest(_CanonicalMessageTestBase):
                         delivery_id=delivery_id,
                         attempt_id=forged_attempt_id,
                         receipt_id=forged_attempt_receipt_id,
+                    )
+
+                forged_delivery_id = "delivery_" + "c" * 64
+                store._connection.execute(
+                    "INSERT INTO canonical_deliveries VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        WORKSPACE,
+                        "project",
+                        PROJECT,
+                        message_id,
+                        forged_delivery_id,
+                        "agent_claude",
+                        "endpoint_forged_delivery",
+                        0,
+                        NOW,
+                    ),
+                )
+                forged_delivery_attempt_id = store_module._derive_attempt_id(
+                    WORKSPACE,
+                    "project",
+                    PROJECT,
+                    message_id,
+                    forged_delivery_id,
+                    0,
+                )
+                store._connection.execute(
+                    "INSERT INTO canonical_delivery_attempts VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        WORKSPACE,
+                        "project",
+                        PROJECT,
+                        message_id,
+                        forged_delivery_id,
+                        forged_delivery_attempt_id,
+                        0,
+                        1_300,
+                        NOW,
+                    ),
+                )
+                forged_delivery_evidence = state_evidence(
+                    message_id=message_id,
+                    delivery_id=forged_delivery_id,
+                    attempt_id=forged_delivery_attempt_id,
+                    endpoint_id="endpoint_forged_delivery",
+                    state="processing",
+                    correlation_id="corr_forged_delivery",
+                )
+                body, evidence_sha256, state, quality, kind = store_module._normalize_evidence(
+                    forged_delivery_evidence
+                )
+                forged_delivery_receipt_id = store_module._derive_receipt_id(
+                    WORKSPACE,
+                    "project",
+                    PROJECT,
+                    message_id,
+                    forged_delivery_id,
+                    forged_delivery_attempt_id,
+                    evidence_sha256,
+                )
+                store._connection.execute(
+                    "INSERT INTO canonical_evidence_bodies VALUES (?, ?, ?, ?, ?)",
+                    (WORKSPACE, evidence_sha256, len(body), body, NOW),
+                )
+                store._connection.execute(
+                    "INSERT INTO canonical_delivery_receipts VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        WORKSPACE,
+                        "project",
+                        PROJECT,
+                        message_id,
+                        forged_delivery_id,
+                        forged_delivery_attempt_id,
+                        forged_delivery_receipt_id,
+                        evidence_sha256,
+                        state,
+                        quality,
+                        kind,
+                        None,
+                        NOW,
+                    ),
+                )
+                with self.assertRaisesRegex(
+                    CanonicalIntegrityError,
+                    "canonical delivery_id does not match its immutable route tuple",
+                ):
+                    store.read_canonical_receipt(
+                        workspace_id=WORKSPACE,
+                        scope_kind="project",
+                        scope_identity=PROJECT,
+                        message_id=message_id,
+                        delivery_id=forged_delivery_id,
+                        attempt_id=forged_delivery_attempt_id,
+                        receipt_id=forged_delivery_receipt_id,
                     )
 
                 proper_attempt_id, _created = create_attempt(
