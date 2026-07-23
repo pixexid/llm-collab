@@ -35,7 +35,9 @@ CAPABILITY_NOT_DECLARED = "CAPABILITY_NOT_DECLARED"
 SESSION_METHODS = frozenset((METHOD_DELIVER, METHOD_CANCEL, METHOD_RECONCILE))
 PROTOCOL_CONTROL_METHODS = frozenset((METHOD_HEALTH, METHOD_SHUTDOWN))
 
-_AUTHORITY_RECORD_FIELDS = frozenset(("adapter_id", "endpoint", "capability_set", "session_action_relations"))
+_AUTHORITY_RECORD_FIELDS = frozenset(
+    ("adapter_id", "endpoint", "capability_set", "session_action_relations", "evidence_profiles")
+)
 _ENDPOINT_FIELDS = frozenset(
     (
         "schema_version",
@@ -60,6 +62,8 @@ _ATTESTATION_FIELDS = frozenset(("evidence_kind", "source_id", "source_revision"
 _SESSION_ACTION_RELATION_FIELDS = frozenset(
     ("capability_set_id", "capability_set_revision", "method", "selected_capability", "required_quality")
 )
+_EVIDENCE_PROFILE_FIELDS = frozenset(("capability_profile_id", "capability_profile_revision"))
+_EVIDENCE_QUALITIES = frozenset(("best_effort", "authoritative"))
 
 
 class CapabilityAuthorityError(ValueError):
@@ -83,6 +87,14 @@ class CapabilityDecision:
     method: str
     selected_capability: str
     selected_quality: str
+
+
+@dataclass(frozen=True)
+class EvidenceProfileDecision:
+    capability_profile_id: str
+    capability_profile_revision: str
+    evidence_kind: str
+    evidence_quality: str
 
 
 class TrustedCapabilityAuthorityRegistry:
@@ -164,6 +176,45 @@ class TrustedCapabilityAuthorityRegistry:
             selected_quality=entry["quality"],
         )
 
+    def validate_evidence_profile_authority(
+        self,
+        bound: BoundCapabilityContext,
+        evidence: Mapping[str, Any],
+        *,
+        caller_authority_fields: Mapping[str, Any] | None = None,
+    ) -> EvidenceProfileDecision:
+        """Authorize one carried StateEvidenceV1 capability profile independently."""
+
+        if not isinstance(bound, BoundCapabilityContext):
+            _reject("bound capability context is required")
+        if caller_authority_fields is not None:
+            _reject("caller-supplied evidence-profile authority fields are not trusted")
+        if not isinstance(evidence, Mapping):
+            _reject("evidence must be a mapping")
+        evidence_quality = evidence.get("quality")
+        if evidence_quality not in _EVIDENCE_QUALITIES:
+            _reject("evidence quality must be best_effort or authoritative")
+        evidence_kind = evidence.get("evidence_kind")
+        if not isinstance(evidence_kind, str) or not evidence_kind:
+            _reject("evidence kind must be a non-empty string")
+        authority = _mapping(evidence.get("authority"), "evidence authority")
+        capability_profile_id = _capability_token(authority.get("capability_profile_id"))
+        capability_profile_revision = _capability_token(authority.get("capability_profile_revision"))
+        if capability_profile_revision != bound.capability_set["revision"]:
+            _reject("evidence capability-profile revision must equal the bound CapabilitySetV1 revision")
+
+        record = self._record(bound.adapter_id)
+        _select_evidence_profile(record["evidence_profiles"], capability_profile_id, capability_profile_revision)
+        entry = _select_capability(bound.capability_set, capability_profile_id)
+        _require_supported_entry(bound.endpoint, entry)
+        _require_evidence_quality_ceiling(entry["quality"], evidence_quality)
+        return EvidenceProfileDecision(
+            capability_profile_id=capability_profile_id,
+            capability_profile_revision=capability_profile_revision,
+            evidence_kind=evidence_kind,
+            evidence_quality=evidence_quality,
+        )
+
     def _record(self, adapter_id: str) -> Mapping[str, Any]:
         try:
             return self._records[adapter_id]
@@ -208,6 +259,11 @@ def _validate_authority_record(adapter_id: str, record: Any) -> None:
         _reject("session action relations must be a sequence")
     for relation in relations:
         _validate_session_action_relation_shape(relation)
+    evidence_profiles = record.get("evidence_profiles")
+    if not isinstance(evidence_profiles, (list, tuple)):
+        _reject("evidence profiles must be a sequence")
+    for profile in evidence_profiles:
+        _validate_evidence_profile_shape(profile)
 
 
 def _validate_endpoint_shape(endpoint: Mapping[str, Any]) -> None:
@@ -330,6 +386,15 @@ def _validate_session_action_relation_shape(relation: Any) -> None:
         _reject("session action relation method must be a product session method")
 
 
+def _validate_evidence_profile_shape(profile: Any) -> None:
+    if not isinstance(profile, Mapping):
+        _reject("evidence profile must be a mapping")
+    if set(profile) != _EVIDENCE_PROFILE_FIELDS:
+        _reject("evidence profile contains fields outside the trusted schema")
+    _capability_token(profile.get("capability_profile_id"))
+    _capability_token(profile.get("capability_profile_revision"))
+
+
 def _select_session_action_relation(
     relations: Any,
     bound: BoundCapabilityContext,
@@ -349,6 +414,24 @@ def _select_session_action_relation(
     return matches[0]
 
 
+def _select_evidence_profile(
+    profiles: Any,
+    capability_profile_id: str,
+    capability_profile_revision: str,
+) -> Mapping[str, Any]:
+    matches = []
+    for profile in profiles:
+        _validate_evidence_profile_shape(profile)
+        if (
+            profile["capability_profile_id"] == capability_profile_id
+            and profile["capability_profile_revision"] == capability_profile_revision
+        ):
+            matches.append(profile)
+    if len(matches) != 1:
+        _reject("evidence profile must match exactly once")
+    return matches[0]
+
+
 def _select_capability(capability_set: Mapping[str, Any], capability: str) -> Mapping[str, Any]:
     token = _capability_token(capability)
     matches = [
@@ -357,6 +440,13 @@ def _select_capability(capability_set: Mapping[str, Any], capability: str) -> Ma
     if len(matches) != 1:
         _reject("selected capability must occur exactly once")
     return matches[0]
+
+
+def _require_evidence_quality_ceiling(profile_quality: str, evidence_quality: str) -> None:
+    if profile_quality not in _EVIDENCE_QUALITIES and profile_quality != "unsupported":
+        _reject("evidence profile quality must be best_effort or authoritative")
+    if evidence_quality == "authoritative" and profile_quality == "best_effort":
+        _reject("authoritative evidence requires an authoritative capability profile")
 
 
 def _capability_token(value: Any) -> str:
