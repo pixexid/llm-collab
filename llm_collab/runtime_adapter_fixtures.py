@@ -781,6 +781,12 @@ FIXTURES: tuple[RuntimeAdapterFixture, ...] = (
                 polarity=POLARITY_CONFORMING,
                 non_classifying=True,
             ),
+            ClauseReference(
+                clause_key="C13e20170473c.1",
+                text_sha256="13e20170473c871b5ff4fe042fe7ef593bfcb2bc9af570da2d08c5bfdcc9b0e1",
+                polarity=POLARITY_CONFORMING,
+                non_classifying=True,
+            ),
         ),
         trace=(
             *_initialize_trace(),

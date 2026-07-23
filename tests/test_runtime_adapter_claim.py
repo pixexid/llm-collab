@@ -22,8 +22,13 @@ from llm_collab.runtime_adapter_claim import (
     build_claim,
     publish_claim,
 )
-from llm_collab.runtime_adapter_conformance import ClauseOccurrence
-from llm_collab.runtime_adapter_fixtures import FIXTURES, ExpectedRefusal, NO_STATE_CHANGE
+from llm_collab.runtime_adapter_conformance import ClauseOccurrence, ConformanceFailure
+from llm_collab.runtime_adapter_fixtures import (
+    FIXTURES,
+    ExpectedRefusal,
+    NO_STATE_CHANGE,
+    validate_fixtures,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -31,6 +36,19 @@ MODULE_PATH = ROOT / "llm_collab" / "runtime_adapter_claim.py"
 PROTOCOL_PATH = ROOT / "docs" / "protocols" / "runtime-adapter-jsonrpc-v1.md"
 FIXTURES_PATH = ROOT / "llm_collab" / "runtime_adapter_fixtures.py"
 REFERENCE_PATH = ROOT / "llm_collab" / "runtime_adapter_reference.py"
+C06_INDEPENDENCE_KEY = "C13e20170473c.1"
+C07_P5_NON_CLASSIFYING_KEY = "C9a07be32fe6b.1"
+VARIED_BINDING_FIXTURE_ID = "runtime-adapter-reconcile-accepts-varied-binding-capability-profile"
+
+
+def _fixture(fixture_id: str):
+    return next(fixture for fixture in FIXTURES if fixture.fixture_id == fixture_id)
+
+
+def _clauses(protocol: str):
+    from llm_collab.runtime_adapter_conformance import extract_clause_occurrences
+
+    return extract_clause_occurrences(protocol)
 
 
 class RuntimeAdapterClaimTests(unittest.TestCase):
@@ -69,6 +87,62 @@ class RuntimeAdapterClaimTests(unittest.TestCase):
             for ref in fixture.clause_refs
         }
         self.assertFalse(gap_keys & exercised_clause_keys)
+
+    def test_varied_binding_fixture_covers_c06_independence_non_vacuously(self) -> None:
+        fixture = _fixture(VARIED_BINDING_FIXTURE_ID)
+        self.assertTrue(_fixture_replays(fixture))
+
+        refs = {ref.clause_key: ref for ref in fixture.clause_refs}
+        self.assertTrue(refs[C07_P5_NON_CLASSIFYING_KEY].non_classifying)
+        self.assertTrue(refs[C06_INDEPENDENCE_KEY].non_classifying)
+
+        init_result = fixture.trace[1].frame["result"]
+        capabilities = {row["capability"] for row in init_result["capability_set"]["capabilities"]}
+        authority = fixture.trace[2].frame["params"]["session_ref"]["evidence"]["authority"]
+        self.assertIn("runtime_profile", capabilities)
+        self.assertEqual(authority["capability_profile_id"], "runtime_profile_other")
+        self.assertEqual(authority["capability_profile_revision"], "cap_rev_other")
+        self.assertNotEqual(authority["capability_profile_id"], "runtime_profile")
+
+        result = build_claim(self.protocol)
+        self.assertIsInstance(result, ClaimFailure)
+        self.assertEqual(len(result.gaps), 110)
+        gap_keys = {gap["clause_key"] for gap in result.gaps}
+        self.assertNotIn(C06_INDEPENDENCE_KEY, gap_keys)
+        self.assertNotIn(C07_P5_NON_CLASSIFYING_KEY, gap_keys)
+
+    def test_dropping_varied_binding_c06_ref_returns_only_that_gap(self) -> None:
+        fixture = _fixture(VARIED_BINDING_FIXTURE_ID)
+        without_c06 = replace(
+            fixture,
+            clause_refs=tuple(ref for ref in fixture.clause_refs if ref.clause_key != C06_INDEPENDENCE_KEY),
+        )
+        self.assertTrue(_fixture_replays(without_c06))
+
+        mutated = tuple(without_c06 if item.fixture_id == fixture.fixture_id else item for item in FIXTURES)
+        checked = validate_fixtures(self.protocol, mutated)
+        result = _claim_from_checked(
+            _clauses(self.protocol),
+            checked,
+            _replayed_fixture_ids(checked),
+        )
+
+        self.assertIsInstance(result, ClaimFailure)
+        self.assertEqual(len(result.gaps), 111)
+        self.assertIn(C06_INDEPENDENCE_KEY, {gap["clause_key"] for gap in result.gaps})
+
+    def test_stale_varied_binding_c06_ref_fails_closed(self) -> None:
+        fixture = _fixture(VARIED_BINDING_FIXTURE_ID)
+        stale = replace(
+            fixture,
+            clause_refs=tuple(
+                replace(ref, text_sha256="0" * 64) if ref.clause_key == C06_INDEPENDENCE_KEY else ref
+                for ref in fixture.clause_refs
+            ),
+        )
+
+        with self.assertRaisesRegex(ConformanceFailure, C06_INDEPENDENCE_KEY):
+            validate_fixtures(self.protocol, (stale,))
 
     def test_coverage_states_keep_three_distinct_states(self) -> None:
         positive = ClauseOccurrence("pos", "a" * 64, "MUST do it", "MUST", 1, "C01 Test")
