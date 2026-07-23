@@ -611,49 +611,6 @@ def activation_claimant(session: dict) -> tuple[str | None, int]:
     return str(runtime_id) if runtime_id else None, os.getpid()
 
 
-def assert_message_activation(
-    session: dict,
-    message: dict,
-    *,
-    boundary: str,
-) -> tuple[bool, dict[str, Any] | None]:
-    activation_lease = message.get("activation_lease")
-    if not activation_lease:
-        return True, None
-
-    from _activation_lease import LeaseRefused, assert_lease
-
-    runtime_id, owner_pid = activation_claimant(session)
-    try:
-        lease = assert_lease(
-            activation_lease["identity"],
-            owner_session_id=str(session["session_id"]),
-            fence_token=int(activation_lease["fence_token"]),
-            owner_pid=owner_pid,
-            claimant_runtime_id=str(runtime_id) if runtime_id else None,
-        )
-    except LeaseRefused as exc:
-        return False, {
-            "event": "activation_assert_refused",
-            "message_path": message["path"],
-            "boundary": boundary,
-            "reason": exc.reason,
-            "owner": exc.owner,
-        }
-    return True, {
-        "event": "activation_asserted",
-        "message_path": message["path"],
-        "boundary": boundary,
-        "lease": {
-            "lease_key": lease.get("lease_key"),
-            "fence_token": lease.get("fence_token"),
-            "owner_session_id": lease.get("owner_session_id"),
-            "owner_runtime_session_id": lease.get("owner_runtime_session_id"),
-            "owner_pid": lease.get("owner_pid"),
-        },
-    }
-
-
 def activation_fenced_mutation(
     session: dict,
     message: dict,
