@@ -34,6 +34,7 @@ from llm_collab.runtime_adapter_conformance import (
 )
 from llm_collab.runtime_adapter_manifest import TrustedManifestRegistry
 from llm_collab.runtime_adapter_reference import (
+    AdapterIdentity,
     FAULT_ABSENT_ID_REQUEST,
     FAULT_CLOSED_ENVELOPE,
     FAULT_DUPLICATE_OUTPUT,
@@ -135,6 +136,10 @@ def frame(method: str, params: dict, request_id: str) -> str:
 
 
 def initialize_frame(request_id: str = "initialize-1") -> str:
+    return initialize_frame_for_endpoint(ENDPOINT, request_id=request_id)
+
+
+def initialize_frame_for_endpoint(endpoint: dict, request_id: str = "initialize-1") -> str:
     return frame(
         "initialize",
         {
@@ -143,7 +148,7 @@ def initialize_frame(request_id: str = "initialize-1") -> str:
             "adapter_revision": "adapter_rev1",
             "manifest_id": "manifest_alpha",
             "manifest_revision": "manifest_rev1",
-            "endpoint": ENDPOINT,
+            "endpoint": endpoint,
         },
         request_id,
     )
@@ -193,6 +198,31 @@ def session_ref() -> dict:
     }
 
 
+def project_endpoint() -> dict:
+    endpoint = copy.deepcopy(ENDPOINT)
+    endpoint["scope"] = {"kind": "project", "project_id": "project_alpha"}
+    return endpoint
+
+
+def project_session_ref(
+    *,
+    scope_project_id: str = "project_alpha",
+    repository_project_id: str = "project_alpha",
+) -> dict:
+    value = session_ref()
+    repository_binding = {
+        "project_id": repository_project_id,
+        "repo_id": "repo_alpha",
+        "canonical_cwd": "/repo",
+    }
+    value["scope"] = {"kind": "project", "project_id": scope_project_id}
+    value["repository_binding"] = repository_binding
+    value["evidence"]["scope"] = value["scope"]
+    value["evidence"]["subject"]["repository_binding"] = repository_binding
+    value["evidence"]["integrity"] = canonical_digest(value["evidence"])
+    return value
+
+
 class RuntimeAdapterReferenceTests(unittest.TestCase):
     def test_default_adapter_is_inert_and_spawnable_via_module(self) -> None:
         self.assertIsNone(ReferenceAdapter().fault_injection)
@@ -218,6 +248,7 @@ class RuntimeAdapterReferenceTests(unittest.TestCase):
                     row = capabilities[name]
                     self.assertEqual(row["quality"], "authoritative")
                     self.assertEqual(row["constraints"], {"access_mode": "observe_only"})
+
                     self.assertEqual(
                         row["evidence"]["evidence_kind"],
                         "profile_attestation",
@@ -246,6 +277,119 @@ class RuntimeAdapterReferenceTests(unittest.TestCase):
                 },
             )
             self.assertEqual(health_obj["result"]["status"], "healthy")
+
+    def test_default_adapter_identity_stays_workspace_scoped(self) -> None:
+        adapter = ReferenceAdapter()
+
+        self.assertEqual(adapter._identity.endpoint()["scope"], {"kind": "workspace"})
+        self.assertEqual(adapter._identity.initialize_result()["capability_set"]["scope"], {"kind": "workspace"})
+
+    def test_project_scoped_reconcile_accepts_matching_repository_binding(self) -> None:
+        adapter = ReferenceAdapter(identity=AdapterIdentity(scope={"kind": "project", "project_id": "project_alpha"}))
+        initialized = json.loads(adapter.handle_text(initialize_frame_for_endpoint(project_endpoint())) or "{}")
+
+        self.assertEqual(initialized["result"]["endpoint"]["scope"], {"kind": "project", "project_id": "project_alpha"})
+        self.assertEqual(
+            initialized["result"]["capability_set"]["scope"],
+            {"kind": "project", "project_id": "project_alpha"},
+        )
+        health = json.loads(adapter.handle_text(frame("runtime.health", {}, "health-project")) or "{}")
+        self.assertEqual(health["result"]["scope_kind"], "project")
+        self.assertEqual(health["result"]["project_id"], "project_alpha")
+
+        response = json.loads(
+            adapter.handle_text(
+                frame(
+                    "runtime.reconcile",
+                    {
+                        "session_ref": project_session_ref(),
+                        "original_request_id": "deliver-1",
+                        "delivery_id": "delivery_alpha",
+                        "attempt_id": "attempt_alpha",
+                    },
+                    "reconcile-project",
+                )
+            )
+            or "{}"
+        )
+
+        receipt = response["result"]
+        self.assertEqual(receipt["scope"], {"kind": "project", "project_id": "project_alpha"})
+        self.assertEqual(receipt["message_id"], "msg_alpha")
+
+    def test_project_scoped_reconcile_rejects_scope_project_mismatch(self) -> None:
+        adapter = ReferenceAdapter(identity=AdapterIdentity(scope={"kind": "project", "project_id": "project_alpha"}))
+        adapter.handle_text(initialize_frame_for_endpoint(project_endpoint()))
+
+        response = json.loads(
+            adapter.handle_text(
+                frame(
+                    "runtime.reconcile",
+                    {
+                        "session_ref": project_session_ref(scope_project_id="project_other"),
+                        "original_request_id": "deliver-1",
+                        "delivery_id": "delivery_alpha",
+                        "attempt_id": "attempt_alpha",
+                    },
+                    "reconcile-project-scope-mismatch",
+                )
+            )
+            or "{}"
+        )
+
+        self.assertEqual(response["error"]["data"]["name"], "INVALID_SESSION_REF")
+        self.assertEqual(response["error"]["code"], -32008)
+
+    def test_project_scoped_reconcile_rejects_repository_project_mismatch(self) -> None:
+        adapter = ReferenceAdapter(identity=AdapterIdentity(scope={"kind": "project", "project_id": "project_alpha"}))
+        adapter.handle_text(initialize_frame_for_endpoint(project_endpoint()))
+
+        response = json.loads(
+            adapter.handle_text(
+                frame(
+                    "runtime.reconcile",
+                    {
+                        "session_ref": project_session_ref(repository_project_id="project_other"),
+                        "original_request_id": "deliver-1",
+                        "delivery_id": "delivery_alpha",
+                        "attempt_id": "attempt_alpha",
+                    },
+                    "reconcile-project-repository-mismatch",
+                )
+            )
+            or "{}"
+        )
+
+        self.assertEqual(response["error"]["data"]["name"], "INVALID_SESSION_REF")
+        self.assertEqual(response["error"]["code"], -32008)
+
+    def test_workspace_reconcile_rejects_repository_binding_even_when_subject_matches(self) -> None:
+        adapter = ReferenceAdapter()
+        adapter.handle_text(initialize_frame())
+        bound = session_ref()
+        repository_binding = {"project_id": "project_alpha", "repo_id": "repo_alpha", "canonical_cwd": "/repo"}
+        bound["repository_binding"] = repository_binding
+        bound["evidence"]["subject"]["repository_binding"] = repository_binding
+        bound["evidence"]["integrity"] = canonical_digest(bound["evidence"])
+
+        response = json.loads(
+            adapter.handle_text(
+                frame(
+                    "runtime.reconcile",
+                    {
+                        "session_ref": bound,
+                        "original_request_id": "deliver-1",
+                        "delivery_id": "delivery_alpha",
+                        "attempt_id": "attempt_alpha",
+                    },
+                    "reconcile-workspace-repository-binding-subject-match",
+                )
+            )
+            or "{}"
+        )
+
+        self.assertEqual(response["error"]["data"]["name"], "INVALID_SESSION_REF")
+        self.assertEqual(response["error"]["code"], -32008)
 
     def test_initialize_capability_set_requires_authoritative_constraints(self) -> None:
         capability_set = json.loads(json.dumps(ReferenceAdapter()._identity.initialize_result()["capability_set"]))

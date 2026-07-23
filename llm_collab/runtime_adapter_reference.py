@@ -11,7 +11,7 @@ import argparse
 import hashlib
 import json
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from typing import Any, BinaryIO, Mapping
 
 from llm_collab.runtime_adapter_conformance import (
@@ -67,12 +67,13 @@ class AdapterIdentity:
     workspace_id: str = "ws_alpha"
     capability_set_id: str = "caps_alpha"
     capability_set_revision: str = "cap_rev1"
+    scope: Mapping[str, Any] = field(default_factory=lambda: {"kind": "workspace"})
 
     def endpoint(self) -> Mapping[str, Any]:
         return {
             "schema_version": 1,
             "workspace_id": self.workspace_id,
-            "scope": {"kind": "workspace"},
+            "scope": dict(self.scope),
             "endpoint_id": self.endpoint_id,
             "agent_id": "agent_alpha",
             "adapter_name": self.adapter_id,
@@ -114,7 +115,7 @@ class AdapterIdentity:
             "capability_set": {
                 "schema_version": 1,
                 "workspace_id": self.workspace_id,
-                "scope": {"kind": "workspace"},
+                "scope": dict(self.scope),
                 "capability_set_id": self.capability_set_id,
                 "revision": self.capability_set_revision,
                 "capabilities": (
@@ -162,15 +163,19 @@ class ReferenceAdapter:
         self._initialized = False
         self._terminal = False
         self._shutdown = False
-        self._scope: Mapping[str, Any] = {"kind": "workspace"}
-        self._deliveries: Mapping[Any, Mapping[str, Any]] = {
+        self._scope: Mapping[str, Any] = dict(self._identity.scope)
+        self._deliveries: Mapping[Any, Mapping[str, Any]] = self._delivery_rows()
+
+    def _delivery_rows(self) -> Mapping[Any, Mapping[str, Any]]:
+        scope = dict(self._identity.scope)
+        return {
             "deliver-1": {
                 "message_id": "msg_alpha",
                 "delivery_id": "delivery_alpha",
                 "attempt_id": "attempt_alpha",
-                "workspace_id": "ws_alpha",
-                "scope": {"kind": "workspace"},
-                "endpoint_id": "endpoint_alpha",
+                "workspace_id": self._identity.workspace_id,
+                "scope": scope,
+                "endpoint_id": self._identity.endpoint_id,
                 "session_ref_id": "session_alpha",
                 "native_session_id": "native-session-alpha",
             },
@@ -178,9 +183,9 @@ class ReferenceAdapter:
                 "message_id": "msg_numeric",
                 "delivery_id": "delivery_numeric",
                 "attempt_id": "attempt_numeric",
-                "workspace_id": "ws_alpha",
-                "scope": {"kind": "workspace"},
-                "endpoint_id": "endpoint_alpha",
+                "workspace_id": self._identity.workspace_id,
+                "scope": scope,
+                "endpoint_id": self._identity.endpoint_id,
                 "session_ref_id": "session_alpha",
                 "native_session_id": "native-session-alpha",
             }
@@ -268,6 +273,7 @@ class ReferenceAdapter:
             valid_endpoint = validate_endpoint_v1(endpoint)
         except Exception:
             return self._error(request_id, "INVALID_PARAMS")
+        expected = replace(expected, scope=valid_endpoint["scope"])
         if valid_endpoint != expected.endpoint():
             return self._error(request_id, "INVALID_PARAMS")
         if (
@@ -277,6 +283,9 @@ class ReferenceAdapter:
             or params.get("manifest_revision") != expected.manifest_revision
         ):
             return self._error(request_id, "INVALID_PARAMS")
+        self._identity = expected
+        self._scope = dict(expected.scope)
+        self._deliveries = self._delivery_rows()
         self._initialized = True
         return self._result(request_id, expected.initialize_result())
 
@@ -328,15 +337,25 @@ class ReferenceAdapter:
 
     def _valid_session_ref(self, value: Mapping[str, Any]) -> bool:
         document = value
+        endpoint_scope = self._identity.endpoint()["scope"]
         if document["workspace_id"] != self._identity.workspace_id:
             return False
-        if document["scope"] != self._identity.endpoint()["scope"]:
+        if document["scope"] != endpoint_scope:
             return False
-        if "repository_binding" in document:
+        repository_binding = document.get("repository_binding")
+        if endpoint_scope["kind"] == "workspace" and repository_binding is not None:
             return False
+        if endpoint_scope["kind"] == "project":
+            project_id = endpoint_scope.get("project_id")
+            if not isinstance(project_id, str) or not project_id:
+                return False
+            if repository_binding is not None and repository_binding["project_id"] != project_id:
+                return False
         if document["endpoint_id"] != self._identity.endpoint_id:
             return False
         evidence = document["evidence"]
+        if evidence["workspace_id"] != document["workspace_id"] or evidence["scope"] != document["scope"]:
+            return False
         if evidence["state"] != "visible" or not _is_token(evidence["evidence_id"], prefix="evidence_"):
             return False
         if not _is_token(evidence["correlation_id"], prefix="corr_"):
@@ -359,17 +378,22 @@ class ReferenceAdapter:
         ):
             return False
         subject = evidence["subject"]
-        if not isinstance(subject, Mapping) or set(subject) != {
+        subject_keys = {
             "endpoint_id",
             "session_ref_id",
             "native_session_id",
-        }:
+        }
+        if repository_binding is not None:
+            subject_keys.add("repository_binding")
+        if not isinstance(subject, Mapping) or set(subject) != subject_keys:
             return False
         if (
             subject["endpoint_id"] != value["endpoint_id"]
             or subject["session_ref_id"] != value["session_ref_id"]
             or subject["native_session_id"] != value["native_session_id"]
         ):
+            return False
+        if repository_binding is not None and subject["repository_binding"] != repository_binding:
             return False
         return evidence["integrity"] == _canonical_digest(evidence)
 

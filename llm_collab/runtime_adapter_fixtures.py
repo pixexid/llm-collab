@@ -275,6 +275,78 @@ def _session_ref_with(mutator) -> Mapping[str, Any]:
     return _freeze(value)
 
 
+def _canonical_digest_without_integrity(value: Mapping[str, Any]) -> str:
+    import hashlib
+    import json
+
+    material = _thaw(value)
+    material.pop("integrity", None)
+    raw = json.dumps(material, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    return "sha256:" + hashlib.sha256(raw).hexdigest()
+
+
+def _with_integrity(evidence: Mapping[str, Any]) -> Mapping[str, Any]:
+    value = _thaw(evidence)
+    value["integrity"] = _canonical_digest_without_integrity(value)
+    return _freeze(value)
+
+
+def _project_scope(project_id: str = "project_alpha") -> Mapping[str, Any]:
+    return _freeze({"kind": "project", "project_id": project_id})
+
+
+def _project_repository_binding(project_id: str = "project_alpha") -> Mapping[str, Any]:
+    return _freeze({"project_id": project_id, "repo_id": "repo_alpha", "canonical_cwd": "/repo"})
+
+
+def _project_endpoint() -> Mapping[str, Any]:
+    value = _thaw(_ENDPOINT)
+    value["scope"] = _project_scope()
+    return _freeze(value)
+
+
+def _project_capability_set() -> Mapping[str, Any]:
+    value = _thaw(_CAPABILITY_SET)
+    value["scope"] = _project_scope()
+    return _freeze(value)
+
+
+def _project_initialize_trace() -> tuple[TraceFrame, TraceFrame]:
+    params = _thaw(_INITIALIZE_PARAMS)
+    params["endpoint"] = _project_endpoint()
+    result = _thaw(_INITIALIZE_RESULT)
+    result["endpoint"] = _project_endpoint()
+    result["capability_set"] = _project_capability_set()
+    return (
+        TraceFrame("host", "adapter", _request("initialize", _freeze(params), "initialize-project")),
+        TraceFrame("adapter", "host", _response("initialize-project", _freeze(result))),
+    )
+
+
+def _project_session_ref(
+    *,
+    scope_project_id: str = "project_alpha",
+    repository_project_id: str = "project_alpha",
+) -> Mapping[str, Any]:
+    scope = _project_scope(scope_project_id)
+    repository_binding = _project_repository_binding(repository_project_id)
+    value = _thaw(_SESSION_REF)
+    value["scope"] = scope
+    value["repository_binding"] = repository_binding
+    value["evidence"]["scope"] = scope
+    value["evidence"]["subject"]["repository_binding"] = repository_binding
+    value["evidence"] = _with_integrity(value["evidence"])
+    return _freeze(value)
+
+
+def _project_receipt() -> Mapping[str, Any]:
+    value = _thaw(_RECEIPT)
+    value["scope"] = _project_scope()
+    value["evidence"]["scope"] = _project_scope()
+    value["evidence"] = _with_integrity(value["evidence"])
+    return _freeze(value)
+
+
 def _initialize_trace() -> tuple[TraceFrame, TraceFrame]:
     return (
         TraceFrame("host", "adapter", _request("initialize", _INITIALIZE_PARAMS, "initialize-1")),
@@ -453,6 +525,81 @@ FIXTURES: tuple[RuntimeAdapterFixture, ...] = (
         expectation=ExpectedRefusal(
             error_name="INVALID_PARAMS",
             error_code=-32602,
+            state_effect=NO_STATE_CHANGE,
+            response_emitted=True,
+            closes_connection=False,
+        ),
+    ),
+    RuntimeAdapterFixture(
+        fixture_id="runtime-adapter-project-reconcile-request",
+        polarity=POLARITY_CONFORMING,
+        clause_refs=(
+            ClauseReference(
+                clause_key="C8ed901b43824.1",
+                text_sha256="8ed901b43824181e067e6559b1a7412fc15861d6ae8d54a0b89b127d26ff6799",
+                polarity=POLARITY_CONFORMING,
+            ),
+            ClauseReference(
+                clause_key="C8ed901b43824.2",
+                text_sha256="8ed901b43824181e067e6559b1a7412fc15861d6ae8d54a0b89b127d26ff6799",
+                polarity=POLARITY_CONFORMING,
+            ),
+        ),
+        trace=(
+            *_project_initialize_trace(),
+            _reconcile_trace(_project_session_ref(), "reconcile-project"),
+        ),
+        expectation=ExpectedResult(
+            method="runtime.reconcile",
+            result=_project_receipt(),
+            state_effect="attempt_reconciled",
+        ),
+    ),
+    RuntimeAdapterFixture(
+        fixture_id="runtime-adapter-project-reconcile-rejects-scope-mismatch",
+        polarity=POLARITY_VIOLATING,
+        clause_refs=(
+            ClauseReference(
+                clause_key="C8ed901b43824.1",
+                text_sha256="8ed901b43824181e067e6559b1a7412fc15861d6ae8d54a0b89b127d26ff6799",
+                polarity=POLARITY_VIOLATING,
+            ),
+        ),
+        trace=(
+            *_project_initialize_trace(),
+            _reconcile_trace(
+                _project_session_ref(scope_project_id="project_other"),
+                "reconcile-project-scope-mismatch",
+            ),
+        ),
+        expectation=ExpectedRefusal(
+            error_name="INVALID_SESSION_REF",
+            error_code=-32008,
+            state_effect=NO_STATE_CHANGE,
+            response_emitted=True,
+            closes_connection=False,
+        ),
+    ),
+    RuntimeAdapterFixture(
+        fixture_id="runtime-adapter-project-reconcile-rejects-repository-project-mismatch",
+        polarity=POLARITY_VIOLATING,
+        clause_refs=(
+            ClauseReference(
+                clause_key="C8ed901b43824.2",
+                text_sha256="8ed901b43824181e067e6559b1a7412fc15861d6ae8d54a0b89b127d26ff6799",
+                polarity=POLARITY_VIOLATING,
+            ),
+        ),
+        trace=(
+            *_project_initialize_trace(),
+            _reconcile_trace(
+                _project_session_ref(repository_project_id="project_other"),
+                "reconcile-project-repository-mismatch",
+            ),
+        ),
+        expectation=ExpectedRefusal(
+            error_name="INVALID_SESSION_REF",
+            error_code=-32008,
             state_effect=NO_STATE_CHANGE,
             response_emitted=True,
             closes_connection=False,
@@ -671,6 +818,17 @@ def _is_nonempty_string(value: Any) -> bool:
     return isinstance(value, str) and bool(value)
 
 
+def _is_scope(value: Any) -> bool:
+    return (
+        _is_closed_mapping(value, {"kind"})
+        and value["kind"] == "workspace"
+    ) or (
+        _is_closed_mapping(value, {"kind", "project_id"})
+        and value["kind"] == "project"
+        and _is_nonempty_string(value["project_id"])
+    )
+
+
 def _validate_schema_version(value: Mapping[str, Any], label: str) -> None:
     if type(value.get("schema_version")) is not int or value["schema_version"] != 1:
         raise ConformanceFailure("fixture-result-shape", label)
@@ -709,7 +867,7 @@ def _validate_initialize_result(result: Any) -> None:
     ):
         if not _is_nonempty_string(endpoint[key]):
             raise ConformanceFailure("fixture-conforming-trace", "initialize")
-    if not _is_closed_mapping(endpoint["scope"], {"kind"}) or endpoint["scope"]["kind"] not in {"workspace", "project"}:
+    if not _is_scope(endpoint["scope"]):
         raise ConformanceFailure("fixture-conforming-trace", "initialize")
     if not _is_closed_mapping(endpoint["platform"], {"os", "architecture"}):
         raise ConformanceFailure("fixture-conforming-trace", "initialize")
@@ -725,7 +883,7 @@ def _validate_initialize_result(result: Any) -> None:
     for key in ("workspace_id", "capability_set_id", "revision"):
         if not _is_nonempty_string(capability_set[key]):
             raise ConformanceFailure("fixture-conforming-trace", "initialize")
-    if not _is_closed_mapping(capability_set["scope"], {"kind"}):
+    if not _is_scope(capability_set["scope"]):
         raise ConformanceFailure("fixture-conforming-trace", "initialize")
     if not isinstance(capability_set["capabilities"], (list, tuple)) or not capability_set["capabilities"]:
         raise ConformanceFailure("fixture-conforming-trace", "initialize")
@@ -736,24 +894,36 @@ def _validate_session_ref(value: Any) -> None:
         value = validate_session_ref_v1(value)
     except Exception as error:
         raise ConformanceFailure("fixture-session-ref", "session_ref") from error
-    if value["workspace_id"] != _ENDPOINT["workspace_id"]:
+    expected_endpoint = _project_endpoint() if value["scope"].get("kind") == "project" else _ENDPOINT
+    if value["workspace_id"] != expected_endpoint["workspace_id"]:
         raise ConformanceFailure("fixture-session-ref-identity", "workspace")
-    if value["scope"] != _ENDPOINT["scope"]:
+    if value["scope"] != expected_endpoint["scope"]:
         raise ConformanceFailure("fixture-session-ref-identity", "scope")
-    if "repository_binding" in value:
+    repository_binding = value.get("repository_binding")
+    if value["scope"]["kind"] == "workspace" and repository_binding is not None:
         raise ConformanceFailure("fixture-session-ref-identity", "repository_binding")
-    if value["endpoint_id"] != _ENDPOINT["endpoint_id"]:
+    if value["scope"]["kind"] == "project" and repository_binding is not None:
+        if repository_binding["project_id"] != value["scope"]["project_id"]:
+            raise ConformanceFailure("fixture-session-ref-identity", "repository_binding")
+    if value["endpoint_id"] != expected_endpoint["endpoint_id"]:
         raise ConformanceFailure("fixture-session-ref-identity", "endpoint")
     evidence = value["evidence"]
+    if evidence["workspace_id"] != value["workspace_id"] or evidence["scope"] != value["scope"]:
+        raise ConformanceFailure("fixture-session-ref-identity", "session evidence scope")
     if evidence["evidence_kind"] != "exact_session_binding" or evidence["quality"] != "authoritative":
         raise ConformanceFailure("fixture-session-ref-identity", "session evidence")
     subject = evidence["subject"]
-    if not _is_closed_mapping(subject, {"endpoint_id", "session_ref_id", "native_session_id"}):
+    subject_keys = {"endpoint_id", "session_ref_id", "native_session_id"}
+    if repository_binding is not None:
+        subject_keys.add("repository_binding")
+    if not _is_closed_mapping(subject, subject_keys):
         raise ConformanceFailure("fixture-session-ref-identity", "session subject")
     if subject["endpoint_id"] != value["endpoint_id"] or subject["session_ref_id"] != value["session_ref_id"]:
         raise ConformanceFailure("fixture-session-ref-identity", "session subject mismatch")
     if subject["native_session_id"] != value["native_session_id"]:
         raise ConformanceFailure("fixture-session-ref-identity", "native session mismatch")
+    if repository_binding is not None and subject["repository_binding"] != repository_binding:
+        raise ConformanceFailure("fixture-session-ref-identity", "repository binding mismatch")
     try:
         _validate_evidence_integrity(evidence)
     except ConformanceFailure as error:
@@ -883,16 +1053,6 @@ def _validate_result_shape(fixture: RuntimeAdapterFixture, methods: tuple[str, .
         _validate_receipt_result(expectation.result, params)
     else:
         raise ConformanceFailure("fixture-result-method", fixture.fixture_id)
-
-
-def _canonical_digest_without_integrity(value: Mapping[str, Any]) -> str:
-    import hashlib
-    import json
-
-    material = _thaw(value)
-    material.pop("integrity", None)
-    raw = json.dumps(material, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-    return "sha256:" + hashlib.sha256(raw).hexdigest()
 
 
 def _validate_evidence_integrity(evidence: Mapping[str, Any]) -> None:
