@@ -35,7 +35,7 @@ CAPABILITY_NOT_DECLARED = "CAPABILITY_NOT_DECLARED"
 SESSION_METHODS = frozenset((METHOD_DELIVER, METHOD_CANCEL, METHOD_RECONCILE))
 PROTOCOL_CONTROL_METHODS = frozenset((METHOD_HEALTH, METHOD_SHUTDOWN))
 
-_AUTHORITY_RECORD_FIELDS = frozenset(("adapter_id", "endpoint", "capability_set"))
+_AUTHORITY_RECORD_FIELDS = frozenset(("adapter_id", "endpoint", "capability_set", "session_action_relations"))
 _ENDPOINT_FIELDS = frozenset(
     (
         "schema_version",
@@ -57,6 +57,9 @@ _CAPABILITY_SET_FIELDS = frozenset(
 _CAPABILITY_FIELDS = frozenset(("capability", "quality", "constraints", "evidence"))
 _UNSUPPORTED_CAPABILITY_FIELDS = frozenset(("capability", "quality"))
 _ATTESTATION_FIELDS = frozenset(("evidence_kind", "source_id", "source_revision", "integrity"))
+_SESSION_ACTION_RELATION_FIELDS = frozenset(
+    ("capability_set_id", "capability_set_revision", "method", "selected_capability", "required_quality")
+)
 
 
 class CapabilityAuthorityError(ValueError):
@@ -73,6 +76,13 @@ class BoundCapabilityContext:
     manifest_revision: str
     endpoint: Mapping[str, Any]
     capability_set: Mapping[str, Any]
+
+
+@dataclass(frozen=True)
+class CapabilityDecision:
+    method: str
+    selected_capability: str
+    selected_quality: str
 
 
 class TrustedCapabilityAuthorityRegistry:
@@ -127,6 +137,33 @@ class TrustedCapabilityAuthorityRegistry:
         _require_supported_entry(bound.endpoint, entry)
         return _freeze(entry)
 
+    def validate_request_authority(
+        self,
+        bound: BoundCapabilityContext,
+        method: str,
+        *,
+        caller_authority_fields: Mapping[str, Any] | None = None,
+    ) -> CapabilityDecision:
+        """Authorize one post-initialize session action from host-trusted relations."""
+
+        if not isinstance(bound, BoundCapabilityContext):
+            _reject("bound capability context is required")
+        if caller_authority_fields is not None:
+            _reject("caller-supplied authority fields are not trusted")
+        if method not in SESSION_METHODS:
+            _reject("method is not a product capability session action")
+        record = self._record(bound.adapter_id)
+        relation = _select_session_action_relation(record["session_action_relations"], bound, method)
+        entry = _select_capability(bound.capability_set, relation["selected_capability"])
+        _require_supported_entry(bound.endpoint, entry)
+        if entry["quality"] != relation["required_quality"]:
+            _reject("selected capability quality does not match trusted action relation")
+        return CapabilityDecision(
+            method=method,
+            selected_capability=relation["selected_capability"],
+            selected_quality=entry["quality"],
+        )
+
     def _record(self, adapter_id: str) -> Mapping[str, Any]:
         try:
             return self._records[adapter_id]
@@ -166,6 +203,11 @@ def _validate_authority_record(adapter_id: str, record: Any) -> None:
     capability_set = _mapping(record.get("capability_set"), "trusted capability_set")
     _validate_endpoint_shape(endpoint)
     _validate_capability_set_shape(capability_set)
+    relations = record.get("session_action_relations")
+    if not isinstance(relations, (list, tuple)):
+        _reject("session action relations must be a sequence")
+    for relation in relations:
+        _validate_session_action_relation_shape(relation)
 
 
 def _validate_endpoint_shape(endpoint: Mapping[str, Any]) -> None:
@@ -274,6 +316,37 @@ def _require_supported_entry(endpoint: Mapping[str, Any], entry: Mapping[str, An
         or any(ch not in "0123456789abcdef" for ch in integrity[7:])
     ):
         _reject("capability attestation integrity must be a sha256 digest")
+
+
+def _validate_session_action_relation_shape(relation: Any) -> None:
+    if not isinstance(relation, Mapping):
+        _reject("session action relation must be a mapping")
+    if set(relation) != _SESSION_ACTION_RELATION_FIELDS:
+        _reject("session action relation contains fields outside the trusted schema")
+    for key in ("capability_set_id", "capability_set_revision", "selected_capability", "required_quality"):
+        if not isinstance(relation.get(key), str) or not relation.get(key):
+            _reject(f"session action relation {key} must be a non-empty string")
+    if relation.get("method") not in SESSION_METHODS:
+        _reject("session action relation method must be a product session method")
+
+
+def _select_session_action_relation(
+    relations: Any,
+    bound: BoundCapabilityContext,
+    method: str,
+) -> Mapping[str, Any]:
+    matches = []
+    for relation in relations:
+        _validate_session_action_relation_shape(relation)
+        if (
+            relation["capability_set_id"] == bound.endpoint["capability_set_id"]
+            and relation["capability_set_revision"] == bound.capability_set["revision"]
+            and relation["method"] == method
+        ):
+            matches.append(relation)
+    if len(matches) != 1:
+        _reject("session action relation must match exactly once")
+    return matches[0]
 
 
 def _select_capability(capability_set: Mapping[str, Any], capability: str) -> Mapping[str, Any]:
