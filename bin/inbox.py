@@ -486,8 +486,25 @@ def main():
 
     if not messages:
         if args.json_output:
-            print("[]")
+            if published_runtime is None:
+                print("[]")
+            else:
+                print(json.dumps({"messages": [], "published_runtime": published_runtime}, indent=2))
         else:
+            if published_runtime is not None:
+                if published_runtime.get("published") is False:
+                    print(
+                        "[session] publish refused "
+                        f"{published_runtime['runtime_family']}: "
+                        f"{published_runtime['reason']}\n"
+                    )
+                else:
+                    print(
+                        "[session] published "
+                        f"{published_runtime['session']['runtime']['family']} "
+                        f"{published_runtime['session']['runtime']['session_id']} "
+                        f"for {published_runtime['session']['session_id']}\n"
+                    )
             print(f"[inbox] No {'messages' if args.show_all else 'unread messages'} for {args.me}.")
         return
 

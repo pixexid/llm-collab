@@ -1733,6 +1733,20 @@ class SessionAutobridgeTest(unittest.TestCase):
         self.assertNotIn("find_dispatchable_target_session", source)
         self.assertIn("resolve_exact_dispatch_target", source)
 
+    def test_load_binding_rejects_malformed_and_non_object_json(self):
+        root = self.make_workspace()
+        binding_root = root / "State" / "session_autobridge" / "bindings"
+        path = binding_root / "amiga" / "CHAT-BAD-BINDING" / "claude.json"
+
+        with patch.object(session_autobridge_lib, "BINDINGS_DIR", binding_root):
+            for payload in ("{", "[]"):
+                with self.subTest(payload=payload):
+                    write(path, payload)
+                    with self.assertRaises(FileNotFoundError):
+                        session_autobridge_lib.load_binding(
+                            "amiga", "CHAT-BAD-BINDING", "claude"
+                        )
+
     def test_inbox_publish_refuses_heuristic_runtime_discovery_for_all_families(self):
         root = self.make_workspace()
         self.add_agent(
@@ -1780,6 +1794,72 @@ class SessionAutobridgeTest(unittest.TestCase):
                     session_autobridge_lib.HEURISTIC_RUNTIME_DISCOVERY_REFUSED_REASON,
                     payload["published_runtime"]["reason"],
                 )
+
+    def test_inbox_publish_refusal_is_reported_for_empty_inbox(self):
+        root = self.make_workspace()
+        self.add_agent(
+            root,
+            {
+                "id": "codex",
+                "display_name": "Codex",
+                "activation": {"type": "cli_session", "watcher_enabled": True},
+            },
+        )
+
+        json_result = subprocess.run(
+            [
+                sys.executable,
+                str(INBOX_SCRIPT),
+                "--me",
+                "codex",
+                "--peek",
+                "--project",
+                "amiga",
+                "--publish-session",
+                "--session",
+                "SESSION-INBOX-EMPTY",
+                "--runtime-family",
+                "codex_app",
+                "--json",
+            ],
+            cwd=root,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        payload = json.loads(json_result.stdout)
+        self.assertEqual([], payload["messages"])
+        self.assertFalse(payload["published_runtime"]["published"])
+        self.assertEqual(
+            session_autobridge_lib.HEURISTIC_RUNTIME_DISCOVERY_REFUSED_REASON,
+            payload["published_runtime"]["reason"],
+        )
+
+        human_result = subprocess.run(
+            [
+                sys.executable,
+                str(INBOX_SCRIPT),
+                "--me",
+                "codex",
+                "--peek",
+                "--project",
+                "amiga",
+                "--publish-session",
+                "--session",
+                "SESSION-INBOX-EMPTY",
+                "--runtime-family",
+                "codex_app",
+            ],
+            cwd=root,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        self.assertIn(
+            "[session] publish refused codex_app: heuristic_runtime_discovery_refused",
+            human_result.stdout,
+        )
+        self.assertIn("[inbox] No unread messages for codex.", human_result.stdout)
 
     def test_discover_runtime_for_claude_project_index(self):
         root = self.make_workspace()
@@ -1916,7 +1996,7 @@ class SessionAutobridgeTest(unittest.TestCase):
             "project_id": "amiga",
             "chat_id": "CHAT-EXACT-DUP",
             "status": "parked",
-            "runtime": {"session_id": "runtime-dup"},
+            "runtime": {"family": "claude_app", "session_id": "runtime-dup"},
         }
         duplicate_b = dict(duplicate_a)
 
@@ -1928,6 +2008,7 @@ class SessionAutobridgeTest(unittest.TestCase):
                 "chat_id": "CHAT-EXACT-DUP",
                 "agent_id": "claude",
                 "session_id": "SESSION-DUP",
+                "runtime_family": "claude_app",
                 "runtime_session_id": "runtime-dup",
             },
         ), patch.object(
@@ -1953,6 +2034,7 @@ class SessionAutobridgeTest(unittest.TestCase):
                 "chat_id": "CHAT-EXACT-DUP",
                 "agent_id": "claude",
                 "session_id": "SESSION-DUP",
+                "runtime_family": "claude_app",
                 "runtime_session_id": "runtime-dup",
             },
         ), patch.object(
@@ -1978,7 +2060,7 @@ class SessionAutobridgeTest(unittest.TestCase):
             "project_id": "amiga",
             "chat_id": "CHAT-SESSION-DRIFT",
             "status": "parked",
-            "runtime": {"session_id": "runtime-reused"},
+            "runtime": {"family": "claude_app", "session_id": "runtime-reused"},
         }
 
         with patch.object(
@@ -1989,6 +2071,7 @@ class SessionAutobridgeTest(unittest.TestCase):
                 "chat_id": "CHAT-SESSION-DRIFT",
                 "agent_id": "claude",
                 "session_id": "SESSION-A",
+                "runtime_family": "claude_app",
                 "runtime_session_id": "runtime-reused",
             },
         ), patch.object(
@@ -2011,7 +2094,7 @@ class SessionAutobridgeTest(unittest.TestCase):
             "project_id": "nuvyr",
             "chat_id": "CHAT-SESSION-DRIFT",
             "status": "parked",
-            "runtime": {"session_id": "runtime-bound"},
+            "runtime": {"family": "claude_app", "session_id": "runtime-bound"},
         }
 
         with patch.object(
@@ -2022,6 +2105,7 @@ class SessionAutobridgeTest(unittest.TestCase):
                 "chat_id": "CHAT-SESSION-DRIFT",
                 "agent_id": "claude",
                 "session_id": "SESSION-A",
+                "runtime_family": "claude_app",
                 "runtime_session_id": "runtime-bound",
             },
         ), patch.object(
@@ -2036,6 +2120,145 @@ class SessionAutobridgeTest(unittest.TestCase):
             )
             self.assertIsNone(session)
             self.assertEqual(session_autobridge_lib.EXACT_BINDING_MISMATCH_REASON, reason)
+
+    def test_resolve_exact_dispatch_target_compares_runtime_id_not_target_ids(self):
+        drifted_runtime = {
+            "session_id": "SESSION-STABLE",
+            "agent_id": "claude",
+            "project_id": "amiga",
+            "chat_id": "CHAT-RUNTIME-DRIFT",
+            "status": "parked",
+            "runtime": {"family": "claude_app", "session_id": "runtime-current"},
+        }
+
+        with patch.object(
+            session_autobridge_lib,
+            "load_binding",
+            return_value={
+                "project_id": "amiga",
+                "chat_id": "CHAT-RUNTIME-DRIFT",
+                "agent_id": "claude",
+                "session_id": "SESSION-STABLE",
+                "runtime_family": "claude_app",
+                "runtime_session_id": "SESSION-STABLE",
+            },
+        ), patch.object(
+            session_autobridge_lib,
+            "iter_sessions",
+            return_value=[drifted_runtime],
+        ):
+            session, reason = session_autobridge_lib.resolve_exact_dispatch_target(
+                "amiga",
+                "CHAT-RUNTIME-DRIFT",
+                "claude",
+            )
+            self.assertIsNone(session)
+            self.assertEqual(session_autobridge_lib.EXACT_BINDING_MISMATCH_REASON, reason)
+
+    def test_resolve_exact_dispatch_target_requires_runtime_family_match(self):
+        family_drift = {
+            "session_id": "SESSION-FAMILY",
+            "agent_id": "claude",
+            "project_id": "amiga",
+            "chat_id": "CHAT-FAMILY-DRIFT",
+            "status": "parked",
+            "runtime": {"family": "gemini_cli", "session_id": "runtime-shared"},
+        }
+
+        with patch.object(
+            session_autobridge_lib,
+            "load_binding",
+            return_value={
+                "project_id": "amiga",
+                "chat_id": "CHAT-FAMILY-DRIFT",
+                "agent_id": "claude",
+                "session_id": "SESSION-FAMILY",
+                "runtime_family": "claude_app",
+                "runtime_session_id": "runtime-shared",
+            },
+        ), patch.object(
+            session_autobridge_lib,
+            "iter_sessions",
+            return_value=[family_drift],
+        ):
+            session, reason = session_autobridge_lib.resolve_exact_dispatch_target(
+                "amiga",
+                "CHAT-FAMILY-DRIFT",
+                "claude",
+            )
+            self.assertIsNone(session)
+            self.assertEqual(session_autobridge_lib.EXACT_BINDING_MISMATCH_REASON, reason)
+
+    def test_deliver_treats_malformed_binding_as_exact_refusal_and_writes_packet(self):
+        root = self.make_workspace()
+        self.add_agent(
+            root,
+            {
+                "id": "codex",
+                "display_name": "Codex",
+                "activation": {"type": "cli_session", "watcher_enabled": True},
+            },
+        )
+        self.add_agent(
+            root,
+            {
+                "id": "claude",
+                "display_name": "Claude",
+                "activation": {"type": "cli_session", "watcher_enabled": True},
+            },
+        )
+        chat_dir = self.create_chat(
+            root,
+            chat_dir_name="2026-04-23_malformed-binding__CHAT-BIND-MALFORMED",
+            chat_id="CHAT-BIND-MALFORMED",
+            project_id="amiga",
+        )
+        binding_path = (
+            root
+            / "State"
+            / "session_autobridge"
+            / "bindings"
+            / "amiga"
+            / "CHAT-BIND-MALFORMED"
+            / "claude.json"
+        )
+        write(binding_path, "{")
+
+        deliver_result = subprocess.run(
+            [
+                sys.executable,
+                str(DELIVER_SCRIPT),
+                "--chat",
+                "CHAT-BIND-MALFORMED",
+                "--from",
+                "codex",
+                "--to",
+                "claude",
+                "--project",
+                "amiga",
+                "--title",
+                "Malformed binding still delivers",
+                "--body-file",
+                "-",
+            ],
+            cwd=root,
+            text=True,
+            input="Write the durable packet even when exact runtime binding is unreadable.",
+            capture_output=True,
+            check=True,
+        )
+        result_payload = json.loads(deliver_result.stdout.split("\n\n", 1)[0])
+        self.assertFalse(result_payload["autobridge_ready"])
+        self.assertEqual(
+            session_autobridge_lib.EXACT_BINDING_REQUIRED_REASON,
+            result_payload["autobridge_refusal_reason"],
+        )
+        self.assertIsNone(result_payload["resolved_target_session_id"])
+
+        delivered_candidates = sorted(chat_dir.glob("*_to-claude_*.md"))
+        self.assertTrue(delivered_candidates)
+        frontmatter, _ = parse_frontmatter(delivered_candidates[-1].read_text())
+        self.assertIsNone(frontmatter["target_session_id"])
 
     def test_deliver_uses_canonical_binding_for_target_session_id(self):
         root = self.make_workspace()
@@ -3408,6 +3631,8 @@ class SessionAutobridgeTest(unittest.TestCase):
         session = {
             "session_id": "SESSION-RUNTIME",
             "agent_id": "gemini",
+            "project_id": "amiga",
+            "chat_id": "CHAT-BIND-SAFE",
             "wake_strategy": "runtime_trigger",
             "runtime": {
                 "family": "gemini_cli",
@@ -3418,6 +3643,8 @@ class SessionAutobridgeTest(unittest.TestCase):
             "binding_generation": 7,
         }
         base_frontmatter = {
+            "project_id": "amiga",
+            "chat_id": "CHAT-BIND-SAFE",
             "target_session_id": "gemini-runtime-1",
             "repo_targets": ["llm-collab"],
             "target_binding_id": "binding_current",
@@ -3528,6 +3755,7 @@ class SessionAutobridgeTest(unittest.TestCase):
         worker_script = root / "binding_scoped_runtime.py"
         output_a = root / "binding_scoped_runtime_a.json"
         output_b = root / "binding_scoped_runtime_b.json"
+        output_wildcard = root / "binding_scoped_runtime_wildcard.json"
         write(
             worker_script,
             "\n".join(
@@ -3581,6 +3809,36 @@ class SessionAutobridgeTest(unittest.TestCase):
             )
             write_json(session_path, session_payload)
 
+        self.run_cli(
+            root,
+            "register",
+            "--session",
+            "SESSION-BIND-0-WILDCARD",
+            "--agent",
+            "gemini",
+            "--project",
+            "amiga",
+            "--chat",
+            "CHAT-BIND-SAFE",
+            "--mode",
+            "auto-read",
+            "--wake-strategy",
+            "runtime_trigger",
+            "--runtime-family",
+            "gemini_cli",
+            "--runtime-session-id",
+            "gemini-runtime-a",
+            "--runtime-session-source",
+            "first_read",
+            "--runtime-command",
+            json.dumps([sys.executable, str(worker_script), str(output_wildcard)]),
+        )
+        wildcard_path = root / "State" / "session_autobridge" / "sessions" / "SESSION-BIND-0-WILDCARD.json"
+        wildcard_payload = json.loads(wildcard_path.read_text())
+        wildcard_payload.pop("project_id")
+        wildcard_payload.pop("chat_id")
+        write_json(wildcard_path, wildcard_payload)
+
         watcher_result = subprocess.run(
             [
                 sys.executable,
@@ -3608,6 +3866,7 @@ class SessionAutobridgeTest(unittest.TestCase):
         self.assertEqual([matched], consumed)
         self.assertTrue(output_a.exists())
         self.assertFalse(output_b.exists())
+        self.assertFalse(output_wildcard.exists())
 
         inbox = json.loads((root / "agents" / "gemini" / "inbox.json").read_text())
         self.assertEqual([matched], inbox["read"])
