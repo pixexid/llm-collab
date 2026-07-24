@@ -58,6 +58,13 @@ def parse_args():
     register.add_argument("--agent", required=True, help="Agent ID the parked session belongs to")
     register.add_argument("--project", default=None, help="Optional project_id filter")
     register.add_argument("--chat", default=None, help="Optional chat_id filter")
+    register.add_argument(
+        "--repo-target",
+        dest="repo_targets",
+        action="append",
+        default=None,
+        help="Explicit repository subscription; repeat for multiple repositories",
+    )
     register.add_argument("--mode", default="manual", choices=SESSION_MODES)
     register.add_argument("--status", default="parked", choices=SESSION_STATUSES)
     register.add_argument("--wake-strategy", default="none", choices=WAKE_STRATEGIES)
@@ -87,6 +94,13 @@ def parse_args():
     publish.add_argument("--runtime-family", required=True, choices=("codex_app", "claude_app", "gemini_cli"))
     publish.add_argument("--project", default=None, help="Optional project_id filter")
     publish.add_argument("--chat", default=None, help="Optional chat_id filter")
+    publish.add_argument(
+        "--repo-target",
+        dest="repo_targets",
+        action="append",
+        default=None,
+        help="Explicit repository subscription; repeat for multiple repositories",
+    )
     publish.add_argument("--project-path", default=None, help="Optional runtime project path hint")
     publish.add_argument("--mode", default="notify", choices=SESSION_MODES)
     publish.add_argument("--status", default="parked", choices=SESSION_STATUSES)
@@ -108,6 +122,13 @@ def parse_args():
 
     dispatch = subparsers.add_parser("dispatch", help="Run one bounded dispatch pass")
     dispatch.add_argument("--session", required=True)
+    dispatch.add_argument(
+        "--repo-target",
+        dest="repo_targets",
+        action="append",
+        default=None,
+        help="Explicit repository subscription; repeat for multiple repositories",
+    )
     dispatch.add_argument("--json", dest="json_output", action="store_true")
 
     deactivate = subparsers.add_parser("deactivate", help="Stop or supersede a session lease")
@@ -224,6 +245,9 @@ def register_session(args) -> dict:
         "created_utc": existing.get("created_utc", utc_iso()),
         "processed_messages": existing.get("processed_messages", []),
     }
+    repo_targets = getattr(args, "repo_targets", None)
+    if repo_targets is not None:
+        payload["repo_targets"] = repo_targets
     save_session(payload)
     binding = update_binding_from_session(payload)
     if binding is not None:
@@ -264,6 +288,7 @@ def publish_current_session(args) -> dict:
     register_args.agent = args.agent
     register_args.project = args.project
     register_args.chat = args.chat
+    register_args.repo_targets = args.repo_targets
     register_args.mode = args.mode
     register_args.status = args.status
     register_args.wake_strategy = args.wake_strategy
@@ -379,7 +404,7 @@ def main():
     elif args.command == "show-binding":
         result = show_binding(args)
     elif args.command == "dispatch":
-        result = dispatch_session(args.session)
+        result = dispatch_session(args.session, repo_targets=args.repo_targets)
     elif args.command == "lease-claim":
         result, exit_code = lease_claim_command(args)
     elif args.command == "lease-show":

@@ -539,6 +539,32 @@ def _frontmatter_strings(value: Any) -> list[str]:
     return []
 
 
+def _repo_target_set(value: Any) -> set[str] | None:
+    if not isinstance(value, list):
+        return None
+    values = _frontmatter_strings(value)
+    if (
+        not values
+        or values != value
+        or any(item != item.strip() or not item for item in values)
+        or len(values) != len(set(values))
+    ):
+        return None
+    return set(values)
+
+
+def repo_scope_matches(subscriber_targets: Any, packet_targets: Any) -> tuple[bool, str]:
+    """Apply the one repo-scope rule used by inbox, watcher, and autobridge."""
+
+    if subscriber_targets is None:
+        return True, "unscoped"
+    subscriber = _repo_target_set(subscriber_targets)
+    packet = _repo_target_set(packet_targets)
+    if subscriber is None or packet is None or not packet <= subscriber:
+        return False, ROUTE_AMBIGUOUS_REASON
+    return True, "repo_scope_match"
+
+
 def _declared_target(value: Any) -> str | None:
     if value is None:
         return None
@@ -548,10 +574,11 @@ def _declared_target(value: Any) -> str | None:
 
 def binding_scoped_message_matches_session(session: dict, message: dict) -> tuple[bool, str]:
     frontmatter = message.get("frontmatter", {})
-    session_repos = set(_frontmatter_strings(session.get("repo_targets")))
-    message_repos = set(_frontmatter_strings(frontmatter.get("repo_targets")))
-    if session_repos and not (session_repos & message_repos):
-        return False, ROUTE_AMBIGUOUS_REASON
+    repo_match, repo_reason = repo_scope_matches(
+        session.get("repo_targets"), frontmatter.get("repo_targets")
+    )
+    if not repo_match:
+        return False, repo_reason
 
     target_binding_id = _declared_target(
         frontmatter.get("target_binding_id", frontmatter.get("binding_id"))
@@ -654,6 +681,11 @@ def resolve_exact_dispatch_target(
 
 def message_targets_session(session: dict, message: dict) -> tuple[bool, str]:
     frontmatter = message.get("frontmatter", {})
+    repo_match, repo_reason = repo_scope_matches(
+        session.get("repo_targets"), frontmatter.get("repo_targets")
+    )
+    if not repo_match:
+        return False, repo_reason
     if is_codex_self_target_message(message):
         return True, "explicit_target_match"
     exact_required = session_requires_exact_receive_target(session)
@@ -1969,8 +2001,12 @@ def create_relay_prompt(session: dict, message: dict) -> dict[str, Any]:
     return {"prompt_path": str(prompt_path.relative_to(ROOT)), "prompt": prompt}
 
 
-def dispatch_session(session_id: str) -> dict[str, Any]:
+def dispatch_session(
+    session_id: str, *, repo_targets: list[str] | None = None
+) -> dict[str, Any]:
     session = load_session(session_id)
+    if repo_targets is not None:
+        session = {**session, "repo_targets": repo_targets}
     dispatchable, reason = session_is_dispatchable(session)
     if not dispatchable:
         append_event(

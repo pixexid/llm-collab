@@ -33,8 +33,14 @@ from _helpers import (
     config_get,
     load_agent_inbox,
     mark_messages_read,
+    parse_frontmatter,
 )
-from _session_autobridge import SESSIONS_DIR, dispatch_session, load_session
+from _session_autobridge import (
+    SESSIONS_DIR,
+    dispatch_session,
+    load_session,
+    repo_scope_matches,
+)
 
 
 def parse_args():
@@ -45,6 +51,12 @@ def parse_args():
     p.add_argument("--notify", action="store_true", help="Send desktop notification on new messages")
     p.add_argument("--no-autobridge", action="store_true", help="Disable automatic session autobridge dispatch on new unread messages")
     p.add_argument("--skip-existing", action="store_true", help="Treat current unread as already seen")
+    p.add_argument(
+        "--repo-target",
+        action="append",
+        default=None,
+        help="Explicit repository subscription; repeat for multiple repositories",
+    )
     p.add_argument("--json", dest="json_output", action="store_true", help="Emit JSON lines")
     return p.parse_args()
 
@@ -92,11 +104,16 @@ def autobridge_session_ids(agent_id: str) -> list[str]:
     return session_ids
 
 
-def dispatch_autobridge(agent_id: str, json_output: bool) -> list[str]:
+def dispatch_autobridge(
+    agent_id: str,
+    json_output: bool,
+    *,
+    repo_targets: list[str] | None = None,
+) -> list[str]:
     consumed_paths: list[str] = []
 
     for session_id in autobridge_session_ids(agent_id):
-        result = dispatch_session(session_id)
+        result = dispatch_session(session_id, repo_targets=repo_targets)
         if not result.get("actions"):
             continue
 
@@ -116,6 +133,34 @@ def dispatch_autobridge(agent_id: str, json_output: bool) -> list[str]:
             runtime_result = action.get("runtime_result") or {}
             runtime_ok = runtime_result.get("returncode") == 0
             if action.get("effective_action") == "runtime_trigger" and runtime_ok:
+                # Stored session scope was already checked by dispatch_session;
+                # an explicit watcher scope is rechecked at the read boundary.
+                effective_repo_targets = repo_targets
+                message_path = ROOT / action["message_path"]
+                if effective_repo_targets is None:
+                    repo_match, repo_reason = True, "unscoped"
+                else:
+                    try:
+                        frontmatter, _ = parse_frontmatter(message_path.read_text())
+                        repo_match, repo_reason = repo_scope_matches(
+                            effective_repo_targets, frontmatter.get("repo_targets")
+                        )
+                    except Exception:
+                        repo_match, repo_reason = False, "route_ambiguous"
+                if not repo_match:
+                    emit(
+                        {
+                            "ts": utc_now_str(),
+                            "event": "autobridge_repo_scope_refused",
+                            "detail": action["message_path"],
+                            "agent": agent_id,
+                            "session_id": session_id,
+                            "message_path": action["message_path"],
+                            "reason": repo_reason,
+                        },
+                        json_output,
+                    )
+                    continue
                 consumed_paths.append(action["message_path"])
                 emit(
                     {
@@ -181,7 +226,15 @@ def main():
                             f"New message: {Path(path).stem}",
                         )
                 if unread and not args.no_autobridge:
-                    consumed_paths = sorted(set(dispatch_autobridge(args.me, args.json_output)))
+                    consumed_paths = sorted(
+                        set(
+                            dispatch_autobridge(
+                                args.me,
+                                args.json_output,
+                                repo_targets=args.repo_target,
+                            )
+                        )
+                    )
                 seen_paths = seen_paths | new_msgs
         except Exception as e:
             ts_str = utc_now_str()

@@ -4170,6 +4170,10 @@ class SessionAutobridgeTest(unittest.TestCase):
                 session_autobridge_lib.ROUTE_AMBIGUOUS_REASON,
             ),
             (
+                {"repo_targets": ["llm-collab", "amiga"]},
+                session_autobridge_lib.ROUTE_AMBIGUOUS_REASON,
+            ),
+            (
                 {"target_binding_id": "binding_other"},
                 session_autobridge_lib.ROUTE_AMBIGUOUS_REASON,
             ),
@@ -4265,6 +4269,131 @@ class SessionAutobridgeTest(unittest.TestCase):
                 wildcard_session, missing_scope_message
             ),
         )
+
+    def test_repo_scope_is_unscoped_or_strict_subset_everywhere(self):
+        self.assertEqual(
+            (True, "unscoped"),
+            session_autobridge_lib.repo_scope_matches(None, None),
+        )
+        self.assertEqual(
+            (True, "repo_scope_match"),
+            session_autobridge_lib.repo_scope_matches(
+                ["llm-collab", "amiga"], ["llm-collab"]
+            ),
+        )
+        for subscriber, packet in (
+            (["llm-collab"], ["llm-collab", "amiga"]),
+            (["llm-collab"], None),
+            (["llm-collab"], []),
+            (["llm-collab"], [" llm-collab"]),
+            (["llm-collab", "llm-collab"], ["llm-collab"]),
+        ):
+            with self.subTest(subscriber=subscriber, packet=packet):
+                self.assertEqual(
+                    (False, session_autobridge_lib.ROUTE_AMBIGUOUS_REASON),
+                    session_autobridge_lib.repo_scope_matches(subscriber, packet),
+                )
+
+        general_session = {
+            "session_id": "SESSION-GENERAL",
+            "agent_id": "gemini",
+            "wake_strategy": "notify",
+            "repo_targets": ["llm-collab"],
+        }
+        self.assertEqual(
+            (True, "broadcast_or_agent_scoped"),
+            session_autobridge_lib.message_targets_session(
+                general_session,
+                {"frontmatter": {"repo_targets": ["llm-collab"]}},
+            ),
+        )
+        self.assertEqual(
+            (False, session_autobridge_lib.ROUTE_AMBIGUOUS_REASON),
+            session_autobridge_lib.message_targets_session(
+                general_session,
+                {"frontmatter": {"repo_targets": ["llm-collab", "amiga"]}},
+            ),
+        )
+
+    def test_register_persists_explicit_repo_subscription(self):
+        root = self.make_workspace()
+        self.add_agent(
+            root,
+            {
+                "id": "gemini",
+                "display_name": "Gemini",
+                "activation": {"type": "cli_session", "watcher_enabled": True},
+            },
+        )
+        session = self.run_cli(
+            root,
+            "register",
+            "--session",
+            "SESSION-REPO-SCOPED",
+            "--agent",
+            "gemini",
+            "--repo-target",
+            "llm-collab",
+            "--repo-target",
+            "amiga",
+        )
+        self.assertEqual(["llm-collab", "amiga"], session["repo_targets"])
+
+    def test_watcher_passes_explicit_repo_subscription_to_dispatch(self):
+        with patch.object(
+            watch_inbox_lib, "autobridge_session_ids", return_value=["SESSION-REPO"]
+        ), patch.object(
+            watch_inbox_lib,
+            "dispatch_session",
+            return_value={"actions": []},
+        ) as dispatch:
+            self.assertEqual(
+                [],
+                watch_inbox_lib.dispatch_autobridge(
+                    "gemini", json_output=True, repo_targets=["llm-collab"]
+                ),
+            )
+        dispatch.assert_called_once_with(
+            "SESSION-REPO", repo_targets=["llm-collab"]
+        )
+
+    def test_watcher_repo_scope_recheck_blocks_wrong_packet_before_read(self):
+        with tempfile.TemporaryDirectory(prefix="lca-watch-repo-") as temp_dir:
+            root = Path(temp_dir)
+            packet_path = root / "Chats" / "wrong.md"
+            write(
+                packet_path,
+                "\n".join(
+                    [
+                        "---",
+                        "repo_targets: [amiga]",
+                        "---",
+                        "",
+                        "wrong repository",
+                    ]
+                ),
+            )
+            action = {
+                "effective_action": "runtime_trigger",
+                "message_path": "Chats/wrong.md",
+                "runtime_result": {"returncode": 0},
+            }
+            with patch.object(
+                watch_inbox_lib, "ROOT", root
+            ), patch.object(
+                watch_inbox_lib, "autobridge_session_ids", return_value=["SESSION-REPO"]
+            ), patch.object(
+                watch_inbox_lib,
+                "dispatch_session",
+                return_value={"actions": [action]},
+            ), patch.object(watch_inbox_lib, "mark_messages_read") as mark_read:
+                self.assertEqual(
+                    [],
+                    watch_inbox_lib.dispatch_autobridge(
+                        "gemini", json_output=True, repo_targets=["llm-collab"]
+                    ),
+                )
+            mark_read.assert_not_called()
 
     def test_watch_inbox_marks_only_binding_matched_runtime_paths(self):
         root = self.make_workspace()

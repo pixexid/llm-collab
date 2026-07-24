@@ -49,6 +49,7 @@ from _session_autobridge import (
     HEURISTIC_RUNTIME_DISCOVERY_REFUSED_REASON,
     discover_runtime_session,
     load_session,
+    repo_scope_matches,
     save_session,
 )
 from session_autobridge import register_session
@@ -68,6 +69,12 @@ def parse_args():
         help="Explicitly target every project (only valid with --mark-all-read)",
     )
     p.add_argument("--chat", default=None, help="Filter by chat substring")
+    p.add_argument(
+        "--repo-target",
+        action="append",
+        default=None,
+        help="Explicit repository subscription; repeat for multiple repositories",
+    )
     p.add_argument(
         "--packet",
         default=None,
@@ -213,6 +220,49 @@ def filter_messages(
         else:
             messages = [m for m in messages if Path(m["path"]).name == packet]
     return messages
+
+
+def filter_repo_scope(
+    messages: list[dict], subscriber_targets: list[str] | None
+) -> tuple[list[dict], list[dict]]:
+    if subscriber_targets is None:
+        return messages, []
+    matched: list[dict] = []
+    refused: list[dict] = []
+    for message in messages:
+        allowed, reason = repo_scope_matches(
+            subscriber_targets, message.get("frontmatter", {}).get("repo_targets")
+        )
+        if allowed:
+            matched.append(message)
+        else:
+            refused.append({"path": message["path"], "reason": reason})
+    return matched, refused
+
+
+def recheck_repo_scope_before_read(
+    agent_id: str,
+    paths: list[str],
+    subscriber_targets: list[str] | None,
+) -> tuple[list[str], list[dict]]:
+    if subscriber_targets is None:
+        return paths, []
+    current = {
+        message["path"]: message
+        for message in unread_messages_with_missing_files(agent_id)
+    }
+    allowed: list[str] = []
+    refused: list[dict] = []
+    for path in paths:
+        message = current.get(path, {"path": path, "frontmatter": {}})
+        matched, reason = repo_scope_matches(
+            subscriber_targets, message.get("frontmatter", {}).get("repo_targets")
+        )
+        if matched:
+            allowed.append(path)
+        else:
+            refused.append({"path": path, "reason": reason})
+    return allowed, refused
 
 
 def packet_selection_error(args, messages: list[dict]) -> None:
@@ -388,6 +438,7 @@ def mark_all_read(args) -> dict:
         messages = unread_messages_with_missing_files(args.me)
     else:
         messages = filter_messages(get_unread_messages(args.me), args.project, None)
+    messages, repo_scope_refused = filter_repo_scope(messages, args.repo_target)
 
     marked_by_project: dict[str, int] = {}
     held_activation = 0
@@ -408,6 +459,10 @@ def mark_all_read(args) -> dict:
         marked_by_project[bucket] = marked_by_project.get(bucket, 0) + 1
 
     paths = [message["path"] for message in markable]
+    paths, late_refused = recheck_repo_scope_before_read(
+        args.me, paths, args.repo_target
+    )
+    repo_scope_refused.extend(late_refused)
     mark_messages_read(args.me, paths)
     result = {
         "marked_read": len(paths),
@@ -416,6 +471,8 @@ def mark_all_read(args) -> dict:
     if held_activation:
         result["held_activation"] = held_activation
         result["held_activation_paths"] = held_paths
+    if repo_scope_refused:
+        result["repo_scope_refused"] = repo_scope_refused
     return result
 
 
@@ -481,15 +538,23 @@ def main():
     messages = filter_messages(messages, args.project, args.chat, args.packet)
     if args.packet and len(messages) != 1:
         packet_selection_error(args, messages)
+    messages, repo_scope_refused = filter_repo_scope(messages, args.repo_target)
     if not args.packet:
         messages = messages[: args.limit]
 
     if not messages:
         if args.json_output:
-            if published_runtime is None:
+            if not repo_scope_refused and published_runtime is None:
                 print("[]")
+                return
+            payload = {"messages": []}
+            if repo_scope_refused:
+                payload["repo_scope_refused"] = repo_scope_refused
+            if published_runtime is None:
+                print(json.dumps(payload, indent=2))
             else:
-                print(json.dumps({"messages": [], "published_runtime": published_runtime}, indent=2))
+                payload["published_runtime"] = published_runtime
+                print(json.dumps(payload, indent=2))
         else:
             if published_runtime is not None:
                 if published_runtime.get("published") is False:
@@ -506,6 +571,11 @@ def main():
                         f"for {published_runtime['session']['session_id']}\n"
                     )
             print(f"[inbox] No {'messages' if args.show_all else 'unread messages'} for {args.me}.")
+            for refused in repo_scope_refused:
+                print(
+                    f"[inbox] Repo-scope refused {refused['path']}: {refused['reason']}",
+                    file=sys.stderr,
+                )
         return
 
     consume = not args.peek and not args.show_all
@@ -533,9 +603,16 @@ def main():
         sys.exit(75)
 
     shown_paths = [m["path"] for m in messages if not m.get("read")]
+    if consume:
+        shown_paths, late_refused = recheck_repo_scope_before_read(
+            args.me, shown_paths, args.repo_target
+        )
+        repo_scope_refused.extend(late_refused)
 
     if args.json_output:
         payload: dict[str, object] = {"messages": messages}
+        if repo_scope_refused:
+            payload["repo_scope_refused"] = repo_scope_refused
         if published_runtime is not None:
             payload["published_runtime"] = published_runtime
         print(json.dumps(payload, indent=2))
@@ -557,6 +634,11 @@ def main():
         print(f"\n[inbox] {len(messages)} {'message(s)' if args.show_all else 'unread message(s)'} for {args.me}\n")
         for i, msg in enumerate(messages):
             print(format_message(msg, i))
+        for refused in repo_scope_refused:
+            print(
+                f"[inbox] Repo-scope refused {refused['path']}: {refused['reason']}",
+                file=sys.stderr,
+            )
 
     if consume:
         mark_messages_read(args.me, shown_paths)
