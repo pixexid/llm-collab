@@ -559,7 +559,7 @@ def binding_scoped_message_matches_session(session: dict, message: dict) -> tupl
     session_binding_id = _declared_target(
         session.get("binding_id", session.get("conversation_binding_id"))
     )
-    if target_binding_id and session_binding_id and target_binding_id != session_binding_id:
+    if target_binding_id is not None and target_binding_id != session_binding_id:
         return False, ROUTE_AMBIGUOUS_REASON
 
     target_generation = _declared_target(
@@ -568,7 +568,7 @@ def binding_scoped_message_matches_session(session: dict, message: dict) -> tupl
     session_generation = _declared_target(
         session.get("binding_generation", session.get("generation"))
     )
-    if target_generation and session_generation and target_generation != session_generation:
+    if target_generation is not None and target_generation != session_generation:
         return False, STALE_GENERATION_REASON
 
     return True, "explicit_target_match"
@@ -2011,11 +2011,6 @@ def dispatch_session(session_id: str) -> dict[str, Any]:
                 },
             )
             continue
-        activation_allowed, activation_event = claim_message_activation(session, message)
-        if activation_event is not None:
-            append_event(session_id, activation_event)
-        if not activation_allowed:
-            continue
         skip, skip_reason = should_skip_for_loop_protection(session, message)
         if skip:
             append_event(
@@ -2043,6 +2038,11 @@ def dispatch_session(session_id: str) -> dict[str, Any]:
                         "reason": assertion_event["reason"] if assertion_event else "activation_assert_refused",
                     },
                 )
+            continue
+        activation_allowed, activation_event = claim_message_activation(session, message)
+        if activation_event is not None:
+            append_event(session_id, activation_event)
+        if not activation_allowed:
             continue
         matched.append(message)
 
