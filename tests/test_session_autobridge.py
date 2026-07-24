@@ -1971,6 +1971,72 @@ class SessionAutobridgeTest(unittest.TestCase):
                 reason,
             )
 
+    def test_resolve_exact_dispatch_target_refuses_session_id_drift_with_reused_runtime(self):
+        wrong_session = {
+            "session_id": "SESSION-B",
+            "agent_id": "claude",
+            "project_id": "amiga",
+            "chat_id": "CHAT-SESSION-DRIFT",
+            "status": "parked",
+            "runtime": {"session_id": "runtime-reused"},
+        }
+
+        with patch.object(
+            session_autobridge_lib,
+            "load_binding",
+            return_value={
+                "project_id": "amiga",
+                "chat_id": "CHAT-SESSION-DRIFT",
+                "agent_id": "claude",
+                "session_id": "SESSION-A",
+                "runtime_session_id": "runtime-reused",
+            },
+        ), patch.object(
+            session_autobridge_lib,
+            "iter_sessions",
+            return_value=[wrong_session],
+        ):
+            session, reason = session_autobridge_lib.resolve_exact_dispatch_target(
+                "amiga",
+                "CHAT-SESSION-DRIFT",
+                "claude",
+            )
+            self.assertIsNone(session)
+            self.assertEqual(session_autobridge_lib.EXACT_BINDING_MISMATCH_REASON, reason)
+
+    def test_resolve_exact_dispatch_target_refuses_scope_drift_on_bound_session(self):
+        foreign_scope_session = {
+            "session_id": "SESSION-A",
+            "agent_id": "claude",
+            "project_id": "nuvyr",
+            "chat_id": "CHAT-SESSION-DRIFT",
+            "status": "parked",
+            "runtime": {"session_id": "runtime-bound"},
+        }
+
+        with patch.object(
+            session_autobridge_lib,
+            "load_binding",
+            return_value={
+                "project_id": "amiga",
+                "chat_id": "CHAT-SESSION-DRIFT",
+                "agent_id": "claude",
+                "session_id": "SESSION-A",
+                "runtime_session_id": "runtime-bound",
+            },
+        ), patch.object(
+            session_autobridge_lib,
+            "iter_sessions",
+            return_value=[foreign_scope_session],
+        ):
+            session, reason = session_autobridge_lib.resolve_exact_dispatch_target(
+                "amiga",
+                "CHAT-SESSION-DRIFT",
+                "claude",
+            )
+            self.assertIsNone(session)
+            self.assertEqual(session_autobridge_lib.EXACT_BINDING_MISMATCH_REASON, reason)
+
     def test_deliver_uses_canonical_binding_for_target_session_id(self):
         root = self.make_workspace()
         self.add_agent(
@@ -2051,6 +2117,92 @@ class SessionAutobridgeTest(unittest.TestCase):
         self.assertTrue(delivered_candidates)
         delivered_text = delivered_candidates[-1].read_text()
         self.assertIn("target_session_id: claude-bound-session-42", delivered_text)
+
+    def test_deliver_refuses_explicit_target_that_disagrees_with_exact_binding(self):
+        root = self.make_workspace()
+        self.add_agent(
+            root,
+            {
+                "id": "codex",
+                "display_name": "Codex",
+                "activation": {"type": "cli_session", "watcher_enabled": True},
+            },
+        )
+        self.add_agent(
+            root,
+            {
+                "id": "claude",
+                "display_name": "Claude",
+                "activation": {"type": "cli_session", "watcher_enabled": True},
+            },
+        )
+        chat_dir = self.create_chat(
+            root,
+            chat_dir_name="2026-04-23_binding-explicit-mismatch__CHAT-BIND2",
+            chat_id="CHAT-BIND2",
+            project_id="amiga",
+        )
+
+        self.run_cli(
+            root,
+            "register",
+            "--session",
+            "SESSION-CLAUDE-BOUND",
+            "--agent",
+            "claude",
+            "--project",
+            "amiga",
+            "--chat",
+            "CHAT-BIND2",
+            "--mode",
+            "notify",
+            "--runtime-family",
+            "claude_app",
+            "--runtime-session-id",
+            "claude-bound-session-42",
+            "--runtime-session-source",
+            "first_read",
+        )
+
+        deliver_result = subprocess.run(
+            [
+                sys.executable,
+                str(DELIVER_SCRIPT),
+                "--chat",
+                "CHAT-BIND2",
+                "--from",
+                "codex",
+                "--to",
+                "claude",
+                "--project",
+                "amiga",
+                "--title",
+                "Binding explicit mismatch",
+                "--sender-session-id",
+                "codex-session-5",
+                "--target-session-id",
+                "wrong-runtime",
+                "--body-file",
+                "-",
+            ],
+            cwd=root,
+            text=True,
+            input="Do not silently override the explicit target.",
+            capture_output=True,
+            check=True,
+        )
+        result_payload = json.loads(deliver_result.stdout.split("\n\n", 1)[0])
+        self.assertFalse(result_payload["autobridge_ready"])
+        self.assertEqual(
+            session_autobridge_lib.EXACT_BINDING_MISMATCH_REASON,
+            result_payload["autobridge_refusal_reason"],
+        )
+        self.assertIsNone(result_payload["resolved_target_session_id"])
+
+        delivered_candidates = sorted(chat_dir.glob("*_to-claude_*.md"))
+        self.assertTrue(delivered_candidates)
+        frontmatter, _ = parse_frontmatter(delivered_candidates[-1].read_text())
+        self.assertIsNone(frontmatter["target_session_id"])
 
     def test_deliver_suppresses_codex_self_activation_for_amiga_and_non_amiga(self):
         cases = (("amiga", "CHAT-SELF-AMIGA"), ("nuvyr", "CHAT-SELF-NUVYR"))
