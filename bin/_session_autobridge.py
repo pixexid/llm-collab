@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import importlib
 import os
 import re
 import signal
@@ -8,6 +9,7 @@ import base64
 import hashlib
 import socket
 import subprocess
+import sys
 import time
 import urllib.parse
 import urllib.request
@@ -21,9 +23,11 @@ STALE_GENERATION_REASON = "stale_generation"
 from _helpers import (
     ROOT,
     build_handoff_prompt,
+    config_get,
     get_agent,
     get_unread_messages,
     now_utc,
+    project_state_root,
     utc_iso,
     write_file,
     write_chat_note,
@@ -503,6 +507,12 @@ def session_requires_exact_receive_target(session: dict) -> bool:
     )
 
 
+def _repo_package_root() -> None:
+    repo_root = str(Path(__file__).resolve().parent.parent)
+    if repo_root not in sys.path:
+        sys.path.insert(0, repo_root)
+
+
 def _frontmatter_strings(value: Any) -> list[str]:
     if isinstance(value, list):
         return [str(item) for item in value if str(item)]
@@ -610,12 +620,57 @@ def processed_messages(session: dict) -> set[str]:
     return set(session.get("processed_messages", []))
 
 
+def message_needs_canonical_materialization(session: dict, message: dict) -> bool:
+    if resolve_effective_action(session, message)[0] != "runtime_trigger":
+        return False
+    frontmatter = message.get("frontmatter", {})
+    return bool(
+        session.get("binding_id")
+        or session.get("conversation_binding_id")
+        or frontmatter.get("target_binding_id")
+        or frontmatter.get("binding_id")
+    )
+
+
+def processed_message_blocks_dispatch(session: dict, message: dict, seen: set[str]) -> bool:
+    if message["path"] not in seen:
+        return False
+    return not message_needs_canonical_materialization(session, message)
+
+
 def mark_message_processed(session: dict, message_path: str) -> None:
     existing = session.get("processed_messages", [])
     if message_path not in existing:
         existing.append(message_path)
     session["processed_messages"] = existing
     save_session(session)
+
+
+def materialize_selected_runtime_packet(session: dict, message: dict) -> dict[str, Any]:
+    _repo_package_root()
+    materialization_module = importlib.import_module(
+        "llm_collab.canonical.legacy_packet_materialization"
+    )
+    ledger_module = importlib.import_module(".".join(("llm_collab", "ledger")))
+
+    workspace_id = config_get("workspace_id")
+    if not workspace_id:
+        return {
+            "resolved": False,
+            "reason": ROUTE_AMBIGUOUS_REASON,
+            "detail": "workspace_id is missing",
+        }
+    try:
+        paths = ledger_module.LedgerPaths.derive(project_state_root(), str(workspace_id))
+        with ledger_module.LedgerStore.open_writer(paths) as store:
+            return materialization_module.materialize_selected_legacy_packet(
+                store,
+                workspace_root=ROOT,
+                session=session,
+                message=message,
+            )
+    except materialization_module.LegacyPacketMaterializationRefused as exc:
+        return {"resolved": False, "reason": exc.reason, "detail": exc.detail}
 
 
 def claim_message_activation(session: dict, message: dict) -> tuple[bool, dict[str, Any] | None]:
@@ -1824,7 +1879,7 @@ def dispatch_session(session_id: str) -> dict[str, Any]:
     matched = []
     seen = processed_messages(session)
     for message in matching_unread_messages(session):
-        if message["path"] in seen:
+        if processed_message_blocks_dispatch(session, message, seen):
             continue
         target_match, target_reason = message_targets_session(session, message)
         if not target_match:
@@ -1889,6 +1944,33 @@ def dispatch_session(session_id: str) -> dict[str, Any]:
 
         if action == "runtime_trigger":
             runtime = runtime_metadata(session)
+            if message_needs_canonical_materialization(session, message):
+                asserted, assertion_event, materialization_result = activation_fenced_mutation(
+                    session,
+                    message,
+                    boundary="canonical_receive_materialization",
+                    mutation=lambda: materialize_selected_runtime_packet(session, message),
+                )
+                if assertion_event is not None:
+                    event.setdefault("activation_assertions", []).append(assertion_event)
+                if not asserted:
+                    event["reason"] = (
+                        assertion_event["reason"]
+                        if assertion_event
+                        else "activation_assert_refused"
+                    )
+                    append_event(session_id, event)
+                    actions.append(event)
+                    continue
+                event["canonical_materialization_result"] = materialization_result
+                if not materialization_result.get("resolved"):
+                    event["reason"] = materialization_result.get(
+                        "reason",
+                        ROUTE_AMBIGUOUS_REASON,
+                    )
+                    append_event(session_id, event)
+                    actions.append(event)
+                    continue
             asserted, assertion_event, _ = activation_fenced_mutation(
                 session,
                 message,

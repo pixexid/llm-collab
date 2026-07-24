@@ -2,8 +2,7 @@
 
 ## Status
 
-Draft for Claude stamp. Do not implement from this document until it is stamped
-or restamped.
+Stamped by Claude at task head `006bc2e`; implementation active.
 
 This is a receive-time compatibility bridge from one already-selected legacy
 `Chats/` packet into the existing canonical message, delivery, and bound-attempt
@@ -104,8 +103,20 @@ The helper feeds `create_or_return_equivalent(...)` as follows:
 
 `create_or_return_equivalent(...)` then derives `message_id` from the existing
 canonical fields, including the packet bytes' body hash and the packet locator
-dedupe key. Re-materializing the same packet feeds the same arguments and must
-return `(same_message_id, False)` without new message/body/child rows.
+dedupe key. The message identity is the existing `_derive_message_id(...)`
+sixteen-field identity, so the materializer must feed deterministic values for
+all sixteen framed inputs: workspace id, scope kind, scope identity, sender
+agent id, dedupe key, exact packet body hash, recipients, reply-to message id,
+TTL seconds, ack policy, artifacts, title, priority, tags, chat link, and task
+link. Re-materializing the same packet feeds the same arguments and must return
+`(same_message_id, False)` without new message/body/child rows.
+
+If the legacy packet file is edited before it is consumed, the exact packet
+bytes change and therefore both `packet_sha256` and the message body hash
+change. That produces a new canonical message identity. This is defensible
+because the durable packet changed. It must not double-consume a packet that has
+already moved from unread to read: selection still comes only from the legacy
+unread index, and materialization itself does not mutate read state.
 
 The helper feeds `create_deliveries(...)` and the store's `_derive_delivery_id`
 through the existing public wrapper:

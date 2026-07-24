@@ -17,6 +17,9 @@ from jsonschema import Draft202012Validator
 import llm_collab.canonical as canonical
 import llm_collab.canonical.control as control_module
 import llm_collab.canonical.delivery as delivery_module
+from llm_collab.canonical.legacy_packet_materialization import (
+    materialize_selected_legacy_packet,
+)
 import llm_collab.canonical.messages as messages_module
 import llm_collab.compatibility.projection as projection_module
 import llm_collab.ledger.store as store_module
@@ -61,6 +64,7 @@ NOW = "2026-07-22T00:00:00+00:00"
 def resolver_consumer_offenders(root: Path) -> list[str]:
     allowed = {
         Path("llm_collab/canonical/delivery.py"),
+        Path("llm_collab/canonical/legacy_packet_materialization.py"),
         Path("llm_collab/session_lifecycle.py"),
     }
     offenders = []
@@ -4507,6 +4511,133 @@ class CanonicalMessageTest(_CanonicalMessageTestBase):
                 changed = dict(base)
                 changed[field] = value
                 self.assertNotEqual(messages_module._derive_message_id(**changed), original)
+
+    def test_legacy_packet_materialization_is_deterministic_and_packet_edit_creates_new_message(self) -> None:
+        packet_relpath = (
+            "Chats/2026-07-22_materialization__CHAT-SAMEID/"
+            "2026-07-22T00-00-00_to-claude_materialize.md"
+        )
+        session = {
+            "session_id": "SESSION-MATERIALIZE",
+            "agent_id": "claude",
+            "project_id": PROJECT,
+            "chat_id": "CHAT-SAMEID",
+            "repo_targets": ["llm-collab"],
+            "binding_id": "binding_one",
+            "binding_generation": 1,
+            "endpoint_id": "endpoint_claude_desktop",
+            "runtime": {"session_id": "runtime-materialize"},
+        }
+        message = {"path": packet_relpath}
+
+        def packet(priority: str = "normal") -> str:
+            return "\n".join(
+                [
+                    "---",
+                    "chat_id: CHAT-SAMEID",
+                    "from: codex",
+                    "to: claude",
+                    "title: Lazy packet",
+                    f"priority: {priority}",
+                    f"project_id: {PROJECT}",
+                    f"sent_utc: {NOW}",
+                    "target_session_id: runtime-materialize",
+                    "target_binding_id: binding_one",
+                    "target_binding_generation: 1",
+                    'repo_targets: ["llm-collab"]',
+                    'path_targets: ["docs/workflows/lazy-packet-materialization-task.md"]',
+                    'tags: ["review"]',
+                    "related_task: TASK-OPTIONA",
+                    "---",
+                    "",
+                    "Durable packet body.",
+                ]
+            )
+
+        def materialize_once(root: Path, ledger_root: str) -> dict[str, object]:
+            packet_path = root / packet_relpath
+            packet_path.parent.mkdir(parents=True)
+            packet_path.write_text(packet(), encoding="utf-8")
+            paths = LedgerPaths.derive(ledger_root, WORKSPACE)
+            with LedgerStore.open_writer(paths) as store:
+                record_registry(store)
+                seed_delivery_binding(
+                    store,
+                    participant_id="participant_claude",
+                    agent_id="agent_claude",
+                    endpoint_id="endpoint_claude_desktop",
+                    native_session_id="runtime-materialize",
+                )
+                result = materialize_selected_legacy_packet(
+                    store,
+                    workspace_root=root,
+                    session=session,
+                    message=message,
+                )
+                self.assertTrue(result["resolved"])
+                counts = store._connection.execute(
+                    """
+                    SELECT
+                      (SELECT count(*) FROM canonical_messages),
+                      (SELECT count(*) FROM canonical_deliveries),
+                      (SELECT count(*) FROM canonical_delivery_attempts),
+                      (SELECT count(*) FROM canonical_delivery_attempt_binding_freezes)
+                    """
+                ).fetchone()
+                self.assertEqual((1, 1, 1, 1), counts)
+                return result
+
+        with TemporaryDirectory(dir="/tmp") as tmp_a, TemporaryDirectory(dir="/tmp") as tmp_b:
+            first = materialize_once(Path(tmp_a) / "workspace", str(Path(tmp_a) / "ledger"))
+            second = materialize_once(Path(tmp_b) / "workspace", str(Path(tmp_b) / "ledger"))
+            self.assertEqual(first["message_id"], second["message_id"])
+            self.assertEqual(first["delivery_id"], second["delivery_id"])
+            self.assertEqual(first["attempt_id"], second["attempt_id"])
+
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            root = Path(tmp) / "workspace"
+            packet_path = root / packet_relpath
+            packet_path.parent.mkdir(parents=True)
+            packet_path.write_text(packet(), encoding="utf-8")
+            paths = LedgerPaths.derive(str(Path(tmp) / "ledger"), WORKSPACE)
+            with LedgerStore.open_writer(paths) as store:
+                record_registry(store)
+                seed_delivery_binding(
+                    store,
+                    participant_id="participant_claude",
+                    agent_id="agent_claude",
+                    endpoint_id="endpoint_claude_desktop",
+                    native_session_id="runtime-materialize",
+                )
+                original = materialize_selected_legacy_packet(
+                    store,
+                    workspace_root=root,
+                    session=session,
+                    message=message,
+                )
+                again = materialize_selected_legacy_packet(
+                    store,
+                    workspace_root=root,
+                    session=session,
+                    message=message,
+                )
+                self.assertEqual(original["message_id"], again["message_id"])
+                self.assertFalse(again["message_created"])
+                packet_path.write_text(packet(priority="high"), encoding="utf-8")
+                edited = materialize_selected_legacy_packet(
+                    store,
+                    workspace_root=root,
+                    session=session,
+                    message=message,
+                )
+                self.assertNotEqual(original["message_id"], edited["message_id"])
+                self.assertEqual(
+                    2,
+                    store._connection.execute(
+                        "SELECT count(*) FROM canonical_messages"
+                    ).fetchone()[0],
+                )
+
     def test_mutation_13_null_marker_collision_is_killed(self) -> None:
         base = {
             "workspace_id": WORKSPACE,
