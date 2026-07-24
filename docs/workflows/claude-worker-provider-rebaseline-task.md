@@ -141,6 +141,8 @@ inspect before changing Claude receive behavior.
 | `bin/inbox.py:544` | `if consume: mark_messages_read(args.me, shown_paths)` | Manual consume path that marks displayed paths read. It must not be confused with runtime receive acceptance. |
 | `bin/deliver.py:398` | `resolve_exact_dispatch_target(...)` | Sender-side check for exact autobridge target before delivery readiness. |
 | `bin/deliver.py:505` | `add_to_inbox(args.recipient, to_path)` | Sender-side enqueue into the shared recipient inbox. It persists intent only. |
+| `bin/project_design_queue.py:722` | `activation_packet_state(context)` | Read-only status reporting over the unpartitioned `claude` inbox. It reads `unread`/`read` state but does not consume or mark paths. |
+| `bin/project_design_queue.py:734` | `unread_messages_from(agent, sender=..., project_id=...)` | Read-only design-queue status helper over an agent inbox. It filters unread paths for display only and does not move read state. |
 
 ### Invariant for the first code child
 
@@ -160,6 +162,92 @@ exact path:
 If any condition is false, the packet remains unread in the shared agent inbox.
 Session-local processed state may suppress legacy duplicate handling, but it
 must not be treated as canonical acceptance or shared read-state authority.
+
+## Child 2 Claude attached-session registration design
+
+Child 2 is design-only. It freezes the registration contract for a Claude
+attached session, but it does not implement a provider, mutate a Claude session,
+open a composer, or create a live channel.
+
+### Registration object model
+
+Claude registration composes existing lifecycle authority. It must not add a
+stored worker table or a second routing key:
+
+```text
+worker projection
+  = (workspace_id, scope_kind, scope_identity, conversation_id, participant_id)
+    + active binding_id/generation
+    + provider_id/endpoint_id/native_session_id/runtime_instance_id
+```
+
+The Claude provider uses `llm_collab.session_lifecycle` only as the authority
+surface:
+
+- `LifecycleSubject` names the compound participant tuple plus
+  `agent_id`, `endpoint_id`, `native_session_id`, and `runtime_instance_id`;
+- `SessionLifecycleCore.reserve(...)` creates a bounded one-time challenge;
+- `SessionLifecycleCore.consume(...)` validates the challenge, re-attests the
+  native session, and lets storage derive `binding_id` and generation;
+- `heartbeat(...)`, `mark_restart_unverified(...)`, `retire(...)`,
+  `rebind(...)`, and `inspect(...)` are later lifecycle operations, not initial
+  receive authority.
+
+The provider registry remains distinct from runtime-adapter manifests. A
+lifecycle provider may prove that one Claude native session is bound to one
+participant. It does not authorize post-initialize runtime adapter methods and
+does not make AX/UI state authoritative.
+
+### Proposed registration flow
+
+1. The daemon creates a registration challenge for the exact participant tuple
+   and intended Claude endpoint. The challenge is TTL-bounded and one-time.
+2. The Claude-attached side obtains the challenge through an explicit provider
+   hook or session-local channel. The hook/channel must provide exact native
+   session evidence and must not rely on newest, frontmost, sidebar, window
+   title, mtime, or generic `claude` inbox state.
+3. The daemon validates the attestation against trusted project/root input on
+   every reserve/consume/restart path. It validates before challenge consumption
+   or binding mutation.
+4. Storage consumes the challenge and creates the binding atomically. A forced
+   mid-operation failure leaves the challenge pending and creates no binding.
+5. Storage derives `binding_id` and generation. Caller-provided binding or
+   generation values are ignored or refused; they never become authority.
+6. The resulting binding starts as the only route authority for later watcher
+   receive and outbound identity children. Child 2 itself does not dispatch or
+   mark any packet read.
+
+### Required proof shape for the first registration code child
+
+| Guard | Expected proof |
+| --- | --- |
+| Exact participant tuple | Same `conversation_id` in two projects/scopes creates distinct bindings; `conversation_id` alone cannot resolve. |
+| Native-session owner tuple | The same Claude native session cannot be active for two mutation-capable participants; two distinct native sessions can bind independently. |
+| Challenge tuple binding | Wrong workspace, scope, conversation, participant, endpoint, native session, runtime instance, provider, challenge id, or token fails closed and preserves pending state. |
+| TTL and replay | Expired, replayed, or duplicate challenge consumption is refused without creating or retargeting a binding. |
+| Atomic consume+bind | Forced failure between consume and bind leaves no consumed challenge and no binding. |
+| Trusted-root revalidation | Project/root/cwd evidence is checked against trusted registry input on reserve, consume, heartbeat, and restart re-attestation; no cached repo/cwd copy becomes authority. |
+| Derived identity | Caller-provided `binding_id` or generation cannot change storage-derived values. |
+| No heuristic registration | `discover_claude_runtime_session(...)`, mtime/newest discovery, frontmost UI, AX, and generic inbox state cannot register or bind a mutation-capable worker. |
+| Inertness | Child 2 code does not call watcher dispatch, runtime trigger, `mark_messages_read`, `add_to_inbox`, AX, Computer Use, subprocess, socket, or wall-clock-derived token sources. |
+
+Each proof must isolate one guard. A broad happy-path fixture is insufficient.
+
+### Child 2 allowlist proposal
+
+The expected implementation allowlist is:
+
+- `llm_collab/session_lifecycle.py`, only if a Claude-specific provider can be
+  modeled through the existing lifecycle core without adding a new authority;
+- `llm_collab/ledger/store.py`, only if existing v11 challenge/binding methods
+  need a narrowly-scoped helper for the Claude provider;
+- focused lifecycle/store tests;
+- this design doc and `docs/protocols/session-lifecycle-v1.md` for contract
+  wording.
+
+If registration needs a new schema version, a new provider transport module, a
+daemon/CLI surface, or any live Claude hook/channel, stop and restamp before
+implementation.
 
 ## First code child acceptance table
 
