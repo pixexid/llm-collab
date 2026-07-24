@@ -40,6 +40,7 @@ def _integrity_snapshot(
     checked_at_utc: str | None = None,
     age_seconds: int | None = None,
     error: str | None = None,
+    error_truncated: bool = False,
 ) -> dict[str, object]:
     return {
         "state": state,
@@ -47,14 +48,19 @@ def _integrity_snapshot(
         "checked_at_utc": checked_at_utc,
         "age_seconds": age_seconds,
         "error": error,
+        "error_truncated": error_truncated,
     }
 
 
-def _bounded_integrity_error(error: object) -> str:
+def _bounded_integrity_error_parts(error: object) -> tuple[str, bool]:
     text = str(error).replace("\x00", "")
     if len(text) > INTEGRITY_ERROR_LIMIT:
-        return text[: INTEGRITY_ERROR_LIMIT - 3] + "..."
-    return text
+        return text[: INTEGRITY_ERROR_LIMIT - 3] + "...", True
+    return text, False
+
+
+def _bounded_integrity_error(error: object) -> str:
+    return _bounded_integrity_error_parts(error)[0]
 
 
 def _workspace_root_from_cwd() -> Path:
@@ -272,7 +278,10 @@ class DaemonServer:
                 if writer is None:
                     raise RuntimeError("integrity probe has no writer")
                 writer_identity = writer.database_identity
-                with LedgerStore.open_reader(self.paths) as reader:
+                with LedgerStore.open_reader(
+                    self.paths,
+                    validate_integrity=False,
+                ) as reader:
                     if reader.database_identity != writer_identity:
                         raise RuntimeError(
                             "integrity probe opened a different ledger file than the writer"
@@ -281,25 +290,26 @@ class DaemonServer:
                 if result == "ok":
                     self._record_integrity_result("ok")
                 else:
-                    self._record_integrity_result(
-                        "failed", error=_bounded_integrity_error(result)
-                    )
+                    self._record_integrity_result("failed", error=result)
             except Exception as exc:
-                self._record_integrity_result(
-                    "failed", error=_bounded_integrity_error(exc)
-                )
+                self._record_integrity_result("failed", error=exc)
             if stop.wait(INTEGRITY_REFRESH_SECONDS):
                 return
 
-    def _record_integrity_result(self, state: str, *, error: str | None = None) -> None:
+    def _record_integrity_result(self, state: str, *, error: object | None = None) -> None:
         checked_at_utc = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        bounded_error = None
+        error_truncated = False
+        if error is not None:
+            bounded_error, error_truncated = _bounded_integrity_error_parts(error)
         with self._integrity_lock:
             self._integrity_snapshot = _integrity_snapshot(
                 state,
                 freshness="current",
                 checked_at_utc=checked_at_utc,
                 age_seconds=0,
-                error=None if error is None else _bounded_integrity_error(error),
+                error=bounded_error,
+                error_truncated=error_truncated,
             )
             self._integrity_completed_monotonic = self._clock()
 

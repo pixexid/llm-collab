@@ -3271,6 +3271,8 @@ class LedgerStore:
     def open_reader(
         cls,
         paths: LedgerPaths,
+        *,
+        validate_integrity: bool = True,
     ) -> "LedgerStore":
         require_safe_sqlite()
         paths.assert_contained()
@@ -3283,7 +3285,11 @@ class LedgerStore:
             timeout=BUSY_TIMEOUT_MS / 1_000,
         )
         try:
-            cls._validate_schema(connection, paths)
+            cls._validate_schema(
+                connection,
+                paths,
+                validate_integrity=validate_integrity,
+            )
             cls._configure(connection, writer=False)
             return cls(
                 paths,
@@ -3462,10 +3468,17 @@ class LedgerStore:
         }
 
     @classmethod
-    def _validate_schema(cls, connection: sqlite3.Connection, paths: LedgerPaths) -> None:
+    def _validate_schema(
+        cls,
+        connection: sqlite3.Connection,
+        paths: LedgerPaths,
+        *,
+        validate_integrity: bool = True,
+    ) -> None:
         """Require the exact latest schema; query-only readers never accept v1."""
         try:
-            cls._validate_database_health(connection)
+            if validate_integrity:
+                cls._validate_database_health(connection)
             claimed = connection.execute("PRAGMA user_version").fetchone()[0]
             if claimed != SCHEMA_VERSION:
                 raise MigrationError(

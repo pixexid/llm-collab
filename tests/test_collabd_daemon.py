@@ -411,6 +411,39 @@ class DaemonTest(unittest.TestCase):
         self.assertEqual(failed["state"], "failed")
         self.assertEqual(failed["freshness"], "current")
         self.assertEqual(len(failed["error"]), 256)
+        self.assertTrue(failed["error_truncated"])
+
+    def test_integrity_probe_preserves_diagnostic_from_one_reader_scan(self) -> None:
+        reader = MagicMock()
+        reader.__enter__.return_value = reader
+        reader.__exit__.return_value = False
+        reader.database_identity = (1, 1)
+        reader.integrity_check.return_value = "row 1 missing from index"
+        writer = Mock()
+        writer.database_identity = (1, 1)
+        server = DaemonServer(self.paths)
+        server._store = writer
+        recorded = threading.Event()
+        original_record = server._record_integrity_result
+
+        def record(*args, **kwargs):
+            original_record(*args, **kwargs)
+            recorded.set()
+
+        with patch.object(server, "_record_integrity_result", side_effect=record):
+            with patch.object(LedgerStore, "open_reader", return_value=reader) as open_reader:
+                server._start_integrity_probe()
+                try:
+                    self.assertTrue(recorded.wait(1))
+                finally:
+                    server._stop_integrity_probe()
+
+        open_reader.assert_called_once_with(self.paths, validate_integrity=False)
+        reader.integrity_check.assert_called_once_with()
+        result = server._integrity_status()
+        self.assertEqual(result["state"], "failed")
+        self.assertEqual(result["error"], "row 1 missing from index")
+        self.assertFalse(result["error_truncated"])
 
     def test_shutdown_does_not_wait_for_blocked_integrity_probe(self) -> None:
         entered = threading.Event()
