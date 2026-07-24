@@ -106,8 +106,9 @@ def allocate_activation_packet_paths(
         return to_path, from_path
     raise OSError("exhausted unique activation packet name attempts")
 from _session_autobridge import (
-    find_dispatchable_target_session,
+    EXACT_BINDING_MISMATCH_REASON,
     load_binding,
+    resolve_exact_dispatch_target,
     resolve_thread_pair_session_id,
     update_thread_pair,
 )
@@ -379,6 +380,8 @@ def main():
         )
         sys.exit(1)
 
+    explicit_target_session_id = args.target_session_id
+    autobridge_refusal_reason = None
     if thread_coordination_required:
         # A Codex self-target is durable history only. Never retain a runtime
         # target that a later watcher could interpret as an app wake request.
@@ -390,20 +393,27 @@ def main():
                 or resolve_bound_runtime_session_id(args.project, chat_id, args.sender)
             )
 
-        if args.target_session_id is None:
-            args.target_session_id = (
-                resolve_thread_pair_session_id(args.project, chat_id, args.recipient, args.sender)
-                or resolve_bound_runtime_session_id(args.project, chat_id, args.recipient)
-            )
     autobridge_target = None
     if not thread_coordination_required:
-        autobridge_target = find_dispatchable_target_session(
-            agent_id=args.recipient,
-            project_id=args.project,
-            chat_id=chat_id,
-            target_session_id=args.target_session_id,
-            require_exact_scope=args.activation,
+        autobridge_target, autobridge_refusal_reason = resolve_exact_dispatch_target(
+            args.project,
+            chat_id,
+            args.recipient,
         )
+        resolved_binding_target = resolve_bound_runtime_session_id(
+            args.project,
+            chat_id,
+            args.recipient,
+        )
+        if autobridge_target is not None and resolved_binding_target is not None:
+            if explicit_target_session_id and str(explicit_target_session_id) != resolved_binding_target:
+                autobridge_target = None
+                autobridge_refusal_reason = EXACT_BINDING_MISMATCH_REASON
+                args.target_session_id = None
+            else:
+                args.target_session_id = resolved_binding_target
+        else:
+            args.target_session_id = None
     autobridge_ready = autobridge_target is not None
 
     body = read_body(args.body_file)
@@ -591,7 +601,9 @@ def main():
     )
     activation_unavailable_reason = None
     if activation_unavailable:
-        if recipient_type == "cli_session":
+        if autobridge_refusal_reason and recipient_type == "cli_session":
+            activation_unavailable_reason = autobridge_refusal_reason
+        elif recipient_type == "cli_session":
             activation_unavailable_reason = (
                 "cli_session has no dispatchable runtime session or activation.ax_app"
             )
@@ -619,6 +631,7 @@ def main():
         "activation_unavailable_reason": activation_unavailable_reason,
         "resolved_target_session_id": args.target_session_id,
         "autobridge_ready": autobridge_ready,
+        "autobridge_refusal_reason": autobridge_refusal_reason,
         "autobridge_session_id": autobridge_target.get("session_id") if autobridge_target else None,
     }
     print(json.dumps(result, indent=2))

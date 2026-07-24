@@ -28,6 +28,9 @@ Send-side dispatch can still choose a runtime session heuristically:
   `sessions-index.json` entry by `fileMtime`.
 - `discover_gemini_runtime_session(...)` chooses the newest Gemini
   `session-*.json` by filesystem mtime.
+- `discover_codex_runtime_session(...)` chooses the newest Codex app session
+  from `session_index.jsonl` (last object) or the newest history fallback, then
+  can feed `register_session(...)` through publish mutation paths.
 
 The task is to make those heuristic choices unreachable from mutation or
 dispatch paths whenever exact runtime routing is required.
@@ -88,7 +91,8 @@ delivery where autobridge readiness is being considered.
 Important ordering:
 
 1. Validate chat/project.
-2. Resolve sender/recipient session hints as today for packet frontmatter.
+2. Resolve sender session hints as today for packet frontmatter. Do not write a
+   recipient runtime target hint unless the exact dispatch target gate succeeds.
 3. Before setting `autobridge_ready`, call the exact dispatch target gate.
 4. If it returns a session, set `autobridge_ready=true` and use the binding's
    runtime session id as the target session id.
@@ -102,22 +106,27 @@ here means "no exact autobridge wake", not "do not write the packet".
 
 ### 3. Runtime discovery mutation gate
 
-Keep `discover_claude_runtime_session(...)` and
-`discover_gemini_runtime_session(...)` as read-only diagnostics. They are useful
-for humans to see what the legacy heuristic would have found.
+Keep runtime discovery as a read-only diagnostic. It is useful for humans to see
+what the legacy heuristic would have found, but it must not publish or bind that
+heuristic result.
 
 Make them unreachable from mutation paths:
 
-- `bin/session_autobridge.py publish-current` must refuse for `claude_app` and
-  `gemini_cli` if it would call heuristic discovery to create/update a session
-  binding.
-- `bin/inbox.py --publish-session` must make the same refusal for those
+- `bin/session_autobridge.py publish-current` must refuse for `codex_app`,
+  `claude_app`, and `gemini_cli` if it would call heuristic discovery to
+  create/update a session binding.
+- `bin/inbox.py --publish-session` must make the same refusal for all three
   families.
-- `bin/session_autobridge.py discover` may still call discovery because it only
-  reports data and does not publish a binding.
+- `bin/session_autobridge.py discover-runtime` may still call discovery because
+  it only reports data and does not publish a binding.
+- Exact binding through `bin/session_autobridge.py register
+  --runtime-session-id ...` remains allowed because it does not infer identity
+  from newest/mtime discovery.
 
-Codex app discovery is out of this slice unless a reviewer finds an equivalent
-heuristic mutation path. The packet named the Claude and Gemini mtime paths.
+This gate refuses only heuristic-fed publish mutation. It must leave open:
+
+- read-only `session_autobridge.py discover-runtime`;
+- exact bind via `session_autobridge.py register --runtime-session-id`.
 
 ## Refusal reason strings
 
@@ -129,7 +138,7 @@ Use a small fixed vocabulary. Do not add parallel free-form reason sets.
 | `exact_binding_not_dispatchable` | The bound session exists but is stopped, expired, superseded, or otherwise not dispatchable. |
 | `exact_binding_ambiguous` | More than one dispatchable session claims the same exact binding identity. |
 | `exact_binding_mismatch` | Binding payload fields disagree with the requested project/chat/agent or the matched session. |
-| `heuristic_runtime_discovery_refused` | A mutation path tried to publish a Claude/Gemini runtime binding from newest/mtime discovery. |
+| `heuristic_runtime_discovery_refused` | A mutation path tried to publish a Codex/Claude/Gemini runtime binding from newest/mtime discovery. |
 
 `deliver.py` should expose these as an autobridge refusal/blocker field in its
 JSON and human output. It should not silently downgrade the refusal to
@@ -140,8 +149,9 @@ JSON and human output. It should not silently downgrade the refusal to
 | Function | After this slice |
 |---|---|
 | `find_dispatchable_target_session(...)` | Retained for diagnostics and legacy read-only/tests, but unreachable from `deliver.py` autobridge readiness. If a future mutation caller needs it, that caller must explicitly justify why first-match is safe. |
-| `discover_claude_runtime_session(...)` | Retained for `session_autobridge.py discover`; unreachable from `publish-current` and `inbox.py --publish-session`. |
-| `discover_gemini_runtime_session(...)` | Retained for `session_autobridge.py discover`; unreachable from `publish-current` and `inbox.py --publish-session`. |
+| `discover_codex_runtime_session(...)` | Retained for `session_autobridge.py discover-runtime`; unreachable from `publish-current` and `inbox.py --publish-session`. |
+| `discover_claude_runtime_session(...)` | Retained for `session_autobridge.py discover-runtime`; unreachable from `publish-current` and `inbox.py --publish-session`. |
+| `discover_gemini_runtime_session(...)` | Retained for `session_autobridge.py discover-runtime`; unreachable from `publish-current` and `inbox.py --publish-session`. |
 
 Proof should be structural:
 
@@ -149,9 +159,9 @@ Proof should be structural:
   `find_dispatchable_target_session`;
 - tests that monkeypatch `find_dispatchable_target_session` to raise and prove
   a deliver autobridge path still succeeds/fails by the exact resolver;
-- tests that monkeypatch Claude/Gemini discovery to raise and prove publish
+- tests that monkeypatch Codex/Claude/Gemini discovery to raise and prove publish
   mutation paths refuse before calling them;
-- tests that `session_autobridge.py discover` still calls discovery and remains
+- tests that `session_autobridge.py discover-runtime` still calls discovery and remains
   read-only.
 
 ## Mutation table
@@ -166,9 +176,10 @@ Proof should be structural:
 | Dispatchability | Skip `session_is_dispatchable` | Stopped/expired bound session fixture must fail with `exact_binding_not_dispatchable`. |
 | Deliver callsite | Reintroduce `find_dispatchable_target_session(...)` in `deliver.py` | AST/source guard fails; monkeypatched first-match helper raises. |
 | Thread-pair authority | Use `resolve_thread_pair_session_id(...)` as dispatch authority | Thread-pair-only fixture must not produce `autobridge_ready=true`. |
+| Codex publish heuristic | Let `publish-current --runtime-family codex_app` call newest `session_index.jsonl` / history discovery | Publish mutation test must fail unless it returns `heuristic_runtime_discovery_refused`. |
 | Claude publish heuristic | Let `publish-current --runtime-family claude_app` call newest `fileMtime` discovery | Publish mutation test must fail unless it returns `heuristic_runtime_discovery_refused`. |
 | Gemini publish heuristic | Let `inbox.py --publish-session --runtime-family gemini_cli` call newest mtime discovery | Publish mutation test must fail unless it returns `heuristic_runtime_discovery_refused`. |
-| Diagnostic retention | Remove read-only `session_autobridge.py discover` | Diagnostic test fails; this slice retires mutation reachability, not the diagnostic command. |
+| Diagnostic retention | Remove read-only `session_autobridge.py discover-runtime` | Diagnostic test fails; this slice retires mutation reachability, not the diagnostic command. |
 
 ## Verification plan
 
@@ -181,7 +192,7 @@ Focused tests should stay in `tests/test_session_autobridge.py`:
 - stale binding/session mismatch refusal;
 - duplicate exact binding refusal;
 - stopped/expired bound session refusal;
-- Claude/Gemini publish mutation refusal;
+- Codex/Claude/Gemini publish mutation refusal;
 - read-only discovery still reports.
 
 Also run the existing standalone feature/consumer guard if implementation

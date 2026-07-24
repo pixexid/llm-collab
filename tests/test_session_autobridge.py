@@ -1615,7 +1615,7 @@ class SessionAutobridgeTest(unittest.TestCase):
 
         delivered_text = delivered_file.read_text()
         self.assertIn("sender_session_id: codex-app-session-1", delivered_text)
-        self.assertIn("target_session_id: claude-app-session-9", delivered_text)
+        self.assertIn("target_session_id: null", delivered_text)
         self.assertIn("supersedes_session_id: codex-app-session-0", delivered_text)
 
         inbox_result = subprocess.run(
@@ -1632,10 +1632,10 @@ class SessionAutobridgeTest(unittest.TestCase):
             check=True,
         )
         self.assertIn("Sender Session: codex-app-session-1", inbox_result.stdout)
-        self.assertIn("Target Session: claude-app-session-9", inbox_result.stdout)
+        self.assertNotIn("Target Session: claude-app-session-9", inbox_result.stdout)
         self.assertIn("Supersedes: codex-app-session-0", inbox_result.stdout)
 
-    def test_discover_runtime_for_codex_and_publish_from_inbox(self):
+    def test_discover_runtime_for_codex_remains_read_only_but_inbox_publish_refuses(self):
         root = self.make_workspace()
         self.add_agent(
             root,
@@ -1690,31 +1690,96 @@ class SessionAutobridgeTest(unittest.TestCase):
             env={**os.environ, "CODEX_HOME": str(codex_home)},
             check=True,
         )
-        self.assertIn("[session] published codex_app codex-thread-123", inbox_result.stdout)
-
-        published_session = self.run_cli_with_env(
-            root,
-            {"CODEX_HOME": str(codex_home)},
-            "show",
-            "--session",
-            "SESSION-CODEX-PUBLISH",
+        self.assertIn(
+            "[session] publish refused codex_app: heuristic_runtime_discovery_refused",
+            inbox_result.stdout,
         )
-        self.assertEqual("codex-thread-123", published_session["runtime"]["session_id"])
-        self.assertEqual("codex_app", published_session["runtime"]["family"])
 
-        binding = self.run_cli_with_env(
+    def test_publish_current_refuses_heuristic_runtime_discovery_for_all_families(self):
+        root = self.make_workspace()
+        self.add_agent(
             root,
-            {"CODEX_HOME": str(codex_home)},
-            "show-binding",
-            "--project",
-            "amiga",
-            "--chat",
-            "CHAT-PUBLISH1",
-            "--agent",
-            "codex",
+            {
+                "id": "codex",
+                "display_name": "Codex",
+                "activation": {"type": "cli_session", "watcher_enabled": True},
+            },
         )
-        self.assertEqual("codex-thread-123", binding["runtime_session_id"])
-        self.assertEqual("SESSION-CODEX-PUBLISH", binding["session_id"])
+
+        for runtime_family in ("codex_app", "claude_app", "gemini_cli"):
+            with self.subTest(runtime_family=runtime_family):
+                result = self.run_cli(
+                    root,
+                    "publish-current",
+                    "--session",
+                    f"SESSION-{runtime_family}",
+                    "--agent",
+                    "codex",
+                    "--runtime-family",
+                    runtime_family,
+                    "--project",
+                    "amiga",
+                    "--chat",
+                    "CHAT-PUBLISH-REFUSE",
+                )
+                self.assertFalse(result["published"])
+                self.assertEqual(
+                    session_autobridge_lib.HEURISTIC_RUNTIME_DISCOVERY_REFUSED_REASON,
+                    result["reason"],
+                )
+
+    def test_deliver_autobridge_readiness_does_not_reference_first_match_helper(self):
+        source = DELIVER_SCRIPT.read_text()
+        self.assertNotIn("find_dispatchable_target_session", source)
+        self.assertIn("resolve_exact_dispatch_target", source)
+
+    def test_inbox_publish_refuses_heuristic_runtime_discovery_for_all_families(self):
+        root = self.make_workspace()
+        self.add_agent(
+            root,
+            {
+                "id": "codex",
+                "display_name": "Codex",
+                "activation": {"type": "cli_session", "watcher_enabled": True},
+            },
+        )
+        self.add_message(
+            root,
+            agent_id="codex",
+            chat_id="CHAT-INBOX-PUBLISH-REFUSE",
+            project_id="amiga",
+            title="Inbox publish refusal",
+        )
+
+        for runtime_family in ("codex_app", "claude_app", "gemini_cli"):
+            with self.subTest(runtime_family=runtime_family):
+                result = subprocess.run(
+                    [
+                        sys.executable,
+                        str(INBOX_SCRIPT),
+                        "--me",
+                        "codex",
+                        "--peek",
+                        "--project",
+                        "amiga",
+                        "--publish-session",
+                        "--session",
+                        f"SESSION-INBOX-{runtime_family}",
+                        "--runtime-family",
+                        runtime_family,
+                        "--json",
+                    ],
+                    cwd=root,
+                    text=True,
+                    capture_output=True,
+                    check=True,
+                )
+                payload = json.loads(result.stdout)
+                self.assertFalse(payload["published_runtime"]["published"])
+                self.assertEqual(
+                    session_autobridge_lib.HEURISTIC_RUNTIME_DISCOVERY_REFUSED_REASON,
+                    payload["published_runtime"]["reason"],
+                )
 
     def test_discover_runtime_for_claude_project_index(self):
         root = self.make_workspace()
@@ -1772,6 +1837,139 @@ class SessionAutobridgeTest(unittest.TestCase):
             "gemini_cli",
         )
         self.assertEqual("gemini-session-789", discovered["session_id"])
+
+    def test_resolve_exact_dispatch_target_refuses_missing_and_stale_bindings(self):
+        root = self.make_workspace()
+        self.add_agent(
+            root,
+            {
+                "id": "claude",
+                "display_name": "Claude",
+                "activation": {"type": "cli_session", "watcher_enabled": True},
+            },
+        )
+        with patch.object(
+            session_autobridge_lib,
+            "BINDINGS_DIR",
+            root / "State" / "session_autobridge" / "bindings",
+        ), patch.object(
+            session_autobridge_lib,
+            "SESSIONS_DIR",
+            root / "State" / "session_autobridge" / "sessions",
+        ):
+            session, reason = session_autobridge_lib.resolve_exact_dispatch_target(
+                "amiga",
+                "CHAT-EXACT-REFUSE",
+                "claude",
+            )
+            self.assertIsNone(session)
+            self.assertEqual(session_autobridge_lib.EXACT_BINDING_REQUIRED_REASON, reason)
+
+        self.run_cli(
+            root,
+            "register",
+            "--session",
+            "SESSION-CLAUDE-STALE",
+            "--agent",
+            "claude",
+            "--project",
+            "amiga",
+            "--chat",
+            "CHAT-EXACT-REFUSE",
+            "--mode",
+            "auto-read",
+            "--wake-strategy",
+            "runtime_trigger",
+            "--runtime-family",
+            "claude_app",
+            "--runtime-session-id",
+            "runtime-old",
+            "--runtime-session-source",
+            "exact",
+        )
+        session_path = root / "State" / "session_autobridge" / "sessions" / "SESSION-CLAUDE-STALE.json"
+        payload = json.loads(session_path.read_text())
+        payload["runtime"]["session_id"] = "runtime-new"
+        write_json(session_path, payload)
+
+        with patch.object(
+            session_autobridge_lib,
+            "BINDINGS_DIR",
+            root / "State" / "session_autobridge" / "bindings",
+        ), patch.object(
+            session_autobridge_lib,
+            "SESSIONS_DIR",
+            root / "State" / "session_autobridge" / "sessions",
+        ):
+            session, reason = session_autobridge_lib.resolve_exact_dispatch_target(
+                "amiga",
+                "CHAT-EXACT-REFUSE",
+                "claude",
+            )
+            self.assertIsNone(session)
+            self.assertEqual(session_autobridge_lib.EXACT_BINDING_MISMATCH_REASON, reason)
+
+    def test_resolve_exact_dispatch_target_refuses_ambiguous_and_stopped_sessions(self):
+        duplicate_a = {
+            "session_id": "SESSION-DUP",
+            "agent_id": "claude",
+            "project_id": "amiga",
+            "chat_id": "CHAT-EXACT-DUP",
+            "status": "parked",
+            "runtime": {"session_id": "runtime-dup"},
+        }
+        duplicate_b = dict(duplicate_a)
+
+        with patch.object(
+            session_autobridge_lib,
+            "load_binding",
+            return_value={
+                "project_id": "amiga",
+                "chat_id": "CHAT-EXACT-DUP",
+                "agent_id": "claude",
+                "session_id": "SESSION-DUP",
+                "runtime_session_id": "runtime-dup",
+            },
+        ), patch.object(
+            session_autobridge_lib,
+            "iter_sessions",
+            return_value=[duplicate_a, duplicate_b],
+        ):
+            session, reason = session_autobridge_lib.resolve_exact_dispatch_target(
+                "amiga",
+                "CHAT-EXACT-DUP",
+                "claude",
+            )
+            self.assertIsNone(session)
+            self.assertEqual(session_autobridge_lib.EXACT_BINDING_AMBIGUOUS_REASON, reason)
+
+        stopped = dict(duplicate_a)
+        stopped["status"] = "stopped"
+        with patch.object(
+            session_autobridge_lib,
+            "load_binding",
+            return_value={
+                "project_id": "amiga",
+                "chat_id": "CHAT-EXACT-DUP",
+                "agent_id": "claude",
+                "session_id": "SESSION-DUP",
+                "runtime_session_id": "runtime-dup",
+            },
+        ), patch.object(
+            session_autobridge_lib,
+            "iter_sessions",
+            return_value=[stopped],
+        ):
+            session, reason = session_autobridge_lib.resolve_exact_dispatch_target(
+                "amiga",
+                "CHAT-EXACT-DUP",
+                "claude",
+            )
+            self.assertIsNone(session)
+            self.assertEqual(
+                session_autobridge_lib.EXACT_BINDING_NOT_DISPATCHABLE_REASON,
+                reason,
+            )
 
     def test_deliver_uses_canonical_binding_for_target_session_id(self):
         root = self.make_workspace()
@@ -1845,6 +2043,8 @@ class SessionAutobridgeTest(unittest.TestCase):
             check=True,
         )
         result_payload = json.loads(deliver_result.stdout.split("\n\n", 1)[0])
+        self.assertTrue(result_payload["autobridge_ready"])
+        self.assertIsNone(result_payload["autobridge_refusal_reason"])
         self.assertEqual("claude-bound-session-42", result_payload["resolved_target_session_id"])
 
         delivered_candidates = sorted(chat_dir.glob("*_to-claude_*.md"))
@@ -2227,7 +2427,10 @@ class SessionAutobridgeTest(unittest.TestCase):
         self.assertTrue(result_payload["activation_unavailable"])
         self.assertFalse(result_payload["relay_required"])
         self.assertFalse(result_payload["ax_doorbell_required"])
-        self.assertIn("activation.ax_app", result_payload["activation_unavailable_reason"])
+        self.assertEqual(
+            session_autobridge_lib.EXACT_BINDING_REQUIRED_REASON,
+            result_payload["activation_unavailable_reason"],
+        )
         self.assertIn("ACTIVATION UNAVAILABLE", deliver_result.stdout)
         self.assertNotIn("RELAY REQUIRED FOR OPERATOR", deliver_result.stdout)
 
@@ -2366,13 +2569,13 @@ class SessionAutobridgeTest(unittest.TestCase):
             check=True,
         )
 
-        result_payload = json.loads(deliver_result.stdout.strip())
+        result_payload = json.loads(deliver_result.stdout.split("\n\n", 1)[0])
         self.assertTrue(result_payload["autobridge_ready"])
         self.assertEqual("SESSION-CDX2-DISPATCHABLE", result_payload["autobridge_session_id"])
         self.assertFalse(result_payload["relay_required"])
         self.assertNotIn("RELAY REQUIRED FOR OPERATOR", deliver_result.stdout)
 
-    def test_deliver_suppresses_manual_relay_for_untargeted_dispatchable_session(self):
+    def test_deliver_refuses_untargeted_dispatchable_session_as_exact_binding_required(self):
         root = self.make_workspace()
         self.add_agent(
             root,
@@ -2443,14 +2646,25 @@ class SessionAutobridgeTest(unittest.TestCase):
             check=True,
         )
 
-        result_payload = json.loads(deliver_result.stdout.strip())
-        self.assertTrue(result_payload["autobridge_ready"])
-        self.assertEqual("SESSION-CDX2-BROADCAST", result_payload["autobridge_session_id"])
-        self.assertFalse(result_payload["relay_required"])
+        result_payload = json.loads(deliver_result.stdout.split("\n\n", 1)[0])
+        self.assertFalse(result_payload["autobridge_ready"])
+        self.assertEqual(
+            session_autobridge_lib.EXACT_BINDING_REQUIRED_REASON,
+            result_payload["autobridge_refusal_reason"],
+        )
+        self.assertIsNone(result_payload["autobridge_session_id"])
+        self.assertTrue(result_payload["relay_required"])
         self.assertIsNone(result_payload["resolved_target_session_id"])
-        self.assertNotIn("RELAY REQUIRED FOR OPERATOR", deliver_result.stdout)
+        delivered_candidates = sorted(
+            (root / "Chats" / "2026-04-25_dispatchable-broadcast__CHAT-DISPATCH2").glob(
+                "*_to-cdx2_*.md"
+            )
+        )
+        self.assertTrue(delivered_candidates)
+        frontmatter, _ = parse_frontmatter(delivered_candidates[-1].read_text())
+        self.assertIsNone(frontmatter["target_session_id"])
 
-    def test_deliver_uses_thread_pair_for_reverse_reply_routing(self):
+    def test_deliver_refuses_thread_pair_as_dispatch_authority(self):
         root = self.make_workspace()
         self.add_agent(
             root,
@@ -2528,28 +2742,32 @@ class SessionAutobridgeTest(unittest.TestCase):
         )
 
         result_payload = json.loads(reverse_result.stdout.split("\n\n", 1)[0])
-        self.assertEqual("codex-thread-1", result_payload["resolved_target_session_id"])
+        self.assertFalse(result_payload["autobridge_ready"])
+        self.assertEqual(
+            session_autobridge_lib.EXACT_BINDING_REQUIRED_REASON,
+            result_payload["autobridge_refusal_reason"],
+        )
+        self.assertIsNone(result_payload["resolved_target_session_id"])
 
         delivered_candidates = sorted(chat_dir.glob("*_to-codex_*.md"))
         self.assertTrue(delivered_candidates)
         delivered_text = delivered_candidates[-1].read_text()
-        self.assertIn("sender_session_id: cdx2-thread-9", delivered_text)
-        self.assertIn("target_session_id: codex-thread-1", delivered_text)
+        self.assertIn("target_session_id:", delivered_text)
+        frontmatter, _ = parse_frontmatter(delivered_text)
+        self.assertIsNone(frontmatter["target_session_id"])
 
         pair_path = root / "State" / "session_autobridge" / "thread_pairs" / "amiga" / "CHAT-PAIR1" / "cdx2__codex.json"
         pair = json.loads(pair_path.read_text())
         self.assertEqual("codex-thread-1", pair["sessions"]["codex"])
-        self.assertEqual("cdx2-thread-9", pair["sessions"]["cdx2"])
 
         note_candidates = sorted(chat_dir.glob("*_note-cdx2_*.md"))
         self.assertTrue(note_candidates)
         note_text = note_candidates[-1].read_text()
         self.assertIn("summary_event: sent", note_text)
-        self.assertIn("sender_session_id: cdx2-thread-9", note_text)
-        self.assertIn("target_session_id: codex-thread-1", note_text)
+        self.assertIn("target_session_id:", note_text)
         self.assertIn("cdx2 sent `Reply to sender thread` to codex.", note_text)
 
-    def test_deliver_updates_thread_pair_when_sender_session_changes(self):
+    def test_deliver_preserves_thread_pair_sender_state_without_authorizing_dispatch(self):
         root = self.make_workspace()
         self.add_agent(
             root,
@@ -2628,12 +2846,17 @@ class SessionAutobridgeTest(unittest.TestCase):
         )
 
         result_payload = json.loads(reverse_result.stdout.split("\n\n", 1)[0])
-        self.assertEqual("codex-thread-2", result_payload["resolved_target_session_id"])
+        self.assertFalse(result_payload["autobridge_ready"])
+        self.assertEqual(
+            session_autobridge_lib.EXACT_BINDING_REQUIRED_REASON,
+            result_payload["autobridge_refusal_reason"],
+        )
+        self.assertIsNone(result_payload["resolved_target_session_id"])
 
         pair_path = root / "State" / "session_autobridge" / "thread_pairs" / "amiga" / "CHAT-PAIR2" / "cdx2__codex.json"
         pair = json.loads(pair_path.read_text())
         self.assertEqual("codex-thread-2", pair["sessions"]["codex"])
-        self.assertEqual("cdx2-thread-9", pair["sessions"]["cdx2"])
+        self.assertNotIn("cdx2", pair["sessions"])
 
     def test_dispatch_writes_operator_picked_up_note(self):
         root = self.make_workspace()

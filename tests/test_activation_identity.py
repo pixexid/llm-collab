@@ -568,6 +568,24 @@ class DeliverFoundationTest(unittest.TestCase):
                 },
             },
         )
+        write_json(
+            root
+            / "State"
+            / "session_autobridge"
+            / "bindings"
+            / "amiga"
+            / "CHAT-TEST0001"
+            / "claude.json",
+            {
+                "project_id": "amiga",
+                "chat_id": "CHAT-TEST0001",
+                "agent_id": "claude",
+                "session_id": "SESSION-CLAUDE-EXACT",
+                "runtime_family": "claude_app",
+                "runtime_session_id": "claude-runtime",
+                "runtime_session_source": "test_fixture",
+            },
+        )
         autobridge_selected = subprocess.run(
             argv, cwd=root, text=True, capture_output=True, env={**os.environ}, check=False
         )
