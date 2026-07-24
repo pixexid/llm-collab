@@ -3751,6 +3751,179 @@ class SessionAutobridgeTest(unittest.TestCase):
         session_payload = self.run_cli(root, "show", "--session", "SESSION-WATCHER")
         self.assertIn(message_rel, session_payload["processed_messages"])
 
+    def test_watch_inbox_default_off_empty_ledger_preserves_legacy_runtime_trigger(self):
+        root = self.make_workspace()
+        self.add_agent(
+            root,
+            {
+                "id": "gemini",
+                "display_name": "Gemini",
+                "activation": {"type": "cli_session", "watcher_enabled": True},
+            },
+        )
+        message_rel = self.add_message(
+            root,
+            agent_id="gemini",
+            chat_id="CHAT-EMPTY-LEDGER",
+            project_id="amiga",
+            title="Empty ledger gate",
+            sender_session_id="codex-empty-ledger",
+            target_session_id="gemini-runtime-empty-ledger",
+            sender_agent_id="codex",
+            repo_targets=["llm-collab"],
+            target_binding_id="binding-empty-ledger",
+            target_binding_generation=1,
+            packet_slug="empty-ledger",
+        )
+        self.seed_binding_ledger(
+            root,
+            chat_id="CHAT-EMPTY-LEDGER",
+            agent_id="gemini",
+            binding_id="binding-empty-ledger",
+            generation=1,
+            endpoint_id="endpoint_gemini_runtime_empty_ledger",
+            native_session_id="gemini-runtime-empty-ledger",
+        )
+        paths = LedgerPaths.derive(root / "project-state", "ws_alpha")
+        with patch.object(store_module, "_linked_sqlite_version_info", return_value=SAFE_VERSION):
+            with LedgerStore.open_writer(paths) as store:
+                store.record_registry_snapshot(
+                    workspace_id="ws_alpha",
+                    registry_revision="sha256:" + "b" * 64,
+                    registry_source_sha256="b" * 64,
+                    captured_at_utc="2026-04-22T00:00:01+00:00",
+                    workspace_snapshot_json=json.dumps(
+                        {"workspace_id": "ws_alpha", "projects": ["nuvyr"]}
+                    ),
+                    project_snapshots={"nuvyr": json.dumps({"project_id": "nuvyr"})},
+                    source_snapshots={"nuvyr": {}},
+                )
+
+        worker_script = root / "empty_ledger_runtime_worker.py"
+        output_file = root / "empty_ledger_runtime_result.json"
+        write(
+            worker_script,
+            "\n".join(
+                [
+                    "import json",
+                    "import sys",
+                    "from pathlib import Path",
+                    "payload = json.load(sys.stdin)",
+                    "Path(sys.argv[1]).write_text(json.dumps(payload, indent=2))",
+                ]
+            ),
+        )
+        self.run_cli(
+            root,
+            "register",
+            "--session",
+            "SESSION-EMPTY-LEDGER",
+            "--agent",
+            "gemini",
+            "--project",
+            "amiga",
+            "--chat",
+            "CHAT-EMPTY-LEDGER",
+            "--mode",
+            "auto-read",
+            "--wake-strategy",
+            "runtime_trigger",
+            "--runtime-family",
+            "gemini_cli",
+            "--runtime-session-id",
+            "gemini-runtime-empty-ledger",
+            "--runtime-session-source",
+            "first_read",
+            "--runtime-command",
+            json.dumps([sys.executable, str(worker_script), str(output_file)]),
+        )
+        session_path = (
+            root
+            / "State"
+            / "session_autobridge"
+            / "sessions"
+            / "SESSION-EMPTY-LEDGER.json"
+        )
+        session_payload = json.loads(session_path.read_text())
+        session_payload.update(
+            {
+                "repo_targets": ["llm-collab"],
+                "binding_id": "binding-empty-ledger",
+                "binding_generation": 1,
+                "endpoint_id": "endpoint_gemini_runtime_empty_ledger",
+            }
+        )
+        write_json(session_path, session_payload)
+
+        watcher_result = subprocess.run(
+            [
+                sys.executable,
+                str(WATCH_INBOX_SCRIPT),
+                "--me",
+                "gemini",
+                "--max-polls",
+                "1",
+                "--json",
+            ],
+            cwd=root,
+            text=True,
+            capture_output=True,
+            env={**self.subprocess_env(root), "LLM_COLLAB_CANONICAL_CONTROL": ""},
+            check=True,
+        )
+        watcher_events = [
+            json.loads(line) for line in watcher_result.stdout.splitlines() if line.strip()
+        ]
+        self.assertTrue(any(event.get("event") == "autobridge_dispatch" for event in watcher_events))
+        self.assertTrue(
+            any(
+                event.get("event") == "autobridge_consumed"
+                and event.get("detail") == message_rel
+                for event in watcher_events
+            )
+        )
+        session_events = [
+            json.loads(line)
+            for line in (
+                root
+                / "State"
+                / "session_autobridge"
+                / "events"
+                / "SESSION-EMPTY-LEDGER.jsonl"
+            ).read_text().splitlines()
+            if line.strip()
+        ]
+        dispatch = next(
+            event
+            for event in session_events
+            if event.get("event") == "message_dispatched"
+            and event.get("message_path") == message_rel
+        )
+        self.assertEqual(
+            {
+                "resolved": True,
+                "materialized": False,
+                "gate": "disabled",
+                "registry_revision": None,
+            },
+            {
+                key: dispatch["canonical_materialization_result"][key]
+                for key in ("resolved", "materialized", "gate", "registry_revision")
+            },
+        )
+        self.assertTrue(output_file.exists())
+        self.assertNotIn("route_ambiguous", watcher_result.stdout)
+        with patch.object(store_module, "_linked_sqlite_version_info", return_value=SAFE_VERSION):
+            with LedgerStore.open_reader(paths) as store:
+                self.assertEqual(
+                    (0, 0, 0),
+                    store._connection.execute(
+                        "SELECT count(*), (SELECT count(*) FROM canonical_deliveries), "
+                        "(SELECT count(*) FROM canonical_delivery_attempts) "
+                        "FROM canonical_messages"
+                    ).fetchone(),
+                )
+
     def test_runtime_receive_requires_explicit_target_session(self):
         runtime_session = {
             "session_id": "SESSION-RUNTIME",
