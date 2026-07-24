@@ -3,8 +3,9 @@
 ## Status and authority
 
 This document freezes Session Lifecycle Protocol V1 for Phase 3.5. The v8
-storage foundation and pure read-only binding resolver have landed, but they do
-not add runtime behavior, delivery authority, or production activation.
+storage foundation, pure read-only binding resolver, v9 delivery-attempt
+freeze, and v10 rebind/handoff audit have landed, but they do not add live
+runtime behavior, delivery authority, or production activation.
 
 Session Lifecycle Protocol V1 is orthogonal to
 [Runtime Adapter JSON-RPC Protocol V1](runtime-adapter-jsonrpc-v1.md). Runtime
@@ -138,6 +139,17 @@ Rebind and handoff are explicit audited transitions. They record actor, reason,
 predecessor binding, successor binding, transferred pending work, preserved
 predecessor work, and verification evidence. They cannot erase receipts,
 quarantine, or contradictory host evidence.
+
+The current v10 child implements the zero-transfer rebind/handoff foundation.
+The successor must pre-exist for the same compound participant in a pre-active
+state (`reserved`, `registering`, or `unverified`) with a higher generation.
+The store performs one atomic swap: validate both rows, count predecessor
+delivery-attempt freezes, mark the predecessor `superseded`, mark the successor
+`active`, and append the transition audit row in the same transaction. It never
+transfers or retargets frozen attempts. Existing attempted work remains bound to
+the predecessor generation; new attempts can resolve the successor only after
+the swap commits. Nonzero transfer of never-attempted work remains a later
+live-dispatcher child, not v10 authority.
 
 Rollback disables binding resolution for new mutation work first. It preserves
 canonical messages, delivery attempts, receipts, binding records, and binding

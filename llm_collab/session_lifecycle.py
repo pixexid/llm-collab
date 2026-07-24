@@ -304,6 +304,40 @@ class SessionLifecycleCore:
         )
         return self.inspect(store, subject)
 
+    def rebind(
+        self,
+        store: LedgerStore,
+        subject: LifecycleSubject,
+        predecessor_binding: Mapping[str, object],
+        successor_binding: Mapping[str, object],
+        *,
+        transition_kind: str,
+        actor_id: str,
+        reason: str,
+        evidence: bytes,
+        created_at_utc: str,
+    ) -> dict[str, object]:
+        return store.record_conversation_binding_transition(
+            workspace_id=subject.workspace_id,
+            scope_kind=subject.scope_kind,
+            scope_identity=subject.scope_identity,
+            conversation_id=subject.conversation_id,
+            participant_id=subject.participant_id,
+            predecessor_binding_id=str(predecessor_binding["binding_id"]),
+            predecessor_generation=_positive_int(
+                predecessor_binding["generation"], "predecessor_generation"
+            ),
+            successor_binding_id=str(successor_binding["binding_id"]),
+            successor_generation=_positive_int(
+                successor_binding["generation"], "successor_generation"
+            ),
+            transition_kind=transition_kind,
+            actor_id=actor_id,
+            reason=reason,
+            evidence=evidence,
+            created_at_utc=created_at_utc,
+        )
+
 
 def _repository_binding(
     subject: LifecycleSubject, trusted_project_root: TrustedProjectRoot | None

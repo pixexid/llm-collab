@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import inspect
 import sqlite3
 import unittest
 from pathlib import Path
@@ -348,6 +349,71 @@ class LifecycleTest(unittest.TestCase):
             self.assertEqual(
                 self.core.retire(store, active_subject, binding)["reason"],
                 "pull_pending",
+            )
+
+    def test_rebind_records_derived_zero_transfer_transition(self) -> None:
+        active_subject = subject()
+        with LedgerStore.open_writer(self.paths) as store:
+            challenge = self.reserve(store, active_subject)
+            predecessor = self.consume(store, active_subject, challenge)
+            store._connection.execute(
+                """
+                INSERT INTO conversation_bindings
+                (
+                    workspace_id, scope_kind, scope_identity, conversation_id, participant_id,
+                    binding_id, generation, state, mutation_capable, provider_id,
+                    provider_revision, endpoint_id, session_ref_id, native_session_id,
+                    runtime_instance_id, registered_at_utc
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    WORKSPACE,
+                    "project",
+                    PROJECT,
+                    "CHAT-SAMEID",
+                    "participant_codex",
+                    "binding_successor",
+                    2,
+                    "reserved",
+                    1,
+                    "provider_codex",
+                    "revision_1",
+                    "endpoint_codex",
+                    "session_ref_two",
+                    "native_session_two",
+                    "runtime_two",
+                    NOW,
+                ),
+            )
+            successor = {"binding_id": "binding_successor", "generation": 2}
+            result = self.core.rebind(
+                store,
+                active_subject,
+                predecessor,
+                successor,
+                transition_kind="rebind",
+                actor_id="operator",
+                reason="operator_rebind",
+                evidence=b"operator approval",
+                created_at_utc=NOW,
+            )
+
+            self.assertNotIn(
+                "transition_id", inspect.signature(SessionLifecycleCore.rebind).parameters
+            )
+            self.assertEqual(result["transferred_pending_count"], 0)
+            self.assertEqual(
+                store._connection.execute(
+                    "SELECT binding_id, state FROM conversation_bindings ORDER BY generation"
+                ).fetchall(),
+                [(predecessor["binding_id"], "superseded"), ("binding_successor", "active")],
+            )
+            self.assertEqual(
+                store._connection.execute(
+                    "SELECT actor_id, reason, transferred_pending_count FROM conversation_binding_transition_audit"
+                ).fetchall(),
+                [("operator", "operator_rebind", 0)],
             )
 
     def test_no_process_socket_ax_wallclock_or_runtime_consumers(self) -> None:

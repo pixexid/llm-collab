@@ -259,7 +259,7 @@ def insert_v8_challenge(connection: sqlite3.Connection, *, challenge_id: str = "
 def v8_fingerprint_for(statements: tuple[str, ...]) -> str:
     connection = sqlite3.connect(":memory:")
     try:
-        for _version, migration in store_module.MIGRATIONS[:-2]:
+        for _version, migration in store_module.MIGRATIONS[:-3]:
             for statement in migration:
                 connection.execute(statement)
         for statement in statements:
@@ -272,7 +272,7 @@ def v8_fingerprint_for(statements: tuple[str, ...]) -> str:
 def v9_fingerprint_for_v8(statements: tuple[str, ...]) -> str:
     connection = sqlite3.connect(":memory:")
     try:
-        for _version, migration in store_module.MIGRATIONS[:-2]:
+        for _version, migration in store_module.MIGRATIONS[:-3]:
             for statement in migration:
                 connection.execute(statement)
         for statement in statements:
@@ -284,17 +284,41 @@ def v9_fingerprint_for_v8(statements: tuple[str, ...]) -> str:
         connection.close()
 
 
+def v10_fingerprint_for_v8(statements: tuple[str, ...]) -> str:
+    connection = sqlite3.connect(":memory:")
+    try:
+        for _version, migration in store_module.MIGRATIONS[:-3]:
+            for statement in migration:
+                connection.execute(statement)
+        for statement in statements:
+            connection.execute(statement)
+        for statement in store_module.V9_SQL:
+            connection.execute(statement)
+        for statement in store_module.V10_SQL:
+            connection.execute(statement)
+        return store_module._schema_fingerprint(connection)
+    finally:
+        connection.close()
+
+
 @contextmanager
 def open_store_with_v8(paths: LedgerPaths, statements: tuple[str, ...]):
     checksum = store_module._migration_checksum(statements)
     fingerprint = v8_fingerprint_for(statements)
     v9_fingerprint = v9_fingerprint_for_v8(statements)
-    migrations = (*store_module.MIGRATIONS[:-2], (8, statements), (9, store_module.V9_SQL))
+    v10_fingerprint = v10_fingerprint_for_v8(statements)
+    migrations = (
+        *store_module.MIGRATIONS[:-3],
+        (8, statements),
+        (9, store_module.V9_SQL),
+        (10, store_module.V10_SQL),
+    )
     with (
         patch.object(store_module, "V8_SQL", statements),
         patch.object(store_module, "V8_MIGRATION_CHECKSUM", checksum),
         patch.object(store_module, "V8_SCHEMA_FINGERPRINT", fingerprint),
         patch.object(store_module, "V9_SCHEMA_FINGERPRINT", v9_fingerprint),
+        patch.object(store_module, "V10_SCHEMA_FINGERPRINT", v10_fingerprint),
         LedgerStore.open_writer(paths, migrations=migrations) as store,
     ):
         yield store
@@ -831,8 +855,9 @@ class CompatibilityProjectionTest(unittest.TestCase):
             "V7_SQL": "2de4a95aaf7f92fb436772b5cf4fede42db485ae464809b9a23f9c8ccc6dda03",
             "V8_SQL": "21f2d8971cad7428b0da108df3b64f7f05e3f92ad05ac53cba2209cb13ae63cd",
             "V9_SQL": "9381ebdcff6d3e512f0760e67254bae826c3cfbbf6d8a8d4347ed83b6b65fbab",
+            "V10_SQL": "8270fde4fb3e86eb0bf743c1d1222a5e1961e2436b79cffbbbbbf92f4298e2c9",
         }
-        self.assertEqual(store_module.SCHEMA_VERSION, 9)
+        self.assertEqual(store_module.SCHEMA_VERSION, 10)
         self.assertEqual(
             {
                 name: hashlib.sha256("\n".join(getattr(store_module, name)).encode()).hexdigest()
@@ -851,6 +876,7 @@ class CompatibilityProjectionTest(unittest.TestCase):
                 store_module.V7_MIGRATION_CHECKSUM,
                 store_module.V8_MIGRATION_CHECKSUM,
                 store_module.V9_MIGRATION_CHECKSUM,
+                store_module.V10_MIGRATION_CHECKSUM,
                 store_module.V1_SCHEMA_FINGERPRINT,
                 store_module.V2_SCHEMA_FINGERPRINT,
                 store_module.V3_SCHEMA_FINGERPRINT,
@@ -860,6 +886,7 @@ class CompatibilityProjectionTest(unittest.TestCase):
                 store_module.V7_SCHEMA_FINGERPRINT,
                 store_module.V8_SCHEMA_FINGERPRINT,
                 store_module.V9_SCHEMA_FINGERPRINT,
+                store_module.V10_SCHEMA_FINGERPRINT,
             ),
             (
                 "sha256:ce236daff444f736e01f3666ed44baf1c3ba17e81215fedb638276aff76b01c7",
@@ -871,6 +898,7 @@ class CompatibilityProjectionTest(unittest.TestCase):
                 "sha256:2de4a95aaf7f92fb436772b5cf4fede42db485ae464809b9a23f9c8ccc6dda03",
                 "sha256:437fe52450978b246b2a62fd5a0a0f08ddbf4f3f97501dafda0eb999e48580ff",
                 "sha256:601eb6b5a7edfd3b409e578c9d57ea752c5af30cfd027c34512a16b1dc1c9a3b",
+                "sha256:44547c1810cacf9ba9d8edc2e7ee057446d93d1103d4c1424a868febbb525ecd",
                 "sha256:26a856329406e45d22a8fbecdbd769d9c632acae3652d8c72438d228de7cfca2",
                 "sha256:805aa5ae43c31d85dbe9a84590050b701ddc69cfe1dd225e9c6e67afbd889a7c",
                 "sha256:88e59c9be91df366c03985f99f8b3db1c68382b4846612c0334fd15cc505e673",
@@ -880,6 +908,7 @@ class CompatibilityProjectionTest(unittest.TestCase):
                 "sha256:3fd3ca002c8571ff90165da045929aedd520d2a891a8b95b2a36ba07569c32e1",
                 "sha256:9aefd9f214307d6645358444485b632dcbfc8c1a809a0c3708c369909abdaf3f",
                 "sha256:867ed58b94e0dae45c21347409af0daa30ae901b6e2120111b2a26fddd8a4889",
+                "sha256:f32ef268eb81fced863c66f0209cc8fcfaac87a3c87bf628454d74c405124427",
             ),
         )
 
@@ -2132,6 +2161,404 @@ class CanonicalMessageTest(_CanonicalMessageTestBase):
                     ).fetchone()[0],
                     0,
                 )
+
+    def test_binding_transition_atomic_swap_activates_preexisting_successor(self) -> None:
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            paths = LedgerPaths.derive(tmp, WORKSPACE)
+            with LedgerStore.open_writer(paths) as store:
+                seed_delivery_binding(store)
+                with self.assertRaises(sqlite3.IntegrityError):
+                    seed_delivery_binding(
+                        store,
+                        binding_id="binding_two",
+                        generation=2,
+                        state="active",
+                        session_ref_id="session_ref_two",
+                        native_session_id="native_session_two",
+                        runtime_instance_id="runtime_two",
+                    )
+                seed_delivery_binding(
+                    store,
+                    binding_id="binding_two",
+                    generation=2,
+                    state="reserved",
+                    session_ref_id="session_ref_two",
+                    native_session_id="native_session_two",
+                    runtime_instance_id="runtime_two",
+                )
+
+                result = store.record_conversation_binding_transition(
+                    workspace_id=WORKSPACE,
+                    scope_kind="project",
+                    scope_identity=PROJECT,
+                    conversation_id="CHAT-SAMEID",
+                    participant_id="participant_claude",
+                    predecessor_binding_id="binding_one",
+                    predecessor_generation=1,
+                    successor_binding_id="binding_two",
+                    successor_generation=2,
+                    transition_kind="rebind",
+                    actor_id="operator",
+                    reason="operator_rebind",
+                    evidence=b"operator approved rebind",
+                    created_at_utc=NOW,
+                )
+
+                self.assertEqual(result["transferred_pending_count"], 0)
+                self.assertEqual(result["preserved_pending_count"], 0)
+                self.assertRegex(str(result["transition_id"]), r"^transition_[0-9a-f]{64}$")
+                self.assertEqual(
+                    store._connection.execute(
+                        "SELECT binding_id, state FROM conversation_bindings ORDER BY generation"
+                    ).fetchall(),
+                    [("binding_one", "superseded"), ("binding_two", "active")],
+                )
+                self.assertEqual(
+                    store._connection.execute(
+                        """
+                        SELECT transition_kind, predecessor_binding_id, successor_binding_id,
+                               transferred_pending_count, preserved_pending_count
+                        FROM conversation_binding_transition_audit
+                        """
+                    ).fetchall(),
+                    [("rebind", "binding_one", "binding_two", 0, 0)],
+                )
+
+    def test_binding_transition_preserves_old_freeze_and_routes_new_attempt_to_successor(self) -> None:
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            paths = LedgerPaths.derive(tmp, WORKSPACE)
+            with LedgerStore.open_writer(paths) as store:
+                record_registry(store)
+                message_id, delivery_id = delivery_route_fixture(store)
+                seed_delivery_binding(store)
+                first = create_bound_attempt(
+                    store,
+                    workspace_id=WORKSPACE,
+                    scope_kind="project",
+                    scope_identity=PROJECT,
+                    message_id=message_id,
+                    delivery_id=delivery_id,
+                    attempt_index=0,
+                    attempt_epoch_ms=1_100,
+                    created_at_utc=NOW,
+                    conversation_id="CHAT-SAMEID",
+                    participant_id="participant_claude",
+                )
+                freeze_before = store._connection.execute(
+                    "SELECT * FROM canonical_delivery_attempt_binding_freezes"
+                ).fetchone()
+                seed_delivery_binding(
+                    store,
+                    binding_id="binding_two",
+                    generation=2,
+                    state="reserved",
+                    session_ref_id="session_ref_two",
+                    native_session_id="native_session_two",
+                    runtime_instance_id="runtime_two",
+                )
+
+                result = store.record_conversation_binding_transition(
+                    workspace_id=WORKSPACE,
+                    scope_kind="project",
+                    scope_identity=PROJECT,
+                    conversation_id="CHAT-SAMEID",
+                    participant_id="participant_claude",
+                    predecessor_binding_id="binding_one",
+                    predecessor_generation=1,
+                    successor_binding_id="binding_two",
+                    successor_generation=2,
+                    transition_kind="handoff",
+                    actor_id="operator",
+                    reason="manual_handoff",
+                    evidence=b"handoff evidence",
+                    created_at_utc=NOW,
+                )
+                repeated = create_bound_attempt(
+                    store,
+                    workspace_id=WORKSPACE,
+                    scope_kind="project",
+                    scope_identity=PROJECT,
+                    message_id=message_id,
+                    delivery_id=delivery_id,
+                    attempt_index=0,
+                    attempt_epoch_ms=1_100,
+                    created_at_utc=NOW,
+                    conversation_id="CHAT-SAMEID",
+                    participant_id="participant_claude",
+                )
+                new_attempt = create_bound_attempt(
+                    store,
+                    workspace_id=WORKSPACE,
+                    scope_kind="project",
+                    scope_identity=PROJECT,
+                    message_id=message_id,
+                    delivery_id=delivery_id,
+                    attempt_index=1,
+                    attempt_epoch_ms=1_200,
+                    created_at_utc=NOW,
+                    conversation_id="CHAT-SAMEID",
+                    participant_id="participant_claude",
+                )
+
+                self.assertEqual(result["transferred_pending_count"], 0)
+                self.assertEqual(result["preserved_pending_count"], 1)
+                self.assertEqual(first["binding_id"], "binding_one")
+                self.assertEqual(repeated["reason"], "stale_generation")
+                self.assertEqual(new_attempt["binding_id"], "binding_two")
+                self.assertEqual(
+                    store._connection.execute(
+                        "SELECT * FROM canonical_delivery_attempt_binding_freezes WHERE attempt_id = ?",
+                        (first["attempt_id"],),
+                    ).fetchone(),
+                    freeze_before,
+                )
+
+    def test_binding_transition_audit_failure_rolls_back_both_states(self) -> None:
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            paths = LedgerPaths.derive(tmp, WORKSPACE)
+            with LedgerStore.open_writer(paths) as store:
+                seed_delivery_binding(store)
+                seed_delivery_binding(
+                    store,
+                    binding_id="binding_two",
+                    generation=2,
+                    state="reserved",
+                    session_ref_id="session_ref_two",
+                    native_session_id="native_session_two",
+                    runtime_instance_id="runtime_two",
+                )
+                store._connection.execute(
+                    """
+                    CREATE TRIGGER fail_transition_audit
+                    BEFORE INSERT ON conversation_binding_transition_audit
+                    BEGIN
+                        SELECT RAISE(ABORT, 'forced transition audit failure');
+                    END
+                    """
+                )
+                with self.assertRaisesRegex(sqlite3.IntegrityError, "forced transition audit failure"):
+                    store.record_conversation_binding_transition(
+                        workspace_id=WORKSPACE,
+                        scope_kind="project",
+                        scope_identity=PROJECT,
+                        conversation_id="CHAT-SAMEID",
+                        participant_id="participant_claude",
+                        predecessor_binding_id="binding_one",
+                        predecessor_generation=1,
+                        successor_binding_id="binding_two",
+                        successor_generation=2,
+                        transition_kind="rebind",
+                        actor_id="operator",
+                        reason="operator_rebind",
+                        evidence=b"evidence",
+                        created_at_utc=NOW,
+                    )
+                self.assertEqual(
+                    store._connection.execute(
+                        "SELECT binding_id, state FROM conversation_bindings ORDER BY generation"
+                    ).fetchall(),
+                    [("binding_one", "active"), ("binding_two", "reserved")],
+                )
+                self.assertEqual(
+                    store._connection.execute(
+                        "SELECT count(*) FROM conversation_binding_transition_audit"
+                    ).fetchone()[0],
+                    0,
+                )
+
+    def test_binding_transition_rejects_illegal_sequences(self) -> None:
+        cases = (
+            ("missing_successor", "binding_missing", 2, None, CanonicalConflictError),
+            ("same_generation", "binding_one", 1, None, ValueError),
+            ("wrong_participant", "binding_two", 2, "participant_other", CanonicalConflictError),
+            ("successor_retired", "binding_two", 2, "retired", CanonicalConflictError),
+        )
+        for label, successor_binding_id, successor_generation, successor_shape, error in cases:
+            with self.subTest(label=label), TemporaryDirectory(dir="/tmp") as tmp:
+                paths = LedgerPaths.derive(tmp, WORKSPACE)
+                with LedgerStore.open_writer(paths) as store:
+                    seed_delivery_binding(store)
+                    if successor_shape == "participant_other":
+                        seed_delivery_binding(
+                            store,
+                            participant_id="participant_other",
+                            agent_id="agent_other",
+                            binding_id=successor_binding_id,
+                            generation=successor_generation,
+                            state="reserved",
+                            session_ref_id="session_ref_two",
+                            native_session_id="native_session_two",
+                            runtime_instance_id="runtime_two",
+                        )
+                    elif successor_shape == "retired":
+                        seed_delivery_binding(
+                            store,
+                            binding_id=successor_binding_id,
+                            generation=successor_generation,
+                            state="retired",
+                            mutation_capable=0,
+                            session_ref_id="session_ref_two",
+                            native_session_id="native_session_two",
+                            runtime_instance_id="runtime_two",
+                        )
+                    before_rows = store._connection.execute(
+                        "SELECT binding_id, state FROM conversation_bindings WHERE participant_id = 'participant_claude' ORDER BY generation"
+                    ).fetchall()
+                    with self.assertRaises(error):
+                        store.record_conversation_binding_transition(
+                            workspace_id=WORKSPACE,
+                            scope_kind="project",
+                            scope_identity=PROJECT,
+                            conversation_id="CHAT-SAMEID",
+                            participant_id="participant_claude",
+                            predecessor_binding_id="binding_one",
+                            predecessor_generation=1,
+                            successor_binding_id=successor_binding_id,
+                            successor_generation=successor_generation,
+                            transition_kind="rebind",
+                            actor_id="operator",
+                            reason="operator_rebind",
+                            evidence=b"evidence",
+                            created_at_utc=NOW,
+                        )
+                    self.assertEqual(
+                        store._connection.execute(
+                            "SELECT binding_id, state FROM conversation_bindings WHERE participant_id = 'participant_claude' ORDER BY generation"
+                        ).fetchall(),
+                        before_rows,
+                    )
+                    self.assertEqual(
+                        store._connection.execute(
+                            "SELECT count(*) FROM conversation_binding_transition_audit"
+                        ).fetchone()[0],
+                        0,
+                    )
+
+    def test_binding_transition_audit_is_append_only_and_nul_safe(self) -> None:
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            paths = LedgerPaths.derive(tmp, WORKSPACE)
+            with LedgerStore.open_writer(paths) as store:
+                seed_delivery_binding(store)
+                seed_delivery_binding(
+                    store,
+                    binding_id="binding_two",
+                    generation=2,
+                    state="reserved",
+                    session_ref_id="session_ref_two",
+                    native_session_id="native_session_two",
+                    runtime_instance_id="runtime_two",
+                )
+                result = store.record_conversation_binding_transition(
+                    workspace_id=WORKSPACE,
+                    scope_kind="project",
+                    scope_identity=PROJECT,
+                    conversation_id="CHAT-SAMEID",
+                    participant_id="participant_claude",
+                    predecessor_binding_id="binding_one",
+                    predecessor_generation=1,
+                    successor_binding_id="binding_two",
+                    successor_generation=2,
+                    transition_kind="rebind",
+                    actor_id="operator",
+                    reason="operator_rebind",
+                    evidence=b"evidence",
+                    created_at_utc=NOW,
+                )
+                with self.assertRaisesRegex(sqlite3.IntegrityError, "append-only"):
+                    store._connection.execute(
+                        "UPDATE conversation_binding_transition_audit SET reason = 'manual_handoff'"
+                    )
+                with self.assertRaisesRegex(sqlite3.IntegrityError, "append-only"):
+                    store._connection.execute("DELETE FROM conversation_binding_transition_audit")
+
+                text_columns = [
+                    "workspace_id",
+                    "scope_kind",
+                    "scope_identity",
+                    "conversation_id",
+                    "participant_id",
+                    "transition_id",
+                    "transition_kind",
+                    "predecessor_binding_id",
+                    "successor_binding_id",
+                    "actor_id",
+                    "reason",
+                    "evidence_sha256",
+                    "created_at_utc",
+                ]
+                columns = [
+                    "workspace_id",
+                    "scope_kind",
+                    "scope_identity",
+                    "conversation_id",
+                    "participant_id",
+                    "transition_id",
+                    "transition_kind",
+                    "predecessor_binding_id",
+                    "predecessor_generation",
+                    "successor_binding_id",
+                    "successor_generation",
+                    "actor_id",
+                    "reason",
+                    "transferred_pending_count",
+                    "preserved_pending_count",
+                    "evidence_sha256",
+                    "created_at_utc",
+                ]
+                values = [
+                    WORKSPACE,
+                    "project",
+                    PROJECT,
+                    "CHAT-SAMEID",
+                    "participant_claude",
+                    "transition_" + "a" * 64,
+                    "handoff",
+                    "binding_one",
+                    1,
+                    "binding_two",
+                    2,
+                    "operator",
+                    "manual_handoff",
+                    0,
+                    0,
+                    "b" * 64,
+                    NOW,
+                ]
+                store._connection.execute("PRAGMA foreign_keys = OFF")
+                try:
+                    nonzero_transfer = list(values)
+                    nonzero_transfer[columns.index("transition_id")] = "transition_" + "c" * 64
+                    nonzero_transfer[columns.index("transferred_pending_count")] = 1
+                    with self.assertRaises(sqlite3.IntegrityError):
+                        store._connection.execute(
+                            "INSERT INTO conversation_binding_transition_audit "
+                            f"({', '.join(columns)}) VALUES ({', '.join('?' for _ in columns)})",
+                            nonzero_transfer,
+                        )
+                    for column in text_columns:
+                        with self.subTest(column=column):
+                            nul_values = list(values)
+                            nul_values[columns.index(column)] = str(
+                                nul_values[columns.index(column)]
+                            ) + "\x00"
+                            if column != "transition_id":
+                                nul_values[columns.index("transition_id")] = (
+                                    "transition_" + hashlib.sha256(column.encode()).hexdigest()
+                                )
+                            with self.assertRaises(sqlite3.IntegrityError):
+                                store._connection.execute(
+                                    "INSERT INTO conversation_binding_transition_audit "
+                                    f"({', '.join(columns)}) VALUES ({', '.join('?' for _ in columns)})",
+                                    nul_values,
+                                )
+                    self.assertEqual(
+                        store._connection.execute(
+                            "SELECT transition_id FROM conversation_binding_transition_audit"
+                        ).fetchall(),
+                        [(result["transition_id"],)],
+                    )
+                finally:
+                    store._connection.execute("PRAGMA foreign_keys = ON")
 
     def test_v9_freeze_rows_reject_nul_in_every_text_column(self) -> None:
         text_columns = [
