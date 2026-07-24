@@ -31,6 +31,7 @@ from _helpers import (
     agent_ids,
     agent_inbox_path,
     config_get,
+    get_unread_messages,
     load_agent_inbox,
     mark_messages_read,
     parse_frontmatter,
@@ -46,6 +47,7 @@ from _session_autobridge import (
 def parse_args():
     p = argparse.ArgumentParser(description="Background inbox watcher.")
     p.add_argument("--me", required=True, help="Agent ID to watch for")
+    p.add_argument("--project", default=None, help="Filter by exact project_id")
     p.add_argument("--poll-seconds", type=int, default=None, help="Poll interval (default: from config)")
     p.add_argument("--max-polls", type=int, default=0, help="Stop after N polls; 0 = forever")
     p.add_argument("--notify", action="store_true", help="Send desktop notification on new messages")
@@ -58,7 +60,10 @@ def parse_args():
         help="Explicit repository subscription; repeat for multiple repositories",
     )
     p.add_argument("--json", dest="json_output", action="store_true", help="Emit JSON lines")
-    return p.parse_args()
+    args = p.parse_args()
+    if args.repo_target is not None and args.project is None:
+        p.error("--repo-target requires --project <id>")
+    return args
 
 
 def send_notification(title: str, body: str) -> None:
@@ -88,7 +93,7 @@ def utc_now_str() -> str:
     return datetime.utcnow().isoformat(timespec="seconds")
 
 
-def autobridge_session_ids(agent_id: str) -> list[str]:
+def autobridge_session_ids(agent_id: str, project_id: str | None = None) -> list[str]:
     if not SESSIONS_DIR.exists():
         return []
 
@@ -100,6 +105,8 @@ def autobridge_session_ids(agent_id: str) -> list[str]:
             continue
         if session.get("agent_id") != agent_id:
             continue
+        if project_id is not None and session.get("project_id") != project_id:
+            continue
         session_ids.append(path.stem)
     return session_ids
 
@@ -108,12 +115,28 @@ def dispatch_autobridge(
     agent_id: str,
     json_output: bool,
     *,
+    project_id: str | None = None,
     repo_targets: list[str] | None = None,
 ) -> list[str]:
     consumed_paths: list[str] = []
 
-    for session_id in autobridge_session_ids(agent_id):
-        result = dispatch_session(session_id, repo_targets=repo_targets)
+    for session_id in autobridge_session_ids(agent_id, project_id):
+        result = dispatch_session(
+            session_id, project_id=project_id, repo_targets=repo_targets
+        )
+        for refusal in result.get("repo_scope_refused", []):
+            emit(
+                {
+                    "ts": utc_now_str(),
+                    "event": "autobridge_repo_scope_refused",
+                    "detail": refusal["path"],
+                    "agent": agent_id,
+                    "session_id": session_id,
+                    "message_path": refusal["path"],
+                    "reason": refusal["reason"],
+                },
+                json_output,
+            )
         if not result.get("actions"):
             continue
 
@@ -143,7 +166,10 @@ def dispatch_autobridge(
                     try:
                         frontmatter, _ = parse_frontmatter(message_path.read_text())
                         repo_match, repo_reason = repo_scope_matches(
-                            effective_repo_targets, frontmatter.get("repo_targets")
+                            effective_repo_targets,
+                            frontmatter.get("repo_targets"),
+                            subscriber_project=project_id,
+                            packet_project=frontmatter.get("project_id"),
                         )
                     except Exception:
                         repo_match, repo_reason = False, "route_ambiguous"
@@ -217,7 +243,34 @@ def main():
                 data = load_agent_inbox(args.me)
                 unread = set(data.get("unread", []))
                 new_msgs = unread - seen_paths
+                messages = {message["path"]: message for message in get_unread_messages(args.me)}
+                visible_new_msgs: list[str] = []
                 for path in sorted(new_msgs):
+                    message = messages.get(path, {"frontmatter": {}})
+                    frontmatter = message.get("frontmatter", {})
+                    if args.project is not None and frontmatter.get("project_id") != args.project:
+                        continue
+                    repo_match, repo_reason = repo_scope_matches(
+                        args.repo_target,
+                        frontmatter.get("repo_targets"),
+                        subscriber_project=args.project,
+                        packet_project=frontmatter.get("project_id"),
+                    )
+                    if not repo_match:
+                        emit(
+                            {
+                                "ts": utc_now_str(),
+                                "event": "repo_scope_refused",
+                                "detail": path,
+                                "agent": args.me,
+                                "message_path": path,
+                                "reason": repo_reason,
+                            },
+                            args.json_output,
+                        )
+                        continue
+                    visible_new_msgs.append(path)
+                for path in visible_new_msgs:
                     ts_str = utc_now_str()
                     emit({"ts": ts_str, "event": "new_message", "detail": path, "agent": args.me}, args.json_output)
                     if args.notify:
@@ -231,6 +284,7 @@ def main():
                             dispatch_autobridge(
                                 args.me,
                                 args.json_output,
+                                project_id=args.project,
                                 repo_targets=args.repo_target,
                             )
                         )

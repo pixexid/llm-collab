@@ -553,15 +553,47 @@ def _repo_target_set(value: Any) -> set[str] | None:
     return set(values)
 
 
-def repo_scope_matches(subscriber_targets: Any, packet_targets: Any) -> tuple[bool, str]:
+def repo_scope_matches(
+    subscriber_targets: Any,
+    packet_targets: Any,
+    *,
+    subscriber_project: Any = None,
+    packet_project: Any = None,
+) -> tuple[bool, str]:
     """Apply the one repo-scope rule used by inbox, watcher, and autobridge."""
 
     if subscriber_targets is None:
         return True, "unscoped"
+    if not isinstance(subscriber_project, str) or not subscriber_project:
+        return False, ROUTE_AMBIGUOUS_REASON
+    if packet_project != subscriber_project:
+        return False, ROUTE_AMBIGUOUS_REASON
     subscriber = _repo_target_set(subscriber_targets)
     packet = _repo_target_set(packet_targets)
     if subscriber is None or packet is None or not packet <= subscriber:
         return False, ROUTE_AMBIGUOUS_REASON
+    return True, "repo_scope_match"
+
+
+def _session_repo_scope_matches(
+    session: dict,
+    message: dict,
+    invocation_repo_targets: Any = None,
+) -> tuple[bool, str]:
+    frontmatter = message.get("frontmatter", {})
+    packet_targets = frontmatter.get("repo_targets")
+    for subscriber_targets in (
+        session.get("repo_targets"),
+        invocation_repo_targets,
+    ):
+        matched, reason = repo_scope_matches(
+            subscriber_targets,
+            packet_targets,
+            subscriber_project=session.get("project_id"),
+            packet_project=frontmatter.get("project_id"),
+        )
+        if not matched:
+            return False, reason
     return True, "repo_scope_match"
 
 
@@ -572,10 +604,15 @@ def _declared_target(value: Any) -> str | None:
     return text if text else None
 
 
-def binding_scoped_message_matches_session(session: dict, message: dict) -> tuple[bool, str]:
+def binding_scoped_message_matches_session(
+    session: dict,
+    message: dict,
+    *,
+    invocation_repo_targets: Any = None,
+) -> tuple[bool, str]:
     frontmatter = message.get("frontmatter", {})
-    repo_match, repo_reason = repo_scope_matches(
-        session.get("repo_targets"), frontmatter.get("repo_targets")
+    repo_match, repo_reason = _session_repo_scope_matches(
+        session, message, invocation_repo_targets
     )
     if not repo_match:
         return False, repo_reason
@@ -679,10 +716,15 @@ def resolve_exact_dispatch_target(
     return dispatchable[0], None
 
 
-def message_targets_session(session: dict, message: dict) -> tuple[bool, str]:
+def message_targets_session(
+    session: dict,
+    message: dict,
+    *,
+    invocation_repo_targets: Any = None,
+) -> tuple[bool, str]:
     frontmatter = message.get("frontmatter", {})
-    repo_match, repo_reason = repo_scope_matches(
-        session.get("repo_targets"), frontmatter.get("repo_targets")
+    repo_match, repo_reason = _session_repo_scope_matches(
+        session, message, invocation_repo_targets
     )
     if not repo_match:
         return False, repo_reason
@@ -709,12 +751,21 @@ def message_targets_session(session: dict, message: dict) -> tuple[bool, str]:
                 and session_chat == message_chat
             ):
                 return False, ROUTE_AMBIGUOUS_REASON
-            return binding_scoped_message_matches_session(session, message)
+            return binding_scoped_message_matches_session(
+                session,
+                message,
+                invocation_repo_targets=invocation_repo_targets,
+            )
         return True, "explicit_target_match"
     return False, "target_session_mismatch"
 
 
-def matching_unread_messages(session: dict) -> list[dict]:
+def matching_unread_messages(
+    session: dict,
+    *,
+    invocation_repo_targets: Any = None,
+    repo_scope_refusals: list[dict] | None = None,
+) -> list[dict]:
     messages = get_unread_messages(str(session["agent_id"]))
     project_id = session.get("project_id")
     chat_id = session.get("chat_id")
@@ -724,7 +775,20 @@ def matching_unread_messages(session: dict) -> list[dict]:
         messages = [m for m in messages if m["frontmatter"].get("chat_id") == chat_id]
     matched_messages: list[dict] = []
     for message in messages:
-        target_match, _ = message_targets_session(session, message)
+        repo_match, repo_reason = _session_repo_scope_matches(
+            session, message, invocation_repo_targets
+        )
+        if not repo_match:
+            if repo_scope_refusals is not None:
+                repo_scope_refusals.append(
+                    {"path": message["path"], "reason": repo_reason}
+                )
+            continue
+        target_match, _ = message_targets_session(
+            session,
+            message,
+            invocation_repo_targets=invocation_repo_targets,
+        )
         if target_match:
             matched_messages.append(message)
     return matched_messages
@@ -2002,11 +2066,28 @@ def create_relay_prompt(session: dict, message: dict) -> dict[str, Any]:
 
 
 def dispatch_session(
-    session_id: str, *, repo_targets: list[str] | None = None
+    session_id: str,
+    *,
+    project_id: str | None = None,
+    repo_targets: list[str] | None = None,
 ) -> dict[str, Any]:
     session = load_session(session_id)
-    if repo_targets is not None:
-        session = {**session, "repo_targets": repo_targets}
+    if project_id is not None and session.get("project_id") != project_id:
+        append_event(
+            session_id,
+            {
+                "event": "session_skipped",
+                "reason": "project_scope_mismatch",
+                "status": session.get("status"),
+            },
+        )
+        return {
+            "session_id": session_id,
+            "dispatchable": False,
+            "reason": "project_scope_mismatch",
+            "matched_messages": 0,
+            "actions": [],
+        }
     dispatchable, reason = session_is_dispatchable(session)
     if not dispatchable:
         append_event(
@@ -2026,9 +2107,14 @@ def dispatch_session(
         }
 
     matched = []
+    repo_scope_refusals: list[dict] = []
     completed_settlements = []
     seen = processed_messages(session)
-    for message in matching_unread_messages(session):
+    for message in matching_unread_messages(
+        session,
+        invocation_repo_targets=repo_targets,
+        repo_scope_refusals=repo_scope_refusals,
+    ):
         if processed_message_blocks_dispatch(session, message, seen):
             if (
                 message_needs_canonical_materialization(session, message)
@@ -2036,7 +2122,11 @@ def dispatch_session(
             ):
                 completed_settlements.append(message)
             continue
-        target_match, target_reason = message_targets_session(session, message)
+        target_match, target_reason = message_targets_session(
+            session,
+            message,
+            invocation_repo_targets=repo_targets,
+        )
         if not target_match:
             append_event(
                 session_id,
@@ -2285,10 +2375,21 @@ def dispatch_session(
             mark_message_processed(session, message["path"])
         actions.append(event)
 
+    for refusal in repo_scope_refusals:
+        append_event(
+            session_id,
+            {
+                "event": "message_skipped",
+                "message_path": refusal["path"],
+                "reason": refusal["reason"],
+            },
+        )
+
     return {
         "session_id": session_id,
         "dispatchable": True,
         "reason": "ok",
         "matched_messages": len(matched),
+        "repo_scope_refused": repo_scope_refusals,
         "actions": actions,
     }

@@ -9,6 +9,7 @@ import unittest
 from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 
@@ -251,7 +252,9 @@ class InboxMarkAllReadTest(unittest.TestCase):
             "WRONG-REPO", project_line="amiga", repo_targets=["amiga"]
         )
 
-        result = self.run_inbox("--repo-target", "llm-collab", "--json")
+        result = self.run_inbox(
+            "--project", "amiga", "--repo-target", "llm-collab", "--json"
+        )
 
         self.assertEqual(0, result.returncode, result.stderr)
         payload = json.loads(result.stdout)
@@ -296,12 +299,12 @@ class InboxMarkAllReadTest(unittest.TestCase):
         message = {
             "path": "Chats/late/packet.md",
             "read": False,
-            "frontmatter": {"repo_targets": ["llm-collab"]},
+            "frontmatter": {"project_id": "amiga", "repo_targets": ["llm-collab"]},
             "body": "packet",
         }
         changed = {
             **message,
-            "frontmatter": {"repo_targets": ["amiga"]},
+            "frontmatter": {"project_id": "amiga", "repo_targets": ["amiga"]},
         }
         stdout = StringIO()
         with patch.object(inbox_lib, "agent_ids", return_value=["codex"]), patch.object(
@@ -318,6 +321,8 @@ class InboxMarkAllReadTest(unittest.TestCase):
                     "inbox.py",
                     "--me",
                     "codex",
+                    "--project",
+                    "amiga",
                     "--repo-target",
                     "llm-collab",
                     "--json",
@@ -331,6 +336,103 @@ class InboxMarkAllReadTest(unittest.TestCase):
             [{"path": message["path"], "reason": "route_ambiguous"}],
             payload["repo_scope_refused"],
         )
+
+    def test_repo_target_requires_project_scope(self) -> None:
+        result = self.run_inbox("--repo-target", "llm-collab", "--json")
+
+        self.assertEqual(2, result.returncode)
+        self.assertIn("--repo-target requires --project <id>", result.stderr)
+
+    def test_mark_all_read_counts_only_paths_surviving_late_scope_recheck(self) -> None:
+        message = {
+            "path": "Chats/late/count.md",
+            "frontmatter": {"project_id": "amiga", "repo_targets": ["llm-collab"]},
+            "body": "packet",
+        }
+        changed = {
+            **message,
+            "frontmatter": {"project_id": "amiga", "repo_targets": ["amiga"]},
+        }
+        stdout = StringIO()
+        with patch.object(inbox_lib, "agent_ids", return_value=["codex"]), patch.object(
+            inbox_lib, "get_unread_messages", return_value=[message]
+        ), patch.object(
+            inbox_lib,
+            "unread_messages_with_missing_files",
+            return_value=[changed],
+        ), patch.object(inbox_lib, "mark_messages_read") as mark_read, redirect_stdout(stdout):
+            with patch.object(
+                sys,
+                "argv",
+                [
+                    "inbox.py",
+                    "--me",
+                    "codex",
+                    "--project",
+                    "amiga",
+                    "--repo-target",
+                    "llm-collab",
+                    "--mark-all-read",
+                ],
+            ):
+                inbox_lib.main()
+
+        mark_read.assert_called_once_with("codex", [])
+        self.assertEqual(
+            {
+                "marked_read": 0,
+                "marked_read_by_project": {},
+                "repo_scope_refused": [
+                    {"path": message["path"], "reason": "route_ambiguous"}
+                ],
+            },
+            json.loads(stdout.getvalue()),
+        )
+
+    def test_publish_session_carries_repository_subscription(self) -> None:
+        args = SimpleNamespace(
+            publish_session=True,
+            me="codex",
+            session="SESSION-PUBLISH-SCOPE",
+            runtime_family="claude_app",
+            project="amiga",
+            chat=None,
+            repo_target=["llm-collab"],
+            project_path=None,
+        )
+        registered = {}
+
+        def register(args):
+            registered.update(vars(args))
+            return {"session_id": args.session}
+
+        with patch.object(
+            inbox_lib,
+            "discover_runtime_session",
+            return_value={
+                "family": "claude_app",
+                "session_id": "claude-runtime",
+                "session_source": "test",
+            },
+        ), patch.object(
+            inbox_lib,
+            "get_unread_messages",
+            return_value=[
+                {
+                    "frontmatter": {
+                        "project_id": "amiga",
+                        "chat_id": "CHAT-PUBLISH",
+                    }
+                }
+            ],
+        ), patch.object(
+            inbox_lib,
+            "HEURISTIC_RUNTIME_DISCOVERY_FAMILIES",
+            frozenset(),
+        ), patch.object(inbox_lib, "register_session", side_effect=register):
+            inbox_lib.publish_runtime_identity(args)
+
+        self.assertEqual(["llm-collab"], registered["repo_targets"])
 
     def test_chat_filter_is_rejected_for_mutation(self) -> None:
         amiga = self.add_message("AMIGA", project_line="amiga")

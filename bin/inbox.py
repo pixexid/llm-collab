@@ -94,6 +94,8 @@ def parse_args():
 
     if args.project is not None and not args.project.strip():
         p.error("--project requires a non-empty project id")
+    if args.repo_target is not None and args.project is None:
+        p.error("--repo-target requires --project <id>")
 
     if args.all_projects and not args.mark_all_read:
         p.error("--all-projects is only valid with --mark-all-read")
@@ -169,6 +171,7 @@ def publish_runtime_identity(args) -> dict | None:
     register_args.agent = args.me
     register_args.project = args.project
     register_args.chat = resolved_chat_id
+    register_args.repo_targets = args.repo_target
     register_args.mode = "notify"
     register_args.status = "parked"
     register_args.wake_strategy = "none"
@@ -223,7 +226,7 @@ def filter_messages(
 
 
 def filter_repo_scope(
-    messages: list[dict], subscriber_targets: list[str] | None
+    messages: list[dict], subscriber_targets: list[str] | None, project_id: str | None
 ) -> tuple[list[dict], list[dict]]:
     if subscriber_targets is None:
         return messages, []
@@ -231,7 +234,10 @@ def filter_repo_scope(
     refused: list[dict] = []
     for message in messages:
         allowed, reason = repo_scope_matches(
-            subscriber_targets, message.get("frontmatter", {}).get("repo_targets")
+            subscriber_targets,
+            message.get("frontmatter", {}).get("repo_targets"),
+            subscriber_project=project_id,
+            packet_project=message.get("frontmatter", {}).get("project_id"),
         )
         if allowed:
             matched.append(message)
@@ -244,6 +250,7 @@ def recheck_repo_scope_before_read(
     agent_id: str,
     paths: list[str],
     subscriber_targets: list[str] | None,
+    project_id: str | None,
 ) -> tuple[list[str], list[dict]]:
     if subscriber_targets is None:
         return paths, []
@@ -256,7 +263,10 @@ def recheck_repo_scope_before_read(
     for path in paths:
         message = current.get(path, {"path": path, "frontmatter": {}})
         matched, reason = repo_scope_matches(
-            subscriber_targets, message.get("frontmatter", {}).get("repo_targets")
+            subscriber_targets,
+            message.get("frontmatter", {}).get("repo_targets"),
+            subscriber_project=project_id,
+            packet_project=message.get("frontmatter", {}).get("project_id"),
         )
         if matched:
             allowed.append(path)
@@ -438,7 +448,9 @@ def mark_all_read(args) -> dict:
         messages = unread_messages_with_missing_files(args.me)
     else:
         messages = filter_messages(get_unread_messages(args.me), args.project, None)
-    messages, repo_scope_refused = filter_repo_scope(messages, args.repo_target)
+    messages, repo_scope_refused = filter_repo_scope(
+        messages, args.repo_target, args.project
+    )
 
     marked_by_project: dict[str, int] = {}
     held_activation = 0
@@ -452,17 +464,20 @@ def mark_all_read(args) -> dict:
                 held_paths.append(message["path"])
                 continue
         markable.append(message)
+
+    paths = [message["path"] for message in markable]
+    paths, late_refused = recheck_repo_scope_before_read(
+        args.me, paths, args.repo_target, args.project
+    )
+    repo_scope_refused.extend(late_refused)
+    markable_by_path = {message["path"]: message for message in markable}
+    for path in paths:
+        message = markable_by_path[path]
         if message.get("missing_message"):
             bucket = MISSING_MESSAGE_BUCKET
         else:
             bucket = project_bucket(message["frontmatter"])
         marked_by_project[bucket] = marked_by_project.get(bucket, 0) + 1
-
-    paths = [message["path"] for message in markable]
-    paths, late_refused = recheck_repo_scope_before_read(
-        args.me, paths, args.repo_target
-    )
-    repo_scope_refused.extend(late_refused)
     mark_messages_read(args.me, paths)
     result = {
         "marked_read": len(paths),
@@ -535,10 +550,12 @@ def main():
     else:
         messages = get_unread_messages(args.me)
 
-    messages = filter_messages(messages, args.project, args.chat, args.packet)
+        messages = filter_messages(messages, args.project, args.chat, args.packet)
     if args.packet and len(messages) != 1:
         packet_selection_error(args, messages)
-    messages, repo_scope_refused = filter_repo_scope(messages, args.repo_target)
+    messages, repo_scope_refused = filter_repo_scope(
+        messages, args.repo_target, args.project
+    )
     if not args.packet:
         messages = messages[: args.limit]
 
@@ -605,7 +622,7 @@ def main():
     shown_paths = [m["path"] for m in messages if not m.get("read")]
     if consume:
         shown_paths, late_refused = recheck_repo_scope_before_read(
-            args.me, shown_paths, args.repo_target
+            args.me, shown_paths, args.repo_target, args.project
         )
         repo_scope_refused.extend(late_refused)
 

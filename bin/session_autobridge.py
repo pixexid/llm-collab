@@ -122,6 +122,7 @@ def parse_args():
 
     dispatch = subparsers.add_parser("dispatch", help="Run one bounded dispatch pass")
     dispatch.add_argument("--session", required=True)
+    dispatch.add_argument("--project", default=None, help="Invocation project scope")
     dispatch.add_argument(
         "--repo-target",
         dest="repo_targets",
@@ -177,7 +178,12 @@ def parse_args():
     lease_release.add_argument("--owner-pid", type=int, default=None, help="Releasing process id")
     lease_release.add_argument("--claimant-runtime-id", default=None, help="Current runtime/session id")
     lease_release.add_argument("--status", default="released", choices=("released", "superseded"))
-    return parser.parse_args()
+    args = parser.parse_args()
+    if getattr(args, "repo_targets", None) is not None:
+        project = getattr(args, "project", None)
+        if project is None:
+            parser.error("--repo-target requires --project <id>")
+    return args
 
 
 def emit(payload: dict, json_output: bool) -> None:
@@ -404,7 +410,11 @@ def main():
     elif args.command == "show-binding":
         result = show_binding(args)
     elif args.command == "dispatch":
-        result = dispatch_session(args.session, repo_targets=args.repo_targets)
+        result = dispatch_session(
+            args.session,
+            project_id=args.project,
+            repo_targets=args.repo_targets,
+        )
     elif args.command == "lease-claim":
         result, exit_code = lease_claim_command(args)
     elif args.command == "lease-show":
