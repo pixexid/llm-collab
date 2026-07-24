@@ -122,6 +122,10 @@ binding reference and one of the closed non-send reasons
 fabricate `SessionRefV1` evidence from v8 storage rows. The dispatch attempt
 stays bound to that exact generation. If a rebind or restart occurs before the
 attempt is resolved, the attempt is not retargeted to the newer generation.
+The current storage implementation persists this freeze in a v9 side table keyed
+to the canonical delivery attempt. The freeze is internal authority only:
+adapter `DeliveryV1` payloads stay unchanged, and no caller may provide
+`binding_id` or generation as input.
 
 Pending work may transfer during explicit audited rebind/handoff only when the
 work has not been attempted and no possible native acceptance exists.

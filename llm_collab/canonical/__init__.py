@@ -10,6 +10,7 @@ from .messages import (
 )
 from .delivery import (
     append_receipt,
+    create_bound_attempt,
     create_attempt,
     create_deliveries,
     project_delivery_v1,
@@ -33,6 +34,7 @@ __all__ = [
     "append_dead_letter_receipt",
     "append_receipt",
     "create_attempt",
+    "create_bound_attempt",
     "create_deliveries",
     "create_or_return_equivalent",
     "inspect_delivery",
