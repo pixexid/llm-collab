@@ -3787,8 +3787,17 @@ class SessionAutobridgeTest(unittest.TestCase):
         paths = LedgerPaths.derive(root / "project-state", "ws_alpha")
         with patch.object(store_module, "_linked_sqlite_version_info", return_value=SAFE_VERSION):
             with LedgerStore.open_writer(paths) as store:
-                store._connection.execute("DELETE FROM project_registry_snapshots")
-                store._connection.execute("DELETE FROM workspace_registry_snapshots")
+                store.record_registry_snapshot(
+                    workspace_id="ws_alpha",
+                    registry_revision="sha256:" + "b" * 64,
+                    registry_source_sha256="b" * 64,
+                    captured_at_utc="2026-04-22T00:00:01+00:00",
+                    workspace_snapshot_json=json.dumps(
+                        {"workspace_id": "ws_alpha", "projects": ["nuvyr"]}
+                    ),
+                    project_snapshots={"nuvyr": json.dumps({"project_id": "nuvyr"})},
+                    source_snapshots={"nuvyr": {}},
+                )
 
         worker_script = root / "empty_ledger_runtime_worker.py"
         output_file = root / "empty_ledger_runtime_result.json"

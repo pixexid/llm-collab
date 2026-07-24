@@ -4641,6 +4641,7 @@ class CanonicalMessageTest(_CanonicalMessageTestBase):
             packet_path.write_text(packet, encoding="utf-8")
             paths = LedgerPaths.derive(str(Path(tmp) / "ledger"), WORKSPACE)
             with LedgerStore.open_writer(paths) as store:
+                record_registry_for_control(store)
                 seed_delivery_binding(
                     store,
                     participant_id="participant_claude",
@@ -4648,6 +4649,76 @@ class CanonicalMessageTest(_CanonicalMessageTestBase):
                     endpoint_id="endpoint_claude_desktop",
                     native_session_id="runtime-gate",
                 )
+                result = materialize_selected_legacy_packet(
+                    store,
+                    workspace_root=root,
+                    session=session,
+                    message={"path": packet_relpath},
+                )
+                self.assertEqual(
+                    {
+                        "resolved": True,
+                        "materialized": False,
+                        "gate": "disabled",
+                        "registry_revision": None,
+                    },
+                    {
+                        key: result[key]
+                        for key in ("resolved", "materialized", "gate", "registry_revision")
+                    },
+                )
+                self.assertEqual(
+                    (0, 0, 0),
+                    store._connection.execute(
+                        "SELECT count(*), (SELECT count(*) FROM canonical_deliveries), "
+                        "(SELECT count(*) FROM canonical_delivery_attempts) "
+                        "FROM canonical_messages"
+                    ).fetchone(),
+                )
+
+    @patch.dict(os.environ, {control_module.CANONICAL_CONTROL_ENV: "enabled"})
+    def test_materialization_enabled_empty_ledger_returns_disabled_without_canonical_rows(self) -> None:
+        packet_relpath = (
+            "Chats/2026-07-22_materialization__CHAT-EMPTY-LEDGER/"
+            "2026-07-22T00-00-00_to-claude_empty-ledger.md"
+        )
+        session = {
+            "session_id": "SESSION-EMPTY-LEDGER",
+            "agent_id": "claude",
+            "project_id": PROJECT,
+            "chat_id": "CHAT-EMPTY-LEDGER",
+            "repo_targets": ["llm-collab"],
+            "binding_id": "binding_one",
+            "binding_generation": 1,
+            "endpoint_id": "endpoint_claude_desktop",
+            "runtime": {"session_id": "runtime-empty-ledger"},
+        }
+        packet = "\n".join(
+            [
+                "---",
+                "chat_id: CHAT-EMPTY-LEDGER",
+                "from: codex",
+                "to: claude",
+                "title: Empty ledger test",
+                "priority: normal",
+                f"project_id: {PROJECT}",
+                f"sent_utc: {NOW}",
+                "target_session_id: runtime-empty-ledger",
+                "target_binding_id: binding_one",
+                "target_binding_generation: 1",
+                'repo_targets: ["llm-collab"]',
+                "---",
+                "",
+                "Empty ledger body.",
+            ]
+        )
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            root = Path(tmp) / "workspace"
+            packet_path = root / packet_relpath
+            packet_path.parent.mkdir(parents=True)
+            packet_path.write_text(packet, encoding="utf-8")
+            paths = LedgerPaths.derive(str(Path(tmp) / "ledger"), WORKSPACE)
+            with LedgerStore.open_writer(paths) as store:
                 result = materialize_selected_legacy_packet(
                     store,
                     workspace_root=root,
