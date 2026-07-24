@@ -120,7 +120,7 @@ def load_binding(project_id: str, chat_id: str, agent_id: str) -> dict:
         )
     try:
         payload = json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, ValueError) as exc:
         raise FileNotFoundError(
             f"Unreadable binding: project={project_id} chat={chat_id} agent={agent_id}"
         ) from exc

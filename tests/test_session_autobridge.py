@@ -1746,6 +1746,11 @@ class SessionAutobridgeTest(unittest.TestCase):
                         session_autobridge_lib.load_binding(
                             "amiga", "CHAT-BAD-BINDING", "claude"
                         )
+            path.write_bytes(b"\xff")
+            with self.assertRaises(FileNotFoundError):
+                session_autobridge_lib.load_binding(
+                    "amiga", "CHAT-BAD-BINDING", "claude"
+                )
 
     def test_inbox_publish_refuses_heuristic_runtime_discovery_for_all_families(self):
         root = self.make_workspace()
@@ -2222,7 +2227,8 @@ class SessionAutobridgeTest(unittest.TestCase):
             / "CHAT-BIND-MALFORMED"
             / "claude.json"
         )
-        write(binding_path, "{")
+        binding_path.parent.mkdir(parents=True, exist_ok=True)
+        binding_path.write_bytes(b"\xff")
 
         deliver_result = subprocess.run(
             [
