@@ -664,9 +664,17 @@ def message_targets_session(session: dict, message: dict) -> tuple[bool, str]:
         return True, "broadcast_or_agent_scoped"
     if str(target_session_id) in session_target_ids(session):
         if exact_required:
-            if (
-                session.get("project_id") != frontmatter.get("project_id")
-                or session.get("chat_id") != frontmatter.get("chat_id")
+            session_project = session.get("project_id")
+            session_chat = session.get("chat_id")
+            message_project = frontmatter.get("project_id")
+            message_chat = frontmatter.get("chat_id")
+            if not (
+                session_project
+                and session_chat
+                and message_project
+                and message_chat
+                and session_project == message_project
+                and session_chat == message_chat
             ):
                 return False, ROUTE_AMBIGUOUS_REASON
             return binding_scoped_message_matches_session(session, message)

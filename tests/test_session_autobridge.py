@@ -3725,6 +3725,20 @@ class SessionAutobridgeTest(unittest.TestCase):
             (False, session_autobridge_lib.ROUTE_AMBIGUOUS_REASON),
             session_autobridge_lib.message_targets_session(wildcard_session, message),
         )
+        missing_scope_message = {
+            "frontmatter": {
+                "target_session_id": "gemini-runtime-1",
+                "repo_targets": ["llm-collab"],
+                "target_binding_id": "binding_current",
+                "target_binding_generation": 7,
+            }
+        }
+        self.assertEqual(
+            (False, session_autobridge_lib.ROUTE_AMBIGUOUS_REASON),
+            session_autobridge_lib.message_targets_session(
+                wildcard_session, missing_scope_message
+            ),
+        )
 
     def test_watch_inbox_marks_only_binding_matched_runtime_paths(self):
         root = self.make_workspace()
