@@ -259,7 +259,7 @@ def insert_v8_challenge(connection: sqlite3.Connection, *, challenge_id: str = "
 def v8_fingerprint_for(statements: tuple[str, ...]) -> str:
     connection = sqlite3.connect(":memory:")
     try:
-        for _version, migration in store_module.MIGRATIONS[:-3]:
+        for _version, migration in store_module.MIGRATIONS[:-4]:
             for statement in migration:
                 connection.execute(statement)
         for statement in statements:
@@ -272,7 +272,7 @@ def v8_fingerprint_for(statements: tuple[str, ...]) -> str:
 def v9_fingerprint_for_v8(statements: tuple[str, ...]) -> str:
     connection = sqlite3.connect(":memory:")
     try:
-        for _version, migration in store_module.MIGRATIONS[:-3]:
+        for _version, migration in store_module.MIGRATIONS[:-4]:
             for statement in migration:
                 connection.execute(statement)
         for statement in statements:
@@ -287,7 +287,7 @@ def v9_fingerprint_for_v8(statements: tuple[str, ...]) -> str:
 def v10_fingerprint_for_v8(statements: tuple[str, ...]) -> str:
     connection = sqlite3.connect(":memory:")
     try:
-        for _version, migration in store_module.MIGRATIONS[:-3]:
+        for _version, migration in store_module.MIGRATIONS[:-4]:
             for statement in migration:
                 connection.execute(statement)
         for statement in statements:
@@ -301,17 +301,38 @@ def v10_fingerprint_for_v8(statements: tuple[str, ...]) -> str:
         connection.close()
 
 
+def v11_fingerprint_for_v8(statements: tuple[str, ...]) -> str:
+    connection = sqlite3.connect(":memory:")
+    try:
+        for _version, migration in store_module.MIGRATIONS[:-4]:
+            for statement in migration:
+                connection.execute(statement)
+        for statement in statements:
+            connection.execute(statement)
+        for statement in store_module.V9_SQL:
+            connection.execute(statement)
+        for statement in store_module.V10_SQL:
+            connection.execute(statement)
+        for statement in store_module.V11_SQL:
+            connection.execute(statement)
+        return store_module._schema_fingerprint(connection)
+    finally:
+        connection.close()
+
+
 @contextmanager
 def open_store_with_v8(paths: LedgerPaths, statements: tuple[str, ...]):
     checksum = store_module._migration_checksum(statements)
     fingerprint = v8_fingerprint_for(statements)
     v9_fingerprint = v9_fingerprint_for_v8(statements)
     v10_fingerprint = v10_fingerprint_for_v8(statements)
+    v11_fingerprint = v11_fingerprint_for_v8(statements)
     migrations = (
-        *store_module.MIGRATIONS[:-3],
+        *store_module.MIGRATIONS[:-4],
         (8, statements),
         (9, store_module.V9_SQL),
         (10, store_module.V10_SQL),
+        (11, store_module.V11_SQL),
     )
     with (
         patch.object(store_module, "V8_SQL", statements),
@@ -319,6 +340,7 @@ def open_store_with_v8(paths: LedgerPaths, statements: tuple[str, ...]):
         patch.object(store_module, "V8_SCHEMA_FINGERPRINT", fingerprint),
         patch.object(store_module, "V9_SCHEMA_FINGERPRINT", v9_fingerprint),
         patch.object(store_module, "V10_SCHEMA_FINGERPRINT", v10_fingerprint),
+        patch.object(store_module, "V11_SCHEMA_FINGERPRINT", v11_fingerprint),
         LedgerStore.open_writer(paths, migrations=migrations) as store,
     ):
         yield store
@@ -856,8 +878,9 @@ class CompatibilityProjectionTest(unittest.TestCase):
             "V8_SQL": "21f2d8971cad7428b0da108df3b64f7f05e3f92ad05ac53cba2209cb13ae63cd",
             "V9_SQL": "9381ebdcff6d3e512f0760e67254bae826c3cfbbf6d8a8d4347ed83b6b65fbab",
             "V10_SQL": "8270fde4fb3e86eb0bf743c1d1222a5e1961e2436b79cffbbbbbf92f4298e2c9",
+            "V11_SQL": "905783c2dda078ff675b51e942fb4786e0ca48612778e09289eb689b26578a2d",
         }
-        self.assertEqual(store_module.SCHEMA_VERSION, 10)
+        self.assertEqual(store_module.SCHEMA_VERSION, 11)
         self.assertEqual(
             {
                 name: hashlib.sha256("\n".join(getattr(store_module, name)).encode()).hexdigest()
@@ -877,6 +900,7 @@ class CompatibilityProjectionTest(unittest.TestCase):
                 store_module.V8_MIGRATION_CHECKSUM,
                 store_module.V9_MIGRATION_CHECKSUM,
                 store_module.V10_MIGRATION_CHECKSUM,
+                store_module.V11_MIGRATION_CHECKSUM,
                 store_module.V1_SCHEMA_FINGERPRINT,
                 store_module.V2_SCHEMA_FINGERPRINT,
                 store_module.V3_SCHEMA_FINGERPRINT,
@@ -887,6 +911,7 @@ class CompatibilityProjectionTest(unittest.TestCase):
                 store_module.V8_SCHEMA_FINGERPRINT,
                 store_module.V9_SCHEMA_FINGERPRINT,
                 store_module.V10_SCHEMA_FINGERPRINT,
+                store_module.V11_SCHEMA_FINGERPRINT,
             ),
             (
                 "sha256:ce236daff444f736e01f3666ed44baf1c3ba17e81215fedb638276aff76b01c7",
@@ -899,6 +924,7 @@ class CompatibilityProjectionTest(unittest.TestCase):
                 "sha256:437fe52450978b246b2a62fd5a0a0f08ddbf4f3f97501dafda0eb999e48580ff",
                 "sha256:601eb6b5a7edfd3b409e578c9d57ea752c5af30cfd027c34512a16b1dc1c9a3b",
                 "sha256:44547c1810cacf9ba9d8edc2e7ee057446d93d1103d4c1424a868febbb525ecd",
+                "sha256:4b61d82c2a2578fdd25f39ea42f73cc5545edf40460df45c0ef986eae84c57fe",
                 "sha256:26a856329406e45d22a8fbecdbd769d9c632acae3652d8c72438d228de7cfca2",
                 "sha256:805aa5ae43c31d85dbe9a84590050b701ddc69cfe1dd225e9c6e67afbd889a7c",
                 "sha256:88e59c9be91df366c03985f99f8b3db1c68382b4846612c0334fd15cc505e673",
@@ -909,6 +935,7 @@ class CompatibilityProjectionTest(unittest.TestCase):
                 "sha256:9aefd9f214307d6645358444485b632dcbfc8c1a809a0c3708c369909abdaf3f",
                 "sha256:867ed58b94e0dae45c21347409af0daa30ae901b6e2120111b2a26fddd8a4889",
                 "sha256:f32ef268eb81fced863c66f0209cc8fcfaac87a3c87bf628454d74c405124427",
+                "sha256:decb92cd78ac700383cf7e1b5a7b2c5137e37978b2b06a1cc108bcb9da559081",
             ),
         )
 
