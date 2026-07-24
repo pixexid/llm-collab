@@ -231,6 +231,46 @@ class SessionLifecycleCore:
             expected_generation=expected_generation,
         )
 
+    def inspect_for_operator(
+        self,
+        store: LedgerStore,
+        subject: LifecycleSubject,
+        *,
+        expected_binding_id: str | None = None,
+        expected_generation: int | None = None,
+    ) -> dict[str, object]:
+        """Return a fixed read-only operator projection for one participant binding."""
+
+        if store._connection.execute("PRAGMA query_only").fetchone()[0] != 1:
+            raise SessionLifecycleError("operator inspection requires a query-only reader")
+        resolved = self.inspect(
+            store,
+            subject,
+            expected_binding_id=expected_binding_id,
+            expected_generation=expected_generation,
+        )
+        return {
+            "projection_kind": "session_lifecycle_operator_inspection_v1",
+            "authority": "read_only_inspection",
+            "resolved": resolved["resolved"],
+            "reason": resolved["reason"],
+            "workspace_id": resolved["workspace_id"],
+            "scope_kind": resolved["scope_kind"],
+            "scope_identity": resolved["scope_identity"],
+            "conversation_id": resolved["conversation_id"],
+            "participant_id": resolved["participant_id"],
+            "binding_id": resolved.get("binding_id"),
+            "generation": resolved.get("generation"),
+            "state": resolved.get("state"),
+            "mutation_capable": resolved.get("mutation_capable"),
+            "provider_id": resolved.get("provider_id"),
+            "provider_revision": resolved.get("provider_revision"),
+            "endpoint_id": resolved.get("endpoint_id"),
+            "session_ref_id": resolved.get("session_ref_id"),
+            "native_session_id": resolved.get("native_session_id"),
+            "runtime_instance_id": resolved.get("runtime_instance_id"),
+        }
+
     def heartbeat(
         self,
         store: LedgerStore,

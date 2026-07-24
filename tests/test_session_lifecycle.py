@@ -29,6 +29,54 @@ NOW = "2026-07-23T00:00:00+00:00"
 BEFORE_EXPIRY = "2026-07-23T00:00:59+00:00"
 AT_EXPIRY = "2026-07-23T00:01:00+00:00"
 SAFE_VERSION = (3, 51, 3)
+OPERATOR_INSPECTION_KEYS = {
+    "projection_kind",
+    "authority",
+    "resolved",
+    "reason",
+    "workspace_id",
+    "scope_kind",
+    "scope_identity",
+    "conversation_id",
+    "participant_id",
+    "binding_id",
+    "generation",
+    "state",
+    "mutation_capable",
+    "provider_id",
+    "provider_revision",
+    "endpoint_id",
+    "session_ref_id",
+    "native_session_id",
+    "runtime_instance_id",
+}
+LIFECYCLE_ROW_COUNT_TABLES = (
+    "conversation_participants",
+    "lifecycle_provider_registry",
+    "conversation_bindings",
+    "session_binding_challenges",
+    "canonical_delivery_attempt_binding_freezes",
+    "conversation_binding_transition_audit",
+    "legacy_provenance_imports",
+    "legacy_autobridge_provenance_imports",
+)
+WRITE_SQL_PREFIXES = (
+    "INSERT",
+    "UPDATE",
+    "DELETE",
+    "REPLACE",
+    "CREATE",
+    "DROP",
+    "ALTER",
+    "BEGIN",
+    "COMMIT",
+    "ROLLBACK",
+    "SAVEPOINT",
+    "RELEASE",
+    "VACUUM",
+    "ATTACH",
+    "DETACH",
+)
 
 
 def frame(value: str) -> bytes:
@@ -53,6 +101,13 @@ def expected_binding_id(*, session_ref_id: str, generation: int) -> str:
         "runtime_one",
     )
     return "binding_" + hashlib.sha256(b"".join(frame(value) for value in fields)).hexdigest()
+
+
+def row_counts(store: LedgerStore) -> dict[str, int]:
+    return {
+        table: store._connection.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
+        for table in LIFECYCLE_ROW_COUNT_TABLES
+    }
 
 
 def subject(**changes: str) -> LifecycleSubject:
@@ -325,6 +380,92 @@ class LifecycleTest(unittest.TestCase):
                 "session_unverified",
             )
 
+    def test_operator_inspection_is_query_only_closed_and_non_authoritative(self) -> None:
+        active_subject = subject()
+        with LedgerStore.open_writer(self.paths) as store:
+            challenge = self.reserve(store, active_subject)
+            binding = self.consume(store, active_subject, challenge)
+
+        with LedgerStore.open_reader(self.paths) as reader:
+            self.assertEqual(reader._connection.execute("PRAGMA query_only").fetchone()[0], 1)
+            before = row_counts(reader)
+            statements: list[str] = []
+            reader._connection.set_trace_callback(statements.append)
+            try:
+                projected = self.core.inspect_for_operator(reader, active_subject)
+                stale = self.core.inspect_for_operator(
+                    reader,
+                    active_subject,
+                    expected_binding_id=str(binding["binding_id"]),
+                    expected_generation=2,
+                )
+            finally:
+                reader._connection.set_trace_callback(None)
+            after = row_counts(reader)
+
+        self.assertEqual(before, after)
+        write_statements = [
+            statement
+            for statement in statements
+            if statement.lstrip().upper().startswith(WRITE_SQL_PREFIXES)
+        ]
+        self.assertEqual(write_statements, [])
+        self.assertEqual(set(projected), OPERATOR_INSPECTION_KEYS)
+        self.assertEqual(projected["projection_kind"], "session_lifecycle_operator_inspection_v1")
+        self.assertEqual(projected["authority"], "read_only_inspection")
+        self.assertIs(projected["resolved"], True)
+        self.assertEqual(projected["binding_id"], binding["binding_id"])
+        self.assertEqual(projected["generation"], 1)
+        self.assertEqual(projected["state"], "active")
+        self.assertEqual(projected["session_ref_id"], binding["session_ref_id"])
+        self.assertIsInstance(projected["authority"], str)
+        self.assertFalse(
+            {
+                "evidence",
+                "extensions",
+                "repository_binding",
+                "runtime_home",
+                "scope",
+                "schema_version",
+            }
+            & set(projected)
+        )
+        self.assertEqual(set(stale), OPERATOR_INSPECTION_KEYS)
+        self.assertIs(stale["resolved"], False)
+        self.assertEqual(stale["reason"], "stale_generation")
+        self.assertIsNone(stale["binding_id"])
+
+    def test_operator_inspection_requires_full_subject_and_query_only_reader(self) -> None:
+        self.assertEqual(
+            [
+                name
+                for name in inspect.signature(
+                    SessionLifecycleCore.inspect_for_operator
+                ).parameters
+                if name not in {
+                    "self",
+                    "store",
+                    "subject",
+                    "expected_binding_id",
+                    "expected_generation",
+                }
+            ],
+            [],
+        )
+        active_subject = subject()
+        with LedgerStore.open_writer(self.paths) as store:
+            challenge = self.reserve(store, active_subject)
+            self.consume(store, active_subject, challenge)
+            with self.assertRaisesRegex(SessionLifecycleError, "query-only reader"):
+                self.core.inspect_for_operator(store, active_subject)
+
+        with LedgerStore.open_reader(self.paths) as reader:
+            missing_participant = self.core.inspect_for_operator(
+                reader,
+                subject(participant_id="participant_missing"),
+            )
+        self.assertEqual(missing_participant["reason"], "waiting_for_session")
+
     def test_retire_open_ui_and_consumer_boundaries(self) -> None:
         active_subject = subject()
         with LedgerStore.open_writer(self.paths) as store:
@@ -432,6 +573,16 @@ class LifecycleTest(unittest.TestCase):
             if isinstance(node, ast.ImportFrom) and node.module
         }
         self.assertFalse({"subprocess", "socket", "time", "datetime", "Quartz"} & imports)
+        text = lifecycle.read_text(encoding="utf-8")
+        for forbidden in (
+            "_session_autobridge",
+            "runtime_adapter",
+            "Computer Use",
+            "computer_use",
+            "browser",
+            "webbrowser",
+        ):
+            self.assertNotIn(forbidden, text)
         forbidden_calls = []
         for node in ast.walk(tree):
             if isinstance(node, ast.Attribute) and node.attr in {"now", "time", "monotonic"}:
