@@ -22,6 +22,7 @@ WATCH_INBOX_SCRIPT = REPO_ROOT / "bin" / "watch_inbox.py"
 sys.path.insert(0, str(REPO_ROOT / "bin"))
 
 import _session_autobridge as session_autobridge_lib
+import watch_inbox as watch_inbox_lib
 from _helpers import parse_frontmatter
 
 
@@ -89,10 +90,14 @@ class SessionAutobridgeTest(unittest.TestCase):
         sender_session_id: str | None = None,
         target_session_id: str | None = None,
         sender_agent_id: str | None = None,
+        repo_targets: list[str] | None = None,
+        target_binding_id: str | None = None,
+        target_binding_generation: int | None = None,
+        packet_slug: str = "test",
     ) -> str:
         chat_dir = root / "Chats" / f"2026-04-22_autobridge-test__{chat_id}"
         write_json(chat_dir / "meta.json", {"chat_id": chat_id, "project_id": project_id})
-        message_rel = f"Chats/{chat_dir.name}/2026-04-22T00-00-00_to-{agent_id}_test.md"
+        message_rel = f"Chats/{chat_dir.name}/2026-04-22T00-00-00_to-{agent_id}_{packet_slug}.md"
         message_path = root / message_rel
         frontmatter_lines = [
             "---",
@@ -108,6 +113,12 @@ class SessionAutobridgeTest(unittest.TestCase):
             frontmatter_lines.append(f"sender_session_id: {sender_session_id}")
         if target_session_id:
             frontmatter_lines.append(f"target_session_id: {target_session_id}")
+        if repo_targets is not None:
+            frontmatter_lines.append("repo_targets: " + json.dumps(repo_targets))
+        if target_binding_id:
+            frontmatter_lines.append(f"target_binding_id: {target_binding_id}")
+        if target_binding_generation is not None:
+            frontmatter_lines.append(f"target_binding_generation: {target_binding_generation}")
         frontmatter_lines.extend(
             [
                 "---",
@@ -160,6 +171,7 @@ class SessionAutobridgeTest(unittest.TestCase):
             chat_id="CHAT-TEST1234",
             project_id="amiga",
             title="Runtime trigger",
+            target_session_id="api-trigger-1",
         )
         worker_script = root / "runtime_worker.py"
         output_file = root / "runtime_result.json"
@@ -2861,6 +2873,248 @@ class SessionAutobridgeTest(unittest.TestCase):
         session_payload = self.run_cli(root, "show", "--session", "SESSION-WATCHER")
         self.assertIn(message_rel, session_payload["processed_messages"])
 
+    def test_runtime_receive_requires_explicit_target_session(self):
+        runtime_session = {
+            "session_id": "SESSION-RUNTIME",
+            "agent_id": "gemini",
+            "wake_strategy": "runtime_trigger",
+            "runtime": {
+                "family": "gemini_cli",
+                "session_id": "gemini-runtime-1",
+            },
+        }
+        notify_session = {
+            **runtime_session,
+            "wake_strategy": "notify",
+        }
+        message = {"frontmatter": {}}
+
+        self.assertEqual(
+            (False, session_autobridge_lib.ROUTE_AMBIGUOUS_REASON),
+            session_autobridge_lib.message_targets_session(runtime_session, message),
+        )
+        self.assertEqual(
+            (True, "broadcast_or_agent_scoped"),
+            session_autobridge_lib.message_targets_session(notify_session, message),
+        )
+
+    def test_runtime_receive_rejects_repo_binding_and_generation_mismatch(self):
+        session = {
+            "session_id": "SESSION-RUNTIME",
+            "agent_id": "gemini",
+            "wake_strategy": "runtime_trigger",
+            "runtime": {
+                "family": "gemini_cli",
+                "session_id": "gemini-runtime-1",
+            },
+            "repo_targets": ["llm-collab"],
+            "binding_id": "binding_current",
+            "binding_generation": 7,
+        }
+        base_frontmatter = {
+            "target_session_id": "gemini-runtime-1",
+            "repo_targets": ["llm-collab"],
+            "target_binding_id": "binding_current",
+            "target_binding_generation": 7,
+        }
+
+        self.assertEqual(
+            (True, "explicit_target_match"),
+            session_autobridge_lib.message_targets_session(
+                session, {"frontmatter": dict(base_frontmatter)}
+            ),
+        )
+
+        cases = [
+            (
+                {"repo_targets": ["amiga"]},
+                session_autobridge_lib.ROUTE_AMBIGUOUS_REASON,
+            ),
+            (
+                {"target_binding_id": "binding_other"},
+                session_autobridge_lib.ROUTE_AMBIGUOUS_REASON,
+            ),
+            (
+                {"target_binding_generation": 6},
+                session_autobridge_lib.STALE_GENERATION_REASON,
+            ),
+        ]
+        for override, reason in cases:
+            with self.subTest(override=override):
+                frontmatter = {**base_frontmatter, **override}
+                self.assertEqual(
+                    (False, reason),
+                    session_autobridge_lib.message_targets_session(
+                        session, {"frontmatter": frontmatter}
+                    ),
+                )
+
+    def test_watch_inbox_marks_only_binding_matched_runtime_paths(self):
+        root = self.make_workspace()
+        self.add_agent(
+            root,
+            {
+                "id": "gemini",
+                "display_name": "Gemini",
+                "activation": {"type": "cli_session", "watcher_enabled": True},
+            },
+        )
+        matched = self.add_message(
+            root,
+            agent_id="gemini",
+            chat_id="CHAT-BIND-SAFE",
+            project_id="amiga",
+            title="Matched binding",
+            target_session_id="gemini-runtime-a",
+            repo_targets=["llm-collab"],
+            target_binding_id="binding-a",
+            target_binding_generation=7,
+            sender_agent_id="codex",
+            packet_slug="matched",
+        )
+        wrong_repo = self.add_message(
+            root,
+            agent_id="gemini",
+            chat_id="CHAT-BIND-SAFE",
+            project_id="amiga",
+            title="Wrong repo",
+            target_session_id="gemini-runtime-a",
+            repo_targets=["amiga"],
+            target_binding_id="binding-a",
+            target_binding_generation=7,
+            sender_agent_id="codex",
+            packet_slug="wrong-repo",
+        )
+        wrong_binding = self.add_message(
+            root,
+            agent_id="gemini",
+            chat_id="CHAT-BIND-SAFE",
+            project_id="amiga",
+            title="Wrong binding",
+            target_session_id="gemini-runtime-a",
+            repo_targets=["llm-collab"],
+            target_binding_id="binding-b",
+            target_binding_generation=7,
+            sender_agent_id="codex",
+            packet_slug="wrong-binding",
+        )
+        missing_target = self.add_message(
+            root,
+            agent_id="gemini",
+            chat_id="CHAT-BIND-SAFE",
+            project_id="amiga",
+            title="Missing target",
+            repo_targets=["llm-collab"],
+            target_binding_id="binding-a",
+            target_binding_generation=7,
+            sender_agent_id="codex",
+            packet_slug="missing-target",
+        )
+        worker_script = root / "binding_scoped_runtime.py"
+        output_a = root / "binding_scoped_runtime_a.json"
+        output_b = root / "binding_scoped_runtime_b.json"
+        write(
+            worker_script,
+            "\n".join(
+                [
+                    "import json",
+                    "import sys",
+                    "from pathlib import Path",
+                    "payload = json.load(sys.stdin)",
+                    "Path(sys.argv[1]).write_text(json.dumps(payload, indent=2))",
+                ]
+            ),
+        )
+
+        for session_id, runtime_id, output_file in (
+            ("SESSION-BIND-A", "gemini-runtime-a", output_a),
+            ("SESSION-BIND-B", "gemini-runtime-b", output_b),
+        ):
+            self.run_cli(
+                root,
+                "register",
+                "--session",
+                session_id,
+                "--agent",
+                "gemini",
+                "--project",
+                "amiga",
+                "--chat",
+                "CHAT-BIND-SAFE",
+                "--mode",
+                "auto-read",
+                "--wake-strategy",
+                "runtime_trigger",
+                "--runtime-family",
+                "gemini_cli",
+                "--runtime-session-id",
+                runtime_id,
+                "--runtime-session-source",
+                "first_read",
+                "--runtime-command",
+                json.dumps([sys.executable, str(worker_script), str(output_file)]),
+            )
+            session_path = root / "State" / "session_autobridge" / "sessions" / f"{session_id}.json"
+            session_payload = json.loads(session_path.read_text())
+            session_payload["repo_targets"] = ["llm-collab"]
+            session_payload["binding_id"] = "binding-a" if session_id.endswith("-A") else "binding-b"
+            session_payload["binding_generation"] = 7
+            write_json(session_path, session_payload)
+
+        watcher_result = subprocess.run(
+            [
+                sys.executable,
+                str(WATCH_INBOX_SCRIPT),
+                "--me",
+                "gemini",
+                "--max-polls",
+                "1",
+                "--json",
+            ],
+            cwd=root,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        watcher_events = [
+            json.loads(line) for line in watcher_result.stdout.splitlines() if line.strip()
+        ]
+        consumed = [
+            event["message_path"]
+            for event in watcher_events
+            if event["event"] == "autobridge_consumed"
+        ]
+        self.assertEqual([matched], consumed)
+        self.assertTrue(output_a.exists())
+        self.assertFalse(output_b.exists())
+
+        inbox = json.loads((root / "agents" / "gemini" / "inbox.json").read_text())
+        self.assertEqual([matched], inbox["read"])
+        self.assertEqual([wrong_repo, wrong_binding, missing_target], inbox["unread"])
+
+    def test_watch_inbox_read_state_guard_is_not_in_helpers(self):
+        with patch.object(watch_inbox_lib, "autobridge_session_ids", return_value=["SESSION-A"]):
+            with patch.object(
+                watch_inbox_lib,
+                "dispatch_session",
+                return_value={
+                    "actions": [
+                        {
+                            "effective_action": "runtime_trigger",
+                            "message_path": "Chats/x/matched.md",
+                            "runtime_result": {"returncode": 0},
+                        }
+                    ]
+                },
+            ):
+                with patch.object(watch_inbox_lib, "mark_messages_read") as mark_read:
+                    self.assertEqual(
+                        ["Chats/x/matched.md"],
+                        watch_inbox_lib.dispatch_autobridge("gemini", json_output=True),
+                    )
+
+        mark_read.assert_called_once_with("gemini", ["Chats/x/matched.md"])
+
     def test_watch_inbox_consumes_unread_in_only_one_overlapping_session(self):
         root = self.make_workspace()
         self.add_agent(
@@ -2878,6 +3132,7 @@ class SessionAutobridgeTest(unittest.TestCase):
             project_id="amiga",
             title="Watcher overlap",
             sender_session_id="codex-live-1",
+            target_session_id="session-watcher-a",
             sender_agent_id="codex",
         )
         worker_script = root / "watcher_runtime_overlap.py"
