@@ -5098,6 +5098,8 @@ class LedgerStore:
         conversation_id: str,
         participant_id: str,
         resolve_binding: Callable[..., dict[str, object]],
+        expected_binding_id: str | None = None,
+        expected_generation: int | None = None,
     ) -> dict[str, object]:
         self.canonical_preflight(write=True)
         workspace_id, scope_kind, scope_identity = _canonical_scope(
@@ -5123,6 +5125,18 @@ class LedgerStore:
             conversation_id, "conversation_id", 128
         )
         participant_id = _conversation_binding_text(participant_id, "participant_id", 128)
+        if (expected_binding_id is None) != (expected_generation is None):
+            raise ValueError("expected binding id and generation must be provided together")
+        if expected_binding_id is not None:
+            expected_binding_id = _conversation_binding_text(
+                expected_binding_id, "expected_binding_id", 128
+            )
+            if (
+                isinstance(expected_generation, bool)
+                or not isinstance(expected_generation, int)
+                or expected_generation <= 0
+            ):
+                raise ValueError("expected_generation must be a positive integer")
         if (
             getattr(resolve_binding, "__self__", None) is not self
             or getattr(resolve_binding, "__func__", None)
@@ -5204,6 +5218,17 @@ class LedgerStore:
                     raise CanonicalConflictError(
                         "canonical delivery attempt conflicts with different binding target"
                     )
+                if expected_binding_id is not None and (
+                    str(binding_id), int(generation)
+                ) != (expected_binding_id, expected_generation):
+                    self._connection.execute("COMMIT")
+                    return result(
+                        created=False,
+                        resolved=False,
+                        reason="stale_generation",
+                        binding_id=str(binding_id),
+                        generation=int(generation),
+                    )
                 resolved = resolve_binding(
                     workspace_id=workspace_id,
                     scope_kind=scope_kind,
@@ -5253,6 +5278,8 @@ class LedgerStore:
                 scope_identity=scope_identity,
                 conversation_id=conversation_id,
                 participant_id=participant_id,
+                expected_binding_id=expected_binding_id,
+                expected_generation=expected_generation,
             )
             if not resolved["resolved"]:
                 self._connection.execute("COMMIT")

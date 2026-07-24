@@ -18,6 +18,7 @@ import llm_collab.canonical as canonical
 import llm_collab.canonical.control as control_module
 import llm_collab.canonical.delivery as delivery_module
 from llm_collab.canonical.legacy_packet_materialization import (
+    LegacyPacketMaterializationRefused,
     materialize_selected_legacy_packet,
 )
 import llm_collab.canonical.messages as messages_module
@@ -2031,6 +2032,91 @@ class CanonicalMessageTest(_CanonicalMessageTestBase):
                         ).fetchone()[0],
                         0,
                     )
+
+    def test_bound_attempt_create_refuses_rebind_after_expected_binding_selection(self) -> None:
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            paths = LedgerPaths.derive(tmp, WORKSPACE)
+            with LedgerStore.open_writer(paths) as store:
+                record_registry(store)
+                message_id, delivery_id = delivery_route_fixture(store)
+                seed_delivery_binding(store)
+                result = create_bound_attempt(
+                    store,
+                    workspace_id=WORKSPACE,
+                    scope_kind="project",
+                    scope_identity=PROJECT,
+                    message_id=message_id,
+                    delivery_id=delivery_id,
+                    attempt_index=0,
+                    attempt_epoch_ms=1_100,
+                    created_at_utc=NOW,
+                    conversation_id="CHAT-SAMEID",
+                    participant_id="participant_claude",
+                    expected_binding_id="binding_one",
+                    expected_generation=2,
+                )
+                self.assertEqual("stale_generation", result["reason"])
+                self.assertFalse(result["resolved"])
+                self.assertEqual(
+                    (0, 0),
+                    store._connection.execute(
+                        "SELECT count(*), (SELECT count(*) FROM canonical_delivery_attempt_binding_freezes) "
+                        "FROM canonical_delivery_attempts"
+                    ).fetchone(),
+                )
+
+    def test_bound_attempt_retry_refuses_existing_freeze_that_differs_from_expected_binding(self) -> None:
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            paths = LedgerPaths.derive(tmp, WORKSPACE)
+            with LedgerStore.open_writer(paths) as store:
+                record_registry(store)
+                message_id, delivery_id = delivery_route_fixture(store)
+                seed_delivery_binding(store)
+                first = create_bound_attempt(
+                    store,
+                    workspace_id=WORKSPACE,
+                    scope_kind="project",
+                    scope_identity=PROJECT,
+                    message_id=message_id,
+                    delivery_id=delivery_id,
+                    attempt_index=0,
+                    attempt_epoch_ms=1_100,
+                    created_at_utc=NOW,
+                    conversation_id="CHAT-SAMEID",
+                    participant_id="participant_claude",
+                    expected_binding_id="binding_one",
+                    expected_generation=1,
+                )
+                freeze_before = store._connection.execute(
+                    "SELECT conversation_id, participant_id, binding_id, binding_generation "
+                    "FROM canonical_delivery_attempt_binding_freezes WHERE attempt_id = ?",
+                    (first["attempt_id"],),
+                ).fetchone()
+                repeated = create_bound_attempt(
+                    store,
+                    workspace_id=WORKSPACE,
+                    scope_kind="project",
+                    scope_identity=PROJECT,
+                    message_id=message_id,
+                    delivery_id=delivery_id,
+                    attempt_index=0,
+                    attempt_epoch_ms=1_100,
+                    created_at_utc=NOW,
+                    conversation_id="CHAT-SAMEID",
+                    participant_id="participant_claude",
+                    expected_binding_id="binding_two",
+                    expected_generation=2,
+                )
+                self.assertEqual("stale_generation", repeated["reason"])
+                self.assertFalse(repeated["resolved"])
+                self.assertEqual(
+                    freeze_before,
+                    store._connection.execute(
+                        "SELECT conversation_id, participant_id, binding_id, binding_generation "
+                        "FROM canonical_delivery_attempt_binding_freezes WHERE attempt_id = ?",
+                        (first["attempt_id"],),
+                    ).fetchone(),
+                )
 
     def test_bound_attempt_reuses_closed_reason_vocabulary_and_preserves_old_freeze(self) -> None:
         reason_cases = (
@@ -4512,7 +4598,225 @@ class CanonicalMessageTest(_CanonicalMessageTestBase):
                 changed[field] = value
                 self.assertNotEqual(messages_module._derive_message_id(**changed), original)
 
-    def test_legacy_packet_materialization_is_deterministic_and_packet_edit_creates_new_message(self) -> None:
+    @patch.dict(os.environ, {control_module.CANONICAL_CONTROL_ENV: ""})
+    def test_dispatch_default_off_gate_preserves_legacy_runtime_without_canonical_rows(self) -> None:
+        packet_relpath = (
+            "Chats/2026-07-22_materialization__CHAT-GATE/"
+            "2026-07-22T00-00-00_to-claude_gate.md"
+        )
+        session = {
+            "session_id": "SESSION-GATE",
+            "agent_id": "claude",
+            "project_id": PROJECT,
+            "chat_id": "CHAT-GATE",
+            "repo_targets": ["llm-collab"],
+            "binding_id": "binding_one",
+            "binding_generation": 1,
+            "endpoint_id": "endpoint_claude_desktop",
+            "runtime": {"session_id": "runtime-gate"},
+        }
+        packet = "\n".join(
+            [
+                "---",
+                "chat_id: CHAT-GATE",
+                "from: codex",
+                "to: claude",
+                "title: Gate test",
+                "priority: normal",
+                f"project_id: {PROJECT}",
+                f"sent_utc: {NOW}",
+                "target_session_id: runtime-gate",
+                "target_binding_id: binding_one",
+                "target_binding_generation: 1",
+                'repo_targets: ["llm-collab"]',
+                "---",
+                "",
+                "Gate body.",
+            ]
+        )
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            root = Path(tmp) / "workspace"
+            packet_path = root / packet_relpath
+            packet_path.parent.mkdir(parents=True)
+            packet_path.write_text(packet, encoding="utf-8")
+            paths = LedgerPaths.derive(str(Path(tmp) / "ledger"), WORKSPACE)
+            with LedgerStore.open_writer(paths) as store:
+                record_registry_for_control(store)
+                seed_delivery_binding(
+                    store,
+                    participant_id="participant_claude",
+                    agent_id="agent_claude",
+                    endpoint_id="endpoint_claude_desktop",
+                    native_session_id="runtime-gate",
+                )
+                result = materialize_selected_legacy_packet(
+                    store,
+                    workspace_root=root,
+                    session=session,
+                    message={"path": packet_relpath},
+                )
+                self.assertEqual(
+                    {
+                        "resolved": True,
+                        "materialized": False,
+                        "gate": "disabled",
+                    },
+                    {key: result[key] for key in ("resolved", "materialized", "gate")},
+                )
+                self.assertEqual(
+                    (0, 0, 0),
+                    store._connection.execute(
+                        "SELECT count(*), (SELECT count(*) FROM canonical_deliveries), "
+                        "(SELECT count(*) FROM canonical_delivery_attempts) "
+                        "FROM canonical_messages"
+                    ).fetchone(),
+                )
+
+    def test_materialization_normalizes_crlf_frontmatter_parser_error_without_canonical_rows(self) -> None:
+        packet_relpath = (
+            "Chats/2026-07-22_materialization__CHAT-CRLF/"
+            "2026-07-22T00-00-00_to-claude_crlf.md"
+        )
+        session = {
+            "session_id": "SESSION-CRLF",
+            "agent_id": "claude",
+            "project_id": PROJECT,
+            "chat_id": "CHAT-CRLF",
+            "repo_targets": ["llm-collab"],
+            "binding_id": "binding_one",
+            "binding_generation": 1,
+            "endpoint_id": "endpoint_claude_desktop",
+            "runtime": {"session_id": "runtime-crlf"},
+        }
+        packet = b"\r\n".join(
+            [
+                b"---",
+                b"chat_id: CHAT-CRLF",
+                b"from: codex",
+                b"to: claude",
+                b"title: CRLF parser test",
+                b"priority: normal",
+                f"project_id: {PROJECT}".encode("utf-8"),
+                f"sent_utc: {NOW}".encode("utf-8"),
+                b"target_session_id: runtime-crlf",
+                b"target_binding_id: binding_one",
+                b"target_binding_generation: 1",
+                b'repo_targets: ["llm-collab"]',
+                b"---",
+                b"",
+                b"Body.",
+            ]
+        )
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            root = Path(tmp) / "workspace"
+            packet_path = root / packet_relpath
+            packet_path.parent.mkdir(parents=True)
+            packet_path.write_bytes(packet)
+            paths = LedgerPaths.derive(str(Path(tmp) / "ledger"), WORKSPACE)
+            with LedgerStore.open_writer(paths) as store:
+                with self.assertRaisesRegex(
+                    LegacyPacketMaterializationRefused,
+                    "legacy packet is missing frontmatter",
+                ):
+                    materialize_selected_legacy_packet(
+                        store,
+                        workspace_root=root,
+                        session=session,
+                        message={"path": packet_relpath},
+                    )
+                self.assertEqual(
+                    (0, 0, 0),
+                    store._connection.execute(
+                        "SELECT count(*), (SELECT count(*) FROM canonical_deliveries), "
+                        "(SELECT count(*) FROM canonical_delivery_attempts) "
+                        "FROM canonical_messages"
+                    ).fetchone(),
+                )
+
+    def test_materialization_refuses_project_absent_from_latest_workspace_registry_revision(self) -> None:
+        packet_relpath = (
+            "Chats/2026-07-22_materialization__CHAT-REGISTRY/"
+            "2026-07-22T00-00-00_to-claude_registry.md"
+        )
+        session = {
+            "session_id": "SESSION-REGISTRY",
+            "agent_id": "claude",
+            "project_id": PROJECT,
+            "chat_id": "CHAT-REGISTRY",
+            "repo_targets": ["llm-collab"],
+            "binding_id": "binding_one",
+            "binding_generation": 1,
+            "endpoint_id": "endpoint_claude_desktop",
+            "runtime": {"session_id": "runtime-registry"},
+        }
+        packet = "\n".join(
+            [
+                "---",
+                "chat_id: CHAT-REGISTRY",
+                "from: codex",
+                "to: claude",
+                "title: Registry test",
+                "priority: normal",
+                f"project_id: {PROJECT}",
+                f"sent_utc: {NOW}",
+                "target_session_id: runtime-registry",
+                "target_binding_id: binding_one",
+                "target_binding_generation: 1",
+                'repo_targets: ["llm-collab"]',
+                "---",
+                "",
+                "Registry body.",
+            ]
+        )
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            root = Path(tmp) / "workspace"
+            packet_path = root / packet_relpath
+            packet_path.parent.mkdir(parents=True)
+            packet_path.write_text(packet, encoding="utf-8")
+            paths = LedgerPaths.derive(str(Path(tmp) / "ledger"), WORKSPACE)
+            with LedgerStore.open_writer(paths) as store:
+                record_registry_for_control(store)
+                store.record_registry_snapshot(
+                    workspace_id=WORKSPACE,
+                    registry_revision="sha256:" + "b" * 64,
+                    registry_source_sha256="b" * 64,
+                    captured_at_utc="2026-07-22T00:00:01+00:00",
+                    workspace_snapshot_json=json.dumps(
+                        {"workspace_id": WORKSPACE, "projects": [OTHER_PROJECT]}
+                    ),
+                    project_snapshots={
+                        OTHER_PROJECT: json.dumps({"project_id": OTHER_PROJECT})
+                    },
+                    source_snapshots={OTHER_PROJECT: {}},
+                )
+                seed_delivery_binding(
+                    store,
+                    participant_id="participant_claude",
+                    agent_id="agent_claude",
+                    endpoint_id="endpoint_claude_desktop",
+                    native_session_id="runtime-registry",
+                )
+                with self.assertRaisesRegex(
+                    LegacyPacketMaterializationRefused,
+                    "project is absent from the latest registry revision",
+                ):
+                    materialize_selected_legacy_packet(
+                        store,
+                        workspace_root=root,
+                        session=session,
+                        message={"path": packet_relpath},
+                    )
+                self.assertEqual(
+                    (0, 0, 0),
+                    store._connection.execute(
+                        "SELECT count(*), (SELECT count(*) FROM canonical_deliveries), "
+                        "(SELECT count(*) FROM canonical_delivery_attempts) "
+                        "FROM canonical_messages"
+                    ).fetchone(),
+                )
+
+    @patch.dict(os.environ, {control_module.CANONICAL_CONTROL_ENV: "enabled"})
+    def test_materialization_retry_reuses_packet_derived_timestamps(self) -> None:
         packet_relpath = (
             "Chats/2026-07-22_materialization__CHAT-SAMEID/"
             "2026-07-22T00-00-00_to-claude_materialize.md"
@@ -4560,7 +4864,7 @@ class CanonicalMessageTest(_CanonicalMessageTestBase):
             packet_path.write_text(packet(), encoding="utf-8")
             paths = LedgerPaths.derive(ledger_root, WORKSPACE)
             with LedgerStore.open_writer(paths) as store:
-                record_registry(store)
+                record_registry_for_control(store)
                 seed_delivery_binding(
                     store,
                     participant_id="participant_claude",
@@ -4601,7 +4905,7 @@ class CanonicalMessageTest(_CanonicalMessageTestBase):
             packet_path.write_text(packet(), encoding="utf-8")
             paths = LedgerPaths.derive(str(Path(tmp) / "ledger"), WORKSPACE)
             with LedgerStore.open_writer(paths) as store:
-                record_registry(store)
+                record_registry_for_control(store)
                 seed_delivery_binding(
                     store,
                     participant_id="participant_claude",

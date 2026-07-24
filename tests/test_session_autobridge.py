@@ -11,7 +11,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, Mock, patch
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -168,6 +168,7 @@ class SessionAutobridgeTest(unittest.TestCase):
         with patch.object(store_module, "_linked_sqlite_version_info", return_value=SAFE_VERSION):
             writer = LedgerStore.open_writer(paths)
         with writer as store:
+            write_gate_key = "canonical" + "_" + "writes"
             store.record_registry_snapshot(
                 workspace_id="ws_alpha",
                 registry_revision="sha256:" + "a" * 64,
@@ -177,7 +178,9 @@ class SessionAutobridgeTest(unittest.TestCase):
                     {"workspace_id": "ws_alpha", "projects": ["amiga", "nuvyr"]}
                 ),
                 project_snapshots={
-                    "amiga": json.dumps({"project_id": "amiga"}),
+                    "amiga": json.dumps(
+                        {"project_id": "amiga", write_gate_key: True}
+                    ),
                     "nuvyr": json.dumps({"project_id": "nuvyr"}),
                 },
                 source_snapshots={"amiga": {}, "nuvyr": {}},
@@ -271,6 +274,7 @@ class SessionAutobridgeTest(unittest.TestCase):
         return {
             **os.environ,
             "LLM_COLLAB_UI_REFRESH": "0",
+            "LLM_COLLAB_CANONICAL_CONTROL": "enabled",
             "PYTHONPATH": os.pathsep.join(
                 [
                     str(root),
@@ -280,6 +284,145 @@ class SessionAutobridgeTest(unittest.TestCase):
                 ]
             ),
         }
+
+    def _dispatch_patch_context(self, session: dict, messages: list[dict]):
+        return patch.multiple(
+            session_autobridge_lib,
+            load_session=Mock(return_value=session),
+            session_is_dispatchable=Mock(return_value=(True, "ok")),
+            matching_unread_messages=Mock(return_value=messages),
+            processed_messages=Mock(
+                side_effect=lambda _session: set(session.get("processed_messages", []))
+            ),
+            message_targets_session=Mock(return_value=(True, "test")),
+            claim_message_activation=Mock(return_value=(True, None)),
+            should_skip_for_loop_protection=Mock(return_value=(False, "ok")),
+            resolve_effective_action=Mock(return_value=("runtime_trigger", "test")),
+            append_event=Mock(),
+            write_operator_turn_summary=Mock(return_value={}),
+            execute_runtime_trigger=Mock(return_value={"returncode": 0}),
+            refresh_runtime_ui=Mock(return_value={}),
+            mark_message_processed=Mock(),
+            save_session=Mock(),
+        )
+
+    def test_dispatch_materializes_at_most_one_bound_packet_per_poll_and_defers_the_rest(self):
+        session = {
+            "session_id": "SESSION-SLOT",
+            "agent_id": "gemini",
+            "mode": "auto-read",
+            "wake_strategy": "runtime_trigger",
+            "binding_id": "binding-slot",
+            "binding_generation": 1,
+            "runtime": {"session_id": "runtime-slot"},
+        }
+        messages = [
+            {"path": "Chats/slot/first.md", "frontmatter": {}},
+            {"path": "Chats/slot/second.md", "frontmatter": {}},
+        ]
+        with self._dispatch_patch_context(session, messages), patch.object(
+            session_autobridge_lib,
+            "materialize_selected_runtime_packet",
+            side_effect=[
+                {"resolved": True, "canonical_write_started": True},
+                {"resolved": True, "canonical_write_started": True},
+            ],
+        ) as materialize:
+            result = session_autobridge_lib.dispatch_session("SESSION-SLOT")
+
+        self.assertEqual(2, len(result["actions"]))
+        self.assertEqual(1, materialize.call_count)
+        self.assertEqual("pull_pending", result["actions"][1]["reason"])
+        self.assertTrue(result["actions"][1]["canonical_materialization_result"]["deferred"])
+
+    def test_dispatch_structures_malformed_materialization_refusal_and_continues(self):
+        session = {
+            "session_id": "SESSION-MALFORMED",
+            "agent_id": "gemini",
+            "mode": "auto-read",
+            "wake_strategy": "runtime_trigger",
+            "binding_id": "binding-malformed",
+            "binding_generation": 1,
+            "runtime": {"session_id": "runtime-malformed"},
+        }
+        messages = [
+            {"path": "Chats/malformed/bad.md", "frontmatter": {}},
+            {"path": "Chats/malformed/good.md", "frontmatter": {}},
+        ]
+        from llm_collab.canonical import legacy_packet_materialization
+
+        writer = MagicMock()
+        writer.__enter__.return_value = object()
+        writer.__exit__.return_value = False
+        with self._dispatch_patch_context(session, messages), patch.object(
+            legacy_packet_materialization,
+            "materialize_selected_legacy_packet",
+            side_effect=RuntimeError("malformed packet"),
+        ) as materialize, patch.object(
+            session_autobridge_lib,
+            "_repo_package_root",
+        ), patch.object(
+            session_autobridge_lib,
+            "config_get",
+            return_value="ws_alpha",
+        ), patch.object(
+            session_autobridge_lib,
+            "project_state_root",
+            return_value=Path("/tmp/lca-f5-ledger"),
+        ), patch.object(
+            LedgerStore,
+            "open_writer",
+            return_value=writer,
+        ):
+            result = session_autobridge_lib.dispatch_session("SESSION-MALFORMED")
+
+        self.assertEqual(2, len(result["actions"]))
+        self.assertEqual(1, materialize.call_count)
+        self.assertEqual("route_ambiguous", result["actions"][0]["reason"])
+        self.assertEqual("pull_pending", result["actions"][1]["reason"])
+
+    def test_processed_bound_packet_does_not_retrigger_runtime_before_legacy_mark_read(self):
+        session = {
+            "session_id": "SESSION-PROCESSED",
+            "agent_id": "gemini",
+            "mode": "auto-read",
+            "wake_strategy": "runtime_trigger",
+            "binding_id": "binding-processed",
+            "binding_generation": 1,
+            "runtime": {"session_id": "runtime-processed"},
+        }
+        message = {"path": "Chats/processed/packet.md", "frontmatter": {}}
+        runtime_trigger = Mock(return_value={"returncode": 0})
+        original_mark_message_processed = session_autobridge_lib.mark_message_processed
+        with self._dispatch_patch_context(session, [message]), patch.object(
+            session_autobridge_lib,
+            "materialize_selected_runtime_packet",
+            return_value={
+                "resolved": True,
+                "materialized": False,
+                "gate": "disabled",
+                "canonical_write_started": False,
+            },
+        ), patch.object(
+            session_autobridge_lib,
+            "execute_runtime_trigger",
+            new=runtime_trigger,
+        ), patch.object(
+            session_autobridge_lib,
+            "mark_message_processed",
+            wraps=original_mark_message_processed,
+        ):
+            first = session_autobridge_lib.dispatch_session("SESSION-PROCESSED")
+            second = session_autobridge_lib.dispatch_session("SESSION-PROCESSED")
+
+        self.assertEqual(1, runtime_trigger.call_count)
+        self.assertEqual(
+            {"reason": "gate_disabled"},
+            session["canonical_settled_messages"][message["path"]],
+        )
+        self.assertEqual("runtime_trigger", first["actions"][0]["effective_action"])
+        self.assertEqual("message_already_consumed", second["actions"][0]["event"])
+        self.assertTrue(second["actions"][0]["runtime_result"]["skipped"])
 
     def create_chat(self, root: Path, *, chat_dir_name: str, chat_id: str, project_id: str) -> Path:
         chat_dir = root / "Chats" / chat_dir_name

@@ -72,6 +72,8 @@ def create_bound_attempt(
     created_at_utc: str,
     conversation_id: str,
     participant_id: str,
+    expected_binding_id: str | None = None,
+    expected_generation: int | None = None,
 ) -> dict[str, object]:
     return store.create_bound_canonical_delivery_attempt(
         workspace_id=workspace_id,
@@ -84,6 +86,8 @@ def create_bound_attempt(
         created_at_utc=created_at_utc,
         conversation_id=conversation_id,
         participant_id=participant_id,
+        expected_binding_id=expected_binding_id,
+        expected_generation=expected_generation,
         resolve_binding=store.resolve_conversation_binding,
     )
 
