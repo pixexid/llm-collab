@@ -3682,6 +3682,50 @@ class SessionAutobridgeTest(unittest.TestCase):
                     ),
                 )
 
+    def test_runtime_receive_rejects_wildcard_session_for_targeted_packet(self):
+        scoped_session = {
+            "session_id": "SESSION-SCOPED",
+            "agent_id": "gemini",
+            "project_id": "amiga",
+            "chat_id": "CHAT-BIND-SAFE",
+            "wake_strategy": "runtime_trigger",
+            "runtime": {
+                "family": "gemini_cli",
+                "session_id": "gemini-runtime-1",
+            },
+            "repo_targets": ["llm-collab"],
+            "binding_id": "binding_current",
+            "binding_generation": 7,
+        }
+        wildcard_session = {
+            "session_id": "SESSION-WILDCARD",
+            "agent_id": "gemini",
+            "wake_strategy": "runtime_trigger",
+            "runtime": {
+                "family": "gemini_cli",
+                "session_id": "gemini-runtime-1",
+            },
+        }
+        message = {
+            "frontmatter": {
+                "project_id": "amiga",
+                "chat_id": "CHAT-BIND-SAFE",
+                "target_session_id": "gemini-runtime-1",
+                "repo_targets": ["llm-collab"],
+                "target_binding_id": "binding_current",
+                "target_binding_generation": 7,
+            }
+        }
+
+        self.assertEqual(
+            (True, "explicit_target_match"),
+            session_autobridge_lib.message_targets_session(scoped_session, message),
+        )
+        self.assertEqual(
+            (False, session_autobridge_lib.ROUTE_AMBIGUOUS_REASON),
+            session_autobridge_lib.message_targets_session(wildcard_session, message),
+        )
+
     def test_watch_inbox_marks_only_binding_matched_runtime_paths(self):
         root = self.make_workspace()
         self.add_agent(
