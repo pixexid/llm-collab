@@ -76,6 +76,91 @@ authority.
 The recommended first child is child 1 only. It is read-only/design work and
 exists to pin the implementation seam before provider authority is introduced.
 
+## Child 1 receive/read-state inventory
+
+Child 1 is read-only. It freezes the real files the first code child must
+inspect before changing Claude receive behavior.
+
+### Watcher entry points
+
+| File:line | Function | Receive/read-state role |
+| --- | --- | --- |
+| `bin/watch_inbox.py:79` | `autobridge_session_ids(agent_id)` | Enumerates every legacy session with the same `agent_id`. This is still agent-scoped, so exact binding filters must happen after enumeration and before consumption. |
+| `bin/watch_inbox.py:95` | `dispatch_autobridge(agent_id, json_output)` | Dispatches every enumerated session, collects successful runtime-trigger paths, and is the only background watcher caller of `mark_messages_read`. |
+| `bin/watch_inbox.py:145` | `mark_messages_read(agent_id, sorted(set(consumed_paths)))` | Moves agent-inbox read state after any session reports a successful runtime trigger. This is the residual issue 141 hazard: read state is keyed by agent, not by binding. |
+| `bin/watch_inbox.py:150` | `main()` | Poll loop that loads the agent inbox, computes new unread paths, optionally notifies, and calls `dispatch_autobridge` when unread paths exist. |
+
+### Agent inbox helpers
+
+| File:line | Function | Receive/read-state role |
+| --- | --- | --- |
+| `bin/_helpers.py:489` | `load_agent_inbox(agent_id)` | Reads one shared inbox document for the logical agent. It has no project, worker, binding, or generation partition. |
+| `bin/_helpers.py:503` | `add_to_inbox(agent_id, message_path)` | Adds durable packet paths to the recipient's shared unread list. This is enqueue authority, not receive acceptance. |
+| `bin/_helpers.py:512` | `mark_messages_read(agent_id, paths)` | Removes paths from that shared unread list and appends them to shared read state. A code child must prove only binding-selected, materialized, claimed paths reach this helper. |
+| `bin/_helpers.py:522` | `get_unread_messages(agent_id)` | Expands shared unread paths into parsed packet frontmatter/body for matching. Filtering after this point cannot make the underlying inbox partitioned. |
+
+### Session autobridge selection and local processed state
+
+| File:line | Function | Receive/read-state role |
+| --- | --- | --- |
+| `bin/_session_autobridge.py:93` | `load_session(session_id)` | Loads one legacy parked session record. |
+| `bin/_session_autobridge.py:100` | `iter_sessions(agent_id=None)` | Lists legacy session records; with `agent_id`, it remains logical-agent scoped. |
+| `bin/_session_autobridge.py:217` | `save_session(payload)` | Persists the session-local processed-message list and runtime metadata. |
+| `bin/_session_autobridge.py:265` | `append_event(session_id, event)` | Persists dispatch, skip, refusal, and mutation-boundary events. Event append is evidence only; it is not receive acceptance. |
+| `bin/_session_autobridge.py:539` | `binding_scoped_message_matches_session(session, message)` | Applies repo-target, target binding-id, and target-generation checks when exact receive targeting is required. |
+| `bin/_session_autobridge.py:641` | `message_targets_session(session, message)` | Routes explicit target-session packets, refuses missing targets for exact-receive sessions, and otherwise still returns `broadcast_or_agent_scoped`. |
+| `bin/_session_autobridge.py:658` | `matching_unread_messages(session)` | Reads the shared agent inbox and filters by project, chat, and `message_targets_session`. |
+| `bin/_session_autobridge.py:674` | `processed_messages(session)` | Reads the legacy session-local processed-path set. This is duplicate suppression only, not canonical acceptance. |
+| `bin/_session_autobridge.py:690` | `processed_message_blocks_dispatch(session, message, seen)` | Allows binding-scoped packets to re-enter materialization while blocking already-processed noncanonical packets. |
+| `bin/_session_autobridge.py:696` | `mark_message_processed(session, message_path)` | Moves session-local processed state through `save_session`. This does not move the shared agent inbox read state. |
+
+### Materialization, trigger, and consume ordering
+
+| File:line | Function | Receive/read-state role |
+| --- | --- | --- |
+| `bin/_session_autobridge.py:704` | `materialize_selected_runtime_packet(session, message)` | Opens the canonical ledger and calls legacy packet materialization for the selected packet. It returns a closed resolver reason on refusal. |
+| `bin/_session_autobridge.py:1316` | `execute_runtime_trigger(session, message)` | Runs the selected runtime trigger after materialization and operator-turn summary boundaries. It is transport execution evidence, not acceptance. |
+| `bin/_session_autobridge.py:1914` | `dispatch_session(session_id)` | Main receive pipeline: session dispatchability, matching, activation claim, loop protection, materialization, runtime trigger, UI refresh, and session-local processed marking. |
+| `bin/_session_autobridge.py:2000` | `if action == "runtime_trigger"` | Runtime-trigger branch. When materialization is needed, it happens before operator summary and trigger execution. |
+| `bin/_session_autobridge.py:2002` | `message_needs_canonical_materialization(session, message)` | Decides whether binding-targeted runtime packets must pass canonical materialization before trigger. |
+| `bin/_session_autobridge.py:2003` | `activation_fenced_mutation(... boundary="canonical_receive_materialization" ...)` | Mutation boundary for materialization. Refusal appends an event and continues without runtime trigger. |
+| `bin/_session_autobridge.py:2112` | `mark_after_event` block | Session-local processed marking happens after the dispatch event; activation messages use a fenced mutation. |
+
+### Heuristic discovery and dispatch-adjacent seams
+
+| File:line | Function | Receive/read-state role |
+| --- | --- | --- |
+| `bin/_session_autobridge.py:385` | `discover_codex_runtime_session()` | Read-only/newest-style diagnostic discovery. It must not become receive/send authority. |
+| `bin/_session_autobridge.py:416` | `discover_claude_runtime_session(project_path=None)` | Read-only/newest-style Claude discovery by project session index and file mtime. It must not bind or route mutation-capable receive. |
+| `bin/_session_autobridge.py:452` | `discover_gemini_runtime_session(project_path=None)` | Read-only/newest-style diagnostic discovery. It must not bind or route mutation-capable receive. |
+| `bin/_session_autobridge.py:475` | `discover_runtime_session(runtime_family, project_path=None)` | Dispatcher for the read-only discovery helpers. |
+| `bin/_session_autobridge.py:567` | `find_dispatchable_target_session(...)` | Legacy first-match helper retained for diagnostics/tests. A future Claude mutation path must not call it. |
+| `bin/_session_autobridge.py:594` | `resolve_exact_dispatch_target(project_id, chat_id, agent_id)` | Exact binding-file resolver used by deliver/autobridge readiness. It is not the v11 lifecycle resolver, but it is the current nonheuristic dispatch-adjacent seam. |
+| `bin/inbox.py:137` | `publish_runtime_session_if_requested(args)` | Refuses heuristic runtime discovery families for session publishing and points users to read-only diagnostics or exact registration. |
+| `bin/inbox.py:386` | `mark_all_read(args)` | Manual command path that can move shared agent-inbox read state. It is not watcher acceptance and must stay outside automatic Claude receive. |
+| `bin/inbox.py:544` | `if consume: mark_messages_read(args.me, shown_paths)` | Manual consume path that marks displayed paths read. It must not be confused with runtime receive acceptance. |
+| `bin/deliver.py:398` | `resolve_exact_dispatch_target(...)` | Sender-side check for exact autobridge target before delivery readiness. |
+| `bin/deliver.py:505` | `add_to_inbox(args.recipient, to_path)` | Sender-side enqueue into the shared recipient inbox. It persists intent only. |
+
+### Invariant for the first code child
+
+For Claude receive, a packet may reach `bin/_helpers.py:512`
+`mark_messages_read(agent_id, paths)` only after all of these are true for that
+exact path:
+
+1. the watcher selected one exact active participant binding and generation;
+2. the packet matched that binding and was not a broadcast, generic agent, stale
+   generation, foreign project, missing-binding, or ambiguous route;
+3. legacy packet materialization resolved through canonical rows;
+4. the receive claim/bound attempt was created or idempotently returned;
+5. the runtime write completed; and
+6. no unresolved refusal reason from `CONVERSATION_BINDING_RESOLUTION_REASONS`
+   was produced.
+
+If any condition is false, the packet remains unread in the shared agent inbox.
+Session-local processed state may suppress legacy duplicate handling, but it
+must not be treated as canonical acceptance or shared read-state authority.
+
 ## First code child acceptance table
 
 | Guard | Expected proof |
