@@ -6,9 +6,15 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 import hashlib
+import os
 from pathlib import Path
 
-from llm_collab.canonical.control import CanonicalControlError, require_canonical_write_gate
+from llm_collab.canonical.control import (
+    CANONICAL_CONTROL_ENABLED,
+    CANONICAL_CONTROL_ENV,
+    CanonicalControlError,
+    require_canonical_write_gate,
+)
 from llm_collab.canonical.delivery import create_bound_attempt, create_deliveries
 from llm_collab.canonical.messages import create_or_return_equivalent
 from llm_collab.ledger.store import (
@@ -61,11 +67,29 @@ def materialize_selected_legacy_packet(
     target_binding_id, target_generation = _require_binding(session, frontmatter)
     _require_repo_scope(session, frontmatter)
 
+    if os.environ.get(CANONICAL_CONTROL_ENV) != CANONICAL_CONTROL_ENABLED:
+        return {
+            "created": False,
+            "resolved": True,
+            "materialized": False,
+            "gate": "disabled",
+            "registry_revision": None,
+            "canonical_write_started": False,
+        }
     registry_revision = _latest_project_registry_revision(
         store,
         workspace_id=store.paths.workspace_id,
         project_id=project_id,
     )
+    if registry_revision is None:
+        return {
+            "created": False,
+            "resolved": True,
+            "materialized": False,
+            "gate": "disabled",
+            "registry_revision": None,
+            "canonical_write_started": False,
+        }
     try:
         require_canonical_write_gate(
             store,
@@ -248,7 +272,7 @@ def _latest_project_registry_revision(
     *,
     workspace_id: str,
     project_id: str,
-) -> str:
+) -> str | None:
     row = store._connection.execute(
         """
         SELECT registry_revision
@@ -260,7 +284,7 @@ def _latest_project_registry_revision(
         (workspace_id,),
     ).fetchone()
     if row is None:
-        _refuse("registry revision is unprovable")
+        return None
     registry_revision = str(row[0])
     if store.get_project_snapshot(
         workspace_id=workspace_id,

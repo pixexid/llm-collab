@@ -4641,7 +4641,6 @@ class CanonicalMessageTest(_CanonicalMessageTestBase):
             packet_path.write_text(packet, encoding="utf-8")
             paths = LedgerPaths.derive(str(Path(tmp) / "ledger"), WORKSPACE)
             with LedgerStore.open_writer(paths) as store:
-                record_registry_for_control(store)
                 seed_delivery_binding(
                     store,
                     participant_id="participant_claude",
@@ -4660,8 +4659,12 @@ class CanonicalMessageTest(_CanonicalMessageTestBase):
                         "resolved": True,
                         "materialized": False,
                         "gate": "disabled",
+                        "registry_revision": None,
                     },
-                    {key: result[key] for key in ("resolved", "materialized", "gate")},
+                    {
+                        key: result[key]
+                        for key in ("resolved", "materialized", "gate", "registry_revision")
+                    },
                 )
                 self.assertEqual(
                     (0, 0, 0),
@@ -4733,6 +4736,7 @@ class CanonicalMessageTest(_CanonicalMessageTestBase):
                     ).fetchone(),
                 )
 
+    @patch.dict(os.environ, {control_module.CANONICAL_CONTROL_ENV: "enabled"})
     def test_materialization_refuses_project_absent_from_latest_workspace_registry_revision(self) -> None:
         packet_relpath = (
             "Chats/2026-07-22_materialization__CHAT-REGISTRY/"
