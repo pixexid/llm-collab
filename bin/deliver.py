@@ -110,6 +110,7 @@ from _session_autobridge import (
     load_binding,
     resolve_exact_dispatch_target,
     resolve_thread_pair_session_id,
+    session_target_ids,
     update_thread_pair,
 )
 
@@ -414,7 +415,11 @@ def main():
                 args.target_session_id = resolved_binding_target
         else:
             args.target_session_id = None
-    autobridge_ready = autobridge_target is not None
+    autobridge_ready = bool(
+        autobridge_target is not None
+        and args.target_session_id
+        and str(args.target_session_id) in session_target_ids(autobridge_target)
+    )
 
     body = read_body(args.body_file)
     recipient_agent = get_agent(args.recipient)
