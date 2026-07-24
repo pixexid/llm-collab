@@ -118,7 +118,17 @@ def load_binding(project_id: str, chat_id: str, agent_id: str) -> dict:
         raise FileNotFoundError(
             f"Unknown binding: project={project_id} chat={chat_id} agent={agent_id}"
         )
-    return json.loads(path.read_text())
+    try:
+        payload = json.loads(path.read_text())
+    except (OSError, ValueError) as exc:
+        raise FileNotFoundError(
+            f"Unreadable binding: project={project_id} chat={chat_id} agent={agent_id}"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise FileNotFoundError(
+            f"Malformed binding: project={project_id} chat={chat_id} agent={agent_id}"
+        )
+    return payload
 
 
 def load_thread_pair(project_id: str, chat_id: str, agent_a: str, agent_b: str) -> dict:
@@ -610,6 +620,7 @@ def resolve_exact_dispatch_target(
 
     bound_session_id = binding.get("session_id")
     bound_runtime_id = binding.get("runtime_session_id")
+    bound_runtime_family = binding.get("runtime_family")
     if not bound_session_id or not bound_runtime_id:
         return None, EXACT_BINDING_REQUIRED_REASON
 
@@ -619,7 +630,10 @@ def resolve_exact_dispatch_target(
             continue
         if str(session.get("session_id")) != str(bound_session_id):
             continue
-        if str(bound_runtime_id) not in session_target_ids(session):
+        runtime = runtime_metadata(session)
+        if not bound_runtime_family or str(bound_runtime_family) != str(runtime.get("family")):
+            continue
+        if not runtime.get("session_id") or str(bound_runtime_id) != str(runtime.get("session_id")):
             continue
         exact_matches.append(session)
 
@@ -650,6 +664,19 @@ def message_targets_session(session: dict, message: dict) -> tuple[bool, str]:
         return True, "broadcast_or_agent_scoped"
     if str(target_session_id) in session_target_ids(session):
         if exact_required:
+            session_project = session.get("project_id")
+            session_chat = session.get("chat_id")
+            message_project = frontmatter.get("project_id")
+            message_chat = frontmatter.get("chat_id")
+            if not (
+                session_project
+                and session_chat
+                and message_project
+                and message_chat
+                and session_project == message_project
+                and session_chat == message_chat
+            ):
+                return False, ROUTE_AMBIGUOUS_REASON
             return binding_scoped_message_matches_session(session, message)
         return True, "explicit_target_match"
     return False, "target_session_mismatch"
