@@ -57,6 +57,21 @@ REVISION = "sha256:" + REVISION_HASH
 NOW = "2026-07-22T00:00:00+00:00"
 
 
+def resolver_consumer_offenders(root: Path) -> list[str]:
+    allowed = {Path("llm_collab/session_lifecycle.py")}
+    offenders = []
+    for checked_root in (root / "bin", root / "scripts", root / "llm_collab"):
+        if not checked_root.exists():
+            continue
+        for path in checked_root.rglob("*.py"):
+            relative = path.relative_to(root)
+            if relative == Path("llm_collab/ledger/store.py") or relative in allowed:
+                continue
+            if "resolve_conversation_binding" in path.read_text(encoding="utf-8"):
+                offenders.append(str(relative))
+    return sorted(offenders)
+
+
 def record_registry(store: LedgerStore, revision_hash: str = REVISION_HASH) -> str:
     revision = "sha256:" + revision_hash
     store.record_registry_snapshot(
@@ -1407,19 +1422,34 @@ class CompatibilityProjectionTest(unittest.TestCase):
 
     def test_resolver_has_no_runtime_consumers(self) -> None:
         root = Path(__file__).parents[1]
-        checked_roots = [
-            root / "bin",
-            root / "scripts",
-            root / "llm_collab",
-        ]
-        offenders = []
-        for checked_root in checked_roots:
-            for path in checked_root.rglob("*.py"):
-                if path == root / "llm_collab" / "ledger" / "store.py":
-                    continue
-                if "resolve_conversation_binding" in path.read_text(encoding="utf-8"):
-                    offenders.append(str(path.relative_to(root)))
-        self.assertEqual(offenders, [])
+        self.assertEqual(resolver_consumer_offenders(root), [])
+        self.assertIn(
+            "resolve_conversation_binding",
+            (root / "llm_collab" / "session_lifecycle.py").read_text(encoding="utf-8"),
+        )
+
+    def test_resolver_consumer_guard_rejects_runtime_surface(self) -> None:
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            root = Path(tmp)
+            (root / "bin").mkdir()
+            (root / "scripts").mkdir()
+            (root / "llm_collab" / "ledger").mkdir(parents=True)
+            (root / "llm_collab" / "session_lifecycle.py").write_text(
+                "store.resolve_conversation_binding()",
+                encoding="utf-8",
+            )
+            (root / "llm_collab" / "ledger" / "store.py").write_text(
+                "def resolve_conversation_binding(): pass",
+                encoding="utf-8",
+            )
+            (root / "bin" / "runtime_consumer.py").write_text(
+                "store.resolve_conversation_binding()",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                resolver_consumer_offenders(root),
+                ["bin/runtime_consumer.py"],
+            )
 
     def test_p2d_ast_import_graph_has_no_bin_path_to_projection(self) -> None:
         root = Path(__file__).parents[1]

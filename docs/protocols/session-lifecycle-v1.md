@@ -50,6 +50,11 @@ Untrusted payloads, remote messages, adapter output, window titles, cwd claims,
 display labels, "latest", sidebar order, and AX state cannot select a lifecycle
 provider.
 
+Project repository and cwd evidence is revalidated from the trusted registry or
+trusted root on every lifecycle attestation, including restart handling. The v8
+ledger does not cache repo ID or canonical cwd because that would create a
+second authority that can drift from the registry.
+
 ## Binding lifecycle
 
 The binding state vocabulary is closed:
@@ -102,6 +107,10 @@ The provider may report native facts, but the core validates them against the
 trusted registry and derives the binding. A stale challenge, duplicate
 challenge, mismatched scope, foreign project, changed cwd evidence, or ambiguous
 native session fails closed.
+
+Challenge consumption and binding creation are one atomic operation. Production
+challenge tokens come from OS-backed secrets; tests may inject fixed tokens, but
+the protocol never derives tokens from counters or wall-clock time.
 
 ## Dispatch freeze
 

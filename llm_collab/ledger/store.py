@@ -500,6 +500,41 @@ def _derive_receipt_id(
     ).hexdigest()
 
 
+def _derive_conversation_binding_id(
+    workspace_id: str,
+    scope_kind: str,
+    scope_identity: str,
+    conversation_id: str,
+    participant_id: str,
+    generation: int,
+    provider_id: str,
+    provider_revision: str,
+    endpoint_id: str,
+    session_ref_id: str,
+    native_session_id: str,
+    runtime_instance_id: str,
+) -> str:
+    return "binding_" + hashlib.sha256(
+        b"".join(
+            (
+                _frame("conversation-binding-v1"),
+                _frame(workspace_id),
+                _frame(scope_kind),
+                _frame(scope_identity),
+                _frame(conversation_id),
+                _frame(participant_id),
+                _frame(str(generation)),
+                _frame(provider_id),
+                _frame(provider_revision),
+                _frame(endpoint_id),
+                _frame(session_ref_id),
+                _frame(native_session_id),
+                _frame(runtime_instance_id),
+            )
+        )
+    ).hexdigest()
+
+
 def _validate_canonical_json_text(value: str) -> None:
     try:
         value.encode("utf-8")
@@ -5255,6 +5290,370 @@ class LedgerStore:
             "native_session_id": binding["native_session_id"],
             "runtime_instance_id": binding["runtime_instance_id"],
         }
+
+    def reserve_session_binding_challenge(
+        self,
+        *,
+        workspace_id: str,
+        scope_kind: str,
+        scope_identity: str,
+        conversation_id: str,
+        participant_id: str,
+        agent_id: str,
+        provider_id: str,
+        provider_revision: str,
+        endpoint_id: str,
+        session_ref_id: str,
+        native_session_id: str,
+        runtime_instance_id: str,
+        challenge_id: str,
+        challenge_token_sha256: str,
+        expires_at_utc: str,
+        created_at_utc: str,
+        trust_class: str = "managed",
+        supported_operations_json: str = '["reserve","start","attach","inspect","heartbeat","retire","open_ui"]',
+        challenge_algorithm: str = "sha256",
+        challenge_ttl_seconds: int = 60,
+    ) -> None:
+        """Create the inert v8 participant/provider/challenge rows."""
+
+        self._ensure_thread()
+        if self._read_only:
+            raise PermissionError("query-only readers cannot reserve session challenges")
+        workspace_id, scope_kind, scope_identity = _canonical_scope(
+            workspace_id, scope_kind, scope_identity
+        )
+        self._validate_canonical_scope(workspace_id, scope_kind, scope_identity)
+        conversation_id = _conversation_binding_text(
+            conversation_id, "conversation_id", 128
+        )
+        participant_id = _conversation_binding_text(participant_id, "participant_id", 128)
+        agent_id = _canonical_agent_id(agent_id, "agent_id")
+        provider_id = _conversation_binding_text(provider_id, "provider_id", 128)
+        provider_revision = _conversation_binding_text(
+            provider_revision, "provider_revision", 128
+        )
+        endpoint_id = _canonical_endpoint_id(endpoint_id, "endpoint_id")
+        session_ref_id = _optional_session_ref_id(session_ref_id)
+        if session_ref_id is None:
+            raise ValueError("session_ref_id must be a session_ identifier")
+        native_session_id = _conversation_binding_text(
+            native_session_id, "native_session_id", 256
+        )
+        runtime_instance_id = _conversation_binding_text(
+            runtime_instance_id, "runtime_instance_id", 128
+        )
+        challenge_id = _conversation_binding_text(challenge_id, "challenge_id", 128)
+        _canonical_sha256(challenge_token_sha256, "challenge_token_sha256")
+        _utc_timestamp(expires_at_utc, "expires_at_utc")
+        _utc_timestamp(created_at_utc, "created_at_utc")
+        trust_class = _conversation_binding_text(trust_class, "trust_class", 32)
+        _bounded_text(supported_operations_json, "supported_operations_json", 4096)
+        challenge_algorithm = _conversation_binding_text(
+            challenge_algorithm, "challenge_algorithm", 64
+        )
+        if not isinstance(challenge_ttl_seconds, int) or challenge_ttl_seconds <= 0:
+            raise ValueError("challenge_ttl_seconds must be a positive integer")
+        self._connection.execute("BEGIN IMMEDIATE")
+        try:
+            self._connection.execute(
+                """
+                INSERT OR IGNORE INTO conversation_participants
+                (workspace_id, scope_kind, scope_identity, conversation_id, participant_id, agent_id, created_at_utc)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    workspace_id,
+                    scope_kind,
+                    scope_identity,
+                    conversation_id,
+                    participant_id,
+                    agent_id,
+                    created_at_utc,
+                ),
+            )
+            self._connection.execute(
+                """
+                INSERT OR IGNORE INTO lifecycle_provider_registry
+                (
+                    workspace_id, provider_id, provider_revision, trust_class,
+                    supported_operations_json, challenge_algorithm, challenge_ttl_seconds, created_at_utc
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    workspace_id,
+                    provider_id,
+                    provider_revision,
+                    trust_class,
+                    supported_operations_json,
+                    challenge_algorithm,
+                    challenge_ttl_seconds,
+                    created_at_utc,
+                ),
+            )
+            self._connection.execute(
+                """
+                INSERT INTO session_binding_challenges
+                (
+                    workspace_id, scope_kind, scope_identity, conversation_id, participant_id,
+                    challenge_id, challenge_state, provider_id, provider_revision, endpoint_id,
+                    session_ref_id, native_session_id, runtime_instance_id, challenge_token_sha256,
+                    expires_at_utc, created_at_utc, consumed_at_utc
+                )
+                VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+                """,
+                (
+                    workspace_id,
+                    scope_kind,
+                    scope_identity,
+                    conversation_id,
+                    participant_id,
+                    challenge_id,
+                    provider_id,
+                    provider_revision,
+                    endpoint_id,
+                    session_ref_id,
+                    native_session_id,
+                    runtime_instance_id,
+                    challenge_token_sha256,
+                    expires_at_utc,
+                    created_at_utc,
+                ),
+            )
+            self._connection.execute("COMMIT")
+        except BaseException:
+            try:
+                self._connection.execute("ROLLBACK")
+            finally:
+                pass
+            raise
+
+    def consume_session_binding_challenge(
+        self,
+        *,
+        workspace_id: str,
+        scope_kind: str,
+        scope_identity: str,
+        conversation_id: str,
+        participant_id: str,
+        challenge_id: str,
+        challenge_token_sha256: str,
+        provider_id: str,
+        provider_revision: str,
+        endpoint_id: str,
+        session_ref_id: str,
+        native_session_id: str,
+        runtime_instance_id: str,
+        consumed_at_utc: str,
+    ) -> dict[str, object]:
+        """Atomically consume one pending challenge and create its active binding."""
+
+        self._ensure_thread()
+        if self._read_only:
+            raise PermissionError("query-only readers cannot consume session challenges")
+        workspace_id, scope_kind, scope_identity = _canonical_scope(
+            workspace_id, scope_kind, scope_identity
+        )
+        self._validate_canonical_scope(workspace_id, scope_kind, scope_identity)
+        conversation_id = _conversation_binding_text(
+            conversation_id, "conversation_id", 128
+        )
+        participant_id = _conversation_binding_text(participant_id, "participant_id", 128)
+        challenge_id = _conversation_binding_text(challenge_id, "challenge_id", 128)
+        _canonical_sha256(challenge_token_sha256, "challenge_token_sha256")
+        provider_id = _conversation_binding_text(provider_id, "provider_id", 128)
+        provider_revision = _conversation_binding_text(
+            provider_revision, "provider_revision", 128
+        )
+        endpoint_id = _canonical_endpoint_id(endpoint_id, "endpoint_id")
+        session_ref_id = _optional_session_ref_id(session_ref_id)
+        if session_ref_id is None:
+            raise ValueError("session_ref_id must be a session_ identifier")
+        native_session_id = _conversation_binding_text(
+            native_session_id, "native_session_id", 256
+        )
+        runtime_instance_id = _conversation_binding_text(
+            runtime_instance_id, "runtime_instance_id", 128
+        )
+        consumed_at_utc = _utc_timestamp(consumed_at_utc, "consumed_at_utc")
+        self._connection.execute("BEGIN IMMEDIATE")
+        try:
+            challenge = self._connection.execute(
+                """
+                SELECT expires_at_utc FROM session_binding_challenges
+                WHERE workspace_id = ? AND scope_kind = ? AND scope_identity = ?
+                  AND conversation_id = ? AND participant_id = ?
+                  AND challenge_id = ? AND challenge_state = 'pending'
+                  AND provider_id = ? AND provider_revision = ? AND endpoint_id = ?
+                  AND session_ref_id = ? AND native_session_id = ?
+                  AND runtime_instance_id = ? AND challenge_token_sha256 = ?
+                """,
+                (
+                    workspace_id,
+                    scope_kind,
+                    scope_identity,
+                    conversation_id,
+                    participant_id,
+                    challenge_id,
+                    provider_id,
+                    provider_revision,
+                    endpoint_id,
+                    session_ref_id,
+                    native_session_id,
+                    runtime_instance_id,
+                    challenge_token_sha256,
+                ),
+            ).fetchone()
+            if challenge is None:
+                raise CanonicalConflictError("session binding challenge is not pending or does not match")
+            if consumed_at_utc >= _utc_timestamp(challenge[0], "expires_at_utc"):
+                raise CanonicalConflictError("session binding challenge expired")
+            generation = int(
+                self._connection.execute(
+                    """
+                    SELECT COALESCE(MAX(generation), 0) + 1
+                    FROM conversation_bindings
+                    WHERE workspace_id = ? AND scope_kind = ? AND scope_identity = ?
+                      AND conversation_id = ? AND participant_id = ?
+                    """,
+                    (
+                        workspace_id,
+                        scope_kind,
+                        scope_identity,
+                        conversation_id,
+                        participant_id,
+                    ),
+                ).fetchone()[0]
+            )
+            binding_id = _derive_conversation_binding_id(
+                workspace_id,
+                scope_kind,
+                scope_identity,
+                conversation_id,
+                participant_id,
+                generation,
+                provider_id,
+                provider_revision,
+                endpoint_id,
+                session_ref_id,
+                native_session_id,
+                runtime_instance_id,
+            )
+            self._connection.execute(
+                """
+                UPDATE session_binding_challenges
+                SET challenge_state = 'consumed', consumed_at_utc = ?
+                WHERE workspace_id = ? AND challenge_id = ? AND challenge_state = 'pending'
+                """,
+                (consumed_at_utc, workspace_id, challenge_id),
+            )
+            self._connection.execute(
+                """
+                INSERT INTO conversation_bindings
+                (
+                    workspace_id, scope_kind, scope_identity, conversation_id, participant_id,
+                    binding_id, generation, state, mutation_capable, provider_id,
+                    provider_revision, endpoint_id, session_ref_id, native_session_id,
+                    runtime_instance_id, registered_at_utc
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'active', 1, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    workspace_id,
+                    scope_kind,
+                    scope_identity,
+                    conversation_id,
+                    participant_id,
+                    binding_id,
+                    generation,
+                    provider_id,
+                    provider_revision,
+                    endpoint_id,
+                    session_ref_id,
+                    native_session_id,
+                    runtime_instance_id,
+                    consumed_at_utc,
+                ),
+            )
+            self._connection.execute("COMMIT")
+        except BaseException:
+            try:
+                self._connection.execute("ROLLBACK")
+            finally:
+                pass
+            raise
+        return self.resolve_conversation_binding(
+            workspace_id=workspace_id,
+            scope_kind=scope_kind,
+            scope_identity=scope_identity,
+            conversation_id=conversation_id,
+            participant_id=participant_id,
+            expected_binding_id=binding_id,
+            expected_generation=generation,
+        )
+
+    def update_conversation_binding_state(
+        self,
+        *,
+        workspace_id: str,
+        scope_kind: str,
+        scope_identity: str,
+        conversation_id: str,
+        participant_id: str,
+        binding_id: str,
+        generation: int,
+        state: str,
+    ) -> None:
+        """Update one exact binding state."""
+
+        self._ensure_thread()
+        if self._read_only:
+            raise PermissionError("query-only readers cannot update conversation bindings")
+        workspace_id, scope_kind, scope_identity = _canonical_scope(
+            workspace_id, scope_kind, scope_identity
+        )
+        self._validate_canonical_scope(workspace_id, scope_kind, scope_identity)
+        conversation_id = _conversation_binding_text(
+            conversation_id, "conversation_id", 128
+        )
+        participant_id = _conversation_binding_text(participant_id, "participant_id", 128)
+        binding_id = _conversation_binding_text(binding_id, "binding_id", 128)
+        if not isinstance(generation, int) or generation <= 0:
+            raise ValueError("generation must be a positive integer")
+        state = _conversation_binding_text(state, "state", 12)
+        if state not in {"draining", "unverified", "superseded", "retired", "quarantined"}:
+            raise ValueError("state is not an allowed lifecycle update target")
+        self._connection.execute("BEGIN IMMEDIATE")
+        try:
+            cursor = self._connection.execute(
+                """
+                UPDATE conversation_bindings
+                SET state = ?
+                WHERE workspace_id = ? AND scope_kind = ? AND scope_identity = ?
+                  AND conversation_id = ? AND participant_id = ?
+                  AND binding_id = ? AND generation = ?
+                """,
+                (
+                    state,
+                    workspace_id,
+                    scope_kind,
+                    scope_identity,
+                    conversation_id,
+                    participant_id,
+                    binding_id,
+                    generation,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise CanonicalConflictError("conversation binding is not current")
+            self._connection.execute("COMMIT")
+        except BaseException:
+            try:
+                self._connection.execute("ROLLBACK")
+            finally:
+                pass
+            raise
 
     def record_registry_snapshot(
         self,
