@@ -10,7 +10,9 @@ import socket
 import stat
 import struct
 import sys
+import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Mapping
 
@@ -22,10 +24,37 @@ RESPONSE_LIMIT = 64 * 1024
 DEADLINE_SECONDS = 2
 LOG_LIMIT = 10 * 1024 * 1024
 OBSERVATION_STARTUP_GRACE_SECONDS = 0.5
+INTEGRITY_REFRESH_SECONDS = 60
+INTEGRITY_SHUTDOWN_JOIN_SECONDS = 0.25
+INTEGRITY_ERROR_LIMIT = 256
 
 
 class ProtocolError(ValueError):
     pass
+
+
+def _integrity_snapshot(
+    state: str,
+    *,
+    freshness: str = "unknown",
+    checked_at_utc: str | None = None,
+    age_seconds: int | None = None,
+    error: str | None = None,
+) -> dict[str, object]:
+    return {
+        "state": state,
+        "freshness": freshness,
+        "checked_at_utc": checked_at_utc,
+        "age_seconds": age_seconds,
+        "error": error,
+    }
+
+
+def _bounded_integrity_error(error: object) -> str:
+    text = str(error).replace("\x00", "")
+    if len(text) > INTEGRITY_ERROR_LIMIT:
+        return text[: INTEGRITY_ERROR_LIMIT - 3] + "..."
+    return text
 
 
 def _workspace_root_from_cwd() -> Path:
@@ -136,6 +165,11 @@ class DaemonServer:
         self._observation: object | None = None
         self._observation_error: str | None = None
         self._store: LedgerStore | None = None
+        self._integrity_lock = threading.Lock()
+        self._integrity_snapshot = _integrity_snapshot("unknown")
+        self._integrity_completed_monotonic: float | None = None
+        self._integrity_stop: threading.Event | None = None
+        self._integrity_thread: threading.Thread | None = None
 
     def run(self) -> None:
         self._gate_status = evaluate_observation_gate(
@@ -162,6 +196,8 @@ class DaemonServer:
             # Establish the control surface before starting optional background
             # hints so every later setup failure shares the cleanup below.
             listener = self._open_listener()
+            if store is not None:
+                self._start_integrity_probe()
             if self._gate_status is not None and self._gate_status.effective:
                 from llm_collab.daemon.observe import ObservationEngine
 
@@ -198,8 +234,79 @@ class DaemonServer:
             if self._observation is not None:
                 self._observation.close()
                 self._observation = None
+            self._stop_integrity_probe()
             self._store = None
             self._write_log({"event": "stopped"})
+
+    def _start_integrity_probe(self) -> None:
+        self._stop_integrity_probe()
+        stop = threading.Event()
+        with self._integrity_lock:
+            self._integrity_snapshot = _integrity_snapshot("checking")
+            self._integrity_completed_monotonic = None
+        self._integrity_stop = stop
+        thread = threading.Thread(
+            target=self._run_integrity_probe,
+            args=(stop,),
+            name="llm-collab-integrity-probe",
+            daemon=True,
+        )
+        self._integrity_thread = thread
+        thread.start()
+
+    def _stop_integrity_probe(self) -> None:
+        stop = self._integrity_stop
+        thread = self._integrity_thread
+        self._integrity_stop = None
+        self._integrity_thread = None
+        if stop is None or thread is None:
+            return
+        stop.set()
+        if thread is not threading.current_thread():
+            thread.join(timeout=INTEGRITY_SHUTDOWN_JOIN_SECONDS)
+
+    def _run_integrity_probe(self, stop: threading.Event) -> None:
+        while not stop.is_set():
+            try:
+                with LedgerStore.open_reader(self.paths) as reader:
+                    result = reader.integrity_check()
+                if result == "ok":
+                    self._record_integrity_result("ok")
+                else:
+                    self._record_integrity_result(
+                        "failed", error=_bounded_integrity_error(result)
+                    )
+            except Exception as exc:
+                self._record_integrity_result(
+                    "failed", error=_bounded_integrity_error(exc)
+                )
+            if stop.wait(INTEGRITY_REFRESH_SECONDS):
+                return
+
+    def _record_integrity_result(self, state: str, *, error: str | None = None) -> None:
+        checked_at_utc = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        with self._integrity_lock:
+            self._integrity_snapshot = _integrity_snapshot(
+                state,
+                freshness="current",
+                checked_at_utc=checked_at_utc,
+                age_seconds=0,
+                error=None if error is None else _bounded_integrity_error(error),
+            )
+            self._integrity_completed_monotonic = self._clock()
+
+    def _integrity_status(self) -> dict[str, object]:
+        with self._integrity_lock:
+            result = dict(self._integrity_snapshot)
+            completed = self._integrity_completed_monotonic
+        if completed is None:
+            return result
+        age_seconds = max(0, int(self._clock() - completed))
+        result["age_seconds"] = age_seconds
+        result["freshness"] = (
+            "current" if age_seconds <= INTEGRITY_REFRESH_SECONDS else "stale"
+        )
+        return result
 
     def _tick_observation(self, *, force: bool = False) -> None:
         if self._observation is None or self._store is None:
@@ -303,9 +410,9 @@ class DaemonServer:
             "pid": os.getpid(),
             "observation_gate": gate,
         }
-        integrity: str | None = None
+        integrity: object | None = None
         if self._store is not None:
-            integrity = self._store.integrity_check()
+            integrity = self._integrity_status()
             response["ledger"] = {
                 "schema_version": self._store.schema_version(),
                 "integrity": integrity,
@@ -315,7 +422,7 @@ class DaemonServer:
             response["ledger"] = {
                 "state": "present_not_opened_gate_off" if self.paths.ledger.exists() else "absent",
                 "schema_version": "not_checked_gate_off",
-                "integrity": "not_checked_gate_off",
+                "integrity": _integrity_snapshot("gate_off"),
                 "migration_state": "not_checked_gate_off",
             }
         if self._observation is None:

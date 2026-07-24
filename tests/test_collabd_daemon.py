@@ -16,7 +16,7 @@ import time
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import llm_collab.ledger.store as store_module
 from llm_collab.daemon import cli
@@ -27,6 +27,7 @@ from llm_collab.daemon.server import (
     REQUEST_LIMIT,
     RESPONSE_LIMIT,
     DEADLINE_SECONDS,
+    INTEGRITY_REFRESH_SECONDS,
     DaemonServer,
     ProtocolError,
     parse_request,
@@ -271,7 +272,7 @@ class DaemonTest(unittest.TestCase):
         finally:
             self.stop(thread)
 
-    def test_status_runs_one_shared_integrity_scan_or_zero_when_gated_off(self) -> None:
+    def test_status_uses_cached_integrity_snapshot_or_gate_off_shape(self) -> None:
         def request_status(server: DaemonServer) -> dict[str, object]:
             client, connection = socket.socketpair()
             try:
@@ -304,6 +305,7 @@ class DaemonTest(unittest.TestCase):
             server._gate_status = enabled_gate
             server._store = store
             server._observation = engine
+            server._record_integrity_result("ok")
 
             statements: list[str] = []
             store._connection.set_trace_callback(statements.append)
@@ -314,8 +316,9 @@ class DaemonTest(unittest.TestCase):
                     for statement in statements
                     if statement.strip().lower() == "pragma integrity_check"
                 ]
-                self.assertEqual(len(scans), 1)
-                self.assertEqual(response["ledger"]["integrity"], "ok")
+                self.assertEqual(scans, [])
+                self.assertEqual(response["ledger"]["integrity"]["state"], "ok")
+                self.assertEqual(response["ledger"]["integrity"]["freshness"], "current")
                 self.assertEqual(
                     response["observation"]["ledger"]["integrity"],
                     response["ledger"]["integrity"],
@@ -329,8 +332,11 @@ class DaemonTest(unittest.TestCase):
                     for statement in statements
                     if statement.strip().lower() == "pragma integrity_check"
                 ]
-                self.assertEqual(len(scans), 1)
-                self.assertEqual(without_observation["ledger"]["integrity"], "ok")
+                self.assertEqual(scans, [])
+                self.assertEqual(
+                    without_observation["ledger"]["integrity"],
+                    response["ledger"]["integrity"],
+                )
 
                 statements.clear()
                 server._store = None
@@ -341,11 +347,94 @@ class DaemonTest(unittest.TestCase):
                     if statement.strip().lower() == "pragma integrity_check"
                 ]
                 self.assertEqual(scans, [])
-                self.assertEqual(
-                    gated_off["ledger"]["integrity"], "not_checked_gate_off"
-                )
+                self.assertEqual(gated_off["ledger"]["integrity"]["state"], "gate_off")
+                self.assertEqual(gated_off["ledger"]["integrity"]["freshness"], "unknown")
             finally:
                 store._connection.set_trace_callback(None)
+
+    def test_status_returns_while_integrity_probe_is_blocked(self) -> None:
+        entered = threading.Event()
+        release = threading.Event()
+
+        def blocked_integrity() -> str:
+            entered.set()
+            release.wait(2)
+            return "ok"
+
+        reader = MagicMock()
+        reader.__enter__.return_value = reader
+        reader.__exit__.return_value = False
+        reader.integrity_check.side_effect = blocked_integrity
+        writer = Mock()
+        writer.schema_version.return_value = 8
+        writer.integrity_check.side_effect = blocked_integrity
+        server = DaemonServer(self.paths, clock=time.monotonic)
+        server._store = writer
+        with patch.object(LedgerStore, "open_reader", return_value=reader):
+            server._start_integrity_probe()
+            self.assertTrue(entered.wait(1))
+            completed = threading.Event()
+            response: dict[str, object] = {}
+
+            def request_status() -> None:
+                response.update(server._status_response())
+                completed.set()
+
+            request = threading.Thread(target=request_status)
+            request.start()
+            try:
+                self.assertTrue(completed.wait(0.5))
+                self.assertEqual(
+                    response["ledger"]["integrity"]["state"],  # type: ignore[index]
+                    "checking",
+                )
+                writer.integrity_check.assert_not_called()
+            finally:
+                release.set()
+                server._stop_integrity_probe()
+                request.join(1)
+
+    def test_integrity_snapshot_reports_stale_and_bounded_failure(self) -> None:
+        now = [100.0]
+        server = DaemonServer(self.paths, clock=lambda: now[0])
+        self.assertEqual(server._integrity_status()["state"], "unknown")
+        server._record_integrity_result("ok")
+        self.assertEqual(server._integrity_status()["freshness"], "current")
+        now[0] += INTEGRITY_REFRESH_SECONDS + 1
+        stale = server._integrity_status()
+        self.assertEqual(stale["state"], "ok")
+        self.assertEqual(stale["freshness"], "stale")
+        server._record_integrity_result("failed", error="x" * 1000)
+        failed = server._integrity_status()
+        self.assertEqual(failed["state"], "failed")
+        self.assertEqual(failed["freshness"], "current")
+        self.assertEqual(len(failed["error"]), 256)
+
+    def test_shutdown_does_not_wait_for_blocked_integrity_probe(self) -> None:
+        entered = threading.Event()
+        release = threading.Event()
+
+        def blocked_integrity() -> str:
+            entered.set()
+            release.wait(2)
+            return "ok"
+
+        reader = MagicMock()
+        reader.__enter__.return_value = reader
+        reader.__exit__.return_value = False
+        reader.integrity_check.side_effect = blocked_integrity
+        server = DaemonServer(self.paths)
+        server._store = Mock(schema_version=Mock(return_value=8))
+        with patch.object(LedgerStore, "open_reader", return_value=reader):
+            server._start_integrity_probe()
+            thread = server._integrity_thread
+            self.assertIsNotNone(thread)
+            self.assertTrue(entered.wait(1))
+            started = time.monotonic()
+            server._stop_integrity_probe()
+            self.assertLess(time.monotonic() - started, 0.5)
+            release.set()
+            thread.join(1)
 
     def test_server_resolves_nested_cwd_to_the_collab_workspace(self) -> None:
         nested = self.root / "one" / "two"

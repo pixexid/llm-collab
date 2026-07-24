@@ -23,6 +23,7 @@ BUSY_TIMEOUT_MS = 5_000
 SYNCHRONOUS_FULL = 2
 MIGRATION_TOOL_VERSION = "llm-collab-ledger/1"
 SAFE_SQLITE_BACKPORTS = {(3, 44, 6), (3, 50, 7)}
+_CONNECTION_OPEN_LOCK = threading.RLock()
 V1_TABLES = frozenset(
     {
         "schema_migrations",
@@ -3348,30 +3349,31 @@ class LedgerStore:
         )
         connection = None
         try:
-            before = _connection_fd_snapshot()
-            connection = sqlite3.connect(
-                path.as_uri() + ("?mode=ro" if read_only else "?mode=rw"),
-                uri=True,
-                timeout=timeout,
-                isolation_level=None,
-            )
-            after = _connection_fd_snapshot()
-            opened_regular_files = [
-                record
-                for fd, record in after.items()
-                if fd not in before
-                and stat.S_ISREG(record[2])
-                and _reported_path_matches(record[3], path)
-            ]
-            if len(opened_regular_files) != 1:
-                raise SQLiteSafetyError(
-                    "SQLite main-database descriptor proof is unavailable or ambiguous"
+            with _CONNECTION_OPEN_LOCK:
+                before = _connection_fd_snapshot()
+                connection = sqlite3.connect(
+                    path.as_uri() + ("?mode=ro" if read_only else "?mode=rw"),
+                    uri=True,
+                    timeout=timeout,
+                    isolation_level=None,
                 )
-            actual = opened_regular_files[0]
-            if (actual[0], actual[1]) != pin.identity:
-                raise SQLiteSafetyError("SQLite opened a different file than the no-follow pin")
-            if not read_only:
-                pin.fchmod(0o600)
+                after = _connection_fd_snapshot()
+                opened_regular_files = [
+                    record
+                    for fd, record in after.items()
+                    if fd not in before
+                    and stat.S_ISREG(record[2])
+                    and _reported_path_matches(record[3], path)
+                ]
+                if len(opened_regular_files) != 1:
+                    raise SQLiteSafetyError(
+                        "SQLite main-database descriptor proof is unavailable or ambiguous"
+                    )
+                actual = opened_regular_files[0]
+                if (actual[0], actual[1]) != pin.identity:
+                    raise SQLiteSafetyError("SQLite opened a different file than the no-follow pin")
+                if not read_only:
+                    pin.fchmod(0o600)
             return connection, pin
         except BaseException:
             _close_connection_and_pin(connection, pin)
@@ -7503,7 +7505,7 @@ class LedgerStore:
         self,
         *,
         workspace_id: str,
-        integrity: str | None = None,
+        integrity: object | None = None,
         group_limit: int = 50,
         audit_limit: int = 200,
     ) -> dict[str, object]:
