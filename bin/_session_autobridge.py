@@ -15,6 +15,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+ROUTE_AMBIGUOUS_REASON = "route_ambiguous"
+STALE_GENERATION_REASON = "stale_generation"
+
 from _helpers import (
     ROOT,
     build_handoff_prompt,
@@ -492,6 +495,57 @@ def session_target_ids(session: dict) -> set[str]:
     return target_ids
 
 
+def session_requires_exact_receive_target(session: dict) -> bool:
+    runtime = runtime_metadata(session)
+    return (
+        session.get("wake_strategy") == "runtime_trigger"
+        and bool(runtime.get("command") or (runtime.get("family") and runtime.get("session_id")))
+    )
+
+
+def _frontmatter_strings(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(item) for item in value if str(item)]
+    if value:
+        return [str(value)]
+    return []
+
+
+def _declared_target(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value)
+    return text if text else None
+
+
+def binding_scoped_message_matches_session(session: dict, message: dict) -> tuple[bool, str]:
+    frontmatter = message.get("frontmatter", {})
+    session_repos = set(_frontmatter_strings(session.get("repo_targets")))
+    message_repos = set(_frontmatter_strings(frontmatter.get("repo_targets")))
+    if session_repos and not (session_repos & message_repos):
+        return False, ROUTE_AMBIGUOUS_REASON
+
+    target_binding_id = _declared_target(
+        frontmatter.get("target_binding_id", frontmatter.get("binding_id"))
+    )
+    session_binding_id = _declared_target(
+        session.get("binding_id", session.get("conversation_binding_id"))
+    )
+    if target_binding_id and session_binding_id and target_binding_id != session_binding_id:
+        return False, ROUTE_AMBIGUOUS_REASON
+
+    target_generation = _declared_target(
+        frontmatter.get("target_binding_generation", frontmatter.get("binding_generation"))
+    )
+    session_generation = _declared_target(
+        session.get("binding_generation", session.get("generation"))
+    )
+    if target_generation and session_generation and target_generation != session_generation:
+        return False, STALE_GENERATION_REASON
+
+    return True, "explicit_target_match"
+
+
 def find_dispatchable_target_session(
     *,
     agent_id: str,
@@ -521,10 +575,17 @@ def find_dispatchable_target_session(
 
 def message_targets_session(session: dict, message: dict) -> tuple[bool, str]:
     frontmatter = message.get("frontmatter", {})
+    if is_codex_self_target_message(message):
+        return True, "explicit_target_match"
+    exact_required = session_requires_exact_receive_target(session)
     target_session_id = frontmatter.get("target_session_id")
     if not target_session_id:
+        if exact_required:
+            return False, ROUTE_AMBIGUOUS_REASON
         return True, "broadcast_or_agent_scoped"
     if str(target_session_id) in session_target_ids(session):
+        if exact_required:
+            return binding_scoped_message_matches_session(session, message)
         return True, "explicit_target_match"
     return False, "target_session_mismatch"
 
