@@ -3341,15 +3341,16 @@ class LedgerStore:
         exclusive: bool = False,
         timeout: float = BUSY_TIMEOUT_MS / 1_000,
     ) -> tuple[sqlite3.Connection, _PinnedFile]:
-        pin = cls._pin_regular_file(
-            path,
-            writable=not read_only,
-            create=create,
-            exclusive=exclusive,
-        )
         connection = None
+        pin = None
         try:
             with _CONNECTION_OPEN_LOCK:
+                pin = cls._pin_regular_file(
+                    path,
+                    writable=not read_only,
+                    create=create,
+                    exclusive=exclusive,
+                )
                 before = _connection_fd_snapshot()
                 connection = sqlite3.connect(
                     path.as_uri() + ("?mode=ro" if read_only else "?mode=rw"),
@@ -3998,6 +3999,10 @@ class LedgerStore:
             raise sqlite3.ProgrammingError("ledger connections may not be reused across threads")
         if self._closed:
             raise sqlite3.ProgrammingError("ledger connection is closed")
+
+    @property
+    def database_identity(self) -> tuple[int, int]:
+        return self._database_pin.identity
 
     def schema_version(self) -> int:
         self._ensure_thread()

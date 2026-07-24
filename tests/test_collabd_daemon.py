@@ -364,8 +364,10 @@ class DaemonTest(unittest.TestCase):
         reader = MagicMock()
         reader.__enter__.return_value = reader
         reader.__exit__.return_value = False
+        reader.database_identity = (1, 1)
         reader.integrity_check.side_effect = blocked_integrity
         writer = Mock()
+        writer.database_identity = (1, 1)
         writer.schema_version.return_value = 8
         writer.integrity_check.side_effect = blocked_integrity
         server = DaemonServer(self.paths, clock=time.monotonic)
@@ -422,9 +424,11 @@ class DaemonTest(unittest.TestCase):
         reader = MagicMock()
         reader.__enter__.return_value = reader
         reader.__exit__.return_value = False
+        reader.database_identity = (1, 1)
         reader.integrity_check.side_effect = blocked_integrity
         server = DaemonServer(self.paths)
         server._store = Mock(schema_version=Mock(return_value=8))
+        server._store.database_identity = (1, 1)
         with patch.object(LedgerStore, "open_reader", return_value=reader):
             server._start_integrity_probe()
             thread = server._integrity_thread
@@ -435,6 +439,92 @@ class DaemonTest(unittest.TestCase):
             self.assertLess(time.monotonic() - started, 0.5)
             release.set()
             thread.join(1)
+
+    def test_concurrent_reader_pins_cannot_enter_one_descriptor_proof_window(self) -> None:
+        with LedgerStore.open_writer(self.paths):
+            pass
+
+        first_snapshot = threading.Event()
+        second_pin = threading.Event()
+        original_snapshot = store_module._connection_fd_snapshot
+        original_pin = LedgerStore._pin_regular_file
+        snapshot_calls: dict[str, int] = {}
+
+        def snapshot() -> dict[int, tuple[int, int, int, str]]:
+            result = original_snapshot()
+            if threading.current_thread().name == "reader-a":
+                calls = snapshot_calls.get("reader-a", 0) + 1
+                snapshot_calls["reader-a"] = calls
+                if calls == 1:
+                    first_snapshot.set()
+                    second_pin.wait(1)
+            return result
+
+        def pin(path: Path, **kwargs):
+            result = original_pin(path, **kwargs)
+            if threading.current_thread().name == "reader-b":
+                second_pin.set()
+            return result
+
+        errors: list[BaseException] = []
+
+        def open_reader() -> None:
+            connection = None
+            pin = None
+            try:
+                connection, pin = LedgerStore._open_verified_connection(
+                    self.paths.ledger,
+                    read_only=True,
+                )
+            except BaseException as exc:
+                errors.append(exc)
+            finally:
+                if connection is not None:
+                    connection.close()
+                if pin is not None:
+                    pin.close()
+
+        with patch.object(store_module, "_connection_fd_snapshot", side_effect=snapshot):
+            with patch.object(LedgerStore, "_pin_regular_file", side_effect=pin):
+                thread_a = threading.Thread(target=open_reader, name="reader-a")
+                thread_a.start()
+                self.assertTrue(first_snapshot.wait(1))
+                thread_b = threading.Thread(target=open_reader, name="reader-b")
+                thread_b.start()
+                thread_a.join(2)
+                thread_b.join(2)
+
+        self.assertFalse(thread_a.is_alive())
+        self.assertFalse(thread_b.is_alive())
+        self.assertEqual(errors, [])
+
+    def test_integrity_probe_fails_closed_on_writer_reader_identity_mismatch(self) -> None:
+        reader = MagicMock()
+        reader.__enter__.return_value = reader
+        reader.__exit__.return_value = False
+        reader.database_identity = (2, 20)
+        writer = Mock()
+        writer.database_identity = (1, 10)
+        server = DaemonServer(self.paths)
+        server._store = writer
+        recorded = threading.Event()
+        original_record = server._record_integrity_result
+
+        def record(*args, **kwargs):
+            original_record(*args, **kwargs)
+            recorded.set()
+
+        with patch.object(server, "_record_integrity_result", side_effect=record):
+            with patch.object(LedgerStore, "open_reader", return_value=reader):
+                server._start_integrity_probe()
+                try:
+                    self.assertTrue(recorded.wait(1))
+                    result = server._integrity_status()
+                    self.assertEqual(result["state"], "failed")
+                    self.assertIn("different ledger file", result["error"])
+                    reader.integrity_check.assert_not_called()
+                finally:
+                    server._stop_integrity_probe()
 
     def test_server_resolves_nested_cwd_to_the_collab_workspace(self) -> None:
         nested = self.root / "one" / "two"

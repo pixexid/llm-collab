@@ -268,7 +268,15 @@ class DaemonServer:
     def _run_integrity_probe(self, stop: threading.Event) -> None:
         while not stop.is_set():
             try:
+                writer = self._store
+                if writer is None:
+                    raise RuntimeError("integrity probe has no writer")
+                writer_identity = writer.database_identity
                 with LedgerStore.open_reader(self.paths) as reader:
+                    if reader.database_identity != writer_identity:
+                        raise RuntimeError(
+                            "integrity probe opened a different ledger file than the writer"
+                        )
                     result = reader.integrity_check()
                 if result == "ok":
                     self._record_integrity_result("ok")
