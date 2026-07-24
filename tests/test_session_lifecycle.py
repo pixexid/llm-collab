@@ -152,6 +152,7 @@ class LifecycleTest(unittest.TestCase):
         self.addCleanup(patcher.stop)
 
     def reserve(self, store: LedgerStore, active_subject: LifecycleSubject):
+        self.provision(store, active_subject, self.core.provider)
         return self.core.reserve(
             store,
             active_subject,
@@ -160,6 +161,50 @@ class LifecycleTest(unittest.TestCase):
             expires_at_utc=AT_EXPIRY,
             correlation_id="corr_reserve",
             trusted_project_root=self.trusted_root,
+        )
+
+    def provision(
+        self,
+        store: LedgerStore,
+        active_subject: LifecycleSubject,
+        provider: FakeLifecycleProvider,
+    ) -> None:
+        descriptor = provider.descriptor()
+        store._connection.execute(
+            """
+            INSERT INTO conversation_participants
+            (workspace_id, scope_kind, scope_identity, conversation_id, participant_id, agent_id, created_at_utc)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                active_subject.workspace_id,
+                active_subject.scope_kind,
+                active_subject.scope_identity,
+                active_subject.conversation_id,
+                active_subject.participant_id,
+                active_subject.agent_id,
+                NOW,
+            ),
+        )
+        store._connection.execute(
+            """
+            INSERT OR IGNORE INTO lifecycle_provider_registry
+            (
+                workspace_id, provider_id, provider_revision, trust_class,
+                supported_operations_json, challenge_algorithm, challenge_ttl_seconds, created_at_utc
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                active_subject.workspace_id,
+                descriptor["provider_id"],
+                descriptor["provider_revision"],
+                descriptor["trust_class"],
+                descriptor["supported_operations_json"],
+                descriptor["challenge_algorithm"],
+                descriptor["challenge_ttl_seconds"],
+                NOW,
+            ),
         )
 
     def consume(self, store: LedgerStore, active_subject: LifecycleSubject, challenge):
@@ -205,11 +250,123 @@ class LifecycleTest(unittest.TestCase):
                 1,
             )
 
+    def test_consume_requires_the_preprovisioned_participant_agent(self) -> None:
+        active_subject = subject()
+        other_agent = subject(agent_id="agent_claude")
+        with LedgerStore.open_writer(self.paths) as store:
+            challenge = self.reserve(store, active_subject)
+            before = row_counts(store)
+            with self.assertRaisesRegex(CanonicalConflictError, "not pending or does not match"):
+                self.consume(store, other_agent, challenge)
+            self.assertEqual(row_counts(store), before)
+            self.assertEqual(
+                store._connection.execute(
+                    "SELECT challenge_state FROM session_binding_challenges"
+                ).fetchone()[0],
+                "pending",
+            )
+
+    def test_reserve_requires_preprovisioned_provider_and_participant(self) -> None:
+        active_subject = subject()
+        with LedgerStore.open_writer(self.paths) as store:
+            before = row_counts(store)
+            with self.assertRaisesRegex(CanonicalConflictError, "pre-provisioned"):
+                self.core.reserve(
+                    store,
+                    active_subject,
+                    runtime_home=self.runtime_home,
+                    created_at_utc=NOW,
+                    expires_at_utc=AT_EXPIRY,
+                    correlation_id="corr_missing_identity",
+                    trusted_project_root=self.trusted_root,
+                )
+            self.assertEqual(row_counts(store), before)
+
+            self.provision(store, active_subject, self.core.provider)
+            altered = FakeLifecycleProvider(trust_class="native_attached")
+            altered_core = SessionLifecycleCore(altered, token_factory=lambda: "token-altered")
+            before = row_counts(store)
+            with self.assertRaisesRegex(CanonicalConflictError, "not allowlisted"):
+                altered_core.reserve(
+                    store,
+                    active_subject,
+                    runtime_home=self.runtime_home,
+                    created_at_utc=NOW,
+                    expires_at_utc=AT_EXPIRY,
+                    correlation_id="corr_altered_descriptor",
+                    trusted_project_root=self.trusted_root,
+                )
+            self.assertEqual(row_counts(store), before)
+
+    def test_workspace_scope_cannot_register_attached_session(self) -> None:
+        workspace_subject = subject(scope_kind="workspace", scope_identity="workspace")
+        with LedgerStore.open_writer(self.paths) as store:
+            before = row_counts(store)
+            with self.assertRaisesRegex(SessionLifecycleError, "requires project scope"):
+                self.core.reserve(
+                    store,
+                    workspace_subject,
+                    runtime_home=self.runtime_home,
+                    created_at_utc=NOW,
+                    expires_at_utc=AT_EXPIRY,
+                    correlation_id="corr_workspace_scope",
+                )
+            self.assertEqual(row_counts(store), before)
+
+    def test_same_native_session_cannot_become_two_project_owners(self) -> None:
+        active_subject = subject()
+        other_repo = self.outside / "other-repo"
+        other_repo.mkdir()
+        other_cwd = other_repo / "work"
+        other_cwd.mkdir()
+        other_root = TrustedProjectRoot(OTHER_PROJECT, "repo_other", str(other_repo), str(other_cwd))
+        other_subject = subject(scope_identity=OTHER_PROJECT)
+        with LedgerStore.open_writer(self.paths) as store:
+            first = self.reserve(store, active_subject)
+            first_binding = self.consume(store, active_subject, first)
+            self.provision(store, other_subject, self.core.provider)
+            second = self.core.reserve(
+                store,
+                other_subject,
+                runtime_home=self.runtime_home,
+                created_at_utc=NOW,
+                expires_at_utc=AT_EXPIRY,
+                correlation_id="corr_other_project",
+                trusted_project_root=other_root,
+            )
+            with self.assertRaises(sqlite3.IntegrityError):
+                self.core.consume(
+                    store,
+                    other_subject,
+                    second,
+                    runtime_home=self.runtime_home,
+                    consumed_at_utc=BEFORE_EXPIRY,
+                    correlation_id="corr_other_project_consume",
+                    trusted_project_root=other_root,
+                )
+            self.assertEqual(
+                store._connection.execute(
+                    "SELECT challenge_state FROM session_binding_challenges WHERE challenge_id = ?",
+                    (second.challenge_id,),
+                ).fetchone()[0],
+                "pending",
+            )
+            self.assertEqual(
+                store._connection.execute("SELECT count(*) FROM conversation_bindings").fetchone()[0],
+                1,
+            )
+            second_ref = store._connection.execute(
+                "SELECT session_ref_id FROM session_binding_challenges WHERE challenge_id = ?",
+                (second.challenge_id,),
+            ).fetchone()[0]
+            self.assertEqual(first_binding["session_ref_id"], second_ref)
+
     def test_token_hash_is_stored_not_token_and_default_uses_secrets(self) -> None:
         active_subject = subject()
         with LedgerStore.open_writer(self.paths) as store:
             with patch("secrets.token_urlsafe", return_value="secret-token") as token_urlsafe:
                 core = SessionLifecycleCore(FakeLifecycleProvider())
+                self.provision(store, active_subject, core.provider)
                 challenge = core.reserve(
                     store,
                     active_subject,

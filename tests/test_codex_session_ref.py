@@ -148,6 +148,23 @@ class CodexSessionRefTests(unittest.TestCase):
                 expected_evidence_integrity=session_ref["evidence"]["integrity"],
             )
 
+    def test_session_ref_identity_is_scope_independent_but_evidence_keeps_scope(self):
+        session_ref, identity, _repo, _cwd, _binding = self.build()
+        other = build_session_ref(
+            workspace_id="ws_alpha",
+            scope={"kind": "project", "project_id": "other"},
+            endpoint_id="endpoint_alpha",
+            native_session_id="native-session-alpha",
+            runtime_home=identity,
+            authority=self.authority(),
+            observed_at_utc="2026-07-23T00:00:00Z",
+            correlation_id="corr_session_other",
+        )
+
+        self.assertEqual(session_ref["session_ref_id"], other["session_ref_id"])
+        self.assertNotEqual(session_ref["evidence"]["scope"], other["evidence"]["scope"])
+        self.assertNotEqual(session_ref["evidence"]["evidence_id"], other["evidence"]["evidence_id"])
+
     def test_schema_and_semantic_drift_fail_closed(self):
         session_ref, identity, _repo, _cwd, binding = self.build()
 

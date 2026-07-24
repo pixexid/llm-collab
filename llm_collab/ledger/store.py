@@ -98,6 +98,11 @@ class CanonicalIntegrityError(RuntimeError):
     pass
 
 
+LIFECYCLE_PROVIDER_OPERATIONS = frozenset(
+    {"reserve", "start", "attach", "inspect", "heartbeat", "retire", "open_ui"}
+)
+
+
 _CANONICAL_AGENT_ID = re.compile(r"agent_[A-Za-z0-9][A-Za-z0-9_-]{2,127}\Z")
 _CANONICAL_MESSAGE_ID = re.compile(r"msg_[0-9a-f]{64}\Z")
 _CANONICAL_DELIVERY_ID = re.compile(r"delivery_[0-9a-f]{64}\Z")
@@ -225,6 +230,50 @@ def _canonical_agent_id(value: object, name: str) -> str:
     if not isinstance(value, str) or _CANONICAL_AGENT_ID.fullmatch(value) is None:
         raise ValueError(f"{name} must be a MessageV1 agent_ identifier")
     return value
+
+
+def _provider_descriptor(
+    value: Mapping[str, object],
+) -> tuple[str, str, str, str, str, int]:
+    if not isinstance(value, Mapping):
+        raise ValueError("provider_descriptor must be a mapping")
+    provider_id = _conversation_binding_text(value.get("provider_id"), "provider_id", 128)
+    provider_revision = _conversation_binding_text(
+        value.get("provider_revision"), "provider_revision", 128
+    )
+    trust_class = _conversation_binding_text(value.get("trust_class"), "trust_class", 32)
+    supported_operations_json = _bounded_text(
+        value.get("supported_operations_json"), "supported_operations_json", 4096
+    )
+    try:
+        supported_operations = json.loads(supported_operations_json)
+    except json.JSONDecodeError as exc:
+        raise ValueError("supported_operations_json must be valid JSON") from exc
+    if (
+        not isinstance(supported_operations, list)
+        or any(not isinstance(operation, str) for operation in supported_operations)
+        or len(set(supported_operations)) != len(supported_operations)
+        or set(supported_operations) != LIFECYCLE_PROVIDER_OPERATIONS
+    ):
+        raise ValueError("supported_operations_json must be the closed lifecycle capability set")
+    challenge_algorithm = _conversation_binding_text(
+        value.get("challenge_algorithm"), "challenge_algorithm", 64
+    )
+    challenge_ttl_seconds = value.get("challenge_ttl_seconds")
+    if (
+        isinstance(challenge_ttl_seconds, bool)
+        or not isinstance(challenge_ttl_seconds, int)
+        or not 1 <= challenge_ttl_seconds <= 3600
+    ):
+        raise ValueError("challenge_ttl_seconds must be an integer between 1 and 3600")
+    return (
+        provider_id,
+        provider_revision,
+        trust_class,
+        supported_operations_json,
+        challenge_algorithm,
+        challenge_ttl_seconds,
+    )
 
 
 def _canonical_message_id(value: object, name: str) -> str:
@@ -6085,8 +6134,7 @@ class LedgerStore:
         conversation_id: str,
         participant_id: str,
         agent_id: str,
-        provider_id: str,
-        provider_revision: str,
+        provider_descriptor: Mapping[str, object],
         endpoint_id: str,
         session_ref_id: str,
         native_session_id: str,
@@ -6095,12 +6143,8 @@ class LedgerStore:
         challenge_token_sha256: str,
         expires_at_utc: str,
         created_at_utc: str,
-        trust_class: str = "managed",
-        supported_operations_json: str = '["reserve","start","attach","inspect","heartbeat","retire","open_ui"]',
-        challenge_algorithm: str = "sha256",
-        challenge_ttl_seconds: int = 60,
     ) -> None:
-        """Create the inert v8 participant/provider/challenge rows."""
+        """Reserve a challenge for pre-provisioned participant/provider state."""
 
         self._ensure_thread()
         if self._read_only:
@@ -6114,10 +6158,14 @@ class LedgerStore:
         )
         participant_id = _conversation_binding_text(participant_id, "participant_id", 128)
         agent_id = _canonical_agent_id(agent_id, "agent_id")
-        provider_id = _conversation_binding_text(provider_id, "provider_id", 128)
-        provider_revision = _conversation_binding_text(
-            provider_revision, "provider_revision", 128
-        )
+        (
+            provider_id,
+            provider_revision,
+            trust_class,
+            supported_operations_json,
+            challenge_algorithm,
+            challenge_ttl_seconds,
+        ) = _provider_descriptor(provider_descriptor)
         endpoint_id = _canonical_endpoint_id(endpoint_id, "endpoint_id")
         session_ref_id = _optional_session_ref_id(session_ref_id)
         if session_ref_id is None:
@@ -6132,20 +6180,13 @@ class LedgerStore:
         _canonical_sha256(challenge_token_sha256, "challenge_token_sha256")
         _utc_timestamp(expires_at_utc, "expires_at_utc")
         _utc_timestamp(created_at_utc, "created_at_utc")
-        trust_class = _conversation_binding_text(trust_class, "trust_class", 32)
-        _bounded_text(supported_operations_json, "supported_operations_json", 4096)
-        challenge_algorithm = _conversation_binding_text(
-            challenge_algorithm, "challenge_algorithm", 64
-        )
-        if not isinstance(challenge_ttl_seconds, int) or challenge_ttl_seconds <= 0:
-            raise ValueError("challenge_ttl_seconds must be a positive integer")
         self._connection.execute("BEGIN IMMEDIATE")
         try:
-            self._connection.execute(
+            participant = self._connection.execute(
                 """
-                INSERT OR IGNORE INTO conversation_participants
-                (workspace_id, scope_kind, scope_identity, conversation_id, participant_id, agent_id, created_at_utc)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                SELECT agent_id FROM conversation_participants
+                WHERE workspace_id = ? AND scope_kind = ? AND scope_identity = ?
+                  AND conversation_id = ? AND participant_id = ?
                 """,
                 (
                     workspace_id,
@@ -6153,30 +6194,28 @@ class LedgerStore:
                     scope_identity,
                     conversation_id,
                     participant_id,
-                    agent_id,
-                    created_at_utc,
                 ),
-            )
-            self._connection.execute(
-                """
-                INSERT OR IGNORE INTO lifecycle_provider_registry
-                (
-                    workspace_id, provider_id, provider_revision, trust_class,
-                    supported_operations_json, challenge_algorithm, challenge_ttl_seconds, created_at_utc
+            ).fetchone()
+            if participant is None or participant[0] != agent_id:
+                raise CanonicalConflictError(
+                    "participant is not pre-provisioned or agent does not match"
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            provider = self._connection.execute(
+                """
+                SELECT trust_class, supported_operations_json,
+                       challenge_algorithm, challenge_ttl_seconds
+                FROM lifecycle_provider_registry
+                WHERE workspace_id = ? AND provider_id = ? AND provider_revision = ?
                 """,
-                (
-                    workspace_id,
-                    provider_id,
-                    provider_revision,
-                    trust_class,
-                    supported_operations_json,
-                    challenge_algorithm,
-                    challenge_ttl_seconds,
-                    created_at_utc,
-                ),
-            )
+                (workspace_id, provider_id, provider_revision),
+            ).fetchone()
+            if provider is None or tuple(provider) != (
+                trust_class,
+                supported_operations_json,
+                challenge_algorithm,
+                challenge_ttl_seconds,
+            ):
+                raise CanonicalConflictError("provider descriptor is not allowlisted")
             self._connection.execute(
                 """
                 INSERT INTO session_binding_challenges
@@ -6222,6 +6261,7 @@ class LedgerStore:
         scope_identity: str,
         conversation_id: str,
         participant_id: str,
+        agent_id: str,
         challenge_id: str,
         challenge_token_sha256: str,
         provider_id: str,
@@ -6245,6 +6285,7 @@ class LedgerStore:
             conversation_id, "conversation_id", 128
         )
         participant_id = _conversation_binding_text(participant_id, "participant_id", 128)
+        agent_id = _canonical_agent_id(agent_id, "agent_id")
         challenge_id = _conversation_binding_text(challenge_id, "challenge_id", 128)
         _canonical_sha256(challenge_token_sha256, "challenge_token_sha256")
         provider_id = _conversation_binding_text(provider_id, "provider_id", 128)
@@ -6273,6 +6314,15 @@ class LedgerStore:
                   AND provider_id = ? AND provider_revision = ? AND endpoint_id = ?
                   AND session_ref_id = ? AND native_session_id = ?
                   AND runtime_instance_id = ? AND challenge_token_sha256 = ?
+                  AND EXISTS (
+                      SELECT 1 FROM conversation_participants p
+                      WHERE p.workspace_id = session_binding_challenges.workspace_id
+                        AND p.scope_kind = session_binding_challenges.scope_kind
+                        AND p.scope_identity = session_binding_challenges.scope_identity
+                        AND p.conversation_id = session_binding_challenges.conversation_id
+                        AND p.participant_id = session_binding_challenges.participant_id
+                        AND p.agent_id = ?
+                  )
                 """,
                 (
                     workspace_id,
@@ -6288,6 +6338,7 @@ class LedgerStore:
                     native_session_id,
                     runtime_instance_id,
                     challenge_token_sha256,
+                    agent_id,
                 ),
             ).fetchone()
             if challenge is None:

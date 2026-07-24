@@ -21,6 +21,11 @@ class SessionLifecycleError(ValueError):
     """Raised when lifecycle attestation or state transition fails closed."""
 
 
+DEFAULT_SUPPORTED_OPERATIONS_JSON = (
+    '["reserve","start","attach","inspect","heartbeat","retire","open_ui"]'
+)
+
+
 @dataclass(frozen=True)
 class TrustedProjectRoot:
     project_id: str
@@ -71,6 +76,10 @@ class FakeLifecycleProvider:
     authority_identity: str = "fake_lifecycle_provider"
     capability_profile_id: str = "native_session_binding"
     capability_profile_revision: str = "revision_1"
+    trust_class: str = "managed"
+    supported_operations_json: str = DEFAULT_SUPPORTED_OPERATIONS_JSON
+    challenge_algorithm: str = "sha256"
+    challenge_ttl_seconds: int = 60
 
     def authority(self) -> SessionAuthority:
         return SessionAuthority(
@@ -80,6 +89,16 @@ class FakeLifecycleProvider:
             capability_profile_id=self.capability_profile_id,
             capability_profile_revision=self.capability_profile_revision,
         )
+
+    def descriptor(self) -> Mapping[str, object]:
+        return {
+            "provider_id": self.provider_id,
+            "provider_revision": self.provider_revision,
+            "trust_class": self.trust_class,
+            "supported_operations_json": self.supported_operations_json,
+            "challenge_algorithm": self.challenge_algorithm,
+            "challenge_ttl_seconds": self.challenge_ttl_seconds,
+        }
 
     def attest(
         self,
@@ -135,6 +154,7 @@ class SessionLifecycleCore:
         correlation_id: str,
         trusted_project_root: TrustedProjectRoot | None = None,
     ) -> LifecycleChallenge:
+        _require_project_subject(subject)
         session_ref = self.provider.attest(
             subject,
             runtime_home=runtime_home,
@@ -165,8 +185,7 @@ class SessionLifecycleCore:
             conversation_id=subject.conversation_id,
             participant_id=subject.participant_id,
             agent_id=subject.agent_id,
-            provider_id=self.provider.provider_id,
-            provider_revision=self.provider.provider_revision,
+            provider_descriptor=self.provider.descriptor(),
             endpoint_id=subject.endpoint_id,
             session_ref_id=str(session_ref["session_ref_id"]),
             native_session_id=subject.native_session_id,
@@ -189,6 +208,7 @@ class SessionLifecycleCore:
         correlation_id: str,
         trusted_project_root: TrustedProjectRoot | None = None,
     ) -> dict[str, object]:
+        _require_project_subject(subject)
         session_ref = self.provider.attest(
             subject,
             runtime_home=runtime_home,
@@ -202,6 +222,7 @@ class SessionLifecycleCore:
             scope_identity=subject.scope_identity,
             conversation_id=subject.conversation_id,
             participant_id=subject.participant_id,
+            agent_id=subject.agent_id,
             challenge_id=challenge.challenge_id,
             challenge_token_sha256=_sha256_text(challenge.challenge_token),
             provider_id=self.provider.provider_id,
@@ -282,6 +303,7 @@ class SessionLifecycleCore:
         correlation_id: str,
         trusted_project_root: TrustedProjectRoot | None = None,
     ) -> dict[str, object]:
+        _require_project_subject(subject)
         self.provider.attest(
             subject,
             runtime_home=runtime_home,
@@ -302,6 +324,7 @@ class SessionLifecycleCore:
         subject: LifecycleSubject,
         binding: Mapping[str, object],
     ) -> dict[str, object]:
+        _require_project_subject(subject)
         store.update_conversation_binding_state(
             workspace_id=subject.workspace_id,
             scope_kind=subject.scope_kind,
@@ -325,6 +348,7 @@ class SessionLifecycleCore:
         correlation_id: str,
         trusted_project_root: TrustedProjectRoot | None = None,
     ) -> dict[str, object]:
+        _require_project_subject(subject)
         self.provider.attest(
             subject,
             runtime_home=runtime_home,
@@ -357,6 +381,7 @@ class SessionLifecycleCore:
         evidence: bytes,
         created_at_utc: str,
     ) -> dict[str, object]:
+        _require_project_subject(subject)
         return store.record_conversation_binding_transition(
             workspace_id=subject.workspace_id,
             scope_kind=subject.scope_kind,
@@ -382,13 +407,19 @@ class SessionLifecycleCore:
 def _repository_binding(
     subject: LifecycleSubject, trusted_project_root: TrustedProjectRoot | None
 ) -> RepositoryBinding | None:
-    if subject.scope_kind == "workspace":
-        return None
+    _require_project_subject(subject)
     if trusted_project_root is None:
         raise SessionLifecycleError("trusted project root is required for project attestation")
     if trusted_project_root.project_id != subject.scope_identity:
         raise SessionLifecycleError("trusted project root does not match subject scope")
     return trusted_project_root.repository_binding()
+
+
+def _require_project_subject(subject: LifecycleSubject) -> None:
+    if subject.scope_kind != "project":
+        raise SessionLifecycleError(
+            "attached-session lifecycle registration requires project scope"
+        )
 
 def _secret_token() -> str:
     return secrets.token_urlsafe(32)

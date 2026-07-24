@@ -81,15 +81,18 @@ def build_session_ref(
     derivation_seed = {
         "schema_version": 1,
         "workspace_id": workspace_id,
-        "scope": scope_value,
         "endpoint_id": endpoint_id,
         "native_session_id": native_session_id,
-        "repository_binding": repo_value,
         "runtime_home": {
             "runtime_home_realpath": runtime_home.runtime_home_realpath,
             "runtime_home_id": runtime_home.runtime_home_id,
         },
         "authority": _authority_dict(authority),
+    }
+    evidence_seed = {
+        **derivation_seed,
+        "scope": scope_value,
+        "repository_binding": repo_value,
     }
     session_ref_id = _session_id_for(derivation_seed)
     if expected_session_ref_id is not None and expected_session_ref_id != session_ref_id:
@@ -101,7 +104,7 @@ def build_session_ref(
         "schema_version": 1,
         "workspace_id": workspace_id,
         "scope": deepcopy(scope_value),
-        "evidence_id": _evidence_id_for(derivation_seed),
+        "evidence_id": _evidence_id_for(evidence_seed),
         "evidence_kind": "exact_session_binding",
         "quality": "authoritative",
         "state": "routed",
