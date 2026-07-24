@@ -498,6 +498,86 @@ class DaemonTest(unittest.TestCase):
         self.assertFalse(thread_b.is_alive())
         self.assertEqual(errors, [])
 
+    def test_verified_close_cannot_churn_descriptor_proof_window(self) -> None:
+        with LedgerStore.open_writer(self.paths):
+            pass
+        self.paths.ensure_directories()
+        target = self.paths.backups / "descriptor-race.sqlite3"
+        close_go = threading.Event()
+        probe_ready = threading.Event()
+        close_attempted = threading.Event()
+        close_finished = threading.Event()
+        close_errors: list[BaseException] = []
+        probe: dict[str, object] = {}
+        snapshot_calls = 0
+        original_snapshot = store_module._connection_fd_snapshot
+        original_close = store_module._close_connection_and_pin
+
+        def snapshot() -> dict[int, tuple[int, int, int, str]]:
+            nonlocal snapshot_calls
+            result = original_snapshot()
+            snapshot_calls += 1
+            if snapshot_calls == 1:
+                close_go.set()
+                if not close_attempted.wait(1):
+                    raise AssertionError("probe close did not enter the proof window")
+                if close_finished.wait(0.2):
+                    raise AssertionError("probe close raced the descriptor proof window")
+            return result
+
+        def close(connection, pin) -> None:
+            if threading.current_thread().name == "probe-close":
+                close_attempted.set()
+            try:
+                original_close(connection, pin)
+            finally:
+                if threading.current_thread().name == "probe-close":
+                    close_finished.set()
+
+        def close_probe() -> None:
+            try:
+                probe["connection"], probe["pin"] = LedgerStore._open_verified_connection(
+                    self.paths.ledger,
+                    read_only=True,
+                )
+                probe_ready.set()
+            except BaseException as exc:
+                close_errors.append(exc)
+                probe_ready.set()
+                return
+            close_go.wait(1)
+            try:
+                close(probe["connection"], probe["pin"])
+            except BaseException as exc:
+                close_errors.append(exc)
+
+        thread = threading.Thread(target=close_probe, name="probe-close")
+        connection = pin = None
+        thread.start()
+        self.assertTrue(probe_ready.wait(1))
+        with (
+            patch.object(store_module, "_connection_fd_snapshot", side_effect=snapshot),
+            patch.object(store_module, "_close_connection_and_pin", side_effect=close),
+        ):
+            try:
+                connection, pin = LedgerStore._open_verified_connection(
+                    target,
+                    read_only=False,
+                    create=True,
+                    exclusive=True,
+                )
+            finally:
+                close_go.set()
+                thread.join(2)
+
+        try:
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(close_errors, [])
+            self.assertIsNotNone(connection)
+            self.assertIsNotNone(pin)
+        finally:
+            original_close(connection, pin)
+
     def test_integrity_probe_fails_closed_on_writer_reader_identity_mismatch(self) -> None:
         reader = MagicMock()
         reader.__enter__.return_value = reader

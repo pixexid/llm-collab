@@ -690,6 +690,29 @@ class LedgerStoreTest(unittest.TestCase):
             self.assertEqual(database.stat().st_mode & 0o777, 0o644)
             fake_connection.close.assert_called_once_with()
 
+    def test_verified_open_accepts_a_reused_fd_with_a_new_database_record(self) -> None:
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            database = Path(tmp) / "db"
+            database.touch()
+            identity = (database.stat().st_dev, database.stat().st_ino)
+            record = (identity[0], identity[1], stat.S_IFREG | 0o600, str(database))
+            fake_connection = Mock()
+            with (
+                patch.object(
+                    store_module,
+                    "_connection_fd_snapshot",
+                    side_effect=[
+                        {91: (identity[0], identity[1] + 1, stat.S_IFREG | 0o600, "/tmp/other")},
+                        {91: record},
+                    ],
+                ),
+                patch.object(store_module.sqlite3, "connect", return_value=fake_connection),
+            ):
+                connection, pin = LedgerStore._open_verified_connection(database, read_only=True)
+            self.assertIs(connection, fake_connection)
+            fake_connection.close()
+            pin.close()
+
     def test_secure_main_compares_identity_before_chmod(self) -> None:
         with TemporaryDirectory(dir="/tmp") as tmp:
             database = Path(tmp) / "db"

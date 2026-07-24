@@ -3120,9 +3120,10 @@ class _PinnedFile:
         os.fchmod(self._fd, mode)
 
     def close(self) -> None:
-        fd, self._fd = self._fd, None
-        if fd is not None:
-            os.close(fd)
+        with _CONNECTION_OPEN_LOCK:
+            fd, self._fd = self._fd, None
+            if fd is not None:
+                os.close(fd)
 
     def __del__(self) -> None:
         try:
@@ -3134,12 +3135,13 @@ class _PinnedFile:
 def _close_connection_and_pin(
     connection: sqlite3.Connection | None, pin: _PinnedFile | None
 ) -> None:
-    try:
-        if connection is not None:
-            connection.close()
-    finally:
-        if pin is not None:
-            pin.close()
+    with _CONNECTION_OPEN_LOCK:
+        try:
+            if connection is not None:
+                connection.close()
+        finally:
+            if pin is not None:
+                pin.close()
 
 
 def _stable_fd_record(fd: int, path_reader: Callable[[int], str]) -> tuple[int, int, int, str]:
@@ -3362,7 +3364,7 @@ class LedgerStore:
                 opened_regular_files = [
                     record
                     for fd, record in after.items()
-                    if fd not in before
+                    if before.get(fd) != record
                     and stat.S_ISREG(record[2])
                     and _reported_path_matches(record[3], path)
                 ]
