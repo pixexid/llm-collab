@@ -722,8 +722,8 @@ containment.
 
 ### Implemented ledger versions
 
-The exact current ledger is `PRAGMA user_version = 10`
-(`llm_collab.ledger.store.SCHEMA_VERSION == 10`):
+The exact current ledger is `PRAGMA user_version = 11`
+(`llm_collab.ledger.store.SCHEMA_VERSION == 11`):
 
 | Version | Landed in | Tables, triggers, and constraints |
 |---|---|
@@ -737,6 +737,7 @@ The exact current ledger is `PRAGMA user_version = 10`
 | v8 | GH-271 Child 2 | 4 tables plus 2 partial unique indexes and 1 trigger: `conversation_participants`, `lifecycle_provider_registry`, `conversation_bindings`, and `session_binding_challenges`. The storage is inert and adds no route authority. It enforces the compound participant key, a separate lifecycle-provider registry, one active/draining mutation binding per participant, one active/draining mutation owner per exact native-session owner tuple, and monotonic binding generation. |
 | v9 | GH-271 Child 5 | 1 table plus 1 support index and 2 triggers: `canonical_delivery_attempt_binding_freezes` stores one immutable `(binding_id, generation)` freeze for a canonical delivery attempt. The freeze references the exact conversation participant and binding tuple, is append-only, and does not change the adapter `DeliveryV1` wire shape. |
 | v10 | GH-271 Child 6 | 1 table plus 2 triggers: `conversation_binding_transition_audit` records explicit rebind/handoff transitions. The successor must pre-exist in a non-active state; the transition atomically supersedes the predecessor, activates the successor, records zero transferred pending work, and counts preserved predecessor freezes. Audit rows are append-only. |
+| v11 | GH-271 Child 7 | 1 additive table plus 2 triggers: `legacy_autobridge_provenance_imports` records hash-only provenance for the legacy autobridge `bindings` and `thread_pairs` trees. Released v1-v10 SQL remains byte-unchanged; v11 does not rebuild or widen the v3 `legacy_provenance_imports` `record_kind` constraint. Exact-project projections read both provenance tables so `session`, `activation_lease`, `binding`, and `thread_pair` rows cannot be partially surfaced. |
 
 The migration checksums and schema fingerprints are code authority in
 `llm_collab/ledger/store.py` and are verified on open. Current values are:
@@ -753,9 +754,10 @@ The migration checksums and schema fingerprints are code authority in
 | v8 | `sha256:437fe52450978b246b2a62fd5a0a0f08ddbf4f3f97501dafda0eb999e48580ff` | `sha256:9aefd9f214307d6645358444485b632dcbfc8c1a809a0c3708c369909abdaf3f` |
 | v9 | `sha256:601eb6b5a7edfd3b409e578c9d57ea752c5af30cfd027c34512a16b1dc1c9a3b` | `sha256:867ed58b94e0dae45c21347409af0daa30ae901b6e2120111b2a26fddd8a4889` |
 | v10 | `sha256:44547c1810cacf9ba9d8edc2e7ee057446d93d1103d4c1424a868febbb525ecd` | `sha256:f32ef268eb81fced863c66f0209cc8fcfaac87a3c87bf628454d74c405124427` |
+| v11 | `sha256:4b61d82c2a2578fdd25f39ea42f73cc5545edf40460df45c0ef986eae84c57fe` | `sha256:decb92cd78ac700383cf7e1b5a7b2c5137e37978b2b06a1cc108bcb9da559081` |
 
 No subscription, timer, runtime-dispatch lease, fence, retry, or quarantine
-table exists in v1 through v10. Dead-letter and reconciliation outcomes in
+table exists in v1 through v11. Dead-letter and reconciliation outcomes in
 Phase 2 are receipts, not a separate table.
 
 ### Implemented Phase 2 canonical surfaces
@@ -844,24 +846,32 @@ in exact-project projections. One workspace ledger may contain many projects.
 
 ### Implemented legacy provenance import
 
-P1d imports only the closed current-v2 source families
+Provenance import reads only closed current-v2 source families. P1d imported
 `State/session_autobridge/sessions/*.json` and
-`State/session_autobridge/activation_leases/*.json`. It records source family,
-record kind, relative locator, SHA-256, byte size, timestamps, import revision,
-and transaction ID. It never stores source JSON and no runtime, dispatcher,
-lease, activation, inbox, or other consumer reads these rows.
+`State/session_autobridge/activation_leases/*.json`. GH-271 Child 7 additively
+imports `State/session_autobridge/bindings/<project>/<chat>/<agent>.json` and
+`State/session_autobridge/thread_pairs/<project>/<chat>/<agent-a>__<agent-b>.json`
+into a separate v11 table. It records source family, record kind, relative
+locator, SHA-256, byte size, timestamps, import revision, and transaction ID. It
+never stores source JSON and no runtime, dispatcher, lease, activation, inbox,
+or lifecycle consumer reads these rows.
 
 Session scope comes only from a top-level `project_id`; activation-lease scope
-comes only from `identity.project`. The claim must exactly match a project in
-the immutable registry snapshot. Missing, malformed, duplicate-member,
-non-RFC JSON, excessive-depth, unknown, or foreign claims become
-`legacy_unscoped` and are never projected by exact-project reads. Collection is
-bounded to **5000 directory entries total across both source directories** and
+comes only from `identity.project`. Binding and thread-pair scope require both
+the path project/chat/participant tuple and the JSON payload to agree; the
+project must exactly match the immutable registry snapshot. Missing, malformed,
+duplicate-member, non-RFC JSON, excessive-depth, path/payload mismatch,
+unknown, or foreign claims become `legacy_unscoped` and are never projected by
+exact-project reads. Collection is bounded to **5000 directory entries total
+across all source directories and nested autobridge components** and
 **1048576 bytes (1 MiB) per regular JSON file**. The entry budget counts every
 directory entry before suffix filtering and fails closed rather than
 truncating. No-follow, non-blocking file opens reject symlinks, FIFOs, devices,
-sockets, and files that change during collection. The complete set is collected
-and revalidated before one append-only transaction.
+sockets, and files that change during collection. Nested `bindings` and
+`thread_pairs` descent is parent-fd-relative from the one pinned workspace root;
+each opened directory component is revalidated by descriptor identity and
+parent-relative path identity before import. The complete set is collected and
+revalidated before one append-only transaction.
 
 ### Rollback
 
@@ -877,7 +887,7 @@ not a process-wide kill switch for direct in-process `LedgerStore` or
 `llm_collab.canonical` library calls. Rollback never performs an in-place schema
 downgrade or destructive cleanup of canonical evidence. A migration failure may
 restore the verified pre-migration backup automatically; an intentional rollback
-keeps v1-v10 evidence intact for later reconciliation.
+keeps v1-v11 evidence intact for later reconciliation.
 
 ## Implemented Phase 3.5 conversation binding foundation
 

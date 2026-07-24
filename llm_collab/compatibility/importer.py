@@ -24,12 +24,28 @@ _SOURCES = (
         "session",
         "sessions",
         ("State", "session_autobridge", "sessions"),
+        1,
     ),
     (
         "session_autobridge",
         "activation_lease",
         "activation_leases",
         ("State", "session_autobridge", "activation_leases"),
+        1,
+    ),
+    (
+        "session_autobridge",
+        "binding",
+        "bindings",
+        ("State", "session_autobridge", "bindings"),
+        3,
+    ),
+    (
+        "session_autobridge",
+        "thread_pair",
+        "thread_pairs",
+        ("State", "session_autobridge", "thread_pairs"),
+        3,
     ),
 )
 
@@ -94,7 +110,17 @@ def _open_optional_directory(
     return fd, _directory_identity(os.fstat(fd))
 
 
-def _json_names(directory_fd: int, remaining: int) -> tuple[tuple[str, ...], int]:
+def _safe_entry_name(name: str) -> str:
+    try:
+        name.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise LegacyImportError("legacy source filename is not valid UTF-8") from exc
+    if not name or name in {".", ".."} or "/" in name or "\\" in name or "\x00" in name:
+        raise LegacyImportError("legacy source filename is unsafe")
+    return name
+
+
+def _entry_names(directory_fd: int, remaining: int) -> tuple[tuple[str, ...], int]:
     names = []
     scanned = 0
     with os.scandir(directory_fd) as entries:
@@ -104,17 +130,13 @@ def _json_names(directory_fd: int, remaining: int) -> tuple[tuple[str, ...], int
                     "legacy source set exceeds 5000 directory entries"
                 )
             scanned += 1
-            name = entry.name
-            if not name.endswith(".json"):
-                continue
-            try:
-                name.encode("utf-8")
-            except UnicodeEncodeError as exc:
-                raise LegacyImportError("legacy source filename is not valid UTF-8") from exc
-            if not name or name in {".", ".."} or "/" in name or "\\" in name or "\x00" in name:
-                raise LegacyImportError("legacy source filename is unsafe")
-            names.append(name)
+            names.append(_safe_entry_name(entry.name))
     return tuple(sorted(names)), scanned
+
+
+def _json_names(directory_fd: int, remaining: int) -> tuple[tuple[str, ...], int]:
+    names, scanned = _entry_names(directory_fd, remaining)
+    return tuple(name for name in names if name.endswith(".json")), scanned
 
 
 def _revalidate_root(
@@ -200,8 +222,73 @@ def _invalid_json_constant(value: str) -> object:
     raise ValueError(f"invalid JSON constant: {value}")
 
 
+def _text(value: object) -> str | None:
+    return value if isinstance(value, str) and value else None
+
+
+def _claimed_binding_project(
+    payload: dict[str, object],
+    parts: tuple[str, ...],
+    registered: frozenset[str],
+) -> str | None:
+    if len(parts) != 6:
+        return None
+    project_id = _text(payload.get("project_id"))
+    chat_id = _text(payload.get("chat_id"))
+    agent_id = _text(payload.get("agent_id"))
+    runtime_session_id = _text(payload.get("runtime_session_id"))
+    path_project, path_chat, terminal = parts[3], parts[4], parts[5]
+    path_agent = terminal[:-5] if terminal.endswith(".json") else ""
+    if (
+        project_id is None
+        or chat_id is None
+        or agent_id is None
+        or runtime_session_id is None
+        or project_id != path_project
+        or chat_id != path_chat
+        or agent_id != path_agent
+    ):
+        return None
+    return project_id if project_id in registered else None
+
+
+def _claimed_thread_pair_project(
+    payload: dict[str, object],
+    parts: tuple[str, ...],
+    registered: frozenset[str],
+) -> str | None:
+    if len(parts) != 6:
+        return None
+    project_id = _text(payload.get("project_id"))
+    chat_id = _text(payload.get("chat_id"))
+    agents = payload.get("agents")
+    sessions = payload.get("sessions")
+    path_project, path_chat, terminal = parts[3], parts[4], parts[5]
+    terminal_stem = terminal[:-5] if terminal.endswith(".json") else ""
+    path_agents = terminal_stem.split("__")
+    if (
+        project_id is None
+        or chat_id is None
+        or project_id != path_project
+        or chat_id != path_chat
+        or not isinstance(agents, list)
+        or len(agents) != 2
+        or not all(isinstance(agent, str) and agent for agent in agents)
+        or sorted(agents) != path_agents
+        or not isinstance(sessions, dict)
+    ):
+        return None
+    for agent in path_agents:
+        if not _text(sessions.get(agent)):
+            return None
+    return project_id if project_id in registered else None
+
+
 def _claimed_project(
-    raw: bytes, record_kind: str, registered: frozenset[str]
+    raw: bytes,
+    record_kind: str,
+    registered: frozenset[str],
+    parts: tuple[str, ...] = (),
 ) -> str | None:
     try:
         payload = json.loads(
@@ -215,10 +302,79 @@ def _claimed_project(
         return None
     if record_kind == "session":
         claim = payload.get("project_id")
-    else:
+    elif record_kind == "activation_lease":
         identity = payload.get("identity")
         claim = identity.get("project") if isinstance(identity, dict) else None
+    elif record_kind == "binding":
+        return _claimed_binding_project(payload, parts, registered)
+    elif record_kind == "thread_pair":
+        return _claimed_thread_pair_project(payload, parts, registered)
+    else:
+        return None
     return claim if isinstance(claim, str) and claim and claim in registered else None
+
+
+def _scan_child_directory(
+    *,
+    parent_fd: int,
+    name: str,
+    stack: ExitStack,
+    snapshots: list[tuple[int, str, int | None, tuple[int, int, int] | None, tuple[str, ...], int]],
+    remaining: int,
+    optional: bool,
+) -> tuple[int | None, tuple[str, ...], int]:
+    child_fd, identity = _open_optional_directory(parent_fd, name, stack)
+    if child_fd is None:
+        if not optional:
+            raise LegacyImportError(f"legacy source component disappeared: {name}")
+        snapshots.append((parent_fd, name, None, None, (), 0))
+        return None, (), 0
+    names, scanned = _entry_names(child_fd, remaining)
+    snapshots.append((parent_fd, name, child_fd, identity, names, scanned))
+    return child_fd, names, scanned
+
+
+def _collect_candidates(
+    *,
+    directory_fd: int,
+    names: tuple[str, ...],
+    parts: tuple[str, ...],
+    depth: int,
+    stack: ExitStack,
+    snapshots: list[tuple[int, str, int | None, tuple[int, int, int] | None, tuple[str, ...], int]],
+    remaining: int,
+) -> tuple[list[tuple[int, tuple[str, ...], str]], int]:
+    candidates: list[tuple[int, tuple[str, ...], str]] = []
+    if depth == 1:
+        for name in names:
+            if name.endswith(".json"):
+                candidates.append((directory_fd, parts, name))
+        return candidates, remaining
+    for name in names:
+        if name.endswith(".json"):
+            continue
+        child_fd, child_names, scanned = _scan_child_directory(
+            parent_fd=directory_fd,
+            name=name,
+            stack=stack,
+            snapshots=snapshots,
+            remaining=remaining,
+            optional=False,
+        )
+        if child_fd is None:
+            raise LegacyImportError(f"legacy source component disappeared: {name}")
+        remaining -= scanned
+        child_candidates, remaining = _collect_candidates(
+            directory_fd=child_fd,
+            names=child_names,
+            parts=(*parts, name),
+            depth=depth - 1,
+            stack=stack,
+            snapshots=snapshots,
+            remaining=remaining,
+        )
+        candidates.extend(child_candidates)
+    return candidates, remaining
 
 
 def import_current_provenance(
@@ -253,69 +409,66 @@ def import_current_provenance(
                     state_fd, "session_autobridge", stack
                 )
 
-            snapshots = []
+            snapshots: list[
+                tuple[int, str, int | None, tuple[int, int, int] | None, tuple[str, ...], int]
+            ] = []
+            candidates: list[tuple[str, str, int, tuple[str, ...], str]] = []
             remaining = MAX_FILES
-            for source_family, record_kind, directory_name, parts in _SOURCES:
+            for source_family, record_kind, directory_name, parts, depth in _SOURCES:
                 if bridge_fd is None:
-                    directory_fd, directory_identity = None, None
-                    names = ()
-                    scanned = 0
-                else:
-                    directory_fd, directory_identity = _open_optional_directory(
-                        bridge_fd, directory_name, stack
-                    )
-                    if directory_fd is None:
-                        names, scanned = (), 0
-                    else:
-                        names, scanned = _json_names(directory_fd, remaining)
+                    continue
+                directory_fd, names, scanned = _scan_child_directory(
+                    parent_fd=bridge_fd,
+                    name=directory_name,
+                    stack=stack,
+                    snapshots=snapshots,
+                    remaining=remaining,
+                    optional=True,
+                )
                 remaining -= scanned
-                snapshots.append(
+                if directory_fd is None:
+                    continue
+                source_candidates, remaining = _collect_candidates(
+                    directory_fd=directory_fd,
+                    names=names,
+                    parts=parts,
+                    depth=depth,
+                    stack=stack,
+                    snapshots=snapshots,
+                    remaining=remaining,
+                )
+                candidates.extend(
                     (
                         source_family,
                         record_kind,
-                        directory_name,
-                        parts,
-                        directory_fd,
-                        directory_identity,
-                        names,
-                        scanned,
+                        parent_fd,
+                        candidate_parts,
+                        name,
                     )
+                    for parent_fd, candidate_parts, name in source_candidates
                 )
 
             observed_at = clock().astimezone(timezone.utc).isoformat()
-            for (
-                source_family,
-                record_kind,
-                _directory_name,
-                parts,
-                directory_fd,
-                _directory_identity_value,
-                names,
-                _scanned,
-            ) in snapshots:
-                if directory_fd is None:
-                    continue
-                for name in names:
-                    raw, file_identity = _read_stable(directory_fd, name)
-                    project_id = _claimed_project(raw, record_kind, registered)
-                    locator = "/".join((*parts, name))
-                    records.append(
-                        {
-                            "source_family": source_family,
-                            "record_kind": record_kind,
-                            "source_locator": locator,
-                            "content_sha256": hashlib.sha256(raw).hexdigest(),
-                            "byte_size": len(raw),
-                            "observed_at_utc": observed_at,
-                            "scope_kind": (
-                                "exact_project"
-                                if project_id is not None
-                                else "legacy_unscoped"
-                            ),
-                            "project_id": project_id,
-                        }
-                    )
-                    collected_identities[(parts, name)] = file_identity
+            for source_family, record_kind, directory_fd, parts, name in candidates:
+                raw, file_identity = _read_stable(directory_fd, name)
+                full_parts = (*parts, name)
+                project_id = _claimed_project(raw, record_kind, registered, full_parts)
+                locator = "/".join(full_parts)
+                records.append(
+                    {
+                        "source_family": source_family,
+                        "record_kind": record_kind,
+                        "source_locator": locator,
+                        "content_sha256": hashlib.sha256(raw).hexdigest(),
+                        "byte_size": len(raw),
+                        "observed_at_utc": observed_at,
+                        "scope_kind": (
+                            "exact_project" if project_id is not None else "legacy_unscoped"
+                        ),
+                        "project_id": project_id,
+                    }
+                )
+                collected_identities[(parts, name)] = file_identity
 
             _revalidate_root(root, root_fd, root_identity)
             _revalidate_component(root_fd, "State", state_fd, state_identity)
@@ -327,32 +480,17 @@ def import_current_provenance(
                     bridge_identity,
                 )
             if bridge_fd is not None:
-                for (
-                    _source_family,
-                    _record_kind,
-                    directory_name,
-                    parts,
-                    directory_fd,
-                    directory_identity,
-                    names,
-                    scanned,
-                ) in snapshots:
-                    _revalidate_component(
-                        bridge_fd,
-                        directory_name,
-                        directory_fd,
-                        directory_identity,
-                    )
+                for parent_fd, name, directory_fd, directory_identity, names, scanned in snapshots:
+                    _revalidate_component(parent_fd, name, directory_fd, directory_identity)
                     if directory_fd is None:
                         continue
-                    current_names, current_scanned = _json_names(
-                        directory_fd, scanned
-                    )
+                    current_names, current_scanned = _entry_names(directory_fd, scanned)
                     if current_names != names or current_scanned != scanned:
                         raise LegacyImportError(
                             "legacy source set changed during collection"
                         )
-                    for name in names:
+                for _source_family, _record_kind, directory_fd, parts, name in candidates:
+                    try:
                         current = _identity(
                             os.stat(
                                 name,
@@ -360,10 +498,14 @@ def import_current_provenance(
                                 follow_symlinks=False,
                             )
                         )
-                        if current != collected_identities[(parts, name)]:
-                            raise LegacyImportError(
-                                f"legacy source path identity changed before import: {name}"
-                            )
+                    except FileNotFoundError as exc:
+                        raise LegacyImportError(
+                            f"legacy source path disappeared before import: {name}"
+                        ) from exc
+                    if current != collected_identities[(parts, name)]:
+                        raise LegacyImportError(
+                            f"legacy source path identity changed before import: {name}"
+                        )
     except OSError as exc:
         raise LegacyImportError(
             "legacy source is unsafe, changed, or became unreadable"

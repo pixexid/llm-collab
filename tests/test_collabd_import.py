@@ -689,6 +689,284 @@ finally:
                     0,
                 )
 
+    def test_directory_entry_budget_counts_nested_autobridge_descent(self) -> None:
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            root = Path(tmp) / "workspace"
+            root.mkdir()
+            sessions, _leases = source_dirs(root)
+            binding_chat = (
+                root
+                / "State"
+                / "session_autobridge"
+                / "bindings"
+                / "amiga"
+                / "CHAT-SAMEID"
+            )
+            binding_chat.mkdir(parents=True)
+            (binding_chat / "codex.json").write_text(
+                json.dumps(
+                    {
+                        "project_id": "amiga",
+                        "chat_id": "CHAT-SAMEID",
+                        "agent_id": "codex",
+                        "runtime_session_id": "codex-thread-1",
+                    }
+                )
+            )
+            original_scandir = importer_module.os.scandir
+            counts = {sessions.stat().st_ino: 4997}
+
+            def entries_for(directory_fd: int):
+                count = counts.get(os.fstat(directory_fd).st_ino)
+                if count is not None:
+                    return FakeDirectoryEntries(count)
+                return original_scandir(directory_fd)
+
+            paths = LedgerPaths.derive(Path(tmp) / "ledger-state", "ws_alpha")
+            with LedgerStore.open_writer(paths) as store:
+                record_registry(store)
+                with patch.object(importer_module.os, "scandir", side_effect=entries_for):
+                    self.assertEqual(
+                        import_current_provenance(
+                            workspace_root=root,
+                            store=store,
+                            workspace_id="ws_alpha",
+                            registry_revision=REVISION,
+                            clock=lambda: NOW,
+                        ),
+                        1,
+                    )
+                    counts[sessions.stat().st_ino] = 4998
+                    with self.assertRaisesRegex(LegacyImportError, "5000 directory entries"):
+                        import_current_provenance(
+                            workspace_root=root,
+                            store=store,
+                            workspace_id="ws_alpha",
+                            registry_revision=REVISION,
+                            clock=lambda: NOW,
+                        )
+
+    def test_nested_autobridge_provenance_projects_all_four_record_kinds(self) -> None:
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            root = Path(tmp) / "workspace"
+            root.mkdir()
+            sessions, leases = source_dirs(root)
+            bridge = root / "State" / "session_autobridge"
+            bindings = bridge / "bindings" / "amiga" / "CHAT-SAMEID"
+            pairs = bridge / "thread_pairs" / "amiga" / "CHAT-SAMEID"
+            bindings.mkdir(parents=True)
+            pairs.mkdir(parents=True)
+            (sessions / "session.json").write_text(json.dumps({"project_id": "amiga"}))
+            (leases / "lease.json").write_text(
+                json.dumps({"identity": {"project": "amiga"}})
+            )
+            (bindings / "codex.json").write_text(
+                json.dumps(
+                    {
+                        "project_id": "amiga",
+                        "chat_id": "CHAT-SAMEID",
+                        "agent_id": "codex",
+                        "runtime_session_id": "codex-thread-1",
+                    }
+                )
+            )
+            (pairs / "claude__codex.json").write_text(
+                json.dumps(
+                    {
+                        "project_id": "amiga",
+                        "chat_id": "CHAT-SAMEID",
+                        "agents": ["claude", "codex"],
+                        "sessions": {
+                            "claude": "claude-thread-1",
+                            "codex": "codex-thread-1",
+                        },
+                    }
+                )
+            )
+            paths = LedgerPaths.derive(Path(tmp) / "ledger-state", "ws_alpha")
+            with LedgerStore.open_writer(paths) as store:
+                record_registry(store)
+                self.assertEqual(
+                    import_current_provenance(
+                        workspace_root=root,
+                        store=store,
+                        workspace_id="ws_alpha",
+                        registry_revision=REVISION,
+                        clock=lambda: NOW,
+                    ),
+                    4,
+                )
+                projected = store.get_legacy_provenance(
+                    workspace_id="ws_alpha",
+                    project_id="amiga",
+                    registry_revision=REVISION,
+                )
+                self.assertEqual(
+                    {row["record_kind"] for row in projected},
+                    {"session", "activation_lease", "binding", "thread_pair"},
+                )
+                self.assertEqual(
+                    store._connection.execute(
+                        "SELECT count(*) FROM legacy_provenance_imports"
+                    ).fetchone()[0],
+                    2,
+                )
+                self.assertEqual(
+                    store._connection.execute(
+                        "SELECT count(*) FROM legacy_autobridge_provenance_imports"
+                    ).fetchone()[0],
+                    2,
+                )
+                for table in (
+                    "conversation_participants",
+                    "conversation_bindings",
+                    "session_binding_challenges",
+                    "conversation_binding_transition_audit",
+                ):
+                    self.assertEqual(
+                        store._connection.execute(
+                            f'SELECT count(*) FROM "{table}"'
+                        ).fetchone()[0],
+                        0,
+                    )
+
+    def test_nested_autobridge_path_payload_mismatch_stays_unscoped(self) -> None:
+        cases = (
+            (
+                "binding-project",
+                ("bindings", "amiga", "CHAT-SAMEID", "codex.json"),
+                {
+                    "project_id": "nuvyr",
+                    "chat_id": "CHAT-SAMEID",
+                    "agent_id": "codex",
+                    "runtime_session_id": "codex-thread-1",
+                },
+            ),
+            (
+                "binding-chat",
+                ("bindings", "amiga", "CHAT-SAMEID", "codex.json"),
+                {
+                    "project_id": "amiga",
+                    "chat_id": "CHAT-OTHER",
+                    "agent_id": "codex",
+                    "runtime_session_id": "codex-thread-1",
+                },
+            ),
+            (
+                "binding-agent",
+                ("bindings", "amiga", "CHAT-SAMEID", "codex.json"),
+                {
+                    "project_id": "amiga",
+                    "chat_id": "CHAT-SAMEID",
+                    "agent_id": "claude",
+                    "runtime_session_id": "codex-thread-1",
+                },
+            ),
+            (
+                "thread-pair-agents",
+                ("thread_pairs", "amiga", "CHAT-SAMEID", "claude__codex.json"),
+                {
+                    "project_id": "amiga",
+                    "chat_id": "CHAT-SAMEID",
+                    "agents": ["claude", "cdx2"],
+                    "sessions": {
+                        "claude": "claude-thread-1",
+                        "cdx2": "cdx2-thread-1",
+                    },
+                },
+            ),
+        )
+        for case, relative, payload in cases:
+            with self.subTest(case=case), TemporaryDirectory(dir="/tmp") as tmp:
+                root = Path(tmp) / "workspace"
+                root.mkdir()
+                source_dirs(root)
+                path = root / "State" / "session_autobridge" / Path(*relative)
+                path.parent.mkdir(parents=True)
+                path.write_text(json.dumps(payload))
+                paths = LedgerPaths.derive(Path(tmp) / "ledger-state", "ws_alpha")
+                with LedgerStore.open_writer(paths) as store:
+                    record_registry(store)
+                    self.assertEqual(
+                        import_current_provenance(
+                            workspace_root=root,
+                            store=store,
+                            workspace_id="ws_alpha",
+                            registry_revision=REVISION,
+                            clock=lambda: NOW,
+                        ),
+                        1,
+                    )
+                    self.assertEqual(
+                        store.get_legacy_provenance(
+                            workspace_id="ws_alpha",
+                            project_id="amiga",
+                            registry_revision=REVISION,
+                        ),
+                        [],
+                    )
+                    self.assertEqual(
+                        store._connection.execute(
+                            "SELECT count(*) FROM legacy_autobridge_provenance_imports "
+                            "WHERE scope_kind = 'legacy_unscoped' AND project_id IS NULL"
+                        ).fetchone()[0],
+                        1,
+                    )
+
+    def test_midlevel_autobridge_chat_directory_swap_fails_closed(self) -> None:
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            parent = Path(tmp)
+            root = parent / "workspace"
+            root.mkdir()
+            source_dirs(root)
+            chat_dir = (
+                root
+                / "State"
+                / "session_autobridge"
+                / "bindings"
+                / "amiga"
+                / "CHAT-SAMEID"
+            )
+            chat_dir.mkdir(parents=True)
+            payload = {
+                "project_id": "amiga",
+                "chat_id": "CHAT-SAMEID",
+                "agent_id": "codex",
+                "runtime_session_id": "codex-thread-1",
+            }
+            (chat_dir / "codex.json").write_text(json.dumps(payload))
+            parked = parent / "parked-chat"
+            replacement = parent / "replacement-chat"
+            replacement.mkdir()
+            (replacement / "codex.json").write_text(json.dumps(payload))
+            paths = LedgerPaths.derive(parent / "ledger-state", "ws_alpha")
+            with LedgerStore.open_writer(paths) as store:
+                record_registry(store)
+                swapped = False
+
+                def swap_clock() -> datetime:
+                    nonlocal swapped
+                    chat_dir.rename(parked)
+                    replacement.rename(chat_dir)
+                    swapped = True
+                    return NOW
+
+                with self.assertRaisesRegex(LegacyImportError, "component identity changed"):
+                    import_current_provenance(
+                        workspace_root=root,
+                        store=store,
+                        workspace_id="ws_alpha",
+                        registry_revision=REVISION,
+                        clock=swap_clock,
+                    )
+                self.assertTrue(swapped)
+                self.assertEqual(
+                    store._connection.execute(
+                        "SELECT count(*) FROM legacy_autobridge_provenance_imports"
+                    ).fetchone()[0],
+                    0,
+                )
+
     def test_compatibility_importer_has_no_runtime_consumer_or_v2_authority_import(self) -> None:
         source = inspect.getsource(importer_module)
         self.assertNotIn("_session_autobridge", source)
