@@ -717,7 +717,17 @@ def message_needs_canonical_materialization(session: dict, message: dict) -> boo
 def processed_message_blocks_dispatch(session: dict, message: dict, seen: set[str]) -> bool:
     if message["path"] not in seen:
         return False
-    return not message_needs_canonical_materialization(session, message)
+    return not (
+        message_needs_canonical_materialization(session, message)
+        and message["path"] not in canonical_settled_message_paths(session)
+    )
+
+
+def canonical_settled_message_paths(session: dict) -> set[str]:
+    settled = session.get("canonical_settled_messages", {})
+    if isinstance(settled, dict):
+        return {str(path) for path in settled}
+    return set()
 
 
 def mark_message_processed(session: dict, message_path: str) -> None:
@@ -725,6 +735,15 @@ def mark_message_processed(session: dict, message_path: str) -> None:
     if message_path not in existing:
         existing.append(message_path)
     session["processed_messages"] = existing
+    save_session(session)
+
+
+def mark_canonical_settlement_complete(session: dict, message_path: str, reason: str) -> None:
+    existing = session.get("canonical_settled_messages", {})
+    if not isinstance(existing, dict):
+        existing = {}
+    existing.setdefault(message_path, {"reason": reason})
+    session["canonical_settled_messages"] = existing
     save_session(session)
 
 
@@ -752,7 +771,19 @@ def materialize_selected_runtime_packet(session: dict, message: dict) -> dict[st
                 message=message,
             )
     except materialization_module.LegacyPacketMaterializationRefused as exc:
-        return {"resolved": False, "reason": exc.reason, "detail": exc.detail}
+        return {
+            "resolved": False,
+            "reason": exc.reason,
+            "detail": exc.detail,
+            "canonical_write_started": False,
+        }
+    except Exception as exc:
+        return {
+            "resolved": False,
+            "reason": ROUTE_AMBIGUOUS_REASON,
+            "detail": str(exc),
+            "canonical_write_started": True,
+        }
 
 
 def claim_message_activation(session: dict, message: dict) -> tuple[bool, dict[str, Any] | None]:
@@ -1959,9 +1990,15 @@ def dispatch_session(session_id: str) -> dict[str, Any]:
         }
 
     matched = []
+    completed_settlements = []
     seen = processed_messages(session)
     for message in matching_unread_messages(session):
         if processed_message_blocks_dispatch(session, message, seen):
+            if (
+                message_needs_canonical_materialization(session, message)
+                and message["path"] in canonical_settled_message_paths(session)
+            ):
+                completed_settlements.append(message)
             continue
         target_match, target_reason = message_targets_session(session, message)
         if not target_match:
@@ -2010,6 +2047,19 @@ def dispatch_session(session_id: str) -> dict[str, Any]:
         matched.append(message)
 
     actions: list[dict[str, Any]] = []
+    for message in completed_settlements:
+        event = {
+            "event": "message_already_consumed",
+            "message_path": message["path"],
+            "requested_mode": session.get("mode"),
+            "requested_wake_strategy": session.get("wake_strategy"),
+            "effective_action": "runtime_trigger",
+            "reason": "already_processed",
+            "runtime_result": {"returncode": 0, "skipped": True},
+        }
+        append_event(session_id, event)
+        actions.append(event)
+    materialization_slot_available = True
     for message in matched:
         action, action_reason = resolve_effective_action(session, message)
         event: dict[str, Any] = {
@@ -2027,6 +2077,19 @@ def dispatch_session(session_id: str) -> dict[str, Any]:
         if action == "runtime_trigger":
             runtime = runtime_metadata(session)
             if message_needs_canonical_materialization(session, message):
+                if not materialization_slot_available:
+                    event["reason"] = "pull_pending"
+                    event["canonical_materialization_result"] = {
+                        "resolved": False,
+                        "reason": "pull_pending",
+                        "detail": "one canonical materialization slot per poll",
+                        "deferred": True,
+                        "canonical_write_started": False,
+                    }
+                    should_mark_processed = False
+                    append_event(session_id, event)
+                    actions.append(event)
+                    continue
                 asserted, assertion_event, materialization_result = activation_fenced_mutation(
                     session,
                     message,
@@ -2045,6 +2108,8 @@ def dispatch_session(session_id: str) -> dict[str, Any]:
                     actions.append(event)
                     continue
                 event["canonical_materialization_result"] = materialization_result
+                if materialization_result.get("canonical_write_started"):
+                    materialization_slot_available = False
                 if not materialization_result.get("resolved"):
                     event["reason"] = materialization_result.get(
                         "reason",
@@ -2053,6 +2118,33 @@ def dispatch_session(session_id: str) -> dict[str, Any]:
                     append_event(session_id, event)
                     actions.append(event)
                     continue
+                if message["path"] not in canonical_settled_message_paths(session):
+                    settlement_reason = (
+                        "gate_disabled"
+                        if materialization_result.get("gate") == "disabled"
+                        else "materialized"
+                    )
+                    asserted, assertion_event, _ = activation_fenced_mutation(
+                        session,
+                        message,
+                        boundary="mark_canonical_settlement_complete",
+                        mutation=lambda: mark_canonical_settlement_complete(
+                            session,
+                            message["path"],
+                            settlement_reason,
+                        ),
+                    )
+                    if assertion_event is not None:
+                        event.setdefault("activation_assertions", []).append(assertion_event)
+                    if not asserted:
+                        event["reason"] = (
+                            assertion_event["reason"]
+                            if assertion_event
+                            else "activation_assert_refused"
+                        )
+                        append_event(session_id, event)
+                        actions.append(event)
+                        continue
             asserted, assertion_event, _ = activation_fenced_mutation(
                 session,
                 message,

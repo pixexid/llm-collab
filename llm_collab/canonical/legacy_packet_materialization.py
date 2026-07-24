@@ -8,6 +8,7 @@ from datetime import datetime
 import hashlib
 from pathlib import Path
 
+from llm_collab.canonical.control import CanonicalControlError, require_canonical_write_gate
 from llm_collab.canonical.delivery import create_bound_attempt, create_deliveries
 from llm_collab.canonical.messages import create_or_return_equivalent
 from llm_collab.ledger.store import (
@@ -40,7 +41,10 @@ def materialize_selected_legacy_packet(
     """Append canonical rows for one already-selected legacy packet."""
     relpath, packet = _selected_packet(workspace_root, message)
     packet_sha256 = hashlib.sha256(packet).hexdigest()
-    frontmatter, _body = _parse_legacy_frontmatter(packet)
+    try:
+        frontmatter, _body = _parse_legacy_frontmatter(packet)
+    except ValueError as exc:
+        _refuse(str(exc))
     project_id = _required_text(frontmatter.get("project_id"), "project_id")
     chat_id = _required_text(frontmatter.get("chat_id"), "chat_id")
     agent_id = _required_text(session.get("agent_id"), "session.agent_id")
@@ -62,6 +66,24 @@ def materialize_selected_legacy_packet(
         workspace_id=store.paths.workspace_id,
         project_id=project_id,
     )
+    try:
+        require_canonical_write_gate(
+            store,
+            workspace_id=store.paths.workspace_id,
+            scope_kind="project",
+            scope_identity=project_id,
+            registry_revision=registry_revision,
+            allow_canonical_write=True,
+        )
+    except CanonicalControlError:
+        return {
+            "created": False,
+            "resolved": True,
+            "materialized": False,
+            "gate": "disabled",
+            "registry_revision": registry_revision,
+            "canonical_write_started": False,
+        }
     sent_utc = _required_text(frontmatter.get("sent_utc"), "sent_utc")
     sent_epoch_ms = _epoch_ms(sent_utc)
     title = _required_text(frontmatter.get("title"), "title")
@@ -139,6 +161,8 @@ def materialize_selected_legacy_packet(
         created_at_utc=sent_utc,
         conversation_id=chat_id,
         participant_id=participant_id,
+        expected_binding_id=target_binding_id,
+        expected_generation=target_generation,
     )
     return {
         **attempt,
@@ -146,8 +170,10 @@ def materialize_selected_legacy_packet(
         "message_created": message_created,
         "delivery_id": delivery_id,
         "delivery_created": delivery_created,
+        "materialized": True,
         "packet_sha256": packet_sha256,
         "packet_relpath": relpath,
+        "canonical_write_started": True,
     }
 
 
@@ -225,20 +251,24 @@ def _latest_project_registry_revision(
 ) -> str:
     row = store._connection.execute(
         """
-        SELECT p.registry_revision
-        FROM project_registry_snapshots AS p
-        JOIN workspace_registry_snapshots AS w
-          ON w.workspace_id = p.workspace_id
-         AND w.registry_revision = p.registry_revision
-        WHERE p.workspace_id = ? AND p.project_id = ?
-        ORDER BY w.captured_at_utc DESC, p.registry_revision DESC
+        SELECT registry_revision
+        FROM workspace_registry_snapshots
+        WHERE workspace_id = ?
+        ORDER BY captured_at_utc DESC, registry_revision DESC
         LIMIT 1
         """,
-        (workspace_id, project_id),
+        (workspace_id,),
     ).fetchone()
     if row is None:
         _refuse("registry revision is unprovable")
-    return str(row[0])
+    registry_revision = str(row[0])
+    if store.get_project_snapshot(
+        workspace_id=workspace_id,
+        project_id=project_id,
+        registry_revision=registry_revision,
+    ) is None:
+        _refuse("project is absent from the latest registry revision")
+    return registry_revision
 
 
 def _epoch_ms(timestamp: str) -> int:
@@ -271,6 +301,7 @@ def _unresolved(reason: object) -> dict[str, object]:
         "reason": reason,
         "binding_id": None,
         "generation": None,
+        "canonical_write_started": False,
     }
 
 
