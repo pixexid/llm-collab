@@ -940,6 +940,12 @@ instance, `binding_id`, and generation fields; they do not contain the evidence,
 authority, runtime-home annotations, or optional repository binding required to
 fabricate a complete `SessionRefV1` document.
 
+The deterministic lifecycle child consumes v8 challenge rows atomically with
+binding creation and revalidates project-scoped attestations against trusted
+registry/root input every time. v8 intentionally does not persist repo ID or
+canonical cwd: the trusted registry remains the authority, and caching those
+facts in v8 would create a drift-prone second source of truth.
+
 Later Phase 3.5 children still own storage-derived write helpers, audited
 rebind/handoff records, dispatch-time `(binding_id, generation)` persistence,
 restart-to-`unverified` transitions, lifecycle-provider evidence assembly, and
