@@ -18,7 +18,7 @@ from pathlib import Path
 from .paths import LedgerPaths, validate_project_id, validate_registry_token, validate_workspace_id
 
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 BUSY_TIMEOUT_MS = 5_000
 SYNCHRONOUS_FULL = 2
 MIGRATION_TOOL_VERSION = "llm-collab-ledger/1"
@@ -73,6 +73,7 @@ V8_TABLES = V7_TABLES | frozenset(
         "session_binding_challenges",
     }
 )
+V9_TABLES = V8_TABLES | frozenset({"canonical_delivery_attempt_binding_freezes"})
 
 
 class SQLiteSafetyError(RuntimeError):
@@ -2527,6 +2528,101 @@ V8_SQL = (
 )
 V8_MIGRATION_CHECKSUM = "sha256:437fe52450978b246b2a62fd5a0a0f08ddbf4f3f97501dafda0eb999e48580ff"
 V8_SCHEMA_FINGERPRINT = "sha256:9aefd9f214307d6645358444485b632dcbfc8c1a809a0c3708c369909abdaf3f"
+V9_SQL = (
+    """
+    CREATE UNIQUE INDEX conversation_bindings_exact_generation
+    ON conversation_bindings (
+        workspace_id, scope_kind, scope_identity, conversation_id, participant_id, binding_id, generation
+    )
+    """,
+    """
+    CREATE TABLE canonical_delivery_attempt_binding_freezes (
+        workspace_id TEXT NOT NULL
+            CHECK (
+                instr(workspace_id, char(0)) = 0
+                AND length(CAST(workspace_id AS BLOB)) BETWEEN 6 AND 131
+                AND substr(workspace_id, 1, 3) = 'ws_'
+                AND substr(workspace_id, 4, 1) GLOB '[A-Za-z0-9]'
+                AND substr(workspace_id, 4) NOT GLOB '*[^A-Za-z0-9_-]*'
+            ),
+        scope_kind TEXT NOT NULL
+            CHECK (
+                instr(scope_kind, char(0)) = 0
+                AND scope_kind IN ('workspace', 'project')
+            ),
+        scope_identity TEXT NOT NULL
+            CHECK (
+                instr(scope_identity, char(0)) = 0
+                AND length(CAST(scope_identity AS BLOB)) BETWEEN 1 AND 200
+            ),
+        message_id TEXT NOT NULL
+            CHECK (
+                instr(message_id, char(0)) = 0
+                AND length(CAST(message_id AS BLOB)) = 68
+                AND substr(message_id, 1, 4) = 'msg_'
+                AND substr(message_id, 5) NOT GLOB '*[^0-9a-f]*'
+            ),
+        delivery_id TEXT NOT NULL
+            CHECK (
+                instr(delivery_id, char(0)) = 0
+                AND length(CAST(delivery_id AS BLOB)) = 73
+                AND substr(delivery_id, 1, 9) = 'delivery_'
+                AND substr(delivery_id, 10) NOT GLOB '*[^0-9a-f]*'
+            ),
+        attempt_id TEXT NOT NULL
+            CHECK (
+                instr(attempt_id, char(0)) = 0
+                AND length(CAST(attempt_id AS BLOB)) = 72
+                AND substr(attempt_id, 1, 8) = 'attempt_'
+                AND substr(attempt_id, 9) NOT GLOB '*[^0-9a-f]*'
+            ),
+        conversation_id TEXT NOT NULL
+            CHECK (instr(conversation_id, char(0)) = 0 AND length(CAST(conversation_id AS BLOB)) BETWEEN 1 AND 128),
+        participant_id TEXT NOT NULL
+            CHECK (instr(participant_id, char(0)) = 0 AND length(CAST(participant_id AS BLOB)) BETWEEN 1 AND 128),
+        binding_id TEXT NOT NULL
+            CHECK (instr(binding_id, char(0)) = 0 AND length(CAST(binding_id AS BLOB)) BETWEEN 8 AND 128),
+        binding_generation INTEGER NOT NULL
+            CHECK (typeof(binding_generation) = 'integer' AND binding_generation > 0),
+        created_at_utc TEXT NOT NULL
+            CHECK (
+                instr(created_at_utc, char(0)) = 0
+                AND length(CAST(created_at_utc AS BLOB)) BETWEEN 1 AND 128
+            ),
+        PRIMARY KEY (workspace_id, scope_kind, scope_identity, message_id, delivery_id, attempt_id),
+        FOREIGN KEY (workspace_id, scope_kind, scope_identity, message_id, delivery_id, attempt_id)
+            REFERENCES canonical_delivery_attempts (
+                workspace_id, scope_kind, scope_identity, message_id, delivery_id, attempt_id
+            )
+            ON UPDATE RESTRICT
+            ON DELETE RESTRICT,
+        FOREIGN KEY (
+            workspace_id, scope_kind, scope_identity, conversation_id, participant_id, binding_id, binding_generation
+        )
+            REFERENCES conversation_bindings (
+                workspace_id, scope_kind, scope_identity, conversation_id, participant_id, binding_id, generation
+            )
+            ON UPDATE RESTRICT
+            ON DELETE RESTRICT
+    ) STRICT
+    """,
+    """
+    CREATE TRIGGER canonical_delivery_attempt_binding_freezes_no_update
+    BEFORE UPDATE ON canonical_delivery_attempt_binding_freezes
+    BEGIN
+        SELECT RAISE(ABORT, 'canonical delivery attempt binding freezes are append-only');
+    END
+    """,
+    """
+    CREATE TRIGGER canonical_delivery_attempt_binding_freezes_no_delete
+    BEFORE DELETE ON canonical_delivery_attempt_binding_freezes
+    BEGIN
+        SELECT RAISE(ABORT, 'canonical delivery attempt binding freezes are append-only');
+    END
+    """,
+)
+V9_MIGRATION_CHECKSUM = "sha256:601eb6b5a7edfd3b409e578c9d57ea752c5af30cfd027c34512a16b1dc1c9a3b"
+V9_SCHEMA_FINGERPRINT = "sha256:867ed58b94e0dae45c21347409af0daa30ae901b6e2120111b2a26fddd8a4889"
 MIGRATIONS = (
     (1, V1_SQL),
     (2, V2_SQL),
@@ -2536,6 +2632,7 @@ MIGRATIONS = (
     (6, V6_SQL),
     (7, V7_SQL),
     (8, V8_SQL),
+    (9, V9_SQL),
 )
 
 
@@ -2636,6 +2733,26 @@ def _v8_schema_fingerprint_from_sql() -> str:
             *V6_SQL,
             *V7_SQL,
             *V8_SQL,
+        ):
+            connection.execute(statement)
+        return _schema_fingerprint(connection)
+    finally:
+        connection.close()
+
+
+def _v9_schema_fingerprint_from_sql() -> str:
+    connection = sqlite3.connect(":memory:", isolation_level=None)
+    try:
+        for statement in (
+            *V1_SQL,
+            *V2_SQL,
+            *V3_SQL,
+            *V4_SQL,
+            *V5_SQL,
+            *V6_SQL,
+            *V7_SQL,
+            *V8_SQL,
+            *V9_SQL,
         ):
             connection.execute(statement)
         return _schema_fingerprint(connection)
@@ -3058,8 +3175,12 @@ class LedgerStore:
                 raise MigrationError("released v8 migration checksum is incoherent")
             if _v8_schema_fingerprint_from_sql() != V8_SCHEMA_FINGERPRINT:
                 raise MigrationError("released v8 schema fingerprint is incoherent")
+            if _migration_checksum(V9_SQL) != V9_MIGRATION_CHECKSUM:
+                raise MigrationError("released v9 migration checksum is incoherent")
+            if _v9_schema_fingerprint_from_sql() != V9_SCHEMA_FINGERPRINT:
+                raise MigrationError("released v9 schema fingerprint is incoherent")
             rows = cls._migration_rows(connection)
-            if [row[0] for row in rows] != [1, 2, 3, 4, 5, 6, 7, 8]:
+            if [row[0] for row in rows] != [1, 2, 3, 4, 5, 6, 7, 8, 9]:
                 raise MigrationError("ledger migration metadata is incoherent")
             cls._validate_migration_row(rows[0], V1_MIGRATION_CHECKSUM, 0, paths)
             cls._validate_migration_row(rows[1], V2_MIGRATION_CHECKSUM, 1, paths)
@@ -3069,15 +3190,16 @@ class LedgerStore:
             cls._validate_migration_row(rows[5], V6_MIGRATION_CHECKSUM, 5, paths)
             cls._validate_migration_row(rows[6], V7_MIGRATION_CHECKSUM, 6, paths)
             cls._validate_migration_row(rows[7], V8_MIGRATION_CHECKSUM, 7, paths)
+            cls._validate_migration_row(rows[8], V9_MIGRATION_CHECKSUM, 8, paths)
             actual_tables = cls._table_names(connection)
-            if actual_tables != V8_TABLES:
+            if actual_tables != V9_TABLES:
                 raise MigrationError(
-                    "ledger v8 table set is incoherent: "
-                    f"missing={sorted(V8_TABLES - actual_tables)}, "
-                    f"extra={sorted(actual_tables - V8_TABLES)}"
+                    "ledger v9 table set is incoherent: "
+                    f"missing={sorted(V9_TABLES - actual_tables)}, "
+                    f"extra={sorted(actual_tables - V9_TABLES)}"
                 )
-            if _schema_fingerprint(connection) != V8_SCHEMA_FINGERPRINT:
-                raise MigrationError("ledger v8 schema fingerprint is incoherent")
+            if _schema_fingerprint(connection) != V9_SCHEMA_FINGERPRINT:
+                raise MigrationError("ledger v9 schema fingerprint is incoherent")
         except sqlite3.DatabaseError as exc:
             raise MigrationError("ledger schema is corrupt or incoherent") from exc
 
@@ -3358,6 +3480,7 @@ class LedgerStore:
                     6: V6_MIGRATION_CHECKSUM,
                     7: V7_MIGRATION_CHECKSUM,
                     8: V8_MIGRATION_CHECKSUM,
+                    9: V9_MIGRATION_CHECKSUM,
                 }.get(version)
                 if expected_checksum is None or checksum != expected_checksum:
                     raise MigrationError(f"migration {version} does not match its released checksum")
@@ -3384,6 +3507,7 @@ class LedgerStore:
                     6: V6_SCHEMA_FINGERPRINT,
                     7: V7_SCHEMA_FINGERPRINT,
                     8: V8_SCHEMA_FINGERPRINT,
+                    9: V9_SCHEMA_FINGERPRINT,
                 }[version]
                 if _schema_fingerprint(self._connection) != expected_fingerprint:
                     raise MigrationError(f"migration {version} produced an incoherent schema")
@@ -4566,6 +4690,247 @@ class LedgerStore:
             ),
         )
         return attempt_id, True
+
+    def create_bound_canonical_delivery_attempt(
+        self,
+        *,
+        workspace_id: str,
+        scope_kind: str,
+        scope_identity: str,
+        message_id: str,
+        delivery_id: str,
+        attempt_index: int,
+        attempt_epoch_ms: int,
+        created_at_utc: str,
+        conversation_id: str,
+        participant_id: str,
+        resolve_binding: Callable[..., dict[str, object]],
+    ) -> dict[str, object]:
+        self.canonical_preflight(write=True)
+        workspace_id, scope_kind, scope_identity = _canonical_scope(
+            workspace_id, scope_kind, scope_identity
+        )
+        self._validate_canonical_scope(workspace_id, scope_kind, scope_identity)
+        message_id = _canonical_message_id(message_id, "message_id")
+        delivery_id = _canonical_delivery_id(delivery_id, "delivery_id")
+        if (
+            isinstance(attempt_index, bool)
+            or not isinstance(attempt_index, int)
+            or attempt_index < 0
+        ):
+            raise ValueError("attempt_index must be a non-negative integer")
+        if (
+            isinstance(attempt_epoch_ms, bool)
+            or not isinstance(attempt_epoch_ms, int)
+            or attempt_epoch_ms < 0
+        ):
+            raise ValueError("attempt_epoch_ms must be a non-negative integer")
+        created_at_utc = _utc_timestamp(created_at_utc, "created_at_utc")
+        conversation_id = _conversation_binding_text(
+            conversation_id, "conversation_id", 128
+        )
+        participant_id = _conversation_binding_text(participant_id, "participant_id", 128)
+        if (
+            getattr(resolve_binding, "__self__", None) is not self
+            or getattr(resolve_binding, "__func__", None)
+            is not LedgerStore.resolve_conversation_binding
+        ):
+            raise ValueError("resolve_binding must be this store's resolver")
+        attempt_id = _derive_attempt_id(
+            workspace_id,
+            scope_kind,
+            scope_identity,
+            message_id,
+            delivery_id,
+            attempt_index,
+        )
+
+        def result(
+            *,
+            created: bool,
+            resolved: bool,
+            reason: str | None,
+            binding_id: str | None,
+            generation: int | None,
+        ) -> dict[str, object]:
+            if reason is not None and reason not in CONVERSATION_BINDING_RESOLUTION_REASONS:
+                raise RuntimeError("unknown conversation binding resolution reason")
+            return {
+                "attempt_id": attempt_id,
+                "created": created,
+                "resolved": resolved,
+                "reason": reason,
+                "binding_id": binding_id,
+                "generation": generation,
+            }
+
+        self._connection.execute("BEGIN IMMEDIATE")
+        try:
+            delivery = self._connection.execute(
+                """
+                SELECT recipient_agent_id, endpoint_id FROM canonical_deliveries
+                WHERE workspace_id = ? AND scope_kind = ? AND scope_identity = ?
+                  AND message_id = ? AND delivery_id = ?
+                """,
+                (workspace_id, scope_kind, scope_identity, message_id, delivery_id),
+            ).fetchone()
+            if delivery is None:
+                raise KeyError(delivery_id)
+            recipient_agent_id, endpoint_id = str(delivery[0]), str(delivery[1])
+            existing = self._connection.execute(
+                """
+                SELECT attempt_epoch_ms, created_at_utc FROM canonical_delivery_attempts
+                WHERE workspace_id = ? AND scope_kind = ? AND scope_identity = ?
+                  AND message_id = ? AND delivery_id = ? AND attempt_id = ?
+                """,
+                (workspace_id, scope_kind, scope_identity, message_id, delivery_id, attempt_id),
+            ).fetchone()
+            if existing is not None:
+                if existing != (attempt_epoch_ms, created_at_utc):
+                    raise CanonicalConflictError(
+                        "canonical delivery attempt conflicts with different metadata"
+                    )
+                freeze = self._connection.execute(
+                    """
+                    SELECT conversation_id, participant_id, binding_id, binding_generation
+                    FROM canonical_delivery_attempt_binding_freezes
+                    WHERE workspace_id = ? AND scope_kind = ? AND scope_identity = ?
+                      AND message_id = ? AND delivery_id = ? AND attempt_id = ?
+                    """,
+                    (workspace_id, scope_kind, scope_identity, message_id, delivery_id, attempt_id),
+                ).fetchone()
+                if freeze is None:
+                    raise CanonicalIntegrityError(
+                        "canonical delivery attempt is missing binding freeze"
+                    )
+                frozen_conversation_id, frozen_participant_id, binding_id, generation = freeze
+                if (frozen_conversation_id, frozen_participant_id) != (
+                    conversation_id,
+                    participant_id,
+                ):
+                    raise CanonicalConflictError(
+                        "canonical delivery attempt conflicts with different binding target"
+                    )
+                resolved = resolve_binding(
+                    workspace_id=workspace_id,
+                    scope_kind=scope_kind,
+                    scope_identity=scope_identity,
+                    conversation_id=conversation_id,
+                    participant_id=participant_id,
+                    expected_binding_id=str(binding_id),
+                    expected_generation=int(generation),
+                )
+                self._connection.execute("COMMIT")
+                if not resolved["resolved"]:
+                    return result(
+                        created=False,
+                        resolved=False,
+                        reason=str(resolved["reason"]),
+                        binding_id=str(binding_id),
+                        generation=int(generation),
+                    )
+                return result(
+                    created=False,
+                    resolved=True,
+                    reason=None,
+                    binding_id=str(binding_id),
+                    generation=int(generation),
+                )
+
+            participant = self._connection.execute(
+                """
+                SELECT agent_id FROM conversation_participants
+                WHERE workspace_id = ? AND scope_kind = ? AND scope_identity = ?
+                  AND conversation_id = ? AND participant_id = ?
+                """,
+                (workspace_id, scope_kind, scope_identity, conversation_id, participant_id),
+            ).fetchone()
+            if participant is None or str(participant[0]) != recipient_agent_id:
+                self._connection.execute("COMMIT")
+                return result(
+                    created=False,
+                    resolved=False,
+                    reason="route_ambiguous",
+                    binding_id=None,
+                    generation=None,
+                )
+            resolved = resolve_binding(
+                workspace_id=workspace_id,
+                scope_kind=scope_kind,
+                scope_identity=scope_identity,
+                conversation_id=conversation_id,
+                participant_id=participant_id,
+            )
+            if not resolved["resolved"]:
+                self._connection.execute("COMMIT")
+                return result(
+                    created=False,
+                    resolved=False,
+                    reason=str(resolved["reason"]),
+                    binding_id=None,
+                    generation=None,
+                )
+            if resolved["endpoint_id"] != endpoint_id:
+                self._connection.execute("COMMIT")
+                return result(
+                    created=False,
+                    resolved=False,
+                    reason="route_ambiguous",
+                    binding_id=None,
+                    generation=None,
+                )
+            self._connection.execute(
+                """
+                INSERT INTO canonical_delivery_attempts
+                (workspace_id, scope_kind, scope_identity, message_id, delivery_id,
+                 attempt_id, attempt_index, attempt_epoch_ms, created_at_utc)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    workspace_id,
+                    scope_kind,
+                    scope_identity,
+                    message_id,
+                    delivery_id,
+                    attempt_id,
+                    attempt_index,
+                    attempt_epoch_ms,
+                    created_at_utc,
+                ),
+            )
+            self._connection.execute(
+                """
+                INSERT INTO canonical_delivery_attempt_binding_freezes
+                (workspace_id, scope_kind, scope_identity, message_id, delivery_id, attempt_id,
+                 conversation_id, participant_id, binding_id, binding_generation, created_at_utc)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    workspace_id,
+                    scope_kind,
+                    scope_identity,
+                    message_id,
+                    delivery_id,
+                    attempt_id,
+                    conversation_id,
+                    participant_id,
+                    str(resolved["binding_id"]),
+                    int(resolved["generation"]),
+                    created_at_utc,
+                ),
+            )
+            self._connection.execute("COMMIT")
+            return result(
+                created=True,
+                resolved=True,
+                reason=None,
+                binding_id=str(resolved["binding_id"]),
+                generation=int(resolved["generation"]),
+            )
+        except BaseException:
+            if self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
+            raise
 
     def append_canonical_delivery_receipt(
         self,

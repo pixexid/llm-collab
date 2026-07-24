@@ -28,6 +28,7 @@ from llm_collab.canonical import (
     append_dead_letter_receipt,
     append_receipt,
     create_attempt,
+    create_bound_attempt,
     create_deliveries,
     create_or_return_equivalent,
     inspect_delivery,
@@ -58,7 +59,10 @@ NOW = "2026-07-22T00:00:00+00:00"
 
 
 def resolver_consumer_offenders(root: Path) -> list[str]:
-    allowed = {Path("llm_collab/session_lifecycle.py")}
+    allowed = {
+        Path("llm_collab/canonical/delivery.py"),
+        Path("llm_collab/session_lifecycle.py"),
+    }
     offenders = []
     for checked_root in (root / "bin", root / "scripts", root / "llm_collab"):
         if not checked_root.exists():
@@ -255,10 +259,25 @@ def insert_v8_challenge(connection: sqlite3.Connection, *, challenge_id: str = "
 def v8_fingerprint_for(statements: tuple[str, ...]) -> str:
     connection = sqlite3.connect(":memory:")
     try:
-        for _version, migration in store_module.MIGRATIONS[:-1]:
+        for _version, migration in store_module.MIGRATIONS[:-2]:
             for statement in migration:
                 connection.execute(statement)
         for statement in statements:
+            connection.execute(statement)
+        return store_module._schema_fingerprint(connection)
+    finally:
+        connection.close()
+
+
+def v9_fingerprint_for_v8(statements: tuple[str, ...]) -> str:
+    connection = sqlite3.connect(":memory:")
+    try:
+        for _version, migration in store_module.MIGRATIONS[:-2]:
+            for statement in migration:
+                connection.execute(statement)
+        for statement in statements:
+            connection.execute(statement)
+        for statement in store_module.V9_SQL:
             connection.execute(statement)
         return store_module._schema_fingerprint(connection)
     finally:
@@ -269,11 +288,13 @@ def v8_fingerprint_for(statements: tuple[str, ...]) -> str:
 def open_store_with_v8(paths: LedgerPaths, statements: tuple[str, ...]):
     checksum = store_module._migration_checksum(statements)
     fingerprint = v8_fingerprint_for(statements)
-    migrations = (*store_module.MIGRATIONS[:-1], (8, statements))
+    v9_fingerprint = v9_fingerprint_for_v8(statements)
+    migrations = (*store_module.MIGRATIONS[:-2], (8, statements), (9, store_module.V9_SQL))
     with (
         patch.object(store_module, "V8_SQL", statements),
         patch.object(store_module, "V8_MIGRATION_CHECKSUM", checksum),
         patch.object(store_module, "V8_SCHEMA_FINGERPRINT", fingerprint),
+        patch.object(store_module, "V9_SCHEMA_FINGERPRINT", v9_fingerprint),
         LedgerStore.open_writer(paths, migrations=migrations) as store,
     ):
         yield store
@@ -411,6 +432,89 @@ def delivery_attempt_fixture(store: LedgerStore) -> tuple[str, str, str]:
         created_at_utc=NOW,
     )
     return message_id, delivery_id, attempt_id
+
+
+def delivery_route_fixture(store: LedgerStore) -> tuple[str, str]:
+    message_id, _created = create_or_return_equivalent(
+        store, **intent(recipients=["agent_claude"])
+    )
+    ((delivery_id, _created),) = create_deliveries(
+        store,
+        workspace_id=WORKSPACE,
+        scope_kind="project",
+        scope_identity=PROJECT,
+        message_id=message_id,
+        routes=[("agent_claude", "endpoint_claude_desktop")],
+        now_epoch_ms=1_000,
+        created_at_utc=NOW,
+    )
+    return message_id, delivery_id
+
+
+def seed_delivery_binding(
+    store: LedgerStore,
+    *,
+    conversation_id: str = "CHAT-SAMEID",
+    participant_id: str = "participant_claude",
+    agent_id: str = "agent_claude",
+    binding_id: str = "binding_one",
+    generation: int = 1,
+    state: str = "active",
+    endpoint_id: str = "endpoint_claude_desktop",
+    session_ref_id: str = "session_ref_one",
+    native_session_id: str = "native_session_one",
+    runtime_instance_id: str = "runtime_one",
+    mutation_capable: int = 1,
+) -> None:
+    store._connection.execute(
+        """
+        INSERT OR IGNORE INTO lifecycle_provider_registry
+        (
+            workspace_id, provider_id, provider_revision, trust_class,
+            supported_operations_json, challenge_algorithm, challenge_ttl_seconds, created_at_utc
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (WORKSPACE, "provider_codex", "revision_1", "managed", '["attach"]', "sha256", 60, NOW),
+    )
+    store._connection.execute(
+        """
+        INSERT OR IGNORE INTO conversation_participants
+        (workspace_id, scope_kind, scope_identity, conversation_id, participant_id, agent_id, created_at_utc)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (WORKSPACE, "project", PROJECT, conversation_id, participant_id, agent_id, NOW),
+    )
+    store._connection.execute(
+        """
+        INSERT INTO conversation_bindings
+        (
+            workspace_id, scope_kind, scope_identity, conversation_id, participant_id,
+            binding_id, generation, state, mutation_capable, provider_id,
+            provider_revision, endpoint_id, session_ref_id, native_session_id,
+            runtime_instance_id, registered_at_utc
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            WORKSPACE,
+            "project",
+            PROJECT,
+            conversation_id,
+            participant_id,
+            binding_id,
+            generation,
+            state,
+            mutation_capable,
+            "provider_codex",
+            "revision_1",
+            endpoint_id,
+            session_ref_id,
+            native_session_id,
+            runtime_instance_id,
+            NOW,
+        ),
+    )
 
 
 class CanonicalMessageTest(unittest.TestCase):
@@ -726,8 +830,9 @@ class CompatibilityProjectionTest(unittest.TestCase):
             "V6_SQL": "225ece18916fa29ceb40bb72543bf499c42a31a3cd0d38114be0def830570b44",
             "V7_SQL": "2de4a95aaf7f92fb436772b5cf4fede42db485ae464809b9a23f9c8ccc6dda03",
             "V8_SQL": "21f2d8971cad7428b0da108df3b64f7f05e3f92ad05ac53cba2209cb13ae63cd",
+            "V9_SQL": "9381ebdcff6d3e512f0760e67254bae826c3cfbbf6d8a8d4347ed83b6b65fbab",
         }
-        self.assertEqual(store_module.SCHEMA_VERSION, 8)
+        self.assertEqual(store_module.SCHEMA_VERSION, 9)
         self.assertEqual(
             {
                 name: hashlib.sha256("\n".join(getattr(store_module, name)).encode()).hexdigest()
@@ -745,6 +850,7 @@ class CompatibilityProjectionTest(unittest.TestCase):
                 store_module.V6_MIGRATION_CHECKSUM,
                 store_module.V7_MIGRATION_CHECKSUM,
                 store_module.V8_MIGRATION_CHECKSUM,
+                store_module.V9_MIGRATION_CHECKSUM,
                 store_module.V1_SCHEMA_FINGERPRINT,
                 store_module.V2_SCHEMA_FINGERPRINT,
                 store_module.V3_SCHEMA_FINGERPRINT,
@@ -753,6 +859,7 @@ class CompatibilityProjectionTest(unittest.TestCase):
                 store_module.V6_SCHEMA_FINGERPRINT,
                 store_module.V7_SCHEMA_FINGERPRINT,
                 store_module.V8_SCHEMA_FINGERPRINT,
+                store_module.V9_SCHEMA_FINGERPRINT,
             ),
             (
                 "sha256:ce236daff444f736e01f3666ed44baf1c3ba17e81215fedb638276aff76b01c7",
@@ -763,6 +870,7 @@ class CompatibilityProjectionTest(unittest.TestCase):
                 "sha256:56e7ca2ba9eb0a8eb79079372abdc7a39c024977e71a40931b8b60a6acc33c00",
                 "sha256:2de4a95aaf7f92fb436772b5cf4fede42db485ae464809b9a23f9c8ccc6dda03",
                 "sha256:437fe52450978b246b2a62fd5a0a0f08ddbf4f3f97501dafda0eb999e48580ff",
+                "sha256:601eb6b5a7edfd3b409e578c9d57ea752c5af30cfd027c34512a16b1dc1c9a3b",
                 "sha256:26a856329406e45d22a8fbecdbd769d9c632acae3652d8c72438d228de7cfca2",
                 "sha256:805aa5ae43c31d85dbe9a84590050b701ddc69cfe1dd225e9c6e67afbd889a7c",
                 "sha256:88e59c9be91df366c03985f99f8b3db1c68382b4846612c0334fd15cc505e673",
@@ -771,6 +879,7 @@ class CompatibilityProjectionTest(unittest.TestCase):
                 "sha256:eb8bc4ddd4348ce05874b91c63ce963c5bb3653636363b7437e2046900996d60",
                 "sha256:3fd3ca002c8571ff90165da045929aedd520d2a891a8b95b2a36ba07569c32e1",
                 "sha256:9aefd9f214307d6645358444485b632dcbfc8c1a809a0c3708c369909abdaf3f",
+                "sha256:867ed58b94e0dae45c21347409af0daa30ae901b6e2120111b2a26fddd8a4889",
             ),
         )
 
@@ -1427,6 +1536,10 @@ class CompatibilityProjectionTest(unittest.TestCase):
             "resolve_conversation_binding",
             (root / "llm_collab" / "session_lifecycle.py").read_text(encoding="utf-8"),
         )
+        self.assertIn(
+            "resolve_conversation_binding",
+            (root / "llm_collab" / "canonical" / "delivery.py").read_text(encoding="utf-8"),
+        )
 
     def test_resolver_consumer_guard_rejects_runtime_surface(self) -> None:
         with TemporaryDirectory(dir="/tmp") as tmp:
@@ -1434,7 +1547,16 @@ class CompatibilityProjectionTest(unittest.TestCase):
             (root / "bin").mkdir()
             (root / "scripts").mkdir()
             (root / "llm_collab" / "ledger").mkdir(parents=True)
+            (root / "llm_collab" / "canonical").mkdir()
             (root / "llm_collab" / "session_lifecycle.py").write_text(
+                "store.resolve_conversation_binding()",
+                encoding="utf-8",
+            )
+            (root / "llm_collab" / "canonical" / "delivery.py").write_text(
+                "store.resolve_conversation_binding()",
+                encoding="utf-8",
+            )
+            (root / "llm_collab" / "canonical" / "unreviewed.py").write_text(
                 "store.resolve_conversation_binding()",
                 encoding="utf-8",
             )
@@ -1448,7 +1570,7 @@ class CompatibilityProjectionTest(unittest.TestCase):
             )
             self.assertEqual(
                 resolver_consumer_offenders(root),
-                ["bin/runtime_consumer.py"],
+                ["bin/runtime_consumer.py", "llm_collab/canonical/unreviewed.py"],
             )
 
     def test_p2d_ast_import_graph_has_no_bin_path_to_projection(self) -> None:
@@ -1750,6 +1872,304 @@ class CanonicalMessageTest(_CanonicalMessageTestBase):
                         now_epoch_ms=9_000,
                         created_at_utc="2026-07-22T00:00:09+00:00",
                     )
+
+    def test_bound_attempt_freezes_storage_resolved_binding_once(self) -> None:
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            paths = LedgerPaths.derive(tmp, WORKSPACE)
+            with LedgerStore.open_writer(paths) as store:
+                record_registry(store)
+                message_id, delivery_id = delivery_route_fixture(store)
+                seed_delivery_binding(store)
+
+                result = create_bound_attempt(
+                    store,
+                    workspace_id=WORKSPACE,
+                    scope_kind="project",
+                    scope_identity=PROJECT,
+                    message_id=message_id,
+                    delivery_id=delivery_id,
+                    attempt_index=0,
+                    attempt_epoch_ms=1_100,
+                    created_at_utc=NOW,
+                    conversation_id="CHAT-SAMEID",
+                    participant_id="participant_claude",
+                )
+
+                self.assertEqual(
+                    result,
+                    {
+                        "attempt_id": store_module._derive_attempt_id(
+                            WORKSPACE, "project", PROJECT, message_id, delivery_id, 0
+                        ),
+                        "created": True,
+                        "resolved": True,
+                        "reason": None,
+                        "binding_id": "binding_one",
+                        "generation": 1,
+                    },
+                )
+                self.assertEqual(
+                    store._connection.execute(
+                        """
+                        SELECT conversation_id, participant_id, binding_id, binding_generation
+                        FROM canonical_delivery_attempt_binding_freezes
+                        """
+                    ).fetchall(),
+                    [("CHAT-SAMEID", "participant_claude", "binding_one", 1)],
+                )
+                with self.assertRaisesRegex(ValueError, "this store's resolver"):
+                    store.create_bound_canonical_delivery_attempt(
+                        workspace_id=WORKSPACE,
+                        scope_kind="project",
+                        scope_identity=PROJECT,
+                        message_id=message_id,
+                        delivery_id=delivery_id,
+                        attempt_index=1,
+                        attempt_epoch_ms=1_200,
+                        created_at_utc=NOW,
+                        conversation_id="CHAT-SAMEID",
+                        participant_id="participant_claude",
+                        resolve_binding=lambda **_kwargs: {"resolved": True},
+                    )
+
+    def test_bound_attempt_route_mismatches_create_no_attempt(self) -> None:
+        cases = (
+            {"agent_id": "agent_other", "endpoint_id": "endpoint_claude_desktop"},
+            {"agent_id": "agent_claude", "endpoint_id": "endpoint_other"},
+        )
+        for case in cases:
+            with self.subTest(case=case), TemporaryDirectory(dir="/tmp") as tmp:
+                paths = LedgerPaths.derive(tmp, WORKSPACE)
+                with LedgerStore.open_writer(paths) as store:
+                    record_registry(store)
+                    message_id, delivery_id = delivery_route_fixture(store)
+                    seed_delivery_binding(store, **case)
+                    result = create_bound_attempt(
+                        store,
+                        workspace_id=WORKSPACE,
+                        scope_kind="project",
+                        scope_identity=PROJECT,
+                        message_id=message_id,
+                        delivery_id=delivery_id,
+                        attempt_index=0,
+                        attempt_epoch_ms=1_100,
+                        created_at_utc=NOW,
+                        conversation_id="CHAT-SAMEID",
+                        participant_id="participant_claude",
+                    )
+                    self.assertEqual(result["reason"], "route_ambiguous")
+                    self.assertFalse(result["resolved"])
+                    self.assertEqual(
+                        store._connection.execute(
+                            "SELECT count(*) FROM canonical_delivery_attempts"
+                        ).fetchone()[0],
+                        0,
+                    )
+                    self.assertEqual(
+                        store._connection.execute(
+                            "SELECT count(*) FROM canonical_delivery_attempt_binding_freezes"
+                        ).fetchone()[0],
+                        0,
+                    )
+
+    def test_bound_attempt_reuses_closed_reason_vocabulary_and_preserves_old_freeze(self) -> None:
+        reason_cases = (
+            ("waiting_for_session", None, 1),
+            ("session_unverified", "unverified", 1),
+            ("adapter_quarantined", "quarantined", 1),
+            ("pull_pending", "retired", 0),
+        )
+        for reason, state, mutation_capable in reason_cases:
+            with self.subTest(reason=reason), TemporaryDirectory(dir="/tmp") as tmp:
+                paths = LedgerPaths.derive(tmp, WORKSPACE)
+                with LedgerStore.open_writer(paths) as store:
+                    record_registry(store)
+                    message_id, delivery_id = delivery_route_fixture(store)
+                    if state is None:
+                        seed_delivery_binding(
+                            store,
+                            state="retired",
+                            mutation_capable=0,
+                        )
+                        store._connection.execute("DELETE FROM conversation_bindings")
+                    else:
+                        seed_delivery_binding(
+                            store,
+                            state=state,
+                            mutation_capable=mutation_capable,
+                        )
+                    result = create_bound_attempt(
+                        store,
+                        workspace_id=WORKSPACE,
+                        scope_kind="project",
+                        scope_identity=PROJECT,
+                        message_id=message_id,
+                        delivery_id=delivery_id,
+                        attempt_index=0,
+                        attempt_epoch_ms=1_100,
+                        created_at_utc=NOW,
+                        conversation_id="CHAT-SAMEID",
+                        participant_id="participant_claude",
+                    )
+                    self.assertIn(result["reason"], store_module.CONVERSATION_BINDING_RESOLUTION_REASONS)
+                    self.assertEqual(result["reason"], reason)
+                    self.assertEqual(
+                        store._connection.execute(
+                            "SELECT count(*) FROM canonical_delivery_attempts"
+                        ).fetchone()[0],
+                        0,
+                    )
+
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            paths = LedgerPaths.derive(tmp, WORKSPACE)
+            with LedgerStore.open_writer(paths) as store:
+                record_registry(store)
+                message_id, delivery_id = delivery_route_fixture(store)
+                seed_delivery_binding(store)
+                first = create_bound_attempt(
+                    store,
+                    workspace_id=WORKSPACE,
+                    scope_kind="project",
+                    scope_identity=PROJECT,
+                    message_id=message_id,
+                    delivery_id=delivery_id,
+                    attempt_index=0,
+                    attempt_epoch_ms=1_100,
+                    created_at_utc=NOW,
+                    conversation_id="CHAT-SAMEID",
+                    participant_id="participant_claude",
+                )
+                freeze_before = store._connection.execute(
+                    "SELECT * FROM canonical_delivery_attempt_binding_freezes"
+                ).fetchone()
+                store._connection.execute(
+                    "UPDATE conversation_bindings SET state = 'superseded' WHERE binding_id = 'binding_one'"
+                )
+                seed_delivery_binding(
+                    store,
+                    binding_id="binding_two",
+                    generation=2,
+                    session_ref_id="session_ref_two",
+                    native_session_id="native_session_two",
+                    runtime_instance_id="runtime_two",
+                )
+                repeated = create_bound_attempt(
+                    store,
+                    workspace_id=WORKSPACE,
+                    scope_kind="project",
+                    scope_identity=PROJECT,
+                    message_id=message_id,
+                    delivery_id=delivery_id,
+                    attempt_index=0,
+                    attempt_epoch_ms=1_100,
+                    created_at_utc=NOW,
+                    conversation_id="CHAT-SAMEID",
+                    participant_id="participant_claude",
+                )
+                new_attempt = create_bound_attempt(
+                    store,
+                    workspace_id=WORKSPACE,
+                    scope_kind="project",
+                    scope_identity=PROJECT,
+                    message_id=message_id,
+                    delivery_id=delivery_id,
+                    attempt_index=1,
+                    attempt_epoch_ms=1_200,
+                    created_at_utc=NOW,
+                    conversation_id="CHAT-SAMEID",
+                    participant_id="participant_claude",
+                )
+                self.assertEqual(first["binding_id"], "binding_one")
+                self.assertEqual(repeated["reason"], "stale_generation")
+                self.assertEqual(new_attempt["binding_id"], "binding_two")
+                self.assertEqual(
+                    store._connection.execute(
+                        "SELECT * FROM canonical_delivery_attempt_binding_freezes WHERE attempt_id = ?",
+                        (first["attempt_id"],),
+                    ).fetchone(),
+                    freeze_before,
+                )
+                with self.assertRaisesRegex(sqlite3.IntegrityError, "append-only"):
+                    store._connection.execute(
+                        "UPDATE canonical_delivery_attempt_binding_freezes SET binding_id = 'binding_two'"
+                    )
+                with self.assertRaisesRegex(sqlite3.IntegrityError, "append-only"):
+                    store._connection.execute("DELETE FROM canonical_delivery_attempt_binding_freezes")
+
+    def test_bound_attempt_forced_freeze_failure_rolls_back_attempt(self) -> None:
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            paths = LedgerPaths.derive(tmp, WORKSPACE)
+            with LedgerStore.open_writer(paths) as store:
+                record_registry(store)
+                message_id, delivery_id = delivery_route_fixture(store)
+                seed_delivery_binding(store)
+                store._connection.execute(
+                    """
+                    CREATE TRIGGER fail_freeze_insert
+                    BEFORE INSERT ON canonical_delivery_attempt_binding_freezes
+                    BEGIN
+                        SELECT RAISE(ABORT, 'forced freeze failure');
+                    END
+                    """
+                )
+                with self.assertRaisesRegex(sqlite3.IntegrityError, "forced freeze failure"):
+                    create_bound_attempt(
+                        store,
+                        workspace_id=WORKSPACE,
+                        scope_kind="project",
+                        scope_identity=PROJECT,
+                        message_id=message_id,
+                        delivery_id=delivery_id,
+                        attempt_index=0,
+                        attempt_epoch_ms=1_100,
+                        created_at_utc=NOW,
+                        conversation_id="CHAT-SAMEID",
+                        participant_id="participant_claude",
+                    )
+                self.assertEqual(
+                    store._connection.execute(
+                        "SELECT count(*) FROM canonical_delivery_attempts"
+                    ).fetchone()[0],
+                    0,
+                )
+
+    def test_v9_freeze_rows_reject_nul_in_every_text_column(self) -> None:
+        text_columns = [
+            "workspace_id",
+            "scope_kind",
+            "scope_identity",
+            "message_id",
+            "delivery_id",
+            "attempt_id",
+            "conversation_id",
+            "participant_id",
+            "binding_id",
+            "created_at_utc",
+        ]
+        columns = [*text_columns[:-1], "binding_generation", "created_at_utc"]
+        values = [
+            WORKSPACE,
+            "project",
+            PROJECT,
+            "msg_" + "a" * 64,
+            "delivery_" + "b" * 64,
+            "attempt_" + "c" * 64,
+            "CHAT-SAMEID",
+            "participant_claude",
+            "binding_one",
+            1,
+            NOW,
+        ]
+        sql = (
+            "INSERT INTO canonical_delivery_attempt_binding_freezes "
+            f"({', '.join(columns)}) VALUES ({', '.join('?' for _ in columns)})"
+        )
+        for column in text_columns:
+            with self.subTest(column=column), open_v8_memory(foreign_keys=False) as connection:
+                mutated = list(values)
+                mutated[columns.index(column)] = "bad\x00value"
+                with self.assertRaises(sqlite3.IntegrityError):
+                    connection.execute(sql, mutated)
 
     def test_delivery_receipt_fold_integrity_projection_and_derivation_are_shared(self) -> None:
         self.assertIs(delivery_module._derive_delivery_id, store_module._derive_delivery_id)
@@ -3668,6 +4088,7 @@ class CanonicalMessageTest(_CanonicalMessageTestBase):
                 "append_dead_letter_receipt",
                 "append_receipt",
                 "create_attempt",
+                "create_bound_attempt",
                 "create_deliveries",
                 "create_or_return_equivalent",
                 "inspect_delivery",

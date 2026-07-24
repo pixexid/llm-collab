@@ -59,6 +59,35 @@ def create_attempt(
     )
 
 
+def create_bound_attempt(
+    store: LedgerStore,
+    *,
+    workspace_id: str,
+    scope_kind: str,
+    scope_identity: str,
+    message_id: str,
+    delivery_id: str,
+    attempt_index: int,
+    attempt_epoch_ms: int,
+    created_at_utc: str,
+    conversation_id: str,
+    participant_id: str,
+) -> dict[str, object]:
+    return store.create_bound_canonical_delivery_attempt(
+        workspace_id=workspace_id,
+        scope_kind=scope_kind,
+        scope_identity=scope_identity,
+        message_id=message_id,
+        delivery_id=delivery_id,
+        attempt_index=attempt_index,
+        attempt_epoch_ms=attempt_epoch_ms,
+        created_at_utc=created_at_utc,
+        conversation_id=conversation_id,
+        participant_id=participant_id,
+        resolve_binding=store.resolve_conversation_binding,
+    )
+
+
 def append_receipt(
     store: LedgerStore,
     *,

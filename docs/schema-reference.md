@@ -735,6 +735,7 @@ The exact current ledger is `PRAGMA user_version = 8`
 | v6 | P2c merge `a42585b` | 3 tables plus 6 triggers: `legacy_import_manifests`, `legacy_import_manifest_entries`, and `legacy_import_records`. The import manifest is sealed, idempotent, append-only, and records exact locator/content-hash/source membership for legacy v2 packets and inbox indexes. Its publisher/provenance fields are caller-asserted and unauthenticated; GH-195 remains open. |
 | v7 | GH-179 scheduler merge `62b1839` | 1 table: `observation_scheduler_cursors`. The cursor is keyed by exact workspace and closed source `chats_mailbox`, stores the next project ID for fair per-project observation scheduling, and is bound to the workspace registry snapshot. |
 | v8 | GH-271 Child 2 | 4 tables plus 2 partial unique indexes and 1 trigger: `conversation_participants`, `lifecycle_provider_registry`, `conversation_bindings`, and `session_binding_challenges`. The storage is inert and adds no route authority. It enforces the compound participant key, a separate lifecycle-provider registry, one active/draining mutation binding per participant, one active/draining mutation owner per exact native-session owner tuple, and monotonic binding generation. |
+| v9 | GH-271 Child 5 | 1 table plus 1 support index and 2 triggers: `canonical_delivery_attempt_binding_freezes` stores one immutable `(binding_id, generation)` freeze for a canonical delivery attempt. The freeze references the exact conversation participant and binding tuple, is append-only, and does not change the adapter `DeliveryV1` wire shape. |
 
 The migration checksums and schema fingerprints are code authority in
 `llm_collab/ledger/store.py` and are verified on open. Current values are:
@@ -749,9 +750,10 @@ The migration checksums and schema fingerprints are code authority in
 | v6 | `sha256:56e7ca2ba9eb0a8eb79079372abdc7a39c024977e71a40931b8b60a6acc33c00` | `sha256:eb8bc4ddd4348ce05874b91c63ce963c5bb3653636363b7437e2046900996d60` |
 | v7 | `sha256:2de4a95aaf7f92fb436772b5cf4fede42db485ae464809b9a23f9c8ccc6dda03` | `sha256:3fd3ca002c8571ff90165da045929aedd520d2a891a8b95b2a36ba07569c32e1` |
 | v8 | `sha256:437fe52450978b246b2a62fd5a0a0f08ddbf4f3f97501dafda0eb999e48580ff` | `sha256:9aefd9f214307d6645358444485b632dcbfc8c1a809a0c3708c369909abdaf3f` |
+| v9 | `sha256:601eb6b5a7edfd3b409e578c9d57ea752c5af30cfd027c34512a16b1dc1c9a3b` | `sha256:867ed58b94e0dae45c21347409af0daa30ae901b6e2120111b2a26fddd8a4889` |
 
 No subscription, timer, runtime-dispatch lease, fence, retry, or quarantine
-table exists in v1 through v8. Dead-letter and reconciliation outcomes in
+table exists in v1 through v9. Dead-letter and reconciliation outcomes in
 Phase 2 are receipts, not a separate table.
 
 ### Implemented Phase 2 canonical surfaces
@@ -873,7 +875,7 @@ not a process-wide kill switch for direct in-process `LedgerStore` or
 `llm_collab.canonical` library calls. Rollback never performs an in-place schema
 downgrade or destructive cleanup of canonical evidence. A migration failure may
 restore the verified pre-migration backup automatically; an intentional rollback
-keeps v1-v8 evidence intact for later reconciliation.
+keeps v1-v9 evidence intact for later reconciliation.
 
 ## Implemented Phase 3.5 conversation binding foundation
 
@@ -946,10 +948,20 @@ registry/root input every time. v8 intentionally does not persist repo ID or
 canonical cwd: the trusted registry remains the authority, and caching those
 facts in v8 would create a drift-prone second source of truth.
 
-Later Phase 3.5 children still own storage-derived write helpers, audited
-rebind/handoff records, dispatch-time `(binding_id, generation)` persistence,
-restart-to-`unverified` transitions, lifecycle-provider evidence assembly, and
-any delivery-capable route consumption.
+The delivery-freeze child stores the first delivery-capable route consumption as
+one immutable v9 row per canonical delivery attempt. `canonical.delivery`
+resolves the participant inside the attempt transaction, verifies that the
+participant agent matches the delivery recipient and that the resolved endpoint
+matches the delivery endpoint, then freezes the storage-derived `binding_id` and
+generation. Repeating an old attempt after rebind returns the resolver's
+`stale_generation` reason and does not retarget the old freeze. A later attempt
+may freeze the newer active generation. The freeze is internal attempt
+authority only; it does not add fields to adapter `DeliveryV1` and cannot
+fabricate `SessionRefV1`.
+
+Later Phase 3.5 children still own audited rebind/handoff transfer,
+restart-to-`unverified` transitions beyond the current helper, lifecycle-provider
+evidence assembly, and live dispatcher/AX/daemon route consumption.
 
 ## Planned Thread Event Runner records
 
