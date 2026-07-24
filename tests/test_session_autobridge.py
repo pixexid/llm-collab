@@ -23,6 +23,8 @@ sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(REPO_ROOT / "bin"))
 
 import _session_autobridge as session_autobridge_lib
+import _activation_cleanup as activation_cleanup_lib
+import _activation_lease as activation_lease_lib
 import watch_inbox as watch_inbox_lib
 from _helpers import parse_frontmatter
 from llm_collab.ledger import LedgerPaths, LedgerStore
@@ -775,6 +777,97 @@ class SessionAutobridgeTest(unittest.TestCase):
         self.assertEqual("same_session_different_claimant", events[-1]["reason"])
         resolve_action.assert_not_called()
         mark_processed.assert_not_called()
+
+    def test_loop_protection_skips_before_activation_claim_and_takeover(self):
+        root = self.make_workspace()
+        sessions_dir = root / "State" / "session_autobridge" / "sessions"
+        leases_dir = root / "State" / "session_autobridge" / "activation_leases"
+        worktree = root / "skip-lane"
+        worktree.mkdir()
+        owner = {
+            "session_id": "SESSION-OWNER",
+            "agent_id": "codex",
+            "project_id": "amiga",
+            "chat_id": "CHAT-SKIP",
+            "status": "parked",
+            "lease_expires_utc": "2999-01-01T00:00:00+00:00",
+        }
+        session = {
+            "session_id": "SESSION-SKIP",
+            "agent_id": "codex",
+            "project_id": "amiga",
+            "chat_id": "CHAT-SKIP",
+            "mode": "auto-read",
+            "wake_strategy": "runtime_trigger",
+            "runtime": {"family": "codex_app", "session_id": "runtime-skip"},
+        }
+        message = {
+            "path": "Chats/skip/packet.md",
+            "frontmatter": {
+                "from": "codex",
+                "to": "codex",
+                "project_id": "amiga",
+                "chat_id": "CHAT-SKIP",
+                "activation": True,
+                "related_task": "TASK-SKIP",
+                "worktree": str(worktree),
+                "branch": "codex/skip-lane",
+            },
+            "body": "Durable thread coordination only.",
+        }
+        events: list[dict] = []
+
+        write_json(sessions_dir / "SESSION-OWNER.json", owner)
+        write_json(sessions_dir / "SESSION-SKIP.json", session)
+        identity = activation_lease_lib.lease_identity(
+            {
+                "project": "amiga",
+                "chat": "CHAT-SKIP",
+                "task": "TASK-SKIP",
+                "worktree": str(worktree),
+                "branch": "codex/skip-lane",
+                "target_agent": "codex",
+            }
+        )
+
+        with (
+            patch.object(session_autobridge_lib, "SESSIONS_DIR", sessions_dir),
+            patch.object(activation_lease_lib, "ACTIVATION_LEASES_DIR", leases_dir),
+            patch.object(
+                activation_lease_lib,
+                "ACTIVATION_GRANT_LOCK",
+                leases_dir / ".claim-grant.lock",
+            ),
+            patch.object(activation_cleanup_lib, "audit_activation_pollers", return_value=[]),
+            patch.object(session_autobridge_lib, "load_session", return_value=session),
+            patch.object(session_autobridge_lib, "session_is_dispatchable", return_value=(True, "ok")),
+            patch.object(session_autobridge_lib, "matching_unread_messages", return_value=[message]),
+            patch.object(session_autobridge_lib, "processed_messages", return_value=set()),
+            patch.object(session_autobridge_lib, "append_event", side_effect=lambda _sid, event: events.append(event)),
+            patch.object(session_autobridge_lib, "mark_message_processed") as mark_processed,
+            patch.object(session_autobridge_lib, "save_session"),
+        ):
+            held_lease = activation_lease_lib.claim_lease(
+                identity,
+                owner_session_id="SESSION-OWNER",
+                claimant_runtime_id="runtime-owner",
+            )
+            owner["status"] = "stopped"
+            write_json(sessions_dir / "SESSION-OWNER.json", owner)
+            result = session_autobridge_lib.dispatch_session("SESSION-SKIP")
+            remaining_lease = activation_lease_lib.load_lease(identity)
+
+        self.assertEqual([], result["actions"])
+        self.assertEqual("SESSION-OWNER", remaining_lease["owner_session_id"])
+        self.assertEqual(held_lease["fence_token"], remaining_lease["fence_token"])
+        mark_processed.assert_called_once_with(session, message["path"])
+        self.assertTrue(
+            any(
+                event.get("event") == "message_skipped"
+                and event.get("reason") == "codex_self_target_thread_coordination"
+                for event in events
+            )
+        )
 
     def test_runtime_trigger_derives_resume_command_from_registered_session(self):
         fixtures = [
@@ -2490,6 +2583,97 @@ class SessionAutobridgeTest(unittest.TestCase):
         delivered_text = delivered_candidates[-1].read_text()
         self.assertIn("target_session_id: claude-bound-session-42", delivered_text)
 
+    def test_deliver_false_readiness_engages_fallback_and_writes_packet(self):
+        root = self.make_workspace()
+        self.add_agent(
+            root,
+            {
+                "id": "codex",
+                "display_name": "Codex",
+                "activation": {"type": "cli_session", "watcher_enabled": True},
+            },
+        )
+        self.add_agent(
+            root,
+            {
+                "id": "claude",
+                "display_name": "Claude",
+                "activation": {
+                    "type": "cli_session",
+                    "watcher_enabled": True,
+                    "ax_app": "Claude",
+                },
+            },
+        )
+        chat_dir = self.create_chat(
+            root,
+            chat_dir_name="2026-04-23_readiness-drift__CHAT-READY-DRIFT",
+            chat_id="CHAT-READY-DRIFT",
+            project_id="amiga",
+        )
+        body_file = root / "readiness-drift-body.txt"
+        write(body_file, "Durably deliver this packet and wake the receiver.")
+        target = {
+            "session_id": "SESSION-READY-DRIFT",
+            "agent_id": "claude",
+            "project_id": "amiga",
+            "chat_id": "CHAT-READY-DRIFT",
+            "status": "parked",
+            "wake_strategy": "runtime_trigger",
+            "runtime": {"family": "claude_app", "session_id": "claude-runtime-drift"},
+        }
+        harness = root / "deliver_readiness_drift.py"
+        write(
+            harness,
+            "\n".join(
+                [
+                    "import sys",
+                    "import deliver",
+                    "target = {",
+                    "    'session_id': 'SESSION-READY-DRIFT',",
+                    "    'agent_id': 'claude',",
+                    "    'project_id': 'amiga',",
+                    "    'chat_id': 'CHAT-READY-DRIFT',",
+                    "    'status': 'parked',",
+                    "    'wake_strategy': 'runtime_trigger',",
+                    "    'runtime': {'family': 'claude_app', 'session_id': 'claude-runtime-drift'},",
+                    "}",
+                    "deliver.resolve_exact_dispatch_target = lambda *_args: (target, None)",
+                    "deliver.resolve_bound_runtime_session_id = lambda *_args: None",
+                    "sys.argv = [",
+                    "    sys.argv[0], '--chat', 'CHAT-READY-DRIFT', '--from', 'codex',",
+                    "    '--to', 'claude', '--project', 'amiga', '--title', 'Readiness drift',",
+                    "    '--body-file', 'readiness-drift-body.txt', '--skip-awareness-instruction',",
+                    "]",
+                    "deliver.main()",
+                ]
+            ),
+        )
+
+        result = subprocess.run(
+            [sys.executable, str(harness)],
+            cwd=root,
+            text=True,
+            capture_output=True,
+            env=self.subprocess_env(root),
+            check=True,
+        )
+        payload = json.loads(result.stdout.split("\n\n", 1)[0])
+        self.assertFalse(payload["autobridge_ready"])
+        self.assertTrue(payload["ax_doorbell_required"])
+        self.assertIsNone(payload["resolved_target_session_id"])
+
+        delivered_candidates = sorted(chat_dir.glob("*_to-claude_readiness-drift.md"))
+        self.assertTrue(delivered_candidates)
+        frontmatter, _ = parse_frontmatter(delivered_candidates[-1].read_text())
+        self.assertEqual("Readiness drift", frontmatter["title"])
+        self.assertEqual(
+            (False, session_autobridge_lib.ROUTE_AMBIGUOUS_REASON),
+            session_autobridge_lib.message_targets_session(
+                target, {"frontmatter": frontmatter}
+            ),
+        )
+
     def test_deliver_refuses_explicit_target_that_disagrees_with_exact_binding(self):
         root = self.make_workspace()
         self.add_agent(
@@ -3830,6 +4014,26 @@ class SessionAutobridgeTest(unittest.TestCase):
                         session, {"frontmatter": frontmatter}
                     ),
                 )
+
+        missing_binding_session = {**session}
+        missing_binding_session.pop("binding_id")
+        missing_binding_session.pop("binding_generation")
+        self.assertEqual(
+            (False, session_autobridge_lib.ROUTE_AMBIGUOUS_REASON),
+            session_autobridge_lib.message_targets_session(
+                missing_binding_session,
+                {"frontmatter": dict(base_frontmatter)},
+            ),
+        )
+        missing_generation_session = {**session}
+        missing_generation_session.pop("binding_generation")
+        self.assertEqual(
+            (False, session_autobridge_lib.STALE_GENERATION_REASON),
+            session_autobridge_lib.message_targets_session(
+                missing_generation_session,
+                {"frontmatter": dict(base_frontmatter)},
+            ),
+        )
 
     def test_runtime_receive_rejects_wildcard_session_for_targeted_packet(self):
         scoped_session = {
