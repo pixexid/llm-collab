@@ -156,6 +156,24 @@ canonical messages, delivery attempts, receipts, binding records, and binding
 audit. Existing unresolved work returns to pull/manual or stays quarantined; it
 is never silently retargeted.
 
+## Operator read-only inspection
+
+Operator inspection is a query-only projection over the existing conversation
+binding resolver. It returns a closed binding-reference shape with
+`projection_kind = "session_lifecycle_operator_inspection_v1"` and
+`authority = "read_only_inspection"`.
+
+Inspection requires the full compound participant tuple. It cannot select by
+`conversation_id` alone, agent ID, endpoint ID, native session ID, latest,
+frontmost, sidebar order, window title, or UI state. A stale expected generation
+returns the resolver's `stale_generation` reason instead of retargeting to a
+newer active binding.
+
+The projection is not `SessionRefV1` authority. It does not contain runtime
+home, repository binding, evidence, extensions, or any persisted inspection
+record, and it does not open UI, wake a provider, dispatch work, reserve,
+consume, heartbeat, retire, rebind, import, or mutate storage.
+
 ## Non-authorities
 
 The following are never lifecycle or routing authority:
