@@ -722,8 +722,8 @@ containment.
 
 ### Implemented ledger versions
 
-The exact current ledger is `PRAGMA user_version = 8`
-(`llm_collab.ledger.store.SCHEMA_VERSION == 8`):
+The exact current ledger is `PRAGMA user_version = 10`
+(`llm_collab.ledger.store.SCHEMA_VERSION == 10`):
 
 | Version | Landed in | Tables, triggers, and constraints |
 |---|---|
@@ -736,6 +736,7 @@ The exact current ledger is `PRAGMA user_version = 8`
 | v7 | GH-179 scheduler merge `62b1839` | 1 table: `observation_scheduler_cursors`. The cursor is keyed by exact workspace and closed source `chats_mailbox`, stores the next project ID for fair per-project observation scheduling, and is bound to the workspace registry snapshot. |
 | v8 | GH-271 Child 2 | 4 tables plus 2 partial unique indexes and 1 trigger: `conversation_participants`, `lifecycle_provider_registry`, `conversation_bindings`, and `session_binding_challenges`. The storage is inert and adds no route authority. It enforces the compound participant key, a separate lifecycle-provider registry, one active/draining mutation binding per participant, one active/draining mutation owner per exact native-session owner tuple, and monotonic binding generation. |
 | v9 | GH-271 Child 5 | 1 table plus 1 support index and 2 triggers: `canonical_delivery_attempt_binding_freezes` stores one immutable `(binding_id, generation)` freeze for a canonical delivery attempt. The freeze references the exact conversation participant and binding tuple, is append-only, and does not change the adapter `DeliveryV1` wire shape. |
+| v10 | GH-271 Child 6 | 1 table plus 2 triggers: `conversation_binding_transition_audit` records explicit rebind/handoff transitions. The successor must pre-exist in a non-active state; the transition atomically supersedes the predecessor, activates the successor, records zero transferred pending work, and counts preserved predecessor freezes. Audit rows are append-only. |
 
 The migration checksums and schema fingerprints are code authority in
 `llm_collab/ledger/store.py` and are verified on open. Current values are:
@@ -751,9 +752,10 @@ The migration checksums and schema fingerprints are code authority in
 | v7 | `sha256:2de4a95aaf7f92fb436772b5cf4fede42db485ae464809b9a23f9c8ccc6dda03` | `sha256:3fd3ca002c8571ff90165da045929aedd520d2a891a8b95b2a36ba07569c32e1` |
 | v8 | `sha256:437fe52450978b246b2a62fd5a0a0f08ddbf4f3f97501dafda0eb999e48580ff` | `sha256:9aefd9f214307d6645358444485b632dcbfc8c1a809a0c3708c369909abdaf3f` |
 | v9 | `sha256:601eb6b5a7edfd3b409e578c9d57ea752c5af30cfd027c34512a16b1dc1c9a3b` | `sha256:867ed58b94e0dae45c21347409af0daa30ae901b6e2120111b2a26fddd8a4889` |
+| v10 | `sha256:44547c1810cacf9ba9d8edc2e7ee057446d93d1103d4c1424a868febbb525ecd` | `sha256:f32ef268eb81fced863c66f0209cc8fcfaac87a3c87bf628454d74c405124427` |
 
 No subscription, timer, runtime-dispatch lease, fence, retry, or quarantine
-table exists in v1 through v9. Dead-letter and reconciliation outcomes in
+table exists in v1 through v10. Dead-letter and reconciliation outcomes in
 Phase 2 are receipts, not a separate table.
 
 ### Implemented Phase 2 canonical surfaces
@@ -875,7 +877,7 @@ not a process-wide kill switch for direct in-process `LedgerStore` or
 `llm_collab.canonical` library calls. Rollback never performs an in-place schema
 downgrade or destructive cleanup of canonical evidence. A migration failure may
 restore the verified pre-migration backup automatically; an intentional rollback
-keeps v1-v9 evidence intact for later reconciliation.
+keeps v1-v10 evidence intact for later reconciliation.
 
 ## Implemented Phase 3.5 conversation binding foundation
 
@@ -959,9 +961,20 @@ may freeze the newer active generation. The freeze is internal attempt
 authority only; it does not add fields to adapter `DeliveryV1` and cannot
 fabricate `SessionRefV1`.
 
-Later Phase 3.5 children still own audited rebind/handoff transfer,
-restart-to-`unverified` transitions beyond the current helper, lifecycle-provider
-evidence assembly, and live dispatcher/AX/daemon route consumption.
+The rebind/handoff child adds a v10 audit row for each explicit transition.
+The legal sequence is Option B: the successor binding must already exist in a
+non-indexed pre-active state (`reserved`, `registering`, or `unverified`) for
+the same participant and higher generation. One transaction validates both
+bindings, counts predecessor freeze rows, supersedes the predecessor first,
+activates the successor second, and appends the audit row. The transfer count is
+always zero in this child: attempted/frozen work remains bound to the
+predecessor generation, repeated old attempts return `stale_generation`, and new
+attempts resolve the successor only after the swap commits.
+
+Later Phase 3.5 children still own nonzero transfer semantics for
+never-attempted/no-possible-acceptance work, restart-to-`unverified` transitions
+beyond the current helper, lifecycle-provider evidence assembly, and live
+dispatcher/AX/daemon route consumption.
 
 ## Planned Thread Event Runner records
 

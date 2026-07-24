@@ -18,7 +18,7 @@ from pathlib import Path
 from .paths import LedgerPaths, validate_project_id, validate_registry_token, validate_workspace_id
 
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 BUSY_TIMEOUT_MS = 5_000
 SYNCHRONOUS_FULL = 2
 MIGRATION_TOOL_VERSION = "llm-collab-ledger/1"
@@ -74,6 +74,7 @@ V8_TABLES = V7_TABLES | frozenset(
     }
 )
 V9_TABLES = V8_TABLES | frozenset({"canonical_delivery_attempt_binding_freezes"})
+V10_TABLES = V9_TABLES | frozenset({"conversation_binding_transition_audit"})
 
 
 class SQLiteSafetyError(RuntimeError):
@@ -173,6 +174,15 @@ CONVERSATION_BINDING_RESOLUTION_REASONS = frozenset(
         "adapter_quarantined",
         "pull_pending",
         "stale_generation",
+    }
+)
+CONVERSATION_BINDING_TRANSITION_KINDS = frozenset({"rebind", "handoff"})
+CONVERSATION_BINDING_TRANSITION_REASONS = frozenset(
+    {
+        "operator_rebind",
+        "provider_restart",
+        "native_session_replacement",
+        "manual_handoff",
     }
 )
 _CONVERSATION_BINDING_WILDCARDS = frozenset(
@@ -531,6 +541,45 @@ def _derive_conversation_binding_id(
                 _frame(session_ref_id),
                 _frame(native_session_id),
                 _frame(runtime_instance_id),
+            )
+        )
+    ).hexdigest()
+
+
+def _derive_conversation_binding_transition_id(
+    workspace_id: str,
+    scope_kind: str,
+    scope_identity: str,
+    conversation_id: str,
+    participant_id: str,
+    transition_kind: str,
+    predecessor_binding_id: str,
+    predecessor_generation: int,
+    successor_binding_id: str,
+    successor_generation: int,
+    actor_id: str,
+    reason: str,
+    evidence_sha256: str,
+    created_at_utc: str,
+) -> str:
+    return "transition_" + hashlib.sha256(
+        b"".join(
+            (
+                _frame("conversation-binding-transition-v1"),
+                _frame(workspace_id),
+                _frame(scope_kind),
+                _frame(scope_identity),
+                _frame(conversation_id),
+                _frame(participant_id),
+                _frame(transition_kind),
+                _frame(predecessor_binding_id),
+                _frame(str(predecessor_generation)),
+                _frame(successor_binding_id),
+                _frame(str(successor_generation)),
+                _frame(actor_id),
+                _frame(reason),
+                _frame(evidence_sha256),
+                _frame(created_at_utc),
             )
         )
     ).hexdigest()
@@ -2623,6 +2672,112 @@ V9_SQL = (
 )
 V9_MIGRATION_CHECKSUM = "sha256:601eb6b5a7edfd3b409e578c9d57ea752c5af30cfd027c34512a16b1dc1c9a3b"
 V9_SCHEMA_FINGERPRINT = "sha256:867ed58b94e0dae45c21347409af0daa30ae901b6e2120111b2a26fddd8a4889"
+V10_SQL = (
+    """
+    CREATE TABLE conversation_binding_transition_audit (
+        workspace_id TEXT NOT NULL
+            CHECK (
+                instr(workspace_id, char(0)) = 0
+                AND length(CAST(workspace_id AS BLOB)) BETWEEN 6 AND 131
+                AND substr(workspace_id, 1, 3) = 'ws_'
+                AND substr(workspace_id, 4, 1) GLOB '[A-Za-z0-9]'
+                AND substr(workspace_id, 4) NOT GLOB '*[^A-Za-z0-9_-]*'
+            ),
+        scope_kind TEXT NOT NULL
+            CHECK (
+                instr(scope_kind, char(0)) = 0
+                AND scope_kind IN ('workspace', 'project')
+            ),
+        scope_identity TEXT NOT NULL
+            CHECK (
+                instr(scope_identity, char(0)) = 0
+                AND length(CAST(scope_identity AS BLOB)) BETWEEN 1 AND 200
+            ),
+        conversation_id TEXT NOT NULL
+            CHECK (instr(conversation_id, char(0)) = 0 AND length(CAST(conversation_id AS BLOB)) BETWEEN 1 AND 128),
+        participant_id TEXT NOT NULL
+            CHECK (instr(participant_id, char(0)) = 0 AND length(CAST(participant_id AS BLOB)) BETWEEN 1 AND 128),
+        transition_id TEXT NOT NULL
+            CHECK (
+                instr(transition_id, char(0)) = 0
+                AND length(CAST(transition_id AS BLOB)) = 75
+                AND substr(transition_id, 1, 11) = 'transition_'
+                AND substr(transition_id, 12) NOT GLOB '*[^0-9a-f]*'
+            ),
+        transition_kind TEXT NOT NULL
+            CHECK (
+                instr(transition_kind, char(0)) = 0
+                AND transition_kind IN ('rebind', 'handoff')
+            ),
+        predecessor_binding_id TEXT NOT NULL
+            CHECK (instr(predecessor_binding_id, char(0)) = 0 AND length(CAST(predecessor_binding_id AS BLOB)) BETWEEN 8 AND 128),
+        predecessor_generation INTEGER NOT NULL
+            CHECK (typeof(predecessor_generation) = 'integer' AND predecessor_generation > 0),
+        successor_binding_id TEXT NOT NULL
+            CHECK (instr(successor_binding_id, char(0)) = 0 AND length(CAST(successor_binding_id AS BLOB)) BETWEEN 8 AND 128),
+        successor_generation INTEGER NOT NULL
+            CHECK (typeof(successor_generation) = 'integer' AND successor_generation > 0),
+        actor_id TEXT NOT NULL
+            CHECK (instr(actor_id, char(0)) = 0 AND length(CAST(actor_id AS BLOB)) BETWEEN 1 AND 128),
+        reason TEXT NOT NULL
+            CHECK (
+                instr(reason, char(0)) = 0
+                AND reason IN ('operator_rebind', 'provider_restart', 'native_session_replacement', 'manual_handoff')
+            ),
+        transferred_pending_count INTEGER NOT NULL
+            CHECK (typeof(transferred_pending_count) = 'integer' AND transferred_pending_count = 0),
+        preserved_pending_count INTEGER NOT NULL
+            CHECK (typeof(preserved_pending_count) = 'integer' AND preserved_pending_count >= 0),
+        evidence_sha256 TEXT NOT NULL
+            CHECK (
+                instr(evidence_sha256, char(0)) = 0
+                AND length(CAST(evidence_sha256 AS BLOB)) = 64
+                AND evidence_sha256 NOT GLOB '*[^0-9a-f]*'
+            ),
+        created_at_utc TEXT NOT NULL
+            CHECK (
+                instr(created_at_utc, char(0)) = 0
+                AND length(CAST(created_at_utc AS BLOB)) BETWEEN 1 AND 128
+            ),
+        PRIMARY KEY (workspace_id, transition_id),
+        FOREIGN KEY (
+            workspace_id, scope_kind, scope_identity, conversation_id, participant_id,
+            predecessor_binding_id, predecessor_generation
+        )
+            REFERENCES conversation_bindings (
+                workspace_id, scope_kind, scope_identity, conversation_id, participant_id, binding_id, generation
+            )
+            ON UPDATE RESTRICT
+            ON DELETE RESTRICT,
+        FOREIGN KEY (
+            workspace_id, scope_kind, scope_identity, conversation_id, participant_id,
+            successor_binding_id, successor_generation
+        )
+            REFERENCES conversation_bindings (
+                workspace_id, scope_kind, scope_identity, conversation_id, participant_id, binding_id, generation
+            )
+            ON UPDATE RESTRICT
+            ON DELETE RESTRICT,
+        CHECK (predecessor_generation < successor_generation)
+    ) STRICT
+    """,
+    """
+    CREATE TRIGGER conversation_binding_transition_audit_no_update
+    BEFORE UPDATE ON conversation_binding_transition_audit
+    BEGIN
+        SELECT RAISE(ABORT, 'conversation binding transition audit is append-only');
+    END
+    """,
+    """
+    CREATE TRIGGER conversation_binding_transition_audit_no_delete
+    BEFORE DELETE ON conversation_binding_transition_audit
+    BEGIN
+        SELECT RAISE(ABORT, 'conversation binding transition audit is append-only');
+    END
+    """,
+)
+V10_MIGRATION_CHECKSUM = "sha256:44547c1810cacf9ba9d8edc2e7ee057446d93d1103d4c1424a868febbb525ecd"
+V10_SCHEMA_FINGERPRINT = "sha256:f32ef268eb81fced863c66f0209cc8fcfaac87a3c87bf628454d74c405124427"
 MIGRATIONS = (
     (1, V1_SQL),
     (2, V2_SQL),
@@ -2633,6 +2788,7 @@ MIGRATIONS = (
     (7, V7_SQL),
     (8, V8_SQL),
     (9, V9_SQL),
+    (10, V10_SQL),
 )
 
 
@@ -2753,6 +2909,27 @@ def _v9_schema_fingerprint_from_sql() -> str:
             *V7_SQL,
             *V8_SQL,
             *V9_SQL,
+        ):
+            connection.execute(statement)
+        return _schema_fingerprint(connection)
+    finally:
+        connection.close()
+
+
+def _v10_schema_fingerprint_from_sql() -> str:
+    connection = sqlite3.connect(":memory:", isolation_level=None)
+    try:
+        for statement in (
+            *V1_SQL,
+            *V2_SQL,
+            *V3_SQL,
+            *V4_SQL,
+            *V5_SQL,
+            *V6_SQL,
+            *V7_SQL,
+            *V8_SQL,
+            *V9_SQL,
+            *V10_SQL,
         ):
             connection.execute(statement)
         return _schema_fingerprint(connection)
@@ -3179,8 +3356,12 @@ class LedgerStore:
                 raise MigrationError("released v9 migration checksum is incoherent")
             if _v9_schema_fingerprint_from_sql() != V9_SCHEMA_FINGERPRINT:
                 raise MigrationError("released v9 schema fingerprint is incoherent")
+            if _migration_checksum(V10_SQL) != V10_MIGRATION_CHECKSUM:
+                raise MigrationError("released v10 migration checksum is incoherent")
+            if _v10_schema_fingerprint_from_sql() != V10_SCHEMA_FINGERPRINT:
+                raise MigrationError("released v10 schema fingerprint is incoherent")
             rows = cls._migration_rows(connection)
-            if [row[0] for row in rows] != [1, 2, 3, 4, 5, 6, 7, 8, 9]:
+            if [row[0] for row in rows] != [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]:
                 raise MigrationError("ledger migration metadata is incoherent")
             cls._validate_migration_row(rows[0], V1_MIGRATION_CHECKSUM, 0, paths)
             cls._validate_migration_row(rows[1], V2_MIGRATION_CHECKSUM, 1, paths)
@@ -3191,15 +3372,16 @@ class LedgerStore:
             cls._validate_migration_row(rows[6], V7_MIGRATION_CHECKSUM, 6, paths)
             cls._validate_migration_row(rows[7], V8_MIGRATION_CHECKSUM, 7, paths)
             cls._validate_migration_row(rows[8], V9_MIGRATION_CHECKSUM, 8, paths)
+            cls._validate_migration_row(rows[9], V10_MIGRATION_CHECKSUM, 9, paths)
             actual_tables = cls._table_names(connection)
-            if actual_tables != V9_TABLES:
+            if actual_tables != V10_TABLES:
                 raise MigrationError(
-                    "ledger v9 table set is incoherent: "
-                    f"missing={sorted(V9_TABLES - actual_tables)}, "
-                    f"extra={sorted(actual_tables - V9_TABLES)}"
+                    "ledger v10 table set is incoherent: "
+                    f"missing={sorted(V10_TABLES - actual_tables)}, "
+                    f"extra={sorted(actual_tables - V10_TABLES)}"
                 )
-            if _schema_fingerprint(connection) != V9_SCHEMA_FINGERPRINT:
-                raise MigrationError("ledger v9 schema fingerprint is incoherent")
+            if _schema_fingerprint(connection) != V10_SCHEMA_FINGERPRINT:
+                raise MigrationError("ledger v10 schema fingerprint is incoherent")
         except sqlite3.DatabaseError as exc:
             raise MigrationError("ledger schema is corrupt or incoherent") from exc
 
@@ -3481,6 +3663,7 @@ class LedgerStore:
                     7: V7_MIGRATION_CHECKSUM,
                     8: V8_MIGRATION_CHECKSUM,
                     9: V9_MIGRATION_CHECKSUM,
+                    10: V10_MIGRATION_CHECKSUM,
                 }.get(version)
                 if expected_checksum is None or checksum != expected_checksum:
                     raise MigrationError(f"migration {version} does not match its released checksum")
@@ -3508,6 +3691,7 @@ class LedgerStore:
                     7: V7_SCHEMA_FINGERPRINT,
                     8: V8_SCHEMA_FINGERPRINT,
                     9: V9_SCHEMA_FINGERPRINT,
+                    10: V10_SCHEMA_FINGERPRINT,
                 }[version]
                 if _schema_fingerprint(self._connection) != expected_fingerprint:
                     raise MigrationError(f"migration {version} produced an incoherent schema")
@@ -6019,6 +6203,220 @@ class LedgerStore:
             finally:
                 pass
             raise
+
+    def record_conversation_binding_transition(
+        self,
+        *,
+        workspace_id: str,
+        scope_kind: str,
+        scope_identity: str,
+        conversation_id: str,
+        participant_id: str,
+        predecessor_binding_id: str,
+        predecessor_generation: int,
+        successor_binding_id: str,
+        successor_generation: int,
+        transition_kind: str,
+        actor_id: str,
+        reason: str,
+        evidence: bytes,
+        created_at_utc: str,
+    ) -> dict[str, object]:
+        self._ensure_thread()
+        if self._read_only:
+            raise PermissionError("query-only readers cannot record binding transitions")
+        workspace_id, scope_kind, scope_identity = _canonical_scope(
+            workspace_id, scope_kind, scope_identity
+        )
+        self._validate_canonical_scope(workspace_id, scope_kind, scope_identity)
+        conversation_id = _conversation_binding_text(conversation_id, "conversation_id", 128)
+        participant_id = _conversation_binding_text(participant_id, "participant_id", 128)
+        predecessor_binding_id = _conversation_binding_text(
+            predecessor_binding_id, "predecessor_binding_id", 128
+        )
+        successor_binding_id = _conversation_binding_text(
+            successor_binding_id, "successor_binding_id", 128
+        )
+        if (
+            isinstance(predecessor_generation, bool)
+            or not isinstance(predecessor_generation, int)
+            or predecessor_generation <= 0
+        ):
+            raise ValueError("predecessor_generation must be a positive integer")
+        if (
+            isinstance(successor_generation, bool)
+            or not isinstance(successor_generation, int)
+            or successor_generation <= predecessor_generation
+        ):
+            raise ValueError("successor_generation must be greater than predecessor_generation")
+        if transition_kind not in CONVERSATION_BINDING_TRANSITION_KINDS:
+            raise ValueError("transition_kind is not in the closed vocabulary")
+        actor_id = _conversation_binding_text(actor_id, "actor_id", 128)
+        if reason not in CONVERSATION_BINDING_TRANSITION_REASONS:
+            raise ValueError("reason is not in the closed vocabulary")
+        if not isinstance(evidence, bytes) or len(evidence) > 1048576:
+            raise ValueError("evidence must be bytes of at most 1048576 bytes")
+        created_at_utc = _utc_timestamp(created_at_utc, "created_at_utc")
+        evidence_sha256 = hashlib.sha256(evidence).hexdigest()
+        transition_id = _derive_conversation_binding_transition_id(
+            workspace_id,
+            scope_kind,
+            scope_identity,
+            conversation_id,
+            participant_id,
+            transition_kind,
+            predecessor_binding_id,
+            predecessor_generation,
+            successor_binding_id,
+            successor_generation,
+            actor_id,
+            reason,
+            evidence_sha256,
+            created_at_utc,
+        )
+        self._connection.execute("BEGIN IMMEDIATE")
+        try:
+            predecessor = self._connection.execute(
+                """
+                SELECT state FROM conversation_bindings
+                WHERE workspace_id = ? AND scope_kind = ? AND scope_identity = ?
+                  AND conversation_id = ? AND participant_id = ?
+                  AND binding_id = ? AND generation = ?
+                """,
+                (
+                    workspace_id,
+                    scope_kind,
+                    scope_identity,
+                    conversation_id,
+                    participant_id,
+                    predecessor_binding_id,
+                    predecessor_generation,
+                ),
+            ).fetchone()
+            successor = self._connection.execute(
+                """
+                SELECT state FROM conversation_bindings
+                WHERE workspace_id = ? AND scope_kind = ? AND scope_identity = ?
+                  AND conversation_id = ? AND participant_id = ?
+                  AND binding_id = ? AND generation = ?
+                """,
+                (
+                    workspace_id,
+                    scope_kind,
+                    scope_identity,
+                    conversation_id,
+                    participant_id,
+                    successor_binding_id,
+                    successor_generation,
+                ),
+            ).fetchone()
+            if predecessor is None or successor is None:
+                raise CanonicalConflictError("conversation binding transition references missing binding")
+            if predecessor[0] not in {"active", "unverified"}:
+                raise CanonicalConflictError("predecessor binding is not transitionable")
+            if successor[0] not in {"reserved", "registering", "unverified"}:
+                raise CanonicalConflictError("successor binding must be pre-active")
+            preserved_pending_count = int(
+                self._connection.execute(
+                    """
+                    SELECT count(*) FROM canonical_delivery_attempt_binding_freezes
+                    WHERE workspace_id = ? AND scope_kind = ? AND scope_identity = ?
+                      AND conversation_id = ? AND participant_id = ?
+                      AND binding_id = ? AND binding_generation = ?
+                    """,
+                    (
+                        workspace_id,
+                        scope_kind,
+                        scope_identity,
+                        conversation_id,
+                        participant_id,
+                        predecessor_binding_id,
+                        predecessor_generation,
+                    ),
+                ).fetchone()[0]
+            )
+            self._connection.execute(
+                """
+                UPDATE conversation_bindings
+                SET state = 'superseded'
+                WHERE workspace_id = ? AND scope_kind = ? AND scope_identity = ?
+                  AND conversation_id = ? AND participant_id = ?
+                  AND binding_id = ? AND generation = ?
+                """,
+                (
+                    workspace_id,
+                    scope_kind,
+                    scope_identity,
+                    conversation_id,
+                    participant_id,
+                    predecessor_binding_id,
+                    predecessor_generation,
+                ),
+            )
+            self._connection.execute(
+                """
+                UPDATE conversation_bindings
+                SET state = 'active'
+                WHERE workspace_id = ? AND scope_kind = ? AND scope_identity = ?
+                  AND conversation_id = ? AND participant_id = ?
+                  AND binding_id = ? AND generation = ?
+                """,
+                (
+                    workspace_id,
+                    scope_kind,
+                    scope_identity,
+                    conversation_id,
+                    participant_id,
+                    successor_binding_id,
+                    successor_generation,
+                ),
+            )
+            self._connection.execute(
+                """
+                INSERT INTO conversation_binding_transition_audit
+                (
+                    workspace_id, scope_kind, scope_identity, conversation_id, participant_id,
+                    transition_id, transition_kind, predecessor_binding_id, predecessor_generation,
+                    successor_binding_id, successor_generation, actor_id, reason,
+                    transferred_pending_count, preserved_pending_count, evidence_sha256, created_at_utc
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
+                """,
+                (
+                    workspace_id,
+                    scope_kind,
+                    scope_identity,
+                    conversation_id,
+                    participant_id,
+                    transition_id,
+                    transition_kind,
+                    predecessor_binding_id,
+                    predecessor_generation,
+                    successor_binding_id,
+                    successor_generation,
+                    actor_id,
+                    reason,
+                    preserved_pending_count,
+                    evidence_sha256,
+                    created_at_utc,
+                ),
+            )
+            self._connection.execute("COMMIT")
+        except BaseException:
+            if self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
+            raise
+        return {
+            "transition_id": transition_id,
+            "transition_kind": transition_kind,
+            "predecessor_binding_id": predecessor_binding_id,
+            "predecessor_generation": predecessor_generation,
+            "successor_binding_id": successor_binding_id,
+            "successor_generation": successor_generation,
+            "transferred_pending_count": 0,
+            "preserved_pending_count": preserved_pending_count,
+            "evidence_sha256": evidence_sha256,
+        }
 
     def record_registry_snapshot(
         self,
