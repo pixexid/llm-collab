@@ -25,6 +25,8 @@ import json
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent))
 from _helpers import ensure_project, get_agent, now_utc, utc_iso
 from _session_autobridge import (
+    HEURISTIC_RUNTIME_DISCOVERY_FAMILIES,
+    HEURISTIC_RUNTIME_DISCOVERY_REFUSED_REASON,
     SESSION_MODES,
     SESSION_STATUSES,
     WAKE_STRATEGIES,
@@ -244,6 +246,17 @@ def discover_runtime(args) -> dict:
 def publish_current_session(args) -> dict:
     class RegisterArgs:
         pass
+
+    if args.runtime_family in HEURISTIC_RUNTIME_DISCOVERY_FAMILIES:
+        return {
+            "published": False,
+            "reason": HEURISTIC_RUNTIME_DISCOVERY_REFUSED_REASON,
+            "runtime_family": args.runtime_family,
+            "hint": (
+                "Use discover-runtime for read-only diagnostics, or register "
+                "--runtime-session-id with an exact runtime session id."
+            ),
+        }
 
     discovered = discover_runtime_session(args.runtime_family, project_path=args.project_path)
     register_args = RegisterArgs()

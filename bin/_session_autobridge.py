@@ -19,6 +19,14 @@ from typing import Any
 
 ROUTE_AMBIGUOUS_REASON = "route_ambiguous"
 STALE_GENERATION_REASON = "stale_generation"
+EXACT_BINDING_REQUIRED_REASON = "exact_binding_required"
+EXACT_BINDING_NOT_DISPATCHABLE_REASON = "exact_binding_not_dispatchable"
+EXACT_BINDING_AMBIGUOUS_REASON = "exact_binding_ambiguous"
+EXACT_BINDING_MISMATCH_REASON = "exact_binding_mismatch"
+HEURISTIC_RUNTIME_DISCOVERY_REFUSED_REASON = "heuristic_runtime_discovery_refused"
+HEURISTIC_RUNTIME_DISCOVERY_FAMILIES = frozenset(
+    {"codex_app", "claude_app", "gemini_cli"}
+)
 
 from _helpers import (
     ROOT,
@@ -581,6 +589,53 @@ def find_dispatchable_target_session(
         if dispatchable:
             return session
     return None
+
+
+def resolve_exact_dispatch_target(
+    project_id: str,
+    chat_id: str,
+    agent_id: str,
+) -> tuple[dict[str, Any] | None, str | None]:
+    try:
+        binding = load_binding(project_id, chat_id, agent_id)
+    except FileNotFoundError:
+        return None, EXACT_BINDING_REQUIRED_REASON
+
+    if (
+        binding.get("project_id") != project_id
+        or binding.get("chat_id") != chat_id
+        or binding.get("agent_id") != agent_id
+    ):
+        return None, EXACT_BINDING_MISMATCH_REASON
+
+    bound_session_id = binding.get("session_id")
+    bound_runtime_id = binding.get("runtime_session_id")
+    if not bound_session_id or not bound_runtime_id:
+        return None, EXACT_BINDING_REQUIRED_REASON
+
+    exact_matches: list[dict[str, Any]] = []
+    for session in iter_sessions(agent_id=agent_id):
+        if session.get("project_id") != project_id or session.get("chat_id") != chat_id:
+            continue
+        if str(session.get("session_id")) != str(bound_session_id):
+            continue
+        if str(bound_runtime_id) not in session_target_ids(session):
+            continue
+        exact_matches.append(session)
+
+    if not exact_matches:
+        return None, EXACT_BINDING_MISMATCH_REASON
+
+    dispatchable = [
+        session
+        for session in exact_matches
+        if session_is_dispatchable(session)[0]
+    ]
+    if not dispatchable:
+        return None, EXACT_BINDING_NOT_DISPATCHABLE_REASON
+    if len(dispatchable) > 1:
+        return None, EXACT_BINDING_AMBIGUOUS_REASON
+    return dispatchable[0], None
 
 
 def message_targets_session(session: dict, message: dict) -> tuple[bool, str]:

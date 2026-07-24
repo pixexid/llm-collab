@@ -44,7 +44,13 @@ from _helpers import (
     now_utc,
     utc_iso,
 )
-from _session_autobridge import discover_runtime_session, load_session, save_session
+from _session_autobridge import (
+    HEURISTIC_RUNTIME_DISCOVERY_FAMILIES,
+    HEURISTIC_RUNTIME_DISCOVERY_REFUSED_REASON,
+    discover_runtime_session,
+    load_session,
+    save_session,
+)
 from session_autobridge import register_session
 
 
@@ -127,6 +133,17 @@ def publish_runtime_identity(args) -> dict | None:
         raise ValueError("--publish-session requires --session")
     if not args.runtime_family:
         raise ValueError("--publish-session requires --runtime-family")
+
+    if args.runtime_family in HEURISTIC_RUNTIME_DISCOVERY_FAMILIES:
+        return {
+            "published": False,
+            "reason": HEURISTIC_RUNTIME_DISCOVERY_REFUSED_REASON,
+            "runtime_family": args.runtime_family,
+            "hint": (
+                "Use session_autobridge.py discover-runtime for read-only diagnostics, "
+                "or session_autobridge.py register --runtime-session-id for exact binding."
+            ),
+        }
 
     discovered = discover_runtime_session(args.runtime_family, project_path=args.project_path)
     matching_messages = filter_messages(get_unread_messages(args.me), args.project, args.chat)
@@ -507,12 +524,19 @@ def main():
         print(json.dumps(payload, indent=2))
     else:
         if published_runtime is not None:
-            print(
-                "[session] published "
-                f"{published_runtime['session']['runtime']['family']} "
-                f"{published_runtime['session']['runtime']['session_id']} "
-                f"for {published_runtime['session']['session_id']}\n"
-            )
+            if published_runtime.get("published") is False:
+                print(
+                    "[session] publish refused "
+                    f"{published_runtime['runtime_family']}: "
+                    f"{published_runtime['reason']}\n"
+                )
+            else:
+                print(
+                    "[session] published "
+                    f"{published_runtime['session']['runtime']['family']} "
+                    f"{published_runtime['session']['runtime']['session_id']} "
+                    f"for {published_runtime['session']['session_id']}\n"
+                )
         print(f"\n[inbox] {len(messages)} {'message(s)' if args.show_all else 'unread message(s)'} for {args.me}\n")
         for i, msg in enumerate(messages):
             print(format_message(msg, i))
