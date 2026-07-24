@@ -19,11 +19,17 @@ SCRIPT_PATH = REPO_ROOT / "bin" / "session_autobridge.py"
 DELIVER_SCRIPT = REPO_ROOT / "bin" / "deliver.py"
 INBOX_SCRIPT = REPO_ROOT / "bin" / "inbox.py"
 WATCH_INBOX_SCRIPT = REPO_ROOT / "bin" / "watch_inbox.py"
+sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(REPO_ROOT / "bin"))
 
 import _session_autobridge as session_autobridge_lib
 import watch_inbox as watch_inbox_lib
 from _helpers import parse_frontmatter
+from llm_collab.ledger import LedgerPaths, LedgerStore
+import llm_collab.ledger.store as store_module
+
+
+SAFE_VERSION = (3, 51, 3)
 
 
 def write(path: Path, content: str) -> None:
@@ -37,13 +43,24 @@ def write_json(path: Path, payload: dict) -> None:
 
 class SessionAutobridgeTest(unittest.TestCase):
     def make_workspace(self) -> Path:
-        temp_root = Path(tempfile.mkdtemp(prefix="llm-collab-autobridge-"))
+        temp_root = Path(tempfile.mkdtemp(prefix="lca-", dir="/tmp"))
+        write(
+            temp_root / "sitecustomize.py",
+            "\n".join(
+                [
+                    "import llm_collab.ledger.store as store_module",
+                    "store_module._linked_sqlite_version_info = lambda: (3, 51, 3)",
+                ]
+            ),
+        )
         write_json(
             temp_root / "collab.config.json",
             {
                 "workspace_name": "test-collab",
                 "schema_version": 2,
+                "workspace_id": "ws_alpha",
                 "projects_root": str(temp_root),
+                "project_state_root": str(temp_root / "project-state"),
                 "poll_interval_seconds": 15,
                 "notifications_enabled": False,
             },
@@ -136,6 +153,106 @@ class SessionAutobridgeTest(unittest.TestCase):
         write_json(inbox_path, inbox)
         return message_rel
 
+    def seed_binding_ledger(
+        self,
+        root: Path,
+        *,
+        chat_id: str,
+        agent_id: str,
+        binding_id: str,
+        generation: int,
+        endpoint_id: str,
+        native_session_id: str,
+    ) -> None:
+        paths = LedgerPaths.derive(root / "project-state", "ws_alpha")
+        with patch.object(store_module, "_linked_sqlite_version_info", return_value=SAFE_VERSION):
+            writer = LedgerStore.open_writer(paths)
+        with writer as store:
+            store.record_registry_snapshot(
+                workspace_id="ws_alpha",
+                registry_revision="sha256:" + "a" * 64,
+                registry_source_sha256="a" * 64,
+                captured_at_utc="2026-04-22T00:00:00+00:00",
+                workspace_snapshot_json=json.dumps(
+                    {"workspace_id": "ws_alpha", "projects": ["amiga", "nuvyr"]}
+                ),
+                project_snapshots={
+                    "amiga": json.dumps({"project_id": "amiga"}),
+                    "nuvyr": json.dumps({"project_id": "nuvyr"}),
+                },
+                source_snapshots={"amiga": {}, "nuvyr": {}},
+            )
+            store._connection.execute(
+                """
+                INSERT OR IGNORE INTO lifecycle_provider_registry
+                (
+                    workspace_id, provider_id, provider_revision, trust_class,
+                    supported_operations_json, challenge_algorithm,
+                    challenge_ttl_seconds, created_at_utc
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "ws_alpha",
+                    "provider_codex",
+                    "revision_1",
+                    "managed",
+                    '["attach"]',
+                    "sha256",
+                    60,
+                    "2026-04-22T00:00:00+00:00",
+                ),
+            )
+            store._connection.execute(
+                """
+                INSERT OR IGNORE INTO conversation_participants
+                (
+                    workspace_id, scope_kind, scope_identity, conversation_id,
+                    participant_id, agent_id, created_at_utc
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "ws_alpha",
+                    "project",
+                    "amiga",
+                    chat_id,
+                    "participant_" + agent_id,
+                    "agent_" + agent_id,
+                    "2026-04-22T00:00:00+00:00",
+                ),
+            )
+            store._connection.execute(
+                """
+                INSERT INTO conversation_bindings
+                (
+                    workspace_id, scope_kind, scope_identity, conversation_id,
+                    participant_id, binding_id, generation, state, mutation_capable,
+                    provider_id, provider_revision, endpoint_id, session_ref_id,
+                    native_session_id, runtime_instance_id, registered_at_utc
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "ws_alpha",
+                    "project",
+                    "amiga",
+                    chat_id,
+                    "participant_" + agent_id,
+                    binding_id,
+                    generation,
+                    "active",
+                    1,
+                    "provider_codex",
+                    "revision_1",
+                    endpoint_id,
+                    "session_ref_" + binding_id.replace("-", "_"),
+                    native_session_id,
+                    "runtime_" + binding_id.replace("-", "_"),
+                    "2026-04-22T00:00:00+00:00",
+                ),
+            )
+
     def run_cli(self, root: Path, *args: str) -> dict:
         return self.run_cli_with_env(root, None, *args)
 
@@ -145,10 +262,24 @@ class SessionAutobridgeTest(unittest.TestCase):
             cwd=root,
             text=True,
             capture_output=True,
-            env={**os.environ, "LLM_COLLAB_UI_REFRESH": "0", **(env or {})},
+            env={**self.subprocess_env(root), **(env or {})},
             check=True,
         )
         return json.loads(result.stdout)
+
+    def subprocess_env(self, root: Path) -> dict[str, str]:
+        return {
+            **os.environ,
+            "LLM_COLLAB_UI_REFRESH": "0",
+            "PYTHONPATH": os.pathsep.join(
+                [
+                    str(root),
+                    str(REPO_ROOT),
+                    str(REPO_ROOT / "bin"),
+                    os.environ.get("PYTHONPATH", ""),
+                ]
+            ),
+        }
 
     def create_chat(self, root: Path, *, chat_dir_name: str, chat_id: str, project_id: str) -> Path:
         chat_dir = root / "Chats" / chat_dir_name
@@ -3010,6 +3141,15 @@ class SessionAutobridgeTest(unittest.TestCase):
             sender_agent_id="codex",
             packet_slug="missing-target",
         )
+        self.seed_binding_ledger(
+            root,
+            chat_id="CHAT-BIND-SAFE",
+            agent_id="gemini",
+            binding_id="binding-a",
+            generation=7,
+            endpoint_id="endpoint_gemini_runtime_a",
+            native_session_id="gemini-runtime-a",
+        )
         worker_script = root / "binding_scoped_runtime.py"
         output_a = root / "binding_scoped_runtime_a.json"
         output_b = root / "binding_scoped_runtime_b.json"
@@ -3059,6 +3199,11 @@ class SessionAutobridgeTest(unittest.TestCase):
             session_payload["repo_targets"] = ["llm-collab"]
             session_payload["binding_id"] = "binding-a" if session_id.endswith("-A") else "binding-b"
             session_payload["binding_generation"] = 7
+            session_payload["endpoint_id"] = (
+                "endpoint_gemini_runtime_a"
+                if session_id.endswith("-A")
+                else "endpoint_gemini_runtime_b"
+            )
             write_json(session_path, session_payload)
 
         watcher_result = subprocess.run(
@@ -3074,6 +3219,7 @@ class SessionAutobridgeTest(unittest.TestCase):
             cwd=root,
             text=True,
             capture_output=True,
+            env=self.subprocess_env(root),
             check=True,
         )
         watcher_events = [
@@ -3091,6 +3237,155 @@ class SessionAutobridgeTest(unittest.TestCase):
         inbox = json.loads((root / "agents" / "gemini" / "inbox.json").read_text())
         self.assertEqual([matched], inbox["read"])
         self.assertEqual([wrong_repo, wrong_binding, missing_target], inbox["unread"])
+
+        paths = LedgerPaths.derive(root / "project-state", "ws_alpha")
+        with patch.object(store_module, "_linked_sqlite_version_info", return_value=SAFE_VERSION):
+            reader = LedgerStore.open_reader(paths)
+        with reader as store:
+            self.assertEqual(
+                (1, 1, 1),
+                store._connection.execute(
+                    """
+                    SELECT
+                      (SELECT count(*) FROM canonical_messages),
+                      (SELECT count(*) FROM canonical_deliveries),
+                      (SELECT count(*) FROM canonical_delivery_attempts)
+                    """
+                ).fetchone(),
+            )
+
+    def test_watch_inbox_recovers_after_bind_before_mark_read_without_duplicate_rows(self):
+        root = self.make_workspace()
+        self.add_agent(
+            root,
+            {
+                "id": "gemini",
+                "display_name": "Gemini",
+                "activation": {"type": "cli_session", "watcher_enabled": True},
+            },
+        )
+        message_rel = self.add_message(
+            root,
+            agent_id="gemini",
+            chat_id="CHAT-BIND-RECOVER",
+            project_id="amiga",
+            title="Recover binding",
+            target_session_id="gemini-runtime-recover",
+            repo_targets=["llm-collab"],
+            target_binding_id="binding-recover",
+            target_binding_generation=3,
+            sender_agent_id="codex",
+            packet_slug="recover",
+        )
+        self.seed_binding_ledger(
+            root,
+            chat_id="CHAT-BIND-RECOVER",
+            agent_id="gemini",
+            binding_id="binding-recover",
+            generation=3,
+            endpoint_id="endpoint_gemini_recover",
+            native_session_id="gemini-runtime-recover",
+        )
+        worker_script = root / "recover_runtime.py"
+        output_file = root / "recover_runtime.jsonl"
+        write(
+            worker_script,
+            "\n".join(
+                [
+                    "import json",
+                    "import sys",
+                    "from pathlib import Path",
+                    "payload = json.load(sys.stdin)",
+                    "path = Path(sys.argv[1])",
+                    "previous = path.read_text() if path.exists() else ''",
+                    "path.write_text(previous + json.dumps(payload['message']['path']) + '\\n')",
+                ]
+            ),
+        )
+        self.run_cli(
+            root,
+            "register",
+            "--session",
+            "SESSION-BIND-RECOVER",
+            "--agent",
+            "gemini",
+            "--project",
+            "amiga",
+            "--chat",
+            "CHAT-BIND-RECOVER",
+            "--mode",
+            "auto-read",
+            "--wake-strategy",
+            "runtime_trigger",
+            "--runtime-family",
+            "gemini_cli",
+            "--runtime-session-id",
+            "gemini-runtime-recover",
+            "--runtime-session-source",
+            "first_read",
+            "--runtime-command",
+            json.dumps([sys.executable, str(worker_script), str(output_file)]),
+        )
+        session_path = root / "State" / "session_autobridge" / "sessions" / "SESSION-BIND-RECOVER.json"
+        session_payload = json.loads(session_path.read_text())
+        session_payload["repo_targets"] = ["llm-collab"]
+        session_payload["binding_id"] = "binding-recover"
+        session_payload["binding_generation"] = 3
+        session_payload["endpoint_id"] = "endpoint_gemini_recover"
+        write_json(session_path, session_payload)
+
+        dispatch_only = self.run_cli(root, "dispatch", "--session", "SESSION-BIND-RECOVER")
+        self.assertEqual(message_rel, dispatch_only["actions"][0]["message_path"])
+        inbox = json.loads((root / "agents" / "gemini" / "inbox.json").read_text())
+        self.assertEqual([message_rel], inbox["unread"])
+        self.assertEqual([], inbox["read"])
+
+        watcher_result = subprocess.run(
+            [
+                sys.executable,
+                str(WATCH_INBOX_SCRIPT),
+                "--me",
+                "gemini",
+                "--max-polls",
+                "1",
+                "--json",
+            ],
+            cwd=root,
+            text=True,
+            capture_output=True,
+            env=self.subprocess_env(root),
+            check=True,
+        )
+        watcher_events = [
+            json.loads(line) for line in watcher_result.stdout.splitlines() if line.strip()
+        ]
+        self.assertEqual(
+            [message_rel],
+            [
+                event["message_path"]
+                for event in watcher_events
+                if event["event"] == "autobridge_consumed"
+            ],
+        )
+        inbox = json.loads((root / "agents" / "gemini" / "inbox.json").read_text())
+        self.assertEqual([], inbox["unread"])
+        self.assertEqual([message_rel], inbox["read"])
+        paths = LedgerPaths.derive(root / "project-state", "ws_alpha")
+        with patch.object(store_module, "_linked_sqlite_version_info", return_value=SAFE_VERSION):
+            reader = LedgerStore.open_reader(paths)
+        with reader as store:
+            self.assertEqual(
+                (1, 1, 1, 1),
+                store._connection.execute(
+                    """
+                    SELECT
+                      (SELECT count(*) FROM canonical_messages),
+                      (SELECT count(*) FROM canonical_deliveries),
+                      (SELECT count(*) FROM canonical_delivery_attempts),
+                      (SELECT count(*) FROM canonical_delivery_attempt_binding_freezes)
+                    """
+                ).fetchone(),
+            )
 
     def test_watch_inbox_read_state_guard_is_not_in_helpers(self):
         with patch.object(watch_inbox_lib, "autobridge_session_ids", return_value=["SESSION-A"]):
