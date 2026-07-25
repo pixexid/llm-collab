@@ -127,6 +127,54 @@ class ResolutionHintTest(unittest.TestCase):
                          "the reference's own repo must be queried, not this one")
         self.assertTrue(settled)
 
+    def test_repo_targets_frontmatter_attributes_bare_numbers(self) -> None:
+        """`repo_targets: ["llm-collab"]` IS an explicit attribution.
+
+        Ignoring it left the hint inert on every real packet, since our packets all write
+        bare numbers and name the repo in frontmatter -- the field the delivery contract
+        uses for exactly this.
+        """
+        relpath = self.packet('---\nproject_id: amiga\n'
+                              'repo_targets: ["llm-collab"]\n---\nHeld on #170.')
+        seen = []
+
+        def run(argv, **kwargs):
+            if "remote" in argv:
+                return mock.Mock(stdout="https://github.com/pixexid/llm-collab.git\n",
+                                 returncode=0)
+            seen.append(argv[argv.index("--repo") + 1])
+            return mock.Mock(stdout=json.dumps({"state": "MERGED"}))
+
+        with mock.patch.object(operator_digest, "_repo_targets_cache", None):
+            with mock.patch.object(operator_digest.subprocess, "run", side_effect=run):
+                settled, note = operator_digest.resolution_hint(relpath)
+        self.assertEqual(["pixexid/llm-collab"], seen)
+        self.assertTrue(settled)
+        self.assertNotIn("not checked", note)
+
+    def test_two_repo_targets_stay_ambiguous(self) -> None:
+        relpath = self.packet('---\nrepo_targets: ["llm-collab", "amiga"]\n---\nSee #170.')
+        with mock.patch.object(operator_digest.subprocess, "run",
+                               side_effect=AssertionError("must not look up an ambiguous ref")):
+            settled, note = operator_digest.resolution_hint(relpath)
+        self.assertFalse(settled)
+        self.assertIn("not checked", note)
+
+    def test_an_unknown_repo_target_is_not_guessed(self) -> None:
+        relpath = self.packet('---\nrepo_targets: ["some-other-repo"]\n---\nSee #170.')
+        with mock.patch.object(operator_digest.subprocess, "run",
+                               side_effect=AssertionError("must not look up an unknown repo")):
+            settled, _ = operator_digest.resolution_hint(relpath)
+        self.assertFalse(settled)
+
+    def test_no_repo_targets_leaves_bare_numbers_unresolved(self) -> None:
+        relpath = self.packet("---\nproject_id: amiga\n---\nSee #170.")
+        with mock.patch.object(operator_digest.subprocess, "run",
+                               side_effect=AssertionError("project_id alone is not attribution")):
+            settled, note = operator_digest.resolution_hint(relpath)
+        self.assertFalse(settled)
+        self.assertIn("not checked", note)
+
     def test_no_references_yields_no_hint(self) -> None:
         relpath = self.packet("Please decide whether to park the sidecar work.")
         with self.fake_gh({}):
@@ -135,3 +183,42 @@ class ResolutionHintTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RepoEnumerationTest(unittest.TestCase):
+    """The PR section must cover every registered repo, and name what it could not read."""
+
+    def test_this_workspaces_own_repo_is_registered(self) -> None:
+        """A swallowed NameError once dropped it, hiding our own PRs from the operator.
+
+        The digest reported other projects' PRs under the heading "Open pull requests"
+        while omitting the five in front of the reader.
+        """
+        slugs = set(operator_digest.known_repo_targets().values())
+        self.assertIn("pixexid/llm-collab", slugs)
+        self.assertIn("llm-collab", operator_digest.known_repo_targets(),
+                      "the workspace name must be usable as a repo_targets alias")
+
+    def test_registered_project_repos_are_included(self) -> None:
+        targets = operator_digest.known_repo_targets()
+        self.assertEqual("pixexid/amiga", targets.get("amiga"))
+        self.assertEqual("pixexid/nuvyr", targets.get("nuvyr"))
+
+    def test_open_prs_labels_each_row_and_reports_unreachable_repos(self) -> None:
+        def run(argv, **kwargs):
+            slug = argv[argv.index("--repo") + 1]
+            if slug == "pixexid/nuvyr":
+                raise RuntimeError("gh failed")
+            return mock.Mock(stdout=json.dumps([{
+                "number": 1, "title": "t", "isDraft": True,
+                "headRefName": "b", "headRefOid": "a" * 40,
+            }]))
+
+        with mock.patch.object(operator_digest, "known_repo_targets",
+                               return_value={"a": "pixexid/llm-collab", "b": "pixexid/nuvyr"}):
+            with mock.patch.object(operator_digest.subprocess, "run", side_effect=run):
+                rows, unreachable = operator_digest.open_prs()
+        self.assertEqual(["pixexid/llm-collab"], [r["repo"] for r in rows],
+                         "every row must carry the repo it came from")
+        self.assertEqual(["pixexid/nuvyr"], unreachable,
+                         "a repo we could not read must be named, not rendered as empty")

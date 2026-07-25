@@ -29,13 +29,56 @@ import re
 import subprocess
 from datetime import datetime, timezone
 
-from _helpers import ROOT, agent_ids
+from _helpers import ROOT, agent_ids, config_get
 
 DECISION_MARKERS = ("decision", "required", "approve", "ratify", "recommend", "blocked")
 # Bounded so one packet citing many PRs cannot stall the digest on network calls.
 # Exceeding it downgrades the hint to PARTIAL rather than claiming full coverage.
 PR_CHECK_LIMIT = 6
-DEFAULT_REPO = "pixexid/llm-collab"
+_repo_targets_cache: dict[str, str] | None = None
+
+
+def known_repo_targets() -> dict[str, str]:
+    """Map every name a packet may use for a repo onto its owner/name slug.
+
+    Derived from the git origin and projects.json rather than hardcoded, because the
+    previous constant asserted that every `#123` in this workspace belonged to
+    pixexid/llm-collab while project amiga's REGISTERED repo is pixexid/amiga.
+    """
+    global _repo_targets_cache
+    if _repo_targets_cache is not None:
+        return _repo_targets_cache
+
+    targets: dict[str, str] = {}
+
+    def register(slug: str | None, *aliases: str) -> None:
+        if not slug or "/" not in slug:
+            return
+        for alias in (*aliases, slug, slug.split("/")[-1]):
+            if alias:
+                targets[str(alias)] = slug
+
+    try:
+        origin = subprocess.run(
+            ["git", "remote", "get-url", "origin"], cwd=str(ROOT),
+            capture_output=True, text=True, timeout=10, check=True).stdout.strip()
+        origin = re.sub(r"^(?:https://github\.com/|git@github\.com:)", "", origin)
+        register(origin.removesuffix(".git"), config_get("workspace_name"))
+    except (subprocess.SubprocessError, OSError):
+        # Narrow deliberately. A bare `except Exception` here swallowed a NameError from a
+        # missing import and silently dropped THIS workspace's own repo from the operator's
+        # PR view, reporting other projects' PRs while hiding the five in front of them.
+        pass
+
+    try:
+        payload = json.loads((ROOT / "projects.json").read_text(encoding="utf-8"))
+        for project in payload.get("projects", []):
+            register((project.get("github") or {}).get("repo"), project.get("id"))
+    except (OSError, json.JSONDecodeError):
+        pass
+
+    _repo_targets_cache = targets
+    return targets
 
 
 def now() -> datetime:
@@ -85,6 +128,22 @@ def sender_of(relpath: str) -> str:
     return "?"
 
 
+def declared_repo(text: str) -> str | None:
+    """The single repo a packet's frontmatter attributes its bare PR numbers to.
+
+    `repo_targets: ["llm-collab"]` IS an explicit attribution -- it is the field the
+    delivery contract uses for exactly this. Ignoring it left every real packet's hint
+    inert. Two or more targets stay ambiguous, and an unknown name is not guessed.
+    """
+    declared = re.search(r"^repo_targets:\s*\[(.*?)\]", text, re.MULTILINE)
+    if not declared or not declared.group(1).strip():
+        return None
+    named = [t.strip().strip('"\'') for t in declared.group(1).split(",") if t.strip()]
+    if len(named) != 1:
+        return None
+    return known_repo_targets().get(named[0])
+
+
 def qualified_pr_refs(text: str) -> tuple[list[tuple[str, int]], int]:
     """Return (repo-qualified PR refs, count of bare unattributable ones).
 
@@ -106,6 +165,13 @@ def qualified_pr_refs(text: str) -> tuple[list[tuple[str, int]], int]:
     bare = {
         int(n) for n in re.findall(r"(?<![\w/])#(\d{2,4})\b", text)
     } - attributed
+
+    # Frontmatter naming exactly one known repo attributes the bare numbers to it.
+    owner = declared_repo(text)
+    if owner and bare:
+        qualified.extend((owner, number) for number in sorted(bare))
+        bare = set()
+
     unique = sorted(set(qualified))
     return unique, len(bare)
 
@@ -251,15 +317,28 @@ def duplicate_native_ids(sessions: list[dict]) -> dict[str, list[str]]:
     return {k: v for k, v in seen.items() if len(v) > 1}
 
 
-def open_prs() -> list[dict]:
-    try:
-        raw = subprocess.run(
-            ["gh", "pr", "list", "--repo", "pixexid/llm-collab", "--state", "open",
-             "--json", "number,title,isDraft,headRefName,headRefOid"],
-            capture_output=True, text=True, timeout=30, check=True).stdout
-        return json.loads(raw)
-    except Exception:
-        return []
+def open_prs() -> tuple[list[dict], list[str]]:
+    """Open PRs across every registered repo, plus the repos that could not be read.
+
+    Querying one repo under the heading "Open pull requests" let the digest report None
+    while another registered project repo had open work. Each row now carries its repo, and
+    a repo we failed to reach is named rather than silently rendered as empty.
+    """
+    rows: list[dict] = []
+    unreachable: list[str] = []
+    for slug in sorted(set(known_repo_targets().values())):
+        try:
+            raw = subprocess.run(
+                ["gh", "pr", "list", "--repo", slug, "--state", "open",
+                 "--json", "number,title,isDraft,headRefName,headRefOid"],
+                capture_output=True, text=True, timeout=30, check=True).stdout
+            for row in json.loads(raw):
+                row["repo"] = slug
+                rows.append(row)
+        except Exception:
+            unreachable.append(slug)
+    rows.sort(key=lambda r: (r["repo"], -int(r["number"])))
+    return rows, unreachable
 
 
 def unread_counts() -> list[tuple[str, int]]:
@@ -330,20 +409,27 @@ def render() -> str:
             add(f"> - `{native}` ← {', '.join(chats)}")
         add("")
 
-    prs = open_prs()
+    prs, unreachable_repos = open_prs()
+    queried = sorted(set(known_repo_targets().values()))
     add("## 3. Open pull requests")
     add("")
+    add(f"Across every registered repo: {', '.join(queried) or 'none registered'}.")
+    add("")
     if not prs:
-        add("None open, or GitHub is unreachable.")
+        add("None open in any registered repo.")
     else:
-        add("| pr | state | head | title |")
-        add("|---|---|---|---|")
-        for pr in sorted(prs, key=lambda p: -p["number"]):
+        add("| pr | repo | state | head | title |")
+        add("|---|---|---|---|---|")
+        for pr in prs:
             # Draft does NOT mean "with the implementer" here: this workspace reviews
             # drafts and only marks ready to open the merge settle window. Asserting a
             # court the flag does not carry would misdirect the one reader of this file.
             state = "draft" if pr["isDraft"] else "ready — settling for merge"
-            add(f"| #{pr['number']} | {state} | `{pr['headRefOid'][:10]}` | {pr['title'][:60]} |")
+            add(f"| #{pr['number']} | {pr['repo']} | {state} | "
+                f"`{pr['headRefOid'][:10]}` | {pr['title'][:55]} |")
+    if unreachable_repos:
+        add("")
+        add(f"Could not read: {', '.join(unreachable_repos)} — treat as unknown, not empty.")
     add("")
 
     counts = unread_counts()
