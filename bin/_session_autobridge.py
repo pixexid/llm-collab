@@ -4,6 +4,7 @@ import json
 import importlib
 import os
 import stat
+import tempfile
 import re
 import signal
 import base64
@@ -183,7 +184,45 @@ def save_binding(payload: dict) -> None:
     )
     path.parent.mkdir(parents=True, exist_ok=True)
     payload["updated_utc"] = utc_iso()
-    write_file(path, json.dumps(payload, indent=2, sort_keys=True))
+    write_regular_file_atomically(path, json.dumps(payload, indent=2, sort_keys=True))
+
+
+def write_regular_file_atomically(path: Path, content: str) -> None:
+    """Write `content` to `path` without ever blocking on it, replacing it atomically.
+
+    path.write_text() OPENS the destination, so a binding pathname swapped for a writer-less FIFO
+    blocked forever and a directory raised -- either way after the caller had already published
+    other state. Reading the snapshot beforehand protects the VALUES; it does nothing for the
+    write-side descriptor.
+
+    A temporary file in the same directory plus os.replace() never opens the destination at all, so
+    a swapped object cannot block the write, and the replacement is atomic: a reader sees the old
+    record or the new one, never a partial one. An existing destination that is not a regular file
+    is refused first, because silently replacing a FIFO or directory would hide that someone else
+    is doing something unexpected with our authoritative record.
+    """
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        info = None
+    except OSError as error:
+        raise UnreadableFile(f"cannot inspect {path} before writing: {error}") from error
+    if info is not None and not stat.S_ISREG(info.st_mode):
+        raise UnreadableFile(
+            f"{path} exists and is not a regular file; refusing to replace it"
+        )
+
+    descriptor, temporary = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.")
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(content)
+        os.replace(temporary, path)
+    except BaseException:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
 
 
 def save_thread_pair(payload: dict) -> None:

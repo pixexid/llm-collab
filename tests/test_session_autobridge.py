@@ -2723,6 +2723,74 @@ class SessionAutobridgeTest(unittest.TestCase):
             env=self.subprocess_env(root),
         )
 
+    def test_a_binding_pathname_swapped_for_a_FIFO_cannot_hang_or_split_the_write(self):
+        """The write side, which carrying the read snapshot does not protect.
+
+        Registration published the session and THEN reopened the binding pathname through
+        Path.write_text. A pathname swapped for a writer-less FIFO blocked forever there, or a
+        directory raised -- either way with the session already updated and the authoritative
+        binding still pointing at the previous thread. The snapshot protects the VALUES; it says
+        nothing about the descriptor the write lands on.
+        """
+        import os as _os
+        import subprocess as _sp
+        import sys as _sys
+        import textwrap as _tw
+
+        root, binding = self.registered_workspace_with_binding()
+        binding.unlink()
+        _os.mkfifo(binding, 0o600)
+
+        program = _tw.dedent(f"""
+            import sys
+            sys.path.insert(0, {str(REPO_ROOT / "bin")!r})
+            sys.argv = ['session_autobridge.py', 'register', '--session', 'SESSION-NEW',
+                        '--agent', 'claude', '--project', 'amiga', '--chat', 'CHAT-REG1',
+                        '--mode', 'notify', '--runtime-family', 'claude_app',
+                        '--runtime-session-id', 'THREAD-NEW',
+                        '--runtime-session-source', 'first_read', '--json']
+            import session_autobridge as cli
+            try:
+                cli.main()
+                print('COMPLETED')
+            except SystemExit as error:
+                print('REFUSED:', error)
+            except Exception as error:
+                print('RAISED:', type(error).__name__, error)
+        """)
+        try:
+            done = _sp.run([_sys.executable, "-c", program], cwd=root, text=True,
+                           capture_output=True, timeout=20)
+        except _sp.TimeoutExpired:
+            self.fail("registration blocked on the swapped binding pathname")
+
+        combined = done.stdout + done.stderr
+        self.assertNotIn("COMPLETED", combined,
+                         "a non-regular binding pathname must not be silently replaced")
+        self.assertIn("not a regular file", combined)
+        self.assertFalse(
+            (root / "State" / "session_autobridge" / "sessions" / "SESSION-NEW.json").exists(),
+            "the session must NOT have been published before the binding write refused")
+
+    def test_the_binding_is_written_before_the_session_is_published(self):
+        """Two independent writes cannot be atomic, so the ORDER decides the failure mode.
+
+        Binding first means a failed session write leaves a binding referencing a session that does
+        not exist, and the exact-binding resolver requires them to match, so the pair refuses. The
+        old order left a live session bound to a stale thread, which resolves happily and is wrong.
+        """
+        source = (REPO_ROOT / "bin" / "session_autobridge.py").read_text(encoding="utf-8")
+        body = source[source.index("def register_session"):]
+        body = body[:body.index("\ndef ")]
+        # Comments stripped first. My initial version compared raw offsets and matched a COMMENT
+        # that mentions save_session() above the actual call, so it failed against correct code --
+        # an assertion a comment can satisfy is not an assertion, which is the third time that
+        # exact mistake has appeared on this PR.
+        code = "\n".join(line for line in body.splitlines()
+                         if not line.lstrip().startswith("#"))
+        self.assertLess(code.index("update_binding_from_session("), code.index("save_session("),
+                        "the binding write must precede the session publish")
+
     def test_registration_reads_the_existing_binding_EXACTLY_ONCE(self):
         """A preflight that validates and then lets the update reopen the path is a TOCTOU.
 

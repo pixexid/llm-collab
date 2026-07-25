@@ -60,6 +60,11 @@ MAX_SCANNED_CHATS = 2000
 # file's size are capped.
 MAX_SCANNED_SESSIONS = 5000
 MAX_SESSION_BYTES = 256 * 1024
+# A PER-FILE cap is not a total. 5,000 session files each just under MAX_SESSION_BYTES is ~1.25 GiB
+# read and parsed while every individual limit is respected, and the binding reads that follow add
+# more. One cumulative budget spans the whole lookup -- sessions and bindings together -- and is
+# charged BEFORE each file is parsed, so the run aborts instead of finishing the allocation.
+MAX_LOOKUP_TOTAL_BYTES = 64 * 1024 * 1024
 # projects.json is workspace-local and therefore untrusted like the trees above. read_text()
 # allocated and parsed all of it before any lookup limit existed, so the earliest parse boundary in
 # the whole run was also the only unbounded one -- AGENTS.md:165-168 puts the budget exactly there.
@@ -287,6 +292,18 @@ def remember_streamed_message(started_id: str, streamed: set[str]) -> None:
     streamed.add(started_id)
 
 
+def check_deadline(deadline: float | None, where: str) -> None:
+    """Abort if the absolute deadline has already passed.
+
+    Called between every setup step, because those steps are exactly where the duration used to be
+    unaccounted: resolution reads untrusted files, discovery shells out to `ps`, and the token load
+    opens another path. Each can stall on a network or FUSE filesystem where O_NONBLOCK does not
+    help, and none of them consumed any of `--seconds` before this existed.
+    """
+    if deadline is not None and time.monotonic() >= deadline:
+        raise SystemExit(f"[error] --seconds elapsed {where}; nothing was streamed")
+
+
 def notification_belongs_to(method: str, params: dict, thread_id: str) -> bool:
     """Whether this notification is the selected thread's, decided in ONE place.
 
@@ -472,6 +489,29 @@ def resolve_thread(args: argparse.Namespace) -> tuple[str, str, str | None]:
     return thread_id, f"{project}/{chat}", str(home) if home else None
 
 
+class LookupByteBudget:
+    """One cumulative byte budget for a whole lookup.
+
+    Per-file caps bound a single read; they do not bound a scan. Charged before parsing, so the run
+    aborts rather than completing the allocation it has already made.
+    """
+
+    def __init__(self, limit: int | None = None) -> None:
+        # Resolved at CALL time, not bound as a default at definition time: a default argument
+        # captures the constant when the class is defined, so the limit could never be adjusted --
+        # not by a test, and not by any future caller that needs a tighter budget.
+        self.limit = MAX_LOOKUP_TOTAL_BYTES if limit is None else limit
+        self.spent = 0
+
+    def charge(self, count: int, path) -> None:
+        self.spent += count
+        if self.spent > self.limit:
+            raise SystemExit(
+                f"[error] this lookup has read more than {self.limit} bytes across session and "
+                f"binding records (at {path}); refusing to continue"
+            )
+
+
 def bounded_sessions(agent: str) -> list[dict]:
     """Every session for this agent, read ONCE, under a count and a per-file byte cap.
 
@@ -485,6 +525,7 @@ def bounded_sessions(agent: str) -> list[dict]:
     """
     sessions: list[dict] = []
     scanned = 0
+    budget = LookupByteBudget()
     try:
         with os.scandir(autobridge.SESSIONS_DIR) as scan:
             entries = []
@@ -495,7 +536,11 @@ def bounded_sessions(agent: str) -> list[dict]:
                         f"[error] more than {MAX_SCANNED_SESSIONS} entries under "
                         f"{autobridge.SESSIONS_DIR}; refusing to scan further"
                     )
-                if entry.is_file() and entry.name.endswith(".json"):
+                # By NAME only. entry.is_file() is a pathname stat, so a session record that is
+                # ALREADY a FIFO or directory was silently dropped here -- an exact binding whose
+                # session record is non-regular got reported as a binding mismatch rather than an
+                # unreadable record. The bounded reader classifies it on the descriptor instead.
+                if entry.name.endswith(".json"):
                     entries.append(Path(entry.path))
     except FileNotFoundError:
         return []
@@ -512,6 +557,7 @@ def bounded_sessions(agent: str) -> list[dict]:
             continue
         except autobridge.UnreadableFile as error:
             raise SystemExit(f"[error] cannot read session record: {error}")
+        budget.charge(len(raw), path)
         try:
             record = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError):
@@ -579,7 +625,12 @@ def bounded_chat_ids(project: str, agent: str) -> list[str]:
                         f"[error] more than {MAX_SCANNED_CHATS} entries under {project!r}; "
                         "name one with --chat"
                     )
-                if entry.is_dir() and (Path(entry.path) / f"{agent}.json").is_file():
+                # Same reasoning as the session scan: an .is_file() prefilter on the binding
+                # pathname silently OMITTED a chat whose binding is already a FIFO or directory, so
+                # broad lookup could pick a healthy sibling while a present-but-unreadable
+                # authoritative binding sat there. Candidates are enumerated by name; the binding is
+                # classified when it is read.
+                if entry.is_dir() and (Path(entry.path) / f"{agent}.json").exists():
                     chats.append(entry.name)
     except FileNotFoundError:
         # Genuinely absent is the ONLY failure that means "no candidates".
@@ -699,7 +750,16 @@ def describe(method: str, params: dict) -> str | None:
 
 def main() -> None:
     args = parse_args()
+    # The deadline starts HERE, before any untrusted state is read. It used to be created after
+    # resolution, App Server discovery and token loading, so none of those consumed the advertised
+    # duration and `--seconds 1` could hang long before it existed. O_NONBLOCK does not make a
+    # regular-file read non-blocking on a stalled network or FUSE mount, and the `ps` used for
+    # discovery can hang too, so the only thing that bounds them is an absolute deadline that is
+    # already running.
+    deadline = time.monotonic() + args.seconds if args.seconds else None
+    check_deadline(deadline, "before resolving the thread")
     thread_id, provenance, runtime_home = resolve_thread(args)
+    check_deadline(deadline, "after resolving the thread")
     if not runtime_home:
         raise SystemExit(
             "[error] neither the selected binding nor its session records a runtime_home. "
@@ -712,6 +772,7 @@ def main() -> None:
     # carries no home, so honouring it would connect a secondary-CODEX_HOME binding to the primary
     # server -- observing either nothing or an unrelated thread that happens to match.
     endpoint = autobridge.discover_codex_app_server(runtime_home, allow_unscoped_env=False)
+    check_deadline(deadline, "after discovering the App Server")
     if endpoint is None:
         raise SystemExit(
             "[error] no Codex App Server endpoint found for CODEX_HOME "
@@ -729,7 +790,6 @@ def main() -> None:
     # A monotonic deadline: a wall-clock one drifts across a clock adjustment, and the socket
     # timeout must be clamped to whatever remains or `--seconds 0.1` blocks for the full idle
     # timeout before the deadline is even rechecked.
-    deadline = time.monotonic() + args.seconds if args.seconds else None
     # A boolean, not an accumulator. Appending every delta retained the whole response to read
     # only its truthiness, copying the string repeatedly while each chunk was already written
     # straight to stdout.

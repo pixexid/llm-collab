@@ -293,8 +293,15 @@ def register_session(args) -> dict:
     # binding write, which is the original partial-state bug wearing a check. This is the same
     # carry-the-validated-snapshot rule this PR already applied on the read side.
     existing_binding = existing_binding_snapshot_or_refuse(payload)
-    save_session(payload)
+    # The BINDING is written first, then the session. Publishing the session first meant a binding
+    # write that blocked or failed -- a swapped pathname, a full disk -- left the session updated
+    # while the authoritative binding still pointed at the previous thread. Two independent writes
+    # cannot be made atomic, so the order is chosen for its failure mode: if the session write fails
+    # now, the binding references a session that does not exist, and the exact-binding resolver
+    # requires the session to match, so the pair simply refuses. Fail closed rather than a live
+    # session bound to a stale thread.
     binding = update_binding_from_session(payload, existing=existing_binding)
+    save_session(payload)
     if binding is not None:
         payload["binding"] = binding
     return payload

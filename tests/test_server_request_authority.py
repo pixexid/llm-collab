@@ -119,6 +119,91 @@ def assert_call_returns_within(test, seconds, setup, call, expect_substring=None
     return combined
 
 
+class AtomicBindingWriteTest(unittest.TestCase):
+    """The WRITE side of the binding, tested directly.
+
+    My end-to-end attempt at this refused at the READ step -- the snapshot read hits the FIFO first
+    and aborts, so the write path was never reached and the test would have passed with the write
+    guard removed. Testing the writer itself is the only way to exercise it.
+    """
+
+    def setUp(self) -> None:
+        import tempfile as _tf
+
+        self._tmp = _tf.TemporaryDirectory(dir="/tmp")
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+
+    def test_an_existing_FIFO_destination_is_refused_not_replaced(self) -> None:
+        import os as _os
+        import time as _t
+
+        target = self.root / "codex.json"
+        _os.mkfifo(target, 0o600)
+        started = _t.monotonic()
+        with self.assertRaises(autobridge.UnreadableFile) as caught:
+            autobridge.write_regular_file_atomically(target, '{"a": 1}')
+        self.assertLess(_t.monotonic() - started, 0.5,
+                        "the write must not block on a writer-less FIFO destination")
+        self.assertIn("not a regular file", str(caught.exception))
+
+    def test_an_existing_DIRECTORY_destination_is_refused(self) -> None:
+        target = self.root / "codex.json"
+        target.mkdir()
+        with self.assertRaises(autobridge.UnreadableFile):
+            autobridge.write_regular_file_atomically(target, '{"a": 1}')
+
+    def test_an_absent_destination_is_created(self) -> None:
+        target = self.root / "codex.json"
+        autobridge.write_regular_file_atomically(target, '{"a": 1}')
+        self.assertEqual('{"a": 1}', target.read_text())
+
+    def test_an_existing_regular_file_is_replaced(self) -> None:
+        target = self.root / "codex.json"
+        target.write_text("old", encoding="utf-8")
+        autobridge.write_regular_file_atomically(target, "new")
+        self.assertEqual("new", target.read_text())
+
+    def test_a_failed_write_leaves_no_temporary_behind(self) -> None:
+        """Otherwise a full disk would litter the bindings directory with partial files."""
+        import os as _os
+
+        target = self.root / "codex.json"
+        real_replace = _os.replace
+
+        def failing(src, dst):
+            raise OSError(28, "No space left on device")
+
+        with mock.patch.object(_os, "replace", failing):
+            with self.assertRaises(OSError):
+                autobridge.write_regular_file_atomically(target, "content")
+        leftovers = [x.name for x in self.root.iterdir()]
+        self.assertEqual([], leftovers, f"a temporary file was left behind: {leftovers}")
+        _ = real_replace
+
+    def test_the_destination_is_never_opened_directly(self) -> None:
+        """Structural: opening the destination is what blocked; a temp plus replace does not."""
+        import ast as _ast
+
+        source = (ROOT / "bin" / "_session_autobridge.py").read_text(encoding="utf-8")
+        tree = _ast.parse(source)
+        func = next(node for node in _ast.walk(tree)
+                    if isinstance(node, _ast.FunctionDef)
+                    and node.name == "write_regular_file_atomically")
+        # The DOCSTRING is dropped and only real statements are inspected. My first version matched
+        # raw text and failed on correct code, because the docstring explains why path.write_text()
+        # is wrong -- the fourth time on this PR that an assertion was satisfied, or defeated, by
+        # prose rather than by code. Parsing is the fix: a comment cannot be an AST call node.
+        if (func.body and isinstance(func.body[0], _ast.Expr)
+                and isinstance(func.body[0].value, _ast.Constant)):
+            func.body = func.body[1:]
+        code = _ast.dump(_ast.Module(body=func.body, type_ignores=[]))
+        self.assertIn("mkstemp", code)
+        self.assertIn("replace", code)
+        self.assertNotIn("write_text", code,
+                         "the destination must never be opened directly")
+
+
 class RefusePolicyTest(unittest.TestCase):
     """Gate 1 and 3: a request in the response window is refused, id 0 included."""
 

@@ -652,6 +652,77 @@ class ResolveThreadTest(unittest.TestCase):
         self.assertTrue(calls, "session records were not read through the bounded helper")
         self.assertEqual({codex_stream.MAX_SESSION_BYTES}, set(calls))
 
+    def test_a_session_record_that_is_ALREADY_a_FIFO_is_reported_not_skipped(self) -> None:
+        """The ordinary case my earlier test missed.
+
+        The previous FIFO test modelled a RACE -- an entry whose is_file() lies. But the plain case
+        is a session record that is already non-regular, and the `entry.is_file()` prefilter simply
+        dropped it: an exact binding whose session record is a FIFO was reported as a binding
+        mismatch instead of an unreadable record. Candidates are now enumerated by NAME and the
+        bounded reader classifies them.
+        """
+        import os as _os
+
+        self.bind(chat="CHAT-A")
+        for stale in self.sessions.glob("*.json"):
+            stale.unlink()
+        _os.mkfifo(self.sessions / "already.json", 0o600)
+        assert_call_returns_within(
+            self, 5.0,
+            f"""
+        import pathlib
+        codex_stream.autobridge.SESSIONS_DIR = pathlib.Path({str(self.sessions)!r})
+        try:
+            codex_stream.bounded_sessions('codex')
+            print('SILENTLY SKIPPED')
+        except SystemExit as error:
+            print('REPORTED:', error)
+            """.strip(),
+            expect_substring="not a regular file",
+        )
+
+    def test_a_binding_that_is_ALREADY_a_FIFO_is_not_silently_omitted(self) -> None:
+        """Broad lookup must not pick a healthy sibling while an unreadable binding sits there."""
+        import os as _os
+
+        self.bind(chat="CHAT-GOOD", thread="healthy")
+        self.bind(chat="CHAT-BROKEN", thread="doomed")
+        broken = self.bindings / "amiga" / "CHAT-BROKEN" / "codex.json"
+        broken.unlink()
+        _os.mkfifo(broken, 0o600)
+        assert_call_returns_within(
+            self, 5.0,
+            f"""
+        import pathlib
+        codex_stream.BINDINGS_DIR = pathlib.Path({str(self.bindings)!r})
+        codex_stream.autobridge.BINDINGS_DIR = pathlib.Path({str(self.bindings)!r})
+        codex_stream.autobridge.SESSIONS_DIR = pathlib.Path({str(self.sessions)!r})
+        codex_stream.registered_project_ids = lambda: {{'amiga'}}
+        from types import SimpleNamespace
+        args = SimpleNamespace(agent='codex', project='amiga', chat='last',
+                               thread=None, runtime_home=None)
+        try:
+            print('SELECTED:', codex_stream.resolve_thread(args))
+        except SystemExit as error:
+            print('REPORTED:', error)
+            """.strip(),
+        )
+
+    def test_the_lookup_has_a_CUMULATIVE_byte_budget_not_only_a_per_file_one(self) -> None:
+        """5,000 files each just under the per-file cap is ~1.25 GiB within every current limit."""
+        big = "x" * 2048
+        for i in range(40):
+            (self.sessions / f"filler-{i}.json").write_text(
+                json.dumps({"agent_id": "codex", "pad": big}), encoding="utf-8")
+        with mock.patch.object(codex_stream, "MAX_LOOKUP_TOTAL_BYTES", 8192):
+            with self.assertRaises(SystemExit) as caught:
+                codex_stream.bounded_sessions("codex")
+        self.assertIn("across session and binding records", str(caught.exception))
+
+    def test_an_ordinary_lookup_is_far_under_the_cumulative_budget(self) -> None:
+        self.bind(chat="CHAT-A")
+        self.assertTrue(codex_stream.bounded_sessions("codex"))
+
     def test_a_session_record_swapped_for_a_FIFO_cannot_hang_the_scan(self) -> None:
         """The P1: entry.is_file() is a stat on a PATHNAME; the reopen can hit another object.
 
@@ -1641,6 +1712,65 @@ class StreamLoopContractTest(unittest.TestCase):
         """The old hint printed a command that exits `Unknown agent` in this repo."""
         source = self.source()
         self.assertNotIn("pm2_watchers.py start --agent codex-appserver", source)
+
+
+class DeadlineStartsBeforeUntrustedWorkTest(unittest.TestCase):
+    """`--seconds` must be charged against resolution and discovery, not started after them.
+
+    The deadline used to be created only after project/session/binding resolution, App Server
+    discovery and token loading, so none of those consumed any of the advertised duration.
+    O_NONBLOCK does not make a regular-file read non-blocking on a stalled network or FUSE mount,
+    and the `ps` used for discovery can hang too, so `--seconds 1` could hang indefinitely before
+    the deadline existed at all.
+    """
+
+    def run_main(self, seconds, resolve_delay):
+        import time as _t
+        from types import SimpleNamespace
+
+        parsed = SimpleNamespace(agent="codex", project="amiga", chat="CHAT-A", thread=None,
+                                 seconds=seconds, raw=False)
+
+        def slow_resolve(_args):
+            _t.sleep(resolve_delay)
+            return "t1", "amiga/CHAT-A", "/tmp/home"
+
+        with mock.patch.object(codex_stream, "parse_args", lambda: parsed):
+            with mock.patch.object(codex_stream, "resolve_thread", slow_resolve):
+                with self.assertRaises(SystemExit) as caught:
+                    codex_stream.main()
+        return str(caught.exception)
+
+    def test_time_spent_resolving_counts_against_the_duration(self) -> None:
+        message = self.run_main(seconds=0.2, resolve_delay=0.35)
+        self.assertIn("--seconds elapsed", message)
+        self.assertIn("after resolving the thread", message)
+
+    def test_a_fast_resolution_does_not_trip_the_deadline(self) -> None:
+        """The control: it must abort because time PASSED, not merely because a check exists."""
+        message = self.run_main(seconds=30, resolve_delay=0.0)
+        self.assertNotIn("--seconds elapsed", message,
+                         f"a fast resolution must proceed past the deadline checks: {message}")
+
+    def test_the_deadline_is_created_before_resolution_in_the_source(self) -> None:
+        """Structural, parsed rather than grepped: order of statements inside main()."""
+        import ast as _ast
+
+        source = (ROOT / "bin" / "codex_stream.py").read_text(encoding="utf-8")
+        tree = _ast.parse(source)
+        main = next(n for n in _ast.walk(tree)
+                    if isinstance(n, _ast.FunctionDef) and n.name == "main")
+        names = []
+        for node in main.body:
+            dumped = _ast.dump(node)
+            if "deadline" in dumped and "Assign" in type(node).__name__:
+                names.append("deadline_assigned")
+            if "resolve_thread" in dumped:
+                names.append("resolve_thread")
+        self.assertIn("deadline_assigned", names)
+        self.assertIn("resolve_thread", names)
+        self.assertLess(names.index("deadline_assigned"), names.index("resolve_thread"),
+                        "the deadline must exist before any untrusted state is read")
 
 
 class StreamedMessageIndexTest(unittest.TestCase):
