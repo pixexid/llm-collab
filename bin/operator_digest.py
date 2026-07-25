@@ -29,7 +29,7 @@ import re
 import subprocess
 from datetime import datetime, timezone
 
-from _helpers import ROOT, agent_ids, config_get
+from _helpers import ROOT, agent_ids
 
 DECISION_MARKERS = ("decision", "required", "approve", "ratify", "recommend", "blocked")
 # Bounded so one packet citing many PRs cannot stall the digest on network calls.
@@ -38,12 +38,37 @@ PR_CHECK_LIMIT = 6
 _repo_targets_cache: dict[str, str] | None = None
 
 
+def git_origin_slug() -> str | None:
+    """The owner/name of this checkout's origin, or None when it cannot be read.
+
+    Extracted so tests can fixture it instead of stubbing subprocess wholesale, which
+    blocked the legitimate git call and made an unrelated test fail.
+    """
+    try:
+        origin = subprocess.run(
+            ["git", "remote", "get-url", "origin"], cwd=str(ROOT),
+            capture_output=True, text=True, timeout=10, check=True).stdout.strip()
+    except (subprocess.SubprocessError, OSError):
+        # Narrow deliberately. A bare `except Exception` here swallowed a NameError from a
+        # missing import and silently dropped THIS workspace's own repo from the operator's
+        # PR view, reporting other projects' PRs while hiding the five in front of them.
+        return None
+    origin = re.sub(r"^(?:https://github\.com/|git@github\.com:)", "", origin)
+    slug = origin.removesuffix(".git")
+    return slug if "/" in slug else None
+
+
 def known_repo_targets() -> dict[str, str]:
     """Map every name a packet may use for a repo onto its owner/name slug.
 
     Derived from the git origin and projects.json rather than hardcoded, because the
     previous constant asserted that every `#123` in this workspace belonged to
     pixexid/llm-collab while project amiga's REGISTERED repo is pixexid/amiga.
+
+    The workspace's own name is taken from the origin's basename, not from
+    collab.config.json: config_get exits the process when that ignored file is absent, so
+    reading it here made a reporting helper fatal in a detached checkout for a value the
+    origin already carries.
     """
     global _repo_targets_cache
     if _repo_targets_cache is not None:
@@ -51,29 +76,21 @@ def known_repo_targets() -> dict[str, str]:
 
     targets: dict[str, str] = {}
 
-    def register(slug: str | None, *aliases: str) -> None:
+    def register(slug: str | None) -> None:
         if not slug or "/" not in slug:
             return
-        for alias in (*aliases, slug, slug.split("/")[-1]):
-            if alias:
-                targets[str(alias)] = slug
+        targets[slug] = slug
+        targets[slug.split("/")[-1]] = slug
 
-    try:
-        origin = subprocess.run(
-            ["git", "remote", "get-url", "origin"], cwd=str(ROOT),
-            capture_output=True, text=True, timeout=10, check=True).stdout.strip()
-        origin = re.sub(r"^(?:https://github\.com/|git@github\.com:)", "", origin)
-        register(origin.removesuffix(".git"), config_get("workspace_name"))
-    except (subprocess.SubprocessError, OSError):
-        # Narrow deliberately. A bare `except Exception` here swallowed a NameError from a
-        # missing import and silently dropped THIS workspace's own repo from the operator's
-        # PR view, reporting other projects' PRs while hiding the five in front of them.
-        pass
+    register(git_origin_slug())
 
     try:
         payload = json.loads((ROOT / "projects.json").read_text(encoding="utf-8"))
         for project in payload.get("projects", []):
-            register((project.get("github") or {}).get("repo"), project.get("id"))
+            slug = (project.get("github") or {}).get("repo")
+            register(slug)
+            if slug and project.get("id"):
+                targets[str(project["id"])] = slug
     except (OSError, json.JSONDecodeError):
         pass
 

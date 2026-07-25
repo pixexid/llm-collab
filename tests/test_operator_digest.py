@@ -139,13 +139,11 @@ class ResolutionHintTest(unittest.TestCase):
         seen = []
 
         def run(argv, **kwargs):
-            if "remote" in argv:
-                return mock.Mock(stdout="https://github.com/pixexid/llm-collab.git\n",
-                                 returncode=0)
             seen.append(argv[argv.index("--repo") + 1])
             return mock.Mock(stdout=json.dumps({"state": "MERGED"}))
 
-        with mock.patch.object(operator_digest, "_repo_targets_cache", None):
+        with mock.patch.object(operator_digest, "known_repo_targets",
+                               return_value={"llm-collab": "pixexid/llm-collab"}):
             with mock.patch.object(operator_digest.subprocess, "run", side_effect=run):
                 settled, note = operator_digest.resolution_hint(relpath)
         self.assertEqual(["pixexid/llm-collab"], seen)
@@ -162,9 +160,16 @@ class ResolutionHintTest(unittest.TestCase):
 
     def test_an_unknown_repo_target_is_not_guessed(self) -> None:
         relpath = self.packet('---\nrepo_targets: ["some-other-repo"]\n---\nSee #170.')
-        with mock.patch.object(operator_digest.subprocess, "run",
-                               side_effect=AssertionError("must not look up an unknown repo")):
-            settled, _ = operator_digest.resolution_hint(relpath)
+
+        def no_pr_lookup(argv, **kwargs):
+            # prohibit only the PR lookup; a blanket stub also blocked git origin discovery
+            self.assertNotIn("pr", argv, "an unknown repo target must not be looked up")
+            return mock.Mock(stdout="", returncode=0)
+
+        with mock.patch.object(operator_digest, "known_repo_targets",
+                               return_value={"llm-collab": "pixexid/llm-collab"}):
+            with mock.patch.object(operator_digest.subprocess, "run", side_effect=no_pr_lookup):
+                settled, _ = operator_digest.resolution_hint(relpath)
         self.assertFalse(settled)
 
     def test_no_repo_targets_leaves_bare_numbers_unresolved(self) -> None:
@@ -186,23 +191,59 @@ if __name__ == "__main__":
 
 
 class RepoEnumerationTest(unittest.TestCase):
-    """The PR section must cover every registered repo, and name what it could not read."""
+    """The PR section must cover every registered repo, and name what it could not read.
 
-    def test_this_workspaces_own_repo_is_registered(self) -> None:
+    Fixture-only. Reading the live projects.json and the live git origin made these fail in
+    a detached checkout, which is the third time tonight I let a unit test depend on ignored
+    runtime state.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory(dir="/tmp")
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+        (self.root / "projects.json").write_text(json.dumps({"projects": [
+            {"id": "amiga", "github": {"repo": "pixexid/amiga"}},
+            {"id": "nuvyr", "github": {"repo": "pixexid/nuvyr"}},
+            {"id": "no-github"},
+            # id differs from the repo basename: the ONLY case where the explicit id alias
+            # matters, since register() already contributes the basename itself
+            {"id": "web", "github": {"repo": "pixexid/nuvyr_app"}},
+        ]}), encoding="utf-8")
+        for patcher in (
+            mock.patch.object(operator_digest, "ROOT", self.root),
+            mock.patch.object(operator_digest, "_repo_targets_cache", None),
+            mock.patch.object(operator_digest, "git_origin_slug",
+                              return_value="pixexid/llm-collab"),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def test_the_workspaces_own_repo_is_registered_from_the_origin(self) -> None:
         """A swallowed NameError once dropped it, hiding our own PRs from the operator.
 
         The digest reported other projects' PRs under the heading "Open pull requests"
-        while omitting the five in front of the reader.
+        while omitting the five in front of the reader. The origin's basename supplies the
+        alias, so no ignored config file needs to be readable for this to work.
         """
-        slugs = set(operator_digest.known_repo_targets().values())
-        self.assertIn("pixexid/llm-collab", slugs)
-        self.assertIn("llm-collab", operator_digest.known_repo_targets(),
-                      "the workspace name must be usable as a repo_targets alias")
+        targets = operator_digest.known_repo_targets()
+        self.assertEqual("pixexid/llm-collab", targets.get("llm-collab"))
+        self.assertIn("pixexid/llm-collab", set(targets.values()))
 
     def test_registered_project_repos_are_included(self) -> None:
         targets = operator_digest.known_repo_targets()
         self.assertEqual("pixexid/amiga", targets.get("amiga"))
         self.assertEqual("pixexid/nuvyr", targets.get("nuvyr"))
+        self.assertNotIn("no-github", targets, "a project with no repo registers nothing")
+        self.assertEqual("pixexid/nuvyr_app", targets.get("web"),
+                         "a project id that differs from its repo basename must still map")
+
+    def test_an_unreadable_origin_does_not_break_enumeration(self) -> None:
+        with mock.patch.object(operator_digest, "git_origin_slug", return_value=None):
+            with mock.patch.object(operator_digest, "_repo_targets_cache", None):
+                targets = operator_digest.known_repo_targets()
+        self.assertEqual({"pixexid/amiga", "pixexid/nuvyr", "pixexid/nuvyr_app"},
+                         set(targets.values()))
 
     def test_open_prs_labels_each_row_and_reports_unreachable_repos(self) -> None:
         def run(argv, **kwargs):
