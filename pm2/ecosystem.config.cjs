@@ -54,6 +54,22 @@ const watcherAgents = agents.filter(
 // sharing the desktop app's CODEX_HOME so turn/start reaches the same threads.
 // ponytail: presence of the token file is the enable switch — no new config surface.
 // Add a codex_app_server block to collab.config.json only if per-agent ports are ever needed.
+// The single path invariant for the sidecar. Every path that is later COMPARED or
+// LAUNCHED must pass through this: absolute (resolved against the repository root, not
+// the invoker's cwd), redundant segments collapsed, no trailing separator, and symlinks
+// deliberately NOT resolved because discovery matches the launched spelling literally.
+//
+// Five separate defects came from normalizing one side of a two-sided comparison:
+// validating a token path the spawned app would read differently, canonicalizing a
+// runtime home at registration while launching it verbatim, and resolving relative
+// overrides against different bases in the manager and here. One function, applied
+// everywhere, is the fix for the class rather than the instances.
+function canonicalPath(value, base) {
+  if (!value) return value;
+  const resolved = path.resolve(base || root, String(value).trim());
+  return resolved.length > 1 ? resolved.replace(/\/+$/, "") : resolved;
+}
+
 function codexAppServerApps() {
   // The reservation must live HERE, not only in bin/pm2_watchers.py: this config
   // maps watcher agents and appends the transport independently, so a registered
@@ -78,12 +94,13 @@ function codexAppServerApps() {
   // unchanged relative path -- so the gate could check one file while Codex opens
   // another. Resolve against root so validation and launch see the same path.
   const configuredToken = process.env.LLM_COLLAB_CODEX_APP_SERVER_TOKEN_FILE;
-  const tokenFile = configuredToken
-    ? path.resolve(root, configuredToken)
-    : path.join(root, ".secrets", "codex_app_server_ws_token");
-  const codexBin =
+  const tokenFile = canonicalPath(
+    configuredToken || path.join(root, ".secrets", "codex_app_server_ws_token")
+  );
+  const codexBin = canonicalPath(
     process.env.LLM_COLLAB_CODEX_BIN ||
-    "/Applications/ChatGPT.app/Contents/Resources/codex";
+      "/Applications/ChatGPT.app/Contents/Resources/codex"
+  );
   if (!fs.existsSync(codexBin)) return [];
   // Fail closed on an insecure bearer token. The listener is loopback-only, but on a
   // multi-user host any local account that can read this file can invoke App Server
@@ -106,9 +123,12 @@ function codexAppServerApps() {
   if (/\s/.test(tokenFile)) return [];
 
   const port = process.env.LLM_COLLAB_CODEX_APP_SERVER_PORT || "8767";
-  const codexHome =
-    process.env.LLM_COLLAB_CODEX_HOME ||
-    path.join(process.env.HOME || "", ".codex");
+  // Canonical here too: discovery compares CODEX_HOME literally against the process
+  // command line, so launching `/x/.codex/` while a session stored `/x/.codex` yields
+  // no endpoint and no diagnostic.
+  const codexHome = canonicalPath(
+    process.env.LLM_COLLAB_CODEX_HOME || path.join(process.env.HOME || "", ".codex")
+  );
 
   return [
     {

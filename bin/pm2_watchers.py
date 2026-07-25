@@ -63,18 +63,35 @@ def app_name(agent_id: str) -> str:
 SIDECAR_APP_IDS = ("codex-appserver",)
 
 
+def canonical_path(value: str | os.PathLike[str], base: Path | None = None) -> Path:
+    """The single path invariant, matching pm2/ecosystem.config.cjs canonicalPath().
+
+    Absolute (resolved against the repository root, NOT the caller's cwd), redundant
+    segments collapsed, no trailing separator, symlinks deliberately unresolved because
+    discovery matches the launched spelling literally.
+
+    Both sides must agree: the manager previously resolved relative overrides against
+    the caller's cwd while the config resolved against the root, so the manager could
+    report a sidecar enabled that the real config omitted.
+    """
+    text = os.path.expanduser(str(value).strip())
+    root = base or ROOT
+    joined = text if os.path.isabs(text) else os.path.join(str(root), text)
+    return Path(os.path.normpath(joined))
+
+
 def sidecar_token_file() -> Path:
     configured = os.environ.get("LLM_COLLAB_CODEX_APP_SERVER_TOKEN_FILE")
     if configured:
-        return Path(configured)
-    return ROOT / ".secrets" / "codex_app_server_ws_token"
+        return canonical_path(configured)
+    return canonical_path(ROOT / ".secrets" / "codex_app_server_ws_token")
 
 
 def sidecar_binary() -> Path:
     configured = os.environ.get("LLM_COLLAB_CODEX_BIN")
     if configured:
-        return Path(configured)
-    return Path("/Applications/ChatGPT.app/Contents/Resources/codex")
+        return canonical_path(configured)
+    return canonical_path("/Applications/ChatGPT.app/Contents/Resources/codex")
 
 
 def sidecar_token_is_secure(path: Path) -> bool:
@@ -304,6 +321,13 @@ def main():
     status_exit_code = 0
     for agent_id in targets:
         name = app_name(agent_id)
+        if is_sidecar(agent_id) and args.command == "restart":
+            # Plain `pm2 restart <name>` relaunches PM2's STORED definition, so the
+            # gate could approve today's secure token path while PM2 re-ran yesterday's
+            # insecure one. startOrRestart re-reads this ecosystem, making the thing
+            # validated and the thing launched the same thing.
+            pm2_run(["startOrRestart", str(ecosystem_path()), "--only", app_name(agent_id)])
+            continue
         if args.command == "start":
             start_agent(agent_id)
         elif args.command == "restart":
