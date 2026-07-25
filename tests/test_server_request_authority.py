@@ -4,8 +4,10 @@ Two branches in bin/_session_autobridge.py answered ANY server-initiated request
 `{"result": {}}`: one in JsonRpcWebSocketClient.request() while waiting for a response, one in
 execute_codex_app_server_trigger()'s turn loop. Every member of the generated ServerRequest
 union is authority- or data-bearing -- command/file/permission approvals, tool calls, user
-input, MCP elicitation, auth-token refresh, attestation -- and no *Response schema in the
-bundle permits an empty object, so that reply was unauthorized on its face. Since the
+input, MCP elicitation, auth-token refresh, attestation, current time -- and not one of THEIR
+response schemas can be satisfied by an empty object, so that reply was unauthorized on its
+face. (Some CLIENT-request responses in the same bundle do permit an empty object, which is why
+the claim is scoped to the server-request union rather than to the bundle as a whole.) Since the
 production dispatch path uses this client for initialize / thread/resume / turn/start, every
 automatic dispatch carried it.
 
@@ -27,20 +29,29 @@ sys.path.insert(0, str(ROOT / "bin"))
 
 import _session_autobridge as autobridge  # noqa: E402
 
-# every member of the generated ServerRequest union, from
-# `codex app-server generate-json-schema`
-SERVER_REQUEST_METHODS = (
-    "account/chatgptAuthTokens/refresh",
-    "applyPatchApproval",
-    "attestation/generate",
-    "execCommandApproval",
-    "item/commandExecution/requestApproval",
-    "item/fileChange/requestApproval",
-    "item/permissions/requestApproval",
-    "item/tool/call",
-    "item/tool/requestUserInput",
-    "mcpServer/elicitation/request",
-)
+# Every member of the ServerRequest union, from
+# `codex app-server generate-json-schema --experimental`.
+#
+# The --experimental bundle is the right one BECAUSE this client sends
+# capabilities.experimentalApi=true: without the flag the union has ten members, with it
+# eleven. An earlier version of this matrix used the ten and claimed to cover every member,
+# which was false for the connection we actually open. The response each one requires is
+# recorded beside it: not one of them can be satisfied by an empty object, which is what makes
+# `{"result": {}}` unauthorized rather than merely unhelpful.
+SERVER_REQUEST_RESPONSE_REQUIREMENTS = {
+    "account/chatgptAuthTokens/refresh": ("accessToken", "chatgptAccountId"),
+    "applyPatchApproval": ("decision",),
+    "attestation/generate": ("token",),
+    "currentTime/read": ("currentTimeAt",),
+    "execCommandApproval": ("decision",),
+    "item/commandExecution/requestApproval": ("decision",),
+    "item/fileChange/requestApproval": ("decision",),
+    "item/permissions/requestApproval": ("permissions",),
+    "item/tool/call": ("contentItems", "success"),
+    "item/tool/requestUserInput": ("answers",),
+    "mcpServer/elicitation/request": ("action",),
+}
+SERVER_REQUEST_METHODS = tuple(SERVER_REQUEST_RESPONSE_REQUIREMENTS)
 
 
 def client(policy: str = autobridge.SERVER_REQUEST_REFUSE) -> autobridge.JsonRpcWebSocketClient:
@@ -91,6 +102,25 @@ class RefusePolicyTest(unittest.TestCase):
         self.assertNotIn("result", replies[0],
                          "a result is an authorization; dispatch may never send one")
         self.assertEqual(autobridge.JSONRPC_METHOD_NOT_FOUND, replies[0]["error"]["code"])
+
+    def test_the_matrix_covers_the_experimental_union_this_client_opts_into(self) -> None:
+        """Guards the count itself, since the claim is about completeness.
+
+        This client sends capabilities.experimentalApi=true, so the eleven-member experimental
+        union is the one that applies. Asserting ten of them and calling it every member was a
+        false completeness claim, not a missing test.
+        """
+        self.assertEqual(11, len(SERVER_REQUEST_METHODS))
+        self.assertIn("currentTime/read", SERVER_REQUEST_METHODS)
+        for method, required in SERVER_REQUEST_RESPONSE_REQUIREMENTS.items():
+            with self.subTest(method=method):
+                self.assertTrue(required,
+                                f"{method} must require fields, or an empty result would be valid")
+
+    def test_the_client_actually_requests_the_experimental_api(self) -> None:
+        # if this stopped being true, the ten-member union would be the correct matrix
+        source = (ROOT / "bin" / "_session_autobridge.py").read_text(encoding="utf-8")
+        self.assertIn("experimentalApi", source)
 
     def test_every_union_member_is_refused_with_a_correlated_error(self) -> None:
         made = client()
