@@ -45,6 +45,54 @@ def write_json(path: Path, payload: dict) -> None:
     write(path, json.dumps(payload, indent=2))
 
 
+def run_cli_with_eacces_on(root, target_path, module_name, argv):
+    """Run a CLI in a child process with os.open raising EACCES for one path.
+
+    `target_path` may be absolute; only its last four components are matched in the child.
+
+    chmod(0o000) does NOT make a file unreadable for UID 0, so a containerized or root test runner
+    silently stopped exercising the I/O-failure contract and the test failed instead. Injecting the
+    error is identity-independent: it proves the same refusal whoever runs the suite.
+    """
+    import subprocess as _sp
+    import sys as _sys
+    import textwrap as _tw
+
+    suffix = "/".join(Path(target_path).parts[-4:])
+    program = _tw.dedent(f"""
+        import os, sys
+        sys.path.insert(0, {str(REPO_ROOT / "bin")!r})
+        # Match on a path SUFFIX, not an absolute string: the CLI resolves this binding through its
+        # own configured state root, so an absolute comparison silently never fired and the
+        # injection did nothing while the test reported the command had simply succeeded.
+        denied_suffix = {suffix!r}
+        real_open = os.open
+        def guarded(path, flags, *a, **k):
+            if str(path).endswith(denied_suffix):
+                raise PermissionError(13, "Permission denied")
+            return real_open(path, flags, *a, **k)
+        os.open = guarded
+        real_io_open = open
+        def guarded_io(path, *a, **k):
+            if str(path).endswith(denied_suffix):
+                raise PermissionError(13, "Permission denied")
+            return real_io_open(path, *a, **k)
+        import builtins
+        builtins.open = guarded_io
+        sys.argv = {argv!r}
+        import {module_name} as cli
+        try:
+            cli.main()
+        except SystemExit as error:
+            code = error.code if isinstance(error.code, int) else (0 if error.code is None else 1)
+            if error.code not in (0, None):
+                print(error.code, file=sys.stderr)
+            sys.exit(code if isinstance(code, int) else 1)
+    """)
+    return _sp.run([_sys.executable, "-c", program], cwd=root, text=True,
+                   capture_output=True, input="probe body", timeout=60)
+
+
 class SessionAutobridgeTest(unittest.TestCase):
     def make_workspace(self) -> Path:
         temp_root = Path(tempfile.mkdtemp(prefix="lca-", dir="/tmp"))
@@ -2514,8 +2562,14 @@ class SessionAutobridgeTest(unittest.TestCase):
         ]
         if repo_targets is not None:
             argv += ["--repo-targets", repo_targets]
+        # check=False plus an explicit assertion: check=True raises CalledProcessError with the
+        # stderr hidden inside it, so a failing delivery reported only "exit status 1" and I had to
+        # go digging. The command's own error message is the diagnostic.
         done = subprocess.run(argv, cwd=root, text=True, input="scope probe",
-                              capture_output=True, check=True)
+                              capture_output=True, check=False)
+        if done.returncode != 0:
+            self.fail(f"deliver.py exited {done.returncode}\n"
+                      f"stdout:\n{done.stdout[-1500:]}\nstderr:\n{done.stderr[-1500:]}")
         return json.loads(done.stdout.split("\n\n", 1)[0]), done.stderr
 
     def scoped_subscriber_workspace(self, *, subscriber_repo_targets, claude_ax_app=None,
@@ -2633,6 +2687,322 @@ class SessionAutobridgeTest(unittest.TestCase):
         self.assertNotIn("        and not autobridge_ready\n", source,
                          "a wake lane is gating on autobridge_ready directly again")
         self.assertGreaterEqual(source.count("and wake_fallback_allowed"), 5)
+
+    # --- registration is all-or-nothing across BOTH writes ----------------------------------
+    #
+    # register_session wrote the session file and THEN read the existing binding, so an unreadable
+    # one failed between the two writes: the new session persisted, the old binding still pointed at
+    # the previous thread, and the command reported failure having already created partial
+    # authoritative state. Reproduced by Codex through the real CLI.
+
+    def registered_workspace_with_binding(self):
+        root = self.make_workspace()
+        for agent in ("codex", "claude"):
+            self.add_agent(root, {"id": agent, "display_name": agent.title(),
+                                  "activation": {"type": "cli_session", "watcher_enabled": True}})
+        self.create_chat(root, chat_dir_name="2026-07-25_reg__CHAT-REG1",
+                         chat_id="CHAT-REG1", project_id="amiga")
+        self.run_cli(root, "register", "--session", "SESSION-OLD", "--agent", "claude",
+                     "--project", "amiga", "--chat", "CHAT-REG1", "--mode", "notify",
+                     "--runtime-family", "claude_app",
+                     "--runtime-session-id", "THREAD-OLD",
+                     "--runtime-session-source", "first_read")
+        binding = (root / "State" / "session_autobridge" / "bindings" / "amiga" / "CHAT-REG1"
+                   / "claude.json")
+        self.assertTrue(binding.exists())
+        return root, binding
+
+    def register_new_expecting_failure(self, root):
+        return subprocess.run(
+            [sys.executable, str(SCRIPT_PATH), "register", "--session", "SESSION-NEW",
+             "--agent", "claude", "--project", "amiga", "--chat", "CHAT-REG1",
+             "--mode", "notify", "--runtime-family", "claude_app",
+             "--runtime-session-id", "THREAD-NEW",
+             "--runtime-session-source", "first_read", "--json"],
+            cwd=root, text=True, capture_output=True,
+            env=self.subprocess_env(root),
+        )
+
+    def test_a_binding_pathname_swapped_for_a_FIFO_cannot_hang_or_split_the_write(self):
+        """The write side, which carrying the read snapshot does not protect.
+
+        Registration published the session and THEN reopened the binding pathname through
+        Path.write_text. A pathname swapped for a writer-less FIFO blocked forever there, or a
+        directory raised -- either way with the session already updated and the authoritative
+        binding still pointing at the previous thread. The snapshot protects the VALUES; it says
+        nothing about the descriptor the write lands on.
+        """
+        import os as _os
+        import subprocess as _sp
+        import sys as _sys
+        import textwrap as _tw
+
+        root, binding = self.registered_workspace_with_binding()
+        binding.unlink()
+        _os.mkfifo(binding, 0o600)
+
+        program = _tw.dedent(f"""
+            import sys
+            sys.path.insert(0, {str(REPO_ROOT / "bin")!r})
+            sys.argv = ['session_autobridge.py', 'register', '--session', 'SESSION-NEW',
+                        '--agent', 'claude', '--project', 'amiga', '--chat', 'CHAT-REG1',
+                        '--mode', 'notify', '--runtime-family', 'claude_app',
+                        '--runtime-session-id', 'THREAD-NEW',
+                        '--runtime-session-source', 'first_read', '--json']
+            import session_autobridge as cli
+            try:
+                cli.main()
+                print('COMPLETED')
+            except SystemExit as error:
+                print('REFUSED:', error)
+            except Exception as error:
+                print('RAISED:', type(error).__name__, error)
+        """)
+        try:
+            done = _sp.run([_sys.executable, "-c", program], cwd=root, text=True,
+                           capture_output=True, timeout=20)
+        except _sp.TimeoutExpired:
+            self.fail("registration blocked on the swapped binding pathname")
+
+        combined = done.stdout + done.stderr
+        self.assertNotIn("COMPLETED", combined,
+                         "a non-regular binding pathname must not be silently replaced")
+        self.assertIn("not a regular file", combined)
+        self.assertFalse(
+            (root / "State" / "session_autobridge" / "sessions" / "SESSION-NEW.json").exists(),
+            "the session must NOT have been published before the binding write refused")
+
+    def test_the_binding_is_written_before_the_session_is_published(self):
+        """Two independent writes cannot be atomic, so the ORDER decides the failure mode.
+
+        Binding first means a failed session write leaves a binding referencing a session that does
+        not exist, and the exact-binding resolver requires them to match, so the pair refuses. The
+        old order left a live session bound to a stale thread, which resolves happily and is wrong.
+        """
+        source = (REPO_ROOT / "bin" / "session_autobridge.py").read_text(encoding="utf-8")
+        body = source[source.index("def register_session"):]
+        body = body[:body.index("\ndef ")]
+        # Comments stripped first. My initial version compared raw offsets and matched a COMMENT
+        # that mentions save_session() above the actual call, so it failed against correct code --
+        # an assertion a comment can satisfy is not an assertion, which is the third time that
+        # exact mistake has appeared on this PR.
+        code = "\n".join(line for line in body.splitlines()
+                         if not line.lstrip().startswith("#"))
+        self.assertLess(code.index("update_binding_from_session("), code.index("save_session("),
+                        "the binding write must precede the session publish")
+
+    def test_registration_reads_the_existing_binding_EXACTLY_ONCE(self):
+        """A preflight that validates and then lets the update reopen the path is a TOCTOU.
+
+        Codex's deterministic second-read fault: validate, write SESSION-NEW, then fail on the
+        REREAD -- the original partial-state bug wearing a check. Counting the reads is what pins
+        the fix; asserting the happy path cannot distinguish one read from two.
+        """
+        root, binding = self.registered_workspace_with_binding()
+        probe = root / "count_reads.py"
+        probe.write_text(
+            "import json, sys\n"
+            "sys.path.insert(0, 'bin')\n"
+            "import _session_autobridge as ab\n"
+            "import session_autobridge as cli\n"
+            "reads = []\n"
+            "real = ab.load_binding\n"
+            "def counting(p, c, a):\n"
+            "    reads.append((p, c, a))\n"
+            "    return real(p, c, a)\n"
+            "ab.load_binding = counting\n"
+            "cli.load_binding = counting\n"
+            "sys.argv = ['session_autobridge.py',\n"
+            "    'register', '--session', 'SESSION-NEW', '--agent', 'claude',\n"
+            "    '--project', 'amiga', '--chat', 'CHAT-REG1', '--mode', 'notify',\n"
+            "    '--runtime-family', 'claude_app', '--runtime-session-id', 'THREAD-NEW',\n"
+            "    '--runtime-session-source', 'first_read']\n"
+            "cli.register_session(cli.parse_args())\n"
+            "print(json.dumps({'reads': len(reads)}))\n",
+            encoding="utf-8",
+        )
+        done = subprocess.run([sys.executable, str(probe)], cwd=root, text=True,
+                              capture_output=True, env=self.subprocess_env(root))
+        self.assertEqual(0, done.returncode, done.stderr[-600:])
+        self.assertEqual(1, json.loads(done.stdout.strip().splitlines()[-1])["reads"],
+                         "the existing binding must be read once and carried forward")
+
+    def test_a_swap_after_validation_cannot_influence_the_written_binding(self):
+        """The other half of the TOCTOU: the update must use the bytes already in hand."""
+        root, binding = self.registered_workspace_with_binding()
+        probe = root / "swap_after.py"
+        probe.write_text(
+            "import json, sys, pathlib\n"
+            "sys.path.insert(0, 'bin')\n"
+            "import _session_autobridge as ab\n"
+            "import session_autobridge as cli\n"
+            "path = pathlib.Path('State/session_autobridge/bindings/amiga/CHAT-REG1/claude.json')\n"
+            "real = ab.load_binding\n"
+            "swapped = []\n"
+            "def swapping(p, c, a):\n"
+            "    snapshot = real(p, c, a)\n"
+            "    swapped.append(1)\n"
+            "    poisoned = dict(snapshot, runtime_home='/tmp/POISONED', pad='x' * 300000)\n"
+            "    path.write_text(json.dumps(poisoned))\n"
+            "    return snapshot\n"
+            "ab.load_binding = swapping\n"
+            "cli.load_binding = swapping\n"
+            "sys.argv = ['session_autobridge.py',\n"
+            "    'register', '--session', 'SESSION-NEW', '--agent', 'claude',\n"
+            "    '--project', 'amiga', '--chat', 'CHAT-REG1', '--mode', 'notify',\n"
+            "    '--runtime-family', 'claude_app', '--runtime-session-id', 'THREAD-NEW',\n"
+            "    '--runtime-session-source', 'first_read']\n"
+            "result = cli.register_session(cli.parse_args())\n"
+            "print(json.dumps({'home': result.get('binding', {}).get('runtime_home'),\n"
+            "                  'swapped': swapped}))\n",
+            encoding="utf-8",
+        )
+        done = subprocess.run([sys.executable, str(probe)], cwd=root, text=True,
+                              capture_output=True, env=self.subprocess_env(root))
+        self.assertEqual(0, done.returncode, done.stderr[-600:])
+        emitted = json.loads(done.stdout.strip().splitlines()[-1])
+        self.assertTrue(emitted["swapped"],
+                        "the swap never ran, so this test would pass while proving nothing")
+        home = emitted["home"]
+        self.assertNotEqual("/tmp/POISONED", home,
+                            "a binding swapped after validation must not reach the written record")
+        written = json.loads(binding.read_text())
+        self.assertEqual("THREAD-NEW", written["runtime_session_id"])
+        self.assertNotEqual("/tmp/POISONED", written.get("runtime_home"))
+
+    def test_registration_refuses_on_an_OVERSIZED_existing_binding(self):
+        root, binding = self.registered_workspace_with_binding()
+        payload = json.loads(binding.read_text())
+        payload["pad"] = "z" * (256 * 1024 + 2048)
+        binding.write_text(json.dumps(payload), encoding="utf-8")
+        before = binding.read_bytes()
+
+        done = self.register_new_expecting_failure(root)
+
+        self.assertNotEqual(0, done.returncode)
+        self.assertNotIn("Traceback", done.stderr, done.stderr[-400:])
+        self.assertIn("byte limit", done.stderr)
+        self.assertFalse(
+            (root / "State" / "session_autobridge" / "sessions" / "SESSION-NEW.json").exists(),
+            "no session may be written when registration is refused")
+        self.assertEqual(before, binding.read_bytes(),
+                         "the unreadable binding must be left byte-identical, never replaced")
+
+    def test_registration_refuses_on_an_IO_FAILED_existing_binding(self):
+        """EACCES injected in the child rather than chmod(0o000).
+
+        chmod does not make a file unreadable for UID 0, so under a root or containerized runner
+        registration SUCCEEDED and this test failed rather than exercising the contract.
+        """
+        root, binding = self.registered_workspace_with_binding()
+        done = run_cli_with_eacces_on(
+            root, binding, "session_autobridge",
+            ["session_autobridge.py", "register", "--session", "SESSION-NEW", "--agent", "claude",
+             "--project", "amiga", "--chat", "CHAT-REG1", "--mode", "notify",
+             "--runtime-family", "claude_app", "--runtime-session-id", "THREAD-NEW",
+             "--runtime-session-source", "first_read", "--json"],
+        )
+
+        self.assertNotEqual(0, done.returncode)
+        self.assertNotIn("Traceback", done.stderr, done.stderr[-400:])
+        self.assertFalse(
+            (root / "State" / "session_autobridge" / "sessions" / "SESSION-NEW.json").exists())
+        self.assertEqual("THREAD-OLD", json.loads(binding.read_text())["runtime_session_id"],
+                         "the old binding must still point where it did")
+
+    def test_an_ordinary_re_registration_still_succeeds(self):
+        """The control: without it these tests only prove I broke registration."""
+        root, binding = self.registered_workspace_with_binding()
+        done = self.register_new_expecting_failure(root)
+        self.assertEqual(0, done.returncode, done.stderr[-400:])
+        self.assertEqual("THREAD-NEW", json.loads(binding.read_text())["runtime_session_id"])
+
+    def test_a_FIRST_registration_with_no_existing_binding_still_works(self):
+        """FileNotFoundError is the ordinary case and must pass straight through the preflight."""
+        root = self.make_workspace()
+        self.add_agent(root, {"id": "claude", "display_name": "Claude",
+                              "activation": {"type": "cli_session", "watcher_enabled": True}})
+        self.create_chat(root, chat_dir_name="2026-07-25_first__CHAT-FIRST",
+                         chat_id="CHAT-FIRST", project_id="amiga")
+        result = self.run_cli(root, "register", "--session", "SESSION-FIRST", "--agent", "claude",
+                              "--project", "amiga", "--chat", "CHAT-FIRST", "--mode", "notify",
+                              "--runtime-family", "claude_app",
+                              "--runtime-session-id", "THREAD-FIRST",
+                              "--runtime-session-source", "first_read")
+        self.assertEqual("SESSION-FIRST", result["session_id"])
+
+    # --- an unreadable RECIPIENT binding must not cost the durable packet -------------------
+    #
+    # Making BindingUnreadable propagate was right for reporting and wrong for deliver.py: it
+    # escaped before read_body(), so an oversized recipient binding meant exit 1, no packet, and a
+    # traceback. I changed a shared function's failure mode and handled it in one caller.
+
+    def oversize_recipient_binding(self, root, chat_id="CHAT-SCOPE1"):
+        path = (root / "State" / "session_autobridge" / "bindings" / "amiga" / chat_id
+                / "claude.json")
+        self.assertTrue(path.exists(), f"expected a binding at {path}")
+        payload = json.loads(path.read_text())
+        payload["pad"] = "z" * (256 * 1024 + 2048)
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        return path
+
+    def test_an_oversized_recipient_binding_still_writes_the_durable_packet(self):
+        root, chat_dir = self.scoped_subscriber_workspace(
+            subscriber_repo_targets=["llm-collab"], claude_ax_app="Claude")
+        self.oversize_recipient_binding(root)
+        payload, stderr = self.deliver_with_scope(root, "CHAT-SCOPE1",
+                                                 repo_targets="llm-collab")
+        self.assertFalse(payload["autobridge_ready"])
+        self.assertIn("binding_unreadable", payload["autobridge_refusal_reason"])
+        self.assertNotIn("exact_binding_required", payload["autobridge_refusal_reason"],
+                         "an unreadable binding EXISTS; it must not be reported as absent")
+        self.assertTrue(sorted(chat_dir.glob("*_to-claude_*.md")),
+                        "the durable packet must survive a runtime refusal")
+        self.assertNotIn("Traceback", stderr)
+
+    def test_an_oversized_recipient_binding_wakes_nobody(self):
+        root, _chat_dir = self.scoped_subscriber_workspace(
+            subscriber_repo_targets=["llm-collab"], claude_ax_app="Claude")
+        self.oversize_recipient_binding(root)
+        payload, _stderr = self.deliver_with_scope(root, "CHAT-SCOPE1",
+                                                  repo_targets="llm-collab")
+        for flag in self.WAKE_FLAGS:
+            self.assertFalse(payload.get(flag),
+                             f"{flag} must be false: waking someone to read a packet whose "
+                             "binding we could not read is the wrong-wake bug again")
+        for prompt in self.WAKE_PROMPTS:
+            self.assertIsNone(payload.get(prompt))
+
+    def test_an_IO_failed_recipient_binding_behaves_the_same(self):
+        """Permission denied, not oversize -- the other half of "unreadable"."""
+        root, chat_dir = self.scoped_subscriber_workspace(
+            subscriber_repo_targets=["llm-collab"], claude_ax_app="Claude")
+        path = (root / "State" / "session_autobridge" / "bindings" / "amiga" / "CHAT-SCOPE1"
+                / "claude.json")
+        done = run_cli_with_eacces_on(
+            root, path, "deliver",
+            ["deliver.py", "--chat", "CHAT-SCOPE1", "--from", "codex", "--to", "claude",
+             "--project", "amiga", "--title", "IO probe", "--sender-session-id", "codex-session-9",
+             "--repo-targets", "llm-collab", "--body-file", "-"],
+        )
+        self.assertNotIn("Traceback", done.stderr, done.stderr[-500:])
+        payload = json.loads(done.stdout.split("\n\n", 1)[0])
+        self.assertFalse(payload["autobridge_ready"])
+        self.assertIn("binding_unreadable", payload["autobridge_refusal_reason"])
+        self.assertTrue(payload["binding_unreadable_blocker"],
+                        "the blocker flag is the only machine-readable signal in this state")
+        self.assertIn("blocker:", done.stderr)
+        self.assertTrue(sorted(chat_dir.glob("*_to-claude_*.md")),
+                        "the durable packet must survive an I/O-failed binding")
+
+    def test_a_readable_binding_is_unaffected(self):
+        """The control: this must still dispatch, or the tests above prove only that I broke it."""
+        root, _chat_dir = self.scoped_subscriber_workspace(
+            subscriber_repo_targets=["llm-collab"], claude_ax_app="Claude")
+        payload, _stderr = self.deliver_with_scope(root, "CHAT-SCOPE1",
+                                                   repo_targets="llm-collab")
+        self.assertTrue(payload["autobridge_ready"])
+        self.assertIsNone(payload["autobridge_refusal_reason"])
 
     def test_the_routing_contract_behaves_identically_on_a_NON_amiga_project(self):
         """AGENTS.md:43-44 -- a shared-contract change needs Amiga and a non-Amiga project.
