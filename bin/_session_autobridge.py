@@ -670,6 +670,30 @@ def resolve_exact_dispatch_target(
     chat_id: str,
     agent_id: str,
 ) -> tuple[dict[str, Any] | None, str | None]:
+    """The dispatchable session for an exact binding, or a refusal reason.
+
+    Kept at two values because every existing caller unpacks two. A caller that also needs the
+    BINDING it was validated against should use resolve_exact_dispatch_pair(): re-reading the
+    path afterwards is a TOCTOU, and fields the binding owns and the session does not mirror --
+    runtime_home above all -- cannot be recovered by any later cross-check.
+    """
+    pair, reason = resolve_exact_dispatch_pair(project_id, chat_id, agent_id)
+    return (pair[0] if pair else None), reason
+
+
+def resolve_exact_dispatch_pair(
+    project_id: str,
+    chat_id: str,
+    agent_id: str,
+) -> tuple[tuple[dict[str, Any], dict[str, Any]] | None, str | None]:
+    """Return ((session, binding), None) or (None, reason).
+
+    Hands back the exact binding snapshot this validation was performed against, so a caller
+    never has to reopen the path to read a field the session does not carry. Introduced because
+    codex_stream reopened it four times and a swap between validation and use redirected the
+    endpoint; runtime_home is the field that makes a local cross-check impossible, since the
+    session deliberately does not mirror it.
+    """
     try:
         binding = load_binding(project_id, chat_id, agent_id)
     except FileNotFoundError:
@@ -713,7 +737,7 @@ def resolve_exact_dispatch_target(
         return None, EXACT_BINDING_NOT_DISPATCHABLE_REASON
     if len(dispatchable) > 1:
         return None, EXACT_BINDING_AMBIGUOUS_REASON
-    return dispatchable[0], None
+    return (dispatchable[0], binding), None
 
 
 def message_targets_session(

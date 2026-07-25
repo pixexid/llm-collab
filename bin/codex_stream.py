@@ -303,47 +303,26 @@ def resolve_thread(args: argparse.Namespace) -> tuple[str, str, str | None]:
 
 
 def resolve_one(project: str, chat: str, agent: str, *, fatal: bool):
-    """Resolve one chat to a (binding snapshot, session) pair, or None when it is merely dead.
+    """Resolve one chat to the (binding, session) pair the resolver validated, or None if dead.
 
-    ONE read of the binding, carried forward. Reading it again for the family, then again for
-    the recency, then again for the thread id and home meant the resolver validated one snapshot
-    while four later reads could see a different file: swapping it after validation returned a
-    thread and home from a binding that was never checked, while the session had been validated
-    against the original. Four reads, four chances.
+    The snapshot comes FROM the validation, not from a second read. Four re-reads of the path
+    were four chances to see a different file, and narrowing that to one still left a window --
+    which a local cross-check could not close, because `runtime_home` is a field the binding owns
+    and the session deliberately does not mirror. So a swap that moved only the home passed every
+    comparison and still redirected the endpoint.
 
-    The single read is still not the same read the resolver performs internally, so the snapshot
-    is cross-checked against the session it accepted. Any disagreement means the file changed
-    between the two reads, and that aborts rather than picking one of them.
+    resolve_exact_dispatch_pair() hands back the exact binding it validated against, so there is
+    nothing left to reopen and nothing to reconcile.
     """
-    session, reason = autobridge.resolve_exact_dispatch_target(project, chat, agent)
-    if session is None:
+    pair, reason = autobridge.resolve_exact_dispatch_pair(project, chat, agent)
+    if pair is None:
         if not fatal and reason in SKIPPABLE_RESOLVER_REASONS:
             return None
         raise SystemExit(
             f"[error] {project}/{chat} is not an exact live binding for {agent!r}: {reason}"
             + ("" if fatal else ". Fix or remove that binding; broad lookup will not step over it.")
         )
-
-    try:
-        binding = autobridge.load_binding(project, chat, agent)
-    except (FileNotFoundError, OSError, ValueError) as error:
-        raise SystemExit(f"[error] {project}/{chat} binding became unreadable: {error}")
-
-    runtime = session.get("runtime") or {}
-    disagreements = [
-        name for name, left, right in (
-            ("session_id", binding.get("session_id"), session.get("session_id")),
-            ("runtime_session_id", binding.get("runtime_session_id"), runtime.get("session_id")),
-            ("runtime_family", binding.get("runtime_family"), runtime.get("family")),
-            ("project_id", binding.get("project_id"), session.get("project_id")),
-            ("chat_id", binding.get("chat_id"), session.get("chat_id")),
-        ) if str(left or "") != str(right or "")
-    ]
-    if disagreements:
-        raise SystemExit(
-            f"[error] {project}/{chat} changed between validation and use "
-            f"({', '.join(disagreements)} disagree with the validated session); refusing"
-        )
+    session, binding = pair
 
     family = str(binding.get("runtime_family") or "")
     if family != CODEX_RUNTIME_FAMILY:

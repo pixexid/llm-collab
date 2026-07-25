@@ -149,93 +149,91 @@ class ResolveThreadTest(unittest.TestCase):
             codex_stream.resolve_thread(
                 self.args(agent="codex", project="amiga", chat="CHAT-A"))
 
-    # --- one validated snapshot, not four reads ------------------------------------------
+    # --- the snapshot comes from the validation, so there is nothing to race -------------
 
-    def test_a_binding_swapped_after_validation_is_refused(self) -> None:
-        """The reported TOCTOU, reproduced by swapping the real file mid-resolution.
+    def swap_binding_after(self, chat: str, **changes):
+        """Mutate the real binding file the instant the resolver returns.
 
-        The resolver validates ONE snapshot. Re-reading the path afterwards for the family, the
-        recency, then the thread id and home gave four later chances to see a different file --
-        so a swap after validation returned a thread and home from a binding that had never been
-        checked, while the session had been validated against the original.
+        Wraps resolve_exact_dispatch_pair rather than the file, so the swap lands in exactly the
+        window that used to matter: after validation, before use.
         """
+        path = self.bindings / "amiga" / chat / "codex.json"
+        good = json.loads(path.read_text())
+        real = codex_stream.autobridge.resolve_exact_dispatch_pair
+
+        def wrapper(project_id, chat_id, agent_id):
+            result = real(project_id, chat_id, agent_id)
+            path.write_text(json.dumps(dict(good, **changes)), encoding="utf-8")
+            return result
+
+        return mock.patch.object(codex_stream.autobridge, "resolve_exact_dispatch_pair",
+                                 side_effect=wrapper)
+
+    def test_a_home_only_swap_after_validation_cannot_redirect_the_endpoint(self) -> None:
+        """The finding that forced this design, reproduced exactly.
+
+        Changing ONLY runtime_home preserves project, chat, agent, session, runtime and family --
+        so every cross-check I had written passed, and the endpoint was still redirected to
+        /tmp/wrong-home. No local comparison can catch it, because the session deliberately does
+        not mirror the binding's home. The snapshot has to come from the validation itself.
+        """
+        self.bind(chat="CHAT-HOME-RACE", thread="good-thread", home="/tmp/good-home")
+        with self.swap_binding_after("CHAT-HOME-RACE", runtime_home="/tmp/wrong-home"):
+            thread, _p, home = codex_stream.resolve_thread(
+                self.args(agent="codex", project="amiga", chat="CHAT-HOME-RACE"))
+        self.assertEqual("good-thread", thread)
+        self.assertEqual("/tmp/good-home", home,
+                         "the validated snapshot's home must win over the swapped file")
+
+    def test_a_thread_swap_after_validation_cannot_redirect_the_thread(self) -> None:
         self.bind(chat="CHAT-RACE", thread="good-thread", home="/tmp/good-home")
-        path = self.bindings / "amiga" / "CHAT-RACE" / "codex.json"
-        good = json.loads(path.read_text())
-        real_resolver = codex_stream.autobridge.resolve_exact_dispatch_target
+        with self.swap_binding_after("CHAT-RACE", runtime_session_id="wrong-thread",
+                                     runtime_home="/tmp/wrong-home"):
+            thread, _p, home = codex_stream.resolve_thread(
+                self.args(agent="codex", project="amiga", chat="CHAT-RACE"))
+        self.assertEqual("good-thread", thread)
+        self.assertEqual("/tmp/good-home", home)
 
-        def swap_after_validation(project_id, chat_id, agent_id):
-            result = real_resolver(project_id, chat_id, agent_id)
-            # the file changes the instant validation completes
-            swapped = dict(good, runtime_session_id="wrong-thread",
-                           runtime_home="/tmp/wrong-home")
-            path.write_text(json.dumps(swapped), encoding="utf-8")
+    def test_a_family_swap_after_validation_cannot_slip_past_the_gate(self) -> None:
+        """The gate reads the snapshot, so flipping the file afterwards changes nothing."""
+        self.bind(chat="CHAT-FAM", thread="good-thread")
+        with self.swap_binding_after("CHAT-FAM", runtime_family="claude_app"):
+            thread, _p, _h = codex_stream.resolve_thread(
+                self.args(agent="codex", project="amiga", chat="CHAT-FAM"))
+        self.assertEqual("good-thread", thread)
+
+    def test_a_binding_deleted_after_validation_does_not_break_the_lookup(self) -> None:
+        """Previously this had to be refused, because the metadata was still to be read.
+
+        Now the snapshot is already in hand, so the deletion is irrelevant -- a strictly better
+        outcome than failing an otherwise valid resolution.
+        """
+        self.bind(chat="CHAT-GONE", thread="good-thread", home="/tmp/good-home")
+        path = self.bindings / "amiga" / "CHAT-GONE" / "codex.json"
+        real = codex_stream.autobridge.resolve_exact_dispatch_pair
+
+        def unlink_after(project_id, chat_id, agent_id):
+            result = real(project_id, chat_id, agent_id)
+            path.unlink()
             return result
 
-        with mock.patch.object(codex_stream.autobridge, "resolve_exact_dispatch_target",
-                               side_effect=swap_after_validation):
-            with self.assertRaises(SystemExit) as caught:
-                codex_stream.resolve_thread(
-                    self.args(agent="codex", project="amiga", chat="CHAT-RACE"))
-        message = str(caught.exception)
-        self.assertIn("changed between validation and use", message)
-        self.assertIn("runtime_session_id", message,
-                      "the disagreeing field must be named")
+        with mock.patch.object(codex_stream.autobridge, "resolve_exact_dispatch_pair",
+                               side_effect=unlink_after):
+            thread, _p, home = codex_stream.resolve_thread(
+                self.args(agent="codex", project="amiga", chat="CHAT-GONE"))
+        self.assertEqual("good-thread", thread)
+        self.assertEqual("/tmp/good-home", home)
 
-    def test_a_swapped_home_alone_is_also_refused(self) -> None:
-        """Not every swap changes an id -- but every swap that changes what we USE must fail.
+    def test_this_module_never_reads_a_binding_itself(self) -> None:
+        """Zero reads, not one: every field comes from the validated snapshot.
 
-        Here only runtime_home moves, which no id comparison would catch, so the session_id is
-        the field that betrays the substitution.
+        Asserted structurally as well as by count, because "one read" was the previous
+        contract and a regression to it would be invisible to a caller-side count alone.
         """
-        self.bind(chat="CHAT-RACE2", thread="good-thread", home="/tmp/good-home")
-        path = self.bindings / "amiga" / "CHAT-RACE2" / "codex.json"
-        good = json.loads(path.read_text())
-        real_resolver = codex_stream.autobridge.resolve_exact_dispatch_target
+        source = (ROOT / "bin" / "codex_stream.py").read_text(encoding="utf-8")
+        self.assertNotIn("load_binding", source)
 
-        def swap(project_id, chat_id, agent_id):
-            result = real_resolver(project_id, chat_id, agent_id)
-            path.write_text(json.dumps(dict(good, session_id="SESSION-OTHER",
-                                            runtime_home="/tmp/wrong-home")),
-                            encoding="utf-8")
-            return result
-
-        with mock.patch.object(codex_stream.autobridge, "resolve_exact_dispatch_target",
-                               side_effect=swap):
-            with self.assertRaises(SystemExit) as caught:
-                codex_stream.resolve_thread(
-                    self.args(agent="codex", project="amiga", chat="CHAT-RACE2"))
-        self.assertIn("session_id", str(caught.exception))
-
-    def test_the_binding_is_read_once_per_chat(self) -> None:
-        """Four reads were four chances to see a different file."""
-        self.bind(chat="CHAT-A")
-        self.bind(chat="CHAT-B")
-        real_loader = codex_stream.autobridge.load_binding
-        reads = []
-
-        def counting(project_id, chat_id, agent_id):
-            reads.append(chat_id)
-            return real_loader(project_id, chat_id, agent_id)
-
-        with mock.patch.object(codex_stream.autobridge, "load_binding", side_effect=counting):
-            with self.assertRaises(SystemExit):
-                codex_stream.resolve_thread(self.args(agent="codex", project="amiga"))
-        # Patching the module function catches BOTH readers, so two per chat is the floor: one
-        # inside the audited resolver, one by us. Five per chat was the defect -- the resolver's,
-        # then ours for the family, the recency, the thread id and the home.
-        from collections import Counter
-        per_chat = Counter(reads)
-        self.assertEqual({"CHAT-A": 2, "CHAT-B": 2}, dict(per_chat),
-                         f"one read of our own per chat, not four: {dict(per_chat)}")
-
-    def test_a_successful_resolution_reads_the_binding_exactly_once(self) -> None:
-        """Counted on the path that REACHES the end, which the ambiguity case never does.
-
-        There is a second window after the cross-check: re-reading the path to pick the thread
-        id and home would reopen it once more, and a swap in that window is invisible to a check
-        that already ran. Two reads is the floor -- one inside the audited resolver, one ours.
-        """
+    def test_a_successful_resolution_performs_one_binding_read_in_total(self) -> None:
         self.bind(chat="CHAT-ONLY", thread="the-thread", home="/tmp/the-home")
         real_loader = codex_stream.autobridge.load_binding
         reads = []
@@ -249,54 +247,25 @@ class ResolveThreadTest(unittest.TestCase):
                 self.args(agent="codex", project="amiga", chat="CHAT-ONLY"))
         self.assertEqual("the-thread", thread)
         self.assertEqual("/tmp/the-home", home)
-        self.assertEqual(2, len(reads),
-                         f"the resolver's read plus exactly one of ours: {reads}")
+        self.assertEqual(1, len(reads),
+                         f"the resolver's own read and nothing else: {reads}")
 
-    def test_a_swap_after_the_cross_check_cannot_change_what_is_used(self) -> None:
-        """The second window: swap once the cross-check has already passed.
-
-        With the metadata taken from the validated snapshot there is nothing left to reopen, so
-        the swapped file cannot influence the thread id or the home.
-        """
-        self.bind(chat="CHAT-LATE", thread="the-thread", home="/tmp/the-home")
-        path = self.bindings / "amiga" / "CHAT-LATE" / "codex.json"
-        good = json.loads(path.read_text())
+    def test_broad_lookup_reads_each_binding_once_in_total(self) -> None:
+        self.bind(chat="CHAT-A")
+        self.bind(chat="CHAT-B")
         real_loader = codex_stream.autobridge.load_binding
-        calls = {"n": 0}
+        reads = []
 
-        def swap_on_third_read(project_id, chat_id, agent_id):
-            calls["n"] += 1
-            record = real_loader(project_id, chat_id, agent_id)
-            if calls["n"] >= 2:
-                # everything validated; now the file changes underneath us
-                path.write_text(json.dumps(dict(good, runtime_session_id="wrong-thread",
-                                                runtime_home="/tmp/wrong-home")),
-                                encoding="utf-8")
-            return record
+        def counting(project_id, chat_id, agent_id):
+            reads.append(chat_id)
+            return real_loader(project_id, chat_id, agent_id)
 
-        with mock.patch.object(codex_stream.autobridge, "load_binding",
-                               side_effect=swap_on_third_read):
-            thread, _p, home = codex_stream.resolve_thread(
-                self.args(agent="codex", project="amiga", chat="CHAT-LATE"))
-        self.assertEqual("the-thread", thread, "a later swap must not reach the thread id")
-        self.assertEqual("/tmp/the-home", home, "nor the home")
-
-    def test_a_binding_that_vanishes_after_validation_is_refused(self) -> None:
-        self.bind(chat="CHAT-GONE")
-        path = self.bindings / "amiga" / "CHAT-GONE" / "codex.json"
-        real_resolver = codex_stream.autobridge.resolve_exact_dispatch_target
-
-        def unlink_after(project_id, chat_id, agent_id):
-            result = real_resolver(project_id, chat_id, agent_id)
-            path.unlink()
-            return result
-
-        with mock.patch.object(codex_stream.autobridge, "resolve_exact_dispatch_target",
-                               side_effect=unlink_after):
-            with self.assertRaises(SystemExit) as caught:
-                codex_stream.resolve_thread(
-                    self.args(agent="codex", project="amiga", chat="CHAT-GONE"))
-        self.assertIn("unreadable", str(caught.exception))
+        with mock.patch.object(codex_stream.autobridge, "load_binding", side_effect=counting):
+            with self.assertRaises(SystemExit):
+                codex_stream.resolve_thread(self.args(agent="codex", project="amiga"))
+        from collections import Counter
+        self.assertEqual({"CHAT-A": 1, "CHAT-B": 1}, dict(Counter(reads)),
+                         f"one read per chat, all of it the resolver's: {reads}")
 
     # --- the family gate, which the shared resolver does NOT enforce ---------------------
 
