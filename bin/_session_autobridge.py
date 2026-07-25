@@ -1395,6 +1395,12 @@ def _socket_read_exact(sock: socket.socket, count: int, client=None) -> bytes:
 # resolve it. A connection that OWNS a turn must answer, or the turn hangs. A connection that
 # merely observes must not, or it races the operator's own UI and can refuse work they
 # started. There is no correct global default, so each caller states its role.
+# A ceiling on the HTTP upgrade header, charged cumulatively as chunks arrive. Without it the
+# handshake loop grows `response` until the terminator appears -- and a peer that never sends one
+# grows it forever: 1024 full 4 KiB chunks were accepted, 4 MiB, stopping only when the peer closed.
+# A per-recv timeout cannot bound this because every successful chunk resets it, and the observer
+# runs with no absolute deadline by default. Real upgrade headers are a few hundred bytes.
+MAX_HANDSHAKE_HEADER_BYTES = 64 * 1024
 SERVER_REQUEST_REFUSE = "refuse"
 SERVER_REQUEST_IGNORE = "ignore"
 SERVER_REQUEST_POLICIES = (SERVER_REQUEST_REFUSE, SERVER_REQUEST_IGNORE)
@@ -1488,6 +1494,12 @@ class JsonRpcWebSocketClient:
                 chunk = sock.recv(4096)
                 if not chunk:
                     raise ConnectionError("websocket handshake failed")
+                # Charged BEFORE the append, so the ceiling is never exceeded even momentarily.
+                if len(response) + len(chunk) > MAX_HANDSHAKE_HEADER_BYTES:
+                    raise ConnectionError(
+                        f"websocket handshake header exceeded "
+                        f"{MAX_HANDSHAKE_HEADER_BYTES} bytes with no end of headers; refusing"
+                    )
                 response += chunk
             header_text = response.split(b"\r\n\r\n", 1)[0].decode("iso-8859-1")
             if " 101 " not in header_text.splitlines()[0]:

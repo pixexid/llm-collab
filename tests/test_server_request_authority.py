@@ -369,6 +369,94 @@ class HandshakeClosesOnFailureTest(unittest.TestCase):
                         f"a 1ms trickle must still be bounded by the deadline: {elapsed:.3f}s")
         self.assertEqual([], left)
 
+    def serve_endless_handshake_header(self):
+        """Accept, then send 4 KiB header chunks forever without ever sending the terminator."""
+        import socket as _socket
+        import threading
+
+        listener = _socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        port = listener.getsockname()[1]
+        self.addCleanup(listener.close)
+        sent = []
+
+        def serve():
+            try:
+                conn, _addr = listener.accept()
+            except OSError:
+                return
+            with conn:
+                try:
+                    request = b""
+                    while b"\r\n\r\n" not in request:
+                        chunk = conn.recv(4096)
+                        if not chunk:
+                            return
+                        request += chunk
+                    conn.sendall(b"HTTP/1.1 101 Switching Protocols\r\n")
+                    filler = b"X-Filler: " + b"p" * 4080 + b"\r\n"
+                    for _ in range(4096):
+                        conn.sendall(filler)
+                        sent.append(len(filler))
+                except OSError:
+                    pass
+
+        thread = threading.Thread(target=serve, daemon=True)
+        thread.start()
+        self.addCleanup(thread.join, 3.0)
+        return port, sent
+
+    def test_an_endless_handshake_header_is_refused_with_NO_deadline_set(self) -> None:
+        """Codex's proof: 1024 full chunks accepted, 4 MiB, stopping only when the peer closed.
+
+        No deadline is set deliberately -- that is the observer's default, and it is what makes a
+        per-recv timeout useless here: every successful chunk resets it, so only a cumulative
+        ceiling bounds the total.
+        """
+        port, sent = self.serve_endless_handshake_header()
+        made = autobridge.JsonRpcWebSocketClient(f"ws://127.0.0.1:{port}", token=None,
+                                                timeout_seconds=5)
+        self.assertIsNone(made.read_deadline)
+        with self.assertRaises(ConnectionError) as caught:
+            made.__enter__()
+        self.assertIn(str(autobridge.MAX_HANDSHAKE_HEADER_BYTES), str(caught.exception))
+        self.assertLess(sum(sent), 4 * 1024 * 1024,
+                        "the client must give up long before the peer has sent megabytes")
+
+    def test_the_refused_handshake_leaves_no_socket_open(self) -> None:
+        """A refusal that leaks the connected socket is only half a fix."""
+        port, _sent = self.serve_endless_handshake_header()
+        made = autobridge.JsonRpcWebSocketClient(f"ws://127.0.0.1:{port}", token=None,
+                                                timeout_seconds=5)
+        self.assertEqual([], self.sockets_left_open(lambda: made.__enter__()))
+        self.assertIsNone(made.sock)
+
+    def test_an_ordinary_handshake_is_far_under_the_ceiling(self) -> None:
+        """The cap must not be near a real header's size."""
+        import json as _json
+
+        body = _json.dumps({"method": "turn/started", "params": {}}).encode()
+        port = self.serve_ws_and_first_frame_in_ONE_write(body)
+        made = autobridge.JsonRpcWebSocketClient(f"ws://127.0.0.1:{port}", token=None,
+                                                timeout_seconds=3)
+        with made:
+            self.assertEqual("turn/started", made.recv_json()["method"])
+        self.assertGreater(autobridge.MAX_HANDSHAKE_HEADER_BYTES, 8 * 1024,
+                           "a real upgrade header is a few hundred bytes; leave generous headroom")
+
+    def test_the_preserved_over_read_is_itself_bounded_by_the_ceiling(self) -> None:
+        """The over-read buffer cannot exceed the header cap, since it comes out of that buffer."""
+        import json as _json
+
+        body = _json.dumps({"method": "turn/started", "params": {}}).encode()
+        port = self.serve_ws_and_first_frame_in_ONE_write(body)
+        made = autobridge.JsonRpcWebSocketClient(f"ws://127.0.0.1:{port}", token=None,
+                                                timeout_seconds=3)
+        with made:
+            self.assertLessEqual(len(made._buffered_bytes),
+                                 autobridge.MAX_HANDSHAKE_HEADER_BYTES)
+
     def serve_ws_and_first_frame_in_ONE_write(self, payload: bytes):
         """Send the upgrade response and the first frame in a single sendall.
 
