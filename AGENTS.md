@@ -10,6 +10,8 @@ Before changing shared tooling or operating a project lane, read:
 - `README.md`
 - `docs/multi-project.md`
 - `docs/workflows/session-startup.md`
+- `docs/workflows/collab-thread-quickstart.md` — starting and running a collab
+  thread end to end
 - `docs/workflows/task-intake-and-delegation.md`
 
 Then read the target project's own repository instructions and local policy
