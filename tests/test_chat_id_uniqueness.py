@@ -75,6 +75,32 @@ class ChatIdUniquenessTest(unittest.TestCase):
         self.assertEqual("2026-07-21_b__CHAT-8976EECB", found.name,
                          "the real bearer of the id must win over an incidental mention")
 
+    def test_hyphenated_ids_are_not_a_gap_in_the_guard(self) -> None:
+        """The workspace produces CHAT-CLAUDE-CODEX, CHAT-BIND-SAFE, CHAT-READY-DRIFT.
+
+        Re-deriving the id grammar as CHAT-[0-9A-Za-z]+ matched none of them, so both
+        duplicates parsed as None, neither was an exact match, and newest-wins applied --
+        the guard was absent for a whole class of ids while appearing to be present.
+        """
+        for chat_id in ("CHAT-READY-DRIFT", "CHAT-CLAUDE-CODEX", "CHAT-BIND-SAFE"):
+            with self.subTest(chat_id=chat_id):
+                with self._chats(f"2026-07-20_a__{chat_id}", f"2026-07-21_b__{chat_id}"):
+                    with self.assertRaises(ValueError):
+                        _helpers.find_chat_by_partial(chat_id)
+
+    def test_a_unique_hyphenated_id_resolves_to_its_bearer(self) -> None:
+        with self._chats("2026-07-20_a__CHAT-READY-DRIFT", "2026-07-21_b__CHAT-0000AAAA"):
+            found = _helpers.find_chat_by_partial("CHAT-READY-DRIFT")
+        self.assertEqual("2026-07-20_a__CHAT-READY-DRIFT", found.name)
+
+    def test_every_real_chat_directory_yields_an_id(self) -> None:
+        """Guards the naming assumption this rule now depends on."""
+        real = [p for p in (ROOT / "Chats").iterdir()
+                if p.is_dir() and not p.name.startswith(".")]
+        self.assertTrue(real, "the live workspace should have chats to check")
+        missing = [p.name for p in real if _helpers.chat_id_of(p) is None]
+        self.assertEqual([], missing, "every chat directory must expose an id after '__'")
+
     def test_lowercase_legacy_ids_are_covered_by_the_same_rule(self) -> None:
         with self._chats("2026-04-01_a__CHAT-e71d34ff", "2026-04-02_b__CHAT-e71d34ff"):
             with self.assertRaises(ValueError):

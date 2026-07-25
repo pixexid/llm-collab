@@ -730,13 +730,19 @@ def latest_chat() -> Path | None:
     return chats[-1] if chats else None
 
 
-CHAT_ID_SUFFIX = re.compile(r"CHAT-[0-9A-Za-z]+$")
-
-
 def chat_id_of(chat_dir: Path) -> str | None:
-    """The chat id a directory actually carries, from its trailing token."""
-    found = CHAT_ID_SUFFIX.search(chat_dir.name)
-    return found.group(0) if found else None
+    """The chat id a directory actually carries: the token after the final `__`.
+
+    Never re-derive the id GRAMMAR here. An earlier version matched
+    `CHAT-[0-9A-Za-z]+$`, which does not match the hyphenated ids this workspace
+    produces -- CHAT-CLAUDE-CODEX, CHAT-BIND-SAFE, CHAT-READY-DRIFT. Both duplicates of
+    such an id parsed as None, so neither was an exact match and newest-wins applied
+    silently: the collision guard was absent for a whole class of ids while appearing to
+    be present. The naming convention is `<date>_<slug>__<CHAT-ID>`, so splitting on the
+    final separator needs no grammar at all.
+    """
+    _, separator, tail = chat_dir.name.rpartition("__")
+    return tail if separator and tail else None
 
 
 def find_chat_by_partial(partial: str) -> Path | None:
