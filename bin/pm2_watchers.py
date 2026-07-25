@@ -244,9 +244,16 @@ def main():
         )
         sys.exit(2)
 
+    # Collaborator AX capability must print BEFORE any PM2-backed discovery: the
+    # contract is that a PM2 failure never suppresses an agent's AX report. Resolving
+    # sidecar orphans probes PM2, so that resolution is deferred until after the AX
+    # lines below. On this operator's checkout a valid token short-circuited the probe
+    # entirely, which masked the ordering violation locally.
     targets: list[str] = []
+    defer_sidecars = False
     if args.all:
-        targets = [a["id"] for a in watcher_enabled_agents()] + sidecar_ids_for_command(args.command)
+        targets = [a["id"] for a in watcher_enabled_agents()]
+        defer_sidecars = True
     elif args.agent:
         if args.agent not in agent_ids() and not is_sidecar(args.agent):
             print(f"[error] Unknown agent: {args.agent!r}", file=sys.stderr)
@@ -267,6 +274,14 @@ def main():
                 print(f"[sidecar] target={agent_id} (no AX surface)")
                 continue
             print(format_ax_status(probe_ax_trust(get_agent(agent_id)), agent_id=agent_id))
+
+    if defer_sidecars:
+        # safe now: every collaborator AX line is already on stdout
+        sidecars = sidecar_ids_for_command(args.command)
+        targets.extend(sidecars)
+        if args.command == "status":
+            for name in sidecars:
+                print(f"[sidecar] target={name} (no AX surface)")
 
     status_exit_code = 0
     for agent_id in targets:

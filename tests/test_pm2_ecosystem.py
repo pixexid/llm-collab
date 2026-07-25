@@ -432,6 +432,40 @@ class Pm2ManagerSidecarTest(unittest.TestCase):
                 "an absent getuid must fail closed, not raise",
             )
 
+    def test_ax_lines_print_before_any_pm2_backed_sidecar_discovery(self) -> None:
+        """A PM2 failure must never suppress a collaborator's AX report.
+
+        Resolving sidecar orphans probes PM2, so doing it during target resolution
+        meant `status --all` died before printing any AX line. A valid token on the
+        developer's own checkout short-circuited the probe and masked this entirely.
+        """
+        agents = [
+            {"id": "codex", "activation": {"type": "cli_session", "watcher_enabled": True, "ax_app": "Codex"}},
+            {"id": "operator", "activation": {"type": "human_relay", "watcher_enabled": True}},
+        ]
+        out = io.StringIO()
+        with mock.patch.dict(
+            os.environ,
+            {"LLM_COLLAB_CODEX_APP_SERVER_TOKEN_FILE": str(Path(self._tmp.name) / "absent")},
+        ):
+            with contextlib.ExitStack() as stack:
+                for patch in (
+                    mock.patch.object(sys, "argv", ["pm2_watchers.py", "status", "--all"]),
+                    mock.patch.object(pm2_watchers, "watcher_enabled_agents", return_value=agents),
+                    mock.patch.object(pm2_watchers, "get_agent",
+                                      side_effect=lambda a: next(x for x in agents if x["id"] == a)),
+                    mock.patch.object(pm2_watchers, "probe_ax_trust",
+                                      return_value=_ax_trust.AxTrustStatus("trusted")),
+                    mock.patch.object(pm2_watchers, "config_get", return_value="llm-collab"),
+                    mock.patch.object(pm2_watchers, "pm2_run", side_effect=SystemExit(1)),
+                ):
+                    stack.enter_context(patch)
+                with self.assertRaises(SystemExit):
+                    with contextlib.redirect_stdout(out):
+                        pm2_watchers.main()
+        ax = [l for l in out.getvalue().splitlines() if l.startswith("[ax]")]
+        self.assertEqual(2, len(ax), f"one AX line per agent must precede PM2: {ax}")
+
     def test_absent_token_keeps_the_sidecar_out_of_manager_targets(self) -> None:
         with mock.patch.dict(
             os.environ,
