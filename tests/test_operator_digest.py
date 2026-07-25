@@ -77,6 +77,54 @@ class ResolutionHintTest(unittest.TestCase):
         self.assertNotIn("task(s) completed", hint,
                          "one done task among two must not read as completed")
 
+    def test_a_partial_hint_renders_as_awaiting_you_not_moot(self) -> None:
+        """Assert the OPERATOR-FACING row, not the helper's return value.
+
+        The helper was correct while the row built from it read
+        "**likely moot** — PARTIAL — settled: #299; still open: #302": a status telling
+        the reader to skip an item while naming the live work inside it. Testing the
+        helper alone could never catch that.
+        """
+        relpath = self.packet("Three decisions. See #299 and #302.")
+        with self.fake_gh({299: "MERGED", 302: "OPEN"}):
+            status = operator_digest.decision_status(relpath)
+        self.assertIn("awaiting you", status)
+        self.assertNotIn("likely moot", status,
+                         "a row naming still-open work must never read as moot")
+        self.assertIn("#302", status)
+
+    def test_a_fully_settled_hint_still_renders_as_moot(self) -> None:
+        relpath = self.packet("Held on PR #170 and #171.")
+        with self.fake_gh({170: "MERGED", 171: "MERGED"}):
+            status = operator_digest.decision_status(relpath)
+        self.assertIn("likely moot", status)
+
+    def test_a_packet_with_no_references_renders_as_awaiting_you(self) -> None:
+        relpath = self.packet("Please decide whether to park the sidecar work.")
+        with self.fake_gh({}):
+            self.assertEqual("awaiting you", operator_digest.decision_status(relpath))
+
+    def test_a_foreign_project_packets_pr_numbers_are_not_checked_here(self) -> None:
+        """Another project numbers its PRs in another repo."""
+        relpath = self.packet("---\nproject_id: nuvyr\n---\nBlocked on #170.")
+        called = []
+
+        def run(argv, **kwargs):
+            called.append(argv)
+            raise AssertionError("must not reach gh for a foreign-project packet")
+
+        with mock.patch.object(operator_digest.subprocess, "run", side_effect=run):
+            hint = operator_digest.resolution_hint(relpath)
+        self.assertEqual([], called)
+        self.assertIn("not checked", hint)
+        self.assertNotIn("already settled", hint)
+
+    def test_an_amiga_packet_is_still_checked_against_this_repo(self) -> None:
+        relpath = self.packet("---\nproject_id: amiga\n---\nHeld on #170.")
+        with self.fake_gh({170: "MERGED"}):
+            hint = operator_digest.resolution_hint(relpath)
+        self.assertIn("already settled", hint)
+
     def test_no_references_yields_no_hint(self) -> None:
         relpath = self.packet("Please decide whether to park the sidecar work.")
         with self.fake_gh({}):

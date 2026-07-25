@@ -35,6 +35,8 @@ DECISION_MARKERS = ("decision", "required", "approve", "ratify", "recommend", "b
 # Bounded so one packet citing many PRs cannot stall the digest on network calls.
 # Exceeding it downgrades the hint to PARTIAL rather than claiming full coverage.
 PR_CHECK_LIMIT = 6
+PARTIAL_PREFIX = "PARTIAL"
+DEFAULT_REPO = "pixexid/llm-collab"
 
 
 def now() -> datetime:
@@ -84,6 +86,23 @@ def sender_of(relpath: str) -> str:
     return "?"
 
 
+def packet_repo(text: str) -> str | None:
+    """The repository a packet's PR numbers belong to, or None when it is not ours.
+
+    Frontmatter carries project_id and repo_targets. A packet scoped to another project
+    numbers its PRs elsewhere, so this repo's states say nothing about them.
+    """
+    project = re.search(r"^project_id:\s*(\S+)", text, re.MULTILINE)
+    if project and project.group(1).strip('"\'') not in {"amiga", "null", "None"}:
+        return None
+    targets = re.search(r"^repo_targets:\s*\[(.*?)\]", text, re.MULTILINE)
+    if targets and targets.group(1).strip():
+        named = {t.strip().strip('"\'') for t in targets.group(1).split(",") if t.strip()}
+        if named and not named & {"llm-collab", DEFAULT_REPO}:
+            return None
+    return DEFAULT_REPO
+
+
 def resolution_hint(relpath: str) -> str:
     """Flag a request whose subject has already been resolved.
 
@@ -109,6 +128,13 @@ def resolution_hint(relpath: str) -> str:
         notes.append(f"task(s) completed: {', '.join(done)}")
 
     prs = sorted({int(n) for n in re.findall(r"(?:PR\s*)?#(\d{2,4})\b", text)})
+    repo = packet_repo(text)
+    if prs and repo is None:
+        # A packet from another project numbers its PRs in ANOTHER repository. Looking
+        # them up here would report a same-numbered llm-collab PR's state and could
+        # declare a live cross-project request moot on evidence from the wrong repo.
+        notes.append(f"PR reference(s) not checked: packet is not scoped to {DEFAULT_REPO}")
+        prs = []
     if prs:
         # All referenced PRs must be settled, exactly as tasks require all done. An
         # earlier version claimed moot when ANY single PR had merged, which mislabelled
@@ -119,7 +145,7 @@ def resolution_hint(relpath: str) -> str:
         for number in checked:
             try:
                 raw = subprocess.run(
-                    ["gh", "pr", "view", str(number), "--repo", "pixexid/llm-collab",
+                    ["gh", "pr", "view", str(number), "--repo", repo,
                      "--json", "state"],
                     capture_output=True, text=True, timeout=20, check=True).stdout
                 state = json.loads(raw).get("state")
@@ -138,6 +164,22 @@ def resolution_hint(relpath: str) -> str:
             )
 
     return "; ".join(notes)
+
+def decision_status(relpath: str) -> str:
+    """The operator-facing verdict for one row.
+
+    Only a hint with nothing left open may read as moot. An earlier version prefixed
+    every hint with "likely moot", so a PARTIAL hint rendered as
+    "**likely moot** -- PARTIAL -- settled: #299; still open: #302" -- a row that tells
+    the reader to skip an item while naming the live work inside it.
+    """
+    hint = resolution_hint(relpath)
+    if not hint:
+        return "awaiting you"
+    if hint.startswith(PARTIAL_PREFIX):
+        return f"**awaiting you** — {hint}"
+    return f"**likely moot** — {hint}"
+
 
 def pending_for_operator() -> list[tuple[datetime | None, str, str]]:
     rows = []
@@ -225,12 +267,11 @@ def render() -> str:
         add("| age | what | status |")
         add("|---|---|---|")
         for stamp, title, relpath in decisions[:12]:
-            hint = resolution_hint(relpath)
-            status = f"**likely moot** — {hint}" if hint else "awaiting you"
-            add(f"| {age_of(stamp)} | {title} | {status} |")
+            add(f"| {age_of(stamp)} | {title} | {decision_status(relpath)} |")
         add("")
         add("Items marked *likely moot* reference work that has since merged or "
-            "completed; verify before spending attention on them.")
+            "completed; verify before spending attention on them. Anything else, "
+            "including *partly settled*, is still awaiting you.")
     add("")
     other = [r for r in pending if r not in decisions]
     if other:
