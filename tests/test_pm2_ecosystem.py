@@ -398,6 +398,123 @@ class Pm2EcosystemTest(unittest.TestCase):
                     self.assertEqual([], sidecars(load_apps(env)),
                                      "the config must agree with the manager")
 
+    def test_the_blank_predicate_is_identical_in_both_languages(self) -> None:
+        """Neither language's default trim matches the CLI, and they are inverted.
+
+        Python's str.strip() treats U+0085 as blank and U+FEFF as content. JavaScript's
+        String.trim() does the exact opposite. So a BOM-only token was content to the
+        manager and blank to the config, and a NEL-only token was blank to the manager and
+        content to the config -- the two gates disagreeing in OPPOSITE directions about the
+        same file. The CLI trims Rust's Unicode White_Space (U+0085 in, U+FEFF out), which
+        is the predicate both sides now pin.
+
+        Loads the exported production pattern, never a copy.
+        """
+        sys.path.insert(0, str(ROOT / "bin"))
+        import pm2_watchers
+
+        cases = {
+            "bom": "\ufeff",
+            "nel": "\u0085",
+            "space": " ",
+            "nbsp": "\u00a0",
+            "ideographic": "\u3000",
+            "token": "t0ken\n",
+            "bom-prefixed token": "\ufefft0ken",
+            # Python's str.strip() removes the ASCII information separators; they are NOT
+            # Unicode White_Space, so Rust's trim keeps them and the CLI sees content.
+            # Without this case the pinned constant is a no-op on the Python side.
+            "file separator": "\u001c",
+            "unit separator": "\u001f",
+        }
+        probe = (
+            "const c = require(process.argv[1]);"
+            "if (typeof c.TOKEN_BLANK_PATTERN === 'undefined') "
+            "{ throw new Error('TOKEN_BLANK_PATTERN not exported'); }"
+            "const cs = JSON.parse(process.argv[2]); const out = {};"
+            "for (const k in cs) { out[k] = !!cs[k].replace(c.TOKEN_BLANK_PATTERN, ''); }"
+            "process.stdout.write(JSON.stringify(out));"
+        )
+        result = subprocess.run(
+            [NODE, "-e", probe, str(CONFIG), json.dumps(cases)],
+            capture_output=True, text=True, timeout=30, cwd=str(ROOT),
+        )
+        self.assertEqual(0, result.returncode, result.stderr[:400])
+        cjs = json.loads(result.stdout)
+
+        for label, raw in cases.items():
+            with self.subTest(case=label):
+                self.assertEqual(
+                    cjs[label], bool(raw.strip(pm2_watchers.TOKEN_BLANK_CHARS)),
+                    f"the gates disagree on whether {label!r} is content",
+                )
+
+        # anchor the CLI-compatible answers themselves, not just agreement
+        self.assertTrue(cjs["bom"], "a BOM-only token is content the CLI accepts")
+        self.assertFalse(cjs["nel"], "a NEL-only token is blank to the CLI")
+        self.assertTrue(cjs["file separator"],
+                        "U+001C is not Unicode White_Space, so the CLI sees content")
+
+    def test_an_information_separator_token_is_accepted_by_both_gates(self) -> None:
+        """U+001C is not Unicode White_Space, so the CLI sees content and listens.
+
+        Python's default str.strip() removes it, so the manager gate would call the token
+        blank and refuse a sidecar the CLI would happily run -- over-strict, and disagreeing
+        with the config, which never removed it. This drives the REAL gate rather than the
+        shared constant, so reverting to the default strip() is caught here.
+        """
+        sys.path.insert(0, str(ROOT / "bin"))
+        import pm2_watchers
+
+        with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
+            token = Path(tmp) / "token"
+            token.write_text("\u001c", encoding="utf-8")
+            token.chmod(0o600)
+            binary = Path(tmp) / "codex"
+            binary.write_text("#!/bin/sh\n", encoding="utf-8")
+            env = {"LLM_COLLAB_CODEX_APP_SERVER_TOKEN_FILE": str(token),
+                   "LLM_COLLAB_CODEX_BIN": str(binary)}
+
+            self.assertTrue(pm2_watchers.sidecar_token_is_secure(token),
+                            "U+001C is content to the CLI, so the manager must not refuse it")
+            self.assertEqual(1, len(sidecars(load_apps(env))),
+                             "the config must agree with the manager")
+
+    def test_a_nel_only_token_is_refused_by_both_gates(self) -> None:
+        sys.path.insert(0, str(ROOT / "bin"))
+        import pm2_watchers
+
+        with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
+            token = Path(tmp) / "token"
+            token.write_text("\u0085", encoding="utf-8")
+            token.chmod(0o600)
+            binary = Path(tmp) / "codex"
+            binary.write_text("#!/bin/sh\n", encoding="utf-8")
+            env = {"LLM_COLLAB_CODEX_APP_SERVER_TOKEN_FILE": str(token),
+                   "LLM_COLLAB_CODEX_BIN": str(binary)}
+
+            self.assertFalse(pm2_watchers.sidecar_token_is_secure(token))
+            with mock.patch.dict(os.environ, env):
+                self.assertEqual([], pm2_watchers.enabled_sidecar_ids())
+            self.assertEqual([], sidecars(load_apps(env)))
+
+    def test_a_bom_only_token_is_accepted_by_both_gates(self) -> None:
+        """The CLI listens on it, so refusing it would be over-strict, not safe."""
+        sys.path.insert(0, str(ROOT / "bin"))
+        import pm2_watchers
+
+        with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
+            token = Path(tmp) / "token"
+            token.write_text("\ufeff", encoding="utf-8")
+            token.chmod(0o600)
+            binary = Path(tmp) / "codex"
+            binary.write_text("#!/bin/sh\n", encoding="utf-8")
+            env = {"LLM_COLLAB_CODEX_APP_SERVER_TOKEN_FILE": str(token),
+                   "LLM_COLLAB_CODEX_BIN": str(binary)}
+
+            self.assertTrue(pm2_watchers.sidecar_token_is_secure(token))
+            self.assertEqual(1, len(sidecars(load_apps(env))))
+
     def test_a_token_with_content_still_passes_both_gates(self) -> None:
         # the guard above must not reject a legitimate token
         sys.path.insert(0, str(ROOT / "bin"))

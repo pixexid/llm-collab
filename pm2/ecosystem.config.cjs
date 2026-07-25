@@ -14,6 +14,14 @@ const path = require("path");
 
 const root = path.resolve(__dirname, "..");
 
+// Mirrors TOKEN_BLANK_CHARS in bin/pm2_watchers.py. String.trim() must NOT be used here:
+// it strips U+FEFF, which the CLI treats as content, and keeps U+0085, which the CLI
+// treats as blank -- inverted from Python on BOTH, so the two gates disagreed in opposite
+// directions about the same file. This is Rust's Unicode White_Space set, which is what
+// the CLI itself trims.
+const TOKEN_BLANK_PATTERN =
+  /[\t\n\v\f\r \u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]/g;
+
 function readJson(filePath) {
   if (!fs.existsSync(filePath)) return null;
   return JSON.parse(fs.readFileSync(filePath, "utf8"));
@@ -139,9 +147,13 @@ function codexAppServerApps() {
   // non-blank here while the CLI exits before listening with "stream did not contain
   // valid UTF-8". TextDecoder with fatal:true refuses instead of substituting.
   try {
-    const decoded = new TextDecoder("utf-8", { fatal: true })
+    // ignoreBOM:true means "do not treat a leading BOM specially", i.e. KEEP it. The
+    // default strips it, so a BOM-only token decoded to "" here while Python's
+    // bytes.decode kept the character -- the same file, content to one gate and blank to
+    // the other, one layer below the trim divergence.
+    const decoded = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true })
       .decode(fs.readFileSync(tokenFile));
-    if (!decoded.trim()) return [];
+    if (!decoded.replace(TOKEN_BLANK_PATTERN, "")) return [];
   } catch {
     return [];
   }
@@ -210,4 +222,5 @@ module.exports = {
   // copy of it. A test that reimplements the logic it checks cannot detect drift, which
   // is the entire failure mode the parity test exists to catch. PM2 reads only `apps`.
   canonicalPath,
+  TOKEN_BLANK_PATTERN,
 };

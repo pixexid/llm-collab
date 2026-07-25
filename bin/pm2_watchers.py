@@ -36,6 +36,19 @@ from _helpers import ROOT, agent_ids, canonical_path, config_get, get_agent, wat
 COMMANDS = ("start", "restart", "ensure", "stop", "delete", "status", "logs")
 DEFAULT_PM2_TIMEOUT_SECONDS = 15
 
+# The blank set for token CONTENT, pinned explicitly because neither language's default
+# matches the CLI and the two defaults are inverted from each other. Python's str.strip()
+# treats U+0085 as blank and U+FEFF as content; JavaScript's String.trim() does the exact
+# opposite. The CLI trims Rust's Unicode White_Space -- U+0085 in, U+FEFF out -- so a
+# BOM-only token is content it accepts and a NEL-only token is empty to it. Enumerated here
+# and mirrored by TOKEN_BLANK_PATTERN in pm2/ecosystem.config.cjs so that both gates agree
+# with the process they gate rather than with their own language's convention.
+TOKEN_BLANK_CHARS = (
+    "\t\n\v\f\r \u0085\u00a0\u1680"
+    "\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a"
+    "\u2028\u2029\u202f\u205f\u3000"
+)
+
 
 def parse_args():
     p = argparse.ArgumentParser(description="Manage PM2 inbox watchers.")
@@ -114,7 +127,7 @@ def sidecar_token_is_secure(path: Path) -> bool:
         content = path.read_bytes().decode("utf-8")
     except (OSError, UnicodeDecodeError):
         return False
-    return bool(content.strip())
+    return bool(content.strip(TOKEN_BLANK_CHARS))
 
 
 def enabled_sidecar_ids() -> list[str]:
