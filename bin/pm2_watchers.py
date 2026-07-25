@@ -106,10 +106,15 @@ def sidecar_token_is_secure(path: Path) -> bool:
     # CLI then exits immediately with "websocket auth secret must not be empty" -- so PM2
     # burns its restart budget while the manager still reports the transport configured.
     # An interrupted token rotation produces exactly this file.
+    #
+    # Decoding must be STRICT. errors="replace" turns invalid bytes into U+FFFD, which is
+    # non-blank, so a truncated or binary token passed the content check while the CLI
+    # exits before listening with "stream did not contain valid UTF-8".
     try:
-        return bool(path.read_text(encoding="utf-8", errors="replace").strip())
-    except OSError:
+        content = path.read_bytes().decode("utf-8")
+    except (OSError, UnicodeDecodeError):
         return False
+    return bool(content.strip())
 
 
 def enabled_sidecar_ids() -> list[str]:

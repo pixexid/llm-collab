@@ -369,6 +369,35 @@ class Pm2EcosystemTest(unittest.TestCase):
                     self.assertEqual([], sidecars(load_apps(env)),
                                      "the config must agree with the manager")
 
+    def test_invalid_utf8_token_is_refused_by_both_gates(self) -> None:
+        """Replacement-character decoding made a binary token look like content.
+
+        errors="replace" and readFileSync(..., "utf8") both substitute U+FFFD for invalid
+        bytes, which is non-blank, so a truncated or binary token passed the content check
+        while the CLI exits before listening with "stream did not contain valid UTF-8".
+        """
+        sys.path.insert(0, str(ROOT / "bin"))
+        import pm2_watchers
+
+        for label, raw in (("lone continuation byte", b"\x80\x81\x82\n"),
+                           ("truncated sequence", b"tok\xc3")):
+            with self.subTest(token=label):
+                with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
+                    token = Path(tmp) / "token"
+                    token.write_bytes(raw)
+                    token.chmod(0o600)
+                    binary = Path(tmp) / "codex"
+                    binary.write_text("#!/bin/sh\n", encoding="utf-8")
+                    env = {"LLM_COLLAB_CODEX_APP_SERVER_TOKEN_FILE": str(token),
+                           "LLM_COLLAB_CODEX_BIN": str(binary)}
+
+                    self.assertFalse(pm2_watchers.sidecar_token_is_secure(token),
+                                     "the manager gate must refuse a non-UTF-8 token")
+                    with mock.patch.dict(os.environ, env):
+                        self.assertEqual([], pm2_watchers.enabled_sidecar_ids())
+                    self.assertEqual([], sidecars(load_apps(env)),
+                                     "the config must agree with the manager")
+
     def test_a_token_with_content_still_passes_both_gates(self) -> None:
         # the guard above must not reject a legitimate token
         sys.path.insert(0, str(ROOT / "bin"))

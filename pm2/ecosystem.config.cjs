@@ -134,8 +134,14 @@ function codexAppServerApps() {
   // Codex CLI then exits immediately with "websocket auth secret must not be empty",
   // leaving PM2 to exhaust its restart budget while the manager still reports the
   // transport configured. Mirrors sidecar_token_is_secure().
+  // Strict decoding, matching sidecar_token_is_secure(). readFileSync(..., "utf8")
+  // substitutes U+FFFD for invalid bytes, so a truncated or binary token reads as
+  // non-blank here while the CLI exits before listening with "stream did not contain
+  // valid UTF-8". TextDecoder with fatal:true refuses instead of substituting.
   try {
-    if (!fs.readFileSync(tokenFile, "utf8").trim()) return [];
+    const decoded = new TextDecoder("utf-8", { fatal: true })
+      .decode(fs.readFileSync(tokenFile));
+    if (!decoded.trim()) return [];
   } catch {
     return [];
   }
