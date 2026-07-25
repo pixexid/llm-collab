@@ -15,7 +15,8 @@ that replied could abort work the operator initiated in the desktop app.
 Usage:
   python bin/codex_stream.py --agent codex --project amiga --chat CHAT-8976EECB
   python bin/codex_stream.py --agent codex --project amiga --chat last --seconds 60
-  python bin/codex_stream.py --thread 019f9452-6954-7301-bff9-db1c47232bc8 --raw
+  python bin/codex_stream.py --thread 019f9452-6954-7301-bff9-db1c47232bc8 \
+      --runtime-home ~/.codex --raw
 """
 
 from __future__ import annotations
@@ -38,6 +39,15 @@ import _session_autobridge as autobridge
 from _helpers import ROOT
 
 DEFAULT_IDLE_TIMEOUT_SECONDS = 5
+# Only a liveness failure may be skipped when choosing among chats. Every other refusal from
+# the resolver reports that the workspace is INCONSISTENT -- a missing or malformed binding, a
+# binding that does not match its own location, two sessions claiming it -- and quietly moving
+# on would let a corrupt sibling hand the caller a different worker than the one they asked for.
+SKIPPABLE_RESOLVER_REASONS = frozenset({autobridge.EXACT_BINDING_NOT_DISPATCHABLE_REASON})
+# This client speaks to a Codex App Server. The shared resolver only checks that a binding and
+# its session AGREE on the family, so a consistent claude_app or gemini_cli pair passes it --
+# correct for dispatch, wrong here, where the session id would go to the wrong runtime.
+CODEX_RUNTIME_FAMILY = "codex_app"
 # One cumulative budget over an untrusted bindings tree, charged at the enumeration boundary.
 MAX_SCANNED_CHATS = 2000
 BINDINGS_DIR = ROOT / "State" / "session_autobridge" / "bindings"
@@ -263,6 +273,7 @@ def resolve_thread(args: argparse.Namespace) -> tuple[str, str, str | None]:
                 f"[error] {project}/{args.chat} is not an exact live binding for {agent!r}: "
                 f"{reason}"
             )
+        require_codex_family(project, args.chat, agent)
         chosen = [(args.chat, session)]
     else:
         # Broad selection: a dead binding is EXCLUDED, not fatal. deactivate_session() updates
@@ -270,9 +281,18 @@ def resolve_thread(args: argparse.Namespace) -> tuple[str, str, str | None]:
         # would otherwise break `--chat last` for that agent permanently.
         chosen = []
         for chat in bounded_chat_ids(project, agent):
-            session, _reason = autobridge.resolve_exact_dispatch_target(project, chat, agent)
-            if session is not None:
-                chosen.append((chat, session))
+            session, reason = autobridge.resolve_exact_dispatch_target(project, chat, agent)
+            if session is None:
+                if reason in SKIPPABLE_RESOLVER_REASONS:
+                    continue
+                # Not a liveness problem: the workspace is inconsistent here. Skipping it
+                # would let a malformed sibling silently hand over a different worker.
+                raise SystemExit(
+                    f"[error] {project}/{chat} cannot be resolved for {agent!r}: {reason}. "
+                    "Fix or remove that binding; broad lookup will not step over it."
+                )
+            require_codex_family(project, chat, agent)
+            chosen.append((chat, session))
 
     if not chosen:
         raise SystemExit(
@@ -285,13 +305,49 @@ def resolve_thread(args: argparse.Namespace) -> tuple[str, str, str | None]:
             f"one with --chat, or pass --chat last:\n  {names}"
         )
 
-    chat, session = max(chosen, key=lambda pair: str(pair[1].get("updated_utc") or ""))
+    # `last` is advertised as the newest BINDING, and the binding is also where runtime_home
+    # lives. Reading both from the session lost a binding-derived home and silently reordered
+    # `last` by session timestamps instead.
+    chat, session = max(chosen, key=lambda pair: binding_recency(project, pair[0], agent))
+    binding = read_binding(project, chat, agent)
     runtime = session.get("runtime") or {}
-    thread_id = str(runtime.get("session_id") or "")
+    thread_id = str(binding.get("runtime_session_id") or runtime.get("session_id") or "")
     if not thread_id:
         raise SystemExit(f"[error] {project}/{chat} records no runtime thread id")
-    home = args.runtime_home or runtime.get("home")
+    home = args.runtime_home or binding.get("runtime_home") or runtime.get("home")
     return thread_id, f"{project}/{chat}", str(home) if home else None
+
+
+def read_binding(project: str, chat: str, agent: str) -> dict:
+    """The binding record, or an empty mapping when it cannot be read.
+
+    Only ever consulted AFTER the shared resolver has accepted this triple, so its identity is
+    already proven; this reads the fields that resolver does not return.
+    """
+    try:
+        return autobridge.load_binding(project, chat, agent)
+    except (FileNotFoundError, OSError, ValueError):
+        return {}
+
+
+def binding_recency(project: str, chat: str, agent: str) -> str:
+    return str(read_binding(project, chat, agent).get("updated_utc") or "")
+
+
+def require_codex_family(project: str, chat: str, agent: str) -> None:
+    """Refuse a binding whose runtime is not a Codex App Server thread.
+
+    The shared resolver checks only that the binding and its session AGREE on the family, which
+    is right for dispatch -- it can reach several runtimes. This client cannot: sending a
+    claude_app or gemini_cli session id to a Codex App Server fails against the wrong runtime
+    instead of reporting an unsupported binding.
+    """
+    family = str(read_binding(project, chat, agent).get("runtime_family") or "")
+    if family != CODEX_RUNTIME_FAMILY:
+        raise SystemExit(
+            f"[error] {project}/{chat} is runtime_family={family or 'unset'!r}; only "
+            f"{CODEX_RUNTIME_FAMILY} can be watched through a Codex App Server"
+        )
 
 
 def bounded_chat_ids(project: str, agent: str) -> list[str]:

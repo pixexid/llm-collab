@@ -38,28 +38,32 @@ def binding(root: Path, project: str, chat: str, agent: str, thread: str,
 
 
 class ResolveThreadTest(unittest.TestCase):
-    """Selection, delegation, and the endpoint — nothing else.
+    """Selection and the endpoint, exercised against the REAL shared resolver.
 
-    Seven test classes and forty-seven tests used to live here, exercising a
-    reimplementation of exact-binding resolution: record-versus-location identity, a
-    backing-session check, a runtime-family gate, per-binding byte budgets. Six review rounds
-    found holes in all of it, each fix exposing the next adjacent one.
+    An earlier version of this suite stubbed `resolve_exact_dispatch_target`, which made every
+    caller-owned boundary invisible: four regressed at once -- the family gate, which the shared
+    resolver deliberately does not enforce; which refusals may be skipped during broad lookup;
+    and where `runtime_home` and the `last` ordering are read from. A stub cannot show any of
+    that, because the thing it replaces is what decides it.
 
-    That machinery is gone. resolve_thread() now delegates to
-    autobridge.resolve_exact_dispatch_target(), which production dispatch uses and which
-    already enforces every one of those invariants -- and enforces them in one place with its
-    own suite. So these tests assert what remains ours: validating the selectors, choosing
-    WHICH chat when the caller did not name one, and reading the endpoint. Crucially they also
-    assert THAT we delegate, and with which arguments, which the previous forty-seven could
-    not do because there was nothing to delegate to.
+    So these tests write real bindings and real sessions to disk and let the audited function
+    run. It requires an exact binding whose project, chat and agent match its location; a
+    session whose id, runtime family and runtime thread all match that binding; and that the
+    session be dispatchable.
     """
 
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory(dir="/tmp")
         self.addCleanup(self._tmp.cleanup)
         self.root = Path(self._tmp.name)
+        self.bindings = self.root / "bindings"
+        self.sessions = self.root / "sessions"
+        self.bindings.mkdir()
+        self.sessions.mkdir()
         for patcher in (
-            mock.patch.object(codex_stream, "BINDINGS_DIR", self.root),
+            mock.patch.object(codex_stream, "BINDINGS_DIR", self.bindings),
+            mock.patch.object(codex_stream.autobridge, "BINDINGS_DIR", self.bindings),
+            mock.patch.object(codex_stream.autobridge, "SESSIONS_DIR", self.sessions),
             mock.patch.object(codex_stream, "registered_project_ids",
                               return_value={"amiga", "nuvyr"}),
         ):
@@ -72,194 +76,260 @@ class ResolveThreadTest(unittest.TestCase):
         base.update(kw)
         return SimpleNamespace(**base)
 
-    def binding_file(self, project: str, chat: str, agent: str = "codex") -> None:
-        """Only the FILE needs to exist; its contents are the audited path's business."""
-        path = self.root / project / chat / f"{agent}.json"
+    def bind(self, project="amiga", chat="CHAT-A", agent="codex", *, thread="t1",
+             family="codex_app", home="/Users/someone/.codex", updated="2026-07-25T00:00:00Z",
+             session_id=None, status="active", session_status="active", raw=None,
+             session_project=None, session_chat=None, session_thread=None,
+             session_family=None, lease=None, write_session=True,
+             session_home="/Users/session-side/.codex", session_updated="2026-01-01T00:00:00Z"):
+        """One coherent binding+session pair, with every field overridable to break it."""
+        session_id = session_id or f"SESSION-{chat}"
+        path = self.bindings / project / chat / f"{agent}.json"
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("{}", encoding="utf-8")
+        if raw is not None:
+            path.write_text(raw, encoding="utf-8")
+        else:
+            path.write_text(json.dumps({
+                "project_id": project, "chat_id": chat, "agent_id": agent,
+                "session_id": session_id, "runtime_session_id": thread,
+                "runtime_family": family, "runtime_home": home,
+                "status": status, "updated_utc": updated,
+            }), encoding="utf-8")
+        if not write_session:
+            return
+        payload = {
+            "session_id": session_id, "agent_id": agent,
+            "project_id": session_project or project,
+            "chat_id": session_chat or chat,
+            "status": session_status,
+            # deliberately DIFFERENT from the binding's home and timestamp, so that reading
+            # the wrong record is detectable rather than coincidentally identical
+            "runtime": {"family": session_family or family,
+                        "session_id": session_thread or thread,
+                        "home": session_home},
+            "updated_utc": session_updated,
+        }
+        if lease:
+            payload["lease_expires_utc"] = lease
+        (self.sessions / f"{session_id}.json").write_text(json.dumps(payload), encoding="utf-8")
 
-    def session(self, thread="t1", home="/Users/someone/.codex", updated="2026-07-25T00:00:00Z"):
-        return {"runtime": {"session_id": thread, "home": home}, "updated_utc": updated}
+    # --- the happy path, through the audited function ------------------------------------
 
-    def delegate(self, table: dict):
-        """Stub the audited resolver. table maps chat -> session, or chat -> None for dead."""
-        calls = []
-
-        def resolver(project_id, chat_id, agent_id):
-            calls.append((project_id, chat_id, agent_id))
-            found = table.get(chat_id)
-            return (found, None) if found else (None, "exact_binding_not_dispatchable")
-
-        patcher = mock.patch.object(codex_stream.autobridge, "resolve_exact_dispatch_target",
-                                   side_effect=resolver)
-        patcher.start()
-        self.addCleanup(patcher.stop)
-        return calls
-
-    # --- delegation -----------------------------------------------------------------
-
-    def test_a_named_chat_delegates_with_exactly_the_named_triple(self) -> None:
-        self.binding_file("amiga", "CHAT-A")
-        calls = self.delegate({"CHAT-A": self.session()})
+    def test_a_named_chat_resolves_through_the_real_resolver(self) -> None:
+        self.bind()
         thread, provenance, home = codex_stream.resolve_thread(
             self.args(agent="codex", project="amiga", chat="CHAT-A"))
-        self.assertEqual([("amiga", "CHAT-A", "codex")], calls)
         self.assertEqual("t1", thread)
         self.assertEqual("amiga/CHAT-A", provenance)
         self.assertEqual("/Users/someone/.codex", home)
 
-    def test_a_named_chat_that_is_not_live_is_fatal_with_the_reason(self) -> None:
-        """Named exactly, so substituting another chat would be worse than failing."""
-        self.binding_file("amiga", "CHAT-A")
-        self.delegate({})
+    def test_a_session_belonging_to_another_project_is_refused(self) -> None:
+        # the audited function compares project and chat; my own check never did
+        self.bind(session_project="nuvyr")
+        with self.assertRaises(SystemExit):
+            codex_stream.resolve_thread(
+                self.args(agent="codex", project="amiga", chat="CHAT-A"))
+
+    def test_a_session_pointing_at_another_thread_is_refused(self) -> None:
+        self.bind(session_thread="different")
+        with self.assertRaises(SystemExit):
+            codex_stream.resolve_thread(
+                self.args(agent="codex", project="amiga", chat="CHAT-A"))
+
+    def test_a_deactivated_session_is_refused_when_named_exactly(self) -> None:
+        self.bind(session_status="inactive")
         with self.assertRaises(SystemExit) as caught:
             codex_stream.resolve_thread(
                 self.args(agent="codex", project="amiga", chat="CHAT-A"))
-        message = str(caught.exception)
-        self.assertIn("CHAT-A", message)
-        self.assertIn("exact_binding_not_dispatchable", message,
-                      "the audited path's own reason must reach the operator")
+        self.assertIn("not an exact live binding", str(caught.exception))
 
-    def test_broad_selection_excludes_dead_bindings_instead_of_failing(self) -> None:
-        """deactivate_session() leaves the binding behind deliberately.
+    def test_an_expired_lease_is_refused(self) -> None:
+        self.bind(lease="2020-01-01T00:00:00Z")
+        with self.assertRaises(SystemExit):
+            codex_stream.resolve_thread(
+                self.args(agent="codex", project="amiga", chat="CHAT-A"))
 
-        So one ordinary deactivation must not break `--chat last` for that agent forever --
-        which an earlier revision of mine did, by treating any dead candidate as fatal.
+    # --- the family gate, which the shared resolver does NOT enforce ---------------------
+
+    def test_a_consistent_non_codex_family_is_still_refused(self) -> None:
+        """The shared resolver only requires binding and session to AGREE on the family.
+
+        A consistent claude_app pair therefore passes it -- correct for dispatch, which can
+        reach several runtimes, and wrong here: that session id would go to a Codex App Server.
         """
-        for chat in ("CHAT-DEAD", "CHAT-LIVE"):
-            self.binding_file("amiga", chat)
-        self.delegate({"CHAT-LIVE": self.session(thread="live-thread")})
+        for family in ("claude_app", "gemini_cli"):
+            with self.subTest(family=family):
+                self.bind(chat=f"CHAT-{family}", family=family)
+                with self.assertRaises(SystemExit) as caught:
+                    codex_stream.resolve_thread(
+                        self.args(agent="codex", project="amiga", chat=f"CHAT-{family}"))
+                self.assertIn("codex_app", str(caught.exception))
+
+    def test_the_family_gate_also_applies_during_broad_lookup(self) -> None:
+        self.bind(chat="CHAT-CLAUDE", family="claude_app")
+        with self.assertRaises(SystemExit) as caught:
+            codex_stream.resolve_thread(self.args(agent="codex", project="amiga"))
+        self.assertIn("codex_app", str(caught.exception))
+
+    # --- which refusals may be skipped --------------------------------------------------
+
+    def test_broad_lookup_skips_only_a_liveness_failure(self) -> None:
+        self.bind(chat="CHAT-DEAD", session_status="inactive")
+        self.bind(chat="CHAT-LIVE", thread="live-thread")
         thread, provenance, _home = codex_stream.resolve_thread(
             self.args(agent="codex", project="amiga", chat="last"))
         self.assertEqual("live-thread", thread)
         self.assertIn("CHAT-LIVE", provenance)
 
-    def test_broad_selection_refuses_when_several_are_live(self) -> None:
-        for chat in ("CHAT-A", "CHAT-B"):
-            self.binding_file("amiga", chat)
-        self.delegate({"CHAT-A": self.session(thread="a"), "CHAT-B": self.session(thread="b")})
+    def test_a_malformed_sibling_aborts_broad_lookup_instead_of_being_skipped(self) -> None:
+        """An inconsistent workspace must not be stepped over.
+
+        Treating every resolver refusal as "dead" meant a malformed binding beside a valid one
+        silently handed the caller the valid thread -- which is only correct if the malformed
+        one could not have been the intended target, and nothing here establishes that.
+        """
+        self.bind(chat="CHAT-TORN", raw='{"project_id": "amiga", "chat_id": ')
+        self.bind(chat="CHAT-LIVE", thread="live-thread")
+        with self.assertRaises(SystemExit) as caught:
+            codex_stream.resolve_thread(self.args(agent="codex", project="amiga", chat="last"))
+        self.assertIn("CHAT-TORN", str(caught.exception))
+
+    def test_a_binding_that_lies_about_its_location_aborts_broad_lookup(self) -> None:
+        self.bind(chat="CHAT-LIAR", session_chat="CHAT-OTHER")
+        self.bind(chat="CHAT-LIVE", thread="live-thread")
+        with self.assertRaises(SystemExit) as caught:
+            codex_stream.resolve_thread(self.args(agent="codex", project="amiga", chat="last"))
+        self.assertIn("CHAT-LIAR", str(caught.exception))
+
+    def test_a_binding_whose_session_is_missing_aborts_broad_lookup(self) -> None:
+        self.bind(chat="CHAT-ORPHAN", write_session=False)
+        self.bind(chat="CHAT-LIVE", thread="live-thread")
+        with self.assertRaises(SystemExit):
+            codex_stream.resolve_thread(self.args(agent="codex", project="amiga", chat="last"))
+
+    # --- the binding is authoritative for home and recency ------------------------------
+
+    def test_chat_last_orders_by_the_binding_timestamp(self) -> None:
+        """`last` is advertised as the newest BINDING.
+
+        Ordering by the session's own timestamp silently changed what the flag means; both
+        sessions here carry the same session timestamp, so only the binding can decide.
+        """
+        # the session timestamps are INVERTED relative to the bindings, so ordering by the
+        # wrong record picks the wrong chat rather than accidentally agreeing
+        self.bind(chat="CHAT-OLD", thread="old", updated="2026-07-01T00:00:00Z",
+                  session_updated="2026-07-30T00:00:00Z")
+        self.bind(chat="CHAT-NEW", thread="new", updated="2026-07-25T00:00:00Z",
+                  session_updated="2026-07-02T00:00:00Z")
+        thread, _p, _h = codex_stream.resolve_thread(
+            self.args(agent="codex", project="amiga", chat="last"))
+        self.assertEqual("new", thread)
+
+    def test_the_binding_derived_runtime_home_is_used(self) -> None:
+        """The binding carries runtime_home; the session's copy may differ or be absent.
+
+        Reading the session's instead lost a binding-derived home entirely. The fixture gives
+        the two different values so that reading the wrong one cannot pass by coincidence.
+        """
+        self.bind(home="/Users/binding-side/.codex-alt",
+                  session_home="/Users/session-side/.codex")
+        _t, _p, home = codex_stream.resolve_thread(
+            self.args(agent="codex", project="amiga", chat="CHAT-A"))
+        self.assertEqual("/Users/binding-side/.codex-alt", home)
+
+    def test_a_binding_with_no_home_falls_back_to_the_session(self) -> None:
+        self.bind(home=None, session_home="/Users/session-side/.codex")
+        _t, _p, home = codex_stream.resolve_thread(
+            self.args(agent="codex", project="amiga", chat="CHAT-A"))
+        self.assertEqual("/Users/session-side/.codex", home)
+
+    def test_an_explicit_home_overrides_the_binding(self) -> None:
+        self.bind(home="/Users/elsewhere/.codex-alt")
+        _t, _p, home = codex_stream.resolve_thread(
+            self.args(agent="codex", project="amiga", chat="CHAT-A",
+                      runtime_home="/tmp/override"))
+        self.assertEqual("/tmp/override", home)
+
+    def test_there_is_no_hardcoded_home_default_left(self) -> None:
+        source = (ROOT / "bin" / "codex_stream.py").read_text(encoding="utf-8")
+        self.assertNotIn('default="/Users/', source)
+
+    # --- ambiguity ----------------------------------------------------------------------
+
+    def test_two_live_bindings_refuse_and_name_both(self) -> None:
+        self.bind(chat="CHAT-A", thread="a")
+        self.bind(chat="CHAT-B", thread="b")
         with self.assertRaises(SystemExit) as caught:
             codex_stream.resolve_thread(self.args(agent="codex", project="amiga"))
         message = str(caught.exception)
         self.assertIn("CHAT-A", message)
         self.assertIn("CHAT-B", message)
 
-    def test_chat_last_takes_the_newest_of_several_live_bindings(self) -> None:
-        for chat in ("CHAT-OLD", "CHAT-NEW"):
-            self.binding_file("amiga", chat)
-        self.delegate({
-            "CHAT-OLD": self.session(thread="old", updated="2026-07-01T00:00:00Z"),
-            "CHAT-NEW": self.session(thread="new", updated="2026-07-25T00:00:00Z"),
-        })
-        thread, _prov, _home = codex_stream.resolve_thread(
-            self.args(agent="codex", project="amiga", chat="last"))
-        self.assertEqual("new", thread)
-
-    def test_no_live_binding_at_all_is_reported_clearly(self) -> None:
-        self.binding_file("amiga", "CHAT-A")
-        self.delegate({})
+    def test_no_live_binding_is_reported_clearly(self) -> None:
+        self.bind(session_status="inactive")
         with self.assertRaises(SystemExit) as caught:
             codex_stream.resolve_thread(self.args(agent="codex", project="amiga"))
         self.assertIn("no live exactly-bound", str(caught.exception))
 
-    def test_only_chats_with_a_binding_for_this_agent_are_considered(self) -> None:
-        self.binding_file("amiga", "CHAT-MINE", agent="codex")
-        self.binding_file("amiga", "CHAT-THEIRS", agent="claude")
-        calls = self.delegate({"CHAT-MINE": self.session()})
-        codex_stream.resolve_thread(self.args(agent="codex", project="amiga", chat="last"))
-        self.assertEqual([("amiga", "CHAT-MINE", "codex")], calls,
-                         "another agent's chat must not even be offered to the resolver")
+    def test_only_this_agents_chats_are_considered(self) -> None:
+        self.bind(chat="CHAT-MINE", agent="codex", thread="mine")
+        self.bind(chat="CHAT-THEIRS", agent="claude", thread="theirs")
+        thread, _p, _h = codex_stream.resolve_thread(
+            self.args(agent="codex", project="amiga", chat="last"))
+        self.assertEqual("mine", thread)
 
-    # --- the endpoint ---------------------------------------------------------------
-
-    def test_the_runtime_home_comes_from_the_selected_session(self) -> None:
-        # a hardcoded default made this work on exactly one machine
-        self.binding_file("amiga", "CHAT-A")
-        self.delegate({"CHAT-A": self.session(home="/Users/elsewhere/.codex-alt")})
-        _t, _p, home = codex_stream.resolve_thread(
-            self.args(agent="codex", project="amiga", chat="CHAT-A"))
-        self.assertEqual("/Users/elsewhere/.codex-alt", home)
-
-    def test_an_explicit_runtime_home_overrides_the_session(self) -> None:
-        self.binding_file("amiga", "CHAT-A")
-        self.delegate({"CHAT-A": self.session(home="/Users/elsewhere/.codex-alt")})
-        _t, _p, home = codex_stream.resolve_thread(
-            self.args(agent="codex", project="amiga", chat="CHAT-A",
-                      runtime_home="/tmp/override"))
-        self.assertEqual("/tmp/override", home)
-
-    def test_a_session_without_a_home_yields_none_rather_than_a_guess(self) -> None:
-        self.binding_file("amiga", "CHAT-A")
-        self.delegate({"CHAT-A": self.session(home=None)})
-        _t, _p, home = codex_stream.resolve_thread(
-            self.args(agent="codex", project="amiga", chat="CHAT-A"))
-        self.assertIsNone(home)
-
-    def test_a_session_without_a_runtime_thread_is_refused(self) -> None:
-        self.binding_file("amiga", "CHAT-A")
-        self.delegate({"CHAT-A": self.session(thread=None)})
-        with self.assertRaises(SystemExit) as caught:
-            codex_stream.resolve_thread(
-                self.args(agent="codex", project="amiga", chat="CHAT-A"))
-        self.assertIn("no runtime thread id", str(caught.exception))
-
-    def test_there_is_no_hardcoded_home_default_left(self) -> None:
-        source = (ROOT / "bin" / "codex_stream.py").read_text(encoding="utf-8")
-        self.assertNotIn('default="/Users/', source)
-
-    # --- direct-thread mode ---------------------------------------------------------
+    # --- direct-thread mode -------------------------------------------------------------
 
     def test_thread_mode_requires_a_runtime_home(self) -> None:
-        """The documented `--thread ... --raw` invocation could never work without it.
-
-        There is no binding to read a home from, and discovery matches CODEX_HOME exactly, so
-        the old code reached the endpoint lookup with None and always exited.
-        """
         with self.assertRaises(SystemExit) as caught:
             codex_stream.resolve_thread(self.args(thread="019f-abc"))
         self.assertIn("--runtime-home", str(caught.exception))
 
-    def test_thread_mode_with_a_home_bypasses_binding_lookup_entirely(self) -> None:
-        calls = self.delegate({})
+    def test_thread_mode_with_a_home_needs_no_binding(self) -> None:
         thread, provenance, home = codex_stream.resolve_thread(
             self.args(thread="019f-abc", runtime_home="/tmp/home"))
         self.assertEqual(("019f-abc", "--thread", "/tmp/home"), (thread, provenance, home))
-        self.assertEqual([], calls, "no resolution is needed when the thread is named")
 
-    # --- selectors ------------------------------------------------------------------
+    def test_the_documented_thread_example_carries_a_runtime_home(self) -> None:
+        # the example could not work without it, since there is no binding to read one from
+        source = (ROOT / "bin" / "codex_stream.py").read_text(encoding="utf-8")
+        usage = source[source.index("Usage:"):source.index('"""', source.index("Usage:"))]
+        for line in usage.splitlines():
+            if "--thread" in line:
+                block = usage[usage.index(line):]
+                self.assertIn("--runtime-home", block,
+                              "a documented invocation must be runnable as shown")
+                break
+        else:
+            self.fail("no --thread example found in the usage block")
 
-    def test_omitting_project_is_refused_outright(self) -> None:
-        self.binding_file("amiga", "CHAT-A")
-        self.binding_file("nuvyr", "CHAT-B")
+    # --- selectors ----------------------------------------------------------------------
+
+    def test_omitting_project_is_refused(self) -> None:
+        self.bind()
         with self.assertRaises(SystemExit) as caught:
             codex_stream.resolve_thread(self.args(agent="codex"))
         self.assertIn("--project is required", str(caught.exception))
 
     def test_an_unregistered_project_is_refused(self) -> None:
-        self.binding_file("ghost", "CHAT-A")
+        self.bind(project="ghost")
         with self.assertRaises(SystemExit) as caught:
             codex_stream.resolve_thread(self.args(agent="codex", project="ghost"))
         self.assertIn("not registered", str(caught.exception))
 
-    def test_an_unreadable_or_empty_registry_fails_closed(self) -> None:
-        self.binding_file("ghost", "CHAT-A")
+    def test_an_empty_registry_fails_closed(self) -> None:
+        self.bind(project="ghost")
         with mock.patch.object(codex_stream, "registered_project_ids", return_value=set()):
             with self.assertRaises(SystemExit) as caught:
                 codex_stream.resolve_thread(self.args(agent="codex", project="ghost"))
         self.assertIn("cannot be verified", str(caught.exception))
 
-    def test_a_traversing_selector_cannot_reach_another_project(self) -> None:
-        (self.root / "amiga").mkdir(parents=True)
-        self.binding_file("nuvyr", "CHAT-A")
-        with self.assertRaises(SystemExit) as caught:
-            codex_stream.resolve_thread(
-                self.args(agent="codex", project="amiga/../nuvyr", chat="CHAT-A"))
-        self.assertIn("one literal name", str(caught.exception))
-
-    def test_glob_metacharacters_and_empty_selectors_are_refused(self) -> None:
-        self.binding_file("amiga", "CHAT-A")
-        for field, value in (("project", "*"), ("project", ""), ("chat", "CHAT-[A]"),
-                             ("chat", "*"), ("chat", ""), ("chat", "."), ("chat", "..")):
+    def test_traversal_and_glob_selectors_are_refused(self) -> None:
+        self.bind()
+        cases = [("project", "amiga/../nuvyr"), ("project", "*"), ("project", ""),
+                 ("chat", "CHAT-[A]"), ("chat", "*"), ("chat", ""), ("chat", "."),
+                 ("chat", ".."), ("chat", "CHAT-A/../CHAT-B")]
+        for field, value in cases:
             with self.subTest(field=field, value=value):
                 kw = {"agent": "codex", "project": "amiga"}
                 kw[field] = value
@@ -267,27 +337,24 @@ class ResolveThreadTest(unittest.TestCase):
                     codex_stream.resolve_thread(self.args(**kw))
 
     def test_a_traversing_agent_selector_is_refused(self) -> None:
-        self.binding_file("amiga", "CHAT-A")
+        self.bind()
         with self.assertRaises(SystemExit):
             codex_stream.resolve_thread(
                 self.args(agent="../amiga/CHAT-A/codex", project="amiga", chat="CHAT-A"))
 
-    # --- the enumeration budget -----------------------------------------------------
+    # --- the enumeration budget ---------------------------------------------------------
 
-    def test_every_entry_consumes_the_scan_budget_before_filtering(self) -> None:
-        """Charging only directories let an untrusted tree spend unbounded work on entries
-        that were then discarded."""
-        (self.root / "amiga").mkdir(parents=True)
+    def test_every_entry_consumes_the_budget_before_filtering(self) -> None:
+        (self.bindings / "amiga").mkdir(parents=True)
         for i in range(5):
-            (self.root / "amiga" / f"junk-{i}.txt").write_text("x", encoding="utf-8")
+            (self.bindings / "amiga" / f"junk-{i}.txt").write_text("x", encoding="utf-8")
         with mock.patch.object(codex_stream, "MAX_SCANNED_CHATS", 1):
             with self.assertRaises(SystemExit) as caught:
                 codex_stream.resolve_thread(self.args(agent="codex", project="amiga"))
         self.assertIn("more than", str(caught.exception))
 
-    def test_a_named_chat_needs_no_enumeration_at_all(self) -> None:
-        self.binding_file("amiga", "CHAT-A")
-        self.delegate({"CHAT-A": self.session()})
+    def test_a_named_chat_needs_no_enumeration(self) -> None:
+        self.bind()
         with mock.patch.object(codex_stream, "MAX_SCANNED_CHATS", 0):
             thread, _p, _h = codex_stream.resolve_thread(
                 self.args(agent="codex", project="amiga", chat="CHAT-A"))
