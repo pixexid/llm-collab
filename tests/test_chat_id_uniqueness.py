@@ -93,13 +93,30 @@ class ChatIdUniquenessTest(unittest.TestCase):
             found = _helpers.find_chat_by_partial("CHAT-READY-DRIFT")
         self.assertEqual("2026-07-20_a__CHAT-READY-DRIFT", found.name)
 
-    def test_every_real_chat_directory_yields_an_id(self) -> None:
-        """Guards the naming assumption this rule now depends on."""
-        real = [p for p in (ROOT / "Chats").iterdir()
-                if p.is_dir() and not p.name.startswith(".")]
-        self.assertTrue(real, "the live workspace should have chats to check")
-        missing = [p.name for p in real if _helpers.chat_id_of(p) is None]
-        self.assertEqual([], missing, "every chat directory must expose an id after '__'")
+    def test_the_naming_convention_this_rule_depends_on(self) -> None:
+        """Fixture-only, deliberately.
+
+        An earlier version walked the live ROOT/Chats tree, which is gitignored mutable
+        runtime state: absent in a clean checkout, so the suite raised FileNotFoundError
+        there. A unit test may not depend on another lane's working directory. The
+        346-directory live survey that motivated this parser stays where it belongs, as
+        review evidence in the PR body.
+        """
+        shapes = {
+            "2026-07-20_slug__CHAT-8976EECB": "CHAT-8976EECB",
+            "2026-04-23_readiness-drift__CHAT-READY-DRIFT": "CHAT-READY-DRIFT",
+            "2026-03-30_workstream__gh-127-ui__CHAT-b13bc468": "CHAT-b13bc468",
+            "2026-07-20_re-CHAT-0000AAAA-followup__CHAT-8976EECB": "CHAT-8976EECB",
+        }
+        with self._chats(*shapes):
+            for name, expected in shapes.items():
+                with self.subTest(name=name):
+                    self.assertEqual(expected, _helpers.chat_id_of(Path(name)))
+
+    def test_a_directory_without_the_separator_exposes_no_id(self) -> None:
+        # such a directory can never be an exact match, so it can only be a loose one
+        self.assertIsNone(_helpers.chat_id_of(Path("CHAT-8976EECB")))
+        self.assertIsNone(_helpers.chat_id_of(Path("2026-07-20_slug-CHAT-8976EECB")))
 
     def test_lowercase_legacy_ids_are_covered_by_the_same_rule(self) -> None:
         with self._chats("2026-04-01_a__CHAT-e71d34ff", "2026-04-02_b__CHAT-e71d34ff"):
