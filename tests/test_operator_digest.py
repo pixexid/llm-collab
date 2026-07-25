@@ -245,6 +245,76 @@ class RepoEnumerationTest(unittest.TestCase):
         self.assertEqual({"pixexid/amiga", "pixexid/nuvyr", "pixexid/nuvyr_app"},
                          set(targets.values()))
 
+    def _targets_for(self, projects: list[dict], origin: str | None = "pixexid/llm-collab"):
+        (self.root / "projects.json").write_text(json.dumps({"projects": projects}),
+                                                 encoding="utf-8")
+        with mock.patch.object(operator_digest, "_repo_targets_cache", None):
+            with mock.patch.object(operator_digest, "git_origin_slug", return_value=origin):
+                return operator_digest.known_repo_targets()
+
+    def test_a_project_id_colliding_with_another_repos_basename_fails_closed(self) -> None:
+        """Last-write-wins silently retargeted the collision to the wrong repo.
+
+        Project id `shared` names owner/first, while another repo's BASENAME is also
+        `shared`. A packet scoped to project shared then queried owner/shared and could
+        report a live request as moot on a same-numbered PR from the wrong repository.
+        """
+        targets = self._targets_for([
+            {"id": "shared", "github": {"repo": "pixexid/first"}},
+            {"id": "other", "github": {"repo": "pixexid/shared"}},
+        ])
+        self.assertIsNone(targets.get("shared"),
+                          "an alias claimed by two repos must resolve to neither")
+        # both repos remain enumerable, and both stay reachable by their full slug
+        self.assertEqual({"pixexid/first", "pixexid/shared", "pixexid/llm-collab"},
+                         set(targets.values()))
+        self.assertEqual("pixexid/first", targets.get("pixexid/first"))
+        self.assertEqual("pixexid/shared", targets.get("pixexid/shared"))
+        self.assertEqual("other", "other")
+        self.assertEqual("pixexid/shared", targets.get("other"),
+                         "an unambiguous alias for the same repo still resolves")
+
+    def test_two_projects_declaring_the_same_repo_keep_their_aliases(self) -> None:
+        # the same slug claimed twice is not ambiguity -- it is one destination
+        targets = self._targets_for([
+            {"id": "app", "github": {"repo": "pixexid/nuvyr"}},
+            {"id": "web", "github": {"repo": "pixexid/nuvyr"}},
+        ])
+        self.assertEqual("pixexid/nuvyr", targets.get("app"))
+        self.assertEqual("pixexid/nuvyr", targets.get("web"))
+        self.assertEqual("pixexid/nuvyr", targets.get("nuvyr"))
+
+    def test_two_projects_sharing_one_id_across_different_repos_fails_closed(self) -> None:
+        targets = self._targets_for([
+            {"id": "app", "github": {"repo": "pixexid/one"}},
+            {"id": "app", "github": {"repo": "pixexid/two"}},
+        ])
+        self.assertIsNone(targets.get("app"))
+        self.assertEqual({"pixexid/one", "pixexid/two", "pixexid/llm-collab"},
+                         set(targets.values()))
+
+    def test_an_ambiguous_alias_cannot_resolve_a_bare_pr_reference(self) -> None:
+        """The whole point: ambiguity must not settle anything."""
+        packet = self.root / "packet.md"
+        packet.write_text('---\nrepo_targets: ["shared"]\n---\nHeld on #170.',
+                          encoding="utf-8")
+        relpath = "packet.md"
+
+        def no_pr_lookup(argv, **kwargs):
+            self.assertNotIn("pr", argv, "an ambiguous alias must not be looked up")
+            return mock.Mock(stdout="", returncode=0)
+
+        targets = self._targets_for([
+            {"id": "shared", "github": {"repo": "pixexid/first"}},
+            {"id": "other", "github": {"repo": "pixexid/shared"}},
+        ])
+        with mock.patch.object(operator_digest, "known_repo_targets", return_value=targets):
+            with mock.patch.object(operator_digest.subprocess, "run",
+                                   side_effect=no_pr_lookup):
+                settled, note = operator_digest.resolution_hint(relpath)
+        self.assertFalse(settled)
+        self.assertIn("not checked", note)
+
     def test_open_prs_labels_each_row_and_reports_unreachable_repos(self) -> None:
         def run(argv, **kwargs):
             slug = argv[argv.index("--repo") + 1]

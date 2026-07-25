@@ -74,25 +74,37 @@ def known_repo_targets() -> dict[str, str]:
     if _repo_targets_cache is not None:
         return _repo_targets_cache
 
-    targets: dict[str, str] = {}
+    # alias -> every slug that claims it. Collected first, resolved after, because a
+    # last-write-wins map silently retargets a collision: project id `shared` -> owner/first
+    # was overwritten by another repo whose BASENAME is `shared`, so a packet scoped to
+    # project shared queried the wrong repo and could false-moot a live request.
+    claims: dict[str, set[str]] = {}
 
-    def register(slug: str | None) -> None:
+    def claim(alias: str | None, slug: str) -> None:
+        if alias:
+            claims.setdefault(str(alias), set()).add(slug)
+
+    def register(slug: str | None, project_id: str | None = None) -> None:
         if not slug or "/" not in slug:
             return
-        targets[slug] = slug
-        targets[slug.split("/")[-1]] = slug
+        claim(slug, slug)
+        claim(slug.split("/")[-1], slug)
+        claim(project_id, slug)
 
     register(git_origin_slug())
 
     try:
         payload = json.loads((ROOT / "projects.json").read_text(encoding="utf-8"))
         for project in payload.get("projects", []):
-            slug = (project.get("github") or {}).get("repo")
-            register(slug)
-            if slug and project.get("id"):
-                targets[str(project["id"])] = slug
+            register((project.get("github") or {}).get("repo"), project.get("id"))
     except (OSError, json.JSONDecodeError):
         pass
+
+    # An alias claimed by two repos resolves to neither. Every slug also claims ITSELF, and
+    # only itself, so dropping ambiguous aliases never drops a repo from enumeration and an
+    # ambiguous short alias stays reachable by writing the owner/name out in full: failing
+    # closed costs the caller precision, not access.
+    targets = {alias: next(iter(slugs)) for alias, slugs in claims.items() if len(slugs) == 1}
 
     _repo_targets_cache = targets
     return targets
