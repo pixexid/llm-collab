@@ -114,6 +114,33 @@ class ResolveThreadTest(unittest.TestCase):
         thread, _ = codex_stream.resolve_thread(self.args(agent="codex", project="nuvyr"))
         self.assertEqual("nuvyr-thread", thread)
 
+    def test_a_glob_metacharacter_in_a_chat_selector_matches_nothing(self) -> None:
+        """A selector is a name, not a pattern.
+
+        Interpolating selectors into Path.glob made `CHAT-[A]` a character class that
+        resolved CHAT-A -- a caller could reach a thread it did not name.
+        """
+        binding(self.root, "amiga", "CHAT-A", "codex", "thread-a")
+        with self.assertRaises(SystemExit):
+            codex_stream.resolve_thread(
+                self.args(agent="codex", project="amiga", chat="CHAT-[A]"))
+
+    def test_a_wildcard_project_selector_matches_nothing(self) -> None:
+        binding(self.root, "amiga", "CHAT-A", "codex", "thread-a")
+        with self.assertRaises(SystemExit):
+            codex_stream.resolve_thread(self.args(agent="codex", project="*"))
+
+    def test_a_wildcard_chat_selector_matches_nothing(self) -> None:
+        binding(self.root, "amiga", "CHAT-A", "codex", "thread-a")
+        with self.assertRaises(SystemExit):
+            codex_stream.resolve_thread(self.args(agent="codex", project="amiga", chat="*"))
+
+    def test_a_question_mark_in_an_agent_selector_matches_nothing(self) -> None:
+        # the agent lands in the FILENAME, which was globbed too
+        binding(self.root, "amiga", "CHAT-A", "codex", "thread-a")
+        with self.assertRaises(SystemExit):
+            codex_stream.resolve_thread(self.args(agent="code?", project="amiga", chat="CHAT-A"))
+
     def test_explicit_thread_bypasses_binding_lookup(self) -> None:
         thread, provenance = codex_stream.resolve_thread(self.args(thread="thread-x"))
         self.assertEqual("thread-x", thread)

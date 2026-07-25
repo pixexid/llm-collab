@@ -110,13 +110,29 @@ def resolve_thread(args: argparse.Namespace) -> tuple[str, str]:
     if not args.agent:
         raise SystemExit("[error] pass --thread, or --agent with --project/--chat")
 
-    # Every supplied selector narrows the search, independently. An earlier version only
-    # honoured --chat when --project came with it, so `--agent codex --chat CHAT-WANTED`
-    # silently searched every chat and, with exactly one active binding elsewhere, returned
-    # that other thread without any ambiguity error to warn the caller.
-    project_glob = args.project or "*"
-    chat_glob = args.chat if args.chat and args.chat != "last" else "*"
-    candidates = sorted(BINDINGS_DIR.glob(f"{project_glob}/{chat_glob}/{args.agent}.json"))
+    # Every supplied selector narrows the search independently, and is used as a LITERAL
+    # path segment. Two bugs lived here in turn: --chat was ignored unless --project came
+    # with it, so a named chat silently searched every chat; then the fix interpolated the
+    # selectors into a glob pattern, where `CHAT-[A]` became a character class matching
+    # CHAT-A and `--project '*'` matched every project. A selector is a name, not a
+    # pattern, so only OMITTED levels are enumerated.
+    def children(directory: Path) -> list[str]:
+        try:
+            return sorted(d.name for d in directory.iterdir() if d.is_dir())
+        except OSError:
+            return []
+
+    chat_named = args.chat and args.chat != "last"
+    projects = [args.project] if args.project else children(BINDINGS_DIR)
+    candidates: list[Path] = []
+    for project in projects:
+        project_dir = BINDINGS_DIR / project
+        chats = [args.chat] if chat_named else children(project_dir)
+        for chat in chats:
+            candidate = project_dir / chat / f"{args.agent}.json"
+            if candidate.is_file():
+                candidates.append(candidate)
+    candidates.sort()
 
     bindings = []
     for path in candidates:
