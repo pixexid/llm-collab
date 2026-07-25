@@ -730,12 +730,31 @@ def latest_chat() -> Path | None:
     return chats[-1] if chats else None
 
 
+CHAT_ID_PATTERN = re.compile(r"^CHAT-[0-9A-Za-z]+$")
+
+
 def find_chat_by_partial(partial: str) -> Path | None:
+    """Resolve a chat selector to one directory.
+
+    A loose partial matching several chats keeps newest-wins, which is fine for
+    human lookup. An exact chat id matching several directories is different: chat
+    ids must be unique, so two matches mean the workspace is corrupt, and picking
+    the newest silently routed delivery into whichever directory sorted last. That
+    is how mail reaches the wrong receiver -- and how a chat whose duplicate lacked
+    meta.json blocked delivery entirely with an error naming a directory the sender
+    never chose. Refuse instead of guessing.
+    """
     if partial == "last":
         return latest_chat()
     matches = find_chats(partial)
     if not matches:
         return None
+    if len(matches) > 1 and CHAT_ID_PATTERN.match(partial.strip()):
+        names = "\n  ".join(sorted(d.name for d in matches))
+        raise ValueError(
+            f"chat id {partial} matches {len(matches)} directories; ids must be unique:\n  {names}\n"
+            "Merge or re-id the duplicates before sending -- delivery will not guess."
+        )
     return matches[-1]
 
 

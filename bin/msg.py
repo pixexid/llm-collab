@@ -42,7 +42,10 @@ def parse_args() -> argparse.Namespace:
 def resolve_project(chat_selector: str, explicit_project: str | None) -> str:
     if explicit_project:
         return explicit_project
-    chat_dir = find_chat_by_partial(chat_selector)
+    try:
+        chat_dir = find_chat_by_partial(chat_selector)
+    except ValueError as error:
+        raise SystemExit(f"[error] {error}")
     if chat_dir is None:
         raise SystemExit("[error] Could not resolve chat for project inference; pass --project explicitly.")
     chat_meta = load_chat_meta(chat_dir)
