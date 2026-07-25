@@ -1180,36 +1180,78 @@ def command_is_app_server_invocation(command: str) -> bool:
     if not any(token == LISTEN_FLAG or token.startswith(f"{LISTEN_FLAG}=")
                for token in tokens[1:]):
         return False
+    if not executable_is_a_codex_binary(tokens[0]):
+        return False
     return app_server_is_the_subcommand(tokens)
+
+
+def executable_is_a_codex_binary(executable: str) -> bool:
+    """Whether this argv's executable can plausibly be the Codex CLI.
+
+    Needed because NEITHER guess about unknown options is safe on its own. Treating an
+    unrecognized flag as value-taking swallows the subcommand, so
+    `codex --strict-config app-server ...` disappears. Treating it as valueless admits
+    `worker --label app-server ...`, because `app-server` then lands in the subcommand slot.
+    The option table cannot resolve that; the executable can.
+
+    Deliberately weaker than the literal-name match this replaced: the CONFIGURED binary is
+    accepted whatever it is called, which is the point of LLM_COLLAB_CODEX_BIN, and otherwise
+    the basename must contain `codex` -- covering `codex-cli`, `codex-0.146.0` and wrappers
+    named for what they wrap. A wrapper named neither is found only by configuring it, which
+    is a documented knob rather than a silent failure.
+    """
+    configured = os.environ.get("LLM_COLLAB_CODEX_BIN")
+    if configured and executable == configured:
+        return True
+    return "codex" in executable.rsplit("/", 1)[-1].lower()
 
 
 def app_server_is_the_subcommand(tokens: list[str]) -> bool:
     """Whether `app-server` occupies the subcommand slot of this argv.
 
-    Options before the subcommand are skipped, including the value of a separated option such
-    as `-c key=value`, because the real desktop invocation uses exactly that form. Any other
-    bare word reached first means this argv's subcommand is something else, and a later
-    `app-server` token is an option value or a label rather than the command.
+    Global options before the subcommand are skipped, and the ones that consume a following
+    token are ENUMERATED rather than guessed. An earlier version assumed every unrecognized
+    option was value-taking, which swallowed the subcommand after ordinary flags: valid
+    invocations like `codex --strict-config app-server --listen ...`, and the same with
+    `--oss`, `--search` or `--dangerously-bypass-approvals-and-sandbox`, made a reachable
+    server vanish from discovery.
+
+    Guessing in the other direction is the safer default. An unknown flag treated as
+    valueless leaves the subcommand where it is; an unknown flag treated as value-taking eats
+    it. The only cost is that a FUTURE value-taking option whose value is a bare word would
+    hide that one invocation, which a test against the installed CLI is there to catch.
     """
     index = 1
     while index < len(tokens):
         token = tokens[index]
-        if token.startswith("-"):
-            if "=" in token or token.startswith("--no-"):
-                index += 1
-                continue
-            if token in VALUELESS_OPTIONS:
-                index += 1
-                continue
-            index += 2  # the option and its value
-            continue
-        return token == "app-server"
+        if not token.startswith("-"):
+            return token == "app-server"
+        if "=" in token:
+            index += 1  # --flag=value is one token
+        elif token in VALUE_TAKING_GLOBAL_OPTIONS:
+            index += 2  # the option and its separate value
+        else:
+            index += 1  # a flag
     return False
 
 
-# Options that take no value, so the token after them is the next option or the subcommand.
-VALUELESS_OPTIONS = frozenset({"-h", "--help", "-V", "--version", "-q", "--quiet",
-                               "-v", "--verbose", "--json"})
+# Global options that consume a following token, transcribed from `codex --help` (every entry
+# there carrying a `<VALUE>` placeholder). test_option_table_matches_the_installed_cli keeps
+# this honest against the binary rather than against my memory of it -- the whole family of
+# defects in this concern came from encoding a rule about a value instead of reading it.
+VALUE_TAKING_GLOBAL_OPTIONS = frozenset({
+    "-c", "--config",
+    "--enable", "--disable",
+    "--remote", "--remote-auth-token-env",
+    "-i", "--image",
+    "-m", "--model",
+    "--local-provider",
+    "-p", "--profile",
+    "-s", "--sandbox",
+    "-C", "--cd",
+    "--add-dir",
+    "-a", "--ask-for-approval",
+})
 
 
 def codex_app_server_process_rows() -> list[dict[str, Any]]:

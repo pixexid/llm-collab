@@ -5260,6 +5260,92 @@ class RenamedCodexBinaryDiscoveryTest(unittest.TestCase):
         ])
         self.assertEqual([], found, "a false positive points delivery at the wrong endpoint")
 
+    def test_ordinary_global_flags_do_not_hide_the_subcommand(self) -> None:
+        """Assuming every unknown option takes a value swallowed the subcommand.
+
+        These are all valid installed-CLI invocations, and each one made a reachable server
+        vanish from discovery.
+        """
+        found = self.rows([
+            "/opt/bin/codex --strict-config app-server --listen ws://127.0.0.1:8767",
+            "/opt/bin/codex --oss app-server --listen ws://127.0.0.1:8768",
+            "/opt/bin/codex --search app-server --listen ws://127.0.0.1:8769",
+            "/opt/bin/codex --dangerously-bypass-approvals-and-sandbox "
+            "app-server --listen ws://127.0.0.1:8770",
+            "/opt/bin/codex --no-alt-screen app-server --listen ws://127.0.0.1:8771",
+        ])
+        self.assertEqual(5, len(found), f"all five are reachable servers: {found}")
+
+    def test_value_taking_options_still_consume_their_value(self) -> None:
+        found = self.rows([
+            "/opt/bin/codex -m gpt-5 app-server --listen ws://127.0.0.1:8767",
+            "/opt/bin/codex --cd /tmp app-server --listen ws://127.0.0.1:8768",
+            "/opt/bin/codex -c features.x=true --strict-config -p prof "
+            "app-server --listen ws://127.0.0.1:8769",
+        ])
+        self.assertEqual(3, len(found), f"{found}")
+
+    def test_the_option_table_matches_the_installed_cli(self) -> None:
+        """Keeps the transcribed table honest against the binary, not against my memory.
+
+        Every option `codex --help` shows with a <VALUE> placeholder must be listed as
+        value-taking, and no bare flag may be.
+        """
+        import re as _re
+        import shutil as _shutil
+        import subprocess as _sp
+
+        binary = "/Applications/ChatGPT.app/Contents/Resources/codex"
+        if not Path(binary).exists():
+            binary = _shutil.which("codex") or ""
+        if not binary:
+            self.skipTest("no codex binary available to compare against")
+        text = _sp.run([binary, "--help"], capture_output=True, text=True,
+                       timeout=60).stdout
+        table = session_autobridge_lib.VALUE_TAKING_GLOBAL_OPTIONS
+        checked = 0
+        for line in text.splitlines():
+            if not _re.match(r"^  +-", line):
+                continue
+            names = _re.findall(r"(-{1,2}[A-Za-z][\w-]*)", line.split("  ", 3)[-1] or line)
+            names = [n for n in _re.findall(r"(?:^|[\s,])(-{1,2}[A-Za-z][\w-]*)", line)]
+            if not names:
+                continue
+            takes_value = "<" in line
+            for name in names:
+                if name in {"-h", "--help", "-V", "--version"}:
+                    continue
+                checked += 1
+                if takes_value:
+                    self.assertIn(name, table,
+                                  f"{name} takes a value per --help but is missing from the table")
+                else:
+                    self.assertNotIn(name, table,
+                                     f"{name} is a bare flag per --help but listed as value-taking")
+        self.assertGreater(checked, 10, "the help output should have yielded many options")
+
+    def test_an_executable_that_is_not_codex_is_refused(self) -> None:
+        """The option table cannot separate these; the executable can.
+
+        With unknown flags treated as valueless -- which is required so that --strict-config
+        does not hide the subcommand -- `worker --label app-server` puts app-server in the
+        subcommand slot. Only the executable's identity rejects it.
+        """
+        found = self.rows([
+            "/opt/bin/worker --label app-server --listen ws://127.0.0.1:9998",
+            "/usr/bin/python3 -m something app-server --listen ws://127.0.0.1:9997",
+        ])
+        self.assertEqual([], found, f"{found}")
+
+    def test_the_configured_binary_is_accepted_whatever_it_is_called(self) -> None:
+        # the point of LLM_COLLAB_CODEX_BIN: a wrapper named nothing like codex still works
+        from unittest import mock as m
+        with m.patch.dict("os.environ", {"LLM_COLLAB_CODEX_BIN": "/opt/custom/run-server"}):
+            found = self.rows(["/opt/custom/run-server app-server --listen ws://127.0.0.1:8767"])
+        self.assertEqual(1, len(found))
+        unconfigured = self.rows(["/opt/custom/run-server app-server --listen ws://127.0.0.1:8767"])
+        self.assertEqual([], unconfigured, "and only when it is configured")
+
     def test_a_substring_match_is_not_enough(self) -> None:
         """These two were admitted by `"app-server" in command`.
 
