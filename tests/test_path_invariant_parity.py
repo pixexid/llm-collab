@@ -51,6 +51,13 @@ CASES = [
     f"~{getpass.getuser()}",
     f"~{getpass.getuser()}/.codex",
     "~nosuchuser/.codex",
+    # os.path.join(home, "/x") discards home; Node path.join keeps it. normpath preserves
+    # exactly two leading slashes per POSIX; path.resolve collapses them. Both divergences
+    # shipped inside the fix for the named-user one.
+    "~//x",
+    "~///x",
+    "//tmp/codex-home",
+    "///tmp/a",
 ]
 
 # load the REAL exported function, never a reimplementation
@@ -100,8 +107,13 @@ class PathInvariantParityTest(unittest.TestCase):
         found an endpoint and delivery failed with no diagnostic.
         """
         # cross the boundary for each case, including the tilde that used to diverge
-        for case in ("/tmp/codex-home/", "~/.codex", "~",
-                     f"~{getpass.getuser()}/.codex"):
+        # Only cases that canonicalize to an ABSOLUTE literal belong here: this loop
+        # compares two implementations that each bind their own root, so a
+        # relative-resolving case (including the now-literal ~user forms) fails wherever
+        # the checkout and the config's worktree differ. Those are covered by the parity
+        # matrix, which passes one explicit shared base, and by the production
+        # ecosystem test.
+        for case in ("/tmp/codex-home/", "~/.codex", "~", "~//x", "//tmp/codex-home"):
             with self.subTest(case=case):
                 registered = session_autobridge.canonical_runtime_home(case)
                 launched = cjs_canonical([case], base=str(ROOT))[0]

@@ -909,14 +909,21 @@ def canonical_path(value, base=None):
     because os.path.expanduser accepts them and the CJS mirror cannot, and a form that
     canonicalizes to an absolute home on one side and a repo-relative ``~user`` directory
     on the other is the validate-one-path/use-another defect wearing a different hat.
+
+    Leading separator runs collapse to one, and a ``~/`` tail's own leading run is
+    stripped before joining. Both exist because Node and Python disagree by default:
+    ``os.path.join(home, "/x")`` discards home while ``path.join`` keeps it, and
+    ``normpath`` preserves exactly two leading slashes per POSIX while ``path.resolve``
+    collapses them. ``~//x`` and ``//tmp/codex-home`` each canonicalized to a different
+    literal on each side, which is the same one-sided-normalization defect as the rest.
     """
     import os as _os
 
     text = str(value).strip()
     if text == "~" or text.startswith("~/"):
         home = _os.path.expanduser("~")
-        text = home if text == "~" else _os.path.join(home, text[2:])
+        text = home if text == "~" else _os.path.join(home, text[2:].lstrip("/"))
     root = str(base) if base is not None else str(ROOT)
     joined = text if _os.path.isabs(text) else _os.path.join(root, text)
-    normalised = _os.path.normpath(joined)
+    normalised = re.sub(r"^/+", "/", _os.path.normpath(joined))
     return Path(normalised)
