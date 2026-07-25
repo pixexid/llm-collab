@@ -98,6 +98,39 @@ class RegisterRuntimeHomeTest(unittest.TestCase):
         self.assertEqual(0, result.returncode, result.stderr[:400])
         return json.loads(result.stdout[result.stdout.index("{"):])
 
+    def test_a_home_derived_from_the_session_source_is_canonicalized(self) -> None:
+        """The derived fallback must pass through the same invariant as an explicit flag.
+
+        Stored raw, a relative source produced a runtime home that could never match the
+        sidecar's absolute CODEX_HOME process marker, so discovery found no endpoint and
+        delivery failed with no diagnostic -- the exact failure canonicalization was added for.
+        """
+        result = subprocess.run(
+            [
+                sys.executable, str(ROOT / "bin" / "session_autobridge.py"), "register",
+                "--session", "SESSION-RH-DERIVED", "--agent", "codex",
+                "--project", "amiga", "--chat", "CHAT-RH-TEST",
+                "--repo-target", "llm-collab",
+                "--mode", "auto-read", "--status", "parked",
+                "--wake-strategy", "runtime_trigger",
+                "--runtime-family", "codex_app",
+                "--runtime-session-id", "thread-rh-derived",
+                # relative, non-normalized, and NO --runtime-home
+                "--runtime-session-source", "./sub/../rh-sessions/index.jsonl",
+                "--ttl-seconds", "60", "--json",
+            ],
+            capture_output=True, text=True, timeout=60, cwd=str(self.workspace),
+        )
+        self.assertEqual(0, result.returncode, result.stderr[:400])
+        payload = json.loads(result.stdout[result.stdout.index("{"):])
+        home = payload["runtime"].get("home")
+        if home is None:
+            self.skipTest("this runtime family derives no home from a session source")
+        self.assertTrue(home.startswith("/"),
+                        f"a derived home must be absolute to match CODEX_HOME: {home!r}")
+        self.assertNotIn("/../", home, f"and normalized: {home!r}")
+        self.assertNotIn("/./", home, f"and normalized: {home!r}")
+
     def test_registration_never_touches_the_real_state_tree(self) -> None:
         """The isolation itself is the assertion, not a side effect of it."""
         self._register("SESSION-RH-ISOLATION", "amiga", "/tmp/rh-home")

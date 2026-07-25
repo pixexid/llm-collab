@@ -1360,13 +1360,33 @@ class JsonRpcWebSocketClient:
                 self.send_json({"jsonrpc": "2.0", "id": message["id"], "result": {}})
 
 
+# Mirrors TOKEN_BLANK_CHARS in bin/pm2_watchers.py. Python's default strip() removes the
+# ASCII information separators, which the CLI keeps, so reading the secret with the default
+# turned a token the gate had approved into an empty string and sent no credential at all.
+TOKEN_BLANK_CHARS = (
+    "\t\n\v\f\r \u0085\u00a0\u1680"
+    "\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a"
+    "\u2028\u2029\u202f\u205f\u3000"
+)
+
+
 def _codex_app_server_token(token_file: str | None) -> str | None:
+    """Read the bearer token with exactly the semantics the gate validated.
+
+    The gate accepts a token, then this reads it: if the two disagree about what counts as
+    blank, an approved token becomes an empty credential here and the handshake fails with
+    the transport still reported as configured.
+    """
     if not token_file:
         return None
     path = Path(token_file).expanduser()
     if not path.exists():
         return None
-    return path.read_text().strip()
+    try:
+        content = path.read_bytes().decode("utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    return content.strip(TOKEN_BLANK_CHARS) or None
 
 
 def _extract_default_codex_model(models_payload: Any) -> str | None:

@@ -153,7 +153,12 @@ function codexAppServerApps() {
     // the other, one layer below the trim divergence.
     const decoded = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true })
       .decode(fs.readFileSync(tokenFile));
-    if (!decoded.replace(TOKEN_BLANK_PATTERN, "")) return [];
+    // The token must be usable by the DELIVERY CLIENT too, not merely accepted by the CLI:
+    // the client sends it in an HTTP Authorization header, where a BOM cannot be encoded and
+    // U+001C is stripped away to nothing. Mirrors token_is_usable() in bin/pm2_watchers.py.
+    const secret = decoded.replace(TOKEN_BLANK_PATTERN, "");
+    if (!secret) return [];
+    if (!/^[\x21-\x7e]+$/.test(secret)) return [];
   } catch {
     return [];
   }

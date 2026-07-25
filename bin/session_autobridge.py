@@ -243,7 +243,13 @@ def register_session(args) -> dict:
         runtime["session_source"] = args.runtime_session_source
     runtime_home = canonical_runtime_home(getattr(args, "runtime_home", None))
     if runtime_home is None and runtime.get("family") and runtime.get("session_source"):
-        runtime_home = runtime_home_from_source(str(runtime["family"]), runtime.get("session_source"))
+        # The derived fallback must pass through the SAME invariant as an explicit
+        # --runtime-home. Stored raw, a relative or non-normalized source produced a home
+        # that could never match the sidecar's absolute CODEX_HOME process marker, so
+        # discovery found no endpoint and delivery failed with no diagnostic.
+        runtime_home = canonical_runtime_home(
+            runtime_home_from_source(str(runtime["family"]), runtime.get("session_source"))
+        )
     if runtime_home is not None:
         runtime["home"] = runtime_home
     if args.runtime_command:

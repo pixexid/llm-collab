@@ -398,6 +398,70 @@ class Pm2EcosystemTest(unittest.TestCase):
                     self.assertEqual([], sidecars(load_apps(env)),
                                      "the config must agree with the manager")
 
+    def test_the_delivery_client_reads_exactly_what_the_gate_validated(self) -> None:
+        """Gate and client must agree on the same bytes, or an approved token sends nothing.
+
+        The client applied Python's default strip(), which removes the ASCII information
+        separators the gate's pinned predicate keeps. A token the gate approved could therefore
+        be read as empty here and the request go out with no Authorization header, while both
+        gates still reported the transport configured.
+        """
+        sys.path.insert(0, str(ROOT / "bin"))
+        import pm2_watchers
+        import _session_autobridge
+
+        self.assertEqual(pm2_watchers.TOKEN_BLANK_CHARS,
+                         _session_autobridge.TOKEN_BLANK_CHARS,
+                         "the gate and the client must share one blank predicate")
+
+        with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
+            token = Path(tmp) / "token"
+            token.write_text(" t0ken\n", encoding="utf-8")
+            token.chmod(0o600)
+            self.assertTrue(pm2_watchers.sidecar_token_is_secure(token))
+            self.assertEqual("t0ken", _session_autobridge._codex_app_server_token(str(token)))
+
+        # A separator-only token is refused by the gate, but the CLIENT's read must still use
+        # the pinned predicate: with Python's default strip() it returns None, so a manually
+        # launched sidecar's token would silently send no Authorization header.
+        with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
+            separator = Path(tmp) / "sep-token"
+            separator.write_text("\u001c", encoding="utf-8")
+            self.assertEqual(
+                "\u001c", _session_autobridge._codex_app_server_token(str(separator)),
+                "the client must not strip characters the pinned predicate keeps")
+
+    def test_a_token_the_client_would_blank_is_refused_by_the_gate(self) -> None:
+        sys.path.insert(0, str(ROOT / "bin"))
+        import pm2_watchers
+        import _session_autobridge
+
+        with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
+            for label, raw in (("separator", "\u001c"), ("bom", "\ufeff")):
+                with self.subTest(token=label):
+                    token = Path(tmp) / f"token-{label}"
+                    token.write_text(raw, encoding="utf-8")
+                    token.chmod(0o600)
+                    self.assertFalse(pm2_watchers.sidecar_token_is_secure(token),
+                                     "the gate must refuse what the client cannot send")
+
+    def test_a_non_ascii_token_is_refused_by_both_gates(self) -> None:
+        """Valid UTF-8, non-blank, and still unsendable in an HTTP header."""
+        sys.path.insert(0, str(ROOT / "bin"))
+        import pm2_watchers
+
+        with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
+            token = Path(tmp) / "token"
+            token.write_text("t0ken-\u00e9", encoding="utf-8")
+            token.chmod(0o600)
+            binary = Path(tmp) / "codex"
+            binary.write_text("#!/bin/sh\n", encoding="utf-8")
+            env = {"LLM_COLLAB_CODEX_APP_SERVER_TOKEN_FILE": str(token),
+                   "LLM_COLLAB_CODEX_BIN": str(binary)}
+            self.assertFalse(pm2_watchers.sidecar_token_is_secure(token))
+            self.assertEqual([], sidecars(load_apps(env)),
+                             "the config must agree with the manager")
+
     def test_the_blank_predicate_is_identical_in_both_languages(self) -> None:
         """Neither language's default trim matches the CLI, and they are inverted.
 
@@ -455,7 +519,7 @@ class Pm2EcosystemTest(unittest.TestCase):
         self.assertTrue(cjs["file separator"],
                         "U+001C is not Unicode White_Space, so the CLI sees content")
 
-    def test_an_information_separator_token_is_accepted_by_both_gates(self) -> None:
+    def test_an_information_separator_token_is_refused_as_unusable(self) -> None:
         """U+001C is not Unicode White_Space, so the CLI sees content and listens.
 
         Python's default str.strip() removes it, so the manager gate would call the token
@@ -475,10 +539,14 @@ class Pm2EcosystemTest(unittest.TestCase):
             env = {"LLM_COLLAB_CODEX_APP_SERVER_TOKEN_FILE": str(token),
                    "LLM_COLLAB_CODEX_BIN": str(binary)}
 
-            self.assertTrue(pm2_watchers.sidecar_token_is_secure(token),
-                            "U+001C is content to the CLI, so the manager must not refuse it")
-            self.assertEqual(1, len(sidecars(load_apps(env))),
+            self.assertFalse(pm2_watchers.sidecar_token_is_secure(token),
+                             "a credential the client strips to nothing must be refused")
+            self.assertEqual([], sidecars(load_apps(env)),
                              "the config must agree with the manager")
+            # the pinned blank predicate is still what decides blankness -- asserted directly,
+            # because this token is refused for being unusable, not for being blank
+            self.assertTrue("\u001c".strip(pm2_watchers.TOKEN_BLANK_CHARS),
+                            "U+001C must remain CONTENT under the CLI predicate")
 
     def test_a_nel_only_token_is_refused_by_both_gates(self) -> None:
         sys.path.insert(0, str(ROOT / "bin"))
@@ -498,8 +566,15 @@ class Pm2EcosystemTest(unittest.TestCase):
                 self.assertEqual([], pm2_watchers.enabled_sidecar_ids())
             self.assertEqual([], sidecars(load_apps(env)))
 
-    def test_a_bom_only_token_is_accepted_by_both_gates(self) -> None:
-        """The CLI listens on it, so refusing it would be over-strict, not safe."""
+    def test_a_bom_only_token_is_refused_because_the_client_cannot_send_it(self) -> None:
+        """Superseded contract, deliberately inverted.
+
+        This previously asserted acceptance, on the grounds that the CLI listens on a BOM-only
+        token so refusing it would be over-strict. That measured the wrong pair. The token must
+        ALSO be usable by our delivery client, which puts it in an HTTP Authorization header
+        where a BOM cannot be encoded at all. Agreeing with the CLI while disagreeing with our
+        own client still leaves both gates reporting a transport that cannot authenticate.
+        """
         sys.path.insert(0, str(ROOT / "bin"))
         import pm2_watchers
 
@@ -512,8 +587,9 @@ class Pm2EcosystemTest(unittest.TestCase):
             env = {"LLM_COLLAB_CODEX_APP_SERVER_TOKEN_FILE": str(token),
                    "LLM_COLLAB_CODEX_BIN": str(binary)}
 
-            self.assertTrue(pm2_watchers.sidecar_token_is_secure(token))
-            self.assertEqual(1, len(sidecars(load_apps(env))))
+            self.assertFalse(pm2_watchers.sidecar_token_is_secure(token),
+                             "a BOM cannot travel in an HTTP header")
+            self.assertEqual([], sidecars(load_apps(env)))
 
     def test_a_token_with_content_still_passes_both_gates(self) -> None:
         # the guard above must not reject a legitimate token

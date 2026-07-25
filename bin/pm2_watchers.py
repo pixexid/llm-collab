@@ -90,6 +90,23 @@ def sidecar_binary() -> Path:
     return canonical_path("/Applications/ChatGPT.app/Contents/Resources/codex")
 
 
+def token_is_usable(content: str) -> bool:
+    """True when BOTH the CLI and our delivery client can use this secret.
+
+    Agreeing with the CLI alone is not enough. The CLI accepts a BOM-only or U+001C-only
+    token, but the delivery client puts the secret in an HTTP Authorization header: a BOM
+    cannot be encoded there at all, and U+001C is stripped by the client's own read, which
+    would send no credential while both gates reported the transport configured.
+
+    So the accepted token is the INTERSECTION: non-blank under the pinned CLI predicate, and
+    every remaining character printable ASCII, which is what a header can carry.
+    """
+    stripped = content.strip(TOKEN_BLANK_CHARS)
+    if not stripped:
+        return False
+    return all("\x21" <= character <= "\x7e" for character in stripped)
+
+
 def sidecar_token_is_secure(path: Path) -> bool:
     """Mirror the ecosystem config's gate: owner-only regular file, no whitespace.
 
@@ -127,7 +144,7 @@ def sidecar_token_is_secure(path: Path) -> bool:
         content = path.read_bytes().decode("utf-8")
     except (OSError, UnicodeDecodeError):
         return False
-    return bool(content.strip(TOKEN_BLANK_CHARS))
+    return token_is_usable(content)
 
 
 def enabled_sidecar_ids() -> list[str]:
