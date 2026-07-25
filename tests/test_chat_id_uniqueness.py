@@ -92,6 +92,64 @@ class ChatIdUniquenessTest(unittest.TestCase):
                                     "2026-07-19_unrelated__CHAT-Y": "amiga"}):
             self.assertIsNone(_helpers.find_chat_by_partial("CHAT-X", project="amiga"))
 
+    def test_scoped_last_cannot_pick_another_projects_chat(self) -> None:
+        """`last` is a selection too, so it must select within scope.
+
+        Filtering after exact-id selection left this path unscoped: the newest chat overall
+        won even when it belonged to a different project, and the mistake only surfaced later
+        as a delivery failure.
+        """
+        with self._chats_with_meta({"2026-07-20_mine__CHAT-A": "amiga",
+                                    "2026-07-25_theirs__CHAT-B": "nuvyr"}):
+            found = _helpers.find_chat_by_partial("last", project="amiga")
+        self.assertEqual("2026-07-20_mine__CHAT-A", found.name,
+                         "the newest chat IN THIS PROJECT, not the newest overall")
+
+    def test_a_scoped_loose_partial_cannot_leave_the_project(self) -> None:
+        with self._chats_with_meta({"2026-07-20_gh-90-mine__CHAT-A": "amiga",
+                                    "2026-07-25_gh-90-theirs__CHAT-B": "nuvyr"}):
+            found = _helpers.find_chat_by_partial("gh-90", project="amiga")
+        self.assertEqual("2026-07-20_gh-90-mine__CHAT-A", found.name)
+
+    def test_a_scoped_lookup_with_no_chat_in_that_project_resolves_nothing(self) -> None:
+        with self._chats_with_meta({"2026-07-25_theirs__CHAT-B": "nuvyr"}):
+            self.assertIsNone(_helpers.find_chat_by_partial("last", project="amiga"))
+            self.assertIsNone(_helpers.find_chat_by_partial("gh-90", project="amiga"))
+
+    def test_malformed_metadata_elsewhere_cannot_block_a_valid_chat(self) -> None:
+        """An unrelated same-id directory with broken metadata must not raise.
+
+        It also must not match: metadata that cannot be read cannot establish a project.
+        """
+        import json as _json
+        import tempfile as _tempfile
+        tmp = _tempfile.TemporaryDirectory(dir="/tmp")
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        good = root / "2026-07-20_good__CHAT-X"
+        good.mkdir()
+        (good / "meta.json").write_text(
+            _json.dumps({"chat_id": "CHAT-X", "project_id": "amiga"}), encoding="utf-8")
+        broken = root / "2026-07-21_broken__CHAT-X"
+        broken.mkdir()
+        (broken / "meta.json").write_text("{not json", encoding="utf-8")
+
+        with mock.patch.object(_helpers, "CHATS_DIR", root):
+            found = _helpers.find_chat_by_partial("CHAT-X", project="amiga")
+        self.assertEqual("2026-07-20_good__CHAT-X", found.name,
+                         "a broken sibling must neither raise nor win")
+
+    def test_metadata_that_is_not_an_object_is_a_non_match(self) -> None:
+        import tempfile as _tempfile
+        tmp = _tempfile.TemporaryDirectory(dir="/tmp")
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        odd = root / "2026-07-20_odd__CHAT-X"
+        odd.mkdir()
+        (odd / "meta.json").write_text('["amiga"]', encoding="utf-8")
+        with mock.patch.object(_helpers, "CHATS_DIR", root):
+            self.assertIsNone(_helpers.find_chat_by_partial("CHAT-X", project="amiga"))
+
     def test_unscoped_callers_keep_the_global_uniqueness_rule(self) -> None:
         with self._chats_with_meta({"2026-07-20_a__CHAT-X": "amiga",
                                     "2026-07-21_b__CHAT-X": "nuvyr"}):
