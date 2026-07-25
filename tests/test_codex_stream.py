@@ -81,8 +81,17 @@ class ResolveThreadTest(unittest.TestCase):
              session_id=None, status="active", session_status="active", raw=None,
              session_project=None, session_chat=None, session_thread=None,
              session_family=None, lease=None, write_session=True,
-             session_home="/Users/session-side/.codex", session_updated="2026-01-01T00:00:00Z"):
-        """One coherent binding+session pair, with every field overridable to break it."""
+             session_home=None, session_updated="2026-01-01T00:00:00Z"):
+        """One coherent binding+session pair, with every field overridable to break it.
+
+        session_home defaults to the BINDING's home because that is what real records do: across the
+        44 live bindings in this workspace, 43 agree with their session and none disagree (the 44th
+        has one side absent). The old default hard-coded a different value, which made every fixture
+        pair permanently inconsistent about which App Server owns the thread -- and that arbitrary
+        disagreement is what made a real mismatch look like normal fixture noise.
+        """
+        if session_home is None:
+            session_home = home
         session_id = session_id or f"SESSION-{chat}"
         path = self.bindings / project / chat / f"{agent}.json"
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -290,6 +299,40 @@ class ResolveThreadTest(unittest.TestCase):
                 codex_stream.resolve_thread(self.args(agent="codex", project="amiga"))
         self.assertEqual([], scans,
                          "the resolver must not scan at all when the caller supplies sessions")
+
+    # --- binding and session must agree on which App Server owns the thread -----------------
+
+    def test_a_binding_and_session_disagreeing_on_home_are_refused(self) -> None:
+        """A torn re-registration under a different CODEX_HOME leaves a pair the resolver accepts.
+
+        resolve_exact_dispatch_pair validates the thread id and the runtime family but NOT the home,
+        so the two can point at different App Servers: resume fails there, or an unrelated matching
+        thread is observed. Real records always agree, so a disagreement is a conflict rather than a
+        preference to resolve.
+        """
+        self.bind(chat="CHAT-TORN", thread="t-torn", home="/tmp/new-home",
+                  session_home="/tmp/old-home")
+        with self.assertRaises(SystemExit) as caught:
+            codex_stream.resolve_thread(
+                self.args(agent="codex", project="amiga", chat="CHAT-TORN"))
+        message = str(caught.exception)
+        self.assertIn("/tmp/new-home", message)
+        self.assertIn("/tmp/old-home", message)
+        self.assertIn("re-register", message)
+
+    def test_agreeing_homes_resolve_normally(self) -> None:
+        self.bind(chat="CHAT-AGREE", thread="t-agree", home="/tmp/same")
+        _t, _p, home = codex_stream.resolve_thread(
+            self.args(agent="codex", project="amiga", chat="CHAT-AGREE"))
+        self.assertEqual("/tmp/same", home)
+
+    def test_a_session_with_no_home_still_resolves_from_the_binding(self) -> None:
+        """Only a real disagreement refuses; an absent session home is not a conflict."""
+        self.bind(chat="CHAT-NOSESSHOME", thread="t-nsh", home="/tmp/binding-home",
+                  session_home="")
+        _t, _p, home = codex_stream.resolve_thread(
+            self.args(agent="codex", project="amiga", chat="CHAT-NOSESSHOME"))
+        self.assertEqual("/tmp/binding-home", home)
 
     # --- the authoritative binding is bounded before it is parsed --------------------------
     #
@@ -644,13 +687,14 @@ class ResolveThreadTest(unittest.TestCase):
         self.assertEqual("new", thread)
 
     def test_the_binding_derived_runtime_home_is_used(self) -> None:
-        """The binding carries runtime_home; the session's copy may differ or be absent.
+        """The binding carries runtime_home and is the source; the session's copy is a fallback.
 
-        Reading the session's instead lost a binding-derived home entirely. The fixture gives
-        the two different values so that reading the wrong one cannot pass by coincidence.
+        This used to prove it by giving the two DIFFERENT values, so that reading the wrong one
+        could not pass by coincidence. A disagreement is now refused outright -- the two homes point
+        at different App Servers and picking one is guessing -- so the distinguishing case is a
+        session with no home at all. Same guarantee, expressed through a state that can still occur.
         """
-        self.bind(home="/Users/binding-side/.codex-alt",
-                  session_home="/Users/session-side/.codex")
+        self.bind(home="/Users/binding-side/.codex-alt", session_home="")
         _t, _p, home = codex_stream.resolve_thread(
             self.args(agent="codex", project="amiga", chat="CHAT-A"))
         self.assertEqual("/Users/binding-side/.codex-alt", home)
@@ -1041,7 +1085,6 @@ class DeadlineTest(unittest.TestCase):
 
     def client(self, frames=()):
         made = codex_stream.ObserverClient.__new__(codex_stream.ObserverClient)
-        made.observed_requests = []
         made.read_deadline = None
         made.timeout_seconds = 5
         made.sock = mock.Mock()
@@ -1450,7 +1493,9 @@ class SetupBoundaryTest(unittest.TestCase):
             client.request("thread/resume", {"threadId": "T1"})
         self.assertEqual([], client.pending_events,
                          "a server request is refused by policy, not replayed as an event")
-        self.assertEqual(["item/commandExecution/requestApproval"], client.observed_requests)
+        self.assertEqual({"item/commandExecution/requestApproval"},
+                         client.observed_request_methods)
+        self.assertEqual(1, client.observed_request_count)
 
     def test_the_deadline_is_installed_before_initialize(self) -> None:
         """A server that stalls answering initialize must not get the full idle timeout."""
@@ -1529,7 +1574,8 @@ class ObserverAnswersNothingTest(unittest.TestCase):
     def client(self, incoming: list[dict]) -> codex_stream.ObserverClient:
         """A client whose frame source is a queue, since it owns its own frame loop now."""
         client = codex_stream.ObserverClient.__new__(codex_stream.ObserverClient)
-        client.observed_requests = []
+        client.observed_request_methods = set()
+        client.observed_request_count = 0
         client.read_deadline = None
         client.timeout_seconds = 5
         client.sock = mock.Mock()
@@ -1552,6 +1598,35 @@ class ObserverAnswersNothingTest(unittest.TestCase):
         self.stderr = captured.getvalue()
         return got
 
+    def test_the_observed_method_set_is_capped_while_the_count_keeps_rising(self) -> None:
+        """A noisy or hostile peer must not grow this without bound.
+
+        The count is what shutdown reports, so it must stay exact; the SET is what can grow, so it
+        is capped. An earlier version stored one string per request, which a peer with an unlimited
+        streaming duration could grow indefinitely.
+        """
+        invented = [{"id": f"srv-{i}", "method": f"made/up/method-{i}", "params": {}}
+                    for i in range(codex_stream.MAX_OBSERVED_REQUEST_METHODS + 40)]
+        client = self.client(invented + [{"method": "turn/completed", "params": {}}])
+        self.drain(client, 1)
+
+        self.assertEqual(len(invented), client.observed_request_count,
+                         "every request must still be counted")
+        self.assertLessEqual(len(client.observed_request_methods),
+                             codex_stream.MAX_OBSERVED_REQUEST_METHODS,
+                             "the distinct-method set must be capped")
+
+    def test_a_hostile_method_NAME_cannot_evade_the_cap_by_being_huge(self) -> None:
+        """Capping the count of names is useless if one name can be arbitrarily long."""
+        monster = {"id": "srv-x", "method": "m" * 100_000, "params": {}}
+        client = self.client([monster, {"method": "turn/completed", "params": {}}])
+        self.drain(client, 1)
+
+        self.assertEqual(1, client.observed_request_count)
+        stored = next(iter(client.observed_request_methods))
+        self.assertLessEqual(len(stored), codex_stream.MAX_METHOD_NAME_CHARS,
+                             f"stored method name must be truncated, got {len(stored)} chars")
+
     def test_an_approval_request_produces_zero_response_frames(self) -> None:
         approval = {"id": "srv-1", "method": "item/commandExecution/requestApproval",
                     "params": {"threadId": "T1", "turnId": "U1", "command": "rm -rf /"}}
@@ -1562,7 +1637,9 @@ class ObserverAnswersNothingTest(unittest.TestCase):
         self.assertEqual([event], delivered, "the request must not surface as an event")
         self.assertEqual([], client.sent,
                          "an observer must send NO frame at all -- not a result, not an error")
-        self.assertEqual(["item/commandExecution/requestApproval"], client.observed_requests)
+        self.assertEqual({"item/commandExecution/requestApproval"},
+                         client.observed_request_methods)
+        self.assertEqual(1, client.observed_request_count)
         self.assertIn("srv-1", self.stderr, "the request must be reported with its id")
         self.assertIn("T1", self.stderr, "and with the thread it belongs to")
 
@@ -1595,7 +1672,8 @@ class ObserverAnswersNothingTest(unittest.TestCase):
         client = self.client(incoming)
         self.drain(client, 1)
         self.assertEqual([], client.sent, "no member of the union may be answered")
-        self.assertEqual(sorted(methods), sorted(client.observed_requests))
+        self.assertEqual(set(methods), client.observed_request_methods)
+        self.assertEqual(len(methods), client.observed_request_count)
 
     def test_this_client_opts_into_the_experimental_api(self) -> None:
         # if it stopped doing so, the ten-member union would become the correct matrix
@@ -1621,7 +1699,7 @@ class ObserverAnswersNothingTest(unittest.TestCase):
         delivered = self.drain(client, 1)
         self.assertEqual([event], delivered,
                          "a request with id 0 must not surface as an event")
-        self.assertEqual(["item/tool/call"], client.observed_requests)
+        self.assertEqual({"item/tool/call"}, client.observed_request_methods)
         self.assertEqual([], client.sent)
 
     def test_the_cli_entry_point_is_intact(self) -> None:

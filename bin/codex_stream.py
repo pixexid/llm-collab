@@ -75,6 +75,11 @@ MAX_PENDING_EVENT_BYTES = 8 * 1024 * 1024
 # the peer's 64-bit length field and calls recv() with it, so a frame advertising 1 TiB reached
 # recv(1099511627776) before any accounting ran. A budget at the wrong layer is not a budget.
 MAX_FRAME_BYTES = 8 * 1024 * 1024
+# The server-request method vocabulary is finite (11 members under --experimental), so this cap is
+# far above any honest peer and stops an inventive one from growing the set. Names are truncated
+# because the cap limits COUNT, and an unbounded name would evade a count-only limit.
+MAX_OBSERVED_REQUEST_METHODS = 64
+MAX_METHOD_NAME_CHARS = 128
 BINDINGS_DIR = ROOT / "State" / "session_autobridge" / "bindings"
 
 
@@ -107,7 +112,12 @@ class ObserverClient(autobridge.JsonRpcWebSocketClient):
     def __init__(self, *args, **kwargs) -> None:
         kwargs.setdefault("max_frame_bytes", MAX_FRAME_BYTES)
         super().__init__(*args, **kwargs)
-        self.observed_requests: list[str] = []
+        # A COUNT plus the distinct method names, not every occurrence. Shutdown reports both, and
+        # the default run has no duration, so a noisy peer appending one string per request grew
+        # this without limit. The set is bounded because the method vocabulary is finite; a peer
+        # inventing new names cannot grow it past the cap.
+        self.observed_request_count = 0
+        self.observed_request_methods: set[str] = set()
         # Notifications seen while a request/response correlation is in flight. The inherited
         # request() loop DISCARDS them, so an event emitted after this socket was registered
         # for the thread but before thread/resume answered was silently lost -- exactly at the
@@ -189,7 +199,9 @@ class ObserverClient(autobridge.JsonRpcWebSocketClient):
             message = json.loads(payload.decode("utf-8"))
             if message.get("id") is not None and message.get("method"):
                 method = str(message["method"])
-                self.observed_requests.append(method)
+                self.observed_request_count += 1
+                if len(self.observed_request_methods) < MAX_OBSERVED_REQUEST_METHODS:
+                    self.observed_request_methods.add(str(method)[:MAX_METHOD_NAME_CHARS])
                 params = message.get("params") or {}
                 print(f"[request] {method} id={message['id']} "
                       f"thread={params.get('threadId', '?')} turn={params.get('turnId', '?')}",
@@ -397,7 +409,20 @@ def resolve_thread(args: argparse.Namespace) -> tuple[str, str, str | None]:
         )
     # Binding preferred, session as fallback -- both come from the pair this resolution validated,
     # so neither is caller-controlled. There is deliberately no third branch.
-    home = binding.get("runtime_home") or runtime.get("home")
+    # The home decides which App Server this connects to, so a disagreement between the binding and
+    # its session is an identity conflict, not a preference to resolve. resolve_exact_dispatch_pair
+    # validates the thread id and the runtime family but NOT the home, so a torn re-registration
+    # under a different CODEX_HOME leaves a pair it accepts while the two homes point at different
+    # servers -- resume fails there, or an unrelated matching thread is observed.
+    binding_home = binding.get("runtime_home")
+    session_home = runtime.get("home")
+    if binding_home and session_home and str(binding_home) != str(session_home):
+        raise SystemExit(
+            f"[error] {project}/{chat} disagrees with its session about the runtime home: "
+            f"binding says {binding_home!r}, session says {session_home!r}. Refusing rather than "
+            "guessing which App Server owns this thread; re-register the session."
+        )
+    home = binding_home or session_home
     return thread_id, f"{project}/{chat}", str(home) if home else None
 
 
@@ -754,10 +779,10 @@ def main() -> None:
 
     if text_line_open:
         sys.stdout.write("\n")
-    if client.observed_requests:
-        print(f"[stream] saw {len(client.observed_requests)} server request(s) on this "
+    if client.observed_request_count:
+        print(f"[stream] saw {client.observed_request_count} server request(s) on this "
               f"observer socket and answered none: "
-              f"{', '.join(sorted(set(client.observed_requests)))}. Receiving these here "
+              f"{', '.join(sorted(client.observed_request_methods))}. Receiving these here "
               f"means App Server fans requests to non-owner clients.", file=sys.stderr)
     if failed:
         raise SystemExit(1)

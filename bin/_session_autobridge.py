@@ -1747,6 +1747,12 @@ def token_is_usable(content: str) -> bool:
     return usable_token(content) is not None
 
 
+# A bearer token is a short opaque string; the surrounding gates cap every other untrusted read, and
+# this one reached read_bytes() with no ceiling, so a corrupted or hostile --ws-token-file could
+# exhaust memory before the socket was even opened. Generous next to any real token.
+MAX_TOKEN_FILE_BYTES = 64 * 1024
+
+
 def _codex_app_server_token(token_file: str | None) -> str | None:
     """Read the bearer token with exactly the semantics the gate validated.
 
@@ -1760,8 +1766,19 @@ def _codex_app_server_token(token_file: str | None) -> str | None:
     if not path.exists():
         return None
     try:
-        content = path.read_bytes().decode("utf-8")
-    except (OSError, UnicodeDecodeError):
+        with path.open("rb") as handle:
+            raw = handle.read(MAX_TOKEN_FILE_BYTES + 1)
+    except OSError:
+        return None
+    if len(raw) > MAX_TOKEN_FILE_BYTES:
+        # Oversize reports as "no usable token", exactly like an unreadable one: both callers treat
+        # None that way and the connection then fails on the server's own rejection, which is a
+        # clear failure rather than a silent one. Changing the return contract instead would repeat
+        # the mistake of altering a shared function's failure mode for one caller's benefit.
+        return None
+    try:
+        content = raw.decode("utf-8")
+    except UnicodeDecodeError:
         return None
     return usable_token(content)
 

@@ -986,6 +986,58 @@ class HandshakeClosesOnFailureTest(unittest.TestCase):
             made._send_frame(b"hello")
         made.sock.sendall.assert_not_called()
 
+    # --- the token file is untrusted too ----------------------------------------------------
+
+    def test_an_oversized_token_file_is_not_read_whole(self) -> None:
+        """The last unbounded read on this reader's path, reached before the socket is even opened.
+
+        Every other boundary was capped -- registry, sessions, bindings, frames, handshake, setup
+        buffer -- while --ws-token-file still went through read_bytes(). Asserted on the read()
+        ARGUMENT, because read-all-then-measure returns the same verdict and exhausts the same
+        memory.
+        """
+        import tempfile as _tf
+
+        with _tf.TemporaryDirectory(dir="/tmp") as tmp:
+            token_file = Path(tmp) / "token"
+            token_file.write_text("x" * (autobridge.MAX_TOKEN_FILE_BYTES + 4096),
+                                  encoding="utf-8")
+            seen = []
+            real_open = Path.open
+
+            def recording(self_path, *args, **kwargs):
+                handle = real_open(self_path, *args, **kwargs)
+                if self_path.name == "token":
+                    real_read = handle.read
+
+                    def read(*read_args):
+                        seen.append(read_args)
+                        return real_read(*read_args)
+
+                    handle.read = read
+                return handle
+
+            with mock.patch.object(Path, "open", recording):
+                token = autobridge._codex_app_server_token(str(token_file))
+
+        self.assertIsNone(token, "an oversized token file yields no usable token")
+        self.assertTrue(seen, "the token file was not read through a bounded read at all")
+        self.assertEqual((autobridge.MAX_TOKEN_FILE_BYTES + 1,), seen[0],
+                         f"the token read must be capped, got {seen[0]}")
+
+    def test_an_ordinary_token_file_still_works(self) -> None:
+        """The control: a cap that refuses every token would pass the test above just as well."""
+        import tempfile as _tf
+
+        with _tf.TemporaryDirectory(dir="/tmp") as tmp:
+            token_file = Path(tmp) / "token"
+            token_file.write_text("  sk-abc123\n", encoding="utf-8")
+            self.assertEqual("sk-abc123",
+                             autobridge._codex_app_server_token(str(token_file)))
+
+    def test_a_missing_token_file_is_still_simply_absent(self) -> None:
+        self.assertIsNone(autobridge._codex_app_server_token("/tmp/definitely-not-here-xyz"))
+
     def test_the_default_has_no_deadline_so_existing_callers_are_unchanged(self) -> None:
         made = autobridge.JsonRpcWebSocketClient("ws://127.0.0.1:1", timeout_seconds=30)
         self.assertIsNone(made.read_deadline)
