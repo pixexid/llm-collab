@@ -172,7 +172,10 @@ def parse_args() -> argparse.Namespace:
     # to, so a caller-supplied home redirects the endpoint -- and it did: a thread that passed
     # every identity check, plus a home from another project, connected to that project's server.
     # Asserting the thread id did not help, because the mismatch check passed first and the
-    # substitution happened afterwards. The validated binding is the only source for the home.
+    # substitution happened afterwards. The home comes from the VALIDATED PAIR: the binding's
+    # runtime_home preferred, the session's home as fallback when the binding records none, and
+    # caller input never. Both fallback sources were checked by resolve_exact_dispatch_pair; the
+    # caller's was not, which is the whole distinction.
     p.add_argument("--seconds", type=finite_seconds,
                    help="Stop after this long (default: until Ctrl-C)")
     p.add_argument("--raw", action="store_true", help="Print every notification as JSON")
@@ -330,6 +333,8 @@ def resolve_thread(args: argparse.Namespace) -> tuple[str, str, str | None]:
             f"{agent!r}, which is {thread_id!r}. Refusing rather than observing a thread this "
             "project does not own."
         )
+    # Binding preferred, session as fallback -- both come from the pair this resolution validated,
+    # so neither is caller-controlled. There is deliberately no third branch.
     home = binding.get("runtime_home") or runtime.get("home")
     return thread_id, f"{project}/{chat}", str(home) if home else None
 
@@ -549,9 +554,10 @@ def main() -> None:
     thread_id, provenance, runtime_home = resolve_thread(args)
     if not runtime_home:
         raise SystemExit(
-            "[error] the selected binding records no runtime_home. Re-register the session "
-            "with one; this reads the home from the validated binding and accepts no override, "
-            "because the home decides which App Server it connects to."
+            "[error] neither the selected binding nor its session records a runtime_home. "
+            "Re-register the session with one; the home is read from the validated pair "
+            "(binding first, then session) and never from caller input, because the home "
+            "decides which App Server this connects to."
         )
 
     endpoint = autobridge.discover_codex_app_server(runtime_home)

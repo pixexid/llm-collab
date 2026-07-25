@@ -576,6 +576,23 @@ class ResolveThreadTest(unittest.TestCase):
                       runtime_home="/tmp/other-project-home"))
         self.assertEqual("/tmp/session-home", home)
 
+    def test_the_stated_home_contract_matches_what_the_code_does(self) -> None:
+        """The P2: prose claimed the binding was the ONLY source while the session is a fallback.
+
+        Pinned as a test because an inaccurate contract is what makes the next reader trust the
+        wrong invariant -- the same way an assertion that the caller's home wins read as a contract
+        and kept the endpoint redirect alive.
+        """
+        source = (ROOT / "bin" / "codex_stream.py").read_text(encoding="utf-8")
+        self.assertNotIn("is the only source for the home", source,
+                         "the binding is preferred, not the only source")
+        fallback_error = source[source.index("neither the selected binding"):]
+        fallback_error = fallback_error[:fallback_error.index('"""') if '"""' in
+                                       fallback_error[:600] else 400]
+        self.assertIn("session", fallback_error,
+                      "the error must name both validated sources it consulted")
+        self.assertIn("never from caller input", fallback_error)
+
     def test_the_module_never_reads_a_caller_supplied_home(self) -> None:
         """Structural, because the flag being gone is the actual guarantee."""
         source = (ROOT / "bin" / "codex_stream.py").read_text(encoding="utf-8")
