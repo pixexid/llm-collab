@@ -1156,6 +1156,62 @@ def derived_runtime_command(session: dict, message: dict) -> list[str] | None:
     return None
 
 
+LISTEN_FLAG = "--listen"
+
+
+def command_is_app_server_invocation(command: str) -> bool:
+    """True only for `<executable> [options] app-server [options] --listen ...`.
+
+    Not the executable's FILENAME: LLM_COLLAB_CODEX_BIN accepts any path, so a wrapper,
+    symlink or versioned binary launches correctly and a literal "codex app-server" match
+    would never find it.
+
+    But not a substring either. `app-server in command` admitted
+    `worker-app-server-proxy --listen ...` and `worker --label app-server --listen ...`, and
+    discover_codex_app_server takes the FIRST matching endpoint -- so a false positive here
+    points delivery at somebody else's socket, which is worse than the false negative it was
+    fixing. Both parts must be exact argv tokens, and `app-server` must sit in the
+    SUBCOMMAND position: the first token after the executable that is not an option or an
+    option's value.
+    """
+    tokens = command.split()
+    if len(tokens) < 3:
+        return False
+    if not any(token == LISTEN_FLAG or token.startswith(f"{LISTEN_FLAG}=")
+               for token in tokens[1:]):
+        return False
+    return app_server_is_the_subcommand(tokens)
+
+
+def app_server_is_the_subcommand(tokens: list[str]) -> bool:
+    """Whether `app-server` occupies the subcommand slot of this argv.
+
+    Options before the subcommand are skipped, including the value of a separated option such
+    as `-c key=value`, because the real desktop invocation uses exactly that form. Any other
+    bare word reached first means this argv's subcommand is something else, and a later
+    `app-server` token is an option value or a label rather than the command.
+    """
+    index = 1
+    while index < len(tokens):
+        token = tokens[index]
+        if token.startswith("-"):
+            if "=" in token or token.startswith("--no-"):
+                index += 1
+                continue
+            if token in VALUELESS_OPTIONS:
+                index += 1
+                continue
+            index += 2  # the option and its value
+            continue
+        return token == "app-server"
+    return False
+
+
+# Options that take no value, so the token after them is the next option or the subcommand.
+VALUELESS_OPTIONS = frozenset({"-h", "--help", "-V", "--version", "-q", "--quiet",
+                               "-v", "--verbose", "--json"})
+
+
 def codex_app_server_process_rows() -> list[dict[str, Any]]:
     result = subprocess.run(
         ["ps", "eww", "-axo", "pid=,command="],
@@ -1171,13 +1227,7 @@ def codex_app_server_process_rows() -> list[dict[str, Any]]:
         pid_text, _, command = stripped.partition(" ")
         if not pid_text.isdigit():
             continue
-        # Identify the app-server by its SUBCOMMAND and listener, never by the executable's
-        # filename. This PR adds and documents LLM_COLLAB_CODEX_BIN, which accepts any path,
-        # so a wrapper, symlink or versioned binary launches correctly -- and a literal
-        # "codex app-server" match would then never discover it, leaving registered sessions
-        # to lose the transport this PR advertises. The override and the discovery are one
-        # concern precisely because this PR introduces the override.
-        if "app-server" not in command or "--listen" not in command:
+        if not command_is_app_server_invocation(command):
             continue
         rows.append({"pid": int(pid_text), "command": command})
     return rows

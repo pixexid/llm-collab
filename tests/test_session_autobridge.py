@@ -5260,6 +5260,42 @@ class RenamedCodexBinaryDiscoveryTest(unittest.TestCase):
         ])
         self.assertEqual([], found, "a false positive points delivery at the wrong endpoint")
 
+    def test_a_substring_match_is_not_enough(self) -> None:
+        """These two were admitted by `"app-server" in command`.
+
+        discover_codex_app_server takes the FIRST matching row, so a false positive points
+        delivery at somebody else's socket -- worse than the false negative being fixed.
+        """
+        found = self.rows([
+            "/opt/bin/worker-app-server-proxy --listen ws://127.0.0.1:9999 CODEX_HOME=/tmp/home",
+            "/opt/bin/worker --label app-server --listen ws://127.0.0.1:9998",
+            "/opt/bin/app-server-shim --listen ws://127.0.0.1:9997",
+        ])
+        self.assertEqual([], found, f"none of these is a codex app-server: {found}")
+
+    def test_the_real_desktop_invocation_with_a_separated_option_is_matched(self) -> None:
+        # `-c key=value` before the subcommand is exactly how the desktop app launches
+        found = self.rows([
+            "/Applications/ChatGPT.app/Contents/Resources/codex "
+            "-c features.code_mode_host=true app-server --listen ws://127.0.0.1:8767",
+        ])
+        self.assertEqual(1, len(found))
+
+    def test_a_listen_flag_joined_with_equals_still_counts(self) -> None:
+        found = self.rows(["/opt/bin/codex app-server --listen=ws://127.0.0.1:8767"])
+        self.assertEqual(1, len(found))
+
+    def test_discovery_still_requires_the_exact_codex_home_marker(self) -> None:
+        """Being an app-server is necessary, not sufficient: the home must match too."""
+        from unittest import mock as m
+        import subprocess as sp
+        listing = ("111 /opt/bin/codex-cli app-server --listen ws://127.0.0.1:8767 "
+                   "CODEX_HOME=/Users/other/.codex")
+        with m.patch.object(sp, "run", return_value=m.Mock(stdout=listing, returncode=0)):
+            with m.patch.dict("os.environ", {}, clear=False):
+                found = session_autobridge_lib.discover_codex_app_server("/Users/me/.codex")
+        self.assertIsNone(found, "a matching invocation under another home is not our endpoint")
+
     def test_an_app_server_with_no_listener_flag_is_ignored(self) -> None:
         # the desktop app runs one of these; it is not reachable, so it is not an endpoint
         self.assertEqual([], self.rows([
