@@ -24,6 +24,16 @@ THREAD = "thread-abc"
 TURN = "turn-xyz"
 
 
+class _RecordingSocket:
+    """Captures settimeout calls so deadline enforcement is observable."""
+
+    def __init__(self):
+        self.timeouts: list[float] = []
+
+    def settimeout(self, value):
+        self.timeouts.append(value)
+
+
 class FakeClient:
     """Records requests; replays notifications; mimics the real ws client's context."""
 
@@ -144,11 +154,45 @@ class CodexAppServerCliTest(unittest.TestCase):
         text = run_cli(BASE + ["tail", "--seconds", "1", "--raw"], fake)
         self.assertIn("x" * 2000, text, "--raw promises verbatim output")
 
-    def test_tail_surfaces_transport_failure_instead_of_exiting_quietly(self) -> None:
+    def test_tail_surfaces_transport_failure_with_a_nonzero_status(self) -> None:
+        # An earlier version of this test asserted only the printed text, which masked
+        # the fact that tail still exited 0 — a caller could not detect the failure.
         fake = FakeClient(recv_error=ConnectionResetError("peer reset"))
-        text = run_cli(BASE + ["tail", "--seconds", "2"], fake)
-        self.assertIn("[transport]", text)
-        self.assertIn("ConnectionResetError", text)
+        out = io.StringIO()
+        with mock.patch.object(sys, "argv", ["codex_appserver.py"] + BASE + ["tail", "--seconds", "2"]):
+            with mock.patch.object(cli, "connect", return_value=fake):
+                with contextlib.redirect_stdout(out):
+                    with self.assertRaises(SystemExit) as caught:
+                        cli.main()
+        self.assertEqual(1, caught.exception.code, "transport failure must exit non-zero")
+        self.assertIn("[transport]", out.getvalue())
+        self.assertIn("ConnectionResetError", out.getvalue())
+
+    def test_server_requests_are_refused_never_approved(self) -> None:
+        # Replying result:{} was schema-invalid for approvals and could block a turn;
+        # this client must never approve an action on the operator's behalf.
+        approval = {"id": 7, "method": "execCommandApproval",
+                    "params": {"command": "rm -rf /", "threadId": THREAD}}
+        fake = FakeClient(notifications=[approval, turn_notification()])
+        run_cli(BASE + ["tail", "--seconds", "2"], fake)
+        self.assertEqual(1, len(fake.sent), f"expected exactly one reply, got {fake.sent}")
+        reply = fake.sent[0]
+        self.assertEqual(7, reply["id"])
+        self.assertIn("error", reply, "an approval must be refused, not answered with a result")
+        self.assertNotIn("result", reply)
+        self.assertNotIn("approved", json.dumps(reply).lower())
+
+    def test_deadline_bounds_the_blocking_socket_read(self) -> None:
+        # The clock was only checked BETWEEN reads, so a blocking recv could overshoot
+        # by the whole socket timeout: tail --seconds 1 could sit for 120s.
+        fake = FakeClient(notifications=[turn_notification()])
+        fake.sock = _RecordingSocket()
+        run_cli(BASE + ["tail", "--seconds", "2"], fake)
+        self.assertTrue(fake.sock.timeouts, "recv must be bounded by the remaining deadline")
+        self.assertTrue(
+            all(t <= 2.0 for t in fake.sock.timeouts),
+            f"socket timeout exceeded the deadline budget: {fake.sock.timeouts}",
+        )
 
     def test_send_refuses_a_response_without_a_turn_id(self) -> None:
         fake = FakeClient(responses={"turn/start": {"turn": {}}})

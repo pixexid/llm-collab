@@ -137,19 +137,62 @@ def text_of(params: object) -> str:
     return ""
 
 
+def refuse_server_request(client, message: dict) -> None:
+    """Answer a server->client request with a JSON-RPC error. Never approve anything.
+
+    Replying `{"result": {}}` was schema-invalid for every approval/input request
+    (ExecCommandApprovalResponse requires `decision`, PermissionsRequestApprovalResponse
+    requires `permissions`, ToolRequestUserInputResponse requires `answers`) and could
+    block or fail a turn. Mapping each method's denial const would risk sending an
+    approval by mistake, and this CLI is an observer/controller: it must never approve
+    an action on the operator's behalf. An error response is always protocol-valid and
+    unambiguously fails closed.
+    """
+    client.send_json(
+        {
+            "jsonrpc": "2.0",
+            "id": message["id"],
+            "error": {
+                "code": -32601,
+                "message": (
+                    "llm-collab codex_appserver is an observer client and does not "
+                    f"answer server requests ({message.get('method')})"
+                ),
+            },
+        }
+    )
+
+
+def bound_recv(client, deadline: float):
+    """Read one message with the socket bounded by the REMAINING deadline.
+
+    Checking the clock only between reads made deadlines advisory: a blocking
+    recv_json could overshoot by the whole socket timeout, so `tail --seconds 1`
+    could sit for 120s.
+    """
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("deadline reached")
+    sock = getattr(client, "sock", None)
+    if sock is not None and hasattr(sock, "settimeout"):
+        sock.settimeout(max(0.05, min(remaining, float("inf"))))
+    return client.recv_json()
+
+
 def pump(client: JsonRpcWebSocketClient, *, deadline: float, raw: bool, stop_on_terminal: bool) -> str | None:
     """Print notifications until deadline or a terminal turn event. Returns last terminal."""
     while time.monotonic() < deadline:
         try:
-            message = client.recv_json()
+            message = bound_recv(client, deadline)
+        except TimeoutError:
+            return None
         except Exception as exc:
             # Silence must never be indistinguishable from success: a dropped socket
             # or protocol fault is reported, not swallowed as a quiet clean exit.
             print(f"[transport] {type(exc).__name__}: {exc}", flush=True)
             return TRANSPORT_ERROR
         if message.get("id") and message.get("method"):
-            # server->client request: acknowledge so the turn is not blocked on us
-            client.send_json({"jsonrpc": "2.0", "id": message["id"], "result": {}})
+            refuse_server_request(client, message)
             continue
         method = str(message.get("method") or "")
         if not method:
@@ -170,11 +213,11 @@ def observe_running_turn(client: JsonRpcWebSocketClient, *, seconds: int) -> str
     deadline = time.monotonic() + max(seconds, 1)
     while time.monotonic() < deadline:
         try:
-            message = client.recv_json()
+            message = bound_recv(client, deadline)
         except Exception:
             return None
         if message.get("id") and message.get("method"):
-            client.send_json({"jsonrpc": "2.0", "id": message["id"], "result": {}})
+            refuse_server_request(client, message)
             continue
         method = str(message.get("method") or "")
         params = message.get("params")
@@ -285,6 +328,9 @@ def main() -> None:
         deadline = time.monotonic() + args.seconds if args.seconds else float("inf")
         try:
             terminal = pump(client, deadline=deadline, raw=args.raw, stop_on_terminal=bool(args.seconds == 0))
+            if terminal == TRANSPORT_ERROR:
+                # a transport failure must be detectable by a caller, not only visible
+                raise SystemExit(1)
             if terminal:
                 print(f"[end] {terminal}", flush=True)
         except KeyboardInterrupt:
