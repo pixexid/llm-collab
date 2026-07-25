@@ -168,12 +168,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--chat", help="Chat id, or 'last' for the newest binding (with --agent)")
     p.add_argument("--thread", help="Assert the resolved thread id; refuses on mismatch. Not a "
                                     "bypass -- --agent and --project are still required")
-    # NO default. Discovery matches CODEX_HOME exactly, so defaulting to one author's home
-    # made this work on exactly one machine: any binding under a custom or secondary
-    # CODEX_HOME either found no endpoint or connected to the wrong server. The selected
-    # binding already records the right home; this flag is an explicit override only.
-    p.add_argument("--runtime-home", help="Override the CODEX_HOME to discover (default: the "
-                                         "selected binding's own runtime_home)")
+    # There is deliberately NO --runtime-home. The home selects which App Server this connects
+    # to, so a caller-supplied home redirects the endpoint -- and it did: a thread that passed
+    # every identity check, plus a home from another project, connected to that project's server.
+    # Asserting the thread id did not help, because the mismatch check passed first and the
+    # substitution happened afterwards. The validated binding is the only source for the home.
     p.add_argument("--seconds", type=finite_seconds,
                    help="Stop after this long (default: until Ctrl-C)")
     p.add_argument("--raw", action="store_true", help="Print every notification as JSON")
@@ -323,13 +322,15 @@ def resolve_thread(args: argparse.Namespace) -> tuple[str, str, str | None]:
     thread_id = str(binding.get("runtime_session_id") or runtime.get("session_id") or "")
     if not thread_id:
         raise SystemExit(f"[error] {project}/{chat} records no runtime thread id")
+    # The home comes from the validated pair and nothing else. Any caller-supplied value is
+    # ignored by construction rather than by a comparison that could be ordered wrongly.
     if args.thread and args.thread != thread_id:
         raise SystemExit(
             f"[error] --thread {args.thread!r} is not the thread bound to {project}/{chat} for "
             f"{agent!r}, which is {thread_id!r}. Refusing rather than observing a thread this "
             "project does not own."
         )
-    home = args.runtime_home or binding.get("runtime_home") or runtime.get("home")
+    home = binding.get("runtime_home") or runtime.get("home")
     return thread_id, f"{project}/{chat}", str(home) if home else None
 
 
@@ -548,8 +549,9 @@ def main() -> None:
     thread_id, provenance, runtime_home = resolve_thread(args)
     if not runtime_home:
         raise SystemExit(
-            "[error] the selected binding records no runtime_home, and none was supplied. "
-            "Pass --runtime-home explicitly, or re-register the session with one."
+            "[error] the selected binding records no runtime_home. Re-register the session "
+            "with one; this reads the home from the validated binding and accepts no override, "
+            "because the home decides which App Server it connects to."
         )
 
     endpoint = autobridge.discover_codex_app_server(runtime_home)

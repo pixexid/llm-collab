@@ -466,12 +466,19 @@ class ResolveThreadTest(unittest.TestCase):
             self.args(agent="codex", project="amiga", chat="CHAT-A"))
         self.assertEqual("/Users/session-side/.codex", home)
 
-    def test_an_explicit_home_overrides_the_binding(self) -> None:
+    def test_an_explicit_home_does_NOT_override_the_binding(self) -> None:
+        """Inverted deliberately. This test used to assert the override wins.
+
+        It was written when --runtime-home looked like a harmless convenience, and it is what
+        pinned the endpoint-redirect in place: an assertion that the caller's home beats the
+        validated one reads as a contract, so nobody questioned it. The home decides which App
+        Server this connects to, which makes it an identity input, not a convenience.
+        """
         self.bind(home="/Users/elsewhere/.codex-alt")
         _t, _p, home = codex_stream.resolve_thread(
             self.args(agent="codex", project="amiga", chat="CHAT-A",
                       runtime_home="/tmp/override"))
-        self.assertEqual("/tmp/override", home)
+        self.assertEqual("/Users/elsewhere/.codex-alt", home)
 
     def test_there_is_no_hardcoded_home_default_left(self) -> None:
         source = (ROOT / "bin" / "codex_stream.py").read_text(encoding="utf-8")
@@ -537,13 +544,50 @@ class ResolveThreadTest(unittest.TestCase):
         self.assertIn("our-thread", message,
                       "the refusal must say which thread this project actually owns")
 
-    def test_a_foreign_thread_cannot_ride_in_on_a_runtime_home_override(self) -> None:
-        """--runtime-home must not resurrect the bypass by supplying the endpoint itself."""
+    # My previous version of this test was MASKED and proved nothing: it paired a foreign thread
+    # with a foreign home, so it failed at the thread-mismatch check and never reached the home
+    # substitution at all. The substitution was still live -- a thread that passed every identity
+    # check plus a home from another project connected to that project's App Server. These tests
+    # reach the substitution deliberately, by making the thread match.
+
+    def test_a_supplied_home_cannot_redirect_the_endpoint_when_the_thread_MATCHES(self) -> None:
+        """The reproduction Codex gave: matching thread + mismatched home."""
+        self.bind(chat="CHAT-OURS", thread="the-real-thread", home="/tmp/validated-home")
+        _thread, _p, home = codex_stream.resolve_thread(
+            self.args(agent="codex", project="amiga", chat="CHAT-OURS",
+                      thread="the-real-thread", runtime_home="/tmp/other-project-home"))
+        self.assertEqual("/tmp/validated-home", home,
+                         "the home must come from the validated binding, never from the caller")
+
+    def test_a_supplied_home_is_ignored_in_ordinary_agent_mode_too(self) -> None:
+        """No --thread involved, so nothing else could be doing the refusing."""
+        self.bind(chat="CHAT-PLAIN", thread="t-plain", home="/tmp/validated-home")
+        _thread, _p, home = codex_stream.resolve_thread(
+            self.args(agent="codex", project="amiga", chat="CHAT-PLAIN",
+                      runtime_home="/tmp/other-project-home"))
+        self.assertEqual("/tmp/validated-home", home)
+
+    def test_a_supplied_home_cannot_substitute_when_the_binding_has_none(self) -> None:
+        """The empty-home case must fall back to the SESSION, not to the caller."""
+        self.bind(chat="CHAT-NOHOME", thread="t-nohome", home=None,
+                  session_home="/tmp/session-home")
+        _thread, _p, home = codex_stream.resolve_thread(
+            self.args(agent="codex", project="amiga", chat="CHAT-NOHOME",
+                      runtime_home="/tmp/other-project-home"))
+        self.assertEqual("/tmp/session-home", home)
+
+    def test_the_module_never_reads_a_caller_supplied_home(self) -> None:
+        """Structural, because the flag being gone is the actual guarantee."""
+        source = (ROOT / "bin" / "codex_stream.py").read_text(encoding="utf-8")
+        self.assertNotIn("args.runtime_home", source)
+        self.assertNotIn('add_argument("--runtime-home"', source)
+
+    def test_a_foreign_thread_is_still_refused(self) -> None:
         self.bind(chat="CHAT-OURS", thread="our-thread", home="/tmp/ours")
         with self.assertRaises(SystemExit):
             codex_stream.resolve_thread(
                 self.args(agent="codex", project="amiga", chat="CHAT-OURS",
-                          thread="foreign-thread", runtime_home="/tmp/attacker-home"))
+                          thread="foreign-thread"))
 
     def test_an_unregistered_project_is_still_refused_with_a_thread(self) -> None:
         self.bind(chat="CHAT-OURS", thread="our-thread")
