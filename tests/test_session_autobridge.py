@@ -2669,6 +2669,85 @@ class SessionAutobridgeTest(unittest.TestCase):
             env=self.subprocess_env(root),
         )
 
+    def test_registration_reads_the_existing_binding_EXACTLY_ONCE(self):
+        """A preflight that validates and then lets the update reopen the path is a TOCTOU.
+
+        Codex's deterministic second-read fault: validate, write SESSION-NEW, then fail on the
+        REREAD -- the original partial-state bug wearing a check. Counting the reads is what pins
+        the fix; asserting the happy path cannot distinguish one read from two.
+        """
+        root, binding = self.registered_workspace_with_binding()
+        probe = root / "count_reads.py"
+        probe.write_text(
+            "import json, sys\n"
+            "sys.path.insert(0, 'bin')\n"
+            "import _session_autobridge as ab\n"
+            "import session_autobridge as cli\n"
+            "reads = []\n"
+            "real = ab.load_binding\n"
+            "def counting(p, c, a):\n"
+            "    reads.append((p, c, a))\n"
+            "    return real(p, c, a)\n"
+            "ab.load_binding = counting\n"
+            "cli.load_binding = counting\n"
+            "sys.argv = ['session_autobridge.py',\n"
+            "    'register', '--session', 'SESSION-NEW', '--agent', 'claude',\n"
+            "    '--project', 'amiga', '--chat', 'CHAT-REG1', '--mode', 'notify',\n"
+            "    '--runtime-family', 'claude_app', '--runtime-session-id', 'THREAD-NEW',\n"
+            "    '--runtime-session-source', 'first_read']\n"
+            "cli.register_session(cli.parse_args())\n"
+            "print(json.dumps({'reads': len(reads)}))\n",
+            encoding="utf-8",
+        )
+        done = subprocess.run([sys.executable, str(probe)], cwd=root, text=True,
+                              capture_output=True, env=self.subprocess_env(root))
+        self.assertEqual(0, done.returncode, done.stderr[-600:])
+        self.assertEqual(1, json.loads(done.stdout.strip().splitlines()[-1])["reads"],
+                         "the existing binding must be read once and carried forward")
+
+    def test_a_swap_after_validation_cannot_influence_the_written_binding(self):
+        """The other half of the TOCTOU: the update must use the bytes already in hand."""
+        root, binding = self.registered_workspace_with_binding()
+        probe = root / "swap_after.py"
+        probe.write_text(
+            "import json, sys, pathlib\n"
+            "sys.path.insert(0, 'bin')\n"
+            "import _session_autobridge as ab\n"
+            "import session_autobridge as cli\n"
+            "path = pathlib.Path('State/session_autobridge/bindings/amiga/CHAT-REG1/claude.json')\n"
+            "real = ab.load_binding\n"
+            "swapped = []\n"
+            "def swapping(p, c, a):\n"
+            "    snapshot = real(p, c, a)\n"
+            "    swapped.append(1)\n"
+            "    poisoned = dict(snapshot, runtime_home='/tmp/POISONED', pad='x' * 300000)\n"
+            "    path.write_text(json.dumps(poisoned))\n"
+            "    return snapshot\n"
+            "ab.load_binding = swapping\n"
+            "cli.load_binding = swapping\n"
+            "sys.argv = ['session_autobridge.py',\n"
+            "    'register', '--session', 'SESSION-NEW', '--agent', 'claude',\n"
+            "    '--project', 'amiga', '--chat', 'CHAT-REG1', '--mode', 'notify',\n"
+            "    '--runtime-family', 'claude_app', '--runtime-session-id', 'THREAD-NEW',\n"
+            "    '--runtime-session-source', 'first_read']\n"
+            "result = cli.register_session(cli.parse_args())\n"
+            "print(json.dumps({'home': result.get('binding', {}).get('runtime_home'),\n"
+            "                  'swapped': swapped}))\n",
+            encoding="utf-8",
+        )
+        done = subprocess.run([sys.executable, str(probe)], cwd=root, text=True,
+                              capture_output=True, env=self.subprocess_env(root))
+        self.assertEqual(0, done.returncode, done.stderr[-600:])
+        emitted = json.loads(done.stdout.strip().splitlines()[-1])
+        self.assertTrue(emitted["swapped"],
+                        "the swap never ran, so this test would pass while proving nothing")
+        home = emitted["home"]
+        self.assertNotEqual("/tmp/POISONED", home,
+                            "a binding swapped after validation must not reach the written record")
+        written = json.loads(binding.read_text())
+        self.assertEqual("THREAD-NEW", written["runtime_session_id"])
+        self.assertNotEqual("/tmp/POISONED", written.get("runtime_home"))
+
     def test_registration_refuses_on_an_OVERSIZED_existing_binding(self):
         root, binding = self.registered_workspace_with_binding()
         payload = json.loads(binding.read_text())

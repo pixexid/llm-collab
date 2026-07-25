@@ -287,34 +287,40 @@ def register_session(args) -> dict:
     repo_targets = getattr(args, "repo_targets", None)
     if repo_targets is not None:
         payload["repo_targets"] = repo_targets
-    # Read the EXISTING binding before writing anything. save_session() used to run first, so an
-    # unreadable existing binding failed between the two writes: the new session file persisted, the
-    # old binding still pointed at the previous thread, and the command reported failure having
-    # already created partial authoritative state. Registration must be all-or-nothing across both.
-    refuse_if_existing_binding_is_unreadable(payload)
+    # ONE read of the existing binding, before any write, and the resulting snapshot is carried
+    # forward. A preflight that validates and then lets the update REOPEN the path is a TOCTOU: a
+    # second read failing where the first succeeded still lands between save_session() and the
+    # binding write, which is the original partial-state bug wearing a check. This is the same
+    # carry-the-validated-snapshot rule this PR already applied on the read side.
+    existing_binding = existing_binding_snapshot_or_refuse(payload)
     save_session(payload)
-    binding = update_binding_from_session(payload)
+    binding = update_binding_from_session(payload, existing=existing_binding)
     if binding is not None:
         payload["binding"] = binding
     return payload
 
 
-def refuse_if_existing_binding_is_unreadable(payload: dict) -> None:
-    """Refuse registration while nothing has been written yet.
+def existing_binding_snapshot_or_refuse(payload: dict) -> dict:
+    """The existing binding, read ONCE, or a refusal before anything has been written.
 
-    An unreadable existing binding is not an absent one, so it must not be silently replaced: the
-    old binding stays exactly as it is and no session is written. FileNotFoundError is the ordinary
-    first-registration case and passes straight through.
+    Returns the snapshot the update must be built from -- not merely a verdict -- so nothing reopens
+    the path afterwards. An unreadable existing binding is not an absent one, so it is never silently
+    replaced: the old file stays as it is and no session is written. FileNotFoundError is the
+    ordinary first-registration case and yields an empty snapshot.
+
+    This does not make registration atomic against arbitrary I/O failure or a crash between the two
+    writes -- two independent file writes cannot be. It removes the specific failure that an
+    unreadable or swapped binding can no longer produce partial state.
     """
     project_id = payload.get("project_id")
     chat_id = payload.get("chat_id")
     agent_id = payload.get("agent_id")
     if not project_id or not chat_id or not agent_id:
-        return
+        return {}
     try:
-        load_binding(str(project_id), str(chat_id), str(agent_id))
+        return load_binding(str(project_id), str(chat_id), str(agent_id))
     except FileNotFoundError:
-        return
+        return {}
     except BindingUnreadable as error:
         raise SystemExit(
             f"[error] {error}. Refusing to register: the existing binding could not be read, so "

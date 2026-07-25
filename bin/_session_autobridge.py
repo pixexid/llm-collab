@@ -263,7 +263,18 @@ def save_session(payload: dict) -> None:
     write_file(path, json.dumps(payload, indent=2, sort_keys=True))
 
 
-def binding_payload_from_session(session: dict) -> dict[str, Any] | None:
+def binding_payload_from_session(
+    session: dict,
+    existing: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Derive the binding record for `session`.
+
+    `existing` lets a caller pass the snapshot it has ALREADY read and validated, so the payload is
+    built from that exact bytes-in-hand version rather than reopening the path. Reopening is a TOCTOU:
+    a validated-then-swapped binding, or a second read that fails where the first succeeded, lands
+    between a caller's checks and its writes. Default None preserves the read-it-myself behaviour for
+    every existing caller.
+    """
     runtime = runtime_metadata(session)
     project_id = session.get("project_id")
     chat_id = session.get("chat_id")
@@ -272,11 +283,12 @@ def binding_payload_from_session(session: dict) -> dict[str, Any] | None:
     if not project_id or not chat_id or not runtime_family or not runtime_session_id:
         return None
 
-    existing: dict[str, Any] = {}
-    try:
-        existing = load_binding(str(project_id), str(chat_id), str(session["agent_id"]))
-    except FileNotFoundError:
+    if existing is None:
         existing = {}
+        try:
+            existing = load_binding(str(project_id), str(chat_id), str(session["agent_id"]))
+        except FileNotFoundError:
+            existing = {}
 
     return {
         **existing,
@@ -295,8 +307,11 @@ def binding_payload_from_session(session: dict) -> dict[str, Any] | None:
     }
 
 
-def update_binding_from_session(session: dict) -> dict[str, Any] | None:
-    payload = binding_payload_from_session(session)
+def update_binding_from_session(
+    session: dict,
+    existing: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    payload = binding_payload_from_session(session, existing=existing)
     if payload is None:
         return None
     save_binding(payload)
