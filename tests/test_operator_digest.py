@@ -134,6 +134,9 @@ class ResolutionHintTest(unittest.TestCase):
         bare numbers and name the repo in frontmatter -- the field the delivery contract
         uses for exactly this.
         """
+        (self.root / "projects.json").write_text(json.dumps({"projects": [
+            {"id": "amiga", "repos": {"app": "amiga"}, "github": {"repo": "pixexid/amiga"}},
+        ]}), encoding="utf-8")
         relpath = self.packet('---\nproject_id: amiga\n'
                               'repo_targets: ["llm-collab"]\n---\nHeld on #170.')
         seen = []
@@ -323,19 +326,43 @@ class RepoEnumerationTest(unittest.TestCase):
              "github": {"repo": "pixexid/nuvyr"}},
         ]}), encoding="utf-8")
 
+    def _checkouts(self, mapping: dict):
+        """Stub the checkout->origin lookup; a separate test drives real git."""
+        return mock.patch.object(operator_digest, "checkout_origin_slug",
+                                 side_effect=lambda checkout: mapping.get(checkout))
+
     def test_the_logical_app_key_resolves_per_project(self) -> None:
         """`repo_targets: ["app"]` means a different repo in each project.
 
-        amiga's app is amiga; nuvyr's app is nuvyr_app. A global alias table cannot tell them
-        apart, which is why resolution must happen inside the packet's project scope.
+        And the value is a CHECKOUT name, not a repository name: the nuvyr_app checkout's
+        origin is pixexid/nuvyr, and amiga_docs' is pixexid/amiga-docs. Concatenating an owner
+        with the directory name invents a slug that matches neither.
         """
         self._scoped_projects()
-        self.assertEqual("pixexid/amiga",
-                         operator_digest.resolve_repo_target("app", "amiga"))
-        self.assertEqual("pixexid/nuvyr_app",
-                         operator_digest.resolve_repo_target("app", "nuvyr"))
-        self.assertEqual("pixexid/amiga_docs",
-                         operator_digest.resolve_repo_target("docs", "amiga"))
+        with self._checkouts({"amiga": "pixexid/amiga",
+                              "nuvyr_app": "pixexid/nuvyr",
+                              "amiga_docs": "pixexid/amiga-docs"}):
+            self.assertEqual("pixexid/amiga",
+                             operator_digest.resolve_repo_target("app", "amiga"))
+            self.assertEqual("pixexid/nuvyr",
+                             operator_digest.resolve_repo_target("app", "nuvyr"))
+            self.assertEqual("pixexid/amiga-docs",
+                             operator_digest.resolve_repo_target("docs", "amiga"))
+
+    def test_a_checkout_whose_origin_cannot_be_read_resolves_nothing(self) -> None:
+        self._scoped_projects()
+        with self._checkouts({}):
+            self.assertIsNone(operator_digest.resolve_repo_target("app", "amiga"),
+                              "no origin means no slug, never a guessed one")
+
+    def test_an_unknown_project_scope_never_falls_through_globally(self) -> None:
+        """`ghost` + `llm-collab` resolved to this repo on the strength of a name.
+
+        A packet scoped to a project we do not recognise must attribute nothing.
+        """
+        self._scoped_projects()
+        self.assertIsNone(operator_digest.resolve_repo_target("llm-collab", "ghost"))
+        self.assertIsNone(operator_digest.resolve_repo_target("app", "ghost"))
 
     def test_a_project_id_named_app_cannot_retarget_any_projects_app_key(self) -> None:
         """The retargeting hazard, stated as a test.
@@ -348,13 +375,14 @@ class RepoEnumerationTest(unittest.TestCase):
             {"id": "nuvyr", "repos": {"app": "nuvyr_app"}, "github": {"repo": "pixexid/nuvyr"}},
             {"id": "app", "github": {"repo": "pixexid/hijack"}},
         ]}), encoding="utf-8")
-        self.assertEqual("pixexid/amiga",
-                         operator_digest.resolve_repo_target("app", "amiga"))
-        self.assertEqual("pixexid/nuvyr_app",
-                         operator_digest.resolve_repo_target("app", "nuvyr"))
-        # the id alias remains reachable only where no project scope claims the key
-        self.assertEqual("pixexid/hijack",
-                         operator_digest.resolve_repo_target("app", None))
+        with self._checkouts({"amiga": "pixexid/amiga", "nuvyr_app": "pixexid/nuvyr"}):
+            self.assertEqual("pixexid/amiga",
+                             operator_digest.resolve_repo_target("app", "amiga"))
+            self.assertEqual("pixexid/nuvyr",
+                             operator_digest.resolve_repo_target("app", "nuvyr"))
+            # the id alias remains reachable only where no project scope claims the key
+            self.assertEqual("pixexid/hijack",
+                             operator_digest.resolve_repo_target("app", None))
 
     def test_a_logical_key_absent_from_that_project_falls_back_to_global(self) -> None:
         self._scoped_projects()
@@ -372,10 +400,11 @@ class RepoEnumerationTest(unittest.TestCase):
             seen.append(argv[argv.index("--repo") + 1])
             return mock.Mock(stdout=json.dumps({"state": "MERGED"}))
 
-        with mock.patch.object(operator_digest.subprocess, "run", side_effect=run):
-            settled, _ = operator_digest.resolution_hint("packet.md")
-        self.assertEqual(["pixexid/nuvyr_app"], seen,
-                         "the packet's own project scope decides which repo `app` means")
+        with self._checkouts({"nuvyr_app": "pixexid/nuvyr"}):
+            with mock.patch.object(operator_digest.subprocess, "run", side_effect=run):
+                settled, _ = operator_digest.resolution_hint("packet.md")
+        self.assertEqual(["pixexid/nuvyr"], seen,
+                         "the checkout's real origin decides the repo, not its directory name")
         self.assertTrue(settled)
 
     def test_a_project_with_no_github_owner_resolves_nothing(self) -> None:
@@ -403,3 +432,46 @@ class RepoEnumerationTest(unittest.TestCase):
                          "every row must carry the repo it came from")
         self.assertEqual(["pixexid/nuvyr"], unreachable,
                          "a repo we could not read must be named, not rendered as empty")
+
+
+class CheckoutOriginTest(unittest.TestCase):
+    """The slug comes from the checkout's own git origin, exercised against real git."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory(dir="/tmp")
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+        patcher = mock.patch.object(operator_digest, "projects_root", return_value=self.root)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def make_checkout(self, name: str, remote: str | None) -> None:
+        import subprocess as sp
+        path = self.root / name
+        path.mkdir()
+        sp.run(["git", "init", "-q"], cwd=str(path), check=True,
+               capture_output=True, timeout=30)
+        if remote:
+            sp.run(["git", "remote", "add", "origin", remote], cwd=str(path), check=True,
+                   capture_output=True, timeout=30)
+
+    def test_a_checkout_name_that_differs_from_its_repo_resolves_to_the_repo(self) -> None:
+        # the live case: the nuvyr_app checkout is repository pixexid/nuvyr
+        self.make_checkout("nuvyr_app", "https://github.com/pixexid/nuvyr.git")
+        self.assertEqual("pixexid/nuvyr", operator_digest.checkout_origin_slug("nuvyr_app"))
+
+    def test_an_ssh_remote_resolves_too(self) -> None:
+        self.make_checkout("docs", "git@github.com:pixexid/amiga-docs.git")
+        self.assertEqual("pixexid/amiga-docs", operator_digest.checkout_origin_slug("docs"))
+
+    def test_a_checkout_with_no_remote_resolves_to_nothing(self) -> None:
+        self.make_checkout("orphan", None)
+        self.assertIsNone(operator_digest.checkout_origin_slug("orphan"))
+
+    def test_a_missing_checkout_resolves_to_nothing(self) -> None:
+        self.assertIsNone(operator_digest.checkout_origin_slug("not-cloned"))
+
+    def test_a_non_github_remote_is_not_treated_as_a_slug(self) -> None:
+        self.make_checkout("elsewhere", "https://gitlab.com/pixexid/thing.git")
+        self.assertIsNone(operator_digest.checkout_origin_slug("elsewhere"),
+                          "gh pr view cannot query a non-GitHub host")

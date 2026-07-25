@@ -38,6 +38,46 @@ PR_CHECK_LIMIT = 6
 _repo_targets_cache: dict[str, str] | None = None
 
 
+def slug_from_remote(url: str) -> str | None:
+    """owner/name from a git remote URL, or None when it is not a GitHub-style slug."""
+    text = re.sub(r"^(?:https://github\.com/|git@github\.com:|ssh://git@github\.com/)", "",
+                  url.strip())
+    slug = text.removesuffix(".git")
+    return slug if slug.count("/") == 1 and all(slug.split("/")) else None
+
+
+def projects_root() -> Path:
+    """Where registered checkouts live, read without the fatal config helper."""
+    try:
+        payload = json.loads((ROOT / "collab.config.json").read_text(encoding="utf-8"))
+        configured = payload.get("projects_root")
+    except (OSError, json.JSONDecodeError):
+        configured = None
+    return Path(configured) if configured else ROOT.parent
+
+
+def checkout_origin_slug(checkout: str) -> str | None:
+    """The GitHub slug of a registered CHECKOUT, read from that checkout's own origin.
+
+    projects[].repos values are checkout directory names, NOT repository names, and the two
+    genuinely differ here: the `nuvyr_app` checkout has origin pixexid/nuvyr, and
+    `amiga_house_cleaning_company_docs` has origin pixexid/amiga-docs. Concatenating an owner
+    with the directory name invented a slug that misresolved both -- so a bare PR number in an
+    `app` or `docs` packet was checked against a repository that does not exist, and an
+    unlucky match would have reported a live request settled on the wrong repo's PR.
+    """
+    directory = projects_root() / checkout
+    if not (directory / ".git").exists():
+        return None
+    try:
+        url = subprocess.run(
+            ["git", "remote", "get-url", "origin"], cwd=str(directory),
+            capture_output=True, text=True, timeout=10, check=True).stdout
+    except (subprocess.SubprocessError, OSError):
+        return None
+    return slug_from_remote(url)
+
+
 def git_origin_slug() -> str | None:
     """The owner/name of this checkout's origin, or None when it cannot be read.
 
@@ -53,9 +93,7 @@ def git_origin_slug() -> str | None:
         # missing import and silently dropped THIS workspace's own repo from the operator's
         # PR view, reporting other projects' PRs while hiding the five in front of them.
         return None
-    origin = re.sub(r"^(?:https://github\.com/|git@github\.com:)", "", origin)
-    slug = origin.removesuffix(".git")
-    return slug if "/" in slug else None
+    return slug_from_remote(origin)
 
 
 def known_repo_targets() -> dict[str, str]:
@@ -178,15 +216,15 @@ def resolve_repo_target(target: str, project_id: str | None) -> str | None:
     the unambiguous global aliases: a full owner/name, a repo basename, or a project id.
     """
     if project_id:
-        for project in load_projects():
-            if str(project.get("id")) != str(project_id):
-                continue
-            repos = project.get("repos")
-            if isinstance(repos, dict) and target in repos:
-                name = repos[target]
-                owner = str((project.get("github") or {}).get("repo", "")).split("/")[0]
-                return f"{owner}/{name}" if owner and name else None
-            break
+        matched = [p for p in load_projects() if str(p.get("id")) == str(project_id)]
+        if not matched:
+            # An unknown project scope must not fall through to the global aliases: `ghost`
+            # plus `llm-collab` resolved to this repo, attributing a foreign packet's PR
+            # numbers to us on the strength of a name we do not recognise.
+            return None
+        repos = matched[0].get("repos")
+        if isinstance(repos, dict) and target in repos:
+            return checkout_origin_slug(str(repos[target]))
     return known_repo_targets().get(target)
 
 
