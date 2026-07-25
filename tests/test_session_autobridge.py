@@ -2504,12 +2504,12 @@ class SessionAutobridgeTest(unittest.TestCase):
         frontmatter, _ = parse_frontmatter(delivered_candidates[-1].read_text())
         self.assertIsNone(frontmatter["target_session_id"])
 
-    def deliver_with_scope(self, root, chat_id, *, repo_targets=None):
+    def deliver_with_scope(self, root, chat_id, *, repo_targets=None, project="amiga"):
         """Run deliver.py and return its JSON payload plus stderr."""
         argv = [
             sys.executable, str(DELIVER_SCRIPT),
             "--chat", chat_id, "--from", "codex", "--to", "claude",
-            "--project", "amiga", "--title", "Scope preflight probe",
+            "--project", project, "--title", "Scope preflight probe",
             "--sender-session-id", "codex-session-9", "--body-file", "-",
         ]
         if repo_targets is not None:
@@ -2518,8 +2518,15 @@ class SessionAutobridgeTest(unittest.TestCase):
                               capture_output=True, check=True)
         return json.loads(done.stdout.split("\n\n", 1)[0]), done.stderr
 
-    def scoped_subscriber_workspace(self, *, subscriber_repo_targets, claude_ax_app=None):
-        """A claude session bound to CHAT-SCOPE1, optionally declaring a repo scope."""
+    def scoped_subscriber_workspace(self, *, subscriber_repo_targets, claude_ax_app=None,
+                                    project="amiga", chat_id="CHAT-SCOPE1"):
+        """A claude session bound to `chat_id` in `project`, optionally declaring a repo scope.
+
+        Parameterized by project because this patch changes the SHARED deliver.py routing contract,
+        and AGENTS.md:43-44 requires focused coverage for Amiga and at least one non-Amiga project.
+        Hard-coding amiga in the helper meant every case could only ever exercise one project, so a
+        project-specific behaviour leaking into the universal path would have been invisible.
+        """
         root = self.make_workspace()
         for agent in ("codex", "claude"):
             activation = {"type": "cli_session", "watcher_enabled": True}
@@ -2534,13 +2541,14 @@ class SessionAutobridgeTest(unittest.TestCase):
             })
         chat_dir = self.create_chat(
             root,
-            chat_dir_name="2026-07-25_scope-preflight__CHAT-SCOPE1",
-            chat_id="CHAT-SCOPE1",
-            project_id="amiga",
+            chat_dir_name=f"2026-07-25_scope-preflight__{chat_id}",
+            chat_id=chat_id,
+            project_id=project,
         )
         register = [
-            "register", "--session", "SESSION-CLAUDE-SCOPED", "--agent", "claude",
-            "--project", "amiga", "--chat", "CHAT-SCOPE1", "--mode", "notify",
+            "register", "--session", f"SESSION-CLAUDE-SCOPED-{project.upper()}",
+            "--agent", "claude",
+            "--project", project, "--chat", chat_id, "--mode", "notify",
             "--runtime-family", "claude_app",
             "--runtime-session-id", "claude-scoped-session",
             "--runtime-session-source", "first_read",
@@ -2625,6 +2633,42 @@ class SessionAutobridgeTest(unittest.TestCase):
         self.assertNotIn("        and not autobridge_ready\n", source,
                          "a wake lane is gating on autobridge_ready directly again")
         self.assertGreaterEqual(source.count("and wake_fallback_allowed"), 5)
+
+    def test_the_routing_contract_behaves_identically_on_a_NON_amiga_project(self):
+        """AGENTS.md:43-44 -- a shared-contract change needs Amiga and a non-Amiga project.
+
+        nuvyr is registered by this fixture. Run the whole representative set rather than one case:
+        the risk being covered is a project-specific behaviour leaking into the universal path, and
+        a single case cannot distinguish "works for nuvyr" from "refuses everything for nuvyr".
+        """
+        for project, chat_id in (("amiga", "CHAT-SCOPE-A"), ("nuvyr", "CHAT-SCOPE-N")):
+            with self.subTest(project=project):
+                root, chat_dir = self.scoped_subscriber_workspace(
+                    subscriber_repo_targets=["llm-collab"], claude_ax_app="Claude",
+                    project=project, chat_id=chat_id)
+
+                refused, stderr = self.deliver_with_scope(root, chat_id, project=project)
+                self.assertFalse(refused["autobridge_ready"],
+                                 f"{project}: an empty packet scope must not route")
+                self.assertEqual("route_ambiguous", refused["autobridge_refusal_reason"])
+                self.assertIn("RUNTIME DISPATCH REFUSED", stderr)
+                for flag in self.WAKE_FLAGS:
+                    self.assertFalse(refused.get(flag), f"{project}: {flag} must be false")
+                for prompt in self.WAKE_PROMPTS:
+                    self.assertIsNone(refused.get(prompt), f"{project}: {prompt} must be null")
+                self.assertTrue(sorted(chat_dir.glob("*_to-claude_*.md")),
+                                f"{project}: the durable record must survive the refusal")
+
+                accepted, _stderr = self.deliver_with_scope(root, chat_id, project=project,
+                                                            repo_targets="llm-collab")
+                self.assertTrue(accepted["autobridge_ready"],
+                                f"{project}: a declared subset must route")
+                self.assertIsNone(accepted["autobridge_refusal_reason"])
+
+                outside, _stderr = self.deliver_with_scope(root, chat_id, project=project,
+                                                           repo_targets="some-other-repo")
+                self.assertFalse(outside["autobridge_ready"],
+                                 f"{project}: a packet outside the subscriber scope must not route")
 
     def test_scoped_subscriber_refuses_an_empty_packet_scope(self):
         root, _chat_dir = self.scoped_subscriber_workspace(
