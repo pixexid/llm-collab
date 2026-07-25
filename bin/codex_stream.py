@@ -267,49 +267,33 @@ def resolve_thread(args: argparse.Namespace) -> tuple[str, str, str | None]:
     if args.chat is not None and args.chat != "last":
         # Named exactly: a dead or mismatched binding is an ERROR, because the caller asked
         # for this one specifically and silently substituting another would be worse.
-        session, reason = autobridge.resolve_exact_dispatch_target(project, args.chat, agent)
-        if session is None:
-            raise SystemExit(
-                f"[error] {project}/{args.chat} is not an exact live binding for {agent!r}: "
-                f"{reason}"
-            )
-        require_codex_family(project, args.chat, agent)
-        chosen = [(args.chat, session)]
+        chosen = [(args.chat, *resolve_one(project, args.chat, agent, fatal=True))]
     else:
         # Broad selection: a dead binding is EXCLUDED, not fatal. deactivate_session() updates
         # the session and deliberately leaves the binding behind, so one ordinary deactivation
         # would otherwise break `--chat last` for that agent permanently.
         chosen = []
         for chat in bounded_chat_ids(project, agent):
-            session, reason = autobridge.resolve_exact_dispatch_target(project, chat, agent)
-            if session is None:
-                if reason in SKIPPABLE_RESOLVER_REASONS:
-                    continue
-                # Not a liveness problem: the workspace is inconsistent here. Skipping it
-                # would let a malformed sibling silently hand over a different worker.
-                raise SystemExit(
-                    f"[error] {project}/{chat} cannot be resolved for {agent!r}: {reason}. "
-                    "Fix or remove that binding; broad lookup will not step over it."
-                )
-            require_codex_family(project, chat, agent)
-            chosen.append((chat, session))
+            resolved = resolve_one(project, chat, agent, fatal=False)
+            if resolved is not None:
+                chosen.append((chat, *resolved))
 
     if not chosen:
         raise SystemExit(
             f"[error] no live exactly-bound {agent!r} session in {project!r}"
         )
     if len(chosen) > 1 and args.chat != "last":
-        names = "\n  ".join(f"{project}/{chat}" for chat, _ in sorted(chosen))
+        names = "\n  ".join(f"{project}/{chat}" for chat, _binding, _session in sorted(
+            chosen, key=lambda triple: triple[0]))
         raise SystemExit(
             f"[error] {len(chosen)} live bindings match agent {agent!r} in {project!r}; name "
             f"one with --chat, or pass --chat last:\n  {names}"
         )
 
     # `last` is advertised as the newest BINDING, and the binding is also where runtime_home
-    # lives. Reading both from the session lost a binding-derived home and silently reordered
-    # `last` by session timestamps instead.
-    chat, session = max(chosen, key=lambda pair: binding_recency(project, pair[0], agent))
-    binding = read_binding(project, chat, agent)
+    # lives. Every field below comes from the ONE snapshot that was validated -- see
+    # resolve_one() for why re-reading the path here was a TOCTOU.
+    chat, binding, session = max(chosen, key=lambda triple: str(triple[1].get("updated_utc") or ""))
     runtime = session.get("runtime") or {}
     thread_id = str(binding.get("runtime_session_id") or runtime.get("session_id") or "")
     if not thread_id:
@@ -318,36 +302,56 @@ def resolve_thread(args: argparse.Namespace) -> tuple[str, str, str | None]:
     return thread_id, f"{project}/{chat}", str(home) if home else None
 
 
-def read_binding(project: str, chat: str, agent: str) -> dict:
-    """The binding record, or an empty mapping when it cannot be read.
+def resolve_one(project: str, chat: str, agent: str, *, fatal: bool):
+    """Resolve one chat to a (binding snapshot, session) pair, or None when it is merely dead.
 
-    Only ever consulted AFTER the shared resolver has accepted this triple, so its identity is
-    already proven; this reads the fields that resolver does not return.
+    ONE read of the binding, carried forward. Reading it again for the family, then again for
+    the recency, then again for the thread id and home meant the resolver validated one snapshot
+    while four later reads could see a different file: swapping it after validation returned a
+    thread and home from a binding that was never checked, while the session had been validated
+    against the original. Four reads, four chances.
+
+    The single read is still not the same read the resolver performs internally, so the snapshot
+    is cross-checked against the session it accepted. Any disagreement means the file changed
+    between the two reads, and that aborts rather than picking one of them.
     """
+    session, reason = autobridge.resolve_exact_dispatch_target(project, chat, agent)
+    if session is None:
+        if not fatal and reason in SKIPPABLE_RESOLVER_REASONS:
+            return None
+        raise SystemExit(
+            f"[error] {project}/{chat} is not an exact live binding for {agent!r}: {reason}"
+            + ("" if fatal else ". Fix or remove that binding; broad lookup will not step over it.")
+        )
+
     try:
-        return autobridge.load_binding(project, chat, agent)
-    except (FileNotFoundError, OSError, ValueError):
-        return {}
+        binding = autobridge.load_binding(project, chat, agent)
+    except (FileNotFoundError, OSError, ValueError) as error:
+        raise SystemExit(f"[error] {project}/{chat} binding became unreadable: {error}")
 
+    runtime = session.get("runtime") or {}
+    disagreements = [
+        name for name, left, right in (
+            ("session_id", binding.get("session_id"), session.get("session_id")),
+            ("runtime_session_id", binding.get("runtime_session_id"), runtime.get("session_id")),
+            ("runtime_family", binding.get("runtime_family"), runtime.get("family")),
+            ("project_id", binding.get("project_id"), session.get("project_id")),
+            ("chat_id", binding.get("chat_id"), session.get("chat_id")),
+        ) if str(left or "") != str(right or "")
+    ]
+    if disagreements:
+        raise SystemExit(
+            f"[error] {project}/{chat} changed between validation and use "
+            f"({', '.join(disagreements)} disagree with the validated session); refusing"
+        )
 
-def binding_recency(project: str, chat: str, agent: str) -> str:
-    return str(read_binding(project, chat, agent).get("updated_utc") or "")
-
-
-def require_codex_family(project: str, chat: str, agent: str) -> None:
-    """Refuse a binding whose runtime is not a Codex App Server thread.
-
-    The shared resolver checks only that the binding and its session AGREE on the family, which
-    is right for dispatch -- it can reach several runtimes. This client cannot: sending a
-    claude_app or gemini_cli session id to a Codex App Server fails against the wrong runtime
-    instead of reporting an unsupported binding.
-    """
-    family = str(read_binding(project, chat, agent).get("runtime_family") or "")
+    family = str(binding.get("runtime_family") or "")
     if family != CODEX_RUNTIME_FAMILY:
         raise SystemExit(
             f"[error] {project}/{chat} is runtime_family={family or 'unset'!r}; only "
             f"{CODEX_RUNTIME_FAMILY} can be watched through a Codex App Server"
         )
+    return binding, session
 
 
 def bounded_chat_ids(project: str, agent: str) -> list[str]:

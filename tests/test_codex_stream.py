@@ -149,6 +149,155 @@ class ResolveThreadTest(unittest.TestCase):
             codex_stream.resolve_thread(
                 self.args(agent="codex", project="amiga", chat="CHAT-A"))
 
+    # --- one validated snapshot, not four reads ------------------------------------------
+
+    def test_a_binding_swapped_after_validation_is_refused(self) -> None:
+        """The reported TOCTOU, reproduced by swapping the real file mid-resolution.
+
+        The resolver validates ONE snapshot. Re-reading the path afterwards for the family, the
+        recency, then the thread id and home gave four later chances to see a different file --
+        so a swap after validation returned a thread and home from a binding that had never been
+        checked, while the session had been validated against the original.
+        """
+        self.bind(chat="CHAT-RACE", thread="good-thread", home="/tmp/good-home")
+        path = self.bindings / "amiga" / "CHAT-RACE" / "codex.json"
+        good = json.loads(path.read_text())
+        real_resolver = codex_stream.autobridge.resolve_exact_dispatch_target
+
+        def swap_after_validation(project_id, chat_id, agent_id):
+            result = real_resolver(project_id, chat_id, agent_id)
+            # the file changes the instant validation completes
+            swapped = dict(good, runtime_session_id="wrong-thread",
+                           runtime_home="/tmp/wrong-home")
+            path.write_text(json.dumps(swapped), encoding="utf-8")
+            return result
+
+        with mock.patch.object(codex_stream.autobridge, "resolve_exact_dispatch_target",
+                               side_effect=swap_after_validation):
+            with self.assertRaises(SystemExit) as caught:
+                codex_stream.resolve_thread(
+                    self.args(agent="codex", project="amiga", chat="CHAT-RACE"))
+        message = str(caught.exception)
+        self.assertIn("changed between validation and use", message)
+        self.assertIn("runtime_session_id", message,
+                      "the disagreeing field must be named")
+
+    def test_a_swapped_home_alone_is_also_refused(self) -> None:
+        """Not every swap changes an id -- but every swap that changes what we USE must fail.
+
+        Here only runtime_home moves, which no id comparison would catch, so the session_id is
+        the field that betrays the substitution.
+        """
+        self.bind(chat="CHAT-RACE2", thread="good-thread", home="/tmp/good-home")
+        path = self.bindings / "amiga" / "CHAT-RACE2" / "codex.json"
+        good = json.loads(path.read_text())
+        real_resolver = codex_stream.autobridge.resolve_exact_dispatch_target
+
+        def swap(project_id, chat_id, agent_id):
+            result = real_resolver(project_id, chat_id, agent_id)
+            path.write_text(json.dumps(dict(good, session_id="SESSION-OTHER",
+                                            runtime_home="/tmp/wrong-home")),
+                            encoding="utf-8")
+            return result
+
+        with mock.patch.object(codex_stream.autobridge, "resolve_exact_dispatch_target",
+                               side_effect=swap):
+            with self.assertRaises(SystemExit) as caught:
+                codex_stream.resolve_thread(
+                    self.args(agent="codex", project="amiga", chat="CHAT-RACE2"))
+        self.assertIn("session_id", str(caught.exception))
+
+    def test_the_binding_is_read_once_per_chat(self) -> None:
+        """Four reads were four chances to see a different file."""
+        self.bind(chat="CHAT-A")
+        self.bind(chat="CHAT-B")
+        real_loader = codex_stream.autobridge.load_binding
+        reads = []
+
+        def counting(project_id, chat_id, agent_id):
+            reads.append(chat_id)
+            return real_loader(project_id, chat_id, agent_id)
+
+        with mock.patch.object(codex_stream.autobridge, "load_binding", side_effect=counting):
+            with self.assertRaises(SystemExit):
+                codex_stream.resolve_thread(self.args(agent="codex", project="amiga"))
+        # Patching the module function catches BOTH readers, so two per chat is the floor: one
+        # inside the audited resolver, one by us. Five per chat was the defect -- the resolver's,
+        # then ours for the family, the recency, the thread id and the home.
+        from collections import Counter
+        per_chat = Counter(reads)
+        self.assertEqual({"CHAT-A": 2, "CHAT-B": 2}, dict(per_chat),
+                         f"one read of our own per chat, not four: {dict(per_chat)}")
+
+    def test_a_successful_resolution_reads_the_binding_exactly_once(self) -> None:
+        """Counted on the path that REACHES the end, which the ambiguity case never does.
+
+        There is a second window after the cross-check: re-reading the path to pick the thread
+        id and home would reopen it once more, and a swap in that window is invisible to a check
+        that already ran. Two reads is the floor -- one inside the audited resolver, one ours.
+        """
+        self.bind(chat="CHAT-ONLY", thread="the-thread", home="/tmp/the-home")
+        real_loader = codex_stream.autobridge.load_binding
+        reads = []
+
+        def counting(project_id, chat_id, agent_id):
+            reads.append(chat_id)
+            return real_loader(project_id, chat_id, agent_id)
+
+        with mock.patch.object(codex_stream.autobridge, "load_binding", side_effect=counting):
+            thread, _p, home = codex_stream.resolve_thread(
+                self.args(agent="codex", project="amiga", chat="CHAT-ONLY"))
+        self.assertEqual("the-thread", thread)
+        self.assertEqual("/tmp/the-home", home)
+        self.assertEqual(2, len(reads),
+                         f"the resolver's read plus exactly one of ours: {reads}")
+
+    def test_a_swap_after_the_cross_check_cannot_change_what_is_used(self) -> None:
+        """The second window: swap once the cross-check has already passed.
+
+        With the metadata taken from the validated snapshot there is nothing left to reopen, so
+        the swapped file cannot influence the thread id or the home.
+        """
+        self.bind(chat="CHAT-LATE", thread="the-thread", home="/tmp/the-home")
+        path = self.bindings / "amiga" / "CHAT-LATE" / "codex.json"
+        good = json.loads(path.read_text())
+        real_loader = codex_stream.autobridge.load_binding
+        calls = {"n": 0}
+
+        def swap_on_third_read(project_id, chat_id, agent_id):
+            calls["n"] += 1
+            record = real_loader(project_id, chat_id, agent_id)
+            if calls["n"] >= 2:
+                # everything validated; now the file changes underneath us
+                path.write_text(json.dumps(dict(good, runtime_session_id="wrong-thread",
+                                                runtime_home="/tmp/wrong-home")),
+                                encoding="utf-8")
+            return record
+
+        with mock.patch.object(codex_stream.autobridge, "load_binding",
+                               side_effect=swap_on_third_read):
+            thread, _p, home = codex_stream.resolve_thread(
+                self.args(agent="codex", project="amiga", chat="CHAT-LATE"))
+        self.assertEqual("the-thread", thread, "a later swap must not reach the thread id")
+        self.assertEqual("/tmp/the-home", home, "nor the home")
+
+    def test_a_binding_that_vanishes_after_validation_is_refused(self) -> None:
+        self.bind(chat="CHAT-GONE")
+        path = self.bindings / "amiga" / "CHAT-GONE" / "codex.json"
+        real_resolver = codex_stream.autobridge.resolve_exact_dispatch_target
+
+        def unlink_after(project_id, chat_id, agent_id):
+            result = real_resolver(project_id, chat_id, agent_id)
+            path.unlink()
+            return result
+
+        with mock.patch.object(codex_stream.autobridge, "resolve_exact_dispatch_target",
+                               side_effect=unlink_after):
+            with self.assertRaises(SystemExit) as caught:
+                codex_stream.resolve_thread(
+                    self.args(agent="codex", project="amiga", chat="CHAT-GONE"))
+        self.assertIn("unreadable", str(caught.exception))
+
     # --- the family gate, which the shared resolver does NOT enforce ---------------------
 
     def test_a_consistent_non_codex_family_is_still_refused(self) -> None:
