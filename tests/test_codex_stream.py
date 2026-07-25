@@ -711,27 +711,23 @@ class DeadlineTest(unittest.TestCase):
     def test_a_near_deadline_shortens_the_socket_wait(self) -> None:
         made = self.client()
         made.set_deadline(time.monotonic() + 0.1)
-        made._clamp_socket()
-        self.assertLessEqual(made.sock.settimeout.call_args[0][0], 0.1)
+        self.assertLessEqual(made.remaining_wait(), 0.1)
 
     def test_no_deadline_uses_the_idle_cap(self) -> None:
         made = self.client()
         made.set_deadline(None)
-        made._clamp_socket()
-        self.assertEqual(5, made.sock.settimeout.call_args[0][0])
+        self.assertEqual(5, made.remaining_wait())
 
     def test_a_distant_deadline_still_respects_the_idle_cap(self) -> None:
         made = self.client()
         made.set_deadline(time.monotonic() + 600)
-        made._clamp_socket()
-        self.assertEqual(5, made.sock.settimeout.call_args[0][0])
+        self.assertEqual(5, made.remaining_wait())
 
     def test_an_exhausted_window_never_becomes_a_blocking_wait(self) -> None:
         # settimeout(0) makes the socket non-blocking, which is a different failure
         made = self.client()
         made.set_deadline(time.monotonic() - 3)
-        made._clamp_socket()
-        self.assertGreater(made.sock.settimeout.call_args[0][0], 0)
+        self.assertGreater(made.remaining_wait(), 0)
 
     def test_a_ping_storm_cannot_extend_the_deadline(self) -> None:
         """The reported repro: pings are consumed INSIDE the frame loop.

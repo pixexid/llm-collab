@@ -23,6 +23,7 @@ import json
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "bin"))
@@ -64,6 +65,7 @@ def client(policy: str = autobridge.SERVER_REQUEST_REFUSE) -> autobridge.JsonRpc
     made.sock = None
     made.counter = 0
     made.server_requests = []
+    made.read_deadline = None      # the shared client now carries an optional absolute deadline
     made.sent: list[dict] = []
     made.inbox: list[dict] = []
     made.send_json = made.sent.append
@@ -234,3 +236,141 @@ class NoSuccessEnvelopeAnywhereTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HandshakeClosesOnFailureTest(unittest.TestCase):
+    """Every post-connect failure must close the socket, and the deadline must default off.
+
+    The connected socket was leaked whenever sendall, recv or parsing raised before `self.sock`
+    was assigned -- there was nothing for __exit__ to close, and the suites emitted unclosed-socket
+    ResourceWarnings. The deadline lives here rather than in a subclass copy so there is one
+    protocol authority instead of two that can drift.
+    """
+
+    def serve(self, chunks=(), gap=0.0, accept=True):
+        import socket as _socket
+        import threading
+        import time as _time
+
+        listener = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+        listener.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        self.addCleanup(listener.close)
+
+        def run():
+            try:
+                conn, _ = listener.accept()
+            except OSError:
+                return
+            try:
+                conn.recv(4096)
+                for chunk in chunks:
+                    _time.sleep(gap)
+                    conn.sendall(chunk)
+            except OSError:
+                pass
+            finally:
+                conn.close()
+
+        if accept:
+            threading.Thread(target=run, daemon=True).start()
+        return listener.getsockname()[1]
+
+    def client(self, port, *, deadline=None, timeout=1):
+        made = autobridge.JsonRpcWebSocketClient(f"ws://127.0.0.1:{port}", token=None,
+                                                 timeout_seconds=timeout)
+        if deadline is not None:
+            made.set_deadline(deadline)
+        return made
+
+    def sockets_left_open(self, run):
+        """Run `run()` and report any socket it leaves connected."""
+        import socket as _socket
+        created = []
+        real_connect = _socket.create_connection
+
+        def tracking(*args, **kwargs):
+            sock = real_connect(*args, **kwargs)
+            created.append(sock)
+            return sock
+
+        with mock.patch.object(_socket, "create_connection", tracking):
+            with self.assertRaises(BaseException):
+                run()
+        for sock in created:
+            self.addCleanup(sock.close)
+        return [sock for sock in created if sock.fileno() != -1]
+
+    def test_a_failing_sendall_closes_the_socket(self) -> None:
+        port = self.serve()
+        made = self.client(port)
+        real_sendall = None
+
+        def run():
+            nonlocal real_sendall
+            with mock.patch("socket.socket.sendall",
+                            side_effect=OSError("simulated send failure")):
+                with made:
+                    pass
+
+        self.assertEqual([], self.sockets_left_open(run),
+                         "a connected socket must not survive a failed sendall")
+
+    def test_a_rejected_handshake_closes_the_socket(self) -> None:
+        port = self.serve([b"HTTP/1.1 400 Bad Request\r\n\r\n"])
+        made = self.client(port)
+        self.assertEqual([], self.sockets_left_open(lambda: made.__enter__()),
+                         "a non-101 response must not leak the socket")
+
+    def test_a_bad_accept_header_closes_the_socket(self) -> None:
+        port = self.serve([b"HTTP/1.1 101 Switching Protocols\r\n"
+                           b"Sec-WebSocket-Accept: wrong\r\n\r\n"])
+        made = self.client(port)
+        self.assertEqual([], self.sockets_left_open(lambda: made.__enter__()))
+
+    def test_a_peer_that_hangs_up_closes_the_socket(self) -> None:
+        port = self.serve([])          # accepts, reads, closes without replying
+        made = self.client(port)
+        self.assertEqual([], self.sockets_left_open(lambda: made.__enter__()))
+
+    def test_a_trickled_handshake_cannot_outlast_an_absolute_deadline(self) -> None:
+        import time as _time
+        port = self.serve([b"HTTP/1.1 101 Switching Protocols\r\n",
+                           b"Upgrade: websocket\r\n",
+                           b"Connection: Upgrade\r\n\r\n"], gap=0.04)
+        made = self.client(port, deadline=_time.monotonic() + 0.05, timeout=1)
+        started = _time.monotonic()
+        left = self.sockets_left_open(lambda: made.__enter__())
+        self.assertLess(_time.monotonic() - started, 0.5)
+        self.assertEqual([], left, "and the bounded-out socket must be closed too")
+
+    def test_a_fast_trickle_is_bounded_by_the_check_not_the_clamp(self) -> None:
+        """The case clamping alone cannot bound, and the reason the explicit check exists.
+
+        Clamping each wait to whatever the deadline leaves shrinks it toward a 0.01s floor, so a
+        peer sending a chunk every 40ms still times out on the read. A peer sending one every
+        millisecond does not: each recv succeeds inside its own tiny timeout, forever. Only an
+        explicit deadline check between reads stops that.
+
+        My earlier trickle tests all used gaps far larger than the floor, so removing the check
+        changed nothing they could see -- the mutation passed and the proof was hollow.
+        """
+        import time as _time
+        header = (b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n"
+                  b"Connection: Upgrade\r\nSec-WebSocket-Accept: x\r\n" + b"X-Pad: y\r\n" * 400
+                  + b"\r\n")
+        port = self.serve([header[i:i + 1] for i in range(len(header))], gap=0.001)
+        made = self.client(port, deadline=_time.monotonic() + 0.05, timeout=5)
+        started = _time.monotonic()
+        left = self.sockets_left_open(lambda: made.__enter__())
+        elapsed = _time.monotonic() - started
+        self.assertLess(elapsed, 0.5,
+                        f"a 1ms trickle must still be bounded by the deadline: {elapsed:.3f}s")
+        self.assertEqual([], left)
+
+    def test_the_default_has_no_deadline_so_existing_callers_are_unchanged(self) -> None:
+        made = autobridge.JsonRpcWebSocketClient("ws://127.0.0.1:1", timeout_seconds=30)
+        self.assertIsNone(made.read_deadline)
+        self.assertEqual(30, made.remaining_wait(),
+                         "with no deadline every wait gets the full timeout, as before")

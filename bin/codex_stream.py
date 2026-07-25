@@ -91,92 +91,11 @@ class ObserverClient(autobridge.JsonRpcWebSocketClient):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.observed_requests: list[str] = []
-        self.read_deadline: float | None = None
         # Notifications seen while a request/response correlation is in flight. The inherited
         # request() loop DISCARDS them, so an event emitted after this socket was registered
         # for the thread but before thread/resume answered was silently lost -- exactly at the
         # subscription boundary, where turn/started and the first items live.
         self.pending_events: list[dict] = []
-
-    def __enter__(self) -> "ObserverClient":
-        """Connect and handshake under the ABSOLUTE deadline, not a per-call timeout.
-
-        The inherited handshake loops on `recv()` with a fixed socket timeout, so a peer trickling
-        bytes resets that timeout on every chunk and the whole handshake is unbounded: a 50ms
-        budget with three chunks 40ms apart ran 144ms and the deadline was never consulted.
-        Clamping the socket timeout bounds each read; only an absolute check bounds the sum.
-
-        Deliberately a narrow override -- connect and read the header, then hand the socket to the
-        base class's own validation by calling it with the bytes already in hand is not possible,
-        so the validation is repeated here. That duplication is the cost of bounding setup without
-        changing a base class other callers share.
-        """
-        if self.read_deadline is not None and time.monotonic() >= self.read_deadline:
-            raise TimeoutError("read deadline reached before connecting")
-
-        parsed = urllib.parse.urlparse(self.url)
-        if parsed.scheme != "ws" or not parsed.hostname or not parsed.port:
-            raise ValueError(f"Unsupported Codex app-server websocket URL: {self.url}")
-
-        sock = socket.create_connection((parsed.hostname, parsed.port),
-                                        timeout=self._remaining_wait())
-        sock.settimeout(self._remaining_wait())
-        path = parsed.path or "/"
-        if parsed.query:
-            path = f"{path}?{parsed.query}"
-        key = base64.b64encode(os.urandom(16)).decode("ascii")
-        headers = [
-            f"GET {path} HTTP/1.1",
-            f"Host: {parsed.hostname}:{parsed.port}",
-            "Upgrade: websocket",
-            "Connection: Upgrade",
-            f"Sec-WebSocket-Key: {key}",
-            "Sec-WebSocket-Version: 13",
-        ]
-        if self.token:
-            headers.append(f"Authorization: Bearer {self.token}")
-        sock.sendall(("\r\n".join(headers) + "\r\n\r\n").encode("ascii"))
-
-        response = b""
-        while b"\r\n\r\n" not in response:
-            if self.read_deadline is not None and time.monotonic() >= self.read_deadline:
-                sock.close()
-                raise TimeoutError("read deadline reached during the websocket handshake")
-            sock.settimeout(self._remaining_wait())
-            chunk = sock.recv(4096)
-            if not chunk:
-                sock.close()
-                raise ConnectionError("websocket handshake failed")
-            response += chunk
-
-        header_text = response.split(b"\r\n\r\n", 1)[0].decode("iso-8859-1")
-        if " 101 " not in header_text.splitlines()[0]:
-            sock.close()
-            raise ConnectionError(
-                f"websocket handshake failed: {header_text.splitlines()[0]}")
-        expected_accept = base64.b64encode(
-            hashlib.sha1((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode("ascii")).digest()
-        ).decode("ascii")
-        if expected_accept not in header_text:
-            sock.close()
-            raise ConnectionError("websocket handshake failed: invalid accept header")
-        self.sock = sock
-        return self
-
-    def _remaining_wait(self) -> float:
-        """Seconds to allow one blocking operation, never more than the deadline leaves."""
-        cap = float(self.timeout_seconds or DEFAULT_IDLE_TIMEOUT_SECONDS)
-        if self.read_deadline is None:
-            return cap
-        return max(0.01, min(cap, self.read_deadline - time.monotonic()))
-
-    def set_deadline(self, deadline: float | None) -> None:
-        """The absolute monotonic instant after which no further frame may be awaited."""
-        self.read_deadline = deadline
-
-    def _clamp_socket(self) -> None:
-        if self.sock is not None:
-            self.sock.settimeout(self._remaining_wait())
 
     def request(self, method: str, params: dict | None = None, **kwargs) -> object:
         """Correlate a response while BUFFERING anything else that arrives.
@@ -215,9 +134,9 @@ class ObserverClient(autobridge.JsonRpcWebSocketClient):
         frames and refused server requests all cost time against it instead of extending it.
         """
         while True:
-            if self.read_deadline is not None and time.monotonic() >= self.read_deadline:
-                raise TimeoutError("read deadline reached")
-            self._clamp_socket()
+            self._check_deadline("while reading")
+            if self.sock is not None:
+                self.sock.settimeout(self.remaining_wait())
             opcode, payload = self._recv_frame()
             if opcode == 0x8:
                 raise ConnectionError("websocket closed")

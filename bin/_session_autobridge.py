@@ -1389,41 +1389,76 @@ class JsonRpcWebSocketClient:
         self.sock: socket.socket | None = None
         self.counter = 0
         self.server_requests: list[str] = []
+        # An optional ABSOLUTE instant after which no blocking operation may still be waiting.
+        # None keeps the historical behaviour exactly: every wait gets the full timeout_seconds.
+        # A per-call timeout cannot bound a handshake, because a peer trickling bytes resets it
+        # on every chunk -- only an absolute limit bounds the sum.
+        self.read_deadline: float | None = None
+
+    def set_deadline(self, deadline: float | None) -> None:
+        """The absolute monotonic instant after which no blocking wait may continue."""
+        self.read_deadline = deadline
+
+    def remaining_wait(self) -> float:
+        """How long one blocking operation may wait: the timeout, capped by the deadline."""
+        cap = float(self.timeout_seconds or 30)
+        if self.read_deadline is None:
+            return cap
+        return max(0.01, min(cap, self.read_deadline - time.monotonic()))
+
+    def _check_deadline(self, where: str) -> None:
+        if self.read_deadline is not None and time.monotonic() >= self.read_deadline:
+            raise TimeoutError(f"read deadline reached {where}")
 
     def __enter__(self) -> "JsonRpcWebSocketClient":
         parsed = urllib.parse.urlparse(self.url)
         if parsed.scheme != "ws" or not parsed.hostname or not parsed.port:
             raise ValueError(f"Unsupported Codex app-server websocket URL: {self.url}")
-        sock = socket.create_connection((parsed.hostname, parsed.port), timeout=self.timeout_seconds)
-        sock.settimeout(self.timeout_seconds)
-        path = parsed.path or "/"
-        if parsed.query:
-            path = f"{path}?{parsed.query}"
-        key = base64.b64encode(os.urandom(16)).decode("ascii")
-        headers = [
-            f"GET {path} HTTP/1.1",
-            f"Host: {parsed.hostname}:{parsed.port}",
-            "Upgrade: websocket",
-            "Connection: Upgrade",
-            f"Sec-WebSocket-Key: {key}",
-            "Sec-WebSocket-Version: 13",
-        ]
-        if self.token:
-            headers.append(f"Authorization: Bearer {self.token}")
-        sock.sendall(("\r\n".join(headers) + "\r\n\r\n").encode("ascii"))
-        response = b""
-        while b"\r\n\r\n" not in response:
-            response += sock.recv(4096)
-            if not response:
-                raise ConnectionError("websocket handshake failed")
-        header_text = response.split(b"\r\n\r\n", 1)[0].decode("iso-8859-1")
-        if " 101 " not in header_text.splitlines()[0]:
-            raise ConnectionError(f"websocket handshake failed: {header_text.splitlines()[0]}")
-        expected_accept = base64.b64encode(
-            hashlib.sha1((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode("ascii")).digest()
-        ).decode("ascii")
-        if expected_accept not in header_text:
-            raise ConnectionError("websocket handshake failed: invalid accept header")
+        self._check_deadline("before connecting")
+        sock = socket.create_connection((parsed.hostname, parsed.port),
+                                        timeout=self.remaining_wait())
+        # Everything after the connect must close the socket on ANY failure. Leaving it to the
+        # caller leaked a connected socket whenever sendall, recv or parsing raised before
+        # self.sock was assigned -- there was nothing for __exit__ to close.
+        try:
+            sock.settimeout(self.remaining_wait())
+            path = parsed.path or "/"
+            if parsed.query:
+                path = f"{path}?{parsed.query}"
+            key = base64.b64encode(os.urandom(16)).decode("ascii")
+            headers = [
+                f"GET {path} HTTP/1.1",
+                f"Host: {parsed.hostname}:{parsed.port}",
+                "Upgrade: websocket",
+                "Connection: Upgrade",
+                f"Sec-WebSocket-Key: {key}",
+                "Sec-WebSocket-Version: 13",
+            ]
+            if self.token:
+                headers.append(f"Authorization: Bearer {self.token}")
+            sock.sendall(("\r\n".join(headers) + "\r\n\r\n").encode("ascii"))
+            response = b""
+            while b"\r\n\r\n" not in response:
+                # Checked per chunk, not per byte-budget: a peer sending the header in pieces
+                # resets a per-call timeout on every piece, so only this bounds the total.
+                self._check_deadline("during the websocket handshake")
+                sock.settimeout(self.remaining_wait())
+                chunk = sock.recv(4096)
+                if not chunk:
+                    raise ConnectionError("websocket handshake failed")
+                response += chunk
+            header_text = response.split(b"\r\n\r\n", 1)[0].decode("iso-8859-1")
+            if " 101 " not in header_text.splitlines()[0]:
+                raise ConnectionError(
+                    f"websocket handshake failed: {header_text.splitlines()[0]}")
+            expected_accept = base64.b64encode(
+                hashlib.sha1((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode("ascii")).digest()
+            ).decode("ascii")
+            if expected_accept not in header_text:
+                raise ConnectionError("websocket handshake failed: invalid accept header")
+        except BaseException:
+            sock.close()
+            raise
         self.sock = sock
         return self
 
@@ -1474,6 +1509,9 @@ class JsonRpcWebSocketClient:
 
     def recv_json(self) -> dict[str, Any]:
         while True:
+            self._check_deadline("while reading")
+            if self.sock is not None:
+                self.sock.settimeout(self.remaining_wait())
             opcode, payload = self._recv_frame()
             if opcode == 0x8:
                 raise ConnectionError("websocket closed")
