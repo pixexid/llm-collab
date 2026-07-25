@@ -35,7 +35,6 @@ DECISION_MARKERS = ("decision", "required", "approve", "ratify", "recommend", "b
 # Bounded so one packet citing many PRs cannot stall the digest on network calls.
 # Exceeding it downgrades the hint to PARTIAL rather than claiming full coverage.
 PR_CHECK_LIMIT = 6
-PARTIAL_PREFIX = "PARTIAL"
 DEFAULT_REPO = "pixexid/llm-collab"
 
 
@@ -86,84 +85,106 @@ def sender_of(relpath: str) -> str:
     return "?"
 
 
-def packet_repo(text: str) -> str | None:
-    """The repository a packet's PR numbers belong to, or None when it is not ours.
+def qualified_pr_refs(text: str) -> tuple[list[tuple[str, int]], int]:
+    """Return (repo-qualified PR refs, count of bare unattributable ones).
 
-    Frontmatter carries project_id and repo_targets. A packet scoped to another project
-    numbers its PRs elsewhere, so this repo's states say nothing about them.
+    A bare `#170` names no repository. This workspace's packets are scoped to project
+    `amiga`, whose REGISTERED repo is pixexid/amiga -- not pixexid/llm-collab -- so
+    guessing this repo could report a same-numbered PR's state from the wrong project and
+    declare a live request settled on it. Only an explicitly qualified reference is
+    checkable; bare ones stay unresolved and count against settlement.
     """
-    project = re.search(r"^project_id:\s*(\S+)", text, re.MULTILINE)
-    if project and project.group(1).strip('"\'') not in {"amiga", "null", "None"}:
+    qualified: list[tuple[str, int]] = []
+    for owner, repo, number in re.findall(
+        r"github\.com/([\w.-]+)/([\w.-]+)/pull/(\d+)", text
+    ):
+        qualified.append((f"{owner}/{repo}", int(number)))
+    for owner, repo, number in re.findall(r"\b([\w.-]+)/([\w.-]+)#(\d{1,5})\b", text):
+        qualified.append((f"{owner}/{repo}", int(number)))
+
+    attributed = {number for _, number in qualified}
+    bare = {
+        int(n) for n in re.findall(r"(?<![\w/])#(\d{2,4})\b", text)
+    } - attributed
+    unique = sorted(set(qualified))
+    return unique, len(bare)
+
+
+def pr_state(repo: str, number: int) -> str | None:
+    try:
+        raw = subprocess.run(
+            ["gh", "pr", "view", str(number), "--repo", repo, "--json", "state"],
+            capture_output=True, text=True, timeout=20, check=True).stdout
+        return json.loads(raw).get("state")
+    except Exception:
         return None
-    targets = re.search(r"^repo_targets:\s*\[(.*?)\]", text, re.MULTILINE)
-    if targets and targets.group(1).strip():
-        named = {t.strip().strip('"\'') for t in targets.group(1).split(",") if t.strip()}
-        if named and not named & {"llm-collab", DEFAULT_REPO}:
-            return None
-    return DEFAULT_REPO
 
 
-def resolution_hint(relpath: str) -> str:
-    """Flag a request whose subject has already been resolved.
+def resolution_hint(relpath: str) -> tuple[bool, str]:
+    """Return (fully_settled, note) for one packet.
 
-    A packet listing unread forever is not the same as a decision still needed. The
-    oldest item in this queue asked to ratify an option and said two PRs were held until
-    then; both merged six hours later and the task moved to Tasks/done, so it presented
-    itself as an urgent blocker for four days after ceasing to block anything. Checking
-    the subject, not just the read flag, is what stops that class of ghost.
+    A packet listing unread forever is not the same as a decision still needed. The oldest
+    item in this queue asked to ratify an option and said two PRs were held until then;
+    both merged and the task moved to Tasks/done, so it presented as an urgent blocker for
+    four days after ceasing to block anything.
+
+    Authority is RETURNED, never inferred from this note's wording. An earlier version made
+    the caller test the note's prefix, so a packet whose note began with a completed-task
+    clause -- or with "PR reference(s) not checked" -- was rendered moot although live work
+    remained inside it. Anything unresolved, including an unreachable PR or a bare
+    unattributable reference, counts against settlement.
     """
     try:
         text = (ROOT / relpath).read_text(encoding="utf-8", errors="replace")
     except OSError:
-        return ""
+        return False, ""
 
     notes: list[str] = []
+    saw_reference = False
+    settled_everywhere = True
 
     tasks = sorted(set(re.findall(r"TASK-[0-9A-F]{6}", text)))
-    done = []
-    for task in tasks:
-        if any((ROOT / "Tasks" / "done").glob(f"*{task}*")):
-            done.append(task)
-    if done and len(done) == len(tasks):
-        notes.append(f"task(s) completed: {', '.join(done)}")
+    if tasks:
+        saw_reference = True
+        done = [t for t in tasks if any((ROOT / "Tasks" / "done").glob(f"*{t}*"))]
+        if len(done) == len(tasks):
+            notes.append(f"task(s) completed: {', '.join(done)}")
+        else:
+            settled_everywhere = False
+            if done:
+                notes.append(f"task(s) completed: {', '.join(done)}; "
+                             f"still open: {', '.join(t for t in tasks if t not in done)}")
 
-    prs = sorted({int(n) for n in re.findall(r"(?:PR\s*)?#(\d{2,4})\b", text)})
-    repo = packet_repo(text)
-    if prs and repo is None:
-        # A packet from another project numbers its PRs in ANOTHER repository. Looking
-        # them up here would report a same-numbered llm-collab PR's state and could
-        # declare a live cross-project request moot on evidence from the wrong repo.
-        notes.append(f"PR reference(s) not checked: packet is not scoped to {DEFAULT_REPO}")
-        prs = []
-    if prs:
-        # All referenced PRs must be settled, exactly as tasks require all done. An
-        # earlier version claimed moot when ANY single PR had merged, which mislabelled
-        # a packet carrying three decisions because one of the three had shipped. A
-        # wrong "moot" on a live request is worse than no hint at all.
-        checked = prs[:PR_CHECK_LIMIT]
+    qualified, bare_count = qualified_pr_refs(text)
+    if bare_count:
+        saw_reference = True
+        settled_everywhere = False
+        notes.append(f"{bare_count} bare PR reference(s) not checked: no repository named, "
+                     f"and this project's registered repo is not assumed")
+
+    if qualified:
+        saw_reference = True
+        checked = qualified[:PR_CHECK_LIMIT]
+        if len(qualified) > len(checked):
+            settled_everywhere = False
+            notes.append(f"{len(qualified) - len(checked)} further PR ref(s) not checked")
         settled, open_or_unknown = [], []
-        for number in checked:
-            try:
-                raw = subprocess.run(
-                    ["gh", "pr", "view", str(number), "--repo", repo,
-                     "--json", "state"],
-                    capture_output=True, text=True, timeout=20, check=True).stdout
-                state = json.loads(raw).get("state")
-            except Exception:
-                open_or_unknown.append(f"#{number}")
-                continue
-            (settled if state in {"MERGED", "CLOSED"} else open_or_unknown).append(f"#{number}")
-
-        if settled and not open_or_unknown and len(checked) == len(prs):
-            notes.append(f"referenced PR(s) already settled: {', '.join(settled)}")
+        for repo, number in checked:
+            state = pr_state(repo, number)
+            label = f"{repo}#{number}"
+            (settled if state in {"MERGED", "CLOSED"} else open_or_unknown).append(label)
+        if open_or_unknown:
+            settled_everywhere = False
+        if settled and not open_or_unknown:
+            notes.append(f"PR(s) already settled: {', '.join(settled)}")
         elif settled:
-            still = ", ".join(open_or_unknown) or "unchecked references"
-            dropped = f" ({len(prs) - len(checked)} more not checked)" if len(prs) > len(checked) else ""
-            notes.append(
-                f"PARTIAL — settled: {', '.join(settled)}; still open: {still}{dropped}"
-            )
+            notes.append(f"settled: {', '.join(settled)}; still open or unknown: "
+                         f"{', '.join(open_or_unknown)}")
 
-    return "; ".join(notes)
+    if not saw_reference:
+        return False, ""
+    return settled_everywhere, "; ".join(n for n in notes if n)
+
 
 def decision_status(relpath: str) -> str:
     """The operator-facing verdict for one row.
@@ -173,12 +194,12 @@ def decision_status(relpath: str) -> str:
     "**likely moot** -- PARTIAL -- settled: #299; still open: #302" -- a row that tells
     the reader to skip an item while naming the live work inside it.
     """
-    hint = resolution_hint(relpath)
-    if not hint:
+    fully_settled, note = resolution_hint(relpath)
+    if not note:
         return "awaiting you"
-    if hint.startswith(PARTIAL_PREFIX):
-        return f"**awaiting you** — {hint}"
-    return f"**likely moot** — {hint}"
+    if fully_settled:
+        return f"**likely moot** — {note}"
+    return f"**awaiting you** — {note}"
 
 
 def pending_for_operator() -> list[tuple[datetime | None, str, str]]:
@@ -269,9 +290,11 @@ def render() -> str:
         for stamp, title, relpath in decisions[:12]:
             add(f"| {age_of(stamp)} | {title} | {decision_status(relpath)} |")
         add("")
-        add("Items marked *likely moot* reference work that has since merged or "
-            "completed; verify before spending attention on them. Anything else, "
-            "including *partly settled*, is still awaiting you.")
+        add("Only *likely moot* means every referenced task and PR is settled; verify "
+            "before dropping it. Everything else is awaiting you, including rows whose "
+            "note lists what could not be checked. A bare `#123` names no repository, so "
+            "it is reported rather than guessed -- reference PRs as `owner/repo#123` to "
+            "make them checkable.")
     add("")
     other = [r for r in pending if r not in decisions]
     if other:

@@ -45,57 +45,66 @@ class ResolutionHintTest(unittest.TestCase):
             return mock.Mock(stdout=json.dumps({"state": states[number]}))
         return mock.patch.object(operator_digest.subprocess, "run", side_effect=run)
 
-    def test_one_merged_pr_among_open_ones_is_not_moot(self) -> None:
-        relpath = self.packet("Three decisions. See #299 and #302.")
+    def test_one_settled_pr_among_open_ones_is_not_fully_settled(self) -> None:
+        relpath = self.packet("Three decisions. See pixexid/llm-collab#299 and "
+                              "pixexid/llm-collab#302.")
         with self.fake_gh({299: "MERGED", 302: "OPEN"}):
-            hint = operator_digest.resolution_hint(relpath)
-        self.assertIn("PARTIAL", hint)
-        self.assertIn("#302", hint, "the still-open PR must be named")
-        self.assertNotIn("already settled", hint,
-                         "a partially settled packet must not read as fully settled")
+            settled, note = operator_digest.resolution_hint(relpath)
+        self.assertFalse(settled)
+        self.assertIn("#302", note, "the still-open PR must be named")
 
-    def test_all_merged_prs_are_reported_settled(self) -> None:
-        relpath = self.packet("Held on PR #170 and #171 until ratified.")
+    def test_all_settled_qualified_prs_are_fully_settled(self) -> None:
+        relpath = self.packet("Held on pixexid/llm-collab#170 and pixexid/llm-collab#171.")
         with self.fake_gh({170: "MERGED", 171: "CLOSED"}):
-            hint = operator_digest.resolution_hint(relpath)
-        self.assertIn("already settled", hint)
-        self.assertIn("#170", hint)
-        self.assertIn("#171", hint)
+            settled, note = operator_digest.resolution_hint(relpath)
+        self.assertTrue(settled)
+        self.assertIn("#170", note)
 
-    def test_an_unreachable_pr_counts_against_moot_rather_than_for_it(self) -> None:
-        relpath = self.packet("See #299 and #4242.")
+    def test_an_unreachable_pr_counts_against_settlement(self) -> None:
+        relpath = self.packet("See pixexid/llm-collab#299 and pixexid/llm-collab#4242.")
         with self.fake_gh({299: "MERGED"}):  # #4242 lookup raises
-            hint = operator_digest.resolution_hint(relpath)
-        self.assertIn("PARTIAL", hint)
-        self.assertIn("#4242", hint, "an unknown state must be treated as still open")
+            settled, note = operator_digest.resolution_hint(relpath)
+        self.assertFalse(settled)
+        self.assertIn("#4242", note, "an unknown state must be treated as still open")
+
+    def test_a_bare_pr_number_is_never_guessed_against_this_repo(self) -> None:
+        """`#170` names no repository, and amiga's registered repo is pixexid/amiga."""
+        relpath = self.packet("Blocked on #170 until ratified.")
+        called = []
+
+        def run(argv, **kwargs):
+            called.append(argv)
+            raise AssertionError("a bare reference must not be looked up anywhere")
+
+        with mock.patch.object(operator_digest.subprocess, "run", side_effect=run):
+            settled, note = operator_digest.resolution_hint(relpath)
+        self.assertEqual([], called)
+        self.assertFalse(settled, "an unattributable reference cannot settle anything")
+        self.assertIn("not checked", note)
+
+    def test_a_done_task_with_a_bare_pr_is_not_moot(self) -> None:
+        """The exact shape that rendered moot when authority came from the note's prefix."""
+        (self.root / "Tasks" / "done" / "x__TASK-8CED1C.md").write_text("x", encoding="utf-8")
+        relpath = self.packet("Ratify option A for TASK-8CED1C; #170 and #171 are held.")
+        with mock.patch.object(operator_digest.subprocess, "run",
+                               side_effect=AssertionError("no lookup for bare refs")):
+            status = operator_digest.decision_status(relpath)
+        self.assertIn("awaiting you", status)
+        self.assertNotIn("likely moot", status)
+        self.assertIn("TASK-8CED1C", status, "the settled part is still worth showing")
 
     def test_tasks_still_require_every_reference_done(self) -> None:
         (self.root / "Tasks" / "done" / "x__TASK-8CED1C.md").write_text("x", encoding="utf-8")
         relpath = self.packet("Ratify for TASK-8CED1C and TASK-999999.")
         with self.fake_gh({}):
-            hint = operator_digest.resolution_hint(relpath)
-        self.assertNotIn("task(s) completed", hint,
-                         "one done task among two must not read as completed")
+            settled, note = operator_digest.resolution_hint(relpath)
+        self.assertFalse(settled, "one done task among two cannot settle the packet")
+        self.assertIn("TASK-999999", note)
 
-    def test_a_partial_hint_renders_as_awaiting_you_not_moot(self) -> None:
-        """Assert the OPERATOR-FACING row, not the helper's return value.
-
-        The helper was correct while the row built from it read
-        "**likely moot** — PARTIAL — settled: #299; still open: #302": a status telling
-        the reader to skip an item while naming the live work inside it. Testing the
-        helper alone could never catch that.
-        """
-        relpath = self.packet("Three decisions. See #299 and #302.")
-        with self.fake_gh({299: "MERGED", 302: "OPEN"}):
-            status = operator_digest.decision_status(relpath)
-        self.assertIn("awaiting you", status)
-        self.assertNotIn("likely moot", status,
-                         "a row naming still-open work must never read as moot")
-        self.assertIn("#302", status)
-
-    def test_a_fully_settled_hint_still_renders_as_moot(self) -> None:
-        relpath = self.packet("Held on PR #170 and #171.")
-        with self.fake_gh({170: "MERGED", 171: "MERGED"}):
+    def test_a_fully_settled_packet_renders_as_moot(self) -> None:
+        (self.root / "Tasks" / "done" / "x__TASK-8CED1C.md").write_text("x", encoding="utf-8")
+        relpath = self.packet("TASK-8CED1C, held on pixexid/llm-collab#170.")
+        with self.fake_gh({170: "MERGED"}):
             status = operator_digest.decision_status(relpath)
         self.assertIn("likely moot", status)
 
@@ -104,31 +113,24 @@ class ResolutionHintTest(unittest.TestCase):
         with self.fake_gh({}):
             self.assertEqual("awaiting you", operator_digest.decision_status(relpath))
 
-    def test_a_foreign_project_packets_pr_numbers_are_not_checked_here(self) -> None:
-        """Another project numbers its PRs in another repo."""
-        relpath = self.packet("---\nproject_id: nuvyr\n---\nBlocked on #170.")
-        called = []
+    def test_a_foreign_repo_reference_is_checked_against_that_repo(self) -> None:
+        relpath = self.packet("Blocked on pixexid/amiga#170.")
+        seen = []
 
         def run(argv, **kwargs):
-            called.append(argv)
-            raise AssertionError("must not reach gh for a foreign-project packet")
+            seen.append(argv[argv.index("--repo") + 1])
+            return mock.Mock(stdout=json.dumps({"state": "MERGED"}))
 
         with mock.patch.object(operator_digest.subprocess, "run", side_effect=run):
-            hint = operator_digest.resolution_hint(relpath)
-        self.assertEqual([], called)
-        self.assertIn("not checked", hint)
-        self.assertNotIn("already settled", hint)
-
-    def test_an_amiga_packet_is_still_checked_against_this_repo(self) -> None:
-        relpath = self.packet("---\nproject_id: amiga\n---\nHeld on #170.")
-        with self.fake_gh({170: "MERGED"}):
-            hint = operator_digest.resolution_hint(relpath)
-        self.assertIn("already settled", hint)
+            settled, _ = operator_digest.resolution_hint(relpath)
+        self.assertEqual(["pixexid/amiga"], seen,
+                         "the reference's own repo must be queried, not this one")
+        self.assertTrue(settled)
 
     def test_no_references_yields_no_hint(self) -> None:
         relpath = self.packet("Please decide whether to park the sidecar work.")
         with self.fake_gh({}):
-            self.assertEqual("", operator_digest.resolution_hint(relpath))
+            self.assertEqual((False, ""), operator_digest.resolution_hint(relpath))
 
 
 if __name__ == "__main__":
