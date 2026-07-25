@@ -29,10 +29,11 @@ LOAD = (
 )
 
 
-def load_apps(env_overrides: dict[str, str]) -> list[dict]:
+def load_apps(env_overrides: dict[str, str], *, fake_uid: int | None = None) -> list[dict]:
     env = {**os.environ, **env_overrides}
+    script = LOAD if fake_uid is None else f"process.getuid = () => {fake_uid};" + LOAD
     result = subprocess.run(
-        [NODE, "-e", LOAD, str(CONFIG)],
+        [NODE, "-e", script, str(CONFIG)],
         capture_output=True,
         text=True,
         timeout=30,
@@ -149,9 +150,62 @@ class Pm2EcosystemTest(unittest.TestCase):
             self.assertEqual([], sidecars(apps))
 
 
-if __name__ == "__main__":
-    unittest.main()
 
+
+    def test_cjs_uid_branch_emits_for_owner_and_refuses_a_foreign_uid(self) -> None:
+        """Exercise the real CJS uid check, not only the Python mirror.
+
+        Overriding process.getuid in the isolated node subprocess before require makes
+        this directly testable; an earlier revision of this PR wrongly claimed it was
+        not, and relied on the Python mirror alone.
+        """
+        with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
+            token = Path(tmp) / "token"
+            token.write_text("t0ken\n", encoding="utf-8")
+            token.chmod(0o600)
+            binary = Path(tmp) / "codex"
+            binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            env = {
+                "LLM_COLLAB_CODEX_APP_SERVER_TOKEN_FILE": str(token),
+                "LLM_COLLAB_CODEX_BIN": str(binary),
+            }
+            self.assertEqual(
+                1, len(sidecars(load_apps(env, fake_uid=os.getuid()))),
+                "owner uid must emit the sidecar",
+            )
+            self.assertEqual(
+                [], sidecars(load_apps(env, fake_uid=os.getuid() + 1)),
+                "a foreign-owned token must be refused by the CJS gate",
+            )
+
+    def test_cjs_reserves_the_sidecar_id_against_a_registered_agent(self) -> None:
+        """A registered codex-appserver agent must not yield two apps with one name.
+
+        The Python manager guard is insufficient: this config maps watcher agents and
+        appends the transport independently.
+        """
+        agents_path = ROOT / "agents.json"
+        original = agents_path.read_text(encoding="utf-8")
+        payload = json.loads(original)
+        payload["agents"].append(
+            {"id": "codex-appserver", "activation": {"type": "cli_session", "watcher_enabled": True}}
+        )
+        with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
+            token = Path(tmp) / "token"
+            token.write_text("t0ken\n", encoding="utf-8")
+            token.chmod(0o600)
+            binary = Path(tmp) / "codex"
+            binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            try:
+                agents_path.write_text(json.dumps(payload), encoding="utf-8")
+                apps = load_apps({
+                    "LLM_COLLAB_CODEX_APP_SERVER_TOKEN_FILE": str(token),
+                    "LLM_COLLAB_CODEX_BIN": str(binary),
+                })
+            finally:
+                agents_path.write_text(original, encoding="utf-8")
+        names = [a["name"] for a in apps if a["name"].endswith(SIDECAR_SUFFIX)]
+        self.assertEqual(len(names), len(set(names)), f"duplicate PM2 app name: {names}")
 
 class Pm2ManagerSidecarTest(unittest.TestCase):
     """The manager's sidecar branch, forced on so a clean checkout still exercises it.
@@ -262,3 +316,7 @@ class Pm2ManagerSidecarTest(unittest.TestCase):
             },
         ):
             self.assertEqual([], pm2_watchers.enabled_sidecar_ids())
+
+
+if __name__ == "__main__":
+    unittest.main()

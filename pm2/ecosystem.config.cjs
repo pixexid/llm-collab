@@ -55,6 +55,21 @@ const watcherAgents = agents.filter(
 // ponytail: presence of the token file is the enable switch — no new config surface.
 // Add a codex_app_server block to collab.config.json only if per-agent ports are ever needed.
 function codexAppServerApps() {
+  // The reservation must live HERE, not only in bin/pm2_watchers.py: this config
+  // maps watcher agents and appends the transport independently, so a registered
+  // agent literally named `codex-appserver` would emit two apps with one PM2 name.
+  // Skip rather than throw — throwing would take the watchers down with it — and
+  // warn, while the Python manager exits loudly on the path operators actually use.
+  const reserved = watcherAgents.filter((a) => a.id === "codex-appserver");
+  if (reserved.length > 0) {
+    console.error(
+      "[ecosystem] agents.json registers 'codex-appserver', a reserved transport " +
+        "sidecar id; skipping the sidecar to avoid a duplicate PM2 app name. " +
+        "Rename the agent."
+    );
+    return [];
+  }
+
   const tokenFile =
     process.env.LLM_COLLAB_CODEX_APP_SERVER_TOKEN_FILE ||
     path.join(root, ".secrets", "codex_app_server_ws_token");
