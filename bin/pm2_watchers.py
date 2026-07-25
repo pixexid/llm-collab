@@ -92,7 +92,13 @@ def sidecar_token_is_secure(path: Path) -> bool:
         return False
     if not path.is_file():
         return False
-    if info.st_uid != os.getuid():
+    getuid = getattr(os, "getuid", None)
+    if getuid is None:
+        # POSIX-only, as on Windows. Fail closed on the sidecar rather than taking the
+        # manager down before unrelated watchers are handled. The ecosystem config
+        # already had this guard; this mirror was missing it.
+        return False
+    if info.st_uid != getuid():
         return False
     return (info.st_mode & 0o077) == 0
 
@@ -112,10 +118,31 @@ def enabled_sidecar_ids() -> list[str]:
 NON_CREATING_COMMANDS = frozenset({"stop", "delete", "status", "logs", "restart"})
 
 
+def sidecar_is_pm2_registered(agent_id: str) -> bool:
+    """True when PM2 actually knows this app, so cleanup can reach an orphan."""
+    name = app_name(agent_id)
+    result = pm2_run(["describe", name], capture_output=True)
+    text = f"{getattr(result, 'stdout', '') or ''}{getattr(result, 'stderr', '') or ''}".lower()
+    if "doesn't exist" in text or "not found" in text:
+        return False
+    return name.lower() in text
+
+
 def sidecar_ids_for_command(command: str) -> list[str]:
-    if command in NON_CREATING_COMMANDS:
-        return list(SIDECAR_APP_IDS)
-    return enabled_sidecar_ids()
+    """Targets for one command.
+
+    start/ensure use the security gate. Cleanup and inspection must additionally reach
+    a sidecar whose token was removed after it started -- but must not invent a target
+    on an install that never enabled one, which made `status --all` report a phantom
+    sidecar and exit non-zero.
+    """
+    if command not in NON_CREATING_COMMANDS:
+        return enabled_sidecar_ids()
+    enabled = set(enabled_sidecar_ids())
+    return [
+        name for name in SIDECAR_APP_IDS
+        if name in enabled or sidecar_is_pm2_registered(name)
+    ]
 
 
 def is_sidecar(target: str) -> bool:

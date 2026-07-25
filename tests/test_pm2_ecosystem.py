@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import types
 import unittest
 from unittest import mock
 from pathlib import Path
@@ -386,16 +387,50 @@ class Pm2ManagerSidecarTest(unittest.TestCase):
         ):
             self.assertEqual([], pm2_watchers.enabled_sidecar_ids(),
                              "start must be gated once the token is gone")
-            for command in ("stop", "delete", "status", "logs", "restart"):
-                self.assertEqual(
-                    ["codex-appserver"], pm2_watchers.sidecar_ids_for_command(command),
-                    f"{command} --all must still reach a running sidecar",
-                )
+            with mock.patch.object(pm2_watchers, "sidecar_is_pm2_registered", return_value=True):
+                for command in ("stop", "delete", "status", "logs", "restart"):
+                    self.assertEqual(
+                        ["codex-appserver"], pm2_watchers.sidecar_ids_for_command(command),
+                        f"{command} --all must still reach a PM2-registered orphan",
+                    )
             for command in ("start", "ensure"):
                 self.assertEqual(
                     [], pm2_watchers.sidecar_ids_for_command(command),
                     f"{command} must stay gated",
                 )
+
+    def test_never_enabled_install_gets_no_phantom_sidecar_target(self) -> None:
+        """Cleanup must reach an orphan without inventing one.
+
+        Unconditionally targeting the reserved id made `status --all` report a sidecar
+        that never existed and exit non-zero on a plain install.
+        """
+        with mock.patch.dict(
+            os.environ,
+            {
+                "LLM_COLLAB_CODEX_APP_SERVER_TOKEN_FILE": str(Path(self._tmp.name) / "never"),
+                "LLM_COLLAB_CODEX_BIN": str(Path(self._tmp.name) / "no-codex"),
+            },
+        ):
+            with mock.patch.object(pm2_watchers, "sidecar_is_pm2_registered", return_value=False):
+                for command in ("stop", "delete", "status", "logs", "restart", "start", "ensure"):
+                    self.assertEqual(
+                        [], pm2_watchers.sidecar_ids_for_command(command),
+                        f"{command} must not target a sidecar that never existed",
+                    )
+
+    def test_missing_getuid_fails_closed_without_raising(self) -> None:
+        """os.getuid is POSIX-only; the manager must not crash where it is absent.
+
+        Uses a stub module rather than deleting the attribute from the real `os`, which
+        would mutate global state for every other test in the process.
+        """
+        posixless = types.SimpleNamespace(stat=os.stat)  # no getuid, as on Windows
+        with mock.patch.object(pm2_watchers, "os", posixless):
+            self.assertFalse(
+                pm2_watchers.sidecar_token_is_secure(self.token),
+                "an absent getuid must fail closed, not raise",
+            )
 
     def test_absent_token_keeps_the_sidecar_out_of_manager_targets(self) -> None:
         with mock.patch.dict(
