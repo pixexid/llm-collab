@@ -1016,6 +1016,60 @@ class HandshakeClosesOnFailureTest(unittest.TestCase):
         self.assertEqual([], reads,
                          f"an oversized file must be rejected before any read, got {reads}")
 
+    def test_a_SHORT_read_does_not_truncate_the_token(self) -> None:
+        """os.read() is one syscall and may legally return fewer bytes than requested.
+
+        A truncated token is still printable ASCII, so usable_token() accepts it and both callers
+        send a credential the launch gate never approved -- sk-abcdef becomes sk-. The previous
+        Path.open().read(n) looped internally; moving to a raw descriptor lost that silently.
+        """
+        import os as _os
+        import tempfile as _tf
+
+        with _tf.TemporaryDirectory(dir="/tmp") as tmp:
+            token_file = Path(tmp) / "token"
+            token_file.write_text("sk-abcdef\n", encoding="utf-8")
+            real_read = _os.read
+
+            def short(fd, count):
+                return real_read(fd, min(count, 3))
+
+            with mock.patch.object(_os, "read", short):
+                token = autobridge._codex_app_server_token(str(token_file))
+
+        self.assertEqual("sk-abcdef", token,
+                         "a short read must be resumed, never accepted as the whole token")
+
+    def test_a_file_that_GROWS_after_fstat_is_still_bounded(self) -> None:
+        """The loop must stop at limit+1 even if the file is larger than fstat reported.
+
+        fstat is a snapshot; a writer appending afterwards would otherwise let the loop run past
+        the cap it just approved.
+        """
+        import os as _os
+        import tempfile as _tf
+
+        with _tf.TemporaryDirectory(dir="/tmp") as tmp:
+            token_file = Path(tmp) / "token"
+            token_file.write_text("s", encoding="utf-8")
+            real_read = _os.read
+            served = {"n": 0}
+
+            def endless(fd, count):
+                # Pretend the file kept growing: always satisfy the request in full.
+                served["n"] += count
+                if served["n"] > (autobridge.MAX_TOKEN_FILE_BYTES + 1) * 4:
+                    raise AssertionError("the read loop is unbounded")
+                return b"s" * count
+
+            with mock.patch.object(_os, "read", endless):
+                token = autobridge._codex_app_server_token(str(token_file))
+
+        self.assertIsNone(token, "a file that outgrows the cap yields no usable token")
+        self.assertLessEqual(served["n"], autobridge.MAX_TOKEN_FILE_BYTES + 1,
+                             f"the loop must stop at the cap, read {served['n']} bytes")
+        _ = real_read
+
     def test_a_readable_token_is_read_with_a_capped_count(self) -> None:
         """And the read that DOES happen is still bounded, not just size-checked beforehand."""
         import os as _os

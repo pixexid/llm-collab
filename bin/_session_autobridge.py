@@ -1781,7 +1781,20 @@ def _codex_app_server_token(token_file: str | None) -> str | None:
             return None
         if info.st_size > MAX_TOKEN_FILE_BYTES:
             return None
-        raw = os.read(descriptor, MAX_TOKEN_FILE_BYTES + 1)
+        # os.read() is ONE syscall and may return fewer bytes than asked for on a perfectly
+        # healthy regular file. A short read here does not fail -- it silently TRUNCATES the
+        # credential, and a truncated token is still printable ASCII, so usable_token() accepts
+        # it and both callers send a wrong secret the launch gate never approved. The previous
+        # Path.open().read(n) looped internally; swapping to a raw descriptor lost that for free.
+        chunks: list[bytes] = []
+        remaining = MAX_TOKEN_FILE_BYTES + 1
+        while remaining > 0:
+            chunk = os.read(descriptor, remaining)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        raw = b"".join(chunks)
     except OSError:
         return None
     finally:
