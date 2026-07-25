@@ -2634,6 +2634,72 @@ class SessionAutobridgeTest(unittest.TestCase):
                          "a wake lane is gating on autobridge_ready directly again")
         self.assertGreaterEqual(source.count("and wake_fallback_allowed"), 5)
 
+    # --- an unreadable RECIPIENT binding must not cost the durable packet -------------------
+    #
+    # Making BindingUnreadable propagate was right for reporting and wrong for deliver.py: it
+    # escaped before read_body(), so an oversized recipient binding meant exit 1, no packet, and a
+    # traceback. I changed a shared function's failure mode and handled it in one caller.
+
+    def oversize_recipient_binding(self, root, chat_id="CHAT-SCOPE1"):
+        path = (root / "State" / "session_autobridge" / "bindings" / "amiga" / chat_id
+                / "claude.json")
+        self.assertTrue(path.exists(), f"expected a binding at {path}")
+        payload = json.loads(path.read_text())
+        payload["pad"] = "z" * (256 * 1024 + 2048)
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        return path
+
+    def test_an_oversized_recipient_binding_still_writes_the_durable_packet(self):
+        root, chat_dir = self.scoped_subscriber_workspace(
+            subscriber_repo_targets=["llm-collab"], claude_ax_app="Claude")
+        self.oversize_recipient_binding(root)
+        payload, stderr = self.deliver_with_scope(root, "CHAT-SCOPE1",
+                                                 repo_targets="llm-collab")
+        self.assertFalse(payload["autobridge_ready"])
+        self.assertIn("binding_unreadable", payload["autobridge_refusal_reason"])
+        self.assertNotIn("exact_binding_required", payload["autobridge_refusal_reason"],
+                         "an unreadable binding EXISTS; it must not be reported as absent")
+        self.assertTrue(sorted(chat_dir.glob("*_to-claude_*.md")),
+                        "the durable packet must survive a runtime refusal")
+        self.assertNotIn("Traceback", stderr)
+
+    def test_an_oversized_recipient_binding_wakes_nobody(self):
+        root, _chat_dir = self.scoped_subscriber_workspace(
+            subscriber_repo_targets=["llm-collab"], claude_ax_app="Claude")
+        self.oversize_recipient_binding(root)
+        payload, _stderr = self.deliver_with_scope(root, "CHAT-SCOPE1",
+                                                  repo_targets="llm-collab")
+        for flag in self.WAKE_FLAGS:
+            self.assertFalse(payload.get(flag),
+                             f"{flag} must be false: waking someone to read a packet whose "
+                             "binding we could not read is the wrong-wake bug again")
+        for prompt in self.WAKE_PROMPTS:
+            self.assertIsNone(payload.get(prompt))
+
+    def test_an_IO_failed_recipient_binding_behaves_the_same(self):
+        """Permission denied, not oversize -- the other half of "unreadable"."""
+        root, chat_dir = self.scoped_subscriber_workspace(
+            subscriber_repo_targets=["llm-collab"], claude_ax_app="Claude")
+        path = (root / "State" / "session_autobridge" / "bindings" / "amiga" / "CHAT-SCOPE1"
+                / "claude.json")
+        path.chmod(0o000)
+        self.addCleanup(path.chmod, 0o644)
+        payload, stderr = self.deliver_with_scope(root, "CHAT-SCOPE1",
+                                                 repo_targets="llm-collab")
+        self.assertFalse(payload["autobridge_ready"])
+        self.assertIn("binding_unreadable", payload["autobridge_refusal_reason"])
+        self.assertTrue(sorted(chat_dir.glob("*_to-claude_*.md")))
+        self.assertNotIn("Traceback", stderr)
+
+    def test_a_readable_binding_is_unaffected(self):
+        """The control: this must still dispatch, or the tests above prove only that I broke it."""
+        root, _chat_dir = self.scoped_subscriber_workspace(
+            subscriber_repo_targets=["llm-collab"], claude_ax_app="Claude")
+        payload, _stderr = self.deliver_with_scope(root, "CHAT-SCOPE1",
+                                                   repo_targets="llm-collab")
+        self.assertTrue(payload["autobridge_ready"])
+        self.assertIsNone(payload["autobridge_refusal_reason"])
+
     def test_the_routing_contract_behaves_identically_on_a_NON_amiga_project(self):
         """AGENTS.md:43-44 -- a shared-contract change needs Amiga and a non-Amiga project.
 

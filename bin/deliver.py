@@ -106,6 +106,8 @@ def allocate_activation_packet_paths(
         return to_path, from_path
     raise OSError("exhausted unique activation packet name attempts")
 from _session_autobridge import (
+    BINDING_UNREADABLE_REASON,
+    BindingUnreadable,
     EXACT_BINDING_MISMATCH_REASON,
     load_binding,
     repo_scope_matches,
@@ -218,6 +220,12 @@ def resolve_bound_runtime_session_id(project_id: str, chat_id: str, agent_id: st
     try:
         binding = load_binding(project_id, chat_id, agent_id)
     except FileNotFoundError:
+        return None
+    except BindingUnreadable:
+        # Refuse the RUNTIME target, never the durable write. Letting this propagate killed
+        # deliver.py with a traceback before read_body(), so an oversized recipient binding meant
+        # exit 1 and no packet at all -- and the mailbox is the one channel that must survive
+        # every runtime failure. main() records the real cause; this only declines to target.
         return None
     runtime_session_id = binding.get("runtime_session_id")
     if not runtime_session_id:
@@ -409,12 +417,20 @@ def main():
             )
 
     autobridge_target = None
+    binding_unreadable = False
     if not thread_coordination_required:
-        autobridge_target, autobridge_refusal_reason = resolve_exact_dispatch_target(
-            args.project,
-            chat_id,
-            args.recipient,
-        )
+        try:
+            autobridge_target, autobridge_refusal_reason = resolve_exact_dispatch_target(
+                args.project,
+                chat_id,
+                args.recipient,
+            )
+        except BindingUnreadable as error:
+            # Distinct from exact_binding_required, which means the binding is ABSENT. This record
+            # exists and was refused, so the reason says so and carries the real cause with it.
+            autobridge_target = None
+            autobridge_refusal_reason = f"{BINDING_UNREADABLE_REASON}: {error}"
+            binding_unreadable = True
         resolved_binding_target = resolve_bound_runtime_session_id(
             args.project,
             chat_id,
@@ -439,7 +455,10 @@ def main():
     # reporting autobridge_ready here without applying the SAME rule is what let 27 packets be
     # written, reported as ready, and never delivered. This adds no second routing rule -- it runs
     # the existing one early so the sender is told the truth.
-    dispatch_scope_refused = False
+    # Terminal for the same reason a scope refusal is: no lane may wake a recipient whose
+    # authoritative record could not be read. Waking them to "go read it" would be the wrong-wake
+    # bug again, one cause over.
+    dispatch_scope_refused = binding_unreadable
     if autobridge_ready:
         routable, scope_reason = repo_scope_matches(
             autobridge_target.get("repo_targets"),

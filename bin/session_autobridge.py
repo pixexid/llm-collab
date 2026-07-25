@@ -26,6 +26,7 @@ import os
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent))
 from _helpers import canonical_path, ensure_project, get_agent, now_utc, utc_iso
 from _session_autobridge import (
+    BindingUnreadable,
     HEURISTIC_RUNTIME_DISCOVERY_FAMILIES,
     HEURISTIC_RUNTIME_DISCOVERY_REFUSED_REASON,
     SESSION_MODES,
@@ -298,7 +299,11 @@ def show_session(args) -> dict:
 
 
 def show_binding(args) -> dict:
-    return load_binding(args.project, args.chat, args.agent)
+    try:
+        return load_binding(args.project, args.chat, args.agent)
+    except BindingUnreadable as error:
+        # An inspection command answering with a traceback is just a worse error message.
+        raise SystemExit(f"[error] {error}")
 
 
 def discover_runtime(args) -> dict:
