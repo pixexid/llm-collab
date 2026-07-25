@@ -70,6 +70,7 @@ class Pm2EcosystemTest(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
             token = Path(tmp) / "token"
             token.write_text("t0ken\n", encoding="utf-8")
+            token.chmod(0o600)
             apps = load_apps(
                 {
                     "LLM_COLLAB_CODEX_APP_SERVER_TOKEN_FILE": str(token),
@@ -82,6 +83,7 @@ class Pm2EcosystemTest(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
             token = Path(tmp) / "token"
             token.write_text("t0ken\n", encoding="utf-8")
+            token.chmod(0o600)
             binary = Path(tmp) / "codex"
             binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
             codex_home = Path(tmp) / "codex-home"
@@ -112,6 +114,41 @@ class Pm2EcosystemTest(unittest.TestCase):
             self.assertEqual(str(codex_home), app["env"]["CODEX_HOME"])
 
 
+    def test_group_or_world_readable_token_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
+            token = Path(tmp) / "token"
+            token.write_text("t0ken\n", encoding="utf-8")
+            token.chmod(0o644)  # another local account could read the bearer token
+            binary = Path(tmp) / "codex"
+            binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            apps = load_apps(
+                {
+                    "LLM_COLLAB_CODEX_APP_SERVER_TOKEN_FILE": str(token),
+                    "LLM_COLLAB_CODEX_BIN": str(binary),
+                }
+            )
+            self.assertEqual([], sidecars(apps))
+
+    def test_token_path_containing_whitespace_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
+            directory = Path(tmp) / "has space"
+            directory.mkdir()
+            token = directory / "token"
+            token.write_text("t0ken\n", encoding="utf-8")
+            token.chmod(0o600)
+            binary = Path(tmp) / "codex"
+            binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            apps = load_apps(
+                {
+                    "LLM_COLLAB_CODEX_APP_SERVER_TOKEN_FILE": str(token),
+                    "LLM_COLLAB_CODEX_BIN": str(binary),
+                }
+            )
+            # delivery discovery parses flattened `ps` output and would truncate the
+            # path, then connect with no token at all — refuse instead.
+            self.assertEqual([], sidecars(apps))
+
+
 if __name__ == "__main__":
     unittest.main()
 
@@ -133,6 +170,7 @@ class Pm2ManagerSidecarTest(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory(dir="/tmp")
         token = Path(self._tmp.name) / "token"
         token.write_text("t0ken\n", encoding="utf-8")
+        token.chmod(0o600)
         binary = Path(self._tmp.name) / "codex"
         binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         self.token, self.binary = token, binary
@@ -194,6 +232,26 @@ class Pm2ManagerSidecarTest(unittest.TestCase):
                 self.assertEqual(
                     "llm-collab-codex-appserver", pm2_watchers.app_name("codex-appserver")
                 )
+
+    def test_foreign_owned_token_is_refused_by_the_manager_gate(self) -> None:
+        # The CJS uid check cannot be exercised without a file owned by another
+        # account, which a test cannot create unprivileged. The Python mirror is
+        # structurally identical and IS testable, so prove the rule here.
+        with mock.patch.object(os, "getuid", return_value=os.getuid() + 1):
+            self.assertFalse(pm2_watchers.sidecar_token_is_secure(self.token))
+
+    def test_owner_only_token_passes_the_manager_gate(self) -> None:
+        self.assertTrue(pm2_watchers.sidecar_token_is_secure(self.token))
+
+    def test_reserved_sidecar_id_never_shadows_a_registered_agent(self) -> None:
+        # A real collaborator named codex-appserver must win: otherwise its AX report
+        # is suppressed, its watcher flag bypassed, and two PM2 apps share one name.
+        with mock.patch.object(pm2_watchers, "agent_ids", return_value=["codex", "codex-appserver"]):
+            self.assertFalse(pm2_watchers.is_sidecar("codex-appserver"))
+            self.assertEqual(["codex-appserver"], pm2_watchers.sidecar_id_conflicts())
+        with mock.patch.object(pm2_watchers, "agent_ids", return_value=["codex"]):
+            self.assertTrue(pm2_watchers.is_sidecar("codex-appserver"))
+            self.assertEqual([], pm2_watchers.sidecar_id_conflicts())
 
     def test_absent_token_keeps_the_sidecar_out_of_manager_targets(self) -> None:
         with mock.patch.dict(

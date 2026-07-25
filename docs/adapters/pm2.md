@@ -361,7 +361,19 @@ A session must declare the exact runtime home for delivery to resolve:
 ```bash
 python bin/session_autobridge.py register --session <id> --agent codex \
   --project <project> --chat <chat> --repo-target <repo> \
-  --status active --wake-strategy runtime_trigger \
+  --mode auto-read --status active --wake-strategy runtime_trigger \
   --runtime-family codex_app --runtime-session-id <native-thread-id> \
   --runtime-home ~/.codex
 ```
+
+`--mode auto-read` is **required**, not cosmetic. `--mode` defaults to `manual`,
+and `resolve_effective_action()` selects `manual_noop` *before* it considers
+`wake_strategy=runtime_trigger`. A session registered without it still looks
+dispatchable to `deliver.py` — which suppresses the AX fallback — while the
+watcher marks each packet processed without ever calling the App Server. The
+result is silently dropped messages.
+
+The native thread id must be the worker's own exact id, self-reported. Do not use
+`publish-current` for this: it refuses `codex_app`, `claude_app`, and
+`gemini_cli` precisely because disk discovery is heuristic and can resolve a
+stale session from an unrelated project.

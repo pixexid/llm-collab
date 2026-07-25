@@ -25,6 +25,7 @@ require_python()
 
 import argparse
 import os
+import re
 import shutil
 import subprocess
 
@@ -76,14 +77,57 @@ def sidecar_binary() -> Path:
     return Path("/Applications/ChatGPT.app/Contents/Resources/codex")
 
 
+def sidecar_token_is_secure(path: Path) -> bool:
+    """Mirror the ecosystem config's gate: owner-only regular file, no whitespace.
+
+    The bearer token authorizes App Server turns on the operator's real Codex
+    account, and a whitespace path is truncated by delivery discovery's flattened
+    `ps` parsing, which would connect with no token at all.
+    """
+    if re.search(r"\s", str(path)):
+        return False
+    try:
+        info = path.stat()
+    except OSError:
+        return False
+    if not path.is_file():
+        return False
+    if info.st_uid != os.getuid():
+        return False
+    return (info.st_mode & 0o077) == 0
+
+
 def enabled_sidecar_ids() -> list[str]:
-    if sidecar_token_file().exists() and sidecar_binary().exists():
+    if sidecar_token_is_secure(sidecar_token_file()) and sidecar_binary().exists():
         return list(SIDECAR_APP_IDS)
     return []
 
 
 def is_sidecar(target: str) -> bool:
-    return target in SIDECAR_APP_IDS
+    """True only for a reserved sidecar id that is NOT a registered collaborator.
+
+    A registered agent must always win. Otherwise an agents.json entry literally
+    named `codex-appserver` would be silently reclassified as the transport: its AX
+    report suppressed, its watcher_enabled flag bypassed, and the ecosystem emitting
+    two apps with the same PM2 name.
+    """
+    if target not in SIDECAR_APP_IDS:
+        return False
+    try:
+        if target in set(agent_ids()):
+            return False
+    except Exception:
+        pass
+    return True
+
+
+def sidecar_id_conflicts() -> list[str]:
+    """Reserved sidecar ids that a registered agent has taken over."""
+    try:
+        registered = set(agent_ids())
+    except Exception:
+        return []
+    return [name for name in SIDECAR_APP_IDS if name in registered]
 
 
 def pm2_timeout_seconds() -> int:
@@ -148,6 +192,15 @@ def ensure_agent(agent_id: str) -> None:
 
 def main():
     args = parse_args()
+
+    for reserved in sidecar_id_conflicts():
+        print(
+            f"[error] agents.json registers {reserved!r}, which is a reserved transport "
+            "sidecar id. Rename the agent: the sidecar and the collaborator would "
+            "otherwise share one PM2 app name.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
 
     targets: list[str] = []
     if args.all:

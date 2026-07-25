@@ -61,7 +61,22 @@ function codexAppServerApps() {
   const codexBin =
     process.env.LLM_COLLAB_CODEX_BIN ||
     "/Applications/ChatGPT.app/Contents/Resources/codex";
-  if (!fs.existsSync(tokenFile) || !fs.existsSync(codexBin)) return [];
+  if (!fs.existsSync(codexBin)) return [];
+  // Fail closed on an insecure bearer token. The listener is loopback-only, but on a
+  // multi-user host any local account that can read this file can invoke App Server
+  // operations against the operator's real Codex account. A path containing
+  // whitespace is also refused: delivery discovery parses flattened `ps` output and
+  // would truncate it, then attempt the authenticated socket with no token at all.
+  let stat;
+  try {
+    stat = fs.statSync(tokenFile);
+  } catch {
+    return [];
+  }
+  if (!stat.isFile()) return [];
+  if (stat.uid !== process.getuid()) return [];
+  if ((stat.mode & 0o077) !== 0) return [];
+  if (/\s/.test(tokenFile)) return [];
 
   const port = process.env.LLM_COLLAB_CODEX_APP_SERVER_PORT || "8767";
   const codexHome =
