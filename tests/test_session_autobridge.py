@@ -2634,6 +2634,95 @@ class SessionAutobridgeTest(unittest.TestCase):
                          "a wake lane is gating on autobridge_ready directly again")
         self.assertGreaterEqual(source.count("and wake_fallback_allowed"), 5)
 
+    # --- registration is all-or-nothing across BOTH writes ----------------------------------
+    #
+    # register_session wrote the session file and THEN read the existing binding, so an unreadable
+    # one failed between the two writes: the new session persisted, the old binding still pointed at
+    # the previous thread, and the command reported failure having already created partial
+    # authoritative state. Reproduced by Codex through the real CLI.
+
+    def registered_workspace_with_binding(self):
+        root = self.make_workspace()
+        for agent in ("codex", "claude"):
+            self.add_agent(root, {"id": agent, "display_name": agent.title(),
+                                  "activation": {"type": "cli_session", "watcher_enabled": True}})
+        self.create_chat(root, chat_dir_name="2026-07-25_reg__CHAT-REG1",
+                         chat_id="CHAT-REG1", project_id="amiga")
+        self.run_cli(root, "register", "--session", "SESSION-OLD", "--agent", "claude",
+                     "--project", "amiga", "--chat", "CHAT-REG1", "--mode", "notify",
+                     "--runtime-family", "claude_app",
+                     "--runtime-session-id", "THREAD-OLD",
+                     "--runtime-session-source", "first_read")
+        binding = (root / "State" / "session_autobridge" / "bindings" / "amiga" / "CHAT-REG1"
+                   / "claude.json")
+        self.assertTrue(binding.exists())
+        return root, binding
+
+    def register_new_expecting_failure(self, root):
+        return subprocess.run(
+            [sys.executable, str(SCRIPT_PATH), "register", "--session", "SESSION-NEW",
+             "--agent", "claude", "--project", "amiga", "--chat", "CHAT-REG1",
+             "--mode", "notify", "--runtime-family", "claude_app",
+             "--runtime-session-id", "THREAD-NEW",
+             "--runtime-session-source", "first_read", "--json"],
+            cwd=root, text=True, capture_output=True,
+            env=self.subprocess_env(root),
+        )
+
+    def test_registration_refuses_on_an_OVERSIZED_existing_binding(self):
+        root, binding = self.registered_workspace_with_binding()
+        payload = json.loads(binding.read_text())
+        payload["pad"] = "z" * (256 * 1024 + 2048)
+        binding.write_text(json.dumps(payload), encoding="utf-8")
+        before = binding.read_bytes()
+
+        done = self.register_new_expecting_failure(root)
+
+        self.assertNotEqual(0, done.returncode)
+        self.assertNotIn("Traceback", done.stderr, done.stderr[-400:])
+        self.assertIn("byte limit", done.stderr)
+        self.assertFalse(
+            (root / "State" / "session_autobridge" / "sessions" / "SESSION-NEW.json").exists(),
+            "no session may be written when registration is refused")
+        self.assertEqual(before, binding.read_bytes(),
+                         "the unreadable binding must be left byte-identical, never replaced")
+
+    def test_registration_refuses_on_an_IO_FAILED_existing_binding(self):
+        root, binding = self.registered_workspace_with_binding()
+        binding.chmod(0o000)
+        self.addCleanup(binding.chmod, 0o644)
+
+        done = self.register_new_expecting_failure(root)
+
+        self.assertNotEqual(0, done.returncode)
+        self.assertNotIn("Traceback", done.stderr, done.stderr[-400:])
+        self.assertFalse(
+            (root / "State" / "session_autobridge" / "sessions" / "SESSION-NEW.json").exists())
+        binding.chmod(0o644)
+        self.assertEqual("THREAD-OLD", json.loads(binding.read_text())["runtime_session_id"],
+                         "the old binding must still point where it did")
+
+    def test_an_ordinary_re_registration_still_succeeds(self):
+        """The control: without it these tests only prove I broke registration."""
+        root, binding = self.registered_workspace_with_binding()
+        done = self.register_new_expecting_failure(root)
+        self.assertEqual(0, done.returncode, done.stderr[-400:])
+        self.assertEqual("THREAD-NEW", json.loads(binding.read_text())["runtime_session_id"])
+
+    def test_a_FIRST_registration_with_no_existing_binding_still_works(self):
+        """FileNotFoundError is the ordinary case and must pass straight through the preflight."""
+        root = self.make_workspace()
+        self.add_agent(root, {"id": "claude", "display_name": "Claude",
+                              "activation": {"type": "cli_session", "watcher_enabled": True}})
+        self.create_chat(root, chat_dir_name="2026-07-25_first__CHAT-FIRST",
+                         chat_id="CHAT-FIRST", project_id="amiga")
+        result = self.run_cli(root, "register", "--session", "SESSION-FIRST", "--agent", "claude",
+                              "--project", "amiga", "--chat", "CHAT-FIRST", "--mode", "notify",
+                              "--runtime-family", "claude_app",
+                              "--runtime-session-id", "THREAD-FIRST",
+                              "--runtime-session-source", "first_read")
+        self.assertEqual("SESSION-FIRST", result["session_id"])
+
     # --- an unreadable RECIPIENT binding must not cost the durable packet -------------------
     #
     # Making BindingUnreadable propagate was right for reporting and wrong for deliver.py: it

@@ -287,11 +287,39 @@ def register_session(args) -> dict:
     repo_targets = getattr(args, "repo_targets", None)
     if repo_targets is not None:
         payload["repo_targets"] = repo_targets
+    # Read the EXISTING binding before writing anything. save_session() used to run first, so an
+    # unreadable existing binding failed between the two writes: the new session file persisted, the
+    # old binding still pointed at the previous thread, and the command reported failure having
+    # already created partial authoritative state. Registration must be all-or-nothing across both.
+    refuse_if_existing_binding_is_unreadable(payload)
     save_session(payload)
     binding = update_binding_from_session(payload)
     if binding is not None:
         payload["binding"] = binding
     return payload
+
+
+def refuse_if_existing_binding_is_unreadable(payload: dict) -> None:
+    """Refuse registration while nothing has been written yet.
+
+    An unreadable existing binding is not an absent one, so it must not be silently replaced: the
+    old binding stays exactly as it is and no session is written. FileNotFoundError is the ordinary
+    first-registration case and passes straight through.
+    """
+    project_id = payload.get("project_id")
+    chat_id = payload.get("chat_id")
+    agent_id = payload.get("agent_id")
+    if not project_id or not chat_id or not agent_id:
+        return
+    try:
+        load_binding(str(project_id), str(chat_id), str(agent_id))
+    except FileNotFoundError:
+        return
+    except BindingUnreadable as error:
+        raise SystemExit(
+            f"[error] {error}. Refusing to register: the existing binding could not be read, so "
+            "it is left unchanged and no session was written. Repair or remove it first."
+        )
 
 
 def show_session(args) -> dict:
