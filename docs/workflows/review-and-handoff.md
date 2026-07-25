@@ -230,12 +230,9 @@ artifacts or the fallback timeout only; it does not waive the handling below:
   15-minute fallback itself. Required CI, mergeability, independent review,
   and full comment/review/thread inspection still apply.
 
-For requested-review silence, follow the canonical
+For requested-review silence versus the fallback, follow the canonical
 [Explicit requested-review precedence](commit-push-prs.md#explicit-requested-review-precedence).
-Do not apply any fallback clock to an explicitly requested review, and note that
-under manual-only there is no fallback for an UNREQUESTED review either: a Tier A
-head waits without one and never merges on silence, while a Tier B/C head with no
-request does not wait at all.
+Do not apply the 15-minute fallback to an explicitly requested review.
 Automation may issue exactly one re-trigger, and no further automatic retry is
 allowed. The canonical section is the sole authority for both request-anchored
 clocks, current-head invalidation, the post-timeout disposition choices, and

@@ -11,6 +11,8 @@ Before changing shared tooling or operating a project lane, read:
 - `docs/multi-project.md`
 - `docs/workflows/session-startup.md`
 - `docs/workflows/task-intake-and-delegation.md`
+- `## Requesting Code Review` in this file — it governs every repository a lane
+  touches, not just this one
 
 Then read the target project's own repository instructions and local policy
 under `{project_state_root}/{project_id}/`.
@@ -104,6 +106,47 @@ Two incidents established this as repo-local policy:
 - PR #198 repeated the same class through the `GH-` autolink; the merge commit
   body put a closing keyword adjacent to the autolinked reference for issue 91,
   and GitHub changed GH-91 to closed.
+
+## Requesting Code Review (all workers, every repository)
+
+Codex code review is **manual only**. Automatic review is off account-wide, so a
+review happens when a worker asks for it and never otherwise. Do **not** wait for a
+bot review that nobody requested.
+
+This section is worker-facing and applies in **every** repository a lane touches, not
+only this one. It is reachable from every worker because this file is Required
+Reading. It is distinct from the `## Code Review Rules` section below, which is read
+by the reviewer when it reviews *this* repository and must be authored per repository
+from that repository's own incidents.
+
+**Tier A — you MUST request a review on the candidate final head.** Any change
+touching credentials, authentication or an authority decision; money, provider or
+idempotency paths; an untrusted parse, read or enumeration, or any resource or
+deadline bound; shared code that changes an observable contract (return or exception
+shape, authority or source selection, side effects, persistence, ordering,
+deadline/resource behaviour, compatibility, failure handling); concurrency, ordering,
+partial state, TOCTOU or atomicity; migrations, DDL, grants or RLS; a defect family
+that has already produced a finding in that repository; or tests and docs that govern
+or can weaken any of the above. **Failing to request is itself a gate violation.**
+
+**Tier B — your discretion.** New feature surface or a multi-module refactor with no
+Tier A contact; proof-reshaping test changes that do not cover a Tier A invariant;
+normative docs for non-Tier-A behaviour.
+
+**Tier C — do not request.** Formatting, lint or mechanical changes; non-normative
+prose and comments; additive tests with no gate, fixture or baseline change;
+single-caller behaviour-preserving edits.
+
+Request with `@codex review for <focus>`, naming **every** Tier A family the diff
+touches and asking for the full diff through those lenses. Request **once per
+candidate final head** — an amendment stales the review and needs a new request. Any
+finding that arrives must be adjudicated in writing at every tier. A review is
+P0/P1-scoped, so it complements and never replaces independent exact-head
+verification and defect-verbatim mutation proof.
+
+Canonical detail, including the terminal-signal rules and ownership:
+`docs/workflows/commit-push-prs.md` and `docs/workflows/review-and-handoff.md`.
+Policy and rationale: `llm-collab#310`.
 
 ## Code Review Rules
 

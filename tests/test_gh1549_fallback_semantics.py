@@ -308,12 +308,24 @@ class Gh1549ClassDFallbackSemanticsTest(unittest.TestCase):
             "visibility as a required condition (contradicts the "
             "absent-request variant):\n" + "\n".join(contradictory),
         )
-        # Positive anchor: the gate must now state an explicit request is NOT
-        # required, matching the absent-request variant.
+        # Positive anchor, INVERTED 2026-07-25 by the manual-only ruling on llm-collab#310.
+        #
+        # The old anchor required the gate to state that an explicit review request is NOT
+        # required for a head to be reviewable. That was true only because automatic review
+        # existed: a head became reviewable on its own and the fallback clock measured how long
+        # to wait for an unrequested review. With auto review off account-wide, nothing arrives
+        # unrequested, so the old sentence would assert something false and the fallback it
+        # anchored is a path that always ends in silence.
+        #
+        # The replacement pins the invariant that actually governs now: Tier A must request and
+        # never merges on silence, and an unrequested head does not wait at all.
         self.assertRegex(
             text,
-            r"explicit\s+review\s+request\s+is\s+NOT\s+required",
+            r"there is no silence fallback for an unrequested review",
+            "the gate must state that an unrequested review has no fallback; under manual-only "
+            "the old 'a request is NOT required' invariant is false",
         )
+        self.assertRegex(text, r"never merge on silence")
 
 
 class Gh1549FallbackFixturesTest(unittest.TestCase):

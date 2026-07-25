@@ -533,9 +533,21 @@ class ReviewLoopCapContractTest(unittest.TestCase):
                 "covers the exact current OID is terminal for that head",
                 sources["review_policy"],
             )
+            # Updated 2026-07-25 with the manual-only ruling on llm-collab#310. The second
+            # terminal source used to be a watcher-observed eyes-to-`+1` LIFECYCLE on the head.
+            # Under manual-only the `+1` must sit on the exact manual-review REQUEST comment, and a
+            # bare `eyes` is explicitly not a verdict -- so pinning the old lifecycle phrasing would
+            # hold the obsolete model in place. The count of terminal sources is unchanged, which is
+            # still pinned below.
+            # No line break in the pinned phrase: this source is whitespace-normalised, so a
+            # substring spanning a markdown wrap can never match.
             self.assertIn(
-                "the watcher observed the connector's eyes-to-`+1` lifecycle on "
-                "that head",
+                "on the exact manual-review request",
+                sources["review_policy"],
+            )
+            self.assertIn("is terminal CLEAN", sources["review_policy"])
+            self.assertIn(
+                "a bare `eyes` reaction or the request comment itself is never a",
                 sources["review_policy"],
             )
             self.assertIn(
@@ -691,9 +703,13 @@ class ReviewLoopCapContractTest(unittest.TestCase):
                 "exact OID with no actionable issues",
                 handoff,
             )
+            # Same ruling as above: the handoff runbook now states the request-comment `+1` rule.
             self.assertIn(
-                "watcher observed the connector's eyes-to-`+1` (`thumbs-up`) "
-                "transition on the latest head",
+                "a connector-authored `+1` (`thumbs-up`) sits on the exact",
+                handoff,
+            )
+            self.assertIn(
+                "A bare `eyes` reaction is accepted-and-in-progress, never a verdict.",
                 handoff,
             )
             self.assertIn(
