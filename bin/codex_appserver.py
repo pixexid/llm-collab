@@ -190,6 +190,12 @@ def pump(client: JsonRpcWebSocketClient, *, deadline: float, raw: bool, stop_on_
         try:
             message = bound_recv(client, deadline)
         except TimeoutError:
+            # An idle socket timeout is NOT completion. With an infinite deadline the
+            # clamp is the client's finite socket budget, so the first quiet stretch
+            # raised TimeoutError and tail returned as though the turn had ended.
+            # Only a genuinely reached deadline ends the loop.
+            if time.monotonic() < deadline:
+                continue
             return None
         except Exception as exc:
             # Silence must never be indistinguishable from success: a dropped socket

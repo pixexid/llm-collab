@@ -72,7 +72,10 @@ class FakeClient:
 
     def recv_json(self):
         if self._notifications:
-            return self._notifications.pop(0)
+            item = self._notifications.pop(0)
+            if item == "QUIET":
+                raise TimeoutError("timed out")
+            return item
         if self._recv_error is not None:
             raise self._recv_error
         raise TimeoutError("no more notifications")
@@ -229,6 +232,40 @@ class CodexAppServerCliTest(unittest.TestCase):
         text = run_cli(BASE + ["send", "--text", "x"], fake)
         self.assertIn(TURN, text)
         self.assertNotIn("later", text, "send must not stream post-acceptance output")
+
+
+    def test_unbounded_tail_survives_idle_timeouts_until_a_terminal_event(self) -> None:
+        """An idle socket timeout must not be mistaken for turn completion.
+
+        Default tail clamps to the client's finite socket budget, so the first quiet
+        stretch raised TimeoutError and tail returned with no terminal event, looking
+        exactly like a completed turn.
+        """
+        fake = FakeClient(notifications=[
+            turn_notification(), "QUIET", "QUIET",
+            {"method": "turn/completed", "params": {"threadId": THREAD}},
+        ])
+        fake.sock = _RecordingSocket()
+        fake.timeout_seconds = 5
+        out = io.StringIO()
+        with mock.patch.object(sys, "argv", ["codex_appserver.py"] + BASE + ["tail"]):
+            with mock.patch.object(cli, "connect", return_value=fake):
+                with contextlib.redirect_stdout(out):
+                    cli.main()
+        text = out.getvalue()
+        self.assertIn("turn/completed", text, "tail must run through idle gaps to the terminal event")
+        self.assertNotIn("[transport]", text, "an idle timeout is not a transport fault")
+
+    def test_finite_tail_still_ends_when_its_deadline_is_reached(self) -> None:
+        fake = FakeClient(notifications=["QUIET"] * 50)
+        fake.sock = _RecordingSocket()
+        fake.timeout_seconds = 5
+        out = io.StringIO()
+        with mock.patch.object(sys, "argv", ["codex_appserver.py"] + BASE + ["tail", "--seconds", "1"]):
+            with mock.patch.object(cli, "connect", return_value=fake):
+                with contextlib.redirect_stdout(out):
+                    cli.main()  # must return, not loop forever
+        self.assertNotIn("[transport]", out.getvalue())
 
 
 if __name__ == "__main__":
