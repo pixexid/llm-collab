@@ -38,14 +38,8 @@ import _session_autobridge as autobridge
 from _helpers import ROOT
 
 DEFAULT_IDLE_TIMEOUT_SECONDS = 5
-# Cumulative budgets over an untrusted bindings tree. Exceeding either fails closed with a
-# message naming the limit, rather than consuming unbounded CPU or memory first.
+# One cumulative budget over an untrusted bindings tree, charged at the enumeration boundary.
 MAX_SCANNED_CHATS = 2000
-# The only family this client can speak to. claude_app and gemini_cli are equally valid
-# families in a binding; sending their session ids to a Codex App Server fails against the
-# wrong runtime instead of saying the binding is unsupported.
-CODEX_RUNTIME_FAMILY = "codex_app"
-MAX_BINDING_BYTES = 64 * 1024
 BINDINGS_DIR = ROOT / "State" / "session_autobridge" / "bindings"
 
 
@@ -79,6 +73,11 @@ class ObserverClient(autobridge.JsonRpcWebSocketClient):
         super().__init__(*args, **kwargs)
         self.observed_requests: list[str] = []
         self.read_deadline: float | None = None
+        # Notifications seen while a request/response correlation is in flight. The inherited
+        # request() loop DISCARDS them, so an event emitted after this socket was registered
+        # for the thread but before thread/resume answered was silently lost -- exactly at the
+        # subscription boundary, where turn/started and the first items live.
+        self.pending_events: list[dict] = []
 
     def set_deadline(self, deadline: float | None) -> None:
         """The absolute monotonic instant after which no further frame may be awaited."""
@@ -92,6 +91,34 @@ class ObserverClient(autobridge.JsonRpcWebSocketClient):
             self.sock.settimeout(cap)
             return
         self.sock.settimeout(max(0.01, min(cap, self.read_deadline - time.monotonic())))
+
+    def request(self, method: str, params: dict | None = None, **kwargs) -> object:
+        """Correlate a response while BUFFERING anything else that arrives.
+
+        The inherited loop drops every non-matching message. That is harmless for a client
+        which only issues requests, and lossy for one that subscribes: App Server can emit a
+        notification once this socket is registered for the thread and before thread/resume's
+        response comes back, and those events are the beginning of the stream.
+        """
+        self.counter += 1
+        request_id = f"llm-collab-{self.counter}"
+        payload = {"jsonrpc": "2.0", "id": request_id, "method": method,
+                   "params": params or {}}
+        self.send_json(payload)
+        while True:
+            message = self.recv_json()
+            if message.get("id") == request_id:
+                error = message.get("error")
+                if error:
+                    raise RuntimeError(f"{method}: {error.get('message', 'unknown error')}")
+                return message.get("result")
+            if message.get("method"):
+                self.pending_events.append(message)
+
+    def take_pending_events(self) -> list[dict]:
+        """Hand over anything buffered during setup, so the loop can replay it in order."""
+        drained, self.pending_events = self.pending_events, []
+        return drained
 
     def recv_json(self) -> dict:
         """Read one JSON message, rechecking the deadline on every frame.
@@ -150,9 +177,10 @@ def one_path_component(value: str, *, field: str) -> str:
 
     Rejecting glob metacharacters was not enough: a selector is still joined into a path, so
     `--project 'amiga/../nuvyr'` walked out of the segment it named and reached another
-    project's thread. record_matches_path() cannot catch it either, because it compares the
-    record against the LEXICAL destination component -- nuvyr -- not against what the caller
-    actually asked for, so the record looks perfectly consistent.
+    project's thread. A record-versus-location check cannot catch that either, because it
+    compares the record against the LEXICAL destination component -- nuvyr -- not against what
+    the caller actually asked for, so the record looks perfectly consistent with where it
+    landed. The selector has to be validated before it is ever joined into a path.
 
     Validated before any filesystem read: no separators, no . or .., non-empty, and unchanged
     by Path().name so no platform-specific spelling slips through.
@@ -166,42 +194,6 @@ def one_path_component(value: str, *, field: str) -> str:
     return text
 
 
-def record_matches_path(record: dict, path: Path, agent: str) -> bool:
-    """The record must be what its location and the invocation claim it is."""
-    return (
-        str(record.get("agent_id") or "") == agent
-        and str(record.get("chat_id") or "") == path.parent.name
-        and str(record.get("project_id") or "") == path.parent.parent.name
-    )
-
-
-def backing_session_problem(record: dict) -> str | None:
-    """Why this binding's session cannot be watched, or None when it can.
-
-    Identity first, then liveness. A binding naming a session that does not exist, belongs to
-    another agent, or points at a different runtime thread is not merely stale -- it is not
-    describing the worker the caller asked for.
-    """
-    session_id = record.get("session_id")
-    if not session_id:
-        return "the binding names no backing session"
-    try:
-        session = autobridge.load_session(str(session_id))
-    except (FileNotFoundError, OSError, json.JSONDecodeError) as error:
-        return f"backing session {session_id} is unreadable: {error}"
-    if str(session.get("agent_id") or "") != str(record.get("agent_id") or ""):
-        return (f"backing session {session_id} belongs to "
-                f"{session.get('agent_id')!r}, not {record.get('agent_id')!r}")
-    runtime = session.get("runtime") or {}
-    if str(runtime.get("session_id") or "") != str(record.get("runtime_session_id") or ""):
-        return (f"backing session {session_id} points at runtime thread "
-                f"{runtime.get('session_id')!r}, not {record.get('runtime_session_id')!r}")
-    dispatchable, reason = autobridge.session_is_dispatchable(session)
-    if not dispatchable:
-        return f"backing session {session_id} is not live: {reason}"
-    return None
-
-
 def registered_project_ids() -> set[str]:
     """Project ids from projects.json, so an unregistered directory cannot be watched."""
     try:
@@ -211,28 +203,36 @@ def registered_project_ids() -> set[str]:
     projects = payload.get("projects")
     if not isinstance(projects, list):
         return set()
-    return {str(p["id"]) for p in projects if isinstance(p, dict) and p.get("id")}
+    return {str(entry["id"]) for entry in projects
+            if isinstance(entry, dict) and entry.get("id")}
 
 
 def resolve_thread(args: argparse.Namespace) -> tuple[str, str, str | None]:
-    """Return (thread_id, provenance, runtime_home) for ONE registered project's binding.
+    """Return (thread_id, provenance, runtime_home) for ONE live, exactly-bound worker.
 
-    Cross-project selection is not an opt-in ambiguity mode. It used to be: omitting
-    --project enumerated every project directory, so `--chat last` could select a worker
-    thread belonging to a different project, and a supplied project was never checked
-    against projects.json at all -- a fabricated or stale directory was accepted on the
-    strength of existing.
+    Resolution is DELEGATED to autobridge.resolve_exact_dispatch_target(), the same function
+    production dispatch uses. Six consecutive review rounds found holes in my own
+    reimplementation of it -- project and chat not compared, the runtime family unchecked, a
+    deactivated session still winning, identity trusted from the record's own claims -- and each
+    fix exposed the next adjacent one. That is the signature of duplicating an audited
+    invariant, not of an unlucky sequence of bugs. The audited path already requires an exact
+    binding whose project, chat and agent match its location, a session whose id, runtime family
+    and runtime thread all match the binding, and that the session be dispatchable.
+
+    What remains here is only what that function does not do: choosing WHICH chat when the
+    caller did not name one, and reading the runtime home for the endpoint.
     """
     if args.thread:
+        if not args.runtime_home:
+            raise SystemExit(
+                "[error] --thread needs --runtime-home: there is no binding to read the "
+                "CODEX_HOME from, and discovery matches it exactly"
+            )
         return args.thread, "--thread", args.runtime_home
 
     if not args.agent:
-        raise SystemExit("[error] pass --thread, or --agent with --project")
+        raise SystemExit("[error] pass --thread with --runtime-home, or --agent with --project")
 
-    # Every supplied selector is a LITERAL path segment. Three bugs lived here in turn:
-    # --chat ignored unless --project came with it; then the fix interpolated selectors into
-    # a glob, where `CHAT-[A]` became a character class; then `--chat ""` fell through to
-    # every chat. A selector is one name -- asserted once, up front, for all fields.
     agent = one_path_component(args.agent, field="agent")
     if args.project is None:
         raise SystemExit(
@@ -242,9 +242,6 @@ def resolve_thread(args: argparse.Namespace) -> tuple[str, str, str | None]:
     project = one_path_component(args.project, field="project")
     registered = registered_project_ids()
     if not registered:
-        # Fail CLOSED. `if registered and ...` skipped the check entirely when the registry
-        # was unreadable or empty, so the one configuration where we cannot verify a project
-        # was the one where any name was accepted -- including a fabricated `ghost` directory.
         raise SystemExit(
             "[error] cannot read any registered project from projects.json, so "
             f"{project!r} cannot be verified; refusing rather than trusting the directory"
@@ -257,117 +254,70 @@ def resolve_thread(args: argparse.Namespace) -> tuple[str, str, str | None]:
     if args.chat is not None and args.chat != "last":
         one_path_component(args.chat, field="chat")
 
-    chat_named = args.chat is not None and args.chat != "last"
-    project_dir = BINDINGS_DIR / project
-
-    if chat_named:
-        candidates = [project_dir / args.chat / f"{agent}.json"]
+    if args.chat is not None and args.chat != "last":
+        # Named exactly: a dead or mismatched binding is an ERROR, because the caller asked
+        # for this one specifically and silently substituting another would be worse.
+        session, reason = autobridge.resolve_exact_dispatch_target(project, args.chat, agent)
+        if session is None:
+            raise SystemExit(
+                f"[error] {project}/{args.chat} is not an exact live binding for {agent!r}: "
+                f"{reason}"
+            )
+        chosen = [(args.chat, session)]
     else:
-        # The budget has to stop the work, not describe it afterwards. Materialising and
-        # sorting every entry and THEN counting still did the unbounded work first, which is
-        # the whole cost being guarded against. Enumerate lazily and abort on the entry that
-        # exceeds the budget.
-        # The budget begins at the enumeration boundary, BEFORE any filtering. Charging only
-        # directories let an untrusted tree spend unbounded work on entries that were then
-        # discarded: with a budget of one, five non-directory entries were all examined and the
-        # limit never tripped. Every entry the OS hands us costs one unit, whatever it is.
-        entries = []
-        scanned = 0
-        try:
-            with os.scandir(project_dir) as scan:
-                for entry in scan:
-                    scanned += 1
-                    if scanned > MAX_SCANNED_CHATS:
-                        raise SystemExit(
-                            f"[error] more than {MAX_SCANNED_CHATS} entries under "
-                            f"{project!r}; name one with --chat"
-                        )
-                    if entry.is_dir():
-                        entries.append(Path(entry.path))
-        except OSError:
-            entries = []
-        candidates = [d / f"{agent}.json" for d in sorted(entries)]
+        # Broad selection: a dead binding is EXCLUDED, not fatal. deactivate_session() updates
+        # the session and deliberately leaves the binding behind, so one ordinary deactivation
+        # would otherwise break `--chat last` for that agent permanently.
+        chosen = []
+        for chat in bounded_chat_ids(project, agent):
+            session, _reason = autobridge.resolve_exact_dispatch_target(project, chat, agent)
+            if session is not None:
+                chosen.append((chat, session))
 
-    bindings = []
-    for path in candidates:
-        if not path.is_file():
-            continue
-        # A candidate that EXISTS but cannot be read or validated is a lookup failure, never
-        # a skip. Silently discarding one can leave a partial set that looks unambiguous, so
-        # a concurrent non-atomic write to a sibling binding could suppress the refusal and
-        # get the remaining thread watched.
-        # A bounded read, not a stat followed by an unbounded one. stat() and read_bytes() are
-        # separate pathname operations: the file can grow between them, and read_bytes() has no
-        # maximum of its own -- so a small stat authorized an arbitrarily large read. Open once
-        # and ask for one byte more than the limit; if we get it, the file is too big.
-        try:
-            with path.open("rb") as handle:
-                raw = handle.read(MAX_BINDING_BYTES + 1)
-        except OSError as error:
-            raise SystemExit(f"[error] cannot read candidate binding {path}: {error}")
-        if len(raw) > MAX_BINDING_BYTES:
-            raise SystemExit(
-                f"[error] binding {path} exceeds the {MAX_BINDING_BYTES} byte limit; "
-                "refusing to parse it"
-            )
-        try:
-            record = json.loads(raw.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as error:
-            raise SystemExit(f"[error] candidate binding {path} is unreadable: {error}")
-        if not isinstance(record, dict):
-            raise SystemExit(f"[error] candidate binding {path} is not a JSON object")
-        if not record_matches_path(record, path, agent):
-            raise SystemExit(
-                f"[error] binding {path} claims "
-                f"{record.get('project_id')}/{record.get('chat_id')}/{record.get('agent_id')}, "
-                "which is not where it lives"
-            )
-        if not record.get("runtime_session_id"):
-            continue
-        # This client speaks to a Codex App Server. claude_app and gemini_cli are valid
-        # families that binding_payload_from_session() writes, and accepting one would send a
-        # foreign runtime's session id to thread/resume -- failing against the wrong runtime
-        # rather than reporting an unsupported binding.
-        family = str(record.get("runtime_family") or "")
-        if family != CODEX_RUNTIME_FAMILY:
-            raise SystemExit(
-                f"[error] binding {path} is runtime_family={family or 'unset'!r}; "
-                f"only {CODEX_RUNTIME_FAMILY} can be watched through a Codex App Server"
-            )
-        # `deactivate` updates the session JSON and leaves the binding's own status alone, so a
-        # stale binding can keep claiming `active` and outrank the worker's live one. The
-        # backing session is the authority for liveness, exactly as it is for dispatch.
-        problem = backing_session_problem(record)
-        if problem:
-            raise SystemExit(f"[error] binding {path} is not usable: {problem}")
-        bindings.append((record, path))
-
-    if not bindings:
+    if not chosen:
         raise SystemExit(
-            f"[error] no binding with a runtime_session_id for agent {agent!r} in {project!r}"
+            f"[error] no live exactly-bound {agent!r} session in {project!r}"
         )
-
-    # `last` means newest among all LIVE bindings. Preferring active first discarded a newer
-    # parked binding before comparing timestamps -- and registration defaults to parked, so
-    # that is the ordinary case, not an edge one. The active preference is a tie-breaker for
-    # ordinary lookup only, where it disambiguates rather than orders.
-    if args.chat == "last":
-        chosen = bindings
-    else:
-        active = [b for b in bindings if b[0].get("status") == "active"]
-        chosen = active or bindings
     if len(chosen) > 1 and args.chat != "last":
-        names = "\n  ".join(f"{b[0].get('project_id')}/{b[0].get('chat_id')}" for b in chosen)
+        names = "\n  ".join(f"{project}/{chat}" for chat, _ in sorted(chosen))
         raise SystemExit(
-            f"[error] {len(chosen)} bindings match agent {agent!r} in {project!r}; name one "
-            f"with --chat, or pass --chat last:\n  {names}"
+            f"[error] {len(chosen)} live bindings match agent {agent!r} in {project!r}; name "
+            f"one with --chat, or pass --chat last:\n  {names}"
         )
-    record, path = max(chosen, key=lambda b: str(b[0].get("updated_utc") or ""))
-    # The binding's own home wins unless explicitly overridden: discovery matches it exactly.
-    runtime_home = args.runtime_home or record.get("runtime_home")
-    return (str(record["runtime_session_id"]),
-            f"{record.get('project_id')}/{record.get('chat_id')}",
-            str(runtime_home) if runtime_home else None)
+
+    chat, session = max(chosen, key=lambda pair: str(pair[1].get("updated_utc") or ""))
+    runtime = session.get("runtime") or {}
+    thread_id = str(runtime.get("session_id") or "")
+    if not thread_id:
+        raise SystemExit(f"[error] {project}/{chat} records no runtime thread id")
+    home = args.runtime_home or runtime.get("home")
+    return thread_id, f"{project}/{chat}", str(home) if home else None
+
+
+def bounded_chat_ids(project: str, agent: str) -> list[str]:
+    """Chat ids under a project that have a binding for this agent, within one budget.
+
+    The budget is charged at the enumeration boundary, before any filtering: charging only
+    directories let an untrusted tree spend unbounded work on entries that were then discarded.
+    """
+    chats: list[str] = []
+    scanned = 0
+    try:
+        with os.scandir(BINDINGS_DIR / project) as scan:
+            for entry in scan:
+                scanned += 1
+                if scanned > MAX_SCANNED_CHATS:
+                    raise SystemExit(
+                        f"[error] more than {MAX_SCANNED_CHATS} entries under {project!r}; "
+                        "name one with --chat"
+                    )
+                if entry.is_dir() and (Path(entry.path) / f"{agent}.json").is_file():
+                    chats.append(entry.name)
+    except OSError:
+        return []
+    return sorted(chats)
+
+
 
 
 def message_started_id(method: str, params: dict) -> str | None:
@@ -511,6 +461,10 @@ def main() -> None:
     with ObserverClient(
         str(endpoint["url"]), token=token, timeout_seconds=DEFAULT_IDLE_TIMEOUT_SECONDS
     ) as client:
+        # Before initialize, not after: a server that accepts the socket and then stalls while
+        # answering initialize or thread/resume would otherwise get the full idle timeout for
+        # each, ignoring `--seconds` entirely during setup.
+        client.set_deadline(deadline)
         client.request(
             "initialize",
             {
@@ -521,17 +475,16 @@ def main() -> None:
         )
         client.notify("initialized")
         client.request("thread/resume", {"threadId": thread_id})
-        # The deadline is absolute and lives on the client, so pings, control frames and
-        # refused server requests all cost time against it rather than extending it.
-        client.set_deadline(deadline)
         print("[stream] subscribed; Ctrl-C to stop")
+        # Replay anything that arrived during setup, in order, before reading anything new.
+        replay = client.take_pending_events()
 
         while True:
             remaining = None if deadline is None else deadline - time.monotonic()
             if remaining is not None and remaining <= 0:
                 break
             try:
-                message = client.recv_json()
+                message = replay.pop(0) if replay else client.recv_json()
             except (TimeoutError, socket.timeout):
                 continue
             except Exception as error:
