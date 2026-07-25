@@ -121,8 +121,9 @@ from that repository's own incidents.
 
 **Tier A — you MUST request a review on the candidate final head.** Any change
 touching credentials, authentication or an authority decision; money, provider or
-idempotency paths; an untrusted parse, read or enumeration, or any resource or
-deadline bound; shared code that changes an observable contract (return or exception
+idempotency paths; **input we do not control** — network peers, another project's
+data, an external API, or anything a user or third party supplies — including its
+resource and deadline bounds; shared code that changes an observable contract (return or exception
 shape, authority or source selection, side effects, persistence, ordering,
 deadline/resource behaviour, compatibility, failure handling); concurrency, ordering,
 partial state, TOCTOU or atomicity; migrations, DDL, grants or RLS; a defect family
@@ -143,6 +144,13 @@ candidate final head** — an amendment stales the review and needs a new reques
 finding that arrives must be adjudicated in writing at every tier. A review is
 P0/P1-scoped, so it complements and never replaces independent exact-head
 verification and defect-verbatim mutation proof.
+
+**"Untrusted" means input we do not control.** Our own workspace — `State/`,
+`Chats/`, `projects.json`, the checkout itself — is not an adversary: anyone who can
+write there can edit `bin/` and already has code execution as this user. Bound those
+reads against *accidents* (a huge directory, a hung mount, a corrupt record) and stop
+there. Hardening a local tool against a hostile local filesystem has no natural floor
+and will loop forever; llm-collab#306 spent eleven review rounds proving it.
 
 Canonical detail, including the terminal-signal rules and ownership:
 `docs/workflows/commit-push-prs.md` and `docs/workflows/review-and-handoff.md`.
