@@ -141,6 +141,55 @@ class ResolveThreadTest(unittest.TestCase):
         with self.assertRaises(SystemExit):
             codex_stream.resolve_thread(self.args(agent="code?", project="amiga", chat="CHAT-A"))
 
+    def test_a_traversing_project_selector_cannot_reach_another_project(self) -> None:
+        """The intermediate directory must exist, or the OS never traverses `..`.
+
+        `--project 'amiga/../nuvyr'` resolved the nuvyr thread, and record_matches_path
+        could not catch it: it compares the record against the LEXICAL destination
+        component, nuvyr, not against what the caller named.
+        """
+        (self.root / "amiga").mkdir(parents=True)          # intermediate must be present
+        binding(self.root, "nuvyr", "CHAT-A", "codex", "other-project-thread")
+        with self.assertRaises(SystemExit) as caught:
+            codex_stream.resolve_thread(
+                self.args(agent="codex", project="amiga/../nuvyr", chat="CHAT-A"))
+        self.assertIn("one literal name", str(caught.exception))
+
+    def test_a_traversing_chat_selector_cannot_reach_another_chat(self) -> None:
+        binding(self.root, "amiga", "CHAT-A", "codex", "thread-a")
+        binding(self.root, "amiga", "CHAT-B", "codex", "thread-b")
+        with self.assertRaises(SystemExit) as caught:
+            codex_stream.resolve_thread(
+                self.args(agent="codex", project="amiga", chat="CHAT-A/../CHAT-B"))
+        self.assertIn("one literal name", str(caught.exception))
+
+    def test_a_traversing_agent_selector_is_refused(self) -> None:
+        binding(self.root, "amiga", "CHAT-A", "codex", "thread-a")
+        with self.assertRaises(SystemExit):
+            codex_stream.resolve_thread(
+                self.args(agent="../amiga/CHAT-A/codex", project="amiga", chat="CHAT-A"))
+
+    def test_dot_and_dotdot_and_empty_selectors_are_refused(self) -> None:
+        binding(self.root, "amiga", "CHAT-A", "codex", "thread-a")
+        for bad in (".", "..", ""):
+            with self.subTest(selector=bad):
+                with self.assertRaises(SystemExit):
+                    codex_stream.resolve_thread(
+                        self.args(agent="codex", project="amiga", chat=bad))
+
+    def test_an_empty_project_selector_is_refused_too(self) -> None:
+        binding(self.root, "amiga", "CHAT-A", "codex", "thread-a")
+        with self.assertRaises(SystemExit):
+            codex_stream.resolve_thread(self.args(agent="codex", project=""))
+
+    def test_last_remains_the_one_reserved_control_value(self) -> None:
+        binding(self.root, "amiga", "CHAT-A", "codex", "thread-a",
+                updated="2026-07-01T00:00:00+00:00")
+        binding(self.root, "amiga", "CHAT-B", "codex", "thread-b",
+                updated="2026-07-25T00:00:00+00:00")
+        thread, _ = codex_stream.resolve_thread(self.args(agent="codex", chat="last"))
+        self.assertEqual("thread-b", thread)
+
     def test_explicit_thread_bypasses_binding_lookup(self) -> None:
         thread, provenance = codex_stream.resolve_thread(self.args(thread="thread-x"))
         self.assertEqual("thread-x", thread)

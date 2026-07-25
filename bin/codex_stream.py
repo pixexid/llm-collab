@@ -93,6 +93,27 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
+def one_path_component(value: str, *, field: str) -> str:
+    """A selector must name exactly ONE literal path component.
+
+    Rejecting glob metacharacters was not enough: a selector is still joined into a path, so
+    `--project 'amiga/../nuvyr'` walked out of the segment it named and reached another
+    project's thread. record_matches_path() cannot catch it either, because it compares the
+    record against the LEXICAL destination component -- nuvyr -- not against what the caller
+    actually asked for, so the record looks perfectly consistent.
+
+    Validated before any filesystem read: no separators, no . or .., non-empty, and unchanged
+    by Path().name so no platform-specific spelling slips through.
+    """
+    text = str(value)
+    if (not text or text in {".", ".."} or "/" in text or "\\" in text
+            or Path(text).name != text):
+        raise SystemExit(
+            f"[error] --{field} must be one literal name, not a path: {value!r}"
+        )
+    return text
+
+
 def record_matches_path(record: dict, path: Path, agent: str) -> bool:
     """The record must be what its location and the invocation claim it is."""
     return (
@@ -122,14 +143,24 @@ def resolve_thread(args: argparse.Namespace) -> tuple[str, str]:
         except OSError:
             return []
 
-    chat_named = args.chat and args.chat != "last"
-    projects = [args.project] if args.project else children(BINDINGS_DIR)
+    # `is not None` distinguishes NOT SUPPLIED from SUPPLIED EMPTY. Under truthiness,
+    # `--chat ""` skipped validation and fell through to "every chat" -- a supplied selector
+    # silently dropped, which is the original defect of this function wearing a third face.
+    agent = one_path_component(args.agent, field="agent")
+    if args.project is not None:
+        one_path_component(args.project, field="project")
+    # `last` is the one reserved control value; every other chat selector is a name.
+    if args.chat is not None and args.chat != "last":
+        one_path_component(args.chat, field="chat")
+
+    chat_named = args.chat is not None and args.chat != "last"
+    projects = [args.project] if args.project is not None else children(BINDINGS_DIR)
     candidates: list[Path] = []
     for project in projects:
         project_dir = BINDINGS_DIR / project
         chats = [args.chat] if chat_named else children(project_dir)
         for chat in chats:
-            candidate = project_dir / chat / f"{args.agent}.json"
+            candidate = project_dir / chat / f"{agent}.json"
             if candidate.is_file():
                 candidates.append(candidate)
     candidates.sort()
