@@ -83,6 +83,42 @@ def feed(made, messages: list[dict]) -> None:
     made._recv_frame = recv_frame
 
 
+def assert_call_returns_within(test, seconds, setup, call, expect_substring=None):
+    """Run a possibly-BLOCKING call in a child process so a regression fails fast.
+
+    A blocking open() cannot be interrupted in-process: the thread is stuck in the syscall, so an
+    in-process watchdog leaves the suite hanging and a mutation run dies on its harness timeout
+    instead of reporting a failure. Twice today a mutation that reintroduced a blocking open ate a
+    multi-minute timeout rather than telling me it had reintroduced it. A child process can be
+    killed, so the regression reports as a failure with a message.
+
+    `setup` and `call` are source strings run in the child; the child prints the repr of `call`.
+    """
+    import subprocess as _sp
+    import sys as _sys
+    import textwrap as _tw
+
+    program = _tw.dedent(f"""
+        import sys
+        sys.path.insert(0, {str(ROOT / "bin")!r})
+        import _session_autobridge as autobridge
+        import codex_stream
+        {setup}
+        print(repr({call}))
+    """)
+    try:
+        done = _sp.run([_sys.executable, "-c", program], capture_output=True, text=True,
+                       timeout=seconds, cwd=str(ROOT))
+    except _sp.TimeoutExpired:
+        test.fail(f"the call did not return within {seconds}s -- it is blocking, which is the "
+                  "defect this test exists to catch")
+    combined = (done.stdout or "") + (done.stderr or "")
+    if expect_substring is not None:
+        test.assertIn(expect_substring, combined,
+                      f"expected {expect_substring!r} in child output, got: {combined[-400:]}")
+    return combined
+
+
 class RefusePolicyTest(unittest.TestCase):
     """Gate 1 and 3: a request in the response window is refused, id 0 included."""
 
@@ -1107,12 +1143,14 @@ class HandshakeClosesOnFailureTest(unittest.TestCase):
         with _tf.TemporaryDirectory(dir="/tmp") as tmp:
             fifo = Path(tmp) / "token"
             _os.mkfifo(fifo, 0o600)
-            started = _t.monotonic()
-            token = autobridge._codex_app_server_token(str(fifo))
-            elapsed = _t.monotonic() - started
-        self.assertIsNone(token)
-        self.assertLess(elapsed, 0.35,
-                        f"opening a writer-less FIFO must not block: took {elapsed:.3f}s")
+            # In a CHILD process: if the fix regresses, open() blocks and no in-process timer can
+            # break it -- the suite would hang instead of failing. This reports a failure instead.
+            assert_call_returns_within(
+                self, 5.0,
+                setup="",
+                call=f"autobridge._codex_app_server_token({str(fifo)!r})",
+                expect_substring="None",
+            )
 
     def test_a_FIFO_HOLDING_DATA_is_refused_for_being_a_FIFO(self) -> None:
         """The writer-less FIFO test does not prove the S_ISREG check -- this does.

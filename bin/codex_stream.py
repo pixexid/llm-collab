@@ -78,6 +78,9 @@ MAX_FRAME_BYTES = 8 * 1024 * 1024
 # The server-request method vocabulary is finite (11 members under --experimental), so this cap is
 # far above any honest peer and stops an inventive one from growing the set. Names are truncated
 # because the cap limits COUNT, and an unbounded name would evade a count-only limit.
+# Connection- or account-scoped notifications that carry no threadId by design. Verified against
+# the live App Server. Anything else lacking a thread identity is unattributable and is dropped.
+CONNECTION_SCOPED_METHODS = frozenset({"remoteControl/status/changed"})
 MAX_OBSERVED_REQUEST_METHODS = 64
 MAX_METHOD_NAME_CHARS = 128
 BINDINGS_DIR = ROOT / "State" / "session_autobridge" / "bindings"
@@ -254,6 +257,27 @@ def finite_seconds(value: str) -> float:
     return seconds
 
 
+def notification_belongs_to(method: str, params: dict, thread_id: str) -> bool:
+    """Whether this notification is the selected thread's, decided in ONE place.
+
+    A missing threadId used to count as a match, so an event from another thread on the same App
+    Server could be displayed as this project's worker -- worst during the initialize window, before
+    thread/resume has subscribed this connection at all.
+
+    Verified against the live server: thread/* events all carry a threadId, while
+    remoteControl/status/changed is connection-scoped and legitimately carries none. So the
+    allowlist is EXACT, and anything else without an identity is unattributable and dropped rather
+    than assumed to be ours.
+
+    A module-level function rather than an inline condition so the tests exercise this decision
+    itself; a test that re-implements the rule proves only that the copy agrees with itself.
+    """
+    event_thread = params.get("threadId")
+    if event_thread is None:
+        return method in CONNECTION_SCOPED_METHODS
+    return event_thread == thread_id
+
+
 def one_path_component(value: str, *, field: str) -> str:
     """A selector must name exactly ONE literal path component.
 
@@ -280,22 +304,14 @@ def registered_project_ids() -> set[str]:
     """Project ids from projects.json, so an unregistered directory cannot be watched."""
     path = ROOT / "projects.json"
     try:
-        with path.open("rb") as handle:
-            raw = handle.read(MAX_REGISTRY_BYTES + 1)
+        raw = autobridge.read_regular_file_bounded(path, MAX_REGISTRY_BYTES)
     except FileNotFoundError:
         return set()
-    except OSError as error:
+    except autobridge.UnreadableFile as error:
         # Same distinction as the binding scan, found by auditing the family rather than waiting for
         # it to be reported: an unreadable registry is not an empty one. Empty makes the caller say
         # the project cannot be verified, which is fail-closed but names the wrong cause.
         raise SystemExit(f"[error] cannot read {path}: {error}")
-    if len(raw) > MAX_REGISTRY_BYTES:
-        # Raise rather than return empty: an unreadable registry and an oversized one are
-        # different failures, and the caller turns an empty set into "cannot verify the project",
-        # which would misreport this one.
-        raise SystemExit(
-            f"[error] {path} exceeds the {MAX_REGISTRY_BYTES} byte limit; refusing to parse it"
-        )
     try:
         payload = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError):
@@ -457,16 +473,15 @@ def bounded_sessions(agent: str) -> list[dict]:
         raise SystemExit(f"[error] cannot scan session records: {error}")
 
     for path in sorted(entries):
+        # entry.is_file() above is a stat on a PATHNAME; by the time we reopen it, a symlink can
+        # have been retargeted at a writer-less FIFO and the open would block forever. The helper
+        # opens non-blocking and re-checks the type on the descriptor it actually holds.
         try:
-            with path.open("rb") as handle:
-                raw = handle.read(MAX_SESSION_BYTES + 1)
-        except OSError as error:
-            raise SystemExit(f"[error] cannot read session record {path}: {error}")
-        if len(raw) > MAX_SESSION_BYTES:
-            raise SystemExit(
-                f"[error] session record {path} exceeds the {MAX_SESSION_BYTES} byte limit; "
-                "refusing to parse it"
-            )
+            raw = autobridge.read_regular_file_bounded(path, MAX_SESSION_BYTES)
+        except FileNotFoundError:
+            continue
+        except autobridge.UnreadableFile as error:
+            raise SystemExit(f"[error] cannot read session record: {error}")
         try:
             record = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError):
@@ -741,7 +756,14 @@ def main() -> None:
                 continue
 
             params = message.get("params") or {}
-            if params.get("threadId") not in (None, thread_id):
+            # A missing threadId used to count as a match, so an event from another thread on the
+            # same App Server could be displayed as this project's worker -- worst during the
+            # initialize window, before thread/resume has subscribed this connection at all.
+            # Verified against the live server: thread/* events all carry a threadId, while
+            # remoteControl/status/changed is connection-scoped and legitimately carries none. So
+            # the allowlist is exact and everything unknown without an identity is dropped rather
+            # than assumed to be ours.
+            if not notification_belongs_to(method, params, thread_id):
                 continue
 
             if args.raw:

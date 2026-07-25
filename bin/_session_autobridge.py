@@ -1754,6 +1754,52 @@ def token_is_usable(content: str) -> bool:
 MAX_TOKEN_FILE_BYTES = 64 * 1024
 
 
+class UnreadableFile(RuntimeError):
+    """An oversized, non-regular, or I/O-failed path. Distinct from absent, deliberately."""
+
+
+def read_regular_file_bounded(path: Path, limit: int) -> bytes:
+    """Read at most `limit` bytes from a REGULAR file, without ever blocking on open().
+
+    Every untrusted read in this codebase needs the same four things and gets them wrong
+    individually: a non-blocking open (a writer-less FIFO blocks forever INSIDE open(), before any
+    byte cap or deadline can apply), an fstat on that SAME descriptor (stat-then-reopen can resolve
+    two different objects), a regular-file requirement, and a read LOOP (one os.read may return
+    short and silently truncate). Each was fixed separately for the token file and then not applied
+    to its siblings, so this exists to make the next call site correct by construction.
+
+    Raises FileNotFoundError when absent, UnreadableFile for every other refusal.
+    """
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    except FileNotFoundError:
+        raise
+    except OSError as error:
+        raise UnreadableFile(f"cannot open {path}: {error}") from error
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            raise UnreadableFile(f"{path} is not a regular file; refusing to read it")
+        if info.st_size > limit:
+            raise UnreadableFile(f"{path} exceeds the {limit} byte limit; refusing to parse it")
+        chunks: list[bytes] = []
+        remaining = limit + 1
+        while remaining > 0:
+            chunk = os.read(descriptor, remaining)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+    except OSError as error:
+        raise UnreadableFile(f"cannot read {path}: {error}") from error
+    finally:
+        os.close(descriptor)
+    raw = b"".join(chunks)
+    if len(raw) > limit:
+        raise UnreadableFile(f"{path} exceeds the {limit} byte limit; refusing to parse it")
+    return raw
+
+
 def _codex_app_server_token(token_file: str | None) -> str | None:
     """Read the bearer token with exactly the semantics the gate validated.
 

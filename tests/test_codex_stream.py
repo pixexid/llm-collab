@@ -37,6 +37,37 @@ def binding(root: Path, project: str, chat: str, agent: str, thread: str,
     }), encoding="utf-8")
 
 
+def assert_call_returns_within(test, seconds, program_body, expect_substring=None):
+    """Run a possibly-BLOCKING call in a child process so a regression FAILS instead of hanging.
+
+    A blocked open() cannot be interrupted in-process, so an in-process timer leaves the suite
+    hanging: twice today a mutation that reintroduced a blocking open consumed a multi-minute
+    harness timeout instead of reporting that it had reintroduced it. A child can be killed.
+    """
+    import subprocess as _sp
+    import sys as _sys
+    import textwrap as _tw
+
+    program = _tw.dedent(f"""
+        import sys
+        sys.path.insert(0, {str(ROOT / "bin")!r})
+        import _session_autobridge as autobridge
+        import codex_stream
+        {program_body}
+    """)
+    try:
+        done = _sp.run([_sys.executable, "-c", program], capture_output=True, text=True,
+                       timeout=seconds, cwd=str(ROOT))
+    except _sp.TimeoutExpired:
+        test.fail(f"the call did not return within {seconds}s -- it is blocking, which is the "
+                  "defect this test exists to catch")
+    combined = (done.stdout or "") + (done.stderr or "")
+    if expect_substring is not None:
+        test.assertIn(expect_substring, combined,
+                      f"expected {expect_substring!r} in child output, got: {combined[-500:]}")
+    return combined
+
+
 class ResolveThreadTest(unittest.TestCase):
     """Selection and the endpoint, exercised against the REAL shared resolver.
 
@@ -574,34 +605,60 @@ class ResolveThreadTest(unittest.TestCase):
                       "non-json entries must be charged too")
 
     def test_session_files_are_read_with_a_bounded_read(self) -> None:
-        """Asserts the READ SIZE, because the verdict alone cannot distinguish this.
-
-        Reading a whole file and then measuring it rejects an oversized record just the same --
-        only the allocation differs, so a test that checks the refusal passes against the
-        unbounded version. The only observable difference is the argument passed to read().
-        """
+        """Retargeted at the shared helper for the same reason as the registry read."""
         self.bind(chat="CHAT-A")
-        real_open = Path.open
-        sizes = []
+        calls = []
+        real = codex_stream.autobridge.read_regular_file_bounded
 
-        def recording_open(self_path, *args, **kwargs):
-            handle = real_open(self_path, *args, **kwargs)
-            if self_path.suffix == ".json" and "sessions" in str(self_path):
-                real_read = handle.read
+        def recording(path, limit):
+            calls.append(limit)
+            return real(path, limit)
 
-                def read(size=-1):
-                    sizes.append(size)
-                    return real_read(size)
+        with mock.patch.object(codex_stream.autobridge, "read_regular_file_bounded", recording):
+            codex_stream.bounded_sessions("codex")
+        self.assertTrue(calls, "session records were not read through the bounded helper")
+        self.assertEqual({codex_stream.MAX_SESSION_BYTES}, set(calls))
 
-                handle.read = read
-            return handle
+    def test_a_session_record_swapped_for_a_FIFO_cannot_hang_the_scan(self) -> None:
+        """The P1: entry.is_file() is a stat on a PATHNAME; the reopen can hit another object.
 
-        with mock.patch.object(Path, "open", recording_open):
-            codex_stream.resolve_thread(self.args(agent="codex", project="amiga", chat="last"))
-        self.assertTrue(sizes, "a session file should have been read")
-        self.assertTrue(all(size == codex_stream.MAX_SESSION_BYTES + 1 for size in sizes),
-                        f"every session read must be bounded, got {sizes}")
+        A FIFO merely sitting in the directory is filtered by is_file() and never reaches the read,
+        so it does not reproduce this. The defect needs stat-said-regular followed by the object
+        changing, modelled by an entry reporting is_file() True while the path is a FIFO.
 
+        Runs in a CHILD process: if the fix regresses, the read blocks in open() and nothing
+        in-process can interrupt it -- the suite would hang instead of failing, which is exactly
+        what happened to two of my mutation runs before I bounded these probes.
+        """
+        import os as _os
+
+        fifo = self.sessions / "swapped.json"
+        _os.mkfifo(fifo, 0o600)
+        assert_call_returns_within(
+            self, 5.0,
+            f"""
+        import pathlib
+        codex_stream.autobridge.SESSIONS_DIR = pathlib.Path({str(self.sessions)!r})
+
+        class LyingEntry:
+            name = 'swapped.json'
+            path = {str(fifo)!r}
+            def is_file(self): return True
+            def is_dir(self): return False
+
+        class OneLiar:
+            def __enter__(self): return [LyingEntry()]
+            def __exit__(self, *exc): return False
+
+        codex_stream.os.scandir = lambda *a, **k: OneLiar()
+        try:
+            codex_stream.bounded_sessions('codex')
+            print('NO REFUSAL')
+        except SystemExit as error:
+            print('REFUSED:', error)
+            """.strip(),
+            expect_substring="not a regular file",
+        )
     def test_a_malformed_session_is_skipped_not_fatal(self) -> None:
         # matches the behaviour of the resolver's own scan, which this replaces
         self.bind(chat="CHAT-A", thread="good")
@@ -1309,34 +1366,47 @@ class ProjectRegistryBudgetTest(unittest.TestCase):
             codex_stream.registered_project_ids()
         self.assertIn(str(codex_stream.MAX_REGISTRY_BYTES), str(caught.exception))
 
-    def test_the_read_itself_is_bounded_not_just_the_verdict(self) -> None:
-        """A read-all-then-measure implementation gives the same verdict and the same exhaustion.
+    def test_the_registry_read_goes_through_the_bounded_helper(self) -> None:
+        """Retargeted: the registry no longer uses Path.open, so watching it proved nothing.
 
-        Asserted on the argument passed to read(), because that is the difference between refusing
-        an oversized file and allocating it first and then complaining.
+        Both the registry and the session reads now share one helper that opens non-blocking,
+        fstats the descriptor it holds, requires a regular file and loops the read. Asserting the
+        call site USES it is the property that matters; the helper's own mechanics are proved once,
+        against the helper, in tests/test_server_request_authority.py.
         """
         self.write_registry(json.dumps({"projects": [{"id": "amiga"}]}))
-        seen = []
-        real_open = Path.open
+        calls = []
+        real = codex_stream.autobridge.read_regular_file_bounded
 
-        def recording_open(self_path, *args, **kwargs):
-            handle = real_open(self_path, *args, **kwargs)
-            if self_path.name == "projects.json":
-                real_read = handle.read
+        def recording(path, limit):
+            calls.append((path.name, limit))
+            return real(path, limit)
 
-                def read(*read_args):
-                    seen.append(read_args)
-                    return real_read(*read_args)
+        with mock.patch.object(codex_stream.autobridge, "read_regular_file_bounded", recording):
+            self.assertEqual({"amiga"}, codex_stream.registered_project_ids())
+        self.assertEqual([("projects.json", codex_stream.MAX_REGISTRY_BYTES)], calls)
 
-                handle.read = read
-            return handle
+    def test_a_registry_that_is_a_FIFO_cannot_hang_the_command(self) -> None:
+        """The P1: a writer-less FIFO blocks inside open(), before --seconds exists."""
+        import os as _os
+        import time as _t
 
-        with mock.patch.object(Path, "open", recording_open):
+        fifo = self.root / "projects.json"
+        _os.mkfifo(fifo, 0o600)
+        # Child process: a regression makes open() block, and no in-process timer can break that.
+        assert_call_returns_within(
+            self, 5.0,
+            f"""
+        codex_stream.ROOT = __import__('pathlib').Path({str(self.root)!r})
+        try:
             codex_stream.registered_project_ids()
-        self.assertTrue(seen, "projects.json was not read through a bounded read at all")
-        self.assertEqual((codex_stream.MAX_REGISTRY_BYTES + 1,), seen[0],
-                         f"the read must be capped, got {seen[0]}")
-
+            print('NO REFUSAL')
+        except SystemExit as error:
+            print('REFUSED:', error)
+            """.strip(),
+            expect_substring="not a regular file",
+        )
+        _ = _t
     def test_a_registry_at_the_limit_still_parses(self) -> None:
         entry = {"projects": [{"id": "amiga"}]}
         body = json.dumps(entry)
@@ -1346,24 +1416,24 @@ class ProjectRegistryBudgetTest(unittest.TestCase):
         self.assertEqual({"amiga"}, codex_stream.registered_project_ids())
 
     def test_an_unreadable_registry_is_reported_not_treated_as_unregistered(self) -> None:
-        """Same distinction as the binding scan, found by auditing the family, not by it being filed.
+        """Same distinction as the binding scan: unreadable is not empty.
 
-        Lives in THIS class because ResolveThreadTest.setUp patches registered_project_ids, so the
-        version of this test I first wrote there was asserting against a mock and told me nothing.
+        Patches os.open rather than Path.open, because the helper opens a descriptor directly.
         """
+        import os as _os
+
         self.write_registry('{"projects": [{"id": "amiga"}]}')
-        real_open = Path.open
+        real_open = _os.open
 
-        def denied(self_path, *args, **kwargs):
-            if self_path.name == "projects.json":
+        def denied(path, flags, *args, **kwargs):
+            if str(path).endswith("projects.json"):
                 raise PermissionError(13, "Permission denied")
-            return real_open(self_path, *args, **kwargs)
+            return real_open(path, flags, *args, **kwargs)
 
-        with mock.patch.object(Path, "open", denied):
+        with mock.patch.object(_os, "open", denied):
             with self.assertRaises(SystemExit) as caught:
                 codex_stream.registered_project_ids()
         self.assertIn("Permission denied", str(caught.exception))
-
     def test_a_missing_registry_still_returns_empty_rather_than_raising(self) -> None:
         """Unchanged: callers turn an empty set into an explicit refusal to verify the project."""
         self.assertEqual(set(), codex_stream.registered_project_ids())
@@ -1536,6 +1606,57 @@ class StreamLoopContractTest(unittest.TestCase):
         """The old hint printed a command that exits `Unknown agent` in this repo."""
         source = self.source()
         self.assertNotIn("pm2_watchers.py start --agent codex-appserver", source)
+
+
+class NotificationIdentityTest(unittest.TestCase):
+    """A notification without a threadId must not be attributed to the selected thread.
+
+    The filter accepted `threadId is None` as a match, so an event from another thread sharing the
+    App Server could be displayed as this project's worker -- worst during the initialize window,
+    before thread/resume has subscribed this connection at all.
+
+    The allowlist is not a guess: verified against the live server, thread/* events all carry a
+    threadId while remoteControl/status/changed is connection-scoped and carries none. Requiring an
+    exact match unconditionally would have silenced the status line, which is why this is an exact
+    allowlist rather than a blanket rule.
+    """
+
+    def accepted(self, method, params, thread_id="T-MINE"):
+        """Call the REAL decision. An earlier version re-implemented it here, which would have
+        proved only that my copy agreed with itself while a mutation to production passed."""
+        return codex_stream.notification_belongs_to(method, params, thread_id)
+
+    def test_an_event_for_another_thread_is_dropped(self) -> None:
+        self.assertFalse(self.accepted("thread/tokenUsage/updated", {"threadId": "T-THEIRS"}))
+
+    def test_an_event_for_the_selected_thread_is_kept(self) -> None:
+        self.assertTrue(self.accepted("thread/tokenUsage/updated", {"threadId": "T-MINE"}))
+
+    def test_a_thread_scoped_event_with_NO_identity_is_dropped(self) -> None:
+        """The P1 itself: unattributable must not mean "mine"."""
+        for method in ("thread/goal/cleared", "item/updated", "turn/completed",
+                       "item/commandExecution/updated"):
+            with self.subTest(method):
+                self.assertFalse(self.accepted(method, {}),
+                                 f"{method} without a threadId is unattributable")
+
+    def test_the_connection_scoped_status_event_is_still_kept(self) -> None:
+        """Verified live: this one legitimately has no threadId, and the stream relies on it."""
+        self.assertTrue(self.accepted("remoteControl/status/changed", {}))
+
+    def test_an_unknown_method_without_identity_fails_closed(self) -> None:
+        self.assertFalse(self.accepted("something/nobody/anticipated", {}))
+
+    def test_the_allowlist_is_exact_not_a_prefix_match(self) -> None:
+        """A prefix rule would let a peer invent remoteControl/... names to bypass identity."""
+        self.assertFalse(self.accepted("remoteControl/status/changed/extra", {}))
+        self.assertFalse(self.accepted("remoteControl/anything/else", {}))
+
+    def test_the_module_does_not_treat_missing_identity_as_a_match(self) -> None:
+        """Structural: the old `not in (None, thread_id)` form must not come back."""
+        source = (ROOT / "bin" / "codex_stream.py").read_text(encoding="utf-8")
+        self.assertNotIn('params.get("threadId") not in (None, thread_id)', source)
+        self.assertIn("CONNECTION_SCOPED_METHODS", source)
 
 
 class ElideTest(unittest.TestCase):
