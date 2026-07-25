@@ -150,6 +150,46 @@ class ChatIdUniquenessTest(unittest.TestCase):
         with mock.patch.object(_helpers, "CHATS_DIR", root):
             self.assertIsNone(_helpers.find_chat_by_partial("CHAT-X", project="amiga"))
 
+    def test_an_out_of_scope_bearer_beats_an_in_scope_title_mention(self) -> None:
+        """The exact case the pre-filter broke.
+
+        CHAT-X is borne only in nuvyr, while an amiga directory merely MENTIONS it in its
+        title. Pre-filtering to amiga left that mention as the only candidate and the loose
+        fallback returned CHAT-Y -- handing the caller a different chat because the one they
+        named lives elsewhere. Who bears an id is a global fact and must survive scoping.
+        """
+        with self._chats_with_meta({"2026-07-20_followup-CHAT-X__CHAT-Y": "amiga",
+                                    "2026-07-21_real__CHAT-X": "nuvyr"}):
+            self.assertIsNone(_helpers.find_chat_by_partial("CHAT-X", project="amiga"))
+            # and the bearer is still reachable in its own project
+            found = _helpers.find_chat_by_partial("CHAT-X", project="nuvyr")
+        self.assertEqual("2026-07-21_real__CHAT-X", found.name)
+
+    def test_an_in_scope_bearer_wins_over_an_in_scope_mention(self) -> None:
+        with self._chats_with_meta({"2026-07-20_followup-CHAT-X__CHAT-Y": "amiga",
+                                    "2026-07-21_real__CHAT-X": "amiga"}):
+            found = _helpers.find_chat_by_partial("CHAT-X", project="amiga")
+        self.assertEqual("2026-07-21_real__CHAT-X", found.name)
+
+    def test_a_loose_partial_with_no_bearer_anywhere_still_falls_back(self) -> None:
+        # the fallback is only forbidden when the named id exists somewhere
+        with self._chats_with_meta({"2026-07-20_gh-90-one__CHAT-A": "amiga",
+                                    "2026-07-21_gh-90-two__CHAT-B": "amiga"}):
+            found = _helpers.find_chat_by_partial("gh-90", project="amiga")
+        self.assertEqual("2026-07-21_gh-90-two__CHAT-B", found.name)
+
+    def test_a_programming_defect_in_metadata_reading_is_not_swallowed(self) -> None:
+        """A bare except made every scoped chat vanish instead of raising.
+
+        Silent AND confusing: the caller sees "no chat in this project" for a bug in our own
+        code.
+        """
+        with self._chats_with_meta({"2026-07-20_a__CHAT-X": "amiga"}):
+            with mock.patch.object(_helpers, "load_chat_meta",
+                                   side_effect=TypeError("bug in our own code")):
+                with self.assertRaises(TypeError):
+                    _helpers.find_chat_by_partial("CHAT-X", project="amiga")
+
     def test_unscoped_callers_keep_the_global_uniqueness_rule(self) -> None:
         with self._chats_with_meta({"2026-07-20_a__CHAT-X": "amiga",
                                     "2026-07-21_b__CHAT-X": "nuvyr"}):

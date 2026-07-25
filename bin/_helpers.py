@@ -754,7 +754,10 @@ def chat_meta_project(chat_dir: Path) -> str | None:
     """
     try:
         meta = load_chat_meta(chat_dir)
-    except Exception:
+    except (OSError, ValueError):
+        # Only unreadable or undecodable metadata. A bare `except Exception` here masked
+        # programming defects as "every scoped chat disappeared", which is both a silent
+        # failure and an extremely confusing one. json.JSONDecodeError is a ValueError.
         return None
     if not isinstance(meta, dict):
         return None
@@ -790,16 +793,41 @@ def find_chat_by_partial(partial: str, *, project: str | None = None) -> Path | 
     delivery addressing.
     """
     matches = find_chats(partial) if partial != "last" else find_chats()
+    selector = partial.strip().casefold()
+
+    # Who BEARS this id is a global fact, established before any scoping. The pre-filter
+    # discarded that knowledge, so an id borne only in another project left an in-scope
+    # directory that merely MENTIONS it in its title -- `followup-CHAT-X__CHAT-Y` -- and the
+    # loose fallback then returned CHAT-Y. A caller who named an id must never be handed a
+    # different chat because the one they named lives elsewhere.
+    bearers = ([] if partial == "last"
+               else [d for d in matches if (chat_id_of(d) or "").casefold() == selector])
+
     if project is not None:
         # ONE pre-filter, before any selection. Filtering after exact-id selection left the
         # `last` and loose paths unscoped, so they could still choose another project's chat
         # and only fail later at delivery. Scope is a property of the candidate SET, not a
         # tie-breaker applied to a winner.
-        matches = [d for d in matches if chat_meta_project(d) == project]
-    if not matches:
+        scoped = [d for d in matches if chat_meta_project(d) == project]
+    else:
+        scoped = list(matches)
+
+    if not scoped:
         return None
     if partial == "last":
-        return matches[-1]
+        return scoped[-1]
+
+    scoped_names = {d.name for d in scoped}
+    exact = [d for d in bearers if d.name in scoped_names]
+    if len(exact) > 1:
+        raise ValueError(_collision_message(partial, exact, project))
+    if exact:
+        return exact[0]
+    if bearers:
+        # the id exists, but not here. Falling through to a loose match would deliver into a
+        # directory the caller never named.
+        return None
+    return scoped[-1]
 
     selector = partial.strip().casefold()
     exact = [d for d in matches if (chat_id_of(d) or "").casefold() == selector]
