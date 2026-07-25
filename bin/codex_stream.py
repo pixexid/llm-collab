@@ -262,18 +262,23 @@ def resolve_thread(args: argparse.Namespace) -> tuple[str, str, str | None]:
         # sorting every entry and THEN counting still did the unbounded work first, which is
         # the whole cost being guarded against. Enumerate lazily and abort on the entry that
         # exceeds the budget.
+        # The budget begins at the enumeration boundary, BEFORE any filtering. Charging only
+        # directories let an untrusted tree spend unbounded work on entries that were then
+        # discarded: with a budget of one, five non-directory entries were all examined and the
+        # limit never tripped. Every entry the OS hands us costs one unit, whatever it is.
         entries = []
+        scanned = 0
         try:
             with os.scandir(project_dir) as scan:
                 for entry in scan:
-                    if not entry.is_dir():
-                        continue
-                    if len(entries) >= MAX_SCANNED_CHATS:
+                    scanned += 1
+                    if scanned > MAX_SCANNED_CHATS:
                         raise SystemExit(
-                            f"[error] more than {MAX_SCANNED_CHATS} chat directories under "
+                            f"[error] more than {MAX_SCANNED_CHATS} entries under "
                             f"{project!r}; name one with --chat"
                         )
-                    entries.append(Path(entry.path))
+                    if entry.is_dir():
+                        entries.append(Path(entry.path))
         except OSError:
             entries = []
         candidates = [d / f"{agent}.json" for d in sorted(entries)]
@@ -286,21 +291,20 @@ def resolve_thread(args: argparse.Namespace) -> tuple[str, str, str | None]:
         # a skip. Silently discarding one can leave a partial set that looks unambiguous, so
         # a concurrent non-atomic write to a sibling binding could suppress the refusal and
         # get the remaining thread watched.
-        # Size first, from metadata: reading the file and then measuring it has already paid
-        # the cost the limit exists to avoid.
+        # A bounded read, not a stat followed by an unbounded one. stat() and read_bytes() are
+        # separate pathname operations: the file can grow between them, and read_bytes() has no
+        # maximum of its own -- so a small stat authorized an arbitrarily large read. Open once
+        # and ask for one byte more than the limit; if we get it, the file is too big.
         try:
-            size = path.stat().st_size
-        except OSError as error:
-            raise SystemExit(f"[error] cannot stat candidate binding {path}: {error}")
-        if size > MAX_BINDING_BYTES:
-            raise SystemExit(
-                f"[error] binding {path} is {size} bytes, over the {MAX_BINDING_BYTES} "
-                "limit; refusing to read it"
-            )
-        try:
-            raw = path.read_bytes()
+            with path.open("rb") as handle:
+                raw = handle.read(MAX_BINDING_BYTES + 1)
         except OSError as error:
             raise SystemExit(f"[error] cannot read candidate binding {path}: {error}")
+        if len(raw) > MAX_BINDING_BYTES:
+            raise SystemExit(
+                f"[error] binding {path} exceeds the {MAX_BINDING_BYTES} byte limit; "
+                "refusing to parse it"
+            )
         try:
             record = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as error:

@@ -343,6 +343,50 @@ class FailClosedCandidateTest(unittest.TestCase):
                 codex_stream.resolve_thread(self.args(agent="codex", project="amiga"))
         self.assertIn("more than", str(caught.exception))
 
+    def test_non_directory_entries_also_consume_the_budget(self) -> None:
+        """The budget starts at the enumeration boundary, before any filtering.
+
+        Charging only directories let an untrusted tree spend unbounded work on entries that
+        were then discarded: with a budget of one, five files were all examined and the limit
+        never tripped.
+        """
+        (self.root / "amiga").mkdir(parents=True)
+        for i in range(5):
+            (self.root / "amiga" / f"junk-{i}.txt").write_text("x", encoding="utf-8")
+        with mock.patch.object(codex_stream, "MAX_SCANNED_CHATS", 1):
+            with self.assertRaises(SystemExit) as caught:
+                codex_stream.resolve_thread(self.args(agent="codex", project="amiga"))
+        self.assertIn("entries", str(caught.exception))
+
+    def test_a_binding_that_grows_after_stat_cannot_slip_through(self) -> None:
+        """stat() then read_bytes() is not a byte bound.
+
+        They are separate pathname operations, so the file can grow between them, and
+        read_bytes() has no maximum of its own -- a small stat authorized an arbitrarily large
+        read. A bounded read of limit+1 bytes cannot be fooled that way, so a file that is over
+        the limit at READ time is rejected regardless of what any earlier stat said.
+        """
+        path = self.root / "amiga" / "CHAT-BIG" / "codex.json"
+        path.parent.mkdir(parents=True)
+        path.write_bytes(b"[" + b"0," * codex_stream.MAX_BINDING_BYTES + b"0]")
+        real_stat = Path.stat
+
+        def lying_stat(self_path, *args, **kwargs):
+            result = real_stat(self_path, *args, **kwargs)
+            if self_path == path:
+                class Small:
+                    st_size = 10
+                    def __getattr__(self, name):
+                        return getattr(result, name)
+                return Small()
+            return result
+
+        with mock.patch.object(Path, "stat", lying_stat):
+            with self.assertRaises(SystemExit) as caught:
+                codex_stream.resolve_thread(self.args(agent="codex", project="amiga"))
+        self.assertIn("limit", str(caught.exception),
+                      "the read itself must be bounded, not a prior stat")
+
     def test_a_named_chat_skips_the_scan_budget_entirely(self) -> None:
         with mock.patch.object(codex_stream, "MAX_SCANNED_CHATS", 1):
             for i in range(4):
@@ -795,13 +839,18 @@ class ObserverAnswersNothingTest(unittest.TestCase):
         self.assertEqual([], client.sent)
 
     def test_every_generated_server_request_method_is_left_unanswered(self) -> None:
+        # All ELEVEN members of the union this client opts into. Without --experimental the
+        # generated union has ten; this client initializes with experimentalApi:true, so
+        # currentTime/read belongs here. Asserting ten and calling it every member was the same
+        # false completeness claim I had to correct in #308.
         methods = [
             "account/chatgptAuthTokens/refresh", "applyPatchApproval",
-            "attestation/generate", "execCommandApproval",
+            "attestation/generate", "currentTime/read", "execCommandApproval",
             "item/commandExecution/requestApproval", "item/fileChange/requestApproval",
             "item/permissions/requestApproval", "item/tool/call",
             "item/tool/requestUserInput", "mcpServer/elicitation/request",
         ]
+        self.assertEqual(11, len(methods), "the experimental union has eleven members")
         incoming = [{"id": f"srv-{i}", "method": m, "params": {}}
                     for i, m in enumerate(methods)]
         incoming.append({"method": "turn/completed", "params": {}})
@@ -809,6 +858,11 @@ class ObserverAnswersNothingTest(unittest.TestCase):
         self.drain(client, 1)
         self.assertEqual([], client.sent, "no member of the union may be answered")
         self.assertEqual(sorted(methods), sorted(client.observed_requests))
+
+    def test_this_client_opts_into_the_experimental_api(self) -> None:
+        # if it stopped doing so, the ten-member union would become the correct matrix
+        source = (ROOT / "bin" / "codex_stream.py").read_text(encoding="utf-8")
+        self.assertIn("experimentalApi", source)
 
     def test_a_plain_notification_is_passed_through_untouched(self) -> None:
         note = {"method": "item/agentMessage/delta", "params": {"delta": "hi"}}
