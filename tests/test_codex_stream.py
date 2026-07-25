@@ -32,6 +32,7 @@ def binding(root: Path, project: str, chat: str, agent: str, thread: str,
     path.write_text(json.dumps({
         "agent_id": agent, "project_id": project, "chat_id": chat,
         "runtime_session_id": thread, "status": status, "updated_utc": updated,
+        "runtime_family": "codex_app", "session_id": f"SESSION-{chat}",
     }), encoding="utf-8")
 
 
@@ -46,6 +47,8 @@ class ResolveThreadTest(unittest.TestCase):
             # exercised by its own tests rather than gating every other case
             mock.patch.object(codex_stream, "registered_project_ids",
                               return_value={"amiga", "nuvyr"}),
+            # selection is what these tests are about; the backing-session gate has its own
+            mock.patch.object(codex_stream, "backing_session_problem", return_value=None),
         ):
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -227,6 +230,8 @@ class EndpointFromBindingTest(unittest.TestCase):
             mock.patch.object(codex_stream, "BINDINGS_DIR", self.root),
             mock.patch.object(codex_stream, "registered_project_ids",
                               return_value={"amiga", "nuvyr"}),
+            # selection is what these tests are about; the backing-session gate has its own
+            mock.patch.object(codex_stream, "backing_session_problem", return_value=None),
         ):
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -241,7 +246,8 @@ class EndpointFromBindingTest(unittest.TestCase):
         path = self.root / project / chat / f"{agent}.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = {"agent_id": agent, "project_id": project, "chat_id": chat,
-                   "runtime_session_id": thread, "status": "active"}
+                   "runtime_session_id": thread, "status": "active",
+                   "runtime_family": "codex_app", "session_id": f"SESSION-{chat}"}
         if home is not None:
             payload["runtime_home"] = home
         path.write_text(json.dumps(payload), encoding="utf-8")
@@ -287,6 +293,7 @@ class FailClosedCandidateTest(unittest.TestCase):
         for patcher in (
             mock.patch.object(codex_stream, "BINDINGS_DIR", self.root),
             mock.patch.object(codex_stream, "registered_project_ids", return_value={"amiga"}),
+            mock.patch.object(codex_stream, "backing_session_problem", return_value=None),
         ):
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -329,6 +336,297 @@ class FailClosedCandidateTest(unittest.TestCase):
             thread, _, _home = codex_stream.resolve_thread(
                 self.args(agent="codex", project="amiga", chat="CHAT-2"))
         self.assertEqual("t2", thread, "naming a chat needs no enumeration at all")
+
+
+class FileChangePathsTest(unittest.TestCase):
+    """A fileChange item has NO top-level path: the paths live in changes[]."""
+
+    def line(self, item: dict) -> str:
+        return codex_stream.describe("item/started", {"item": item})
+
+    def test_a_single_file_edit_names_the_file(self) -> None:
+        line = self.line({"type": "fileChange",
+                          "changes": [{"path": "bin/deliver.py", "kind": "update"}]})
+        self.assertIn("bin/deliver.py", line)
+
+    def test_a_multi_file_edit_names_every_file(self) -> None:
+        line = self.line({"type": "fileChange", "changes": [
+            {"path": "bin/a.py"}, {"path": "bin/b.py"}, {"path": "tests/c.py"}]})
+        self.assertIn("3 files", line)
+        for path in ("bin/a.py", "bin/b.py", "tests/c.py"):
+            self.assertIn(path, line)
+
+    def test_a_protocol_valid_item_never_prints_an_empty_edit_line(self) -> None:
+        """The defect: reading item["path"] printed `edit ` for every valid item.
+
+        The tool reported that an edit happened while withholding the one fact that matters.
+        """
+        line = self.line({"type": "fileChange",
+                          "changes": [{"path": "bin/deliver.py"}]})
+        self.assertNotEqual("  edit ", line.rstrip())
+        self.assertNotIn("edit \n", line)
+
+    def test_an_item_with_no_usable_paths_says_so_instead_of_nothing(self) -> None:
+        for item in ({"type": "fileChange", "changes": []},
+                     {"type": "fileChange", "changes": "not-a-list"},
+                     {"type": "fileChange"}):
+            with self.subTest(item=item):
+                self.assertIn("unspecified", self.line(item))
+
+
+class BackingSessionTest(unittest.TestCase):
+    """`deactivate` updates the session and leaves the binding's status alone.
+
+    So a stale binding can keep claiming `active` and outrank the worker's live one. The
+    backing session is the authority for both identity and liveness.
+    """
+
+    def record(self, **kw) -> dict:
+        base = {"agent_id": "codex", "project_id": "amiga", "chat_id": "CHAT-A",
+                "runtime_session_id": "thread-1", "session_id": "SESSION-A",
+                "runtime_family": "codex_app", "status": "active"}
+        base.update(kw)
+        return base
+
+    def session(self, **kw) -> dict:
+        base = {"session_id": "SESSION-A", "agent_id": "codex", "status": "active",
+                "runtime": {"session_id": "thread-1"}}
+        base.update(kw)
+        return base
+
+    def check(self, record, session=None, dispatchable=(True, "ok")):
+        loader = (mock.Mock(side_effect=FileNotFoundError("nope")) if session is None
+                  else mock.Mock(return_value=session))
+        with mock.patch.object(codex_stream.autobridge, "load_session", loader):
+            with mock.patch.object(codex_stream.autobridge, "session_is_dispatchable",
+                                   return_value=dispatchable):
+                return codex_stream.backing_session_problem(record)
+
+    def test_a_live_matching_session_is_accepted(self) -> None:
+        self.assertIsNone(self.check(self.record(), self.session()))
+
+    def test_a_deactivated_session_is_refused_even_when_the_binding_says_active(self) -> None:
+        problem = self.check(self.record(status="active"),
+                             self.session(status="inactive"),
+                             dispatchable=(False, "status=inactive"))
+        self.assertIsNotNone(problem)
+        self.assertIn("not live", problem)
+
+    def test_an_expired_lease_is_refused(self) -> None:
+        problem = self.check(self.record(), self.session(), dispatchable=(False, "lease_expired"))
+        self.assertIn("lease_expired", problem)
+
+    def test_a_session_belonging_to_another_agent_is_refused(self) -> None:
+        problem = self.check(self.record(), self.session(agent_id="claude"))
+        self.assertIn("belongs to", problem)
+
+    def test_a_session_pointing_at_another_thread_is_refused(self) -> None:
+        problem = self.check(self.record(),
+                             self.session(runtime={"session_id": "different-thread"}))
+        self.assertIn("points at runtime thread", problem)
+
+    def test_a_missing_session_is_refused(self) -> None:
+        self.assertIn("unreadable", self.check(self.record(), None))
+
+    def test_a_binding_naming_no_session_is_refused(self) -> None:
+        problem = codex_stream.backing_session_problem(self.record(session_id=None))
+        self.assertIn("names no backing session", problem)
+
+
+class RuntimeFamilyGateTest(unittest.TestCase):
+    """Only codex_app can be watched through a Codex App Server."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory(dir="/tmp")
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+        for patcher in (
+            mock.patch.object(codex_stream, "BINDINGS_DIR", self.root),
+            mock.patch.object(codex_stream, "registered_project_ids", return_value={"amiga"}),
+            mock.patch.object(codex_stream, "backing_session_problem", return_value=None),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def args(self, **kw):
+        base = {"agent": "codex", "project": "amiga", "chat": "CHAT-A", "thread": None,
+                "runtime_home": None}
+        base.update(kw)
+        return SimpleNamespace(**base)
+
+    def write(self, family) -> None:
+        path = self.root / "amiga" / "CHAT-A" / "codex.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {"agent_id": "codex", "project_id": "amiga", "chat_id": "CHAT-A",
+                   "runtime_session_id": "t1", "status": "active", "session_id": "S-A"}
+        if family is not None:
+            payload["runtime_family"] = family
+        path.write_text(json.dumps(payload), encoding="utf-8")
+
+    def test_a_foreign_family_is_refused_rather_than_resumed(self) -> None:
+        """Sending a claude_app session id to a Codex App Server fails against the wrong
+        runtime instead of reporting an unsupported binding."""
+        for family in ("claude_app", "gemini_cli", None, ""):
+            with self.subTest(family=family):
+                self.write(family)
+                with self.assertRaises(SystemExit) as caught:
+                    codex_stream.resolve_thread(self.args())
+                self.assertIn("codex_app", str(caught.exception))
+
+    def test_codex_app_is_accepted(self) -> None:
+        self.write("codex_app")
+        thread, _, _home = codex_stream.resolve_thread(self.args())
+        self.assertEqual("t1", thread)
+
+
+class MessageReconciliationTest(unittest.TestCase):
+    """A message that began before subscription must be recovered, once.
+
+    Subscribing mid-message delivers only the later deltas while the completion payload
+    carries the whole text. Always discarding that completion showed a suffix -- or nothing,
+    when every delta preceded subscription. Always printing it would duplicate every message.
+    """
+
+    def test_a_message_followed_from_its_first_delta_is_not_reprinted(self) -> None:
+        seen = {"msg-1"}
+        self.assertIsNone(codex_stream.unstreamed_message_text(
+            {"id": "msg-1", "text": "hello world"}, seen))
+        self.assertEqual(set(), seen, "the id is consumed so it cannot suppress a later item")
+
+    def test_a_message_that_began_before_subscription_is_recovered(self) -> None:
+        self.assertEqual("the whole message", codex_stream.unstreamed_message_text(
+            {"id": "msg-2", "text": "the whole message"}, set()))
+
+    def test_a_message_whose_every_delta_preceded_subscription_is_recovered(self) -> None:
+        # the case where the default view showed NOTHING at all
+        self.assertEqual("entirely missed", codex_stream.unstreamed_message_text(
+            {"id": "msg-3", "text": "entirely missed"}, {"other-msg"}))
+
+    def test_an_empty_completion_reports_nothing(self) -> None:
+        self.assertIsNone(codex_stream.unstreamed_message_text({"id": "m", "text": ""}, set()))
+
+    def test_a_completion_with_no_id_still_recovers_its_text(self) -> None:
+        self.assertEqual("no id", codex_stream.unstreamed_message_text({"text": "no id"}, set()))
+
+    def test_two_messages_are_tracked_independently(self) -> None:
+        seen = {"msg-a"}
+        self.assertIsNone(codex_stream.unstreamed_message_text({"id": "msg-a", "text": "A"}, seen))
+        self.assertEqual("B", codex_stream.unstreamed_message_text({"id": "msg-b", "text": "B"}, seen))
+
+
+class LiveBindingSelectionTest(unittest.TestCase):
+    """Integration: resolve_thread must ACT on the session verdict, and `last` must order by time."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory(dir="/tmp")
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+        for patcher in (
+            mock.patch.object(codex_stream, "BINDINGS_DIR", self.root),
+            mock.patch.object(codex_stream, "registered_project_ids", return_value={"amiga"}),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def args(self, **kw):
+        base = {"agent": "codex", "project": "amiga", "chat": None, "thread": None,
+                "runtime_home": None}
+        base.update(kw)
+        return SimpleNamespace(**base)
+
+    def test_a_binding_whose_session_is_dead_is_refused_by_resolve_thread(self) -> None:
+        """The function's verdict is worthless if the caller ignores it."""
+        binding(self.root, "amiga", "CHAT-A", "codex", "thread-1")
+        with mock.patch.object(codex_stream, "backing_session_problem",
+                               return_value="backing session SESSION-A is not live: status=inactive"):
+            with self.assertRaises(SystemExit) as caught:
+                codex_stream.resolve_thread(self.args(chat="CHAT-A"))
+        self.assertIn("not live", str(caught.exception))
+
+    def test_chat_last_picks_the_newest_live_binding_even_when_it_is_parked(self) -> None:
+        """Registration defaults to parked, so this is the ordinary case, not an edge one.
+
+        Preferring active first discarded the newer parked binding before any timestamp was
+        compared, and `last` then watched the older chat.
+        """
+        binding(self.root, "amiga", "CHAT-OLD", "codex", "old-thread",
+                status="active", updated="2026-07-01T00:00:00+00:00")
+        binding(self.root, "amiga", "CHAT-NEW", "codex", "new-thread",
+                status="parked", updated="2026-07-25T00:00:00+00:00")
+        with mock.patch.object(codex_stream, "backing_session_problem", return_value=None):
+            thread, provenance, _home = codex_stream.resolve_thread(self.args(chat="last"))
+        self.assertEqual("new-thread", thread,
+                         "`last` means newest among live bindings, not newest active one")
+        self.assertIn("CHAT-NEW", provenance)
+
+    def test_ordinary_lookup_still_prefers_active_to_disambiguate(self) -> None:
+        # the active preference remains a tie-breaker for lookup, where it disambiguates
+        binding(self.root, "amiga", "CHAT-OLD", "codex", "old-thread",
+                status="active", updated="2026-07-01T00:00:00+00:00")
+        binding(self.root, "amiga", "CHAT-NEW", "codex", "new-thread",
+                status="parked", updated="2026-07-25T00:00:00+00:00")
+        with mock.patch.object(codex_stream, "backing_session_problem", return_value=None):
+            thread, _, _home = codex_stream.resolve_thread(self.args())
+        self.assertEqual("old-thread", thread)
+
+
+class ReadTimeoutClampTest(unittest.TestCase):
+    """The socket wait must never exceed what the caller's deadline allows."""
+
+    def client(self):
+        made = codex_stream.ObserverClient.__new__(codex_stream.ObserverClient)
+        made.observed_requests = []
+        made.timeout_seconds = 5
+        made.sock = mock.Mock()
+        return made
+
+    def test_a_short_remaining_window_shortens_the_wait(self) -> None:
+        made = self.client()
+        made.set_read_timeout(0.1)
+        made.sock.settimeout.assert_called_once()
+        self.assertAlmostEqual(0.1, made.sock.settimeout.call_args[0][0], places=6)
+
+    def test_the_idle_cap_still_applies_when_plenty_remains(self) -> None:
+        made = self.client()
+        made.set_read_timeout(600)
+        self.assertEqual(5, made.sock.settimeout.call_args[0][0])
+
+    def test_no_deadline_uses_the_idle_cap(self) -> None:
+        made = self.client()
+        made.set_read_timeout(None)
+        self.assertEqual(5, made.sock.settimeout.call_args[0][0])
+
+    def test_an_exhausted_window_never_becomes_a_blocking_wait(self) -> None:
+        # settimeout(0) would make the socket non-blocking, which is a different failure
+        made = self.client()
+        made.set_read_timeout(-3)
+        self.assertGreater(made.sock.settimeout.call_args[0][0], 0)
+
+
+class StreamLoopContractTest(unittest.TestCase):
+    """Structural assertions about the loop the connector flagged."""
+
+    def source(self) -> str:
+        return (ROOT / "bin" / "codex_stream.py").read_text(encoding="utf-8")
+
+    def test_the_whole_response_is_no_longer_accumulated(self) -> None:
+        # appending every delta retained the full response to read only its truthiness
+        self.assertNotIn("pending_text", self.source())
+
+    def test_the_deadline_is_monotonic(self) -> None:
+        source = self.source()
+        self.assertIn("time.monotonic()", source)
+        self.assertNotIn("time.time() + args.seconds", source)
+
+    def test_the_receive_wait_is_clamped_each_iteration(self) -> None:
+        source = self.source()
+        loop = source[source.index("        while True:"):source.index("    if text_line_open:")]
+        self.assertIn("set_read_timeout(remaining)", loop)
+
+    def test_the_recovery_hint_names_no_command_that_does_not_exist(self) -> None:
+        """The old hint printed a command that exits `Unknown agent` in this repo."""
+        source = self.source()
+        self.assertNotIn("pm2_watchers.py start --agent codex-appserver", source)
 
 
 class ElideTest(unittest.TestCase):
@@ -459,6 +757,8 @@ class RecordIdentityTest(unittest.TestCase):
             # exercised by its own tests rather than gating every other case
             mock.patch.object(codex_stream, "registered_project_ids",
                               return_value={"amiga", "nuvyr"}),
+            # selection is what these tests are about; the backing-session gate has its own
+            mock.patch.object(codex_stream, "backing_session_problem", return_value=None),
         ):
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -487,6 +787,7 @@ class RecordIdentityTest(unittest.TestCase):
         self.write("amiga", "CHAT-A", "codex", {
             "agent_id": "codex", "project_id": "amiga", "chat_id": "CHAT-A",
             "runtime_session_id": "right-thread", "status": "active",
+            "runtime_family": "codex_app", "session_id": "SESSION-A",
         })
         thread, _, _home = codex_stream.resolve_thread(
             self.args(agent="codex", project="amiga", chat="CHAT-A"))
@@ -513,7 +814,7 @@ class InterruptExitCodeTest(unittest.TestCase):
 
     def test_keyboard_interrupt_is_not_swallowed_by_the_stream_loop(self) -> None:
         source = (ROOT / "bin" / "codex_stream.py").read_text(encoding="utf-8")
-        loop = source[source.index("while deadline is None"):source.index("if pending_text")]
+        loop = source[source.index("        while True:"):source.index("    if text_line_open:")]
         self.assertNotIn("except KeyboardInterrupt", loop,
                          "the loop must let Ctrl-C reach the 130 handler")
 

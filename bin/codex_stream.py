@@ -40,6 +40,10 @@ DEFAULT_IDLE_TIMEOUT_SECONDS = 5
 # Cumulative budgets over an untrusted bindings tree. Exceeding either fails closed with a
 # message naming the limit, rather than consuming unbounded CPU or memory first.
 MAX_SCANNED_CHATS = 2000
+# The only family this client can speak to. claude_app and gemini_cli are equally valid
+# families in a binding; sending their session ids to a Codex App Server fails against the
+# wrong runtime instead of saying the binding is unsupported.
+CODEX_RUNTIME_FAMILY = "codex_app"
 MAX_BINDING_BYTES = 64 * 1024
 BINDINGS_DIR = ROOT / "State" / "session_autobridge" / "bindings"
 
@@ -68,6 +72,14 @@ class ObserverClient(autobridge.JsonRpcWebSocketClient):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.observed_requests: list[str] = []
+
+    def set_read_timeout(self, remaining: float | None) -> None:
+        """Never wait longer than the caller's own deadline allows."""
+        if self.sock is None:
+            return
+        cap = float(self.timeout_seconds or DEFAULT_IDLE_TIMEOUT_SECONDS)
+        wait = cap if remaining is None else max(0.01, min(cap, remaining))
+        self.sock.settimeout(wait)
 
     def recv_json(self) -> dict:
         while True:
@@ -130,6 +142,33 @@ def record_matches_path(record: dict, path: Path, agent: str) -> bool:
         and str(record.get("chat_id") or "") == path.parent.name
         and str(record.get("project_id") or "") == path.parent.parent.name
     )
+
+
+def backing_session_problem(record: dict) -> str | None:
+    """Why this binding's session cannot be watched, or None when it can.
+
+    Identity first, then liveness. A binding naming a session that does not exist, belongs to
+    another agent, or points at a different runtime thread is not merely stale -- it is not
+    describing the worker the caller asked for.
+    """
+    session_id = record.get("session_id")
+    if not session_id:
+        return "the binding names no backing session"
+    try:
+        session = autobridge.load_session(str(session_id))
+    except (FileNotFoundError, OSError, json.JSONDecodeError) as error:
+        return f"backing session {session_id} is unreadable: {error}"
+    if str(session.get("agent_id") or "") != str(record.get("agent_id") or ""):
+        return (f"backing session {session_id} belongs to "
+                f"{session.get('agent_id')!r}, not {record.get('agent_id')!r}")
+    runtime = session.get("runtime") or {}
+    if str(runtime.get("session_id") or "") != str(record.get("runtime_session_id") or ""):
+        return (f"backing session {session_id} points at runtime thread "
+                f"{runtime.get('session_id')!r}, not {record.get('runtime_session_id')!r}")
+    dispatchable, reason = autobridge.session_is_dispatchable(session)
+    if not dispatchable:
+        return f"backing session {session_id} is not live: {reason}"
+    return None
 
 
 def registered_project_ids() -> set[str]:
@@ -230,6 +269,22 @@ def resolve_thread(args: argparse.Namespace) -> tuple[str, str, str | None]:
             )
         if not record.get("runtime_session_id"):
             continue
+        # This client speaks to a Codex App Server. claude_app and gemini_cli are valid
+        # families that binding_payload_from_session() writes, and accepting one would send a
+        # foreign runtime's session id to thread/resume -- failing against the wrong runtime
+        # rather than reporting an unsupported binding.
+        family = str(record.get("runtime_family") or "")
+        if family != CODEX_RUNTIME_FAMILY:
+            raise SystemExit(
+                f"[error] binding {path} is runtime_family={family or 'unset'!r}; "
+                f"only {CODEX_RUNTIME_FAMILY} can be watched through a Codex App Server"
+            )
+        # `deactivate` updates the session JSON and leaves the binding's own status alone, so a
+        # stale binding can keep claiming `active` and outrank the worker's live one. The
+        # backing session is the authority for liveness, exactly as it is for dispatch.
+        problem = backing_session_problem(record)
+        if problem:
+            raise SystemExit(f"[error] binding {path} is not usable: {problem}")
         bindings.append((record, path))
 
     if not bindings:
@@ -237,8 +292,15 @@ def resolve_thread(args: argparse.Namespace) -> tuple[str, str, str | None]:
             f"[error] no binding with a runtime_session_id for agent {agent!r} in {project!r}"
         )
 
-    active = [b for b in bindings if b[0].get("status") == "active"]
-    chosen = active or bindings
+    # `last` means newest among all LIVE bindings. Preferring active first discarded a newer
+    # parked binding before comparing timestamps -- and registration defaults to parked, so
+    # that is the ordinary case, not an edge one. The active preference is a tie-breaker for
+    # ordinary lookup only, where it disambiguates rather than orders.
+    if args.chat == "last":
+        chosen = bindings
+    else:
+        active = [b for b in bindings if b[0].get("status") == "active"]
+        chosen = active or bindings
     if len(chosen) > 1 and args.chat != "last":
         names = "\n  ".join(f"{b[0].get('project_id')}/{b[0].get('chat_id')}" for b in chosen)
         raise SystemExit(
@@ -251,6 +313,46 @@ def resolve_thread(args: argparse.Namespace) -> tuple[str, str, str | None]:
     return (str(record["runtime_session_id"]),
             f"{record.get('project_id')}/{record.get('chat_id')}",
             str(runtime_home) if runtime_home else None)
+
+
+def unstreamed_message_text(item: dict, streamed_from_start: set[str]) -> str | None:
+    """The message text the caller has NOT already seen streamed, or None.
+
+    An observer that subscribes mid-message receives only the later deltas, while the
+    completion payload carries the whole thing. Discarding that completion on the assumption
+    that every delta was observed left the default view showing a suffix -- or nothing at all
+    when every delta preceded subscription. Reprinting it unconditionally would duplicate
+    every message instead.
+
+    Consumes the id, so a message followed from its first delta is reported once as already
+    seen and its completion stays silent.
+    """
+    item_id = str(item.get("id") or "")
+    if item_id and item_id in streamed_from_start:
+        streamed_from_start.discard(item_id)
+        return None
+    text = str(item.get("text") or "")
+    return text or None
+
+
+def file_change_paths(item: dict) -> str:
+    """The paths a fileChange item touches.
+
+    A fileChange item has NO top-level `path`: the schema requires a `changes` array and each
+    entry carries its own. Reading `item["path"]` printed an empty `edit` line for every
+    protocol-valid item -- the tool reported that an edit happened while withholding the one
+    fact that matters about it.
+    """
+    changes = item.get("changes")
+    if not isinstance(changes, list):
+        return str(item.get("path") or "(unspecified path)")
+    paths = [str(change.get("path")) for change in changes
+             if isinstance(change, dict) and change.get("path")]
+    if not paths:
+        return "(unspecified path)"
+    if len(paths) == 1:
+        return paths[0]
+    return f"{len(paths)} files: {', '.join(paths)}"
 
 
 def elide(value: object, limit: int = 160) -> str:
@@ -281,7 +383,7 @@ def describe(method: str, params: dict) -> str | None:
         if kind == "commandExecution":
             return f"  $ {elide(item.get('command', ''))}"
         if kind == "fileChange":
-            return f"  edit {elide(item.get('path', ''))}"
+            return f"  edit {elide(file_change_paths(item))}"
         return f"  {kind} started"
     if method == "item/completed":
         item = params.get("item", {})
@@ -310,15 +412,29 @@ def main() -> None:
     if endpoint is None:
         raise SystemExit(
             "[error] no Codex App Server endpoint found for CODEX_HOME "
-            f"{runtime_home}. Start the sidecar: "
-            "python bin/pm2_watchers.py start --agent codex-appserver"
+            f"{runtime_home}.\n"
+            "       Discovery looks for a process whose command contains `app-server` and\n"
+            "       `--listen`, launched with CODEX_HOME set to exactly that path. Confirm\n"
+            "       one is running:\n"
+            "         ps ax -o pid=,command= | grep '[a]pp-server'\n"
+            "       See docs/adapters/pm2.md for the supported launch procedure."
         )
 
     token = autobridge._codex_app_server_token(endpoint.get("token_file"))
     print(f"[stream] {provenance} thread {thread_id} via {endpoint['url']}")
 
-    deadline = time.time() + args.seconds if args.seconds else None
-    pending_text = ""
+    # A monotonic deadline: a wall-clock one drifts across a clock adjustment, and the socket
+    # timeout must be clamped to whatever remains or `--seconds 0.1` blocks for the full idle
+    # timeout before the deadline is even rechecked.
+    deadline = time.monotonic() + args.seconds if args.seconds else None
+    # A boolean, not an accumulator. Appending every delta retained the whole response to read
+    # only its truthiness, copying the string repeatedly while each chunk was already written
+    # straight to stdout.
+    text_line_open = False
+    # Item ids whose text we streamed in full. A message that BEGAN before we subscribed
+    # delivers only its later deltas, so its completion payload is the only source for the
+    # earlier part -- but a message we followed from the start must not be printed twice.
+    streamed_from_start: set[str] = set()
 
     failed = False
     with ObserverClient(
@@ -336,8 +452,16 @@ def main() -> None:
         client.request("thread/resume", {"threadId": thread_id})
         print("[stream] subscribed; Ctrl-C to stop")
 
-        while deadline is None or time.time() < deadline:
+        while True:
+            remaining = None if deadline is None else deadline - time.monotonic()
+            if remaining is not None and remaining <= 0:
+                break
             try:
+                # Clamp the socket wait to what the caller actually asked for. With a fixed
+                # idle timeout, `--seconds 0.1` blocked for the whole timeout before the
+                # deadline was rechecked, and a stream of ping frames could keep the receive
+                # looping internally for longer still.
+                client.set_read_timeout(remaining)
                 message = client.recv_json()
             except (TimeoutError, socket.timeout):
                 continue
@@ -362,20 +486,35 @@ def main() -> None:
 
             if method == "item/agentMessage/delta":
                 chunk = params.get("delta") or params.get("text") or ""
-                pending_text += chunk
+                item_id = params.get("itemId")
+                if item_id and not text_line_open:
+                    # first delta we have seen for this item: we are following it from here,
+                    # but we cannot know whether it began before we subscribed
+                    streamed_from_start.add(str(item_id))
                 sys.stdout.write(chunk)
                 sys.stdout.flush()
+                text_line_open = True
                 continue
 
-            if pending_text:
+            if method == "item/completed" and (params.get("item") or {}).get(
+                    "type") == "agentMessage":
+                missing = unstreamed_message_text(params["item"], streamed_from_start)
+                if text_line_open:
+                    sys.stdout.write("\n")
+                    text_line_open = False
+                if missing:
+                    print(f"[reconciled] {missing}")
+                continue
+
+            if text_line_open:
                 sys.stdout.write("\n")
-                pending_text = ""
+                text_line_open = False
 
             line = describe(method, params)
             if line:
                 print(f"[{time.strftime('%H:%M:%S')}] {line}")
 
-    if pending_text:
+    if text_line_open:
         sys.stdout.write("\n")
     if client.observed_requests:
         print(f"[stream] saw {len(client.observed_requests)} server request(s) on this "
