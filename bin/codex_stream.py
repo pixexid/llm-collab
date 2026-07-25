@@ -15,8 +15,8 @@ that replied could abort work the operator initiated in the desktop app.
 Usage:
   python bin/codex_stream.py --agent codex --project amiga --chat CHAT-8976EECB
   python bin/codex_stream.py --agent codex --project amiga --chat last --seconds 60
-  python bin/codex_stream.py --thread 019f9452-6954-7301-bff9-db1c47232bc8 \
-      --runtime-home ~/.codex --raw
+  python bin/codex_stream.py --agent codex --project amiga --chat last \
+      --thread 019f9452-6954-7301-bff9-db1c47232bc8 --raw
 """
 
 from __future__ import annotations
@@ -34,6 +34,7 @@ import base64
 import hashlib
 import urllib.parse
 import json
+import math
 import os
 import socket
 import time
@@ -165,16 +166,38 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--agent", help="Agent id whose bound thread to watch")
     p.add_argument("--project", help="Project id (with --agent)")
     p.add_argument("--chat", help="Chat id, or 'last' for the newest binding (with --agent)")
-    p.add_argument("--thread", help="Exact runtime thread id, bypassing binding lookup")
+    p.add_argument("--thread", help="Assert the resolved thread id; refuses on mismatch. Not a "
+                                    "bypass -- --agent and --project are still required")
     # NO default. Discovery matches CODEX_HOME exactly, so defaulting to one author's home
     # made this work on exactly one machine: any binding under a custom or secondary
     # CODEX_HOME either found no endpoint or connected to the wrong server. The selected
     # binding already records the right home; this flag is an explicit override only.
     p.add_argument("--runtime-home", help="Override the CODEX_HOME to discover (default: the "
                                          "selected binding's own runtime_home)")
-    p.add_argument("--seconds", type=float, help="Stop after this long (default: until Ctrl-C)")
+    p.add_argument("--seconds", type=finite_seconds,
+                   help="Stop after this long (default: until Ctrl-C)")
     p.add_argument("--raw", action="store_true", help="Print every notification as JSON")
     return p.parse_args()
+
+
+def finite_seconds(value: str) -> float:
+    """A real, positive duration.
+
+    argparse's float() happily accepts "nan" and "inf", and both defeat the stopping limit this
+    option advertises: every comparison against a NaN deadline is false, and an infinite deadline
+    is never reached, so an otherwise idle run continues until interrupted.
+    """
+    try:
+        seconds = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{value!r} is not a number")
+    if not math.isfinite(seconds):
+        raise argparse.ArgumentTypeError(
+            f"{value!r} is not a finite duration; it would never stop"
+        )
+    if seconds <= 0:
+        raise argparse.ArgumentTypeError(f"{value!r} must be greater than zero")
+    return seconds
 
 
 def one_path_component(value: str, *, field: str) -> str:
@@ -233,16 +256,16 @@ def resolve_thread(args: argparse.Namespace) -> tuple[str, str, str | None]:
     What remains here is only what that function does not do: choosing WHICH chat when the
     caller did not name one, and reading the runtime home for the endpoint.
     """
-    if args.thread:
-        if not args.runtime_home:
-            raise SystemExit(
-                "[error] --thread needs --runtime-home: there is no binding to read the "
-                "CODEX_HOME from, and discovery matches it exactly"
-            )
-        return args.thread, "--thread", args.runtime_home
-
+    # --thread used to return right here, before --project was required or validated. That let a
+    # thread id from another project -- or from no registered project at all -- be observed
+    # whenever projects share a CODEX_HOME and App Server, which AGENTS.md forbids outright: a
+    # project-aware reader must require an exact project match. So --thread is no longer a bypass
+    # around the binding lookup; it is an ASSERTION over it. You still name the project and agent,
+    # resolution still goes through the audited exact-binding path, and the thread you named must
+    # be the one that path arrives at. An unbound thread is not project-scoped by construction and
+    # is therefore not observable here at all.
     if not args.agent:
-        raise SystemExit("[error] pass --thread with --runtime-home, or --agent with --project")
+        raise SystemExit("[error] pass --agent with --project (and optionally --thread)")
 
     agent = one_path_component(args.agent, field="agent")
     if args.project is None:
@@ -300,6 +323,12 @@ def resolve_thread(args: argparse.Namespace) -> tuple[str, str, str | None]:
     thread_id = str(binding.get("runtime_session_id") or runtime.get("session_id") or "")
     if not thread_id:
         raise SystemExit(f"[error] {project}/{chat} records no runtime thread id")
+    if args.thread and args.thread != thread_id:
+        raise SystemExit(
+            f"[error] --thread {args.thread!r} is not the thread bound to {project}/{chat} for "
+            f"{agent!r}, which is {thread_id!r}. Refusing rather than observing a thread this "
+            "project does not own."
+        )
     home = args.runtime_home or binding.get("runtime_home") or runtime.get("home")
     return thread_id, f"{project}/{chat}", str(home) if home else None
 

@@ -501,27 +501,121 @@ class ResolveThreadTest(unittest.TestCase):
             self.args(agent="codex", project="amiga", chat="last"))
         self.assertEqual("mine", thread)
 
-    # --- direct-thread mode -------------------------------------------------------------
+    # --- --thread asserts the resolution, it does not bypass it ---------------------------
+    #
+    # It used to return before --project was required or validated, so a thread from another or
+    # unregistered project could be observed whenever projects share a CODEX_HOME and App Server.
+    # AGENTS.md:25-27 requires a project-aware reader to demand an exact project match.
 
-    def test_thread_mode_requires_a_runtime_home(self) -> None:
+    def test_thread_alone_is_refused_because_it_names_no_project(self) -> None:
         with self.assertRaises(SystemExit) as caught:
-            codex_stream.resolve_thread(self.args(thread="019f-abc"))
-        self.assertIn("--runtime-home", str(caught.exception))
+            codex_stream.resolve_thread(self.args(thread="019f-abc", runtime_home="/tmp/home"))
+        message = str(caught.exception)
+        self.assertIn("--project", message)
+        self.assertNotIn("019f-abc", message,
+                         "an unvalidated thread id must not be echoed as if it were accepted")
 
-    def test_thread_mode_with_a_home_needs_no_binding(self) -> None:
+    def test_a_thread_matching_the_binding_is_accepted(self) -> None:
+        self.bind(chat="CHAT-ASSERT", thread="the-real-thread", home="/tmp/real-home")
         thread, provenance, home = codex_stream.resolve_thread(
-            self.args(thread="019f-abc", runtime_home="/tmp/home"))
-        self.assertEqual(("019f-abc", "--thread", "/tmp/home"), (thread, provenance, home))
+            self.args(agent="codex", project="amiga", chat="CHAT-ASSERT",
+                      thread="the-real-thread"))
+        self.assertEqual("the-real-thread", thread)
+        self.assertEqual("/tmp/real-home", home,
+                         "the home still comes from the validated binding, not from the flag")
+        self.assertIn("CHAT-ASSERT", provenance)
 
-    def test_the_documented_thread_example_carries_a_runtime_home(self) -> None:
-        # the example could not work without it, since there is no binding to read one from
+    def test_a_thread_the_project_does_not_own_is_refused(self) -> None:
+        """The finding itself: a foreign thread id must not be observable through this project."""
+        self.bind(chat="CHAT-OURS", thread="our-thread")
+        with self.assertRaises(SystemExit) as caught:
+            codex_stream.resolve_thread(
+                self.args(agent="codex", project="amiga", chat="CHAT-OURS",
+                          thread="someone-elses-thread"))
+        message = str(caught.exception)
+        self.assertIn("someone-elses-thread", message)
+        self.assertIn("our-thread", message,
+                      "the refusal must say which thread this project actually owns")
+
+    def test_a_foreign_thread_cannot_ride_in_on_a_runtime_home_override(self) -> None:
+        """--runtime-home must not resurrect the bypass by supplying the endpoint itself."""
+        self.bind(chat="CHAT-OURS", thread="our-thread", home="/tmp/ours")
+        with self.assertRaises(SystemExit):
+            codex_stream.resolve_thread(
+                self.args(agent="codex", project="amiga", chat="CHAT-OURS",
+                          thread="foreign-thread", runtime_home="/tmp/attacker-home"))
+
+    def test_an_unregistered_project_is_still_refused_with_a_thread(self) -> None:
+        self.bind(chat="CHAT-OURS", thread="our-thread")
+        with self.assertRaises(SystemExit) as caught:
+            codex_stream.resolve_thread(
+                self.args(agent="codex", project="not-registered", chat="CHAT-OURS",
+                          thread="our-thread"))
+        self.assertIn("not registered", str(caught.exception))
+
+    # --- a non-finite duration is not a duration -----------------------------------------
+
+    def test_nan_and_inf_durations_are_rejected(self) -> None:
+        """argparse's float() accepts both, and both defeat the advertised stopping limit."""
+        import argparse as _argparse
+
+        for value in ("nan", "inf", "-inf", "NaN", "Infinity"):
+            with self.subTest(value):
+                with self.assertRaises(_argparse.ArgumentTypeError):
+                    codex_stream.finite_seconds(value)
+
+    def test_zero_and_negative_durations_are_rejected(self) -> None:
+        import argparse as _argparse
+
+        for value in ("0", "-1", "-0.5"):
+            with self.subTest(value):
+                with self.assertRaises(_argparse.ArgumentTypeError):
+                    codex_stream.finite_seconds(value)
+
+    def test_a_real_duration_is_accepted(self) -> None:
+        self.assertEqual(60.0, codex_stream.finite_seconds("60"))
+        self.assertEqual(0.5, codex_stream.finite_seconds("0.5"))
+
+    def test_a_non_numeric_duration_is_rejected(self) -> None:
+        import argparse as _argparse
+
+        with self.assertRaises(_argparse.ArgumentTypeError):
+            codex_stream.finite_seconds("soon")
+
+    def test_the_parser_ITSELF_rejects_a_non_finite_duration(self) -> None:
+        """End-to-end through argparse, because testing the validator alone proves nothing.
+
+        A mutation reverting the option to `type=float` left every direct finite_seconds test
+        green -- the validator was still correct, just no longer wired to anything.
+        """
+        for value in ("nan", "inf"):
+            with self.subTest(value):
+                with mock.patch.object(
+                    codex_stream.sys, "argv",
+                    ["codex_stream.py", "--agent", "codex", "--project", "amiga",
+                     "--seconds", value],
+                ):
+                    with self.assertRaises(SystemExit) as caught:
+                        codex_stream.parse_args()
+                    self.assertNotEqual(0, caught.exception.code)
+
+    def test_the_parser_accepts_a_real_duration(self) -> None:
+        with mock.patch.object(
+            codex_stream.sys, "argv",
+            ["codex_stream.py", "--agent", "codex", "--project", "amiga", "--seconds", "45"],
+        ):
+            self.assertEqual(45.0, codex_stream.parse_args().seconds)
+
+    def test_the_documented_thread_example_names_a_project(self) -> None:
+        """A documented invocation must be runnable, and must not show the old bypass."""
         source = (ROOT / "bin" / "codex_stream.py").read_text(encoding="utf-8")
         usage = source[source.index("Usage:"):source.index('"""', source.index("Usage:"))]
         for line in usage.splitlines():
             if "--thread" in line:
-                block = usage[usage.index(line):]
-                self.assertIn("--runtime-home", block,
-                              "a documented invocation must be runnable as shown")
+                block = usage[usage.index(line) - 200:]
+                self.assertIn("--project", block,
+                              "the documented --thread invocation must name a project")
+                self.assertIn("--agent", block)
                 break
         else:
             self.fail("no --thread example found in the usage block")
