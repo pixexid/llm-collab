@@ -161,8 +161,8 @@ class ResolveThreadTest(unittest.TestCase):
         good = json.loads(path.read_text())
         real = codex_stream.autobridge.resolve_exact_dispatch_pair
 
-        def wrapper(project_id, chat_id, agent_id):
-            result = real(project_id, chat_id, agent_id)
+        def wrapper(project_id, chat_id, agent_id, sessions=None):
+            result = real(project_id, chat_id, agent_id, sessions=sessions)
             path.write_text(json.dumps(dict(good, **changes)), encoding="utf-8")
             return result
 
@@ -212,8 +212,8 @@ class ResolveThreadTest(unittest.TestCase):
         path = self.bindings / "amiga" / "CHAT-GONE" / "codex.json"
         real = codex_stream.autobridge.resolve_exact_dispatch_pair
 
-        def unlink_after(project_id, chat_id, agent_id):
-            result = real(project_id, chat_id, agent_id)
+        def unlink_after(project_id, chat_id, agent_id, sessions=None):
+            result = real(project_id, chat_id, agent_id, sessions=sessions)
             path.unlink()
             return result
 
@@ -266,6 +266,111 @@ class ResolveThreadTest(unittest.TestCase):
         from collections import Counter
         self.assertEqual({"CHAT-A": 1, "CHAT-B": 1}, dict(Counter(reads)),
                          f"one read per chat, all of it the resolver's: {reads}")
+
+    # --- one bounded session scan for the whole lookup ------------------------------------
+
+    def test_broad_lookup_scans_the_session_directory_once(self) -> None:
+        """Delegating per chat made the shared resolver rescan every session file per candidate.
+
+        With up to MAX_SCANNED_CHATS candidates that is up to 2,000 full passes over an untrusted
+        directory -- the delegation amplified the very cost the split had moved away. One scan now
+        serves the whole lookup.
+        """
+        for chat in ("CHAT-A", "CHAT-B", "CHAT-C"):
+            self.bind(chat=chat, thread=f"t-{chat}")
+        real_iter = codex_stream.autobridge.iter_sessions
+        scans = []
+
+        def counting(agent_id=None):
+            scans.append(agent_id)
+            return real_iter(agent_id=agent_id)
+
+        with mock.patch.object(codex_stream.autobridge, "iter_sessions", side_effect=counting):
+            with self.assertRaises(SystemExit):   # three live bindings is ambiguous
+                codex_stream.resolve_thread(self.args(agent="codex", project="amiga"))
+        self.assertEqual([], scans,
+                         "the resolver must not scan at all when the caller supplies sessions")
+
+    def test_a_named_chat_lets_the_resolver_scan_for_itself(self) -> None:
+        # one chat, one lookup: no reason for the caller to pre-scan
+        self.bind()
+        real_iter = codex_stream.autobridge.iter_sessions
+        scans = []
+
+        def counting(agent_id=None):
+            scans.append(agent_id)
+            return real_iter(agent_id=agent_id)
+
+        with mock.patch.object(codex_stream.autobridge, "iter_sessions", side_effect=counting):
+            thread, _p, _h = codex_stream.resolve_thread(
+                self.args(agent="codex", project="amiga", chat="CHAT-A"))
+        self.assertEqual("t1", thread)
+        self.assertEqual(1, len(scans), f"exactly one scan: {scans}")
+
+    def test_too_many_session_records_fails_closed(self) -> None:
+        for chat in ("CHAT-A", "CHAT-B"):
+            self.bind(chat=chat)
+        for i in range(6):
+            (self.sessions / f"filler-{i}.json").write_text("{}", encoding="utf-8")
+        with mock.patch.object(codex_stream, "MAX_SCANNED_SESSIONS", 3):
+            with self.assertRaises(SystemExit) as caught:
+                codex_stream.resolve_thread(self.args(agent="codex", project="amiga"))
+        self.assertIn("refusing to scan further", str(caught.exception))
+
+    def test_an_oversized_session_record_is_refused_before_parsing(self) -> None:
+        self.bind(chat="CHAT-A")
+        (self.sessions / "huge.json").write_text("[" + "0," * 4000 + "0]", encoding="utf-8")
+        with mock.patch.object(codex_stream, "MAX_SESSION_BYTES", 512):
+            with self.assertRaises(SystemExit) as caught:
+                codex_stream.resolve_thread(self.args(agent="codex", project="amiga"))
+        self.assertIn("byte limit", str(caught.exception))
+
+    def test_session_entries_consume_the_budget_before_filtering(self) -> None:
+        self.bind(chat="CHAT-A")
+        for i in range(6):
+            (self.sessions / f"not-json-{i}.txt").write_text("x", encoding="utf-8")
+        with mock.patch.object(codex_stream, "MAX_SCANNED_SESSIONS", 3):
+            with self.assertRaises(SystemExit) as caught:
+                codex_stream.resolve_thread(self.args(agent="codex", project="amiga"))
+        self.assertIn("refusing to scan further", str(caught.exception),
+                      "non-json entries must be charged too")
+
+    def test_session_files_are_read_with_a_bounded_read(self) -> None:
+        """Asserts the READ SIZE, because the verdict alone cannot distinguish this.
+
+        Reading a whole file and then measuring it rejects an oversized record just the same --
+        only the allocation differs, so a test that checks the refusal passes against the
+        unbounded version. The only observable difference is the argument passed to read().
+        """
+        self.bind(chat="CHAT-A")
+        real_open = Path.open
+        sizes = []
+
+        def recording_open(self_path, *args, **kwargs):
+            handle = real_open(self_path, *args, **kwargs)
+            if self_path.suffix == ".json" and "sessions" in str(self_path):
+                real_read = handle.read
+
+                def read(size=-1):
+                    sizes.append(size)
+                    return real_read(size)
+
+                handle.read = read
+            return handle
+
+        with mock.patch.object(Path, "open", recording_open):
+            codex_stream.resolve_thread(self.args(agent="codex", project="amiga", chat="last"))
+        self.assertTrue(sizes, "a session file should have been read")
+        self.assertTrue(all(size == codex_stream.MAX_SESSION_BYTES + 1 for size in sizes),
+                        f"every session read must be bounded, got {sizes}")
+
+    def test_a_malformed_session_is_skipped_not_fatal(self) -> None:
+        # matches the behaviour of the resolver's own scan, which this replaces
+        self.bind(chat="CHAT-A", thread="good")
+        (self.sessions / "broken.json").write_text("{not json", encoding="utf-8")
+        thread, _p, _h = codex_stream.resolve_thread(
+            self.args(agent="codex", project="amiga", chat="last"))
+        self.assertEqual("good", thread)
 
     # --- the family gate, which the shared resolver does NOT enforce ---------------------
 
@@ -655,6 +760,39 @@ class DeadlineTest(unittest.TestCase):
         made._send_frame = lambda payload, opcode=0x1: sent_opcodes.append(opcode)
         self.assertEqual("turn/completed", made.recv_json()["method"])
         self.assertEqual([0xA], sent_opcodes, "a ping must be ponged")
+
+
+class ConnectDeadlineTest(unittest.TestCase):
+    """`--seconds` must bound the CONNECT and the upgrade handshake, not only what follows.
+
+    The inherited __enter__ uses timeout_seconds for socket.create_connection() and for every
+    handshake recv(), and it runs before any deadline could be installed -- so a stalled connect,
+    or a handshake trickling bytes, ran for seconds despite `--seconds 0.1`.
+    """
+
+    def source(self) -> str:
+        return (ROOT / "bin" / "codex_stream.py").read_text(encoding="utf-8")
+
+    def test_the_socket_timeout_is_folded_down_to_the_requested_duration(self) -> None:
+        source = self.source()
+        self.assertIn("connect_timeout = max(0.05, min(DEFAULT_IDLE_TIMEOUT_SECONDS, args.seconds))",
+                      source,
+                      "the requested duration must reach the connect timeout itself")
+
+    def test_the_deadline_is_installed_before_the_context_is_entered(self) -> None:
+        source = self.source()
+        set_at = source.index("client.set_deadline(deadline)")
+        enter_at = source.index("with client:")
+        self.assertLess(set_at, enter_at,
+                        "the very first blocking read must already be bounded")
+
+    def test_the_client_is_no_longer_constructed_inside_the_with(self) -> None:
+        # constructing it in the `with` header made __enter__ run before any deadline existed
+        self.assertNotIn("with ObserverClient(", self.source())
+
+    def test_a_small_seconds_value_does_not_become_a_nonblocking_socket(self) -> None:
+        source = self.source()
+        self.assertIn("max(0.05,", source, "a floor keeps the socket blocking")
 
 
 class SetupBoundaryTest(unittest.TestCase):

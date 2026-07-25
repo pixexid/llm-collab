@@ -685,6 +685,7 @@ def resolve_exact_dispatch_pair(
     project_id: str,
     chat_id: str,
     agent_id: str,
+    sessions: list[dict[str, Any]] | None = None,
 ) -> tuple[tuple[dict[str, Any], dict[str, Any]] | None, str | None]:
     """Return ((session, binding), None) or (None, reason).
 
@@ -712,8 +713,14 @@ def resolve_exact_dispatch_pair(
     if not bound_session_id or not bound_runtime_id:
         return None, EXACT_BINDING_REQUIRED_REASON
 
+    # A caller resolving SEVERAL chats would otherwise rescan the whole session directory once
+    # per chat; passing a pre-scanned list makes that one scan for the whole lookup. Defaults to
+    # scanning, so every existing caller is unaffected.
+    candidates = iter_sessions(agent_id=agent_id) if sessions is None else [
+        session for session in sessions if session.get("agent_id") == agent_id
+    ]
     exact_matches: list[dict[str, Any]] = []
-    for session in iter_sessions(agent_id=agent_id):
+    for session in candidates:
         if session.get("project_id") != project_id or session.get("chat_id") != chat_id:
             continue
         if str(session.get("session_id")) != str(bound_session_id):

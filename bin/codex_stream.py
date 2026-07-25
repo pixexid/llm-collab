@@ -50,6 +50,12 @@ SKIPPABLE_RESOLVER_REASONS = frozenset({autobridge.EXACT_BINDING_NOT_DISPATCHABL
 CODEX_RUNTIME_FAMILY = "codex_app"
 # One cumulative budget over an untrusted bindings tree, charged at the enumeration boundary.
 MAX_SCANNED_CHATS = 2000
+# The session tree is untrusted too. Before this budget, delegating per chat meant the shared
+# resolver rescanned every session file once per candidate -- up to MAX_SCANNED_CHATS full passes
+# over an unbounded directory. One scan now serves the whole lookup, and both its count and each
+# file's size are capped.
+MAX_SCANNED_SESSIONS = 5000
+MAX_SESSION_BYTES = 256 * 1024
 BINDINGS_DIR = ROOT / "State" / "session_autobridge" / "bindings"
 
 
@@ -279,8 +285,9 @@ def resolve_thread(args: argparse.Namespace) -> tuple[str, str, str | None]:
         # the session and deliberately leaves the binding behind, so one ordinary deactivation
         # would otherwise break `--chat last` for that agent permanently.
         chosen = []
+        sessions = bounded_sessions(agent)
         for chat in bounded_chat_ids(project, agent):
-            resolved = resolve_one(project, chat, agent, fatal=False)
+            resolved = resolve_one(project, chat, agent, fatal=False, sessions=sessions)
             if resolved is not None:
                 chosen.append((chat, *resolved))
 
@@ -308,7 +315,60 @@ def resolve_thread(args: argparse.Namespace) -> tuple[str, str, str | None]:
     return thread_id, f"{project}/{chat}", str(home) if home else None
 
 
-def resolve_one(project: str, chat: str, agent: str, *, fatal: bool):
+def bounded_sessions(agent: str) -> list[dict]:
+    """Every session for this agent, read ONCE, under a count and a per-file byte cap.
+
+    The shared resolver scans the session directory itself, which is right for a single lookup
+    and wrong for a loop: delegating per chat repeated that whole scan once per candidate. This
+    scan happens once and is handed to each call.
+
+    Bounded because the directory is untrusted: the count is charged at the enumeration boundary
+    before any filtering, and each file is read with one bounded read rather than a stat followed
+    by an unbounded one.
+    """
+    sessions: list[dict] = []
+    scanned = 0
+    try:
+        with os.scandir(autobridge.SESSIONS_DIR) as scan:
+            entries = []
+            for entry in scan:
+                scanned += 1
+                if scanned > MAX_SCANNED_SESSIONS:
+                    raise SystemExit(
+                        f"[error] more than {MAX_SCANNED_SESSIONS} entries under "
+                        f"{autobridge.SESSIONS_DIR}; refusing to scan further"
+                    )
+                if entry.is_file() and entry.name.endswith(".json"):
+                    entries.append(Path(entry.path))
+    except FileNotFoundError:
+        return []
+    except OSError as error:
+        raise SystemExit(f"[error] cannot scan session records: {error}")
+
+    for path in sorted(entries):
+        try:
+            with path.open("rb") as handle:
+                raw = handle.read(MAX_SESSION_BYTES + 1)
+        except OSError as error:
+            raise SystemExit(f"[error] cannot read session record {path}: {error}")
+        if len(raw) > MAX_SESSION_BYTES:
+            raise SystemExit(
+                f"[error] session record {path} exceeds the {MAX_SESSION_BYTES} byte limit; "
+                "refusing to parse it"
+            )
+        try:
+            record = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            # a malformed session cannot describe a live worker; the resolver's own scan skips
+            # these too, so skipping matches the behaviour this replaces
+            continue
+        if isinstance(record, dict) and record.get("agent_id") == agent:
+            sessions.append(record)
+    return sessions
+
+
+def resolve_one(project: str, chat: str, agent: str, *, fatal: bool,
+                sessions: list[dict] | None = None):
     """Resolve one chat to the (binding, session) pair the resolver validated, or None if dead.
 
     The snapshot comes FROM the validation, not from a second read. Four re-reads of the path
@@ -320,7 +380,7 @@ def resolve_one(project: str, chat: str, agent: str, *, fatal: bool):
     resolve_exact_dispatch_pair() hands back the exact binding it validated against, so there is
     nothing left to reopen and nothing to reconcile.
     """
-    pair, reason = autobridge.resolve_exact_dispatch_pair(project, chat, agent)
+    pair, reason = autobridge.resolve_exact_dispatch_pair(project, chat, agent, sessions=sessions)
     if pair is None:
         if not fatal and reason in SKIPPABLE_RESOLVER_REASONS:
             return None
@@ -503,13 +563,18 @@ def main() -> None:
     streamed_from_start: set[str] = set()
 
     failed = False
-    with ObserverClient(
-        str(endpoint["url"]), token=token, timeout_seconds=DEFAULT_IDLE_TIMEOUT_SECONDS
-    ) as client:
-        # Before initialize, not after: a server that accepts the socket and then stalls while
-        # answering initialize or thread/resume would otherwise get the full idle timeout for
-        # each, ignoring `--seconds` entirely during setup.
-        client.set_deadline(deadline)
+    # The inherited __enter__ uses timeout_seconds for socket.create_connection() and for every
+    # handshake recv(), and it runs BEFORE any deadline could be installed. So the requested
+    # duration has to be folded into the timeout itself, or `--seconds 0.1` waits seconds on a
+    # stalled connect or a handshake that trickles bytes.
+    connect_timeout = DEFAULT_IDLE_TIMEOUT_SECONDS
+    if args.seconds:
+        connect_timeout = max(0.05, min(DEFAULT_IDLE_TIMEOUT_SECONDS, args.seconds))
+    client = ObserverClient(str(endpoint["url"]), token=token,
+                            timeout_seconds=connect_timeout)
+    # Set before __enter__ so the very first blocking read is already bounded.
+    client.set_deadline(deadline)
+    with client:
         client.request(
             "initialize",
             {
