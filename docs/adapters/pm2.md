@@ -332,8 +332,10 @@ python bin/pm2_watchers.py logs --agent codex-appserver
 python bin/pm2_watchers.py stop --agent codex-appserver
 ```
 
-`status` reports `[ax] not applicable` for it: a transport sidecar has no
-Accessibility surface, which is the point of it.
+`status` reports `[sidecar] target=codex-appserver (no AX surface)` for it, and
+deliberately not an `[ax]` line: that prefix is the per-agent AX capability
+contract consumers parse, and a transport sidecar has no Accessibility surface.
+That is the point of it.
 
 Persist the process list so it survives a reboot:
 
@@ -345,9 +347,14 @@ pm2 save
 
 ```bash
 curl -s http://127.0.0.1:8767/readyz
-python bin/codex_appserver.py status --session <session-id>
-python bin/codex_appserver.py tail   --session <session-id>
+python bin/pm2_watchers.py status --agent codex-appserver
 ```
+
+Delivery itself is exercised by the autobridge dispatch path, which reports
+`adapter: codex_app_server` with `returncode: 0` once a session declares the
+exact runtime home. (A dedicated observation/control CLI —
+`status`/`tail`/`send`/`steer`/`interrupt` — is queued separately and is not
+required to verify this transport.)
 
 A session must declare the exact runtime home for delivery to resolve:
 

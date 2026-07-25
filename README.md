@@ -375,7 +375,6 @@ Prefix collaboration commands with `bin/llm-collab`:
 | `project_issue_queue.py reconcile/validate --project <project>` | Refresh or validate a GitHub-backed execution queue |
 | `worktree_ctl.py create/list/preflight/...` | Manage isolated implementation worktrees |
 | `pm2_watchers.py start/status/logs ...` | Manage optional inbox watchers and delivery sidecars |
-| `codex_appserver.py status/tail/send/steer/interrupt` | Observe and drive an exact Codex worker over the App Server |
 | `autonomous_loop.py start/update/show/clear --project <project>` | Record persistent queue-runner state |
 | `post_merge_cleanup.py --project <project> ...` | Audit or clean integrated worktrees and branches |
 | `init_agent_memory.py --agent <id> --target <target>` | Generate collaboration-aware worker guidance |

@@ -6,12 +6,16 @@ and its exact launch arguments would otherwise be unverified.
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -110,3 +114,93 @@ class Pm2EcosystemTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Pm2ManagerSidecarTest(unittest.TestCase):
+    """The manager's sidecar branch, forced on so a clean checkout still exercises it.
+
+    Without forcing, enabled_sidecar_ids() returns [] wherever the real token or
+    Codex binary is absent, so `--all` inclusion and the [sidecar] output would be
+    covered only by accident on a machine that happens to have them.
+    """
+
+    def setUp(self) -> None:
+        sys.path.insert(0, str(ROOT / "bin"))
+        global pm2_watchers, _ax_trust
+        import _ax_trust  # noqa: F401
+        import pm2_watchers  # noqa: F811
+
+        self._tmp = tempfile.TemporaryDirectory(dir="/tmp")
+        token = Path(self._tmp.name) / "token"
+        token.write_text("t0ken\n", encoding="utf-8")
+        binary = Path(self._tmp.name) / "codex"
+        binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        self.token, self.binary = token, binary
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _run_status_all(self):
+        agents = [{"id": "codex", "activation": {"type": "cli_session", "watcher_enabled": True, "ax_app": "Codex"}}]
+        output = io.StringIO()
+        patches = [
+            mock.patch.object(sys, "argv", ["pm2_watchers.py", "status", "--all"]),
+            mock.patch.dict(
+                os.environ,
+                {
+                    "LLM_COLLAB_CODEX_APP_SERVER_TOKEN_FILE": str(self.token),
+                    "LLM_COLLAB_CODEX_BIN": str(self.binary),
+                },
+            ),
+            mock.patch.object(pm2_watchers, "watcher_enabled_agents", return_value=agents),
+            mock.patch.object(pm2_watchers, "get_agent", side_effect=lambda a: agents[0]),
+            mock.patch.object(
+                pm2_watchers, "probe_ax_trust", return_value=_ax_trust.AxTrustStatus("trusted")
+            ),
+            mock.patch.object(pm2_watchers, "config_get", return_value="llm-collab"),
+            mock.patch.object(pm2_watchers, "pm2_run", side_effect=SystemExit(1)),
+        ]
+        with contextlib.ExitStack() as stack:
+            for patch in patches:
+                stack.enter_context(patch)
+            with self.assertRaises(SystemExit):
+                with contextlib.redirect_stdout(output):
+                    pm2_watchers.main()
+        return output.getvalue()
+
+    def test_forced_sidecar_is_included_in_all_and_reports_without_an_ax_line(self) -> None:
+        text = self._run_status_all()
+        ax_lines = [line for line in text.splitlines() if line.startswith("[ax]")]
+        sidecar_lines = [line for line in text.splitlines() if line.startswith("[sidecar]")]
+
+        # one [ax] line per real agent, and the sidecar must not add one:
+        # [ax] is the per-agent capability contract consumers parse.
+        self.assertEqual(1, len(ax_lines), f"expected one [ax] line per agent, got: {ax_lines}")
+        self.assertEqual(1, len(sidecar_lines), f"expected one [sidecar] line, got: {sidecar_lines}")
+        self.assertIn("codex-appserver", sidecar_lines[0])
+        self.assertIn("no AX surface", sidecar_lines[0])
+
+    def test_forced_sidecar_is_a_pm2_target_and_addressable_directly(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {
+                "LLM_COLLAB_CODEX_APP_SERVER_TOKEN_FILE": str(self.token),
+                "LLM_COLLAB_CODEX_BIN": str(self.binary),
+            },
+        ):
+            self.assertEqual(["codex-appserver"], pm2_watchers.enabled_sidecar_ids())
+            self.assertTrue(pm2_watchers.is_sidecar("codex-appserver"))
+            with mock.patch.object(pm2_watchers, "config_get", return_value="llm-collab"):
+                self.assertEqual(
+                    "llm-collab-codex-appserver", pm2_watchers.app_name("codex-appserver")
+                )
+
+    def test_absent_token_keeps_the_sidecar_out_of_manager_targets(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {
+                "LLM_COLLAB_CODEX_APP_SERVER_TOKEN_FILE": str(Path(self._tmp.name) / "absent"),
+                "LLM_COLLAB_CODEX_BIN": str(self.binary),
+            },
+        ):
+            self.assertEqual([], pm2_watchers.enabled_sidecar_ids())
