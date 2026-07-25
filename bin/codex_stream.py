@@ -270,8 +270,13 @@ def registered_project_ids() -> set[str]:
     try:
         with path.open("rb") as handle:
             raw = handle.read(MAX_REGISTRY_BYTES + 1)
-    except OSError:
+    except FileNotFoundError:
         return set()
+    except OSError as error:
+        # Same distinction as the binding scan, found by auditing the family rather than waiting for
+        # it to be reported: an unreadable registry is not an empty one. Empty makes the caller say
+        # the project cannot be verified, which is fail-closed but names the wrong cause.
+        raise SystemExit(f"[error] cannot read {path}: {error}")
     if len(raw) > MAX_REGISTRY_BYTES:
         # Raise rather than return empty: an unreadable registry and an oversized one are
         # different failures, and the caller turns an empty set into "cannot verify the project",
@@ -346,7 +351,11 @@ def resolve_thread(args: argparse.Namespace) -> tuple[str, str, str | None]:
     if args.chat is not None and args.chat != "last":
         # Named exactly: a dead or mismatched binding is an ERROR, because the caller asked
         # for this one specifically and silently substituting another would be worse.
-        chosen = [(args.chat, *resolve_one(project, args.chat, agent, fatal=True))]
+        # The SAME bounded snapshot as the broad branch. Without it the shared resolver falls back
+        # to iter_sessions(), which sorts and reads every session file with no count or byte limit --
+        # so the ordinary exact-chat invocation, the common path, was the one left unbounded.
+        chosen = [(args.chat, *resolve_one(project, args.chat, agent, fatal=True,
+                                           sessions=bounded_sessions(agent)))]
     else:
         # Broad selection: a dead binding is EXCLUDED, not fatal. deactivate_session() updates
         # the session and deliberately leaves the binding behind, so one ordinary deactivation
@@ -495,8 +504,17 @@ def bounded_chat_ids(project: str, agent: str) -> list[str]:
                     )
                 if entry.is_dir() and (Path(entry.path) / f"{agent}.json").is_file():
                     chats.append(entry.name)
-    except OSError:
+    except FileNotFoundError:
+        # Genuinely absent is the ONLY failure that means "no candidates".
         return []
+    except OSError as error:
+        # A permission error or transient I/O failure is not an empty workspace. Returning [] made
+        # the caller announce that no live binding exists while valid bindings sat there unreadable,
+        # hiding the real fault and breaking --chat last for a reason it could not report.
+        raise SystemExit(
+            f"[error] cannot scan bindings for {project!r}: {error}. Refusing rather than "
+            "reporting no live session, which would hide this."
+        )
     return sorted(chats)
 
 
@@ -613,7 +631,10 @@ def main() -> None:
             "decides which App Server this connects to."
         )
 
-    endpoint = autobridge.discover_codex_app_server(runtime_home)
+    # allow_unscoped_env=False: this reader is bound to ONE project's worker, and the env override
+    # carries no home, so honouring it would connect a secondary-CODEX_HOME binding to the primary
+    # server -- observing either nothing or an unrelated thread that happens to match.
+    endpoint = autobridge.discover_codex_app_server(runtime_home, allow_unscoped_env=False)
     if endpoint is None:
         raise SystemExit(
             "[error] no Codex App Server endpoint found for CODEX_HOME "

@@ -291,11 +291,98 @@ class ResolveThreadTest(unittest.TestCase):
         self.assertEqual([], scans,
                          "the resolver must not scan at all when the caller supplies sessions")
 
-    def test_a_named_chat_lets_the_resolver_scan_for_itself(self) -> None:
-        # one chat, one lookup: no reason for the caller to pre-scan
+    # --- an unreadable directory is not an empty one ---------------------------------------
+
+    def test_an_unreadable_bindings_dir_is_reported_not_reported_as_no_session(self) -> None:
+        """Returning [] made the caller announce "no live binding" while bindings sat unreadable.
+
+        That hides the real fault and breaks --chat last for a reason it cannot report.
+        """
+        self.bind(chat="CHAT-A")
+        real_scandir = codex_stream.os.scandir
+
+        def denied(path, *args, **kwargs):
+            if str(path).endswith("amiga"):
+                raise PermissionError(13, "Permission denied")
+            return real_scandir(path, *args, **kwargs)
+
+        with mock.patch.object(codex_stream.os, "scandir", denied):
+            with self.assertRaises(SystemExit) as caught:
+                codex_stream.resolve_thread(self.args(agent="codex", project="amiga"))
+        message = str(caught.exception)
+        self.assertIn("cannot scan bindings", message)
+        self.assertIn("Permission denied", message)
+        self.assertNotIn("no live exactly-bound", message,
+                         "an I/O failure must not be reported as an absent session")
+
+    def test_a_genuinely_absent_bindings_dir_still_means_no_candidates(self) -> None:
+        """Only FileNotFoundError may mean "nothing here" -- the narrow case must stay narrow."""
+        with self.assertRaises(SystemExit) as caught:
+            codex_stream.resolve_thread(self.args(agent="codex", project="nuvyr"))
+        self.assertIn("no live exactly-bound", str(caught.exception))
+
+    # --- the endpoint override carries no home, so this reader refuses it -------------------
+
+    def test_the_unscoped_env_override_cannot_redirect_this_reader(self) -> None:
+        """A binding under a secondary CODEX_HOME must not connect to the primary server.
+
+        LLM_COLLAB_CODEX_APP_SERVER_URL has no home or project in it, so honouring it here observed
+        either nothing or an unrelated thread that happened to match.
+        """
+        seen = {}
+        real = codex_stream.autobridge.discover_codex_app_server
+
+        def recording(home, **kwargs):
+            seen.update(home=home, kwargs=kwargs)
+            return real(home, **kwargs)
+
+        with mock.patch.object(codex_stream.autobridge, "discover_codex_app_server", recording):
+            with mock.patch.dict(codex_stream.os.environ,
+                                 {"LLM_COLLAB_CODEX_APP_SERVER_URL": "ws://127.0.0.1:9/primary"}):
+                endpoint = codex_stream.autobridge.discover_codex_app_server(
+                    "/tmp/secondary-home", allow_unscoped_env=False)
+        self.assertIsNone(endpoint,
+                          "with the override refused and no matching process, discovery must fail "
+                          "closed rather than fall back to the workspace-wide URL")
+        self.assertFalse(seen["kwargs"].get("allow_unscoped_env", True))
+
+    def test_dispatch_still_honours_the_override_by_default(self) -> None:
+        """The default must stay True or this change reaches every other caller."""
+        with mock.patch.dict(codex_stream.os.environ,
+                             {"LLM_COLLAB_CODEX_APP_SERVER_URL": "ws://127.0.0.1:9/primary"}):
+            endpoint = codex_stream.autobridge.discover_codex_app_server("/tmp/whatever")
+        self.assertIsNotNone(endpoint)
+        self.assertEqual("env", endpoint["source"])
+
+    def test_this_module_asks_for_home_scoped_discovery(self) -> None:
+        """Structural, asserted on the CALL EXPRESSION rather than a bare substring.
+
+        My first version asserted only that "allow_unscoped_env=False" appeared somewhere in the
+        file -- which the explanatory COMMENT above the call also satisfies. Removing the keyword
+        from the actual call left the test green. An assertion a comment can satisfy is not an
+        assertion.
+        """
+        source = (ROOT / "bin" / "codex_stream.py").read_text(encoding="utf-8")
+        self.assertIn(
+            "autobridge.discover_codex_app_server(runtime_home, allow_unscoped_env=False)",
+            source,
+            "the discovery call itself must opt out of the workspace-wide override",
+        )
+        self.assertNotIn("autobridge.discover_codex_app_server(runtime_home)\n", source,
+                         "no call may fall back to the unscoped default")
+
+    def test_a_named_chat_uses_the_BOUNDED_scan_not_the_resolver_s_own(self) -> None:
+        """Inverted. This asserted "one chat, one lookup: no reason for the caller to pre-scan".
+
+        That reasoning was about call COUNT and ignored that the resolver's own scan is
+        iter_sessions(), which sorts and reads every session file with no count or byte limit. So the
+        named-chat path -- the ordinary one -- was the only unbounded lookup left, while the broad
+        path that looked riskier was bounded. The second test on this PR whose assertion was quietly
+        holding an unsafe path in place.
+        """
         self.bind()
-        real_iter = codex_stream.autobridge.iter_sessions
         scans = []
+        real_iter = codex_stream.autobridge.iter_sessions
 
         def counting(agent_id=None):
             scans.append(agent_id)
@@ -305,7 +392,30 @@ class ResolveThreadTest(unittest.TestCase):
             thread, _p, _h = codex_stream.resolve_thread(
                 self.args(agent="codex", project="amiga", chat="CHAT-A"))
         self.assertEqual("t1", thread)
-        self.assertEqual(1, len(scans), f"exactly one scan: {scans}")
+        self.assertEqual([], scans,
+                         "the unbounded resolver scan must not be reached at all; the caller "
+                         f"supplies a bounded snapshot instead, got {scans}")
+
+    def test_a_named_chat_is_subject_to_the_session_count_budget(self) -> None:
+        """The budget must bite on the named-chat path, not only on broad selection."""
+        self.bind(chat="CHAT-A")
+        for i in range(6):
+            (self.sessions / f"filler-{i}.json").write_text("{}", encoding="utf-8")
+        with mock.patch.object(codex_stream, "MAX_SCANNED_SESSIONS", 3):
+            with self.assertRaises(SystemExit) as caught:
+                codex_stream.resolve_thread(
+                    self.args(agent="codex", project="amiga", chat="CHAT-A"))
+        self.assertIn("refusing to scan further", str(caught.exception))
+
+    def test_a_named_chat_is_subject_to_the_session_byte_budget(self) -> None:
+        self.bind(chat="CHAT-A")
+        (self.sessions / "huge.json").write_text("{" + '"pad":"' + "z" * 4096 + '"}',
+                                                 encoding="utf-8")
+        with mock.patch.object(codex_stream, "MAX_SESSION_BYTES", 512):
+            with self.assertRaises(SystemExit) as caught:
+                codex_stream.resolve_thread(
+                    self.args(agent="codex", project="amiga", chat="CHAT-A"))
+        self.assertIn("byte limit", str(caught.exception))
 
     def test_too_many_session_records_fails_closed(self) -> None:
         for chat in ("CHAT-A", "CHAT-B"):
@@ -1106,6 +1216,25 @@ class ProjectRegistryBudgetTest(unittest.TestCase):
         self.write_registry(json.dumps({"projects": [{"id": "amiga", "pad": "q" * max(pad, 0)}]})
                             if pad > 0 else body)
         self.assertEqual({"amiga"}, codex_stream.registered_project_ids())
+
+    def test_an_unreadable_registry_is_reported_not_treated_as_unregistered(self) -> None:
+        """Same distinction as the binding scan, found by auditing the family, not by it being filed.
+
+        Lives in THIS class because ResolveThreadTest.setUp patches registered_project_ids, so the
+        version of this test I first wrote there was asserting against a mock and told me nothing.
+        """
+        self.write_registry('{"projects": [{"id": "amiga"}]}')
+        real_open = Path.open
+
+        def denied(self_path, *args, **kwargs):
+            if self_path.name == "projects.json":
+                raise PermissionError(13, "Permission denied")
+            return real_open(self_path, *args, **kwargs)
+
+        with mock.patch.object(Path, "open", denied):
+            with self.assertRaises(SystemExit) as caught:
+                codex_stream.registered_project_ids()
+        self.assertIn("Permission denied", str(caught.exception))
 
     def test_a_missing_registry_still_returns_empty_rather_than_raising(self) -> None:
         """Unchanged: callers turn an empty set into an explicit refusal to verify the project."""

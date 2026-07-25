@@ -1318,10 +1318,23 @@ def _extract_arg_value(command: str, flag: str) -> str | None:
     return None
 
 
-def discover_codex_app_server(runtime_home: str | None) -> dict[str, Any] | None:
+def discover_codex_app_server(
+    runtime_home: str | None,
+    *,
+    allow_unscoped_env: bool = True,
+) -> dict[str, Any] | None:
+    """Find the App Server for `runtime_home`.
+
+    LLM_COLLAB_CODEX_APP_SERVER_URL is a WORKSPACE-WIDE override with no home or project in it, so
+    it wins for every home -- fine for dispatch, wrong for a project-aware reader: selecting a valid
+    binding under a secondary CODEX_HOME still connected to the primary server, where thread/resume
+    either fails or observes an unrelated matching thread. A caller that must stay inside one
+    project passes allow_unscoped_env=False and gets home-based discovery only. Default True keeps
+    every existing caller unchanged.
+    """
     configured_url = os.environ.get("LLM_COLLAB_CODEX_APP_SERVER_URL")
     configured_token_file = os.environ.get("LLM_COLLAB_CODEX_APP_SERVER_TOKEN_FILE")
-    if configured_url:
+    if configured_url and allow_unscoped_env:
         return {
             "url": configured_url,
             "token_file": configured_token_file,
