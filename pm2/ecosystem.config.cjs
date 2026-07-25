@@ -9,6 +9,7 @@
  */
 
 const fs = require("fs");
+const os = require("os");
 const path = require("path");
 
 const root = path.resolve(__dirname, "..");
@@ -66,7 +67,15 @@ const watcherAgents = agents.filter(
 // everywhere, is the fix for the class rather than the instances.
 function canonicalPath(value, base) {
   if (!value) return value;
-  const resolved = path.resolve(base || root, String(value).trim());
+  let text = String(value).trim();
+  // Mirror Python's os.path.expanduser: Node's path.resolve does NOT expand `~`, so
+  // `~/.codex` resolved to <repo>/~/.codex here while Python produced $HOME/.codex.
+  // The two sides then disagreed on the one input a human is most likely to type.
+  if (text === "~" || text.startsWith("~/")) {
+    const home = os.homedir();
+    text = text === "~" ? home : path.join(home, text.slice(2));
+  }
+  const resolved = path.resolve(base || root, text);
   return resolved.length > 1 ? resolved.replace(/\/+$/, "") : resolved;
 }
 

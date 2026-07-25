@@ -32,26 +32,39 @@ NODE = shutil.which("node")
 CONFIG = ROOT / "pm2" / "ecosystem.config.cjs"
 
 # the shapes that actually broke us
+# Every shape must cross the language boundary. An earlier matrix omitted "~/.codex"
+# from the CJS side and compared it Python-to-Python only, which is exactly where the
+# implementations diverged: Python expanded it while Node resolved it to <repo>/~/.codex.
 CASES = [
     "/tmp/codex-home/",
     "/tmp/codex-home",
     ".secrets/codex_app_server_ws_token",
     ".codex",
+    "~",
+    "~/.codex",
+    "~/.codex/",
     "/tmp/./a/../codex-home",
     "/tmp/codex-home//",
 ]
 
 # load the REAL exported function, never a reimplementation
+# An explicit shared base is passed to BOTH sides. Relying on each side's implicit root
+# made this environment-sensitive: Python bound the configured checkout while CJS bound
+# whichever worktree held the config, so relative cases diverged in a merge worktree
+# while passing locally. The test must compare the RULE, not the root.
+SHARED_BASE = "/tmp/llm-collab-parity-base"
+
 CJS_PROBE = (
     "const c = require(process.argv[1]);"
     "if (typeof c.canonicalPath !== 'function') { throw new Error('canonicalPath not exported'); }"
-    "process.stdout.write(JSON.stringify(JSON.parse(process.argv[2]).map((v) => c.canonicalPath(v))));"
+    "const base = process.argv[3];"
+    "process.stdout.write(JSON.stringify(JSON.parse(process.argv[2]).map((v) => c.canonicalPath(v, base))));"
 )
 
 
-def cjs_canonical(cases: list[str]) -> list[str]:
+def cjs_canonical(cases: list[str], base: str = SHARED_BASE) -> list[str]:
     result = subprocess.run(
-        [NODE, "-e", CJS_PROBE, str(CONFIG), json.dumps(cases)],
+        [NODE, "-e", CJS_PROBE, str(CONFIG), json.dumps(cases), base],
         capture_output=True, text=True, timeout=30, cwd=str(ROOT),
     )
     if result.returncode != 0:
@@ -65,7 +78,7 @@ class PathInvariantParityTest(unittest.TestCase):
         cjs = cjs_canonical(CASES)
         for case, expected in zip(CASES, cjs):
             self.assertEqual(
-                expected, str(_helpers.canonical_path(case)),
+                expected, str(_helpers.canonical_path(case, base=SHARED_BASE)),
                 f"invariant diverged for {case!r}",
             )
 
@@ -80,12 +93,15 @@ class PathInvariantParityTest(unittest.TestCase):
         `<repo>/.codex`, so discovery -- which matches CODEX_HOME literally -- never
         found an endpoint and delivery failed with no diagnostic.
         """
-        for case in (".codex", "/tmp/codex-home/", "~/.codex"):
+        # cross the boundary for each case, including the tilde that used to diverge
+        for case in ("/tmp/codex-home/", "~/.codex", "~"):
             with self.subTest(case=case):
                 registered = session_autobridge.canonical_runtime_home(case)
-                self.assertEqual(str(_helpers.canonical_path(case)), registered)
-        launched = cjs_canonical([".codex"])[0]
-        self.assertEqual(launched, session_autobridge.canonical_runtime_home(".codex"))
+                launched = cjs_canonical([case], base=str(ROOT))[0]
+                self.assertEqual(
+                    launched, registered,
+                    f"registration and launch disagree for {case!r}",
+                )
 
     def test_trailing_separator_never_changes_the_literal(self) -> None:
         self.assertEqual(
