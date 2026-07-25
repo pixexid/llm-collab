@@ -53,6 +53,7 @@ INTERESTING = {
     "turn/failed": "turn!",
 }
 TERMINAL = {"turn/completed", "turn/failed", "turn/cancelled"}
+TRANSPORT_ERROR = "transport-error"
 
 
 def resolve_target(args) -> tuple[str, str]:
@@ -141,8 +142,11 @@ def pump(client: JsonRpcWebSocketClient, *, deadline: float, raw: bool, stop_on_
     while time.monotonic() < deadline:
         try:
             message = client.recv_json()
-        except Exception:
-            return None
+        except Exception as exc:
+            # Silence must never be indistinguishable from success: a dropped socket
+            # or protocol fault is reported, not swallowed as a quiet clean exit.
+            print(f"[transport] {type(exc).__name__}: {exc}", flush=True)
+            return TRANSPORT_ERROR
         if message.get("id") and message.get("method"):
             # server->client request: acknowledge so the turn is not blocked on us
             client.send_json({"jsonrpc": "2.0", "id": message["id"], "result": {}})
@@ -151,7 +155,7 @@ def pump(client: JsonRpcWebSocketClient, *, deadline: float, raw: bool, stop_on_
         if not method:
             continue
         if raw:
-            print(json.dumps(message)[:600], flush=True)
+            print(json.dumps(message), flush=True)
         elif method in INTERESTING:
             body = text_of(message.get("params")).replace("\n", " ")
             label = INTERESTING[method]
@@ -215,7 +219,19 @@ def main() -> None:
     if args.command == "interrupt":
         with connect(runtime_home, args.timeout) as client:
             handshake(client, thread_id)
-            print(json.dumps(client.request("turn/interrupt", {"threadId": thread_id}))[:400])
+            # TurnInterruptParams requires threadId AND turnId. Sending threadId alone
+            # is rejected and cancels nothing, so identify the running turn first and
+            # refuse when there is none rather than reporting a hollow success.
+            turn_id = args.turn or observe_running_turn(client, seconds=args.observe)
+            if not turn_id:
+                raise SystemExit(
+                    "no running turn observed to interrupt — nothing to cancel, "
+                    "or pass --turn if you already know the id"
+                )
+            result = client.request(
+                "turn/interrupt", {"threadId": thread_id, "turnId": turn_id}
+            )
+            print(json.dumps({"interrupted": True, "turn_id": turn_id, "result": result}))
         return
 
     if args.command in ("send", "steer"):
@@ -238,14 +254,26 @@ def main() -> None:
                 payload["expectedTurnId"] = turn_id
                 print(f"[steer] targeting turn {turn_id}", flush=True)
             result = client.request(method, payload)
-            turn = result.get("turn") if isinstance(result, dict) else None
+            # The two responses differ: TurnStartResponse nests {turn:{id,status}},
+            # TurnSteerResponse is top-level {turnId}. Reading result.turn for both
+            # yielded an "accepted" receipt with a null id, which is worse than an
+            # error because it looks like success.
+            if method == "turn/start":
+                turn = result.get("turn") if isinstance(result, dict) else None
+                turn_id = (turn or {}).get("id")
+                status = (turn or {}).get("status")
+            else:
+                turn_id = result.get("turnId") if isinstance(result, dict) else None
+                status = "steered"
+            if not turn_id:
+                raise SystemExit(f"{method} returned no turn id: {json.dumps(result)[:200]}")
             # ponytail: confirm ACCEPTANCE, never wait for turn/completed — a turn can
             # run for minutes and blocking here would stall the caller (and the watcher).
             print(json.dumps({
                 "accepted": True,
                 "method": method,
-                "turn_id": (turn or {}).get("id"),
-                "status": (turn or {}).get("status"),
+                "turn_id": turn_id,
+                "status": status,
             }, indent=2))
             pump(client, deadline=time.monotonic() + 5, raw=False, stop_on_terminal=False)
         return
