@@ -1506,6 +1506,13 @@ class JsonRpcWebSocketClient:
             header.extend(length.to_bytes(8, "big"))
         mask = os.urandom(4)
         masked = bytes(byte ^ mask[index % 4] for index, byte in enumerate(payload))
+        # Sending blocks too. A peer that completes the upgrade and then stops reading fills the
+        # send buffer, and sendall inherits whatever timeout the last read happened to leave -- so
+        # the absolute deadline did not bound it: a 50ms budget took over 3s against a blocked
+        # peer. sendall applies its timeout to the whole send, so clamping it once is enough; no
+        # custom send loop is needed here, unlike the receive path.
+        self._check_deadline("while sending")
+        self.sock.settimeout(self.remaining_wait())
         self.sock.sendall(bytes(header) + mask + masked)
 
     def _recv_frame(self) -> tuple[int, bytes]:

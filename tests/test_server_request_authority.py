@@ -621,6 +621,87 @@ class HandshakeClosesOnFailureTest(unittest.TestCase):
                               f"the {description} branch was not exercised: {calls}")
                 self.assertIs(real, autobridge._socket_read_exact)
 
+    # --- sending blocks too -------------------------------------------------------------------
+
+    def blocked_peer(self, stale_timeout):
+        """A socket whose peer never reads, with a small send buffer so it fills immediately."""
+        import socket as _socket
+
+        near, far = _socket.socketpair()
+        near.setsockopt(_socket.SOL_SOCKET, _socket.SO_SNDBUF, 4096)
+        far.setsockopt(_socket.SOL_SOCKET, _socket.SO_RCVBUF, 4096)
+        near.settimeout(stale_timeout)
+        self.addCleanup(near.close)
+        self.addCleanup(far.close)
+        return near
+
+    def client_on(self, sock, budget):
+        import time as _t
+
+        made = autobridge.JsonRpcWebSocketClient("ws://127.0.0.1:1", token=None,
+                                                 timeout_seconds=30)
+        made.sock = sock
+        if budget is not None:
+            made.set_deadline(_t.monotonic() + budget)
+        return made
+
+    def test_a_blocked_send_cannot_outlast_the_deadline(self) -> None:
+        """A peer that stops reading must not get the stale socket timeout instead of the budget.
+
+        The stale 3s timeout is the point: a prior read leaves it behind, and sendall inherits it.
+        Measured at this head, 3.072s before the fix versus 0.071s after.
+        """
+        import time as _t
+
+        sock = self.blocked_peer(stale_timeout=3.0)
+        made = self.client_on(sock, budget=0.05)
+        started = _t.monotonic()
+        with self.assertRaises((TimeoutError, OSError)):
+            made._send_frame(b"z" * (1 << 20))
+        elapsed = _t.monotonic() - started
+        self.assertLess(elapsed, 1.0,
+                        "the 50ms deadline must terminate the send well below the stale 3s "
+                        f"socket timeout, took {elapsed:.3f}s")
+
+    def test_a_send_with_no_deadline_gets_the_full_configured_timeout(self) -> None:
+        """The None default must not start cutting sends short.
+
+        Note the deliberate behaviour change this pins down: with no deadline, remaining_wait()
+        returns timeout_seconds, so the clamp REPLACES whatever timeout the socket happened to
+        carry rather than leaving it. That is the point -- the client's configured timeout is the
+        intended bound, and inheriting a stale value from the last read is what caused the bug on
+        the receive side. Asserted here so the change is recorded, not discovered later.
+        """
+        import time as _t
+
+        sock = self.blocked_peer(stale_timeout=5.0)
+        made = autobridge.JsonRpcWebSocketClient("ws://127.0.0.1:1", token=None,
+                                                 timeout_seconds=0.4)
+        made.sock = sock
+        self.assertIsNone(made.read_deadline)
+        started = _t.monotonic()
+        with self.assertRaises((TimeoutError, OSError)):
+            made._send_frame(b"z" * (1 << 20))
+        elapsed = _t.monotonic() - started
+        self.assertGreater(elapsed, 0.3,
+                           "the configured 0.4s timeout must be honoured, not cut short: "
+                           f"{elapsed:.3f}s")
+        self.assertLess(elapsed, 3.0,
+                        "and the stale 5s socket timeout must not win either: "
+                        f"{elapsed:.3f}s")
+
+    def test_a_send_after_the_deadline_has_passed_never_reaches_the_socket(self) -> None:
+        """The check, not just the clamp: an expired budget must refuse before sending."""
+        import time as _t
+
+        made = autobridge.JsonRpcWebSocketClient("ws://127.0.0.1:1", token=None,
+                                                 timeout_seconds=30)
+        made.sock = mock.Mock()
+        made.set_deadline(_t.monotonic() - 1.0)
+        with self.assertRaises(TimeoutError):
+            made._send_frame(b"hello")
+        made.sock.sendall.assert_not_called()
+
     def test_the_default_has_no_deadline_so_existing_callers_are_unchanged(self) -> None:
         made = autobridge.JsonRpcWebSocketClient("ws://127.0.0.1:1", timeout_seconds=30)
         self.assertIsNone(made.read_deadline)
