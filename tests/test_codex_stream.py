@@ -783,11 +783,16 @@ class ElideTest(unittest.TestCase):
 class ObserverAnswersNothingTest(unittest.TestCase):
     """The observer must send zero response frames for a server request.
 
-    The base client answers any interleaved request with {"result": {}} -- invalid for all
-    ten ServerRequest methods, since no Response schema in the bundle permits an empty
-    object. An automatic JSON-RPC error is also wrong on this socket: a pending request can
-    be resolved by the FIRST client to answer, so an observer's error could abort work the
-    operator initiated in the desktop app. Right for a turn's owner, wrong for a watcher.
+    The base client refuses with a correlated JSON-RPC error, which is right for a connection
+    that OWNS a turn -- silence there would hang it. (Before #308 it sent {"result": {}}, an
+    unauthorized success envelope invalid for all ELEVEN members of the experimental
+    ServerRequest union, none of whose response schemas can be satisfied by an empty object.
+    Some CLIENT-request responses in the same bundle can be, which is why the claim is about
+    the server-request union rather than the bundle.)
+
+    An automatic error is wrong on THIS socket: a pending request can be resolved by the first
+    client to answer, so an observer's error could abort work the operator initiated in the
+    desktop app. Right for a turn's owner, wrong for a watcher.
     """
 
     def client(self, incoming: list[dict]) -> codex_stream.ObserverClient:

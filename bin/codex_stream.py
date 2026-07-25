@@ -52,19 +52,24 @@ BINDINGS_DIR = ROOT / "State" / "session_autobridge" / "bindings"
 class ObserverClient(autobridge.JsonRpcWebSocketClient):
     """A connection that answers nothing at all.
 
-    The base client answers any interleaved server request with `{"result": {}}`. Every
-    member of the generated ServerRequest union is authority- or data-bearing -- command,
-    file, and permission approvals, tool calls, user input, MCP elicitation, auth refresh,
-    attestation -- and NO Response schema in the bundle permits an empty object. So that
-    envelope is invalid for all ten methods, and for an observer it is indefensible.
+    The base client refuses a server request with a correlated JSON-RPC error, which is
+    correct for the role it serves: a connection that OWNS a turn must answer, or the turn
+    hangs waiting. (It used to send `{"result": {}}` instead -- an unauthorized success
+    envelope, invalid for all eleven members of the experimental ServerRequest union, since
+    none of their response schemas can be satisfied by an empty object. That was removed
+    from main in #308.)
 
-    Refusing with a JSON-RPC error is also wrong HERE, though it is right for the client
-    that owns a turn. App Server fans a pending request to the subscribed connections, and
-    the first response -- result or error -- can resolve it. An observer that auto-errors
-    can therefore abort work the operator initiated in ChatGPT.app before the UI is
-    answered. The risk is asymmetric: if requests fan out, silence protects the operator
-    and an error harms them; if they only ever reach the turn owner, this connection never
-    sees one and silence costs nothing. Silence is never worse.
+    Refusing is nonetheless wrong HERE. App Server fans a pending request out to the
+    subscribed connections, and the FIRST response -- result or error -- can resolve it. An
+    observer that auto-errors can therefore abort work the operator initiated in ChatGPT.app
+    before the UI has answered, turning their approval into someone else's refusal. So the
+    policy belongs to the role, not to the protocol: `refuse` for a turn owner, silence for
+    a watcher.
+
+    Silence is also the right default under uncertainty, which is how this was decided before
+    the fan-out was confirmed: if requests fan out, silence protects the operator and an
+    error harms them; if they only ever reach the turn owner, this connection never sees one
+    and silence costs nothing. Never worse either way.
 
     So: log the request with its identity, respond nothing, keep reading. Receiving one at
     all is itself evidence of fan-out and is reported as such.
