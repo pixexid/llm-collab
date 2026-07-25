@@ -50,8 +50,49 @@ const watcherAgents = agents.filter(
     a.activation.watcher_enabled === true
 );
 
-module.exports = {
-  apps: watcherAgents.map((agent) => {
+// Codex delivery transport: a sidecar `codex app-server` on a localhost WebSocket,
+// sharing the desktop app's CODEX_HOME so turn/start reaches the same threads.
+// ponytail: presence of the token file is the enable switch — no new config surface.
+// Add a codex_app_server block to collab.config.json only if per-agent ports are ever needed.
+function codexAppServerApps() {
+  const tokenFile =
+    process.env.LLM_COLLAB_CODEX_APP_SERVER_TOKEN_FILE ||
+    path.join(root, ".secrets", "codex_app_server_ws_token");
+  const codexBin =
+    process.env.LLM_COLLAB_CODEX_BIN ||
+    "/Applications/ChatGPT.app/Contents/Resources/codex";
+  if (!fs.existsSync(tokenFile) || !fs.existsSync(codexBin)) return [];
+
+  const port = process.env.LLM_COLLAB_CODEX_APP_SERVER_PORT || "8767";
+  const codexHome =
+    process.env.LLM_COLLAB_CODEX_HOME ||
+    path.join(process.env.HOME || "", ".codex");
+
+  return [
+    {
+      name: `${workspaceName}-codex-appserver`,
+      cwd: root,
+      script: codexBin,
+      args: [
+        "app-server",
+        "--listen", `ws://127.0.0.1:${port}`,
+        "--ws-auth", "capability-token",
+        "--ws-token-file", tokenFile,
+      ],
+      autorestart: true,
+      watch: false,
+      time: true,
+      max_restarts: 10,
+      min_uptime: "5s",
+      out_file: path.join(logsDir, "codex-appserver.pm2.out.log"),
+      error_file: path.join(logsDir, "codex-appserver.pm2.err.log"),
+      merge_logs: false,
+      env: { CODEX_HOME: codexHome },
+    },
+  ];
+}
+
+const watcherApps = watcherAgents.map((agent) => {
     const appArgs = [
       watchScript,
       "--me", agent.id,
@@ -75,5 +116,8 @@ module.exports = {
       merge_logs: false,
       env: buildWatcherEnv(agent),
     };
-  }),
+});
+
+module.exports = {
+  apps: [...watcherApps, ...codexAppServerApps()],
 };

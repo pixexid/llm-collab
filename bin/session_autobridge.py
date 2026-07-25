@@ -74,6 +74,7 @@ def parse_args():
     register.add_argument("--runtime-family", default=None, help="Runtime family, e.g. codex_app, claude_app, gemini_cli")
     register.add_argument("--runtime-session-id", default=None, help="Current runtime-native session identifier")
     register.add_argument("--runtime-session-source", default=None, help="Where the runtime session identifier came from")
+    register.add_argument("--runtime-home", default=None, help="Exact runtime home (e.g. CODEX_HOME) used to resolve the delivery transport")
     register.add_argument("--supersedes-session", default=None, help="Older llm-collab session replaced by this registration")
     register.add_argument(
         "--runtime-command",
