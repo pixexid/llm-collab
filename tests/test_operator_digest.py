@@ -328,8 +328,10 @@ class RepoEnumerationTest(unittest.TestCase):
 
     def _checkouts(self, mapping: dict):
         """Stub the checkout->origin lookup; a separate test drives real git."""
-        return mock.patch.object(operator_digest, "checkout_origin_slug",
-                                 side_effect=lambda checkout: mapping.get(checkout))
+        # mapping is keyed by (project_id, repo_key), matching the real signature
+        return mock.patch.object(
+            operator_digest, "checkout_origin_slug",
+            side_effect=lambda project_id, repo_key: mapping.get((project_id, repo_key)))
 
     def test_the_logical_app_key_resolves_per_project(self) -> None:
         """`repo_targets: ["app"]` means a different repo in each project.
@@ -339,9 +341,9 @@ class RepoEnumerationTest(unittest.TestCase):
         with the directory name invents a slug that matches neither.
         """
         self._scoped_projects()
-        with self._checkouts({"amiga": "pixexid/amiga",
-                              "nuvyr_app": "pixexid/nuvyr",
-                              "amiga_docs": "pixexid/amiga-docs"}):
+        with self._checkouts({("amiga", "app"): "pixexid/amiga",
+                              ("nuvyr", "app"): "pixexid/nuvyr",
+                              ("amiga", "docs"): "pixexid/amiga-docs"}):
             self.assertEqual("pixexid/amiga",
                              operator_digest.resolve_repo_target("app", "amiga"))
             self.assertEqual("pixexid/nuvyr",
@@ -375,7 +377,8 @@ class RepoEnumerationTest(unittest.TestCase):
             {"id": "nuvyr", "repos": {"app": "nuvyr_app"}, "github": {"repo": "pixexid/nuvyr"}},
             {"id": "app", "github": {"repo": "pixexid/hijack"}},
         ]}), encoding="utf-8")
-        with self._checkouts({"amiga": "pixexid/amiga", "nuvyr_app": "pixexid/nuvyr"}):
+        with self._checkouts({("amiga", "app"): "pixexid/amiga",
+                              ("nuvyr", "app"): "pixexid/nuvyr"}):
             self.assertEqual("pixexid/amiga",
                              operator_digest.resolve_repo_target("app", "amiga"))
             self.assertEqual("pixexid/nuvyr",
@@ -400,7 +403,7 @@ class RepoEnumerationTest(unittest.TestCase):
             seen.append(argv[argv.index("--repo") + 1])
             return mock.Mock(stdout=json.dumps({"state": "MERGED"}))
 
-        with self._checkouts({"nuvyr_app": "pixexid/nuvyr"}):
+        with self._checkouts({("nuvyr", "app"): "pixexid/nuvyr"}):
             with mock.patch.object(operator_digest.subprocess, "run", side_effect=run):
                 settled, _ = operator_digest.resolution_hint("packet.md")
         self.assertEqual(["pixexid/nuvyr"], seen,
@@ -441,7 +444,10 @@ class CheckoutOriginTest(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory(dir="/tmp")
         self.addCleanup(self._tmp.cleanup)
         self.root = Path(self._tmp.name)
-        patcher = mock.patch.object(operator_digest, "projects_root", return_value=self.root)
+        # stub the AUTHORITATIVE resolver, so this class still exercises the origin read
+        patcher = mock.patch.object(
+            operator_digest, "resolved_repo_path",
+            side_effect=lambda project_id, repo_key: self.root / repo_key)
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -458,20 +464,70 @@ class CheckoutOriginTest(unittest.TestCase):
     def test_a_checkout_name_that_differs_from_its_repo_resolves_to_the_repo(self) -> None:
         # the live case: the nuvyr_app checkout is repository pixexid/nuvyr
         self.make_checkout("nuvyr_app", "https://github.com/pixexid/nuvyr.git")
-        self.assertEqual("pixexid/nuvyr", operator_digest.checkout_origin_slug("nuvyr_app"))
+        self.assertEqual("pixexid/nuvyr", operator_digest.checkout_origin_slug("nuvyr", "nuvyr_app"))
 
     def test_an_ssh_remote_resolves_too(self) -> None:
         self.make_checkout("docs", "git@github.com:pixexid/amiga-docs.git")
-        self.assertEqual("pixexid/amiga-docs", operator_digest.checkout_origin_slug("docs"))
+        self.assertEqual("pixexid/amiga-docs", operator_digest.checkout_origin_slug("amiga", "docs"))
 
     def test_a_checkout_with_no_remote_resolves_to_nothing(self) -> None:
         self.make_checkout("orphan", None)
-        self.assertIsNone(operator_digest.checkout_origin_slug("orphan"))
+        self.assertIsNone(operator_digest.checkout_origin_slug("amiga", "orphan"))
 
     def test_a_missing_checkout_resolves_to_nothing(self) -> None:
-        self.assertIsNone(operator_digest.checkout_origin_slug("not-cloned"))
+        self.assertIsNone(operator_digest.checkout_origin_slug("amiga", "not-cloned"))
+
+    def test_a_local_path_origin_is_not_treated_as_a_slug(self) -> None:
+        """`pixexid/amiga` and `../amiga` are relative PATHS, not repository references.
+
+        Stripping an optional prefix and accepting whatever had one slash left admitted them,
+        and querying that name hits an UNRELATED GitHub repo -- a false moot reached from a
+        checkout that never touches GitHub at all.
+        """
+        for remote in ("pixexid/amiga", "../amiga", "/Users/pixexid/Projects/amiga",
+                       "file:///tmp/amiga", "./sibling/repo"):
+            with self.subTest(remote=remote):
+                self.assertIsNone(operator_digest.slug_from_remote(remote))
+
+    def test_every_github_transport_is_recognised(self) -> None:
+        expected = "pixexid/amiga"
+        for remote in ("https://github.com/pixexid/amiga.git",
+                       "https://github.com/pixexid/amiga",
+                       "https://token@github.com/pixexid/amiga.git",
+                       "git@github.com:pixexid/amiga.git",
+                       "ssh://git@github.com/pixexid/amiga",
+                       "git://github.com/pixexid/amiga.git"):
+            with self.subTest(remote=remote):
+                self.assertEqual(expected, operator_digest.slug_from_remote(remote))
+
+    def test_a_deeper_github_path_is_not_a_repository(self) -> None:
+        self.assertIsNone(operator_digest.slug_from_remote("https://github.com/pixexid/a/b"))
 
     def test_a_non_github_remote_is_not_treated_as_a_slug(self) -> None:
         self.make_checkout("elsewhere", "https://gitlab.com/pixexid/thing.git")
-        self.assertIsNone(operator_digest.checkout_origin_slug("elsewhere"),
+        self.assertIsNone(operator_digest.checkout_origin_slug("amiga", "elsewhere"),
                           "gh pr view cannot query a non-GitHub host")
+
+
+class PathHelperDelegationTest(unittest.TestCase):
+    """Its own class: the real-git class stubs resolved_repo_path, which hides delegation."""
+
+    def test_resolution_delegates_to_the_authoritative_path_helper(self) -> None:
+        """A second implementation diverged from it on tilde and ../ forms."""
+        seen = []
+
+        def resolver(project_id, repo_key="app"):
+            seen.append((project_id, repo_key))
+            return Path("/nonexistent/nowhere")
+
+        with mock.patch.object(operator_digest, "resolve_project_repo_path", side_effect=resolver):
+            operator_digest.checkout_origin_slug("amiga", "docs")
+        self.assertEqual([("amiga", "docs")], seen)
+
+    def test_a_fatal_config_helper_does_not_kill_the_report(self) -> None:
+        # resolve_project_repo_path reaches config_get, which exits when the ignored config
+        # is absent; a read-only report must still render in a detached checkout
+        with mock.patch.object(operator_digest, "resolve_project_repo_path",
+                               side_effect=SystemExit(1)):
+            self.assertIsNone(operator_digest.resolved_repo_path("amiga", "app"))
+

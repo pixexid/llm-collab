@@ -29,7 +29,7 @@ import re
 import subprocess
 from datetime import datetime, timezone
 
-from _helpers import ROOT, agent_ids
+from _helpers import ROOT, agent_ids, resolve_project_repo_path
 
 DECISION_MARKERS = ("decision", "required", "approve", "ratify", "recommend", "blocked")
 # Bounded so one packet citing many PRs cannot stall the digest on network calls.
@@ -38,36 +38,63 @@ PR_CHECK_LIMIT = 6
 _repo_targets_cache: dict[str, str] | None = None
 
 
+# A remote is a GitHub remote only if it says so. Stripping an optional prefix and accepting
+# whatever had one slash left treated local paths as slugs: `pixexid/amiga` and `../amiga` are
+# ordinary relative paths, and admitting them would query an UNRELATED GitHub repo of the same
+# name -- which is the false-moot path, reached from a checkout that never touches GitHub.
+GITHUB_REMOTE = re.compile(
+    r"""^(?:
+          https://(?:[^@/]+@)?github\.com/
+        | git@github\.com:
+        | ssh://git@github\.com/
+        | git://github\.com/
+    )(?P<owner>[^/]+)/(?P<name>[^/]+?)(?:\.git)?/?$""",
+    re.VERBOSE,
+)
+
+
 def slug_from_remote(url: str) -> str | None:
-    """owner/name from a git remote URL, or None when it is not a GitHub-style slug."""
-    text = re.sub(r"^(?:https://github\.com/|git@github\.com:|ssh://git@github\.com/)", "",
-                  url.strip())
-    slug = text.removesuffix(".git")
-    return slug if slug.count("/") == 1 and all(slug.split("/")) else None
+    """owner/name for a GitHub remote, or None for anything else.
 
-
-def projects_root() -> Path:
-    """Where registered checkouts live, read without the fatal config helper."""
-    try:
-        payload = json.loads((ROOT / "collab.config.json").read_text(encoding="utf-8"))
-        configured = payload.get("projects_root")
-    except (OSError, json.JSONDecodeError):
-        configured = None
-    return Path(configured) if configured else ROOT.parent
-
-
-def checkout_origin_slug(checkout: str) -> str | None:
-    """The GitHub slug of a registered CHECKOUT, read from that checkout's own origin.
-
-    projects[].repos values are checkout directory names, NOT repository names, and the two
-    genuinely differ here: the `nuvyr_app` checkout has origin pixexid/nuvyr, and
-    `amiga_house_cleaning_company_docs` has origin pixexid/amiga-docs. Concatenating an owner
-    with the directory name invented a slug that misresolved both -- so a bare PR number in an
-    `app` or `docs` packet was checked against a repository that does not exist, and an
-    unlucky match would have reported a live request settled on the wrong repo's PR.
+    Anything else includes local paths, file:// origins, and other hosts: `gh pr view` cannot
+    query them, so a slug-shaped value from one is not a repository reference.
     """
-    directory = projects_root() / checkout
-    if not (directory / ".git").exists():
+    found = GITHUB_REMOTE.match(url.strip())
+    return f"{found['owner']}/{found['name']}" if found else None
+
+
+def resolved_repo_path(project_id: str, repo_key: str) -> Path | None:
+    """The authoritative checkout path for one project's repo key.
+
+    Delegates rather than reimplementing: resolve_project_repo_path already handles absolute,
+    `..`-relative, tilde and projects_root-relative forms, and a second implementation here
+    diverged from it on those shapes.
+
+    SystemExit is caught deliberately. That helper reaches config_get, which EXITS THE PROCESS
+    when the gitignored collab.config.json is absent -- fatal behaviour that is correct for a
+    CLI and wrong for a read-only report, which must still render in a detached checkout.
+    Catching it keeps both properties without changing a helper another lane owns.
+    """
+    try:
+        return resolve_project_repo_path(project_id, repo_key)
+    except (SystemExit, OSError, ValueError):
+        return None
+
+
+def checkout_origin_slug(project_id: str, repo_key: str) -> str | None:
+    """The GitHub slug of a registered checkout, read from that checkout's own origin.
+
+    projects[].repos values are checkout PATHS, not repository names, and the two genuinely
+    differ here: the `nuvyr_app` checkout has origin pixexid/nuvyr, and
+    `amiga_house_cleaning_company_docs` has origin pixexid/amiga-docs. Concatenating an owner
+    with the directory name invented a slug that misresolved both.
+
+    Resolution is delegated to _helpers.resolve_project_repo_path, which is authoritative for
+    absolute, `..`-relative, tilde and projects_root-relative forms. A second implementation
+    here diverged from it on exactly those shapes.
+    """
+    directory = resolved_repo_path(project_id, repo_key)
+    if directory is None or not (directory / ".git").exists():
         return None
     try:
         url = subprocess.run(
@@ -224,7 +251,7 @@ def resolve_repo_target(target: str, project_id: str | None) -> str | None:
             return None
         repos = matched[0].get("repos")
         if isinstance(repos, dict) and target in repos:
-            return checkout_origin_slug(str(repos[target]))
+            return checkout_origin_slug(str(project_id), target)
     return known_repo_targets().get(target)
 
 
