@@ -396,6 +396,24 @@ class DaemonTest(unittest.TestCase):
                 server._stop_integrity_probe()
                 request.join(1)
 
+    def test_integrity_declares_probe_coverage_in_every_state(self) -> None:
+        """`ok` must not imply a whole-chain guarantee the probe cannot give.
+
+        Named probe_scope, not verified_scope: the field appears in unknown, checking,
+        gate_off and pre-identity failures too, where nothing has been verified. Calling
+        it "verified" there would swap one overclaim for another.
+        """
+        from llm_collab.daemon.server import PROBE_SCOPE, _integrity_snapshot
+
+        self.assertEqual("main_database_identity", PROBE_SCOPE)
+        for state in ("unknown", "checking", "ok", "failed", "gate_off"):
+            snapshot = _integrity_snapshot(state)
+            self.assertEqual(PROBE_SCOPE, snapshot["probe_scope"], state)
+            self.assertNotIn(
+                "verified_scope", snapshot,
+                "the field must not claim verification in states where none occurred",
+            )
+
     def test_integrity_snapshot_reports_stale_and_bounded_failure(self) -> None:
         now = [100.0]
         server = DaemonServer(self.paths, clock=lambda: now[0])

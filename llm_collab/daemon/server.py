@@ -33,6 +33,19 @@ class ProtocolError(ValueError):
     pass
 
 
+# The probe's COVERAGE, not a claim that verification happened. `ok` alone would
+# overclaim: the reader's main database identity is compared against the writer's, but
+# SQLite resolves the -wal and -shm sidecars by pathname, so an ancestor or sidecar
+# replacement under the same uid is outside what this probe can see. Naming the scope
+# lets a consumer size an `ok` correctly.
+#
+# Deliberately named probe_scope rather than verified_scope: the field is present in
+# every state, including unknown, checking, gate_off and failures that occur before any
+# identity comparison, where nothing has been verified at all. Calling it "verified"
+# there would replace one overclaim with another.
+PROBE_SCOPE = "main_database_identity"
+
+
 def _integrity_snapshot(
     state: str,
     *,
@@ -49,6 +62,7 @@ def _integrity_snapshot(
         "age_seconds": age_seconds,
         "error": error,
         "error_truncated": error_truncated,
+        "probe_scope": PROBE_SCOPE,
     }
 
 
