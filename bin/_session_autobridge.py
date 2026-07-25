@@ -118,6 +118,11 @@ def iter_sessions(agent_id: str | None = None) -> list[dict]:
 MAX_BINDING_BYTES = 256 * 1024
 
 
+# A distinct refusal reason. It must never be exact_binding_required: that means "there is no such
+# binding", and an oversized or permission-denied binding is a record that EXISTS and was refused.
+BINDING_UNREADABLE_REASON = "binding_unreadable"
+
+
 class BindingUnreadable(RuntimeError):
     """An oversized or I/O-failed binding.
 
