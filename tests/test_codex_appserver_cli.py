@@ -31,6 +31,10 @@ class _RecordingSocket:
         self.timeouts: list[float] = []
 
     def settimeout(self, value):
+        # mimic the real socket: a non-finite or oversized timeout raises, which is
+        # exactly what the previous permissive stub masked
+        if value != value or value in (float("inf"), float("-inf")):
+            raise OverflowError("timeout value is not finite")
         self.timeouts.append(value)
 
 
@@ -199,6 +203,32 @@ class CodexAppServerCliTest(unittest.TestCase):
         with self.assertRaises(SystemExit) as caught:
             run_cli(BASE + ["send", "--text", "x"], fake)
         self.assertIn("no turn id", str(caught.exception))
+
+
+    def test_default_unbounded_tail_does_not_crash_on_an_infinite_deadline(self) -> None:
+        # `tail` with no --seconds uses deadline=inf; settimeout(inf) raises OverflowError
+        # on a real socket, which made default tail print a transport error and exit 1.
+        fake = FakeClient(notifications=[turn_notification(), {"method": "turn/completed", "params": {}}])
+        fake.sock = _RecordingSocket()
+        fake.timeout_seconds = 120
+        out = io.StringIO()
+        with mock.patch.object(sys, "argv", ["codex_appserver.py"] + BASE + ["tail"]):
+            with mock.patch.object(cli, "connect", return_value=fake):
+                with contextlib.redirect_stdout(out):
+                    cli.main()
+        self.assertNotIn("[transport]", out.getvalue(), "default tail must not fault")
+        self.assertTrue(fake.sock.timeouts, "recv must still be bounded")
+        self.assertTrue(all(t <= 120 for t in fake.sock.timeouts), fake.sock.timeouts)
+
+    def test_send_returns_on_acceptance_without_further_pumping(self) -> None:
+        # send promised to return once accepted; pumping for 5s afterwards contradicted it
+        fake = FakeClient(
+            responses={"turn/start": {"turn": {"id": TURN, "status": "inProgress"}}},
+            notifications=[{"method": "item/agentMessage/delta", "params": {"delta": "later"}}],
+        )
+        text = run_cli(BASE + ["send", "--text", "x"], fake)
+        self.assertIn(TURN, text)
+        self.assertNotIn("later", text, "send must not stream post-acceptance output")
 
 
 if __name__ == "__main__":

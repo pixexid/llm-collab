@@ -54,6 +54,7 @@ INTERESTING = {
 }
 TERMINAL = {"turn/completed", "turn/failed", "turn/cancelled"}
 TRANSPORT_ERROR = "transport-error"
+RECV_CAP_SECONDS = 30.0
 
 
 def resolve_target(args) -> tuple[str, str]:
@@ -175,7 +176,11 @@ def bound_recv(client, deadline: float):
         raise TimeoutError("deadline reached")
     sock = getattr(client, "sock", None)
     if sock is not None and hasattr(sock, "settimeout"):
-        sock.settimeout(max(0.05, min(remaining, float("inf"))))
+        # remaining is inf for an unbounded tail, and socket.settimeout(inf) raises
+        # OverflowError -- which made default tail exit 1 immediately. Clamp to the
+        # client's own finite socket budget.
+        cap = getattr(client, "timeout_seconds", None) or RECV_CAP_SECONDS
+        sock.settimeout(max(0.05, min(remaining, float(cap))))
     return client.recv_json()
 
 
@@ -318,7 +323,8 @@ def main() -> None:
                 "turn_id": turn_id,
                 "status": status,
             }, indent=2))
-            pump(client, deadline=time.monotonic() + 5, raw=False, stop_on_terminal=False)
+            # Return on acceptance, as documented. Observation is `tail`'s job; pumping
+            # here contradicted the promise and delayed the caller for no benefit.
         return
 
     # tail
