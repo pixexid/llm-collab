@@ -98,9 +98,24 @@ def sidecar_token_is_secure(path: Path) -> bool:
 
 
 def enabled_sidecar_ids() -> list[str]:
+    """Sidecars eligible to be STARTED. Gate creation only — never cleanup."""
     if sidecar_token_is_secure(sidecar_token_file()) and sidecar_binary().exists():
         return list(SIDECAR_APP_IDS)
     return []
+
+
+# Commands that inspect or tear down must reach a process that is already running.
+# Gating these on the same switch as creation meant that removing the token left a
+# live server unreachable by `stop --all` / `delete --all` / `status --all`, which is
+# the opposite of what the docs' "token presence is the enable switch" implies:
+# removing the token does not stop a server that already loaded the bearer token.
+NON_CREATING_COMMANDS = frozenset({"stop", "delete", "status", "logs", "restart"})
+
+
+def sidecar_ids_for_command(command: str) -> list[str]:
+    if command in NON_CREATING_COMMANDS:
+        return list(SIDECAR_APP_IDS)
+    return enabled_sidecar_ids()
 
 
 def is_sidecar(target: str) -> bool:
@@ -204,7 +219,7 @@ def main():
 
     targets: list[str] = []
     if args.all:
-        targets = [a["id"] for a in watcher_enabled_agents()] + enabled_sidecar_ids()
+        targets = [a["id"] for a in watcher_enabled_agents()] + sidecar_ids_for_command(args.command)
     elif args.agent:
         if args.agent not in agent_ids() and not is_sidecar(args.agent):
             print(f"[error] Unknown agent: {args.agent!r}", file=sys.stderr)

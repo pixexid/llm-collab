@@ -241,6 +241,36 @@ class Pm2EcosystemTest(unittest.TestCase):
             )
 
 
+    def test_non_posix_host_disables_the_sidecar_without_crashing_the_config(self) -> None:
+        """process.getuid is POSIX-only; on Windows it is undefined.
+
+        Calling it unguarded threw during module evaluation, which would stop the
+        ENTIRE ecosystem from loading — unrelated inbox watchers included — rather
+        than merely disabling an unsupported sidecar.
+        """
+        with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
+            token = Path(tmp) / "token"
+            token.write_text("t0ken\n", encoding="utf-8")
+            token.chmod(0o600)
+            binary = Path(tmp) / "codex"
+            binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            env = {
+                "LLM_COLLAB_CODEX_APP_SERVER_TOKEN_FILE": str(token),
+                "LLM_COLLAB_CODEX_BIN": str(binary),
+            }
+            # simulate a host with no getuid, as Node presents on Windows
+            script = "delete process.getuid;" + LOAD
+            result = subprocess.run(
+                [NODE, "-e", script, str(CONFIG)],
+                capture_output=True, text=True, timeout=30,
+                env={**os.environ, **env}, cwd=str(ROOT),
+            )
+            self.assertEqual(0, result.returncode,
+                             f"config must still load on a non-POSIX host: {result.stderr[:300]}")
+            apps = json.loads(result.stdout)
+            self.assertEqual([], sidecars(apps), "sidecar must be disabled, not crash")
+            self.assertTrue(apps, "unrelated watcher apps must still be emitted")
+
 class Pm2ManagerSidecarTest(unittest.TestCase):
     """The manager's sidecar branch, forced on so a clean checkout still exercises it.
 
@@ -340,6 +370,32 @@ class Pm2ManagerSidecarTest(unittest.TestCase):
         with mock.patch.object(pm2_watchers, "agent_ids", return_value=["codex"]):
             self.assertTrue(pm2_watchers.is_sidecar("codex-appserver"))
             self.assertEqual([], pm2_watchers.sidecar_id_conflicts())
+
+    def test_cleanup_commands_reach_a_sidecar_whose_token_was_removed(self) -> None:
+        """Removing the token must not orphan a running server.
+
+        enabled_sidecar_ids() gates creation, so stop/delete/status/logs/restart have
+        to use sidecar_ids_for_command() or `--all` silently omits a live process.
+        """
+        with mock.patch.dict(
+            os.environ,
+            {
+                "LLM_COLLAB_CODEX_APP_SERVER_TOKEN_FILE": str(Path(self._tmp.name) / "gone"),
+                "LLM_COLLAB_CODEX_BIN": str(self.binary),
+            },
+        ):
+            self.assertEqual([], pm2_watchers.enabled_sidecar_ids(),
+                             "start must be gated once the token is gone")
+            for command in ("stop", "delete", "status", "logs", "restart"):
+                self.assertEqual(
+                    ["codex-appserver"], pm2_watchers.sidecar_ids_for_command(command),
+                    f"{command} --all must still reach a running sidecar",
+                )
+            for command in ("start", "ensure"):
+                self.assertEqual(
+                    [], pm2_watchers.sidecar_ids_for_command(command),
+                    f"{command} must stay gated",
+                )
 
     def test_absent_token_keeps_the_sidecar_out_of_manager_targets(self) -> None:
         with mock.patch.dict(

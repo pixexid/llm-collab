@@ -89,6 +89,10 @@ function codexAppServerApps() {
     return [];
   }
   if (!stat.isFile()) return [];
+  // process.getuid is POSIX-only. Calling it on Windows throws during module
+  // evaluation, which would prevent the ENTIRE ecosystem from loading -- including
+  // unrelated inbox watchers -- instead of merely disabling an unsupported sidecar.
+  if (typeof process.getuid !== "function") return [];
   if (stat.uid !== process.getuid()) return [];
   if ((stat.mode & 0o077) !== 0) return [];
   if (/\s/.test(tokenFile)) return [];
