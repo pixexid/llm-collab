@@ -795,6 +795,103 @@ class ConnectDeadlineTest(unittest.TestCase):
         self.assertIn("max(0.05,", source, "a floor keeps the socket blocking")
 
 
+class TricklingHandshakeTest(unittest.TestCase):
+    """A REAL socket, because no structural test can detect this.
+
+    The inherited handshake loops on recv() with a fixed socket timeout, so a peer sending the
+    response in small pieces resets that timeout on every piece and the total is unbounded.
+    Clamping the per-call timeout bounds each read; only an absolute deadline bounds the sum.
+    """
+
+    def serve(self, chunks, gap):
+        """A listener that dribbles `chunks` with `gap` seconds between them."""
+        import socket as _socket
+        import threading
+
+        listener = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+        listener.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        self.addCleanup(listener.close)
+        port = listener.getsockname()[1]
+
+        def run():
+            try:
+                conn, _ = listener.accept()
+            except OSError:
+                return
+            try:
+                conn.recv(4096)          # the client's request line and headers
+                for chunk in chunks:
+                    time.sleep(gap)
+                    try:
+                        conn.sendall(chunk)
+                    except OSError:
+                        return
+            finally:
+                conn.close()
+
+        thread = threading.Thread(target=run, daemon=True)
+        thread.start()
+        return port
+
+    def client(self, port, deadline_seconds):
+        made = codex_stream.ObserverClient(f"ws://127.0.0.1:{port}", token=None,
+                                           timeout_seconds=deadline_seconds)
+        made.set_deadline(time.monotonic() + deadline_seconds)
+        return made
+
+    def test_a_trickled_handshake_cannot_outlast_the_budget(self) -> None:
+        """Codex's reproduction: three chunks 40ms apart against a 50ms budget.
+
+        Each recv succeeded inside its own timeout, so the handshake ran ~144ms and the expired
+        absolute deadline was never consulted.
+        """
+        port = self.serve([b"HTTP/1.1 101 Switching Protocols\r\n",
+                           b"Upgrade: websocket\r\n",
+                           b"Connection: Upgrade\r\n\r\n"], gap=0.04)
+        made = self.client(port, 0.05)
+        started = time.monotonic()
+        with self.assertRaises((TimeoutError, ConnectionError, OSError)):
+            with made:
+                pass
+        elapsed = time.monotonic() - started
+        self.assertLess(elapsed, 0.5,
+                        f"the handshake must not outlast the budget: took {elapsed:.3f}s")
+
+    def test_a_silent_peer_cannot_hold_the_handshake_open(self) -> None:
+        port = self.serve([], gap=0)      # accepts, then says nothing at all
+        made = self.client(port, 0.1)
+        started = time.monotonic()
+        with self.assertRaises((TimeoutError, ConnectionError, OSError)):
+            with made:
+                pass
+        self.assertLess(time.monotonic() - started, 0.6)
+
+    def test_many_tiny_chunks_cannot_extend_the_handshake(self) -> None:
+        """The pathological case: each chunk arrives well inside the per-call timeout."""
+        header = (b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n"
+                  b"Connection: Upgrade\r\n\r\n")
+        port = self.serve([header[i:i + 1] for i in range(len(header))], gap=0.01)
+        made = self.client(port, 0.08)
+        started = time.monotonic()
+        with self.assertRaises((TimeoutError, ConnectionError, OSError)):
+            with made:
+                pass
+        elapsed = time.monotonic() - started
+        self.assertLess(elapsed, 0.6, f"took {elapsed:.3f}s for a 0.08s budget")
+
+    def test_an_expired_deadline_refuses_before_connecting(self) -> None:
+        port = self.serve([], gap=0)
+        made = codex_stream.ObserverClient(f"ws://127.0.0.1:{port}", token=None,
+                                           timeout_seconds=1)
+        made.set_deadline(time.monotonic() - 1)
+        with self.assertRaises(TimeoutError) as caught:
+            with made:
+                pass
+        self.assertIn("before connecting", str(caught.exception))
+
+
 class SetupBoundaryTest(unittest.TestCase):
     """Setup is inside the deadline, and nothing emitted during it is lost."""
 
