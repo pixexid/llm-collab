@@ -7,9 +7,9 @@ turn/completed. So "what is Codex doing right now" needs no Accessibility
 automation, no foreground window, and no shared-daemon refactor -- only a second
 WebSocket connection to the App Server we already run.
 
-Observation only. This never starts, steers, or interrupts a turn, and never
-answers a server-initiated request: an approval belongs to the client that owns
-the turn, and answering one here would silently vote on the operator's behalf.
+Observation only. This never starts, steers, or interrupts a turn, and answers
+every server-initiated request with a JSON-RPC error -- never a result. A result is
+an approval, and approving here would vote on the operator's behalf.
 
 Usage:
   python bin/codex_stream.py --agent codex --project amiga --chat CHAT-8976EECB
@@ -46,9 +46,10 @@ class ObserverClient(autobridge.JsonRpcWebSocketClient):
     The base client answers any interleaved server request with `{"result": {}}`, so an
     `item/commandExecution/requestApproval` arriving while `initialize` or `thread/resume`
     is in flight would be APPROVED by an observer that promised never to vote. Printing
-    "left for the turn owner" instead does not work either: a JSON-RPC response belongs on
-    the connection that received the request, so the owner cannot answer one delivered
-    here -- it would simply hang.
+    Deferring instead does not work either: a JSON-RPC response belongs on the connection
+    that received the request, so no other client can answer one delivered here -- it would
+    simply hang. Every server request therefore gets an explicit error reply on THIS socket,
+    correlated to its id. Refusing IS answering; what it never does is approve.
 
     Refusing inside recv_json covers both cases at once, because every read path goes
     through it: the request/response loop and the steady-state event loop.
@@ -216,8 +217,6 @@ def main() -> None:
                 message = client.recv_json()
             except (TimeoutError, socket.timeout):
                 continue
-            except KeyboardInterrupt:
-                break
             except Exception as error:
                 # Supervision must be able to tell a dead live view from a finished one.
                 print(f"[stream] connection ended: {type(error).__name__}: {error}",

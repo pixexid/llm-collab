@@ -4,7 +4,7 @@ Two behaviours carry real risk. Resolving `--agent codex` when several bindings 
 would silently watch one of several threads, which is the wrong-thread failure the
 exact-dispatch contract exists to prevent. Answering a server-initiated request --
 an approval -- would vote on the operator's behalf on a turn this observer does not
-own; the observer must leave it for the turn owner.
+own; the observer must refuse it explicitly on the same socket.
 """
 
 from __future__ import annotations
@@ -96,8 +96,8 @@ class ObserverRefusesServerRequestsTest(unittest.TestCase):
 
     The base client answers any interleaved server request with {"result": {}}, so an
     approval arriving during initialize/resume would be APPROVED. And a request read in
-    the steady-state loop cannot be deferred to "the turn owner": a JSON-RPC response
-    belongs on the connection that received it.
+    the steady-state loop cannot be deferred to another client: a JSON-RPC response belongs
+    on the connection that received it, so refusing here is the only coherent answer.
     """
 
     def client(self, incoming: list[dict]) -> codex_stream.ObserverClient:
@@ -198,6 +198,28 @@ class RecordIdentityTest(unittest.TestCase):
         self.write("amiga", "CHAT-A", "codex", ["runtime_session_id"])
         with self.assertRaises(SystemExit):
             codex_stream.resolve_thread(self.args(agent="codex", project="amiga", chat="CHAT-A"))
+
+
+class InterruptExitCodeTest(unittest.TestCase):
+    """Ctrl-C during streaming must exit 130, not 0.
+
+    The stream loop caught KeyboardInterrupt and broke, so main() returned normally and
+    the outer 130 handler never ran -- supervision saw a clean exit for an interrupted
+    view, which is the same ambiguity the transport-failure fix removed.
+    """
+
+    def test_keyboard_interrupt_is_not_swallowed_by_the_stream_loop(self) -> None:
+        source = (ROOT / "bin" / "codex_stream.py").read_text(encoding="utf-8")
+        loop = source[source.index("while deadline is None"):source.index("if pending_text")]
+        self.assertNotIn("except KeyboardInterrupt", loop,
+                         "the loop must let Ctrl-C reach the 130 handler")
+
+    def test_the_module_promises_only_what_it_does(self) -> None:
+        # prose drift is how a safety claim outlives the behaviour it described
+        source = (ROOT / "bin" / "codex_stream.py").read_text(encoding="utf-8")
+        self.assertNotIn("left for the turn owner", source)
+        self.assertNotIn("never\nanswers a server-initiated request", source)
+        self.assertIn("never a result", source)
 
 
 class DescribeTest(unittest.TestCase):
