@@ -1231,13 +1231,35 @@ def _socket_read_exact(sock: socket.socket, count: int) -> bytes:
     return b"".join(chunks)
 
 
+# How a connection answers a server-initiated request. The policy is explicit because it
+# depends on the connection's ROLE, not on the protocol: App Server broadcasts one pending
+# request to every subscribed connection and the first response -- result OR error -- can
+# resolve it. A connection that OWNS a turn must answer, or the turn hangs. A connection that
+# merely observes must not, or it races the operator's own UI and can refuse work they
+# started. There is no correct global default, so each caller states its role.
+SERVER_REQUEST_REFUSE = "refuse"
+SERVER_REQUEST_IGNORE = "ignore"
+SERVER_REQUEST_POLICIES = (SERVER_REQUEST_REFUSE, SERVER_REQUEST_IGNORE)
+JSONRPC_METHOD_NOT_FOUND = -32601
+
+
 class JsonRpcWebSocketClient:
-    def __init__(self, url: str, token: str | None = None, timeout_seconds: int = 30):
+    def __init__(
+        self,
+        url: str,
+        token: str | None = None,
+        timeout_seconds: int = 30,
+        server_request_policy: str = SERVER_REQUEST_REFUSE,
+    ):
+        if server_request_policy not in SERVER_REQUEST_POLICIES:
+            raise ValueError(f"unknown server_request_policy: {server_request_policy!r}")
         self.url = url
         self.token = token
         self.timeout_seconds = timeout_seconds
+        self.server_request_policy = server_request_policy
         self.sock: socket.socket | None = None
         self.counter = 0
+        self.server_requests: list[str] = []
 
     def __enter__(self) -> "JsonRpcWebSocketClient":
         parsed = urllib.parse.urlparse(self.url)
@@ -1330,7 +1352,40 @@ class JsonRpcWebSocketClient:
                 self._send_frame(payload, opcode=0xA)
                 continue
             if opcode == 0x1:
-                return json.loads(payload.decode("utf-8"))
+                message = json.loads(payload.decode("utf-8"))
+                if self._handle_server_request(message):
+                    continue
+                return message
+
+    def _handle_server_request(self, message: dict[str, Any]) -> bool:
+        """True when this message was a server request and has been dealt with here.
+
+        Centralised so that EVERY read path is covered -- the request/response wait and any
+        caller's own event loop alike. Two separate branches used to answer these with
+        `{"result": {}}`: one while waiting for a response, one in the dispatch turn loop.
+        Every member of the generated ServerRequest union is authority- or data-bearing
+        (command/file/permission approvals, tool calls, user input, MCP elicitation, auth
+        refresh, attestation) and NO Response schema in the bundle permits an empty object,
+        so that envelope was unauthorized on its face.
+
+        `is not None`, never truthiness: 0 is a legal JSON-RPC id, and under truthiness a
+        request with id 0 fell through as if it were a notification.
+        """
+        if message.get("id") is None or not message.get("method"):
+            return False
+        method = str(message["method"])
+        self.server_requests.append(method)
+        if self.server_request_policy == SERVER_REQUEST_REFUSE:
+            self.send_json({
+                "jsonrpc": "2.0",
+                "id": message["id"],
+                "error": {
+                    "code": JSONRPC_METHOD_NOT_FOUND,
+                    "message": ("llm-collab automatic dispatch cannot authorize server "
+                                f"requests; {method} refused"),
+                },
+            })
+        return True
 
     def notify(self, method: str, params: dict[str, Any] | None = None) -> None:
         self.send_json({"jsonrpc": "2.0", "method": method, "params": params or {}})
@@ -1356,8 +1411,8 @@ class JsonRpcWebSocketClient:
                     error = message["error"]
                     raise RuntimeError(f"{method}: {error.get('message', 'unknown error')}")
                 return message.get("result")
-            if message.get("id") and message.get("method"):
-                self.send_json({"jsonrpc": "2.0", "id": message["id"], "result": {}})
+            # Server requests never reach here: recv_json() applies this connection's
+            # policy before returning. This loop only correlates responses.
 
 
 def _codex_app_server_token(token_file: str | None) -> str | None:
@@ -1424,9 +1479,6 @@ def execute_codex_app_server_trigger(session: dict, message: dict, runtime_home:
         deadline = time.monotonic() + timeout_seconds
         while time.monotonic() < deadline:
             message_payload = client.recv_json()
-            if message_payload.get("id") and message_payload.get("method"):
-                client.send_json({"jsonrpc": "2.0", "id": message_payload["id"], "result": {}})
-                continue
             method = str(message_payload.get("method", ""))
             if not method:
                 continue
