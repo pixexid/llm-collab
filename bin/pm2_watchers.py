@@ -95,16 +95,17 @@ def token_is_usable(content: str) -> bool:
 
     Agreeing with the CLI alone is not enough. The CLI accepts a BOM-only or U+001C-only
     token, but the delivery client puts the secret in an HTTP Authorization header: a BOM
-    cannot be encoded there at all, and U+001C is stripped by the client's own read, which
-    would send no credential while both gates reported the transport configured.
+    cannot be encoded there, an interior CRLF would split the header, and U+001C is not
+    sendable -- so the gate would report a transport that cannot authenticate.
 
-    So the accepted token is the INTERSECTION: non-blank under the pinned CLI predicate, and
-    every remaining character printable ASCII, which is what a header can carry.
+    The accepted token is the INTERSECTION: non-blank under the pinned CLI predicate, and
+    every remaining character printable ASCII. Delegates to the delivery client's own
+    implementation so the two cannot drift; a second copy of a two-sided predicate is how
+    every earlier round of this concern went wrong.
     """
-    stripped = content.strip(TOKEN_BLANK_CHARS)
-    if not stripped:
-        return False
-    return all("\x21" <= character <= "\x7e" for character in stripped)
+    from _session_autobridge import token_is_usable as client_token_is_usable
+
+    return client_token_is_usable(content)
 
 
 def sidecar_token_is_secure(path: Path) -> bool:

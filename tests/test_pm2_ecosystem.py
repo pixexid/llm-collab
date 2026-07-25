@@ -421,15 +421,19 @@ class Pm2EcosystemTest(unittest.TestCase):
             self.assertTrue(pm2_watchers.sidecar_token_is_secure(token))
             self.assertEqual("t0ken", _session_autobridge._codex_app_server_token(str(token)))
 
-        # A separator-only token is refused by the gate, but the CLIENT's read must still use
-        # the pinned predicate: with Python's default strip() it returns None, so a manually
-        # launched sidecar's token would silently send no Authorization header.
+        # The client must ALSO refuse what it cannot send. A trailing U+001C is the case that
+        # separates the two possible mistakes: Python's default strip() would silently remove
+        # it and hand back a truncated-but-plausible secret, while the pinned predicate keeps
+        # it -- at which point the usability check must reject the whole token. Returning
+        # either the stripped or the unstripped form would be wrong.
         with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
             separator = Path(tmp) / "sep-token"
-            separator.write_text("\u001c", encoding="utf-8")
-            self.assertEqual(
-                "\u001c", _session_autobridge._codex_app_server_token(str(separator)),
-                "the client must not strip characters the pinned predicate keeps")
+            separator.write_text("t0ken\u001c", encoding="utf-8")
+            self.assertIsNone(
+                _session_autobridge._codex_app_server_token(str(separator)),
+                "a token carrying an unsendable character must not be used at all")
+            self.assertFalse(pm2_watchers.sidecar_token_is_secure(separator),
+                             "and the gate must agree with the client")
 
     def test_a_token_the_client_would_blank_is_refused_by_the_gate(self) -> None:
         sys.path.insert(0, str(ROOT / "bin"))
@@ -444,6 +448,54 @@ class Pm2EcosystemTest(unittest.TestCase):
                     token.chmod(0o600)
                     self.assertFalse(pm2_watchers.sidecar_token_is_secure(token),
                                      "the gate must refuse what the client cannot send")
+
+    def test_the_client_refuses_every_unsendable_token_shape(self) -> None:
+        """A server started or discovered outside the PM2 gates reaches this reader instead.
+
+        So the contract cannot be assumed upstream. An interior CRLF is the sharpest case: it
+        would split the Authorization header itself.
+        """
+        sys.path.insert(0, str(ROOT / "bin"))
+        import _session_autobridge
+
+        shapes = {
+            "bom only": "\ufeff",
+            "bom prefixed": "\ufefft0ken",
+            "separator": "t0ken\u001c",
+            "non ascii": "t0ken-\u00e9",
+            "interior crlf": "t0ken\r\nX-Injected: 1",
+            "interior newline": "t0ken\nmore",
+            "blank": "   \n",
+        }
+        with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
+            for label, raw in shapes.items():
+                with self.subTest(token=label):
+                    token = Path(tmp) / f"tok-{abs(hash(label))}"
+                    token.write_text(raw, encoding="utf-8")
+                    self.assertIsNone(
+                        _session_autobridge._codex_app_server_token(str(token)),
+                        f"{label} cannot be sent as a header value")
+
+    def test_the_client_returns_a_usable_token_unchanged(self) -> None:
+        sys.path.insert(0, str(ROOT / "bin"))
+        import _session_autobridge
+
+        with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
+            token = Path(tmp) / "tok"
+            token.write_text("  sk-t0ken_value-123  \n", encoding="utf-8")
+            self.assertEqual("sk-t0ken_value-123",
+                             _session_autobridge._codex_app_server_token(str(token)))
+
+    def test_one_predicate_backs_both_the_gate_and_the_client(self) -> None:
+        # a second copy of a two-sided predicate is how every earlier round went wrong
+        sys.path.insert(0, str(ROOT / "bin"))
+        import pm2_watchers
+        import _session_autobridge
+
+        for raw in ("t0ken", "\ufeff", "t0ken\u001c", "t0ken-\u00e9", "  ", "a b"):
+            with self.subTest(token=raw):
+                self.assertEqual(_session_autobridge.token_is_usable(raw),
+                                 pm2_watchers.token_is_usable(raw))
 
     def test_a_non_ascii_token_is_refused_by_both_gates(self) -> None:
         """Valid UTF-8, non-blank, and still unsendable in an HTTP header."""

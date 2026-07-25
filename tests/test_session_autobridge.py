@@ -5226,3 +5226,43 @@ class SessionAutobridgeTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RenamedCodexBinaryDiscoveryTest(unittest.TestCase):
+    """LLM_COLLAB_CODEX_BIN accepts any path, so discovery must not key on the filename.
+
+    This PR adds and documents that override. A wrapper, symlink, or versioned executable
+    launches correctly, and a literal "codex app-server" match would then never discover it --
+    registered sessions would lose the very transport this PR advertises. The override and the
+    discovery are one concern because the same change introduces the override.
+    """
+
+    def rows(self, commands):
+        import subprocess as sp
+        from unittest import mock as m
+        listing = "\n".join(f"{1000 + i} {c}" for i, c in enumerate(commands))
+        with m.patch.object(sp, "run", return_value=m.Mock(stdout=listing, returncode=0)):
+            return session_autobridge_lib.codex_app_server_process_rows()
+
+    def test_a_renamed_or_wrapped_binary_is_discovered(self) -> None:
+        found = self.rows([
+            "/opt/bin/codex-cli app-server --listen ws://127.0.0.1:8767 --ws-auth capability-token",
+            "/usr/local/bin/codex-0.146.0 app-server --listen ws://127.0.0.1:8768",
+            "/Applications/ChatGPT.app/Contents/Resources/codex app-server --listen ws://127.0.0.1:8769",
+        ])
+        self.assertEqual(3, len(found), f"all three should be discovered: {found}")
+
+    def test_a_codex_process_that_is_not_an_app_server_is_ignored(self) -> None:
+        found = self.rows([
+            "/opt/bin/codex exec --prompt hello",
+            "/opt/bin/codex login",
+            "grep -r codex app-server /tmp",
+        ])
+        self.assertEqual([], found, "a false positive points delivery at the wrong endpoint")
+
+    def test_an_app_server_with_no_listener_flag_is_ignored(self) -> None:
+        # the desktop app runs one of these; it is not reachable, so it is not an endpoint
+        self.assertEqual([], self.rows([
+            "/Applications/ChatGPT.app/Contents/Resources/codex "
+            "-c features.code_mode_host=true app-server --analytics-default-enabled",
+        ]))

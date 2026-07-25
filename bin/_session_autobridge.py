@@ -1171,7 +1171,13 @@ def codex_app_server_process_rows() -> list[dict[str, Any]]:
         pid_text, _, command = stripped.partition(" ")
         if not pid_text.isdigit():
             continue
-        if "codex app-server" not in command:
+        # Identify the app-server by its SUBCOMMAND and listener, never by the executable's
+        # filename. This PR adds and documents LLM_COLLAB_CODEX_BIN, which accepts any path,
+        # so a wrapper, symlink or versioned binary launches correctly -- and a literal
+        # "codex app-server" match would then never discover it, leaving registered sessions
+        # to lose the transport this PR advertises. The override and the discovery are one
+        # concern precisely because this PR introduces the override.
+        if "app-server" not in command or "--listen" not in command:
             continue
         rows.append({"pid": int(pid_text), "command": command})
     return rows
@@ -1370,12 +1376,38 @@ TOKEN_BLANK_CHARS = (
 )
 
 
+def usable_token(content: str) -> str | None:
+    """The sendable secret in this content, or None when there is not one.
+
+    One strip and one predicate, in one place. Every character of the stripped secret must be
+    printable ASCII: a BOM cannot be encoded in an HTTP header, U+001C and friends are not
+    sendable, and an INTERIOR CRLF would split the header itself. The PM2 gates enforce this,
+    but a server started or discovered outside those gates reaches this reader instead, so the
+    contract holds here rather than being assumed upstream.
+
+    Returning the value rather than a boolean matters: an earlier version stripped once to
+    decide and again to return, and the second strip could not be proven by any test because
+    the decision had already excluded every input the two strips disagree about. Dead
+    distinctions in a credential path are worth removing rather than documenting.
+    """
+    stripped = content.strip(TOKEN_BLANK_CHARS)
+    if not stripped:
+        return None
+    if not all("\x21" <= character <= "\x7e" for character in stripped):
+        return None
+    return stripped
+
+
+def token_is_usable(content: str) -> bool:
+    return usable_token(content) is not None
+
+
 def _codex_app_server_token(token_file: str | None) -> str | None:
     """Read the bearer token with exactly the semantics the gate validated.
 
     The gate accepts a token, then this reads it: if the two disagree about what counts as
-    blank, an approved token becomes an empty credential here and the handshake fails with
-    the transport still reported as configured.
+    blank -- or about what is sendable at all -- an approved token becomes an empty or
+    unsendable credential here while the transport still reports as configured.
     """
     if not token_file:
         return None
@@ -1386,7 +1418,7 @@ def _codex_app_server_token(token_file: str | None) -> str | None:
         content = path.read_bytes().decode("utf-8")
     except (OSError, UnicodeDecodeError):
         return None
-    return content.strip(TOKEN_BLANK_CHARS) or None
+    return usable_token(content)
 
 
 def _extract_default_codex_model(models_payload: Any) -> str | None:
