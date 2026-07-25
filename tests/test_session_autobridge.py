@@ -2504,6 +2504,221 @@ class SessionAutobridgeTest(unittest.TestCase):
         frontmatter, _ = parse_frontmatter(delivered_candidates[-1].read_text())
         self.assertIsNone(frontmatter["target_session_id"])
 
+    def deliver_with_scope(self, root, chat_id, *, repo_targets=None, project="amiga"):
+        """Run deliver.py and return its JSON payload plus stderr."""
+        argv = [
+            sys.executable, str(DELIVER_SCRIPT),
+            "--chat", chat_id, "--from", "codex", "--to", "claude",
+            "--project", project, "--title", "Scope preflight probe",
+            "--sender-session-id", "codex-session-9", "--body-file", "-",
+        ]
+        if repo_targets is not None:
+            argv += ["--repo-targets", repo_targets]
+        done = subprocess.run(argv, cwd=root, text=True, input="scope probe",
+                              capture_output=True, check=True)
+        return json.loads(done.stdout.split("\n\n", 1)[0]), done.stderr
+
+    def scoped_subscriber_workspace(self, *, subscriber_repo_targets, claude_ax_app=None,
+                                    project="amiga", chat_id="CHAT-SCOPE1"):
+        """A claude session bound to `chat_id` in `project`, optionally declaring a repo scope.
+
+        Parameterized by project because this patch changes the SHARED deliver.py routing contract,
+        and AGENTS.md:43-44 requires focused coverage for Amiga and at least one non-Amiga project.
+        Hard-coding amiga in the helper meant every case could only ever exercise one project, so a
+        project-specific behaviour leaking into the universal path would have been invisible.
+        """
+        root = self.make_workspace()
+        for agent in ("codex", "claude"):
+            activation = {"type": "cli_session", "watcher_enabled": True}
+            if agent == "claude" and claude_ax_app:
+                # The real shape that makes this a doorbell target: a cli_session recipient with an
+                # explicit activation.ax_app. Codex reproduced the wrong-wake with exactly this.
+                activation["ax_app"] = claude_ax_app
+            self.add_agent(root, {
+                "id": agent,
+                "display_name": agent.title(),
+                "activation": activation,
+            })
+        chat_dir = self.create_chat(
+            root,
+            chat_dir_name=f"2026-07-25_scope-preflight__{chat_id}",
+            chat_id=chat_id,
+            project_id=project,
+        )
+        register = [
+            "register", "--session", f"SESSION-CLAUDE-SCOPED-{project.upper()}",
+            "--agent", "claude",
+            "--project", project, "--chat", chat_id, "--mode", "notify",
+            "--runtime-family", "claude_app",
+            "--runtime-session-id", "claude-scoped-session",
+            "--runtime-session-source", "first_read",
+        ]
+        for target in subscriber_repo_targets or []:
+            register += ["--repo-target", target]
+        self.run_cli(root, *register)
+        return root, chat_dir
+
+    # --- deliver.py must apply the SAME routing contract the watcher will apply -------------
+    #
+    # 27 packets were written, reported autobridge_ready: true, and never dispatched, because
+    # deliver.py resolved the target session without ever running repo_scope_matches against it.
+    # The three cases below are the contract, not a new rule: fail-closed for a scoped subscriber
+    # with an empty packet scope, accept a declared subset, and leave unscoped acceptance alone.
+
+    # --- a scope refusal is TERMINAL: no lane may wake the recipient ------------------------
+    #
+    # Every wake lane was gated on `not autobridge_ready`, which means "autobridge cannot take it,
+    # try another way to wake them". Setting that flag for a scope refusal therefore turned a silent
+    # drop into a WRONG WAKE: the refused packet raised ax_doorbell_required with a prompt telling
+    # the recipient to go read it. The scope contract says this packet does not reach this
+    # subscriber by ANY lane.
+
+    WAKE_FLAGS = ("ax_doorbell_required", "ax_attended_recovery_required",
+                  "desktop_bridge_required", "operator_relay_required")
+    WAKE_PROMPTS = ("ax_doorbell_prompt", "ax_attended_recovery_prompt", "desktop_bridge_prompt")
+
+    def test_a_scope_refusal_wakes_the_recipient_by_no_lane_at_all(self):
+        """Codex's reproduction: scoped cli_session + activation.ax_app, empty packet scope."""
+        root, _chat_dir = self.scoped_subscriber_workspace(
+            subscriber_repo_targets=["llm-collab"], claude_ax_app="Claude")
+        payload, stderr = self.deliver_with_scope(root, "CHAT-SCOPE1")
+        self.assertFalse(payload["autobridge_ready"])
+        self.assertEqual("route_ambiguous", payload["autobridge_refusal_reason"])
+        for flag in self.WAKE_FLAGS:
+            self.assertFalse(payload.get(flag),
+                             f"{flag} must be false for a refused packet, got {payload.get(flag)!r}")
+        for prompt in self.WAKE_PROMPTS:
+            self.assertIsNone(payload.get(prompt),
+                              f"{prompt} must be null, got {payload.get(prompt)!r}")
+        self.assertIn("RUNTIME DISPATCH REFUSED", stderr)
+
+    def test_the_same_agent_shape_DOES_get_a_doorbell_when_scope_matches(self):
+        """Otherwise the test above would pass by disabling the doorbell entirely."""
+        root, _chat_dir = self.scoped_subscriber_workspace(
+            subscriber_repo_targets=["llm-collab"], claude_ax_app="Claude")
+        payload, _stderr = self.deliver_with_scope(root, "CHAT-SCOPE1",
+                                                  repo_targets="llm-collab")
+        self.assertTrue(payload["autobridge_ready"])
+        self.assertFalse(payload["ax_doorbell_required"],
+                         "a dispatchable packet needs no doorbell either -- autobridge has it")
+
+    def test_an_ax_app_recipient_with_no_live_session_still_gets_its_doorbell(self):
+        """The lane must remain reachable for its real purpose: no session bound at all.
+
+        This is the control that proves the gate is narrow. If this ever goes false, the fix has
+        broken the doorbell rather than confined it to non-refusal cases.
+        """
+        root = self.make_workspace()
+        for agent, activation in (
+            ("codex", {"type": "cli_session", "watcher_enabled": True}),
+            ("claude", {"type": "cli_session", "watcher_enabled": True, "ax_app": "Claude"}),
+        ):
+            self.add_agent(root, {"id": agent, "display_name": agent.title(),
+                                  "activation": activation})
+        self.create_chat(root, chat_dir_name="2026-07-25_no-session__CHAT-NOSESS",
+                         chat_id="CHAT-NOSESS", project_id="amiga")
+        payload, _stderr = self.deliver_with_scope(root, "CHAT-NOSESS")
+        self.assertFalse(payload["autobridge_ready"])
+        self.assertTrue(payload["ax_doorbell_required"],
+                        "with no bound session there is nothing to refuse, so the doorbell stands")
+        self.assertIsNotNone(payload["ax_doorbell_prompt"])
+
+    def test_no_wake_lane_re_derives_the_flag_it_must_not_use(self):
+        """Structural: five lanes each gated on `not autobridge_ready` is five chances to miss one.
+
+        They now share one predicate, so a lane added later cannot quietly opt out by writing the
+        old condition again.
+        """
+        source = (REPO_ROOT / "bin" / "deliver.py").read_text(encoding="utf-8")
+        self.assertNotIn("        and not autobridge_ready\n", source,
+                         "a wake lane is gating on autobridge_ready directly again")
+        self.assertGreaterEqual(source.count("and wake_fallback_allowed"), 5)
+
+    def test_the_routing_contract_behaves_identically_on_a_NON_amiga_project(self):
+        """AGENTS.md:43-44 -- a shared-contract change needs Amiga and a non-Amiga project.
+
+        nuvyr is registered by this fixture. Run the whole representative set rather than one case:
+        the risk being covered is a project-specific behaviour leaking into the universal path, and
+        a single case cannot distinguish "works for nuvyr" from "refuses everything for nuvyr".
+        """
+        for project, chat_id in (("amiga", "CHAT-SCOPE-A"), ("nuvyr", "CHAT-SCOPE-N")):
+            with self.subTest(project=project):
+                root, chat_dir = self.scoped_subscriber_workspace(
+                    subscriber_repo_targets=["llm-collab"], claude_ax_app="Claude",
+                    project=project, chat_id=chat_id)
+
+                refused, stderr = self.deliver_with_scope(root, chat_id, project=project)
+                self.assertFalse(refused["autobridge_ready"],
+                                 f"{project}: an empty packet scope must not route")
+                self.assertEqual("route_ambiguous", refused["autobridge_refusal_reason"])
+                self.assertIn("RUNTIME DISPATCH REFUSED", stderr)
+                for flag in self.WAKE_FLAGS:
+                    self.assertFalse(refused.get(flag), f"{project}: {flag} must be false")
+                for prompt in self.WAKE_PROMPTS:
+                    self.assertIsNone(refused.get(prompt), f"{project}: {prompt} must be null")
+                self.assertTrue(sorted(chat_dir.glob("*_to-claude_*.md")),
+                                f"{project}: the durable record must survive the refusal")
+
+                accepted, _stderr = self.deliver_with_scope(root, chat_id, project=project,
+                                                            repo_targets="llm-collab")
+                self.assertTrue(accepted["autobridge_ready"],
+                                f"{project}: a declared subset must route")
+                self.assertIsNone(accepted["autobridge_refusal_reason"])
+
+                outside, _stderr = self.deliver_with_scope(root, chat_id, project=project,
+                                                           repo_targets="some-other-repo")
+                self.assertFalse(outside["autobridge_ready"],
+                                 f"{project}: a packet outside the subscriber scope must not route")
+
+    def test_scoped_subscriber_refuses_an_empty_packet_scope(self):
+        root, _chat_dir = self.scoped_subscriber_workspace(
+            subscriber_repo_targets=["llm-collab"])
+        payload, stderr = self.deliver_with_scope(root, "CHAT-SCOPE1")
+        self.assertFalse(payload["autobridge_ready"],
+                         "a packet the watcher will refuse must not be reported as ready")
+        self.assertEqual("route_ambiguous", payload["autobridge_refusal_reason"])
+        self.assertIn("DURABLE WRITE OK", stderr)
+        self.assertIn("RUNTIME DISPATCH REFUSED", stderr)
+        self.assertIn("--repo-targets", stderr,
+                      "the operator must be told how to fix it, not just that it failed")
+
+    def test_scoped_subscriber_accepts_a_declared_subset(self):
+        root, _chat_dir = self.scoped_subscriber_workspace(
+            subscriber_repo_targets=["llm-collab", "amiga"])
+        payload, stderr = self.deliver_with_scope(root, "CHAT-SCOPE1",
+                                                 repo_targets="llm-collab")
+        self.assertTrue(payload["autobridge_ready"])
+        self.assertIsNone(payload["autobridge_refusal_reason"])
+        self.assertNotIn("RUNTIME DISPATCH REFUSED", stderr)
+
+    def test_scoped_subscriber_refuses_a_packet_outside_its_scope(self):
+        root, _chat_dir = self.scoped_subscriber_workspace(
+            subscriber_repo_targets=["llm-collab"])
+        payload, _stderr = self.deliver_with_scope(root, "CHAT-SCOPE1",
+                                                  repo_targets="some-other-repo")
+        self.assertFalse(payload["autobridge_ready"])
+        self.assertEqual("route_ambiguous", payload["autobridge_refusal_reason"])
+
+    def test_unscoped_subscriber_still_accepts_an_empty_packet_scope(self):
+        """The rule Codex insisted on preserving: do NOT make --repo-targets globally required."""
+        root, _chat_dir = self.scoped_subscriber_workspace(subscriber_repo_targets=None)
+        payload, stderr = self.deliver_with_scope(root, "CHAT-SCOPE1")
+        self.assertTrue(payload["autobridge_ready"],
+                        "an unscoped subscriber accepts an unscoped packet, as before")
+        self.assertIsNone(payload["autobridge_refusal_reason"])
+        self.assertNotIn("RUNTIME DISPATCH REFUSED", stderr)
+
+    def test_a_refused_packet_is_still_written_to_the_mailbox(self):
+        """Fail-closed on DISPATCH must not mean losing the durable record."""
+        root, chat_dir = self.scoped_subscriber_workspace(
+            subscriber_repo_targets=["llm-collab"])
+        payload, _stderr = self.deliver_with_scope(root, "CHAT-SCOPE1")
+        self.assertFalse(payload["autobridge_ready"])
+        written = sorted(chat_dir.glob("*_to-claude_*.md"))
+        self.assertTrue(written, "the packet must remain readable with inbox.py")
+        frontmatter, _ = parse_frontmatter(written[-1].read_text())
+        self.assertEqual([], frontmatter["repo_targets"])
+
     def test_deliver_uses_canonical_binding_for_target_session_id(self):
         root = self.make_workspace()
         self.add_agent(
