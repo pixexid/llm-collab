@@ -280,3 +280,81 @@ After this, PM2 and all running watchers restart automatically on reboot.
 Logs are written to `Logs/watchers/{agent}.pm2.{out,err}.log`.
 
 These files are gitignored.
+
+## Codex app-server delivery sidecar
+
+PM2 also manages the Codex delivery transport, not just inbox watchers.
+
+`bin/_session_autobridge.py` delivers to a Codex worker over the App Server
+(`initialize` → `thread/resume` → `turn/start`). `discover_codex_app_server()`
+only resolves a target launched with `--listen ws://`. The ChatGPT desktop app
+runs its own app-server on `--listen stdio://`, which no external process can
+connect to, so without this sidecar the delivery path can never find an endpoint
+and every packet falls back to the AX doorbell.
+
+The sidecar shares the desktop app's `CODEX_HOME`, so it reaches the same
+threads and the visible app keeps running.
+
+### Enabling it
+
+The token file's presence is the enable switch — there is no config flag:
+
+```bash
+mkdir -p .secrets
+python3 -c "import secrets; print(secrets.token_urlsafe(32))" > .secrets/codex_app_server_ws_token
+chmod 600 .secrets/codex_app_server_ws_token
+```
+
+`.secrets/` is gitignored. Mode `600` matters: the token authorizes turns on the
+operator's real Codex account.
+
+Overrides, all optional:
+
+| variable | default |
+|---|---|
+| `LLM_COLLAB_CODEX_APP_SERVER_TOKEN_FILE` | `.secrets/codex_app_server_ws_token` |
+| `LLM_COLLAB_CODEX_BIN` | `/Applications/ChatGPT.app/Contents/Resources/codex` |
+| `LLM_COLLAB_CODEX_HOME` | `~/.codex` |
+| `LLM_COLLAB_CODEX_APP_SERVER_PORT` | `8767` |
+
+The listener binds `127.0.0.1` only.
+
+### Lifecycle
+
+Addressed as `codex-appserver` through the normal manager, and included in
+`--all` whenever the token file and the Codex binary both exist:
+
+```bash
+python bin/pm2_watchers.py start --agent codex-appserver
+python bin/pm2_watchers.py status --agent codex-appserver
+python bin/pm2_watchers.py restart --agent codex-appserver
+python bin/pm2_watchers.py logs --agent codex-appserver
+python bin/pm2_watchers.py stop --agent codex-appserver
+```
+
+`status` reports `[ax] not applicable` for it: a transport sidecar has no
+Accessibility surface, which is the point of it.
+
+Persist the process list so it survives a reboot:
+
+```bash
+pm2 save
+```
+
+### Verifying and using it
+
+```bash
+curl -s http://127.0.0.1:8767/readyz
+python bin/codex_appserver.py status --session <session-id>
+python bin/codex_appserver.py tail   --session <session-id>
+```
+
+A session must declare the exact runtime home for delivery to resolve:
+
+```bash
+python bin/session_autobridge.py register --session <id> --agent codex \
+  --project <project> --chat <chat> --repo-target <repo> \
+  --status active --wake-strategy runtime_trigger \
+  --runtime-family codex_app --runtime-session-id <native-thread-id> \
+  --runtime-home ~/.codex
+```

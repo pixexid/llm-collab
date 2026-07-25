@@ -70,7 +70,7 @@ llm-collab/
 ├── tests/                    Python unit and integration tests
 ├── examples/                 public configuration examples
 ├── projects/_example/        public project-state template
-├── pm2/                      optional watcher configuration
+├── pm2/                      optional watcher + delivery-sidecar configuration
 └── .githooks/                local commit safety guard
 ```
 
@@ -106,7 +106,7 @@ Project-local operational state should live outside the checkout:
 - Python 3.10+
 - Git for repository and worktree operations
 - GitHub CLI (`gh`) only for GitHub-backed projects
-- PM2 only for background inbox watchers
+- PM2 for background inbox watchers and the Codex app-server delivery sidecar
 - macOS Accessibility permission only for AX doorbells
 
 Use `bin/llm-collab` for collaboration commands. It selects a compatible Python
@@ -374,7 +374,8 @@ Prefix collaboration commands with `bin/llm-collab`:
 | `task_contract.py sync/validate ...` | Sync and validate UI/UX and database task contracts |
 | `project_issue_queue.py reconcile/validate --project <project>` | Refresh or validate a GitHub-backed execution queue |
 | `worktree_ctl.py create/list/preflight/...` | Manage isolated implementation worktrees |
-| `pm2_watchers.py start/status/logs ...` | Manage optional inbox watchers |
+| `pm2_watchers.py start/status/logs ...` | Manage optional inbox watchers and delivery sidecars |
+| `codex_appserver.py status/tail/send/steer/interrupt` | Observe and drive an exact Codex worker over the App Server |
 | `autonomous_loop.py start/update/show/clear --project <project>` | Record persistent queue-runner state |
 | `post_merge_cleanup.py --project <project> ...` | Audit or clean integrated worktrees and branches |
 | `init_agent_memory.py --agent <id> --target <target>` | Generate collaboration-aware worker guidance |

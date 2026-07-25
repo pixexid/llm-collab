@@ -55,6 +55,37 @@ def app_name(agent_id: str) -> str:
     return f"{workspace}-{agent_id}"
 
 
+# Sidecar transports are PM2 apps but not inbox-watcher agents: they have no
+# agents.json entry and no AX surface. They are addressed by app suffix so
+# app_name() already resolves them, and gated on the same preconditions the
+# ecosystem config uses so `--all` never targets an app the config omits.
+SIDECAR_APP_IDS = ("codex-appserver",)
+
+
+def sidecar_token_file() -> Path:
+    configured = os.environ.get("LLM_COLLAB_CODEX_APP_SERVER_TOKEN_FILE")
+    if configured:
+        return Path(configured)
+    return ROOT / ".secrets" / "codex_app_server_ws_token"
+
+
+def sidecar_binary() -> Path:
+    configured = os.environ.get("LLM_COLLAB_CODEX_BIN")
+    if configured:
+        return Path(configured)
+    return Path("/Applications/ChatGPT.app/Contents/Resources/codex")
+
+
+def enabled_sidecar_ids() -> list[str]:
+    if sidecar_token_file().exists() and sidecar_binary().exists():
+        return list(SIDECAR_APP_IDS)
+    return []
+
+
+def is_sidecar(target: str) -> bool:
+    return target in SIDECAR_APP_IDS
+
+
 def pm2_timeout_seconds() -> int:
     raw_timeout = os.environ.get("LLM_COLLAB_PM2_TIMEOUT_SECONDS")
     if not raw_timeout:
@@ -97,6 +128,9 @@ def ecosystem_path() -> Path:
 
 
 def start_agent(agent_id: str) -> None:
+    if is_sidecar(agent_id):
+        pm2_run(["start", str(ecosystem_path()), "--only", app_name(agent_id)])
+        return
     agent = get_agent(agent_id)
     if not agent.get("activation", {}).get("watcher_enabled", False):
         print(f"[skip] {agent_id} has watcher_enabled: false")
@@ -117,9 +151,9 @@ def main():
 
     targets: list[str] = []
     if args.all:
-        targets = [a["id"] for a in watcher_enabled_agents()]
+        targets = [a["id"] for a in watcher_enabled_agents()] + enabled_sidecar_ids()
     elif args.agent:
-        if args.agent not in agent_ids():
+        if args.agent not in agent_ids() and not is_sidecar(args.agent):
             print(f"[error] Unknown agent: {args.agent!r}", file=sys.stderr)
             sys.exit(1)
         targets = [args.agent]
@@ -131,6 +165,12 @@ def main():
         # Print every target's AX state before invoking PM2. pm2_run exits on a
         # missing binary or timeout, but neither failure may suppress AX status.
         for agent_id in targets:
+            if is_sidecar(agent_id):
+                # Deliberately NOT an [ax] line: that prefix is the per-agent AX
+                # capability contract consumers parse, and a transport sidecar has
+                # no Accessibility surface to report on. That is the point of it.
+                print(f"[sidecar] target={agent_id} (no AX surface)")
+                continue
             print(format_ax_status(probe_ax_trust(get_agent(agent_id)), agent_id=agent_id))
 
     status_exit_code = 0
