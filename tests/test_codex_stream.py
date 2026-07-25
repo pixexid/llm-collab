@@ -91,6 +91,115 @@ class ResolveThreadTest(unittest.TestCase):
         self.assertEqual("--thread", provenance)
 
 
+class ObserverRefusesServerRequestsTest(unittest.TestCase):
+    """The safety contract must hold on the wire, not only in the docstring.
+
+    The base client answers any interleaved server request with {"result": {}}, so an
+    approval arriving during initialize/resume would be APPROVED. And a request read in
+    the steady-state loop cannot be deferred to "the turn owner": a JSON-RPC response
+    belongs on the connection that received it.
+    """
+
+    def client(self, incoming: list[dict]) -> codex_stream.ObserverClient:
+        client = codex_stream.ObserverClient.__new__(codex_stream.ObserverClient)
+        client.refused = []
+        client.sent: list[dict] = []
+        client.queue = list(incoming)
+        client.send_json = client.sent.append
+        return client
+
+    def drain(self, client, count: int) -> list[dict]:
+        def base_recv(_self=None):
+            return client.queue.pop(0)
+        with mock.patch.object(codex_stream.autobridge.JsonRpcWebSocketClient,
+                               "recv_json", base_recv):
+            return [client.recv_json() for _ in range(count)]
+
+    def test_an_approval_request_is_answered_with_an_error_never_a_result(self) -> None:
+        approval = {"id": "srv-1", "method": "item/commandExecution/requestApproval",
+                    "params": {"command": "rm -rf /"}}
+        event = {"method": "turn/completed", "params": {}}
+        got = self.client([approval, event])
+        delivered = self.drain(got, 1)
+
+        self.assertEqual([event], delivered, "the request must not surface as an event")
+        self.assertEqual(1, len(got.sent), "exactly one response must go out")
+        reply = got.sent[0]
+        self.assertEqual("srv-1", reply["id"], "the reply must correlate to the request")
+        self.assertIn("error", reply)
+        self.assertNotIn("result", reply,
+                         "a result is an approval; an observer must never send one")
+        self.assertEqual(codex_stream.METHOD_NOT_FOUND, reply["error"]["code"])
+        self.assertEqual(["item/commandExecution/requestApproval"], got.refused)
+
+    def test_a_request_interleaved_before_a_response_is_still_refused(self) -> None:
+        # this is the initialize/resume window, where the base client would answer {}
+        approval = {"id": "srv-2", "method": "item/fileChange/requestApproval", "params": {}}
+        response = {"id": "llm-collab-1", "result": {"ok": True}}
+        got = self.client([approval, response])
+        delivered = self.drain(got, 1)
+
+        self.assertEqual([response], delivered)
+        self.assertIn("error", got.sent[0])
+        self.assertEqual("srv-2", got.sent[0]["id"])
+
+    def test_a_plain_notification_is_passed_through_untouched(self) -> None:
+        note = {"method": "item/agentMessage/delta", "params": {"delta": "hi"}}
+        got = self.client([note])
+        self.assertEqual([note], self.drain(got, 1))
+        self.assertEqual([], got.sent, "notifications need no response at all")
+
+
+class RecordIdentityTest(unittest.TestCase):
+    """A record at the expected path is not proof of what the record is."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory(dir="/tmp")
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+        patcher = mock.patch.object(codex_stream, "BINDINGS_DIR", self.root)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def args(self, **kw):
+        base = {"agent": None, "project": None, "chat": None, "thread": None}
+        base.update(kw)
+        return SimpleNamespace(**base)
+
+    def write(self, project: str, chat: str, agent: str, payload) -> None:
+        path = self.root / project / chat / f"{agent}.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(payload if isinstance(payload, str) else json.dumps(payload),
+                        encoding="utf-8")
+
+    def test_a_record_claiming_another_project_and_chat_is_refused(self) -> None:
+        self.write("amiga", "CHAT-A", "codex", {
+            "agent_id": "claude", "project_id": "nuvyr", "chat_id": "CHAT-B",
+            "runtime_session_id": "wrong-thread", "status": "active",
+        })
+        with self.assertRaises(SystemExit):
+            codex_stream.resolve_thread(self.args(agent="codex", project="amiga", chat="CHAT-A"))
+
+    def test_a_record_agreeing_with_its_path_is_admitted(self) -> None:
+        self.write("amiga", "CHAT-A", "codex", {
+            "agent_id": "codex", "project_id": "amiga", "chat_id": "CHAT-A",
+            "runtime_session_id": "right-thread", "status": "active",
+        })
+        thread, _ = codex_stream.resolve_thread(
+            self.args(agent="codex", project="amiga", chat="CHAT-A"))
+        self.assertEqual("right-thread", thread)
+
+    def test_malformed_json_fails_closed_rather_than_raising(self) -> None:
+        self.write("amiga", "CHAT-A", "codex", "{not json")
+        with self.assertRaises(SystemExit):
+            codex_stream.resolve_thread(self.args(agent="codex", project="amiga", chat="CHAT-A"))
+
+    def test_a_json_list_is_not_mistaken_for_a_record(self) -> None:
+        self.write("amiga", "CHAT-A", "codex", ["runtime_session_id"])
+        with self.assertRaises(SystemExit):
+            codex_stream.resolve_thread(self.args(agent="codex", project="amiga", chat="CHAT-A"))
+
+
 class DescribeTest(unittest.TestCase):
     def test_agent_message_completion_stays_quiet_because_deltas_already_printed(self) -> None:
         self.assertIsNone(

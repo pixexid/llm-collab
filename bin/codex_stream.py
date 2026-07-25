@@ -37,6 +37,43 @@ from _helpers import ROOT
 
 DEFAULT_IDLE_TIMEOUT_SECONDS = 5
 BINDINGS_DIR = ROOT / "State" / "session_autobridge" / "bindings"
+METHOD_NOT_FOUND = -32601
+
+
+class ObserverClient(autobridge.JsonRpcWebSocketClient):
+    """A connection that refuses every server-initiated request.
+
+    The base client answers any interleaved server request with `{"result": {}}`, so an
+    `item/commandExecution/requestApproval` arriving while `initialize` or `thread/resume`
+    is in flight would be APPROVED by an observer that promised never to vote. Printing
+    "left for the turn owner" instead does not work either: a JSON-RPC response belongs on
+    the connection that received the request, so the owner cannot answer one delivered
+    here -- it would simply hang.
+
+    Refusing inside recv_json covers both cases at once, because every read path goes
+    through it: the request/response loop and the steady-state event loop.
+    """
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.refused: list[str] = []
+
+    def recv_json(self) -> dict:
+        while True:
+            message = super().recv_json()
+            if message.get("id") is not None and message.get("method"):
+                self.refused.append(str(message["method"]))
+                self.send_json({
+                    "jsonrpc": "2.0",
+                    "id": message["id"],
+                    "error": {
+                        "code": METHOD_NOT_FOUND,
+                        "message": ("llm-collab codex_stream is a read-only observer; "
+                                    "it refuses all requests and never approves"),
+                    },
+                })
+                continue
+            return message
 
 
 def parse_args() -> argparse.Namespace:
@@ -49,6 +86,15 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--seconds", type=float, help="Stop after this long (default: until Ctrl-C)")
     p.add_argument("--raw", action="store_true", help="Print every notification as JSON")
     return p.parse_args()
+
+
+def record_matches_path(record: dict, path: Path, agent: str) -> bool:
+    """The record must be what its location and the invocation claim it is."""
+    return (
+        str(record.get("agent_id") or "") == agent
+        and str(record.get("chat_id") or "") == path.parent.name
+        and str(record.get("project_id") or "") == path.parent.parent.name
+    )
 
 
 def resolve_thread(args: argparse.Namespace) -> tuple[str, str]:
@@ -70,9 +116,18 @@ def resolve_thread(args: argparse.Namespace) -> tuple[str, str]:
     for path in candidates:
         if not path.exists():
             continue
-        record = json.loads(path.read_text(encoding="utf-8"))
-        if record.get("runtime_session_id"):
-            bindings.append((record, path))
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(record, dict) or not record.get("runtime_session_id"):
+            continue
+        # A record at the expected path is not proof of what the record IS. One claiming
+        # a different project/chat/agent was admitted on its claims alone and its thread
+        # watched, which crosses a project boundary rather than mislabelling a heading.
+        if not record_matches_path(record, path, args.agent):
+            continue
+        bindings.append((record, path))
 
     if not bindings:
         raise SystemExit(f"[error] no binding with a runtime_session_id for agent {args.agent!r}")
@@ -140,7 +195,8 @@ def main() -> None:
     deadline = time.time() + args.seconds if args.seconds else None
     pending_text = ""
 
-    with autobridge.JsonRpcWebSocketClient(
+    failed = False
+    with ObserverClient(
         str(endpoint["url"]), token=token, timeout_seconds=DEFAULT_IDLE_TIMEOUT_SECONDS
     ) as client:
         client.request(
@@ -163,16 +219,14 @@ def main() -> None:
             except KeyboardInterrupt:
                 break
             except Exception as error:
-                print(f"[stream] connection ended: {type(error).__name__}: {error}")
+                # Supervision must be able to tell a dead live view from a finished one.
+                print(f"[stream] connection ended: {type(error).__name__}: {error}",
+                      file=sys.stderr)
+                failed = True
                 break
 
             method = message.get("method")
             if not method:
-                continue
-
-            # A server-initiated request carries an id. Observers do not answer them.
-            if "id" in message:
-                print(f"[stream] !! server request {method} left for the turn owner")
                 continue
 
             params = message.get("params") or {}
@@ -200,6 +254,11 @@ def main() -> None:
 
     if pending_text:
         sys.stdout.write("\n")
+    if client.refused:
+        print(f"[stream] refused {len(client.refused)} server request(s): "
+              f"{', '.join(sorted(set(client.refused)))}", file=sys.stderr)
+    if failed:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
