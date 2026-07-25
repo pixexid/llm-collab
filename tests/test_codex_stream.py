@@ -836,7 +836,9 @@ class ObserverAnswersNothingTest(unittest.TestCase):
         self.assertIn("T1", self.stderr, "and with the thread it belongs to")
 
     def test_a_request_interleaved_before_a_response_is_also_unanswered(self) -> None:
-        # the initialize/resume window, where the base client would answer {}
+        # the initialize/resume window: silence must hold here too, not only in the event
+        # loop. (The pre-#308 base client answered {} in this window; it refuses now, and an
+        # observer must do neither.)
         approval = {"id": "srv-2", "method": "item/fileChange/requestApproval", "params": {}}
         response = {"id": "llm-collab-1", "result": {"ok": True}}
         client = self.client([approval, response])
