@@ -1170,7 +1170,7 @@ class ObservationEngine:
         }
 
     def diagnostics(
-        self, store: object, integrity: str | None = None
+        self, store: object, integrity: object | None = None
     ) -> dict[str, object]:
         roots = {}
         for name in ("Chats", "agents"):

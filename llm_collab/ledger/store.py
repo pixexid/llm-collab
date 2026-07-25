@@ -23,6 +23,7 @@ BUSY_TIMEOUT_MS = 5_000
 SYNCHRONOUS_FULL = 2
 MIGRATION_TOOL_VERSION = "llm-collab-ledger/1"
 SAFE_SQLITE_BACKPORTS = {(3, 44, 6), (3, 50, 7)}
+_CONNECTION_OPEN_LOCK = threading.RLock()
 V1_TABLES = frozenset(
     {
         "schema_migrations",
@@ -3273,9 +3274,10 @@ class _PinnedFile:
         os.fchmod(self._fd, mode)
 
     def close(self) -> None:
-        fd, self._fd = self._fd, None
-        if fd is not None:
-            os.close(fd)
+        with _CONNECTION_OPEN_LOCK:
+            fd, self._fd = self._fd, None
+            if fd is not None:
+                os.close(fd)
 
     def __del__(self) -> None:
         try:
@@ -3287,12 +3289,13 @@ class _PinnedFile:
 def _close_connection_and_pin(
     connection: sqlite3.Connection | None, pin: _PinnedFile | None
 ) -> None:
-    try:
-        if connection is not None:
-            connection.close()
-    finally:
-        if pin is not None:
-            pin.close()
+    with _CONNECTION_OPEN_LOCK:
+        try:
+            if connection is not None:
+                connection.close()
+        finally:
+            if pin is not None:
+                pin.close()
 
 
 def _stable_fd_record(fd: int, path_reader: Callable[[int], str]) -> tuple[int, int, int, str]:
@@ -3422,6 +3425,8 @@ class LedgerStore:
     def open_reader(
         cls,
         paths: LedgerPaths,
+        *,
+        validate_integrity: bool = True,
     ) -> "LedgerStore":
         require_safe_sqlite()
         paths.assert_contained()
@@ -3434,7 +3439,11 @@ class LedgerStore:
             timeout=BUSY_TIMEOUT_MS / 1_000,
         )
         try:
-            cls._validate_schema(connection, paths)
+            cls._validate_schema(
+                connection,
+                paths,
+                validate_integrity=validate_integrity,
+            )
             cls._configure(connection, writer=False)
             return cls(
                 paths,
@@ -3494,38 +3503,40 @@ class LedgerStore:
         exclusive: bool = False,
         timeout: float = BUSY_TIMEOUT_MS / 1_000,
     ) -> tuple[sqlite3.Connection, _PinnedFile]:
-        pin = cls._pin_regular_file(
-            path,
-            writable=not read_only,
-            create=create,
-            exclusive=exclusive,
-        )
         connection = None
+        pin = None
         try:
-            before = _connection_fd_snapshot()
-            connection = sqlite3.connect(
-                path.as_uri() + ("?mode=ro" if read_only else "?mode=rw"),
-                uri=True,
-                timeout=timeout,
-                isolation_level=None,
-            )
-            after = _connection_fd_snapshot()
-            opened_regular_files = [
-                record
-                for fd, record in after.items()
-                if fd not in before
-                and stat.S_ISREG(record[2])
-                and _reported_path_matches(record[3], path)
-            ]
-            if len(opened_regular_files) != 1:
-                raise SQLiteSafetyError(
-                    "SQLite main-database descriptor proof is unavailable or ambiguous"
+            with _CONNECTION_OPEN_LOCK:
+                pin = cls._pin_regular_file(
+                    path,
+                    writable=not read_only,
+                    create=create,
+                    exclusive=exclusive,
                 )
-            actual = opened_regular_files[0]
-            if (actual[0], actual[1]) != pin.identity:
-                raise SQLiteSafetyError("SQLite opened a different file than the no-follow pin")
-            if not read_only:
-                pin.fchmod(0o600)
+                before = _connection_fd_snapshot()
+                connection = sqlite3.connect(
+                    path.as_uri() + ("?mode=ro" if read_only else "?mode=rw"),
+                    uri=True,
+                    timeout=timeout,
+                    isolation_level=None,
+                )
+                after = _connection_fd_snapshot()
+                opened_regular_files = [
+                    record
+                    for fd, record in after.items()
+                    if before.get(fd) != record
+                    and stat.S_ISREG(record[2])
+                    and _reported_path_matches(record[3], path)
+                ]
+                if len(opened_regular_files) != 1:
+                    raise SQLiteSafetyError(
+                        "SQLite main-database descriptor proof is unavailable or ambiguous"
+                    )
+                actual = opened_regular_files[0]
+                if (actual[0], actual[1]) != pin.identity:
+                    raise SQLiteSafetyError("SQLite opened a different file than the no-follow pin")
+                if not read_only:
+                    pin.fchmod(0o600)
             return connection, pin
         except BaseException:
             _close_connection_and_pin(connection, pin)
@@ -3614,10 +3625,17 @@ class LedgerStore:
         }
 
     @classmethod
-    def _validate_schema(cls, connection: sqlite3.Connection, paths: LedgerPaths) -> None:
+    def _validate_schema(
+        cls,
+        connection: sqlite3.Connection,
+        paths: LedgerPaths,
+        *,
+        validate_integrity: bool = True,
+    ) -> None:
         """Require the exact latest schema; query-only readers never accept v1."""
         try:
-            cls._validate_database_health(connection)
+            if validate_integrity:
+                cls._validate_database_health(connection)
             claimed = connection.execute("PRAGMA user_version").fetchone()[0]
             if claimed != SCHEMA_VERSION:
                 raise MigrationError(
@@ -4204,6 +4222,10 @@ class LedgerStore:
             raise sqlite3.ProgrammingError("ledger connections may not be reused across threads")
         if self._closed:
             raise sqlite3.ProgrammingError("ledger connection is closed")
+
+    @property
+    def database_identity(self) -> tuple[int, int]:
+        return self._database_pin.identity
 
     def schema_version(self) -> int:
         self._ensure_thread()
@@ -7739,7 +7761,7 @@ class LedgerStore:
         self,
         *,
         workspace_id: str,
-        integrity: str | None = None,
+        integrity: object | None = None,
         group_limit: int = 50,
         audit_limit: int = 200,
     ) -> dict[str, object]:
