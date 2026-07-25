@@ -502,6 +502,125 @@ class HandshakeClosesOnFailureTest(unittest.TestCase):
             self.assertIsNone(made.read_deadline)
             self.assertEqual("turn/started", made.recv_json()["method"])
 
+    # --- a FIXED-SIZE read iterates too, when the peer fragments it ----------------------
+    #
+    # I claimed the header, extended-length and mask reads were unprovable, on the grounds that a
+    # 2/8/4-byte read always completes inside the single timeout recv_json already installed. That
+    # is the same wrong model as the bug itself: socket timeouts restart on every recv() and do not
+    # bound the total. Codex disproved it with a two-byte read whose bytes arrive 40ms apart.
+
+    def fragmented_pair(self, chunks, gap):
+        """A connected socket whose peer writes `chunks` `gap` seconds apart."""
+        import socket as _socket
+        import threading as _threading
+        import time as _t
+
+        near, far = _socket.socketpair()
+
+        def feed():
+            try:
+                for chunk in chunks:
+                    _t.sleep(gap)
+                    far.sendall(chunk)
+                _t.sleep(1.0)
+            except OSError:
+                pass
+            finally:
+                far.close()
+
+        thread = _threading.Thread(target=feed, daemon=True)
+        thread.start()
+        self.addCleanup(near.close)
+        self.addCleanup(thread.join, 2.0)
+        return near
+
+    def client_with_deadline(self, budget):
+        import time as _t
+
+        made = autobridge.JsonRpcWebSocketClient("ws://127.0.0.1:1", token=None,
+                                                 timeout_seconds=5)
+        made.set_deadline(_t.monotonic() + budget)
+        return made
+
+    def test_a_fragmented_two_byte_read_is_bounded_when_the_client_is_passed(self) -> None:
+        """Codex's counterexample: 2 bytes, 40ms apart, 50ms deadline -> must raise."""
+        import time as _t
+
+        sock = self.fragmented_pair([b"A", b"B"], gap=0.04)
+        made = self.client_with_deadline(0.05)
+        sock.settimeout(made.remaining_wait())
+        started = _t.monotonic()
+        with self.assertRaises(TimeoutError):
+            autobridge._socket_read_exact(sock, 2, made)
+        self.assertLess(_t.monotonic() - started, 0.5)
+
+    def test_the_same_fragmented_two_byte_read_is_UNBOUNDED_without_the_client(self) -> None:
+        """The other half of the counterexample -- this is what makes the callsites provable.
+
+        Without the client the second recv() gets a fresh full timeout window, so the read
+        succeeds well past the deadline. If this ever starts raising, the test above has stopped
+        proving anything.
+        """
+        import time as _t
+
+        sock = self.fragmented_pair([b"A", b"B"], gap=0.04)
+        made = self.client_with_deadline(0.05)
+        sock.settimeout(made.remaining_wait())
+        started = _t.monotonic()
+        got = autobridge._socket_read_exact(sock, 2)
+        elapsed = _t.monotonic() - started
+        self.assertEqual(b"AB", got)
+        self.assertGreater(elapsed, 0.05,
+                           "the unclamped read must outlast the deadline, or the pair of tests "
+                           f"proves nothing: {elapsed:.3f}s")
+
+    def test_every_exact_read_in_recv_frame_carries_the_client(self) -> None:
+        """Structural: each callsite passes self, including BOTH extended-length branches.
+
+        Timing tests cannot economically cover five callsites, so the wiring is asserted directly.
+        This is what fails when any single callsite drops `self`.
+        """
+        for description, length_bytes, declared, masked in (
+            ("2-byte extended length", 2, 126, False),
+            ("8-byte extended length", 8, 127, False),
+            # A server never masks, so this branch is dead against a real peer -- but _recv_frame
+            # does implement it, and an unbounded read there is a hole all the same.
+            ("masked frame", 4, 126, True),
+        ):
+            with self.subTest(description):
+                body = b"x" * 8
+                mask_key = b"\x01\x02\x03\x04" if masked else b""
+                on_wire = (bytes(byte ^ mask_key[i % 4] for i, byte in enumerate(body))
+                           if masked else body)
+                header = bytes([0x81, (0x80 if masked else 0) | declared])
+                if declared == 126:
+                    header += len(body).to_bytes(2, "big")
+                else:
+                    header += len(body).to_bytes(8, "big")
+                stream = bytearray(header + mask_key + on_wire)
+                real = autobridge._socket_read_exact
+                calls = []
+
+                def recording(sock, count, client=None):
+                    calls.append((count, client))
+                    taken = bytes(stream[:count])
+                    del stream[:count]
+                    return taken
+
+                made = autobridge.JsonRpcWebSocketClient("ws://127.0.0.1:1", token=None,
+                                                         timeout_seconds=5)
+                made.sock = mock.Mock()
+                with mock.patch.object(autobridge, "_socket_read_exact", recording):
+                    opcode, payload = made._recv_frame()
+                self.assertEqual(body, payload,
+                                 "a masked payload must come back unmasked")
+                self.assertGreaterEqual(len(calls), 3, calls)
+                self.assertEqual([], [count for count, client in calls if client is not made],
+                                 f"every exact read must carry the client, got {calls}")
+                self.assertIn(length_bytes, [count for count, _ in calls],
+                              f"the {description} branch was not exercised: {calls}")
+                self.assertIs(real, autobridge._socket_read_exact)
+
     def test_the_default_has_no_deadline_so_existing_callers_are_unchanged(self) -> None:
         made = autobridge.JsonRpcWebSocketClient("ws://127.0.0.1:1", timeout_seconds=30)
         self.assertIsNone(made.read_deadline)

@@ -1357,13 +1357,15 @@ def _socket_read_exact(sock: socket.socket, count: int, client=None) -> bytes:
     because each recv succeeded inside its own timeout and nothing looked at the clock in between.
     Bounding a loop means checking inside it.
 
-    Mutation-proved at this head for the two call sites where it is observable: removing this
-    check, or the payload read's client, both fail the byte-trickle test. Removing it from the
-    header, extended-length or mask reads does NOT fail, and cannot: recv_json() has already
-    clamped the socket to the remaining budget, so any read that finishes within one timeout
-    window behaves identically either way. Those three are fixed-size reads of 2, 8 and 4 bytes.
-    They pass the client for uniformity -- a future longer read gets the bound for free -- but
-    the guarantee is only demonstrable on the loop that actually iterates.
+    Every call site is mutation-proved: dropping the client from the header, either extended-length
+    branch, the mask or the payload read all fail, as does removing this check.
+
+    I first claimed the fixed-size reads were unprovable, reasoning that a 2/8/4-byte read always
+    completes inside the single timeout recv_json has already installed. That is the same wrong
+    model as the bug: a socket timeout restarts on every recv() and never bounds the total, which
+    is exactly why checking once outside the loop was insufficient. A fixed-size read iterates too
+    whenever the peer fragments it -- two bytes 40ms apart under a 50ms deadline raise here at
+    ~56ms, and return successfully at ~90ms without this check.
     """
     chunks: list[bytes] = []
     remaining = count
