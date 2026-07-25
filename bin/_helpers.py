@@ -991,3 +991,38 @@ def print_handoff_prompt(
     print(build_handoff_prompt(agent, sender_id=sender_id, first_time=first_time))
     print()
     print(border)
+
+def canonical_path(value, base=None):
+    """The single path invariant shared by every llm-collab path comparison.
+
+    Absolute (resolved against the repository root, never the caller's cwd), redundant
+    segments collapsed, no trailing separator, symlinks deliberately unresolved because
+    delivery discovery matches the launched spelling literally.
+
+    This lives here, imported by both bin/pm2_watchers.py and bin/session_autobridge.py
+    and mirrored by canonicalPath() in pm2/ecosystem.config.cjs, because six separate
+    defects came from normalizing one side of a two-sided comparison and calling the
+    concern closed. A second copy is how the seventh happens.
+
+    One tilde grammar only: exact ``~`` or a ``~/`` prefix. ``~user`` forms stay literal
+    because os.path.expanduser accepts them and the CJS mirror cannot, and a form that
+    canonicalizes to an absolute home on one side and a repo-relative ``~user`` directory
+    on the other is the validate-one-path/use-another defect wearing a different hat.
+
+    Leading separator runs collapse to one, and a ``~/`` tail's own leading run is
+    stripped before joining. Both exist because Node and Python disagree by default:
+    ``os.path.join(home, "/x")`` discards home while ``path.join`` keeps it, and
+    ``normpath`` preserves exactly two leading slashes per POSIX while ``path.resolve``
+    collapses them. ``~//x`` and ``//tmp/codex-home`` each canonicalized to a different
+    literal on each side, which is the same one-sided-normalization defect as the rest.
+    """
+    import os as _os
+
+    text = str(value).strip()
+    if text == "~" or text.startswith("~/"):
+        home = _os.path.expanduser("~")
+        text = home if text == "~" else _os.path.join(home, text[2:].lstrip("/"))
+    root = str(base) if base is not None else str(ROOT)
+    joined = text if _os.path.isabs(text) else _os.path.join(root, text)
+    normalised = re.sub(r"^/+", "/", _os.path.normpath(joined))
+    return Path(normalised)

@@ -5226,3 +5226,165 @@ class SessionAutobridgeTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RenamedCodexBinaryDiscoveryTest(unittest.TestCase):
+    """LLM_COLLAB_CODEX_BIN accepts any path, so discovery must not key on the filename.
+
+    This PR adds and documents that override. A wrapper, symlink, or versioned executable
+    launches correctly, and a literal "codex app-server" match would then never discover it --
+    registered sessions would lose the very transport this PR advertises. The override and the
+    discovery are one concern because the same change introduces the override.
+    """
+
+    def rows(self, commands):
+        import subprocess as sp
+        from unittest import mock as m
+        listing = "\n".join(f"{1000 + i} {c}" for i, c in enumerate(commands))
+        with m.patch.object(sp, "run", return_value=m.Mock(stdout=listing, returncode=0)):
+            return session_autobridge_lib.codex_app_server_process_rows()
+
+    def test_a_renamed_or_wrapped_binary_is_discovered(self) -> None:
+        found = self.rows([
+            "/opt/bin/codex-cli app-server --listen ws://127.0.0.1:8767 --ws-auth capability-token",
+            "/usr/local/bin/codex-0.146.0 app-server --listen ws://127.0.0.1:8768",
+            "/Applications/ChatGPT.app/Contents/Resources/codex app-server --listen ws://127.0.0.1:8769",
+        ])
+        self.assertEqual(3, len(found), f"all three should be discovered: {found}")
+
+    def test_a_codex_process_that_is_not_an_app_server_is_ignored(self) -> None:
+        found = self.rows([
+            "/opt/bin/codex exec --prompt hello",
+            "/opt/bin/codex login",
+            "grep -r codex app-server /tmp",
+        ])
+        self.assertEqual([], found, "a false positive points delivery at the wrong endpoint")
+
+    def test_ordinary_global_flags_do_not_hide_the_subcommand(self) -> None:
+        """Assuming every unknown option takes a value swallowed the subcommand.
+
+        These are all valid installed-CLI invocations, and each one made a reachable server
+        vanish from discovery.
+        """
+        found = self.rows([
+            "/opt/bin/codex --strict-config app-server --listen ws://127.0.0.1:8767",
+            "/opt/bin/codex --oss app-server --listen ws://127.0.0.1:8768",
+            "/opt/bin/codex --search app-server --listen ws://127.0.0.1:8769",
+            "/opt/bin/codex --dangerously-bypass-approvals-and-sandbox "
+            "app-server --listen ws://127.0.0.1:8770",
+            "/opt/bin/codex --no-alt-screen app-server --listen ws://127.0.0.1:8771",
+        ])
+        self.assertEqual(5, len(found), f"all five are reachable servers: {found}")
+
+    def test_value_taking_options_still_consume_their_value(self) -> None:
+        found = self.rows([
+            "/opt/bin/codex -m gpt-5 app-server --listen ws://127.0.0.1:8767",
+            "/opt/bin/codex --cd /tmp app-server --listen ws://127.0.0.1:8768",
+            "/opt/bin/codex -c features.x=true --strict-config -p prof "
+            "app-server --listen ws://127.0.0.1:8769",
+        ])
+        self.assertEqual(3, len(found), f"{found}")
+
+    def test_the_option_table_matches_the_installed_cli(self) -> None:
+        """Keeps the transcribed table honest against the binary, not against my memory.
+
+        Every option `codex --help` shows with a <VALUE> placeholder must be listed as
+        value-taking, and no bare flag may be.
+        """
+        import re as _re
+        import shutil as _shutil
+        import subprocess as _sp
+
+        binary = "/Applications/ChatGPT.app/Contents/Resources/codex"
+        if not Path(binary).exists():
+            binary = _shutil.which("codex") or ""
+        if not binary:
+            self.skipTest("no codex binary available to compare against")
+        text = _sp.run([binary, "--help"], capture_output=True, text=True,
+                       timeout=60).stdout
+        table = session_autobridge_lib.VALUE_TAKING_GLOBAL_OPTIONS
+        checked = 0
+        for line in text.splitlines():
+            if not _re.match(r"^  +-", line):
+                continue
+            names = _re.findall(r"(-{1,2}[A-Za-z][\w-]*)", line.split("  ", 3)[-1] or line)
+            names = [n for n in _re.findall(r"(?:^|[\s,])(-{1,2}[A-Za-z][\w-]*)", line)]
+            if not names:
+                continue
+            takes_value = "<" in line
+            for name in names:
+                if name in {"-h", "--help", "-V", "--version"}:
+                    continue
+                checked += 1
+                if takes_value:
+                    self.assertIn(name, table,
+                                  f"{name} takes a value per --help but is missing from the table")
+                else:
+                    self.assertNotIn(name, table,
+                                     f"{name} is a bare flag per --help but listed as value-taking")
+        self.assertGreater(checked, 10, "the help output should have yielded many options")
+
+    def test_an_executable_that_is_not_codex_is_refused(self) -> None:
+        """The option table cannot separate these; the executable can.
+
+        With unknown flags treated as valueless -- which is required so that --strict-config
+        does not hide the subcommand -- `worker --label app-server` puts app-server in the
+        subcommand slot. Only the executable's identity rejects it.
+        """
+        found = self.rows([
+            "/opt/bin/worker --label app-server --listen ws://127.0.0.1:9998",
+            "/usr/bin/python3 -m something app-server --listen ws://127.0.0.1:9997",
+        ])
+        self.assertEqual([], found, f"{found}")
+
+    def test_the_configured_binary_is_accepted_whatever_it_is_called(self) -> None:
+        # the point of LLM_COLLAB_CODEX_BIN: a wrapper named nothing like codex still works
+        from unittest import mock as m
+        with m.patch.dict("os.environ", {"LLM_COLLAB_CODEX_BIN": "/opt/custom/run-server"}):
+            found = self.rows(["/opt/custom/run-server app-server --listen ws://127.0.0.1:8767"])
+        self.assertEqual(1, len(found))
+        unconfigured = self.rows(["/opt/custom/run-server app-server --listen ws://127.0.0.1:8767"])
+        self.assertEqual([], unconfigured, "and only when it is configured")
+
+    def test_a_substring_match_is_not_enough(self) -> None:
+        """These two were admitted by `"app-server" in command`.
+
+        discover_codex_app_server takes the FIRST matching row, so a false positive points
+        delivery at somebody else's socket -- worse than the false negative being fixed.
+        """
+        found = self.rows([
+            "/opt/bin/worker-app-server-proxy --listen ws://127.0.0.1:9999 CODEX_HOME=/tmp/home",
+            "/opt/bin/worker --label app-server --listen ws://127.0.0.1:9998",
+            "/opt/bin/app-server-shim --listen ws://127.0.0.1:9997",
+        ])
+        self.assertEqual([], found, f"none of these is a codex app-server: {found}")
+
+    def test_the_real_desktop_invocation_with_a_separated_option_is_matched(self) -> None:
+        # `-c key=value` before the subcommand is exactly how the desktop app launches
+        found = self.rows([
+            "/Applications/ChatGPT.app/Contents/Resources/codex "
+            "-c features.code_mode_host=true app-server --listen ws://127.0.0.1:8767",
+        ])
+        self.assertEqual(1, len(found))
+
+    def test_a_listen_flag_joined_with_equals_still_counts(self) -> None:
+        found = self.rows(["/opt/bin/codex app-server --listen=ws://127.0.0.1:8767"])
+        self.assertEqual(1, len(found))
+
+    def test_discovery_still_requires_the_exact_codex_home_marker(self) -> None:
+        """Being an app-server is necessary, not sufficient: the home must match too."""
+        from unittest import mock as m
+        import subprocess as sp
+        listing = ("111 /opt/bin/codex-cli app-server --listen ws://127.0.0.1:8767 "
+                   "CODEX_HOME=/Users/other/.codex")
+        with m.patch.object(sp, "run", return_value=m.Mock(stdout=listing, returncode=0)):
+            with m.patch.dict("os.environ", {}, clear=False):
+                found = session_autobridge_lib.discover_codex_app_server("/Users/me/.codex")
+        self.assertIsNone(found, "a matching invocation under another home is not our endpoint")
+
+    def test_an_app_server_with_no_listener_flag_is_ignored(self) -> None:
+        # the desktop app runs one of these; it is not reachable, so it is not an endpoint
+        self.assertEqual([], self.rows([
+            "/Applications/ChatGPT.app/Contents/Resources/codex "
+            "-c features.code_mode_host=true app-server --analytics-default-enabled",
+        ]))
