@@ -112,6 +112,23 @@ def iter_sessions(agent_id: str | None = None) -> list[dict]:
     return sessions
 
 
+# The binding is the authoritative record every exact-dispatch decision is made from, and it lives
+# in an untrusted workspace tree like everything around it. read_text() parsed it whole with no
+# ceiling: a valid 4,194,591-byte binding was accepted and resolved. Bounded before the parse.
+MAX_BINDING_BYTES = 256 * 1024
+
+
+class BindingUnreadable(RuntimeError):
+    """An oversized or I/O-failed binding.
+
+    Deliberately NOT a FileNotFoundError. Callers catch that to mean "there is no such binding" and
+    turn it into exact_binding_required or "no live session" -- so collapsing an oversized or
+    permission-denied binding into it would report a present-but-unreadable record as an absent one,
+    hiding the real fault. RuntimeError is outside every (FileNotFoundError, OSError, ValueError)
+    tuple in this codebase, so it propagates instead of being absorbed.
+    """
+
+
 def load_binding(project_id: str, chat_id: str, agent_id: str) -> dict:
     path = autobridge_binding_path(project_id, chat_id, agent_id)
     if not path.exists():
@@ -119,8 +136,17 @@ def load_binding(project_id: str, chat_id: str, agent_id: str) -> dict:
             f"Unknown binding: project={project_id} chat={chat_id} agent={agent_id}"
         )
     try:
-        payload = json.loads(path.read_text())
-    except (OSError, ValueError) as exc:
+        with path.open("rb") as handle:
+            raw = handle.read(MAX_BINDING_BYTES + 1)
+    except OSError as exc:
+        raise BindingUnreadable(f"cannot read binding {path}: {exc}") from exc
+    if len(raw) > MAX_BINDING_BYTES:
+        raise BindingUnreadable(
+            f"binding {path} exceeds the {MAX_BINDING_BYTES} byte limit; refusing to parse it"
+        )
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as exc:
         raise FileNotFoundError(
             f"Unreadable binding: project={project_id} chat={chat_id} agent={agent_id}"
         ) from exc

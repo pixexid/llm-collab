@@ -466,7 +466,14 @@ def resolve_one(project: str, chat: str, agent: str, *, fatal: bool,
     resolve_exact_dispatch_pair() hands back the exact binding it validated against, so there is
     nothing left to reopen and nothing to reconcile.
     """
-    pair, reason = autobridge.resolve_exact_dispatch_pair(project, chat, agent, sessions=sessions)
+    try:
+        pair, reason = autobridge.resolve_exact_dispatch_pair(project, chat, agent,
+                                                             sessions=sessions)
+    except autobridge.BindingUnreadable as error:
+        # Reported, never collapsed: an oversized or unreadable binding is a present record we
+        # refused to parse, not an absent one. Turning it into "no live session" would name the
+        # wrong cause, which is the same mistake the binding scan made with OSError.
+        raise SystemExit(f"[error] {error}")
     if pair is None:
         if not fatal and reason in SKIPPABLE_RESOLVER_REASONS:
             return None

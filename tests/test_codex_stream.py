@@ -291,6 +291,91 @@ class ResolveThreadTest(unittest.TestCase):
         self.assertEqual([], scans,
                          "the resolver must not scan at all when the caller supplies sessions")
 
+    # --- the authoritative binding is bounded before it is parsed --------------------------
+    #
+    # Codex's proof: an ordinary named-chat lookup accepted and resolved a valid 4,194,591-byte
+    # binding, because load_binding used read_text(). My earlier "whole family" audit missed this by
+    # grepping the MODULE rather than the call graph -- the reader delegates resolution to the
+    # shared autobridge, so the shared reads are on this reader's path too.
+
+    def test_an_oversized_binding_is_refused_before_it_is_parsed(self) -> None:
+        self.bind(chat="CHAT-BIG", thread="t-big")
+        path = self.bindings / "amiga" / "CHAT-BIG" / "codex.json"
+        good = json.loads(path.read_text())
+        good["pad"] = "z" * (codex_stream.autobridge.MAX_BINDING_BYTES + 2048)
+        path.write_text(json.dumps(good), encoding="utf-8")
+        with self.assertRaises(SystemExit) as caught:
+            codex_stream.resolve_thread(
+                self.args(agent="codex", project="amiga", chat="CHAT-BIG"))
+        message = str(caught.exception)
+        self.assertIn(str(codex_stream.autobridge.MAX_BINDING_BYTES), message)
+        self.assertNotIn("exact_binding_required", message,
+                         "an oversized binding is present-but-unreadable, not absent")
+        self.assertNotIn("no live exactly-bound", message)
+
+    def test_the_binding_read_ITSELF_is_bounded_not_just_the_verdict(self) -> None:
+        """Asserted on the read() argument: read-all-then-measure gives the same verdict."""
+        self.bind(chat="CHAT-ARG", thread="t-arg")
+        seen = []
+        real_open = Path.open
+
+        def recording(self_path, *args, **kwargs):
+            handle = real_open(self_path, *args, **kwargs)
+            if self_path.name == "codex.json":
+                real_read = handle.read
+
+                def read(*read_args):
+                    seen.append(read_args)
+                    return real_read(*read_args)
+
+                handle.read = read
+            return handle
+
+        with mock.patch.object(Path, "open", recording):
+            codex_stream.resolve_thread(
+                self.args(agent="codex", project="amiga", chat="CHAT-ARG"))
+        self.assertTrue(seen, "the binding was not read through a bounded read at all")
+        self.assertEqual((codex_stream.autobridge.MAX_BINDING_BYTES + 1,), seen[0],
+                         f"the binding read must be capped, got {seen[0]}")
+
+    def test_an_unreadable_binding_is_reported_not_collapsed_to_absent(self) -> None:
+        self.bind(chat="CHAT-DENY", thread="t-deny")
+        real_open = Path.open
+
+        def denied(self_path, *args, **kwargs):
+            if self_path.name == "codex.json":
+                raise PermissionError(13, "Permission denied")
+            return real_open(self_path, *args, **kwargs)
+
+        with mock.patch.object(Path, "open", denied):
+            with self.assertRaises(SystemExit) as caught:
+                codex_stream.resolve_thread(
+                    self.args(agent="codex", project="amiga", chat="CHAT-DENY"))
+        message = str(caught.exception)
+        self.assertIn("Permission denied", message)
+        self.assertNotIn("exact_binding_required", message)
+
+    def test_a_binding_at_the_limit_still_resolves(self) -> None:
+        """The boundary from the other side, so the cap is not merely 'refuses everything'."""
+        self.bind(chat="CHAT-FITS", thread="t-fits")
+        path = self.bindings / "amiga" / "CHAT-FITS" / "codex.json"
+        good = json.loads(path.read_text())
+        headroom = codex_stream.autobridge.MAX_BINDING_BYTES - len(json.dumps(good)) - 16
+        good["pad"] = "q" * max(headroom, 0)
+        path.write_text(json.dumps(good), encoding="utf-8")
+        self.assertLessEqual(len(path.read_bytes()),
+                             codex_stream.autobridge.MAX_BINDING_BYTES)
+        thread, _p, _h = codex_stream.resolve_thread(
+            self.args(agent="codex", project="amiga", chat="CHAT-FITS"))
+        self.assertEqual("t-fits", thread)
+
+    def test_a_missing_binding_is_still_plain_absent(self) -> None:
+        """BindingUnreadable must not swallow the ordinary 'no such binding' path."""
+        with self.assertRaises(SystemExit) as caught:
+            codex_stream.resolve_thread(
+                self.args(agent="codex", project="amiga", chat="CHAT-NOPE"))
+        self.assertIn("exact_binding_required", str(caught.exception))
+
     # --- an unreadable directory is not an empty one ---------------------------------------
 
     def test_an_unreadable_bindings_dir_is_reported_not_reported_as_no_session(self) -> None:
