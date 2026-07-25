@@ -43,6 +43,8 @@ def resolve_project(chat_selector: str, explicit_project: str | None) -> str:
     if explicit_project:
         return explicit_project
     try:
+        # reached only when no project was supplied -- this call INFERS the project,
+        # so there is nothing to scope by and an empty string must not become a filter
         chat_dir = find_chat_by_partial(chat_selector)
     except ValueError as error:
         raise SystemExit(f"[error] {error}")

@@ -745,7 +745,17 @@ def chat_id_of(chat_dir: Path) -> str | None:
     return tail if separator and tail else None
 
 
-def find_chat_by_partial(partial: str) -> Path | None:
+def _collision_message(partial: str, candidates: list, project: str | None) -> str:
+    names = "\n  ".join(sorted(d.name for d in candidates))
+    scope = f" within project {project}" if project else ""
+    return (
+        f"chat id {partial} matches {len(candidates)} directories{scope}; ids must be unique "
+        f"there:\n  {names}\n"
+        "Merge or re-id the duplicates before sending -- delivery will not guess."
+    )
+
+
+def find_chat_by_partial(partial: str, *, project: str | None = None) -> Path | None:
     """Resolve a chat selector to one directory.
 
     Two matches for one chat id mean the workspace is corrupt: ids must be unique, and
@@ -770,14 +780,29 @@ def find_chat_by_partial(partial: str) -> Path | None:
 
     selector = partial.strip().casefold()
     exact = [d for d in matches if (chat_id_of(d) or "").casefold() == selector]
-    if len(exact) > 1:
-        names = "\n  ".join(sorted(d.name for d in exact))
-        raise ValueError(
-            f"chat id {partial} matches {len(exact)} directories; ids must be unique:\n  {names}\n"
-            "Merge or re-id the duplicates before sending -- delivery will not guess."
-        )
-    if exact:
+
+    if project is not None:
+        # Chat ids are NOT globally unique in this workspace, so a collision only matters
+        # WITHIN the project being addressed. Counting across projects blocked
+        # `--project amiga --chat CHAT-X` on an unrelated CHAT-X owned by another project,
+        # turning a silent wrong-delivery bug into a refusal of legitimate traffic. A
+        # directory whose metadata omits project_id cannot be shown to belong here, so it
+        # is a non-match.
+        scoped = [d for d in exact
+                  if load_chat_meta(d).get("project_id") == project]
+        if len(scoped) > 1:
+            raise ValueError(_collision_message(partial, scoped, project))
+        if scoped:
+            return scoped[0]
+        if exact:
+            # the id exists, but not in this project. Falling through to a loose match here
+            # would deliver into a directory the caller never named.
+            return None
+    elif len(exact) > 1:
+        raise ValueError(_collision_message(partial, exact, None))
+    elif exact:
         return exact[0]
+
     return matches[-1]
 
 

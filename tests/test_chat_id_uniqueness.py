@@ -45,6 +45,59 @@ class ChatIdUniquenessTest(unittest.TestCase):
             found = _helpers.find_chat_by_partial("CHAT-8976EECB")
         self.assertEqual("2026-07-20_a__CHAT-8976EECB", found.name)
 
+    def _chats_with_meta(self, spec: dict):
+        """spec: directory name -> project_id, or None to omit meta.json entirely."""
+        import json as _json
+        import tempfile as _tempfile
+        tmp = _tempfile.TemporaryDirectory(dir="/tmp")
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        for name, project in spec.items():
+            (root / name).mkdir(parents=True)
+            if project is not None:
+                (root / name / "meta.json").write_text(
+                    _json.dumps({"chat_id": name.rpartition("__")[2], "project_id": project}),
+                    encoding="utf-8")
+        return mock.patch.object(_helpers, "CHATS_DIR", root)
+
+    def test_same_id_in_two_projects_does_not_block_the_named_project(self) -> None:
+        """Chat ids are NOT globally unique here, so a collision only matters in-project.
+
+        Counting across projects turned a silent wrong-delivery bug into a refusal of
+        legitimate traffic: `--project amiga --chat CHAT-X` was blocked by an unrelated
+        CHAT-X owned by another project.
+        """
+        with self._chats_with_meta({"2026-07-20_a__CHAT-X": "amiga",
+                                    "2026-07-21_b__CHAT-X": "nuvyr"}):
+            found = _helpers.find_chat_by_partial("CHAT-X", project="amiga")
+            self.assertEqual("2026-07-20_a__CHAT-X", found.name)
+            other = _helpers.find_chat_by_partial("CHAT-X", project="nuvyr")
+            self.assertEqual("2026-07-21_b__CHAT-X", other.name)
+
+    def test_a_duplicate_within_one_project_still_refuses(self) -> None:
+        with self._chats_with_meta({"2026-07-20_a__CHAT-X": "amiga",
+                                    "2026-07-21_b__CHAT-X": "amiga"}):
+            with self.assertRaises(ValueError) as caught:
+                _helpers.find_chat_by_partial("CHAT-X", project="amiga")
+        self.assertIn("within project amiga", str(caught.exception))
+
+    def test_a_chat_missing_its_project_id_is_not_claimed_by_a_project(self) -> None:
+        # cannot be shown to belong here, so it must not satisfy a scoped request
+        with self._chats_with_meta({"2026-07-20_a__CHAT-X": None}):
+            self.assertIsNone(_helpers.find_chat_by_partial("CHAT-X", project="amiga"))
+
+    def test_an_id_present_only_in_another_project_resolves_to_nothing(self) -> None:
+        """Never fall through to a loose match: that delivers where the caller did not ask."""
+        with self._chats_with_meta({"2026-07-20_other__CHAT-X": "nuvyr",
+                                    "2026-07-19_unrelated__CHAT-Y": "amiga"}):
+            self.assertIsNone(_helpers.find_chat_by_partial("CHAT-X", project="amiga"))
+
+    def test_unscoped_callers_keep_the_global_uniqueness_rule(self) -> None:
+        with self._chats_with_meta({"2026-07-20_a__CHAT-X": "amiga",
+                                    "2026-07-21_b__CHAT-X": "nuvyr"}):
+            with self.assertRaises(ValueError):
+                _helpers.find_chat_by_partial("CHAT-X")
+
     def test_loose_partial_matching_many_keeps_newest_wins(self) -> None:
         # human lookup, not delivery addressing -- must not become an error
         with self._chats("2026-07-20_gh-90_x__CHAT-AAAA1111", "2026-07-21_gh-90_y__CHAT-BBBB2222"):

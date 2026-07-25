@@ -350,7 +350,7 @@ def main():
 
     # Resolve chat
     try:
-        chat_dir = find_chat_by_partial(args.chat)
+        chat_dir = find_chat_by_partial(args.chat, project=args.project)
     except ValueError as error:
         print(f"[error] {error}", file=sys.stderr)
         sys.exit(1)
