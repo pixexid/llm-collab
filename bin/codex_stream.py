@@ -220,14 +220,20 @@ def registered_project_ids() -> set[str]:
 def resolve_thread(args: argparse.Namespace) -> tuple[str, str, str | None]:
     """Return (thread_id, provenance, runtime_home) for ONE live, exactly-bound worker.
 
-    Resolution is DELEGATED to autobridge.resolve_exact_dispatch_target(), the same function
-    production dispatch uses. Six consecutive review rounds found holes in my own
-    reimplementation of it -- project and chat not compared, the runtime family unchecked, a
-    deactivated session still winning, identity trusted from the record's own claims -- and each
-    fix exposed the next adjacent one. That is the signature of duplicating an audited
-    invariant, not of an unlucky sequence of bugs. The audited path already requires an exact
-    binding whose project, chat and agent match its location, a session whose id, runtime family
-    and runtime thread all match the binding, and that the session be dispatchable.
+    Resolution is DELEGATED to autobridge.resolve_exact_dispatch_pair(), which shares its
+    validation with the resolve_exact_dispatch_target() wrapper that production dispatch calls.
+    The difference between the two is not incidental: `pair` returns the exact binding snapshot
+    the validation was performed against, and `target` returns only the session. Reading the
+    binding again afterwards -- which the binding-less API forces -- is the TOCTOU this PR
+    exists to close, so a maintainer must not be sent back to it.
+
+    Six consecutive review rounds found holes in my own reimplementation of that validation --
+    project and chat not compared, the runtime family unchecked, a deactivated session still
+    winning, identity trusted from the record's own claims -- and each fix exposed the next
+    adjacent one. That is the signature of duplicating an audited invariant, not of an unlucky
+    sequence of bugs. The audited path requires an exact binding whose project, chat and agent
+    match its location, a session whose id, runtime family and runtime thread all match the
+    binding, and that the session be dispatchable.
 
     What remains here is only what that function does not do: choosing WHICH chat when the
     caller did not name one, and reading the runtime home for the endpoint.
