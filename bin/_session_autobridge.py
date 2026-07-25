@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import importlib
 import os
+import stat
 import re
 import signal
 import base64
@@ -1763,13 +1764,28 @@ def _codex_app_server_token(token_file: str | None) -> str | None:
     if not token_file:
         return None
     path = Path(token_file).expanduser()
-    if not path.exists():
-        return None
+    # O_NONBLOCK matters before the read cap does: opening a FIFO with no writer BLOCKS FOREVER, and
+    # that happens inside open(), so a byte limit that applies afterwards never runs. Both callers
+    # load the token before the socket and the deadline exist, so --seconds cannot interrupt it
+    # either. A bounded read on an unbounded open is not a bound.
     try:
-        with path.open("rb") as handle:
-            raw = handle.read(MAX_TOKEN_FILE_BYTES + 1)
+        descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
     except OSError:
         return None
+    try:
+        info = os.fstat(descriptor)
+        # fstat on the SAME descriptor, never stat-then-reopen: the second lookup could land on a
+        # different file. Only a regular file can be a token; a FIFO, device or directory is not one
+        # regardless of what it would yield.
+        if not stat.S_ISREG(info.st_mode):
+            return None
+        if info.st_size > MAX_TOKEN_FILE_BYTES:
+            return None
+        raw = os.read(descriptor, MAX_TOKEN_FILE_BYTES + 1)
+    except OSError:
+        return None
+    finally:
+        os.close(descriptor)
     if len(raw) > MAX_TOKEN_FILE_BYTES:
         # Oversize reports as "no usable token", exactly like an unreadable one: both callers treat
         # None that way and the connection then fails on the server's own rejection, which is a

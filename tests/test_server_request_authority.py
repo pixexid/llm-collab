@@ -988,42 +988,132 @@ class HandshakeClosesOnFailureTest(unittest.TestCase):
 
     # --- the token file is untrusted too ----------------------------------------------------
 
-    def test_an_oversized_token_file_is_not_read_whole(self) -> None:
-        """The last unbounded read on this reader's path, reached before the socket is even opened.
+    def test_an_oversized_token_file_is_never_read_at_all(self) -> None:
+        """Stronger than the cap it replaced: fstat rejects it before any read is issued.
 
-        Every other boundary was capped -- registry, sessions, bindings, frames, handshake, setup
-        buffer -- while --ws-token-file still went through read_bytes(). Asserted on the read()
-        ARGUMENT, because read-all-then-measure returns the same verdict and exhausts the same
-        memory.
+        My previous version asserted the argument passed to Path.open().read(). The implementation
+        now opens a descriptor non-blocking and fstats THAT descriptor, so Path.open is never
+        called -- the old assertion was measuring a code path that no longer exists.
         """
+        import os as _os
         import tempfile as _tf
 
         with _tf.TemporaryDirectory(dir="/tmp") as tmp:
             token_file = Path(tmp) / "token"
             token_file.write_text("x" * (autobridge.MAX_TOKEN_FILE_BYTES + 4096),
                                   encoding="utf-8")
-            seen = []
-            real_open = Path.open
+            reads = []
+            real_read = _os.read
 
-            def recording(self_path, *args, **kwargs):
-                handle = real_open(self_path, *args, **kwargs)
-                if self_path.name == "token":
-                    real_read = handle.read
+            def recording(fd, count):
+                reads.append(count)
+                return real_read(fd, count)
 
-                    def read(*read_args):
-                        seen.append(read_args)
-                        return real_read(*read_args)
-
-                    handle.read = read
-                return handle
-
-            with mock.patch.object(Path, "open", recording):
+            with mock.patch.object(_os, "read", recording):
                 token = autobridge._codex_app_server_token(str(token_file))
 
         self.assertIsNone(token, "an oversized token file yields no usable token")
-        self.assertTrue(seen, "the token file was not read through a bounded read at all")
-        self.assertEqual((autobridge.MAX_TOKEN_FILE_BYTES + 1,), seen[0],
-                         f"the token read must be capped, got {seen[0]}")
+        self.assertEqual([], reads,
+                         f"an oversized file must be rejected before any read, got {reads}")
+
+    def test_a_readable_token_is_read_with_a_capped_count(self) -> None:
+        """And the read that DOES happen is still bounded, not just size-checked beforehand."""
+        import os as _os
+        import tempfile as _tf
+
+        with _tf.TemporaryDirectory(dir="/tmp") as tmp:
+            token_file = Path(tmp) / "token"
+            token_file.write_text("sk-fine", encoding="utf-8")
+            reads = []
+            real_read = _os.read
+
+            def recording(fd, count):
+                reads.append(count)
+                return real_read(fd, count)
+
+            with mock.patch.object(_os, "read", recording):
+                self.assertEqual("sk-fine",
+                                 autobridge._codex_app_server_token(str(token_file)))
+
+        self.assertIn(autobridge.MAX_TOKEN_FILE_BYTES + 1, reads,
+                      f"the read must carry the cap, got {reads}")
+
+    def test_a_FIFO_token_file_with_no_writer_returns_promptly(self) -> None:
+        """A bounded read on an unbounded OPEN is not a bound.
+
+        Opening a FIFO with no writer blocks forever, inside open(), before any byte limit applies.
+        Both callers load the token before the socket and the deadline exist, so --seconds cannot
+        interrupt it either. Timed, because "returns None" would also be true of a hang that was
+        eventually killed.
+        """
+        import os as _os
+        import tempfile as _tf
+        import time as _t
+
+        with _tf.TemporaryDirectory(dir="/tmp") as tmp:
+            fifo = Path(tmp) / "token"
+            _os.mkfifo(fifo, 0o600)
+            started = _t.monotonic()
+            token = autobridge._codex_app_server_token(str(fifo))
+            elapsed = _t.monotonic() - started
+        self.assertIsNone(token)
+        self.assertLess(elapsed, 0.35,
+                        f"opening a writer-less FIFO must not block: took {elapsed:.3f}s")
+
+    def test_a_FIFO_HOLDING_DATA_is_refused_for_being_a_FIFO(self) -> None:
+        """The writer-less FIFO test does not prove the S_ISREG check -- this does.
+
+        With no writer the read fails with EAGAIN, so the token is refused for the wrong reason and
+        removing the regular-file check leaves that test green. This one PRE-FILLS the pipe, so the
+        read would succeed and return a perfectly valid token if S_ISREG were not checked.
+
+        My first attempt used a writer thread and was racy: the writer had not connected when the
+        function ran, so it hit EAGAIN and passed for the same wrong reason it was written to rule
+        out. Opening O_RDWR and writing before the call removes the race entirely.
+        """
+        import os as _os
+        import tempfile as _tf
+
+        with _tf.TemporaryDirectory(dir="/tmp") as tmp:
+            fifo = Path(tmp) / "token"
+            _os.mkfifo(fifo, 0o600)
+            holder = _os.open(fifo, _os.O_RDWR | _os.O_NONBLOCK)
+            try:
+                _os.write(holder, b"sk-from-a-pipe\n")
+                token = autobridge._codex_app_server_token(str(fifo))
+            finally:
+                _os.close(holder)
+
+        self.assertIsNone(token,
+                          "a FIFO is not a token file even when it holds a perfectly valid token")
+
+    def test_a_directory_or_device_is_not_a_token_file(self) -> None:
+        """Only a regular file can be a token, whatever else might read successfully."""
+        import tempfile as _tf
+
+        with _tf.TemporaryDirectory(dir="/tmp") as tmp:
+            self.assertIsNone(autobridge._codex_app_server_token(tmp))
+        self.assertIsNone(autobridge._codex_app_server_token("/dev/zero"),
+                          "/dev/zero would read forever and is not a regular file")
+
+    def test_a_token_file_AT_the_limit_is_still_read(self) -> None:
+        """The over-limit control's partner: a cap that refuses everything would pass that alone."""
+        import tempfile as _tf
+
+        with _tf.TemporaryDirectory(dir="/tmp") as tmp:
+            token_file = Path(tmp) / "token"
+            body = "s" * autobridge.MAX_TOKEN_FILE_BYTES
+            token_file.write_text(body, encoding="utf-8")
+            self.assertEqual(autobridge.MAX_TOKEN_FILE_BYTES, token_file.stat().st_size)
+            self.assertEqual(body, autobridge._codex_app_server_token(str(token_file)))
+
+    def test_a_token_file_ONE_byte_over_the_limit_is_refused(self) -> None:
+        import tempfile as _tf
+
+        with _tf.TemporaryDirectory(dir="/tmp") as tmp:
+            token_file = Path(tmp) / "token"
+            token_file.write_text("s" * (autobridge.MAX_TOKEN_FILE_BYTES + 1), encoding="utf-8")
+            self.assertIsNone(autobridge._codex_app_server_token(str(token_file)))
 
     def test_an_ordinary_token_file_still_works(self) -> None:
         """The control: a cap that refuses every token would pass the test above just as well."""
