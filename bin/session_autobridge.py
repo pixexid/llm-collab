@@ -26,6 +26,7 @@ import os
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent))
 from _helpers import canonical_path, ensure_project, get_agent, now_utc, utc_iso
 from _session_autobridge import (
+    BindingUnreadable,
     HEURISTIC_RUNTIME_DISCOVERY_FAMILIES,
     HEURISTIC_RUNTIME_DISCOVERY_REFUSED_REASON,
     SESSION_MODES,
@@ -286,11 +287,59 @@ def register_session(args) -> dict:
     repo_targets = getattr(args, "repo_targets", None)
     if repo_targets is not None:
         payload["repo_targets"] = repo_targets
+    # ONE read of the existing binding, before any write, and the resulting snapshot is carried
+    # forward. A preflight that validates and then lets the update REOPEN the path is a TOCTOU: a
+    # second read failing where the first succeeded still lands between save_session() and the
+    # binding write, which is the original partial-state bug wearing a check. This is the same
+    # carry-the-validated-snapshot rule this PR already applied on the read side.
+    existing_binding = existing_binding_snapshot_or_refuse(payload)
+    # The BINDING is written first, then the session. Publishing the session first meant a binding
+    # write that blocked or failed left the session updated while the authoritative binding still
+    # pointed at the previous thread -- a live session bound to a stale thread, which resolves
+    # happily and is silently wrong.
+    #
+    # What this order actually guarantees, stated precisely because my first version of this comment
+    # over-claimed: for a NEW session id, a failed session write leaves the binding pointing at a
+    # session file that does not exist, and the exact-binding resolver requires the session to
+    # match, so the pair refuses. For a RE-REGISTRATION where the runtime family and runtime thread
+    # id are unchanged, the pre-existing session record can still satisfy the resolver, so a failed
+    # session write is NOT guaranteed to fail closed -- it leaves the previous, still-coherent pair
+    # in place. That is a benign outcome rather than a guarantee of closure, and it is not the same
+    # claim. Two independent writes cannot be made atomic; the order only chooses which failure
+    # mode we get.
+    binding = update_binding_from_session(payload, existing=existing_binding)
     save_session(payload)
-    binding = update_binding_from_session(payload)
     if binding is not None:
         payload["binding"] = binding
     return payload
+
+
+def existing_binding_snapshot_or_refuse(payload: dict) -> dict:
+    """The existing binding, read ONCE, or a refusal before anything has been written.
+
+    Returns the snapshot the update must be built from -- not merely a verdict -- so nothing reopens
+    the path afterwards. An unreadable existing binding is not an absent one, so it is never silently
+    replaced: the old file stays as it is and no session is written. FileNotFoundError is the
+    ordinary first-registration case and yields an empty snapshot.
+
+    This does not make registration atomic against arbitrary I/O failure or a crash between the two
+    writes -- two independent file writes cannot be. It removes the specific failure that an
+    unreadable or swapped binding can no longer produce partial state.
+    """
+    project_id = payload.get("project_id")
+    chat_id = payload.get("chat_id")
+    agent_id = payload.get("agent_id")
+    if not project_id or not chat_id or not agent_id:
+        return {}
+    try:
+        return load_binding(str(project_id), str(chat_id), str(agent_id))
+    except FileNotFoundError:
+        return {}
+    except BindingUnreadable as error:
+        raise SystemExit(
+            f"[error] {error}. Refusing to register: the existing binding could not be read, so "
+            "it is left unchanged and no session was written. Repair or remove it first."
+        )
 
 
 def show_session(args) -> dict:
@@ -298,7 +347,11 @@ def show_session(args) -> dict:
 
 
 def show_binding(args) -> dict:
-    return load_binding(args.project, args.chat, args.agent)
+    try:
+        return load_binding(args.project, args.chat, args.agent)
+    except BindingUnreadable as error:
+        # An inspection command answering with a traceback is just a worse error message.
+        raise SystemExit(f"[error] {error}")
 
 
 def discover_runtime(args) -> dict:

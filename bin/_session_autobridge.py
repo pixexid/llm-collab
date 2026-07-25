@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import importlib
 import os
+import stat
+import tempfile
 import re
 import signal
 import base64
@@ -112,15 +114,49 @@ def iter_sessions(agent_id: str | None = None) -> list[dict]:
     return sessions
 
 
+# The binding is the authoritative record every exact-dispatch decision is made from, and it lives
+# in an untrusted workspace tree like everything around it. read_text() parsed it whole with no
+# ceiling: a valid 4,194,591-byte binding was accepted and resolved. Bounded before the parse.
+MAX_BINDING_BYTES = 256 * 1024
+
+
+# A distinct refusal reason. It must never be exact_binding_required: that means "there is no such
+# binding", and an oversized or permission-denied binding is a record that EXISTS and was refused.
+BINDING_UNREADABLE_REASON = "binding_unreadable"
+
+
+class BindingUnreadable(RuntimeError):
+    """An oversized or I/O-failed binding.
+
+    Deliberately NOT a FileNotFoundError. Callers catch that to mean "there is no such binding" and
+    turn it into exact_binding_required or "no live session" -- so collapsing an oversized or
+    permission-denied binding into it would report a present-but-unreadable record as an absent one,
+    hiding the real fault. RuntimeError is outside every (FileNotFoundError, OSError, ValueError)
+    tuple in this codebase, so it propagates instead of being absorbed.
+    """
+
+
 def load_binding(project_id: str, chat_id: str, agent_id: str) -> dict:
     path = autobridge_binding_path(project_id, chat_id, agent_id)
     if not path.exists():
         raise FileNotFoundError(
             f"Unknown binding: project={project_id} chat={chat_id} agent={agent_id}"
         )
+    # Through the shared helper like every other untrusted read. This one still used Path.open, so
+    # a binding that was a FIFO would have blocked forever inside open() -- the same hazard the
+    # registry and session reads were just fixed for, on the MOST authoritative record of the three.
+    # Nobody reported it; it turned up because a test injection could not intercept Path.open.
     try:
-        payload = json.loads(path.read_text())
-    except (OSError, ValueError) as exc:
+        raw = read_regular_file_bounded(path, MAX_BINDING_BYTES)
+    except FileNotFoundError:
+        raise FileNotFoundError(
+            f"Unknown binding: project={project_id} chat={chat_id} agent={agent_id}"
+        )
+    except UnreadableFile as exc:
+        raise BindingUnreadable(str(exc)) from exc
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as exc:
         raise FileNotFoundError(
             f"Unreadable binding: project={project_id} chat={chat_id} agent={agent_id}"
         ) from exc
@@ -148,7 +184,45 @@ def save_binding(payload: dict) -> None:
     )
     path.parent.mkdir(parents=True, exist_ok=True)
     payload["updated_utc"] = utc_iso()
-    write_file(path, json.dumps(payload, indent=2, sort_keys=True))
+    write_regular_file_atomically(path, json.dumps(payload, indent=2, sort_keys=True))
+
+
+def write_regular_file_atomically(path: Path, content: str) -> None:
+    """Write `content` to `path` without ever blocking on it, replacing it atomically.
+
+    path.write_text() OPENS the destination, so a binding pathname swapped for a writer-less FIFO
+    blocked forever and a directory raised -- either way after the caller had already published
+    other state. Reading the snapshot beforehand protects the VALUES; it does nothing for the
+    write-side descriptor.
+
+    A temporary file in the same directory plus os.replace() never opens the destination at all, so
+    a swapped object cannot block the write, and the replacement is atomic: a reader sees the old
+    record or the new one, never a partial one. An existing destination that is not a regular file
+    is refused first, because silently replacing a FIFO or directory would hide that someone else
+    is doing something unexpected with our authoritative record.
+    """
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        info = None
+    except OSError as error:
+        raise UnreadableFile(f"cannot inspect {path} before writing: {error}") from error
+    if info is not None and not stat.S_ISREG(info.st_mode):
+        raise UnreadableFile(
+            f"{path} exists and is not a regular file; refusing to replace it"
+        )
+
+    descriptor, temporary = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.")
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(content)
+        os.replace(temporary, path)
+    except BaseException:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
 
 
 def save_thread_pair(payload: dict) -> None:
@@ -232,7 +306,18 @@ def save_session(payload: dict) -> None:
     write_file(path, json.dumps(payload, indent=2, sort_keys=True))
 
 
-def binding_payload_from_session(session: dict) -> dict[str, Any] | None:
+def binding_payload_from_session(
+    session: dict,
+    existing: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Derive the binding record for `session`.
+
+    `existing` lets a caller pass the snapshot it has ALREADY read and validated, so the payload is
+    built from that exact bytes-in-hand version rather than reopening the path. Reopening is a TOCTOU:
+    a validated-then-swapped binding, or a second read that fails where the first succeeded, lands
+    between a caller's checks and its writes. Default None preserves the read-it-myself behaviour for
+    every existing caller.
+    """
     runtime = runtime_metadata(session)
     project_id = session.get("project_id")
     chat_id = session.get("chat_id")
@@ -241,11 +326,12 @@ def binding_payload_from_session(session: dict) -> dict[str, Any] | None:
     if not project_id or not chat_id or not runtime_family or not runtime_session_id:
         return None
 
-    existing: dict[str, Any] = {}
-    try:
-        existing = load_binding(str(project_id), str(chat_id), str(session["agent_id"]))
-    except FileNotFoundError:
+    if existing is None:
         existing = {}
+        try:
+            existing = load_binding(str(project_id), str(chat_id), str(session["agent_id"]))
+        except FileNotFoundError:
+            existing = {}
 
     return {
         **existing,
@@ -264,8 +350,11 @@ def binding_payload_from_session(session: dict) -> dict[str, Any] | None:
     }
 
 
-def update_binding_from_session(session: dict) -> dict[str, Any] | None:
-    payload = binding_payload_from_session(session)
+def update_binding_from_session(
+    session: dict,
+    existing: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    payload = binding_payload_from_session(session, existing=existing)
     if payload is None:
         return None
     save_binding(payload)
@@ -670,6 +759,31 @@ def resolve_exact_dispatch_target(
     chat_id: str,
     agent_id: str,
 ) -> tuple[dict[str, Any] | None, str | None]:
+    """The dispatchable session for an exact binding, or a refusal reason.
+
+    Kept at two values because every existing caller unpacks two. A caller that also needs the
+    BINDING it was validated against should use resolve_exact_dispatch_pair(): re-reading the
+    path afterwards is a TOCTOU, and fields the binding owns and the session does not mirror --
+    runtime_home above all -- cannot be recovered by any later cross-check.
+    """
+    pair, reason = resolve_exact_dispatch_pair(project_id, chat_id, agent_id)
+    return (pair[0] if pair else None), reason
+
+
+def resolve_exact_dispatch_pair(
+    project_id: str,
+    chat_id: str,
+    agent_id: str,
+    sessions: list[dict[str, Any]] | None = None,
+) -> tuple[tuple[dict[str, Any], dict[str, Any]] | None, str | None]:
+    """Return ((session, binding), None) or (None, reason).
+
+    Hands back the exact binding snapshot this validation was performed against, so a caller
+    never has to reopen the path to read a field the session does not carry. Introduced because
+    codex_stream reopened it four times and a swap between validation and use redirected the
+    endpoint; runtime_home is the field that makes a local cross-check impossible, since the
+    session deliberately does not mirror it.
+    """
     try:
         binding = load_binding(project_id, chat_id, agent_id)
     except FileNotFoundError:
@@ -688,8 +802,14 @@ def resolve_exact_dispatch_target(
     if not bound_session_id or not bound_runtime_id:
         return None, EXACT_BINDING_REQUIRED_REASON
 
+    # A caller resolving SEVERAL chats would otherwise rescan the whole session directory once
+    # per chat; passing a pre-scanned list makes that one scan for the whole lookup. Defaults to
+    # scanning, so every existing caller is unaffected.
+    candidates = iter_sessions(agent_id=agent_id) if sessions is None else [
+        session for session in sessions if session.get("agent_id") == agent_id
+    ]
     exact_matches: list[dict[str, Any]] = []
-    for session in iter_sessions(agent_id=agent_id):
+    for session in candidates:
         if session.get("project_id") != project_id or session.get("chat_id") != chat_id:
             continue
         if str(session.get("session_id")) != str(bound_session_id):
@@ -713,7 +833,7 @@ def resolve_exact_dispatch_target(
         return None, EXACT_BINDING_NOT_DISPATCHABLE_REASON
     if len(dispatchable) > 1:
         return None, EXACT_BINDING_AMBIGUOUS_REASON
-    return dispatchable[0], None
+    return (dispatchable[0], binding), None
 
 
 def message_targets_session(
@@ -1287,10 +1407,23 @@ def _extract_arg_value(command: str, flag: str) -> str | None:
     return None
 
 
-def discover_codex_app_server(runtime_home: str | None) -> dict[str, Any] | None:
+def discover_codex_app_server(
+    runtime_home: str | None,
+    *,
+    allow_unscoped_env: bool = True,
+) -> dict[str, Any] | None:
+    """Find the App Server for `runtime_home`.
+
+    LLM_COLLAB_CODEX_APP_SERVER_URL is a WORKSPACE-WIDE override with no home or project in it, so
+    it wins for every home -- fine for dispatch, wrong for a project-aware reader: selecting a valid
+    binding under a secondary CODEX_HOME still connected to the primary server, where thread/resume
+    either fails or observes an unrelated matching thread. A caller that must stay inside one
+    project passes allow_unscoped_env=False and gets home-based discovery only. Default True keeps
+    every existing caller unchanged.
+    """
     configured_url = os.environ.get("LLM_COLLAB_CODEX_APP_SERVER_URL")
     configured_token_file = os.environ.get("LLM_COLLAB_CODEX_APP_SERVER_TOKEN_FILE")
-    if configured_url:
+    if configured_url and allow_unscoped_env:
         return {
             "url": configured_url,
             "token_file": configured_token_file,
@@ -1317,10 +1450,39 @@ def discover_codex_app_server(runtime_home: str | None) -> dict[str, Any] | None
     return None
 
 
-def _socket_read_exact(sock: socket.socket, count: int) -> bytes:
+def _socket_read_exact(sock: socket.socket, count: int, client=None) -> bytes:
+    """Read exactly `count` bytes.
+
+    When a client is supplied, the absolute deadline is checked and the socket re-clamped before
+    EVERY recv. Without that, one frame whose payload arrives a byte at a time is unbounded no
+    matter what the caller checked beforehand: a 50ms deadline returned a frame after 795ms,
+    because each recv succeeded inside its own timeout and nothing looked at the clock in between.
+    Bounding a loop means checking inside it.
+
+    Every call site is mutation-proved: dropping the client from the header, either extended-length
+    branch, the mask or the payload read all fail, as does removing this check.
+
+    I first claimed the fixed-size reads were unprovable, reasoning that a 2/8/4-byte read always
+    completes inside the single timeout recv_json has already installed. That is the same wrong
+    model as the bug: a socket timeout restarts on every recv() and never bounds the total, which
+    is exactly why checking once outside the loop was insufficient. A fixed-size read iterates too
+    whenever the peer fragments it -- two bytes 40ms apart under a 50ms deadline raise here at
+    ~56ms, and return successfully at ~90ms without this check.
+    """
     chunks: list[bytes] = []
     remaining = count
+    # Anything the handshake over-read belongs to the first frames, so it is consumed before the
+    # socket is touched again. Dropping it lost the first notification whenever the peer's upgrade
+    # response and first frame shared a TCP segment.
+    if client is not None and client._buffered_bytes:
+        taken = client._buffered_bytes[:remaining]
+        client._buffered_bytes = client._buffered_bytes[len(taken):]
+        chunks.append(taken)
+        remaining -= len(taken)
     while remaining > 0:
+        if client is not None:
+            client._check_deadline("while reading a frame")
+            sock.settimeout(client.remaining_wait())
         chunk = sock.recv(remaining)
         if not chunk:
             raise ConnectionError("websocket connection closed")
@@ -1335,6 +1497,28 @@ def _socket_read_exact(sock: socket.socket, count: int) -> bytes:
 # resolve it. A connection that OWNS a turn must answer, or the turn hangs. A connection that
 # merely observes must not, or it races the operator's own UI and can refuse work they
 # started. There is no correct global default, so each caller states its role.
+# A ceiling on the HTTP upgrade header, charged cumulatively as chunks arrive. Without it the
+# handshake loop grows `response` until the terminator appears -- and a peer that never sends one
+# grows it forever: 1024 full 4 KiB chunks were accepted, 4 MiB, stopping only when the peer closed.
+# A per-recv timeout cannot bound this because every successful chunk resets it, and the observer
+# runs with no absolute deadline by default. Real upgrade headers are a few hundred bytes.
+MAX_HANDSHAKE_HEADER_BYTES = 64 * 1024
+
+
+def handshake_header_bytes(response: bytes) -> int:
+    """How many bytes of `response` are HTTP header, i.e. up to and including the terminator.
+
+    The ceiling applies to header bytes. Charging the whole buffer rejected a valid header just under
+    the limit whenever a coalesced first frame pushed the chunk over, while the code that follows
+    correctly treats those same trailing bytes as frame data. The header is what an unbounded peer
+    can grow; the frame after it is bounded elsewhere.
+
+    A named function because this is arithmetic, and arithmetic should be tested as arithmetic: the
+    socket-level test for it passed against the vulnerable code depending on where the kernel split
+    the read, which is not a property any test should rest on.
+    """
+    terminator = response.find(b"\r\n\r\n")
+    return len(response) if terminator < 0 else terminator + 4
 SERVER_REQUEST_REFUSE = "refuse"
 SERVER_REQUEST_IGNORE = "ignore"
 SERVER_REQUEST_POLICIES = (SERVER_REQUEST_REFUSE, SERVER_REQUEST_IGNORE)
@@ -1348,6 +1532,7 @@ class JsonRpcWebSocketClient:
         token: str | None = None,
         timeout_seconds: int = 30,
         server_request_policy: str = SERVER_REQUEST_REFUSE,
+        max_frame_bytes: int | None = None,
     ):
         if server_request_policy not in SERVER_REQUEST_POLICIES:
             raise ValueError(f"unknown server_request_policy: {server_request_policy!r}")
@@ -1355,44 +1540,103 @@ class JsonRpcWebSocketClient:
         self.token = token
         self.timeout_seconds = timeout_seconds
         self.server_request_policy = server_request_policy
+        # An optional ceiling on ONE frame's declared payload length. None keeps the historical
+        # behaviour for existing callers. Without it, the peer's own 64-bit length field is trusted
+        # all the way into recv(): a frame advertising 1 TiB and sending no payload reached
+        # recv(1099511627776) here, and any budget applied to the DECODED message is charged too
+        # late to matter. A length is a claim, and this is where the claim is first believed.
+        self.max_frame_bytes = max_frame_bytes
+        # Bytes already pulled off the socket but not yet consumed. The handshake is read with
+        # recv(4096), so when the peer's upgrade response and its first frame land in one segment,
+        # those frame bytes arrive in the SAME read -- and everything after the \r\n\r\n used to be
+        # discarded, silently losing the first frame. For a subscriber that frame is turn/started.
+        # Whether it happens at all depends on TCP coalescing, which is why it looked flaky.
+        self._buffered_bytes = b""
         self.sock: socket.socket | None = None
         self.counter = 0
         self.server_requests: list[str] = []
+        # An optional ABSOLUTE instant after which no blocking operation may still be waiting.
+        # None keeps the historical behaviour exactly: every wait gets the full timeout_seconds.
+        # A per-call timeout cannot bound a handshake, because a peer trickling bytes resets it
+        # on every chunk -- only an absolute limit bounds the sum.
+        self.read_deadline: float | None = None
+
+    def set_deadline(self, deadline: float | None) -> None:
+        """The absolute monotonic instant after which no blocking wait may continue."""
+        self.read_deadline = deadline
+
+    def remaining_wait(self) -> float:
+        """How long one blocking operation may wait: the timeout, capped by the deadline."""
+        cap = float(self.timeout_seconds or 30)
+        if self.read_deadline is None:
+            return cap
+        return max(0.01, min(cap, self.read_deadline - time.monotonic()))
+
+    def _check_deadline(self, where: str) -> None:
+        if self.read_deadline is not None and time.monotonic() >= self.read_deadline:
+            raise TimeoutError(f"read deadline reached {where}")
 
     def __enter__(self) -> "JsonRpcWebSocketClient":
         parsed = urllib.parse.urlparse(self.url)
         if parsed.scheme != "ws" or not parsed.hostname or not parsed.port:
             raise ValueError(f"Unsupported Codex app-server websocket URL: {self.url}")
-        sock = socket.create_connection((parsed.hostname, parsed.port), timeout=self.timeout_seconds)
-        sock.settimeout(self.timeout_seconds)
-        path = parsed.path or "/"
-        if parsed.query:
-            path = f"{path}?{parsed.query}"
-        key = base64.b64encode(os.urandom(16)).decode("ascii")
-        headers = [
-            f"GET {path} HTTP/1.1",
-            f"Host: {parsed.hostname}:{parsed.port}",
-            "Upgrade: websocket",
-            "Connection: Upgrade",
-            f"Sec-WebSocket-Key: {key}",
-            "Sec-WebSocket-Version: 13",
-        ]
-        if self.token:
-            headers.append(f"Authorization: Bearer {self.token}")
-        sock.sendall(("\r\n".join(headers) + "\r\n\r\n").encode("ascii"))
-        response = b""
-        while b"\r\n\r\n" not in response:
-            response += sock.recv(4096)
-            if not response:
-                raise ConnectionError("websocket handshake failed")
-        header_text = response.split(b"\r\n\r\n", 1)[0].decode("iso-8859-1")
-        if " 101 " not in header_text.splitlines()[0]:
-            raise ConnectionError(f"websocket handshake failed: {header_text.splitlines()[0]}")
-        expected_accept = base64.b64encode(
-            hashlib.sha1((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode("ascii")).digest()
-        ).decode("ascii")
-        if expected_accept not in header_text:
-            raise ConnectionError("websocket handshake failed: invalid accept header")
+        self._check_deadline("before connecting")
+        sock = socket.create_connection((parsed.hostname, parsed.port),
+                                        timeout=self.remaining_wait())
+        # Everything after the connect must close the socket on ANY failure. Leaving it to the
+        # caller leaked a connected socket whenever sendall, recv or parsing raised before
+        # self.sock was assigned -- there was nothing for __exit__ to close.
+        try:
+            sock.settimeout(self.remaining_wait())
+            path = parsed.path or "/"
+            if parsed.query:
+                path = f"{path}?{parsed.query}"
+            key = base64.b64encode(os.urandom(16)).decode("ascii")
+            headers = [
+                f"GET {path} HTTP/1.1",
+                f"Host: {parsed.hostname}:{parsed.port}",
+                "Upgrade: websocket",
+                "Connection: Upgrade",
+                f"Sec-WebSocket-Key: {key}",
+                "Sec-WebSocket-Version: 13",
+            ]
+            if self.token:
+                headers.append(f"Authorization: Bearer {self.token}")
+            sock.sendall(("\r\n".join(headers) + "\r\n\r\n").encode("ascii"))
+            response = b""
+            while b"\r\n\r\n" not in response:
+                # Checked per chunk, not per byte-budget: a peer sending the header in pieces
+                # resets a per-call timeout on every piece, so only this bounds the total.
+                self._check_deadline("during the websocket handshake")
+                sock.settimeout(self.remaining_wait())
+                chunk = sock.recv(4096)
+                if not chunk:
+                    raise ConnectionError("websocket handshake failed")
+                response += chunk
+                # The ceiling applies to HTTP HEADER bytes, so it is measured only up to the
+                # terminator. Charging the whole buffer rejected a valid header just under the limit
+                # whenever a coalesced first frame pushed the chunk over it -- while the code just
+                # below correctly treats those same trailing bytes as frame data. The header is what
+                # an unbounded peer can grow; the frame after it is bounded elsewhere.
+                if handshake_header_bytes(response) > MAX_HANDSHAKE_HEADER_BYTES:
+                    raise ConnectionError(
+                        f"websocket handshake header exceeded "
+                        f"{MAX_HANDSHAKE_HEADER_BYTES} bytes with no end of headers; refusing"
+                    )
+            header_text = response.split(b"\r\n\r\n", 1)[0].decode("iso-8859-1")
+            if " 101 " not in header_text.splitlines()[0]:
+                raise ConnectionError(
+                    f"websocket handshake failed: {header_text.splitlines()[0]}")
+            expected_accept = base64.b64encode(
+                hashlib.sha1((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode("ascii")).digest()
+            ).decode("ascii")
+            if expected_accept not in header_text:
+                raise ConnectionError("websocket handshake failed: invalid accept header")
+            # Keep whatever followed the terminator; it is frame data, not handshake data.
+            self._buffered_bytes = response.split(b"\r\n\r\n", 1)[1]
+        except BaseException:
+            sock.close()
+            raise
         self.sock = sock
         return self
 
@@ -1419,21 +1663,35 @@ class JsonRpcWebSocketClient:
             header.extend(length.to_bytes(8, "big"))
         mask = os.urandom(4)
         masked = bytes(byte ^ mask[index % 4] for index, byte in enumerate(payload))
+        # Sending blocks too. A peer that completes the upgrade and then stops reading fills the
+        # send buffer, and sendall inherits whatever timeout the last read happened to leave -- so
+        # the absolute deadline did not bound it: a 50ms budget took over 3s against a blocked
+        # peer. sendall applies its timeout to the whole send, so clamping it once is enough; no
+        # custom send loop is needed here, unlike the receive path.
+        self._check_deadline("while sending")
+        self.sock.settimeout(self.remaining_wait())
         self.sock.sendall(bytes(header) + mask + masked)
 
     def _recv_frame(self) -> tuple[int, bytes]:
         if not self.sock:
             raise ConnectionError("websocket is not connected")
-        first, second = _socket_read_exact(self.sock, 2)
+        first, second = _socket_read_exact(self.sock, 2, self)
         opcode = first & 0x0F
         masked = bool(second & 0x80)
         length = second & 0x7F
         if length == 126:
-            length = int.from_bytes(_socket_read_exact(self.sock, 2), "big")
+            length = int.from_bytes(_socket_read_exact(self.sock, 2, self), "big")
         elif length == 127:
-            length = int.from_bytes(_socket_read_exact(self.sock, 8), "big")
-        mask = _socket_read_exact(self.sock, 4) if masked else b""
-        payload = _socket_read_exact(self.sock, length) if length else b""
+            length = int.from_bytes(_socket_read_exact(self.sock, 8, self), "big")
+        # Checked after the length is decoded and BEFORE any byte of mask or payload is read, so a
+        # refusal costs nothing and an absurd claim is never handed to recv().
+        if self.max_frame_bytes is not None and length > self.max_frame_bytes:
+            raise ConnectionError(
+                f"frame declares {length} payload bytes, above the {self.max_frame_bytes} byte "
+                "limit for this connection; refusing before reading it"
+            )
+        mask = _socket_read_exact(self.sock, 4, self) if masked else b""
+        payload = _socket_read_exact(self.sock, length, self) if length else b""
         if masked:
             payload = bytes(byte ^ mask[index % 4] for index, byte in enumerate(payload))
         return opcode, payload
@@ -1443,6 +1701,9 @@ class JsonRpcWebSocketClient:
 
     def recv_json(self) -> dict[str, Any]:
         while True:
+            self._check_deadline("while reading")
+            if self.sock is not None:
+                self.sock.settimeout(self.remaining_wait())
             opcode, payload = self._recv_frame()
             if opcode == 0x8:
                 raise ConnectionError("websocket closed")
@@ -1549,6 +1810,82 @@ def token_is_usable(content: str) -> bool:
     return usable_token(content) is not None
 
 
+# A bearer token is a short opaque string; the surrounding gates cap every other untrusted read, and
+# this one reached read_bytes() with no ceiling, so a corrupted or hostile --ws-token-file could
+# exhaust memory before the socket was even opened. Generous next to any real token.
+MAX_TOKEN_FILE_BYTES = 64 * 1024
+
+
+class UnreadableFile(RuntimeError):
+    """An oversized, non-regular, or I/O-failed path. Distinct from absent, deliberately."""
+
+
+# An optional budget charged by EVERY bounded read while a lookup is active, including the binding
+# reads that happen inside resolve_exact_dispatch_pair() where the caller has no reach. Set and
+# cleared by the caller around one lookup; None means no cumulative accounting, which is the
+# historical behaviour for every other caller.
+_ACTIVE_READ_BUDGET: list = []
+
+
+class active_read_budget:
+    """Charge every bounded read in this block to one cumulative budget."""
+
+    def __init__(self, budget) -> None:
+        self.budget = budget
+
+    def __enter__(self):
+        _ACTIVE_READ_BUDGET.append(self.budget)
+        return self.budget
+
+    def __exit__(self, *exc) -> bool:
+        _ACTIVE_READ_BUDGET.pop()
+        return False
+
+
+def read_regular_file_bounded(path: Path, limit: int) -> bytes:
+    """Read at most `limit` bytes from a REGULAR file, without ever blocking on open().
+
+    Every untrusted read in this codebase needs the same four things and gets them wrong
+    individually: a non-blocking open (a writer-less FIFO blocks forever INSIDE open(), before any
+    byte cap or deadline can apply), an fstat on that SAME descriptor (stat-then-reopen can resolve
+    two different objects), a regular-file requirement, and a read LOOP (one os.read may return
+    short and silently truncate). Each was fixed separately for the token file and then not applied
+    to its siblings, so this exists to make the next call site correct by construction.
+
+    Raises FileNotFoundError when absent, UnreadableFile for every other refusal.
+    """
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    except FileNotFoundError:
+        raise
+    except OSError as error:
+        raise UnreadableFile(f"cannot open {path}: {error}") from error
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            raise UnreadableFile(f"{path} is not a regular file; refusing to read it")
+        if info.st_size > limit:
+            raise UnreadableFile(f"{path} exceeds the {limit} byte limit; refusing to parse it")
+        chunks: list[bytes] = []
+        remaining = limit + 1
+        while remaining > 0:
+            chunk = os.read(descriptor, remaining)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+    except OSError as error:
+        raise UnreadableFile(f"cannot read {path}: {error}") from error
+    finally:
+        os.close(descriptor)
+    raw = b"".join(chunks)
+    if len(raw) > limit:
+        raise UnreadableFile(f"{path} exceeds the {limit} byte limit; refusing to parse it")
+    if _ACTIVE_READ_BUDGET:
+        _ACTIVE_READ_BUDGET[-1].charge(len(raw), path)
+    return raw
+
+
 def _codex_app_server_token(token_file: str | None) -> str | None:
     """Read the bearer token with exactly the semantics the gate validated.
 
@@ -1559,11 +1896,50 @@ def _codex_app_server_token(token_file: str | None) -> str | None:
     if not token_file:
         return None
     path = Path(token_file).expanduser()
-    if not path.exists():
+    # O_NONBLOCK matters before the read cap does: opening a FIFO with no writer BLOCKS FOREVER, and
+    # that happens inside open(), so a byte limit that applies afterwards never runs. Both callers
+    # load the token before the socket and the deadline exist, so --seconds cannot interrupt it
+    # either. A bounded read on an unbounded open is not a bound.
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    except OSError:
         return None
     try:
-        content = path.read_bytes().decode("utf-8")
-    except (OSError, UnicodeDecodeError):
+        info = os.fstat(descriptor)
+        # fstat on the SAME descriptor, never stat-then-reopen: the second lookup could land on a
+        # different file. Only a regular file can be a token; a FIFO, device or directory is not one
+        # regardless of what it would yield.
+        if not stat.S_ISREG(info.st_mode):
+            return None
+        if info.st_size > MAX_TOKEN_FILE_BYTES:
+            return None
+        # os.read() is ONE syscall and may return fewer bytes than asked for on a perfectly
+        # healthy regular file. A short read here does not fail -- it silently TRUNCATES the
+        # credential, and a truncated token is still printable ASCII, so usable_token() accepts
+        # it and both callers send a wrong secret the launch gate never approved. The previous
+        # Path.open().read(n) looped internally; swapping to a raw descriptor lost that for free.
+        chunks: list[bytes] = []
+        remaining = MAX_TOKEN_FILE_BYTES + 1
+        while remaining > 0:
+            chunk = os.read(descriptor, remaining)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        raw = b"".join(chunks)
+    except OSError:
+        return None
+    finally:
+        os.close(descriptor)
+    if len(raw) > MAX_TOKEN_FILE_BYTES:
+        # Oversize reports as "no usable token", exactly like an unreadable one: both callers treat
+        # None that way and the connection then fails on the server's own rejection, which is a
+        # clear failure rather than a silent one. Changing the return contract instead would repeat
+        # the mistake of altering a shared function's failure mode for one caller's benefit.
+        return None
+    try:
+        content = raw.decode("utf-8")
+    except UnicodeDecodeError:
         return None
     return usable_token(content)
 
