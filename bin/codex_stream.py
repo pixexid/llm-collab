@@ -420,6 +420,16 @@ def resolve_thread(args: argparse.Namespace) -> tuple[str, str, str | None]:
             f"[error] project {project!r} is not registered in projects.json "
             f"(known: {', '.join(sorted(registered))})"
         )
+    # ONE budget for the whole lookup. It was previously local to bounded_sessions(), so the
+    # binding read inside each resolve_one() -- up to 2,000 of them in a broad lookup -- was not
+    # charged at all. The active-budget block reaches the shared resolver's own reads, which the
+    # caller cannot otherwise touch.
+    budget = LookupByteBudget()
+    with autobridge.active_read_budget(budget):
+        return resolve_thread_within_budget(args, project, agent, budget)
+
+
+def resolve_thread_within_budget(args, project: str, agent: str, budget) -> tuple:
     if args.chat is not None and args.chat != "last":
         one_path_component(args.chat, field="chat")
 
@@ -436,7 +446,7 @@ def resolve_thread(args: argparse.Namespace) -> tuple[str, str, str | None]:
         # the session and deliberately leaves the binding behind, so one ordinary deactivation
         # would otherwise break `--chat last` for that agent permanently.
         chosen = []
-        sessions = bounded_sessions(agent)
+        sessions = bounded_sessions(agent, budget=budget)
         for chat in bounded_chat_ids(project, agent):
             resolved = resolve_one(project, chat, agent, fatal=False, sessions=sessions)
             if resolved is not None:
@@ -512,7 +522,7 @@ class LookupByteBudget:
             )
 
 
-def bounded_sessions(agent: str) -> list[dict]:
+def bounded_sessions(agent: str, budget: "LookupByteBudget | None" = None) -> list[dict]:
     """Every session for this agent, read ONCE, under a count and a per-file byte cap.
 
     The shared resolver scans the session directory itself, which is right for a single lookup
@@ -525,7 +535,8 @@ def bounded_sessions(agent: str) -> list[dict]:
     """
     sessions: list[dict] = []
     scanned = 0
-    budget = LookupByteBudget()
+    if budget is None:
+        budget = LookupByteBudget()
     try:
         with os.scandir(autobridge.SESSIONS_DIR) as scan:
             entries = []

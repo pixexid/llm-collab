@@ -719,6 +719,28 @@ class ResolveThreadTest(unittest.TestCase):
                 codex_stream.bounded_sessions("codex")
         self.assertIn("across session and binding records", str(caught.exception))
 
+    def test_binding_reads_are_charged_to_the_SAME_budget_as_sessions(self) -> None:
+        """The budget was local to bounded_sessions(), so up to 2,000 binding reads went uncharged.
+
+        Asserts the CHARGE directly. My first version squeezed the limit until it aborted, but the
+        first session read tripped it before any binding was reached -- so it proved only that
+        sessions are charged, which was never in doubt.
+        """
+        self.bind(chat="CHAT-A", thread="t-a")
+        charged = []
+        real_charge = codex_stream.LookupByteBudget.charge
+
+        def recording(self_budget, count, path):
+            charged.append(Path(path).name)
+            return real_charge(self_budget, count, path)
+
+        with mock.patch.object(codex_stream.LookupByteBudget, "charge", recording):
+            codex_stream.resolve_thread(self.args(agent="codex", project="amiga"))
+
+        self.assertTrue(any(name == "codex.json" for name in charged),
+                        f"the binding read must be charged to the lookup budget, saw {charged}")
+        self.assertTrue(any(name.endswith(".json") and name != "codex.json" for name in charged),
+                        f"session reads must still be charged too, saw {charged}")
     def test_an_ordinary_lookup_is_far_under_the_cumulative_budget(self) -> None:
         self.bind(chat="CHAT-A")
         self.assertTrue(codex_stream.bounded_sessions("codex"))

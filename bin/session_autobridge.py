@@ -294,12 +294,19 @@ def register_session(args) -> dict:
     # carry-the-validated-snapshot rule this PR already applied on the read side.
     existing_binding = existing_binding_snapshot_or_refuse(payload)
     # The BINDING is written first, then the session. Publishing the session first meant a binding
-    # write that blocked or failed -- a swapped pathname, a full disk -- left the session updated
-    # while the authoritative binding still pointed at the previous thread. Two independent writes
-    # cannot be made atomic, so the order is chosen for its failure mode: if the session write fails
-    # now, the binding references a session that does not exist, and the exact-binding resolver
-    # requires the session to match, so the pair simply refuses. Fail closed rather than a live
-    # session bound to a stale thread.
+    # write that blocked or failed left the session updated while the authoritative binding still
+    # pointed at the previous thread -- a live session bound to a stale thread, which resolves
+    # happily and is silently wrong.
+    #
+    # What this order actually guarantees, stated precisely because my first version of this comment
+    # over-claimed: for a NEW session id, a failed session write leaves the binding pointing at a
+    # session file that does not exist, and the exact-binding resolver requires the session to
+    # match, so the pair refuses. For a RE-REGISTRATION where the runtime family and runtime thread
+    # id are unchanged, the pre-existing session record can still satisfy the resolver, so a failed
+    # session write is NOT guaranteed to fail closed -- it leaves the previous, still-coherent pair
+    # in place. That is a benign outcome rather than a guarantee of closure, and it is not the same
+    # claim. Two independent writes cannot be made atomic; the order only chooses which failure
+    # mode we get.
     binding = update_binding_from_session(payload, existing=existing_binding)
     save_session(payload)
     if binding is not None:

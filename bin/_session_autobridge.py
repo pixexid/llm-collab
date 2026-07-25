@@ -1820,6 +1820,28 @@ class UnreadableFile(RuntimeError):
     """An oversized, non-regular, or I/O-failed path. Distinct from absent, deliberately."""
 
 
+# An optional budget charged by EVERY bounded read while a lookup is active, including the binding
+# reads that happen inside resolve_exact_dispatch_pair() where the caller has no reach. Set and
+# cleared by the caller around one lookup; None means no cumulative accounting, which is the
+# historical behaviour for every other caller.
+_ACTIVE_READ_BUDGET: list = []
+
+
+class active_read_budget:
+    """Charge every bounded read in this block to one cumulative budget."""
+
+    def __init__(self, budget) -> None:
+        self.budget = budget
+
+    def __enter__(self):
+        _ACTIVE_READ_BUDGET.append(self.budget)
+        return self.budget
+
+    def __exit__(self, *exc) -> bool:
+        _ACTIVE_READ_BUDGET.pop()
+        return False
+
+
 def read_regular_file_bounded(path: Path, limit: int) -> bytes:
     """Read at most `limit` bytes from a REGULAR file, without ever blocking on open().
 
@@ -1859,6 +1881,8 @@ def read_regular_file_bounded(path: Path, limit: int) -> bytes:
     raw = b"".join(chunks)
     if len(raw) > limit:
         raise UnreadableFile(f"{path} exceeds the {limit} byte limit; refusing to parse it")
+    if _ACTIVE_READ_BUDGET:
+        _ACTIVE_READ_BUDGET[-1].charge(len(raw), path)
     return raw
 
 
