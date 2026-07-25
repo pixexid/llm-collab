@@ -70,6 +70,11 @@ MAX_REGISTRY_BYTES = 256 * 1024
 # subscription boundary is the exact loss this buffer exists to prevent.
 MAX_PENDING_EVENTS = 4096
 MAX_PENDING_EVENT_BYTES = 8 * 1024 * 1024
+# A ceiling on ONE frame, enforced by the shared client the moment the length is decoded. The
+# buffer budget above is charged on the DECODED message, which is far too late: _recv_frame trusts
+# the peer's 64-bit length field and calls recv() with it, so a frame advertising 1 TiB reached
+# recv(1099511627776) before any accounting ran. A budget at the wrong layer is not a budget.
+MAX_FRAME_BYTES = 8 * 1024 * 1024
 BINDINGS_DIR = ROOT / "State" / "session_autobridge" / "bindings"
 
 
@@ -100,6 +105,7 @@ class ObserverClient(autobridge.JsonRpcWebSocketClient):
     """
 
     def __init__(self, *args, **kwargs) -> None:
+        kwargs.setdefault("max_frame_bytes", MAX_FRAME_BYTES)
         super().__init__(*args, **kwargs)
         self.observed_requests: list[str] = []
         # Notifications seen while a request/response correlation is in flight. The inherited

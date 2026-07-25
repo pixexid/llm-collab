@@ -369,6 +369,202 @@ class HandshakeClosesOnFailureTest(unittest.TestCase):
                         f"a 1ms trickle must still be bounded by the deadline: {elapsed:.3f}s")
         self.assertEqual([], left)
 
+    def serve_ws_and_first_frame_in_ONE_write(self, payload: bytes):
+        """Send the upgrade response and the first frame in a single sendall.
+
+        This is what a real peer does when both fit one segment, and it is the condition under
+        which the handshake's recv(4096) over-reads into frame data. Guaranteed here rather than
+        left to TCP coalescing, because a race that only sometimes reproduces is not a test.
+        """
+        import base64 as _b64
+        import hashlib as _hashlib
+        import re as _re
+        import socket as _socket
+        import threading
+        import time as _time
+
+        listener = _socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        port = listener.getsockname()[1]
+        self.addCleanup(listener.close)
+
+        def serve():
+            try:
+                conn, _addr = listener.accept()
+            except OSError:
+                return
+            with conn:
+                request = b""
+                while b"\r\n\r\n" not in request:
+                    chunk = conn.recv(4096)
+                    if not chunk:
+                        return
+                    request += chunk
+                found = _re.search(rb"Sec-WebSocket-Key: (.+)\r\n", request)
+                accept = _b64.b64encode(_hashlib.sha1(
+                    found.group(1).strip() + b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11").digest()
+                ).decode("ascii")
+                if len(payload) < 126:
+                    header = bytes([0x81, len(payload)])
+                else:
+                    header = bytes([0x81, 126]) + len(payload).to_bytes(2, "big")
+                conn.sendall(
+                    b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n"
+                    b"Connection: Upgrade\r\nSec-WebSocket-Accept: "
+                    + accept.encode("ascii") + b"\r\n\r\n"
+                    + header + payload
+                )
+                _time.sleep(1.0)
+
+        thread = threading.Thread(target=serve, daemon=True)
+        thread.start()
+        self.addCleanup(thread.join, 3.0)
+        return port
+
+    def test_a_frame_sharing_the_handshake_write_is_NOT_lost(self) -> None:
+        """Self-found while writing the frame-cap test, and the reason it looked flaky.
+
+        __enter__ reads the handshake with recv(4096) and used to discard everything after the
+        \r\n\r\n terminator. When the peer's upgrade response and first frame share one write,
+        those discarded bytes ARE the first frame -- for a subscriber, turn/started and the first
+        items, the exact events ObserverClient exists to not lose.
+        """
+        import json as _json
+
+        body = _json.dumps({"method": "turn/started", "params": {"turn": {"id": "u1"}}}).encode()
+        port = self.serve_ws_and_first_frame_in_ONE_write(body)
+        made = autobridge.JsonRpcWebSocketClient(f"ws://127.0.0.1:{port}", token=None,
+                                                timeout_seconds=3)
+        with made:
+            self.assertTrue(made._buffered_bytes,
+                            "the handshake must have over-read into frame data for this test to "
+                            "be exercising anything at all")
+            self.assertEqual("turn/started", made.recv_json()["method"])
+
+    def test_a_buffered_frame_is_consumed_before_the_socket_is_read_again(self) -> None:
+        """The buffer must be drained first, not merely kept."""
+        import json as _json
+
+        body = _json.dumps({"method": "turn/started", "params": {}}).encode()
+        port = self.serve_ws_and_first_frame_in_ONE_write(body)
+        reads = self.recording_exact_reads()
+        made = autobridge.JsonRpcWebSocketClient(f"ws://127.0.0.1:{port}", token=None,
+                                                timeout_seconds=3)
+        with made:
+            made.recv_json()
+            self.assertEqual(b"", made._buffered_bytes, "the buffer must be fully consumed")
+        self.assertTrue(reads, "reads were not recorded")
+
+    def serve_ws_then_declare_frame(self, declared_length: int):
+        """Complete a real handshake, then advertise a frame of `declared_length` and send NO body.
+
+        The point is the DECLARED length. A peer's length field is a claim, and _recv_frame believed
+        it all the way into recv(): a 1 TiB claim reached recv(1099511627776).
+        """
+        import base64 as _b64
+        import hashlib as _hashlib
+        import re as _re
+        import socket as _socket
+        import threading
+        import time as _time
+
+        listener = _socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        port = listener.getsockname()[1]
+        self.addCleanup(listener.close)
+
+        def serve():
+            try:
+                conn, _addr = listener.accept()
+            except OSError:
+                return
+            with conn:
+                request = b""
+                while b"\r\n\r\n" not in request:
+                    chunk = conn.recv(4096)
+                    if not chunk:
+                        return
+                    request += chunk
+                found = _re.search(rb"Sec-WebSocket-Key: (.+)\r\n", request)
+                accept = _b64.b64encode(_hashlib.sha1(
+                    found.group(1).strip() + b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11").digest()
+                ).decode("ascii")
+                conn.sendall(
+                    b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n"
+                    b"Connection: Upgrade\r\nSec-WebSocket-Accept: "
+                    + accept.encode("ascii") + b"\r\n\r\n"
+                )
+                if declared_length < 126:
+                    header = bytes([0x81, declared_length])
+                elif declared_length <= 0xFFFF:
+                    header = bytes([0x81, 126]) + declared_length.to_bytes(2, "big")
+                else:
+                    header = bytes([0x81, 127]) + declared_length.to_bytes(8, "big")
+                conn.sendall(header)
+                _time.sleep(1.5)
+
+        thread = threading.Thread(target=serve, daemon=True)
+        thread.start()
+        self.addCleanup(thread.join, 3.0)
+        return port
+
+    def recording_exact_reads(self):
+        """Record every count handed to _socket_read_exact, so 'before any payload recv' is provable."""
+        recorded = []
+        real = autobridge._socket_read_exact
+
+        def watching(sock, count, client=None):
+            recorded.append(count)
+            return real(sock, count, client)
+
+        patcher = mock.patch.object(autobridge, "_socket_read_exact", watching)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return recorded
+
+    def test_an_absurd_declared_length_is_refused_BEFORE_any_payload_recv(self) -> None:
+        """A 1 TiB claim with no body. Codex's probe: recv(1099511627776) was reached."""
+        one_tib = 1 << 40
+        port = self.serve_ws_then_declare_frame(one_tib)
+        reads = self.recording_exact_reads()
+        made = autobridge.JsonRpcWebSocketClient(f"ws://127.0.0.1:{port}", token=None,
+                                                timeout_seconds=2,
+                                                max_frame_bytes=8 * 1024 * 1024)
+        with made:
+            with self.assertRaises(ConnectionError) as caught:
+                made.recv_json()
+        self.assertIn("8388608", str(caught.exception))
+        self.assertNotIn(one_tib, reads,
+                         f"the payload read must never be attempted, got {reads}")
+        self.assertEqual([2, 8], reads,
+                         f"only the header and the 8-byte length may be read, got {reads}")
+
+    def test_a_frame_just_over_the_cap_is_refused_and_one_just_under_is_read(self) -> None:
+        """The boundary, both sides -- a cap tested only far from its edge proves little."""
+        cap = 4096
+        port = self.serve_ws_then_declare_frame(cap + 1)
+        made = autobridge.JsonRpcWebSocketClient(f"ws://127.0.0.1:{port}", token=None,
+                                                timeout_seconds=2, max_frame_bytes=cap)
+        with made:
+            with self.assertRaises(ConnectionError):
+                made.recv_json()
+
+        import json as _json
+        body = _json.dumps({"method": "turn/started",
+                            "params": {"pad": "x" * 3000}}).encode()
+        self.assertLessEqual(len(body), cap)
+        port = self.serve_ws_then_trickle_frame(body, gap=0.0005)
+        made = autobridge.JsonRpcWebSocketClient(f"ws://127.0.0.1:{port}", token=None,
+                                                timeout_seconds=5, max_frame_bytes=cap)
+        with made:
+            self.assertEqual("turn/started", made.recv_json()["method"])
+
+    def test_the_default_has_no_frame_cap_so_existing_callers_are_unchanged(self) -> None:
+        made = autobridge.JsonRpcWebSocketClient("ws://127.0.0.1:1", timeout_seconds=30)
+        self.assertIsNone(made.max_frame_bytes)
+
     def serve_ws_then_trickle_frame(self, payload: bytes, gap: float):
         """Complete a real handshake, then dribble ONE text frame a byte at a time."""
         import base64 as _b64

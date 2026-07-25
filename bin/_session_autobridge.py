@@ -1369,6 +1369,14 @@ def _socket_read_exact(sock: socket.socket, count: int, client=None) -> bytes:
     """
     chunks: list[bytes] = []
     remaining = count
+    # Anything the handshake over-read belongs to the first frames, so it is consumed before the
+    # socket is touched again. Dropping it lost the first notification whenever the peer's upgrade
+    # response and first frame shared a TCP segment.
+    if client is not None and client._buffered_bytes:
+        taken = client._buffered_bytes[:remaining]
+        client._buffered_bytes = client._buffered_bytes[len(taken):]
+        chunks.append(taken)
+        remaining -= len(taken)
     while remaining > 0:
         if client is not None:
             client._check_deadline("while reading a frame")
@@ -1400,6 +1408,7 @@ class JsonRpcWebSocketClient:
         token: str | None = None,
         timeout_seconds: int = 30,
         server_request_policy: str = SERVER_REQUEST_REFUSE,
+        max_frame_bytes: int | None = None,
     ):
         if server_request_policy not in SERVER_REQUEST_POLICIES:
             raise ValueError(f"unknown server_request_policy: {server_request_policy!r}")
@@ -1407,6 +1416,18 @@ class JsonRpcWebSocketClient:
         self.token = token
         self.timeout_seconds = timeout_seconds
         self.server_request_policy = server_request_policy
+        # An optional ceiling on ONE frame's declared payload length. None keeps the historical
+        # behaviour for existing callers. Without it, the peer's own 64-bit length field is trusted
+        # all the way into recv(): a frame advertising 1 TiB and sending no payload reached
+        # recv(1099511627776) here, and any budget applied to the DECODED message is charged too
+        # late to matter. A length is a claim, and this is where the claim is first believed.
+        self.max_frame_bytes = max_frame_bytes
+        # Bytes already pulled off the socket but not yet consumed. The handshake is read with
+        # recv(4096), so when the peer's upgrade response and its first frame land in one segment,
+        # those frame bytes arrive in the SAME read -- and everything after the \r\n\r\n used to be
+        # discarded, silently losing the first frame. For a subscriber that frame is turn/started.
+        # Whether it happens at all depends on TCP coalescing, which is why it looked flaky.
+        self._buffered_bytes = b""
         self.sock: socket.socket | None = None
         self.counter = 0
         self.server_requests: list[str] = []
@@ -1477,6 +1498,8 @@ class JsonRpcWebSocketClient:
             ).decode("ascii")
             if expected_accept not in header_text:
                 raise ConnectionError("websocket handshake failed: invalid accept header")
+            # Keep whatever followed the terminator; it is frame data, not handshake data.
+            self._buffered_bytes = response.split(b"\r\n\r\n", 1)[1]
         except BaseException:
             sock.close()
             raise
@@ -1526,6 +1549,13 @@ class JsonRpcWebSocketClient:
             length = int.from_bytes(_socket_read_exact(self.sock, 2, self), "big")
         elif length == 127:
             length = int.from_bytes(_socket_read_exact(self.sock, 8, self), "big")
+        # Checked after the length is decoded and BEFORE any byte of mask or payload is read, so a
+        # refusal costs nothing and an absurd claim is never handed to recv().
+        if self.max_frame_bytes is not None and length > self.max_frame_bytes:
+            raise ConnectionError(
+                f"frame declares {length} payload bytes, above the {self.max_frame_bytes} byte "
+                "limit for this connection; refusing before reading it"
+            )
         mask = _socket_read_exact(self.sock, 4, self) if masked else b""
         payload = _socket_read_exact(self.sock, length, self) if length else b""
         if masked:
