@@ -1187,6 +1187,104 @@ def derived_runtime_command(session: dict, message: dict) -> list[str] | None:
     return None
 
 
+LISTEN_FLAG = "--listen"
+
+
+def command_is_app_server_invocation(command: str) -> bool:
+    """True only for `<executable> [options] app-server [options] --listen ...`.
+
+    Not the executable's FILENAME: LLM_COLLAB_CODEX_BIN accepts any path, so a wrapper,
+    symlink or versioned binary launches correctly and a literal "codex app-server" match
+    would never find it.
+
+    But not a substring either. `app-server in command` admitted
+    `worker-app-server-proxy --listen ...` and `worker --label app-server --listen ...`, and
+    discover_codex_app_server takes the FIRST matching endpoint -- so a false positive here
+    points delivery at somebody else's socket, which is worse than the false negative it was
+    fixing. Both parts must be exact argv tokens, and `app-server` must sit in the
+    SUBCOMMAND position: the first token after the executable that is not an option or an
+    option's value.
+    """
+    tokens = command.split()
+    if len(tokens) < 3:
+        return False
+    if not any(token == LISTEN_FLAG or token.startswith(f"{LISTEN_FLAG}=")
+               for token in tokens[1:]):
+        return False
+    if not executable_is_a_codex_binary(tokens[0]):
+        return False
+    return app_server_is_the_subcommand(tokens)
+
+
+def executable_is_a_codex_binary(executable: str) -> bool:
+    """Whether this argv's executable can plausibly be the Codex CLI.
+
+    Needed because NEITHER guess about unknown options is safe on its own. Treating an
+    unrecognized flag as value-taking swallows the subcommand, so
+    `codex --strict-config app-server ...` disappears. Treating it as valueless admits
+    `worker --label app-server ...`, because `app-server` then lands in the subcommand slot.
+    The option table cannot resolve that; the executable can.
+
+    Deliberately weaker than the literal-name match this replaced: the CONFIGURED binary is
+    accepted whatever it is called, which is the point of LLM_COLLAB_CODEX_BIN, and otherwise
+    the basename must contain `codex` -- covering `codex-cli`, `codex-0.146.0` and wrappers
+    named for what they wrap. A wrapper named neither is found only by configuring it, which
+    is a documented knob rather than a silent failure.
+    """
+    configured = os.environ.get("LLM_COLLAB_CODEX_BIN")
+    if configured and executable == configured:
+        return True
+    return "codex" in executable.rsplit("/", 1)[-1].lower()
+
+
+def app_server_is_the_subcommand(tokens: list[str]) -> bool:
+    """Whether `app-server` occupies the subcommand slot of this argv.
+
+    Global options before the subcommand are skipped, and the ones that consume a following
+    token are ENUMERATED rather than guessed. An earlier version assumed every unrecognized
+    option was value-taking, which swallowed the subcommand after ordinary flags: valid
+    invocations like `codex --strict-config app-server --listen ...`, and the same with
+    `--oss`, `--search` or `--dangerously-bypass-approvals-and-sandbox`, made a reachable
+    server vanish from discovery.
+
+    Guessing in the other direction is the safer default. An unknown flag treated as
+    valueless leaves the subcommand where it is; an unknown flag treated as value-taking eats
+    it. The only cost is that a FUTURE value-taking option whose value is a bare word would
+    hide that one invocation, which a test against the installed CLI is there to catch.
+    """
+    index = 1
+    while index < len(tokens):
+        token = tokens[index]
+        if not token.startswith("-"):
+            return token == "app-server"
+        if "=" in token:
+            index += 1  # --flag=value is one token
+        elif token in VALUE_TAKING_GLOBAL_OPTIONS:
+            index += 2  # the option and its separate value
+        else:
+            index += 1  # a flag
+    return False
+
+
+# Global options that consume a following token, transcribed from `codex --help` (every entry
+# there carrying a `<VALUE>` placeholder). test_option_table_matches_the_installed_cli keeps
+# this honest against the binary rather than against my memory of it -- the whole family of
+# defects in this concern came from encoding a rule about a value instead of reading it.
+VALUE_TAKING_GLOBAL_OPTIONS = frozenset({
+    "-c", "--config",
+    "--enable", "--disable",
+    "--remote", "--remote-auth-token-env",
+    "-i", "--image",
+    "-m", "--model",
+    "--local-provider",
+    "-p", "--profile",
+    "-s", "--sandbox",
+    "-C", "--cd",
+    "--add-dir",
+    "-a", "--ask-for-approval",
+})
+
+
 def codex_app_server_process_rows() -> list[dict[str, Any]]:
     result = subprocess.run(
         ["ps", "eww", "-axo", "pid=,command="],
@@ -1202,7 +1300,7 @@ def codex_app_server_process_rows() -> list[dict[str, Any]]:
         pid_text, _, command = stripped.partition(" ")
         if not pid_text.isdigit():
             continue
-        if "codex app-server" not in command:
+        if not command_is_app_server_invocation(command):
             continue
         rows.append({"pid": int(pid_text), "command": command})
     return rows
@@ -1262,13 +1360,35 @@ def _socket_read_exact(sock: socket.socket, count: int) -> bytes:
     return b"".join(chunks)
 
 
+# How a connection answers a server-initiated request. The policy is explicit because it
+# depends on the connection's ROLE, not on the protocol: App Server broadcasts one pending
+# request to every subscribed connection and the first response -- result OR error -- can
+# resolve it. A connection that OWNS a turn must answer, or the turn hangs. A connection that
+# merely observes must not, or it races the operator's own UI and can refuse work they
+# started. There is no correct global default, so each caller states its role.
+SERVER_REQUEST_REFUSE = "refuse"
+SERVER_REQUEST_IGNORE = "ignore"
+SERVER_REQUEST_POLICIES = (SERVER_REQUEST_REFUSE, SERVER_REQUEST_IGNORE)
+JSONRPC_METHOD_NOT_FOUND = -32601
+
+
 class JsonRpcWebSocketClient:
-    def __init__(self, url: str, token: str | None = None, timeout_seconds: int = 30):
+    def __init__(
+        self,
+        url: str,
+        token: str | None = None,
+        timeout_seconds: int = 30,
+        server_request_policy: str = SERVER_REQUEST_REFUSE,
+    ):
+        if server_request_policy not in SERVER_REQUEST_POLICIES:
+            raise ValueError(f"unknown server_request_policy: {server_request_policy!r}")
         self.url = url
         self.token = token
         self.timeout_seconds = timeout_seconds
+        self.server_request_policy = server_request_policy
         self.sock: socket.socket | None = None
         self.counter = 0
+        self.server_requests: list[str] = []
 
     def __enter__(self) -> "JsonRpcWebSocketClient":
         parsed = urllib.parse.urlparse(self.url)
@@ -1361,7 +1481,40 @@ class JsonRpcWebSocketClient:
                 self._send_frame(payload, opcode=0xA)
                 continue
             if opcode == 0x1:
-                return json.loads(payload.decode("utf-8"))
+                message = json.loads(payload.decode("utf-8"))
+                if self._handle_server_request(message):
+                    continue
+                return message
+
+    def _handle_server_request(self, message: dict[str, Any]) -> bool:
+        """True when this message was a server request and has been dealt with here.
+
+        Centralised so that EVERY read path is covered -- the request/response wait and any
+        caller's own event loop alike. Two separate branches used to answer these with
+        `{"result": {}}`: one while waiting for a response, one in the dispatch turn loop.
+        Every member of the generated ServerRequest union is authority- or data-bearing
+        (command/file/permission approvals, tool calls, user input, MCP elicitation, auth
+        refresh, attestation) and NO Response schema in the bundle permits an empty object,
+        so that envelope was unauthorized on its face.
+
+        `is not None`, never truthiness: 0 is a legal JSON-RPC id, and under truthiness a
+        request with id 0 fell through as if it were a notification.
+        """
+        if message.get("id") is None or not message.get("method"):
+            return False
+        method = str(message["method"])
+        self.server_requests.append(method)
+        if self.server_request_policy == SERVER_REQUEST_REFUSE:
+            self.send_json({
+                "jsonrpc": "2.0",
+                "id": message["id"],
+                "error": {
+                    "code": JSONRPC_METHOD_NOT_FOUND,
+                    "message": ("llm-collab automatic dispatch cannot authorize server "
+                                f"requests; {method} refused"),
+                },
+            })
+        return True
 
     def notify(self, method: str, params: dict[str, Any] | None = None) -> None:
         self.send_json({"jsonrpc": "2.0", "method": method, "params": params or {}})
@@ -1387,17 +1540,63 @@ class JsonRpcWebSocketClient:
                     error = message["error"]
                     raise RuntimeError(f"{method}: {error.get('message', 'unknown error')}")
                 return message.get("result")
-            if message.get("id") and message.get("method"):
-                self.send_json({"jsonrpc": "2.0", "id": message["id"], "result": {}})
+            # Server requests never reach here: recv_json() applies this connection's
+            # policy before returning. This loop only correlates responses.
+
+
+# Mirrors TOKEN_BLANK_CHARS in bin/pm2_watchers.py. Python's default strip() removes the
+# ASCII information separators, which the CLI keeps, so reading the secret with the default
+# turned a token the gate had approved into an empty string and sent no credential at all.
+TOKEN_BLANK_CHARS = (
+    "\t\n\v\f\r \u0085\u00a0\u1680"
+    "\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a"
+    "\u2028\u2029\u202f\u205f\u3000"
+)
+
+
+def usable_token(content: str) -> str | None:
+    """The sendable secret in this content, or None when there is not one.
+
+    One strip and one predicate, in one place. Every character of the stripped secret must be
+    printable ASCII: a BOM cannot be encoded in an HTTP header, U+001C and friends are not
+    sendable, and an INTERIOR CRLF would split the header itself. The PM2 gates enforce this,
+    but a server started or discovered outside those gates reaches this reader instead, so the
+    contract holds here rather than being assumed upstream.
+
+    Returning the value rather than a boolean matters: an earlier version stripped once to
+    decide and again to return, and the second strip could not be proven by any test because
+    the decision had already excluded every input the two strips disagree about. Dead
+    distinctions in a credential path are worth removing rather than documenting.
+    """
+    stripped = content.strip(TOKEN_BLANK_CHARS)
+    if not stripped:
+        return None
+    if not all("\x21" <= character <= "\x7e" for character in stripped):
+        return None
+    return stripped
+
+
+def token_is_usable(content: str) -> bool:
+    return usable_token(content) is not None
 
 
 def _codex_app_server_token(token_file: str | None) -> str | None:
+    """Read the bearer token with exactly the semantics the gate validated.
+
+    The gate accepts a token, then this reads it: if the two disagree about what counts as
+    blank -- or about what is sendable at all -- an approved token becomes an empty or
+    unsendable credential here while the transport still reports as configured.
+    """
     if not token_file:
         return None
     path = Path(token_file).expanduser()
     if not path.exists():
         return None
-    return path.read_text().strip()
+    try:
+        content = path.read_bytes().decode("utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    return usable_token(content)
 
 
 def _extract_default_codex_model(models_payload: Any) -> str | None:
@@ -1455,9 +1654,6 @@ def execute_codex_app_server_trigger(session: dict, message: dict, runtime_home:
         deadline = time.monotonic() + timeout_seconds
         while time.monotonic() < deadline:
             message_payload = client.recv_json()
-            if message_payload.get("id") and message_payload.get("method"):
-                client.send_json({"jsonrpc": "2.0", "id": message_payload["id"], "result": {}})
-                continue
             method = str(message_payload.get("method", ""))
             if not method:
                 continue

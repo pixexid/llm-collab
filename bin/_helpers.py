@@ -730,12 +730,111 @@ def latest_chat() -> Path | None:
     return chats[-1] if chats else None
 
 
-def find_chat_by_partial(partial: str) -> Path | None:
-    if partial == "last":
-        return latest_chat()
-    matches = find_chats(partial)
-    if not matches:
+def chat_id_of(chat_dir: Path) -> str | None:
+    """The chat id a directory actually carries: the token after the final `__`.
+
+    Never re-derive the id GRAMMAR here. An earlier version matched
+    `CHAT-[0-9A-Za-z]+$`, which does not match the hyphenated ids this workspace
+    produces -- CHAT-CLAUDE-CODEX, CHAT-BIND-SAFE, CHAT-READY-DRIFT. Both duplicates of
+    such an id parsed as None, so neither was an exact match and newest-wins applied
+    silently: the collision guard was absent for a whole class of ids while appearing to
+    be present. The naming convention is `<date>_<slug>__<CHAT-ID>`, so splitting on the
+    final separator needs no grammar at all.
+    """
+    _, separator, tail = chat_dir.name.rpartition("__")
+    return tail if separator and tail else None
+
+
+def chat_meta_project(chat_dir: Path) -> str | None:
+    """The project a directory's metadata claims, or None when it cannot be established.
+
+    Unreadable or malformed metadata is a NON-MATCH, never an error: an unrelated directory
+    sharing a chat id could otherwise raise during filtering and block a perfectly valid chat
+    in the project the caller actually named.
+    """
+    try:
+        meta = load_chat_meta(chat_dir)
+    except (OSError, ValueError):
+        # Only unreadable or undecodable metadata. A bare `except Exception` here masked
+        # programming defects as "every scoped chat disappeared", which is both a silent
+        # failure and an extremely confusing one. json.JSONDecodeError is a ValueError.
         return None
+    if not isinstance(meta, dict):
+        return None
+    project = meta.get("project_id")
+    return str(project) if project else None
+
+
+def _collision_message(partial: str, candidates: list, project: str | None) -> str:
+    names = "\n  ".join(sorted(d.name for d in candidates))
+    scope = f" within project {project}" if project else ""
+    return (
+        f"chat id {partial} matches {len(candidates)} directories{scope}; ids must be unique "
+        f"there:\n  {names}\n"
+        "Merge or re-id the duplicates before sending -- delivery will not guess."
+    )
+
+
+def find_chat_by_partial(partial: str, *, project: str | None = None) -> Path | None:
+    """Resolve a chat selector to one directory.
+
+    Two matches for one chat id mean the workspace is corrupt: ids must be unique, and
+    picking the newest silently routed delivery into whichever directory sorted last.
+    That is how mail reaches the wrong receiver -- and how a chat whose duplicate lacked
+    meta.json blocked delivery entirely with an error naming a directory the sender never
+    chose. Refuse instead of guessing.
+
+    The decision is made by comparing the id each directory ACTUALLY carries, never by
+    the shape of the selector. Testing the selector's shape got all three edge cases
+    wrong at once: a lowercase selector failed the uppercase pattern and bypassed the
+    refusal entirely, an id-shaped prefix like `CHAT-89` was refused although it is an
+    ordinary loose match, and a directory whose title merely mentions another id counted
+    toward the collision. Loose partials keep newest-wins -- that is human lookup, not
+    delivery addressing.
+    """
+    matches = find_chats(partial) if partial != "last" else find_chats()
+    selector = partial.strip().casefold()
+
+    # Who BEARS this id is a global fact, established before any scoping. The pre-filter
+    # discarded that knowledge, so an id borne only in another project left an in-scope
+    # directory that merely MENTIONS it in its title -- `followup-CHAT-X__CHAT-Y` -- and the
+    # loose fallback then returned CHAT-Y. A caller who named an id must never be handed a
+    # different chat because the one they named lives elsewhere.
+    bearers = ([] if partial == "last"
+               else [d for d in matches if (chat_id_of(d) or "").casefold() == selector])
+
+    if project is not None:
+        # ONE pre-filter, before any selection. Filtering after exact-id selection left the
+        # `last` and loose paths unscoped, so they could still choose another project's chat
+        # and only fail later at delivery. Scope is a property of the candidate SET, not a
+        # tie-breaker applied to a winner.
+        scoped = [d for d in matches if chat_meta_project(d) == project]
+    else:
+        scoped = list(matches)
+
+    if not scoped:
+        return None
+    if partial == "last":
+        return scoped[-1]
+
+    scoped_names = {d.name for d in scoped}
+    exact = [d for d in bearers if d.name in scoped_names]
+    if len(exact) > 1:
+        raise ValueError(_collision_message(partial, exact, project))
+    if exact:
+        return exact[0]
+    if bearers:
+        # the id exists, but not here. Falling through to a loose match would deliver into a
+        # directory the caller never named.
+        return None
+    return scoped[-1]
+
+    selector = partial.strip().casefold()
+    exact = [d for d in matches if (chat_id_of(d) or "").casefold() == selector]
+    if len(exact) > 1:
+        raise ValueError(_collision_message(partial, exact, project))
+    if exact:
+        return exact[0]
     return matches[-1]
 
 
@@ -892,3 +991,38 @@ def print_handoff_prompt(
     print(build_handoff_prompt(agent, sender_id=sender_id, first_time=first_time))
     print()
     print(border)
+
+def canonical_path(value, base=None):
+    """The single path invariant shared by every llm-collab path comparison.
+
+    Absolute (resolved against the repository root, never the caller's cwd), redundant
+    segments collapsed, no trailing separator, symlinks deliberately unresolved because
+    delivery discovery matches the launched spelling literally.
+
+    This lives here, imported by both bin/pm2_watchers.py and bin/session_autobridge.py
+    and mirrored by canonicalPath() in pm2/ecosystem.config.cjs, because six separate
+    defects came from normalizing one side of a two-sided comparison and calling the
+    concern closed. A second copy is how the seventh happens.
+
+    One tilde grammar only: exact ``~`` or a ``~/`` prefix. ``~user`` forms stay literal
+    because os.path.expanduser accepts them and the CJS mirror cannot, and a form that
+    canonicalizes to an absolute home on one side and a repo-relative ``~user`` directory
+    on the other is the validate-one-path/use-another defect wearing a different hat.
+
+    Leading separator runs collapse to one, and a ``~/`` tail's own leading run is
+    stripped before joining. Both exist because Node and Python disagree by default:
+    ``os.path.join(home, "/x")`` discards home while ``path.join`` keeps it, and
+    ``normpath`` preserves exactly two leading slashes per POSIX while ``path.resolve``
+    collapses them. ``~//x`` and ``//tmp/codex-home`` each canonicalized to a different
+    literal on each side, which is the same one-sided-normalization defect as the rest.
+    """
+    import os as _os
+
+    text = str(value).strip()
+    if text == "~" or text.startswith("~/"):
+        home = _os.path.expanduser("~")
+        text = home if text == "~" else _os.path.join(home, text[2:].lstrip("/"))
+    root = str(base) if base is not None else str(ROOT)
+    joined = text if _os.path.isabs(text) else _os.path.join(root, text)
+    normalised = re.sub(r"^/+", "/", _os.path.normpath(joined))
+    return Path(normalised)

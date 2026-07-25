@@ -349,7 +349,11 @@ def main():
     ensure_project(args.project, allow_none=False)
 
     # Resolve chat
-    chat_dir = find_chat_by_partial(args.chat)
+    try:
+        chat_dir = find_chat_by_partial(args.chat, project=args.project)
+    except ValueError as error:
+        print(f"[error] {error}", file=sys.stderr)
+        sys.exit(1)
     if chat_dir is None:
         print(f"[error] Chat not found: {args.chat!r}", file=sys.stderr)
         print("       Use 'python bin/new_chat.py --title ...' to create one.", file=sys.stderr)

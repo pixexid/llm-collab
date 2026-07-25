@@ -21,9 +21,10 @@ require_python()
 
 import argparse
 import json
+import os
 
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent))
-from _helpers import ensure_project, get_agent, now_utc, utc_iso
+from _helpers import canonical_path, ensure_project, get_agent, now_utc, utc_iso
 from _session_autobridge import (
     HEURISTIC_RUNTIME_DISCOVERY_FAMILIES,
     HEURISTIC_RUNTIME_DISCOVERY_REFUSED_REASON,
@@ -74,6 +75,15 @@ def parse_args():
     register.add_argument("--runtime-family", default=None, help="Runtime family, e.g. codex_app, claude_app, gemini_cli")
     register.add_argument("--runtime-session-id", default=None, help="Current runtime-native session identifier")
     register.add_argument("--runtime-session-source", default=None, help="Where the runtime session identifier came from")
+    register.add_argument(
+        "--runtime-home",
+        default=None,
+        help=(
+            "Exact runtime home (e.g. CODEX_HOME) used to resolve the delivery "
+            "transport. Canonicalised on write; must match the value the runtime was "
+            "launched with, since discovery matches CODEX_HOME literally."
+        ),
+    )
     register.add_argument("--supersedes-session", default=None, help="Older llm-collab session replaced by this registration")
     register.add_argument(
         "--runtime-command",
@@ -193,6 +203,22 @@ def emit(payload: dict, json_output: bool) -> None:
     print(json.dumps(payload, indent=2, sort_keys=True))
 
 
+def canonical_runtime_home(value: str | None) -> str | None:
+    """Normalise a runtime home using the ONE shared path invariant.
+
+    Delivery resolves an endpoint by matching `CODEX_HOME=<value>` literally against the
+    running process, so registration and launch must agree exactly. A separate
+    implementation here previously stored a relative `.codex` verbatim while the
+    ecosystem launched `<repo>/.codex`, so the two never matched.
+    """
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    return str(canonical_path(text))
+
+
 def register_session(args) -> dict:
     agent = get_agent(args.agent)
     now = now_utc()
@@ -215,9 +241,15 @@ def register_session(args) -> dict:
         runtime["session_id"] = args.runtime_session_id
     if args.runtime_session_source is not None:
         runtime["session_source"] = args.runtime_session_source
-    runtime_home = getattr(args, "runtime_home", None)
+    runtime_home = canonical_runtime_home(getattr(args, "runtime_home", None))
     if runtime_home is None and runtime.get("family") and runtime.get("session_source"):
-        runtime_home = runtime_home_from_source(str(runtime["family"]), runtime.get("session_source"))
+        # The derived fallback must pass through the SAME invariant as an explicit
+        # --runtime-home. Stored raw, a relative or non-normalized source produced a home
+        # that could never match the sidecar's absolute CODEX_HOME process marker, so
+        # discovery found no endpoint and delivery failed with no diagnostic.
+        runtime_home = canonical_runtime_home(
+            runtime_home_from_source(str(runtime["family"]), runtime.get("session_source"))
+        )
     if runtime_home is not None:
         runtime["home"] = runtime_home
     if args.runtime_command:

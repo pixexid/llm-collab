@@ -280,3 +280,102 @@ After this, PM2 and all running watchers restart automatically on reboot.
 Logs are written to `Logs/watchers/{agent}.pm2.{out,err}.log`.
 
 These files are gitignored.
+
+## Codex app-server delivery sidecar
+
+PM2 also manages the Codex delivery transport, not just inbox watchers.
+
+`bin/_session_autobridge.py` delivers to a Codex worker over the App Server
+(`initialize` → `thread/resume` → `turn/start`). `discover_codex_app_server()`
+only resolves a target launched with `--listen ws://`. The ChatGPT desktop app
+runs its own app-server on `--listen stdio://`, which no external process can
+connect to, so without this sidecar the delivery path can never find an endpoint
+and every packet falls back to the AX doorbell.
+
+The sidecar shares the desktop app's `CODEX_HOME`, so it reaches the same
+threads and the visible app keeps running.
+
+### Enabling it
+
+The token file's presence is the enable switch — there is no config flag:
+
+```bash
+mkdir -p .secrets
+python3 -c "import secrets; print(secrets.token_urlsafe(32))" > .secrets/codex_app_server_ws_token
+chmod 600 .secrets/codex_app_server_ws_token
+```
+
+`.secrets/` is gitignored. Mode `600` matters: the token authorizes turns on the
+operator's real Codex account.
+
+Overrides, all optional:
+
+| variable | default |
+|---|---|
+| `LLM_COLLAB_CODEX_APP_SERVER_TOKEN_FILE` | `.secrets/codex_app_server_ws_token` |
+| `LLM_COLLAB_CODEX_BIN` | `/Applications/ChatGPT.app/Contents/Resources/codex` |
+| `LLM_COLLAB_CODEX_HOME` | `~/.codex` |
+| `LLM_COLLAB_CODEX_APP_SERVER_PORT` | `8767` |
+
+The listener binds `127.0.0.1` only.
+
+### Lifecycle
+
+Addressed as `codex-appserver` through the normal manager, and included in
+`--all` whenever the token file and the Codex binary both exist:
+
+```bash
+python bin/pm2_watchers.py start --agent codex-appserver
+python bin/pm2_watchers.py status --agent codex-appserver
+# NOTE: `restart` reuses PM2's stored definition and does NOT re-read this config,
+# so changing CODEX_HOME, the port, the token path, or the binary needs a reload:
+pm2 startOrRestart pm2/ecosystem.config.cjs --only <workspace>-codex-appserver
+python bin/pm2_watchers.py logs --agent codex-appserver
+python bin/pm2_watchers.py stop --agent codex-appserver
+```
+
+`status` reports `[sidecar] target=codex-appserver (no AX surface)` for it, and
+deliberately not an `[ax]` line: that prefix is the per-agent AX capability
+contract consumers parse, and a transport sidecar has no Accessibility surface.
+That is the point of it.
+
+Persist the process list so it survives a reboot:
+
+```bash
+pm2 save
+```
+
+### Verifying and using it
+
+```bash
+curl -s http://127.0.0.1:8767/readyz
+python bin/pm2_watchers.py status --agent codex-appserver
+```
+
+Delivery itself is exercised by the autobridge dispatch path, which reports
+`adapter: codex_app_server` with `returncode: 0` once a session declares the
+exact runtime home. (A dedicated observation/control CLI —
+`status`/`tail`/`send`/`steer`/`interrupt` — is queued separately and is not
+required to verify this transport.)
+
+A session must declare the exact runtime home for delivery to resolve:
+
+```bash
+python bin/session_autobridge.py register --session <id> --agent codex \
+  --project <project> --chat <chat> --repo-target <repo> \
+  --mode auto-read --status active --wake-strategy runtime_trigger \
+  --runtime-family codex_app --runtime-session-id <native-thread-id> \
+  --runtime-home ~/.codex
+```
+
+`--mode auto-read` is **required**, not cosmetic. `--mode` defaults to `manual`,
+and `resolve_effective_action()` selects `manual_noop` *before* it considers
+`wake_strategy=runtime_trigger`. A session registered without it still looks
+dispatchable to `deliver.py` — which suppresses the AX fallback — while the
+watcher marks each packet processed without ever calling the App Server. The
+result is silently dropped messages.
+
+The native thread id must be the worker's own exact id, self-reported. Do not use
+`publish-current` for this: it refuses `codex_app`, `claude_app`, and
+`gemini_cli` precisely because disk discovery is heuristic and can resolve a
+stale session from an unrelated project.
