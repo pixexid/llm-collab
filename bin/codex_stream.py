@@ -82,6 +82,11 @@ MAX_FRAME_BYTES = 8 * 1024 * 1024
 # the live App Server. Anything else lacking a thread identity is unattributable and is dropped.
 CONNECTION_SCOPED_METHODS = frozenset({"remoteControl/status/changed"})
 MAX_OBSERVED_REQUEST_METHODS = 64
+# item/started for an agent message adds an id here and only a matching item/completed removes it,
+# so cancelled or failed turns that omit completion leak entries on an unbounded watch. Capped, and
+# exceeding it ABORTS rather than silently forgetting which messages were streamed -- a partial
+# index that still claims to be complete is the truncation this repo's rules forbid.
+MAX_STREAMED_MESSAGE_IDS = 4096
 MAX_METHOD_NAME_CHARS = 128
 BINDINGS_DIR = ROOT / "State" / "session_autobridge" / "bindings"
 
@@ -121,6 +126,7 @@ class ObserverClient(autobridge.JsonRpcWebSocketClient):
         # inventing new names cannot grow it past the cap.
         self.observed_request_count = 0
         self.observed_request_methods: set[str] = set()
+        self.observed_methods_truncated = False
         # Notifications seen while a request/response correlation is in flight. The inherited
         # request() loop DISCARDS them, so an event emitted after this socket was registered
         # for the thread but before thread/resume answered was silently lost -- exactly at the
@@ -203,8 +209,14 @@ class ObserverClient(autobridge.JsonRpcWebSocketClient):
             if message.get("id") is not None and message.get("method"):
                 method = str(message["method"])
                 self.observed_request_count += 1
-                if len(self.observed_request_methods) < MAX_OBSERVED_REQUEST_METHODS:
-                    self.observed_request_methods.add(str(method)[:MAX_METHOD_NAME_CHARS])
+                name = str(method)[:MAX_METHOD_NAME_CHARS]
+                if (name not in self.observed_request_methods
+                        and len(self.observed_request_methods) >= MAX_OBSERVED_REQUEST_METHODS):
+                    # A cap that silently stops recording turns the report into a partial one that
+                    # still reads as complete. Carry the fact instead of hiding it.
+                    self.observed_methods_truncated = True
+                else:
+                    self.observed_request_methods.add(name)
                 params = message.get("params") or {}
                 print(f"[request] {method} id={message['id']} "
                       f"thread={params.get('threadId', '?')} turn={params.get('turnId', '?')}",
@@ -255,6 +267,24 @@ def finite_seconds(value: str) -> float:
     if seconds <= 0:
         raise argparse.ArgumentTypeError(f"{value!r} must be greater than zero")
     return seconds
+
+
+def remember_streamed_message(started_id: str, streamed: set[str]) -> None:
+    """Record that this agent message streamed from the start, under a cumulative cap.
+
+    Only a matching item/completed removes an id, so cancelled or failed turns that omit completion
+    leak entries on a watch with no duration. Exceeding the cap ABORTS rather than forgetting which
+    messages were streamed: a partial index that still reads as complete would make the stream
+    reprint text it had already shown, which is the silent truncation this repo's rules forbid.
+
+    A module-level function so the cap is testable without driving the whole stream loop.
+    """
+    if started_id not in streamed and len(streamed) >= MAX_STREAMED_MESSAGE_IDS:
+        raise SystemExit(
+            f"[error] more than {MAX_STREAMED_MESSAGE_IDS} agent messages started without "
+            "completing; aborting rather than tracking them without limit"
+        )
+    streamed.add(started_id)
 
 
 def notification_belongs_to(method: str, params: dict, thread_id: str) -> bool:
@@ -772,7 +802,7 @@ def main() -> None:
 
             started_id = message_started_id(method, params)
             if started_id:
-                streamed_from_start.add(started_id)
+                remember_streamed_message(started_id, streamed_from_start)
 
             if method == "item/agentMessage/delta":
                 chunk = params.get("delta") or params.get("text") or ""
@@ -804,7 +834,9 @@ def main() -> None:
     if client.observed_request_count:
         print(f"[stream] saw {client.observed_request_count} server request(s) on this "
               f"observer socket and answered none: "
-              f"{', '.join(sorted(client.observed_request_methods))}. Receiving these here "
+              f"{', '.join(sorted(client.observed_request_methods))}"
+              f"{' (+ more, list truncated)' if client.observed_methods_truncated else ''}"
+              f". Receiving these here "
               f"means App Server fans requests to non-owner clients.", file=sys.stderr)
     if failed:
         raise SystemExit(1)

@@ -45,6 +45,54 @@ def write_json(path: Path, payload: dict) -> None:
     write(path, json.dumps(payload, indent=2))
 
 
+def run_cli_with_eacces_on(root, target_path, module_name, argv):
+    """Run a CLI in a child process with os.open raising EACCES for one path.
+
+    `target_path` may be absolute; only its last four components are matched in the child.
+
+    chmod(0o000) does NOT make a file unreadable for UID 0, so a containerized or root test runner
+    silently stopped exercising the I/O-failure contract and the test failed instead. Injecting the
+    error is identity-independent: it proves the same refusal whoever runs the suite.
+    """
+    import subprocess as _sp
+    import sys as _sys
+    import textwrap as _tw
+
+    suffix = "/".join(Path(target_path).parts[-4:])
+    program = _tw.dedent(f"""
+        import os, sys
+        sys.path.insert(0, {str(REPO_ROOT / "bin")!r})
+        # Match on a path SUFFIX, not an absolute string: the CLI resolves this binding through its
+        # own configured state root, so an absolute comparison silently never fired and the
+        # injection did nothing while the test reported the command had simply succeeded.
+        denied_suffix = {suffix!r}
+        real_open = os.open
+        def guarded(path, flags, *a, **k):
+            if str(path).endswith(denied_suffix):
+                raise PermissionError(13, "Permission denied")
+            return real_open(path, flags, *a, **k)
+        os.open = guarded
+        real_io_open = open
+        def guarded_io(path, *a, **k):
+            if str(path).endswith(denied_suffix):
+                raise PermissionError(13, "Permission denied")
+            return real_io_open(path, *a, **k)
+        import builtins
+        builtins.open = guarded_io
+        sys.argv = {argv!r}
+        import {module_name} as cli
+        try:
+            cli.main()
+        except SystemExit as error:
+            code = error.code if isinstance(error.code, int) else (0 if error.code is None else 1)
+            if error.code not in (0, None):
+                print(error.code, file=sys.stderr)
+            sys.exit(code if isinstance(code, int) else 1)
+    """)
+    return _sp.run([_sys.executable, "-c", program], cwd=root, text=True,
+                   capture_output=True, input="probe body", timeout=60)
+
+
 class SessionAutobridgeTest(unittest.TestCase):
     def make_workspace(self) -> Path:
         temp_root = Path(tempfile.mkdtemp(prefix="lca-", dir="/tmp"))
@@ -2514,8 +2562,14 @@ class SessionAutobridgeTest(unittest.TestCase):
         ]
         if repo_targets is not None:
             argv += ["--repo-targets", repo_targets]
+        # check=False plus an explicit assertion: check=True raises CalledProcessError with the
+        # stderr hidden inside it, so a failing delivery reported only "exit status 1" and I had to
+        # go digging. The command's own error message is the diagnostic.
         done = subprocess.run(argv, cwd=root, text=True, input="scope probe",
-                              capture_output=True, check=True)
+                              capture_output=True, check=False)
+        if done.returncode != 0:
+            self.fail(f"deliver.py exited {done.returncode}\n"
+                      f"stdout:\n{done.stdout[-1500:]}\nstderr:\n{done.stderr[-1500:]}")
         return json.loads(done.stdout.split("\n\n", 1)[0]), done.stderr
 
     def scoped_subscriber_workspace(self, *, subscriber_repo_targets, claude_ax_app=None,
@@ -2767,17 +2821,24 @@ class SessionAutobridgeTest(unittest.TestCase):
                          "the unreadable binding must be left byte-identical, never replaced")
 
     def test_registration_refuses_on_an_IO_FAILED_existing_binding(self):
-        root, binding = self.registered_workspace_with_binding()
-        binding.chmod(0o000)
-        self.addCleanup(binding.chmod, 0o644)
+        """EACCES injected in the child rather than chmod(0o000).
 
-        done = self.register_new_expecting_failure(root)
+        chmod does not make a file unreadable for UID 0, so under a root or containerized runner
+        registration SUCCEEDED and this test failed rather than exercising the contract.
+        """
+        root, binding = self.registered_workspace_with_binding()
+        done = run_cli_with_eacces_on(
+            root, binding, "session_autobridge",
+            ["session_autobridge.py", "register", "--session", "SESSION-NEW", "--agent", "claude",
+             "--project", "amiga", "--chat", "CHAT-REG1", "--mode", "notify",
+             "--runtime-family", "claude_app", "--runtime-session-id", "THREAD-NEW",
+             "--runtime-session-source", "first_read", "--json"],
+        )
 
         self.assertNotEqual(0, done.returncode)
         self.assertNotIn("Traceback", done.stderr, done.stderr[-400:])
         self.assertFalse(
             (root / "State" / "session_autobridge" / "sessions" / "SESSION-NEW.json").exists())
-        binding.chmod(0o644)
         self.assertEqual("THREAD-OLD", json.loads(binding.read_text())["runtime_session_id"],
                          "the old binding must still point where it did")
 
@@ -2850,14 +2911,21 @@ class SessionAutobridgeTest(unittest.TestCase):
             subscriber_repo_targets=["llm-collab"], claude_ax_app="Claude")
         path = (root / "State" / "session_autobridge" / "bindings" / "amiga" / "CHAT-SCOPE1"
                 / "claude.json")
-        path.chmod(0o000)
-        self.addCleanup(path.chmod, 0o644)
-        payload, stderr = self.deliver_with_scope(root, "CHAT-SCOPE1",
-                                                 repo_targets="llm-collab")
+        done = run_cli_with_eacces_on(
+            root, path, "deliver",
+            ["deliver.py", "--chat", "CHAT-SCOPE1", "--from", "codex", "--to", "claude",
+             "--project", "amiga", "--title", "IO probe", "--sender-session-id", "codex-session-9",
+             "--repo-targets", "llm-collab", "--body-file", "-"],
+        )
+        self.assertNotIn("Traceback", done.stderr, done.stderr[-500:])
+        payload = json.loads(done.stdout.split("\n\n", 1)[0])
         self.assertFalse(payload["autobridge_ready"])
         self.assertIn("binding_unreadable", payload["autobridge_refusal_reason"])
-        self.assertTrue(sorted(chat_dir.glob("*_to-claude_*.md")))
-        self.assertNotIn("Traceback", stderr)
+        self.assertTrue(payload["binding_unreadable_blocker"],
+                        "the blocker flag is the only machine-readable signal in this state")
+        self.assertIn("blocker:", done.stderr)
+        self.assertTrue(sorted(chat_dir.glob("*_to-claude_*.md")),
+                        "the durable packet must survive an I/O-failed binding")
 
     def test_a_readable_binding_is_unaffected(self):
         """The control: this must still dispatch, or the tests above prove only that I broke it."""

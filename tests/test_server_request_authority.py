@@ -468,6 +468,117 @@ class HandshakeClosesOnFailureTest(unittest.TestCase):
         self.assertEqual([], self.sockets_left_open(lambda: made.__enter__()))
         self.assertIsNone(made.sock)
 
+    def test_only_bytes_up_to_the_terminator_count_as_header(self) -> None:
+        """Arithmetic tested as arithmetic.
+
+        The socket-level version of this passed against the vulnerable code depending on where the
+        kernel split the read -- the coalesced frame bytes happened to land just under the ceiling.
+        A test whose verdict depends on chunk boundaries is not a test of the rule.
+        """
+        head = b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\r\n"
+        self.assertEqual(len(head), autobridge.handshake_header_bytes(head))
+        self.assertEqual(len(head), autobridge.handshake_header_bytes(head + b"\x81\x05hello"),
+                         "trailing frame bytes are not header bytes")
+        self.assertEqual(len(head), autobridge.handshake_header_bytes(head + b"z" * 100_000),
+                         "however much follows the terminator, the header size is unchanged")
+
+    def test_a_buffer_with_no_terminator_charges_everything(self) -> None:
+        """Until the terminator appears, every byte received IS candidate header and must count."""
+        partial = b"HTTP/1.1 101 Switching Protocols\r\nX-Pad: " + b"p" * 5000
+        self.assertEqual(len(partial), autobridge.handshake_header_bytes(partial))
+
+    def test_the_ceiling_uses_that_accounting(self) -> None:
+        """Structural: the caller must not re-derive the length inline again."""
+        source = (ROOT / "bin" / "_session_autobridge.py").read_text(encoding="utf-8")
+        self.assertIn("if handshake_header_bytes(response) > MAX_HANDSHAKE_HEADER_BYTES:", source)
+
+    def serve_ws_with_padded_header_then_frame(self, header_pad: int, payload: bytes):
+        """Send an upgrade response padded to a chosen size, with the first frame in the SAME write.
+
+        The point is that header + frame together exceed the ceiling while the HEADER alone does not.
+        """
+        import base64 as _b64
+        import hashlib as _hashlib
+        import re as _re
+        import socket as _socket
+        import threading
+        import time as _time
+
+        listener = _socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        port = listener.getsockname()[1]
+        self.addCleanup(listener.close)
+
+        def serve():
+            try:
+                conn, _addr = listener.accept()
+            except OSError:
+                return
+            with conn:
+                request = b""
+                while b"\r\n\r\n" not in request:
+                    chunk = conn.recv(4096)
+                    if not chunk:
+                        return
+                    request += chunk
+                found = _re.search(rb"Sec-WebSocket-Key: (.+)\r\n", request)
+                accept = _b64.b64encode(_hashlib.sha1(
+                    found.group(1).strip() + b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11").digest()
+                ).decode("ascii")
+                head = (b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n"
+                        b"Connection: Upgrade\r\nSec-WebSocket-Accept: "
+                        + accept.encode("ascii") + b"\r\n")
+                head += b"X-Pad: " + b"p" * header_pad + b"\r\n"
+                head += b"\r\n"
+                if len(payload) < 126:
+                    frame = bytes([0x81, len(payload)]) + payload
+                else:
+                    frame = bytes([0x81, 126]) + len(payload).to_bytes(2, "big") + payload
+                conn.sendall(head + frame)
+                _time.sleep(1.0)
+
+        thread = threading.Thread(target=serve, daemon=True)
+        thread.start()
+        self.addCleanup(thread.join, 3.0)
+        return port
+
+    def test_a_header_under_the_ceiling_is_accepted_even_when_a_frame_shares_the_read(self) -> None:
+        """The ceiling applies to HEADER bytes; charging the coalesced frame rejected valid ones.
+
+        Sized so the header alone sits just under MAX_HANDSHAKE_HEADER_BYTES while header + frame
+        exceeds it. Before the fix the whole buffer was charged and this connection was refused,
+        even though the code immediately below correctly treats those trailing bytes as frame data.
+        """
+        import json as _json
+
+        payload = _json.dumps({"method": "turn/started",
+                               "params": {"pad": "x" * 2000}}).encode()
+        # Sized so the header lands a few hundred bytes under the cap. With 2048 of slack the
+        # mutation only triggered when the terminator happened to share a recv() with enough frame
+        # bytes, so the test passed against the vulnerable code roughly at the kernel's discretion.
+        # A few hundred bytes of headroom makes ANY coalesced frame bytes exceed the ceiling.
+        pad = autobridge.MAX_HANDSHAKE_HEADER_BYTES - 300
+        port = self.serve_ws_with_padded_header_then_frame(pad, payload)
+        made = autobridge.JsonRpcWebSocketClient(f"ws://127.0.0.1:{port}", token=None,
+                                                timeout_seconds=5)
+        with made:
+            self.assertEqual("turn/started", made.recv_json()["method"],
+                             "a valid header must not be refused because a frame shared its read")
+
+    def test_a_header_OVER_the_ceiling_is_still_refused(self) -> None:
+        """The other side, so the fix is not simply 'stop counting'."""
+        import json as _json
+
+        payload = _json.dumps({"method": "turn/started", "params": {}}).encode()
+        pad = autobridge.MAX_HANDSHAKE_HEADER_BYTES + 4096
+        port = self.serve_ws_with_padded_header_then_frame(pad, payload)
+        made = autobridge.JsonRpcWebSocketClient(f"ws://127.0.0.1:{port}", token=None,
+                                                timeout_seconds=5)
+        with self.assertRaises(ConnectionError) as caught:
+            made.__enter__()
+        self.assertIn(str(autobridge.MAX_HANDSHAKE_HEADER_BYTES), str(caught.exception))
+
     def test_an_ordinary_handshake_is_far_under_the_ceiling(self) -> None:
         """The cap must not be near a real header's size."""
         import json as _json

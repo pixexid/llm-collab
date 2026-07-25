@@ -141,15 +141,18 @@ def load_binding(project_id: str, chat_id: str, agent_id: str) -> dict:
         raise FileNotFoundError(
             f"Unknown binding: project={project_id} chat={chat_id} agent={agent_id}"
         )
+    # Through the shared helper like every other untrusted read. This one still used Path.open, so
+    # a binding that was a FIFO would have blocked forever inside open() -- the same hazard the
+    # registry and session reads were just fixed for, on the MOST authoritative record of the three.
+    # Nobody reported it; it turned up because a test injection could not intercept Path.open.
     try:
-        with path.open("rb") as handle:
-            raw = handle.read(MAX_BINDING_BYTES + 1)
-    except OSError as exc:
-        raise BindingUnreadable(f"cannot read binding {path}: {exc}") from exc
-    if len(raw) > MAX_BINDING_BYTES:
-        raise BindingUnreadable(
-            f"binding {path} exceeds the {MAX_BINDING_BYTES} byte limit; refusing to parse it"
+        raw = read_regular_file_bounded(path, MAX_BINDING_BYTES)
+    except FileNotFoundError:
+        raise FileNotFoundError(
+            f"Unknown binding: project={project_id} chat={chat_id} agent={agent_id}"
         )
+    except UnreadableFile as exc:
+        raise BindingUnreadable(str(exc)) from exc
     try:
         payload = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, ValueError) as exc:
@@ -1461,6 +1464,22 @@ def _socket_read_exact(sock: socket.socket, count: int, client=None) -> bytes:
 # A per-recv timeout cannot bound this because every successful chunk resets it, and the observer
 # runs with no absolute deadline by default. Real upgrade headers are a few hundred bytes.
 MAX_HANDSHAKE_HEADER_BYTES = 64 * 1024
+
+
+def handshake_header_bytes(response: bytes) -> int:
+    """How many bytes of `response` are HTTP header, i.e. up to and including the terminator.
+
+    The ceiling applies to header bytes. Charging the whole buffer rejected a valid header just under
+    the limit whenever a coalesced first frame pushed the chunk over, while the code that follows
+    correctly treats those same trailing bytes as frame data. The header is what an unbounded peer
+    can grow; the frame after it is bounded elsewhere.
+
+    A named function because this is arithmetic, and arithmetic should be tested as arithmetic: the
+    socket-level test for it passed against the vulnerable code depending on where the kernel split
+    the read, which is not a property any test should rest on.
+    """
+    terminator = response.find(b"\r\n\r\n")
+    return len(response) if terminator < 0 else terminator + 4
 SERVER_REQUEST_REFUSE = "refuse"
 SERVER_REQUEST_IGNORE = "ignore"
 SERVER_REQUEST_POLICIES = (SERVER_REQUEST_REFUSE, SERVER_REQUEST_IGNORE)
@@ -1554,13 +1573,17 @@ class JsonRpcWebSocketClient:
                 chunk = sock.recv(4096)
                 if not chunk:
                     raise ConnectionError("websocket handshake failed")
-                # Charged BEFORE the append, so the ceiling is never exceeded even momentarily.
-                if len(response) + len(chunk) > MAX_HANDSHAKE_HEADER_BYTES:
+                response += chunk
+                # The ceiling applies to HTTP HEADER bytes, so it is measured only up to the
+                # terminator. Charging the whole buffer rejected a valid header just under the limit
+                # whenever a coalesced first frame pushed the chunk over it -- while the code just
+                # below correctly treats those same trailing bytes as frame data. The header is what
+                # an unbounded peer can grow; the frame after it is bounded elsewhere.
+                if handshake_header_bytes(response) > MAX_HANDSHAKE_HEADER_BYTES:
                     raise ConnectionError(
                         f"websocket handshake header exceeded "
                         f"{MAX_HANDSHAKE_HEADER_BYTES} bytes with no end of headers; refusing"
                     )
-                response += chunk
             header_text = response.split(b"\r\n\r\n", 1)[0].decode("iso-8859-1")
             if " 101 " not in header_text.splitlines()[0]:
                 raise ConnectionError(

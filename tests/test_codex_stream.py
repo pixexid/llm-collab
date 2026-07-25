@@ -387,48 +387,81 @@ class ResolveThreadTest(unittest.TestCase):
                          "an oversized binding is present-but-unreadable, not absent")
         self.assertNotIn("no live exactly-bound", message)
 
-    def test_the_binding_read_ITSELF_is_bounded_not_just_the_verdict(self) -> None:
-        """Asserted on the read() argument: read-all-then-measure gives the same verdict."""
+    def test_the_binding_read_goes_through_the_bounded_helper(self) -> None:
+        """Retargeted: load_binding no longer calls Path.open, so watching it proved nothing.
+
+        This is the third test on this PR to have been measuring a mechanism a later commit
+        replaced. The lesson I am taking is that a test asserting HOW something is done has to be
+        re-pointed whenever the how changes, or it quietly stops testing anything.
+        """
         self.bind(chat="CHAT-ARG", thread="t-arg")
-        seen = []
-        real_open = Path.open
+        calls = []
+        real = codex_stream.autobridge.read_regular_file_bounded
 
-        def recording(self_path, *args, **kwargs):
-            handle = real_open(self_path, *args, **kwargs)
-            if self_path.name == "codex.json":
-                real_read = handle.read
+        def recording(path, limit):
+            calls.append((path.name, limit))
+            return real(path, limit)
 
-                def read(*read_args):
-                    seen.append(read_args)
-                    return real_read(*read_args)
-
-                handle.read = read
-            return handle
-
-        with mock.patch.object(Path, "open", recording):
+        with mock.patch.object(codex_stream.autobridge, "read_regular_file_bounded", recording):
             codex_stream.resolve_thread(
                 self.args(agent="codex", project="amiga", chat="CHAT-ARG"))
-        self.assertTrue(seen, "the binding was not read through a bounded read at all")
-        self.assertEqual((codex_stream.autobridge.MAX_BINDING_BYTES + 1,), seen[0],
-                         f"the binding read must be capped, got {seen[0]}")
+        self.assertIn(("codex.json", codex_stream.autobridge.MAX_BINDING_BYTES), calls,
+                      f"the binding must be read through the bounded helper, got {calls}")
+    def test_a_binding_that_is_a_FIFO_cannot_hang_the_lookup(self) -> None:
+        """load_binding still used Path.open, so the MOST authoritative record could hang on open().
+
+        The registry and session reads were fixed for this; the binding was not, and nobody reported
+        it. It surfaced because a test injection could not intercept Path.open, which is a reminder
+        that "the tests could not reach it" is itself evidence about the production path.
+
+        Child process, because a regression blocks in open() and no in-process timer can break it.
+        """
+        import os as _os
+
+        self.bind(chat="CHAT-FIFO", thread="t-fifo")
+        path = self.bindings / "amiga" / "CHAT-FIFO" / "codex.json"
+        path.unlink()
+        _os.mkfifo(path, 0o600)
+        assert_call_returns_within(
+            self, 5.0,
+            f"""
+        import pathlib
+        codex_stream.BINDINGS_DIR = pathlib.Path({str(self.bindings)!r})
+        codex_stream.autobridge.BINDINGS_DIR = pathlib.Path({str(self.bindings)!r})
+        codex_stream.autobridge.SESSIONS_DIR = pathlib.Path({str(self.sessions)!r})
+        codex_stream.registered_project_ids = lambda: {{'amiga'}}
+        from types import SimpleNamespace
+        args = SimpleNamespace(agent='codex', project='amiga', chat='CHAT-FIFO',
+                               thread=None, runtime_home=None)
+        try:
+            codex_stream.resolve_thread(args)
+            print('NO REFUSAL')
+        except SystemExit as error:
+            print('REFUSED:', error)
+            """.strip(),
+            expect_substring="not a regular file",
+        )
 
     def test_an_unreadable_binding_is_reported_not_collapsed_to_absent(self) -> None:
+        """Patches os.open, since the helper opens a descriptor directly."""
+        import os as _os
+
         self.bind(chat="CHAT-DENY", thread="t-deny")
-        real_open = Path.open
+        real_open = _os.open
 
-        def denied(self_path, *args, **kwargs):
-            if self_path.name == "codex.json":
+        def denied(path, flags, *args, **kwargs):
+            if str(path).endswith("CHAT-DENY/codex.json"):
                 raise PermissionError(13, "Permission denied")
-            return real_open(self_path, *args, **kwargs)
+            return real_open(path, flags, *args, **kwargs)
 
-        with mock.patch.object(Path, "open", denied):
+        with mock.patch.object(_os, "open", denied):
             with self.assertRaises(SystemExit) as caught:
                 codex_stream.resolve_thread(
                     self.args(agent="codex", project="amiga", chat="CHAT-DENY"))
         message = str(caught.exception)
         self.assertIn("Permission denied", message)
-        self.assertNotIn("exact_binding_required", message)
-
+        self.assertNotIn("exact_binding_required", message,
+                         "an unreadable binding EXISTS; it must not be reported as absent")
     def test_a_binding_at_the_limit_still_resolves(self) -> None:
         """The boundary from the other side, so the cap is not merely 'refuses everything'."""
         self.bind(chat="CHAT-FITS", thread="t-fits")
@@ -1141,9 +1174,11 @@ class DeadlineTest(unittest.TestCase):
     """The deadline is absolute, so nothing on the wire can extend it."""
 
     def client(self, frames=()):
-        made = codex_stream.ObserverClient.__new__(codex_stream.ObserverClient)
-        made.read_deadline = None
-        made.timeout_seconds = 5
+        # The REAL constructor. This helper listed the fields it thought mattered, so adding
+        # observed_methods_truncated to __init__ broke it with AttributeError -- the same divergent
+        # stub I had already fixed in SetupBoundaryTest and then left in place here. __init__ never
+        # touches the network; only __enter__ connects.
+        made = codex_stream.ObserverClient("ws://127.0.0.1:1", token=None, timeout_seconds=5)
         made.sock = mock.Mock()
         made.sent = []
         made.send_json = made.sent.append
@@ -1608,6 +1643,33 @@ class StreamLoopContractTest(unittest.TestCase):
         self.assertNotIn("pm2_watchers.py start --agent codex-appserver", source)
 
 
+class StreamedMessageIndexTest(unittest.TestCase):
+    """item/started adds an id and only item/completed removes it, so cancelled or failed turns
+    that omit completion leak entries on a watch with no duration."""
+
+    def test_the_index_is_capped_and_aborts_rather_than_forgetting(self) -> None:
+        streamed: set[str] = set()
+        for i in range(codex_stream.MAX_STREAMED_MESSAGE_IDS):
+            codex_stream.remember_streamed_message(f"m-{i}", streamed)
+        self.assertEqual(codex_stream.MAX_STREAMED_MESSAGE_IDS, len(streamed))
+        with self.assertRaises(SystemExit) as caught:
+            codex_stream.remember_streamed_message("one-too-many", streamed)
+        self.assertIn(str(codex_stream.MAX_STREAMED_MESSAGE_IDS), str(caught.exception))
+
+    def test_re_recording_a_known_id_at_the_cap_is_not_an_overflow(self) -> None:
+        """Otherwise a repeated item/started for a message already tracked would abort a healthy
+        stream the moment the index happened to be full."""
+        streamed = {f"m-{i}" for i in range(codex_stream.MAX_STREAMED_MESSAGE_IDS)}
+        codex_stream.remember_streamed_message("m-0", streamed)
+        self.assertEqual(codex_stream.MAX_STREAMED_MESSAGE_IDS, len(streamed))
+
+    def test_ordinary_use_is_unaffected(self) -> None:
+        streamed: set[str] = set()
+        codex_stream.remember_streamed_message("m-1", streamed)
+        codex_stream.remember_streamed_message("m-2", streamed)
+        self.assertEqual({"m-1", "m-2"}, streamed)
+
+
 class NotificationIdentityTest(unittest.TestCase):
     """A notification without a threadId must not be attributed to the selected thread.
 
@@ -1694,11 +1756,9 @@ class ObserverAnswersNothingTest(unittest.TestCase):
 
     def client(self, incoming: list[dict]) -> codex_stream.ObserverClient:
         """A client whose frame source is a queue, since it owns its own frame loop now."""
-        client = codex_stream.ObserverClient.__new__(codex_stream.ObserverClient)
-        client.observed_request_methods = set()
-        client.observed_request_count = 0
-        client.read_deadline = None
-        client.timeout_seconds = 5
+        # Real constructor, for the same reason as the other two helpers: a hand-listed field set
+        # is a second, divergent definition of the object that breaks whenever __init__ grows.
+        client = codex_stream.ObserverClient("ws://127.0.0.1:1", token=None, timeout_seconds=5)
         client.sock = mock.Mock()
         client.sent: list[dict] = []
         client.queue = [json.dumps(m).encode("utf-8") for m in incoming]
@@ -1736,6 +1796,15 @@ class ObserverAnswersNothingTest(unittest.TestCase):
         self.assertLessEqual(len(client.observed_request_methods),
                              codex_stream.MAX_OBSERVED_REQUEST_METHODS,
                              "the distinct-method set must be capped")
+        self.assertTrue(client.observed_methods_truncated,
+                        "a cap that silently stops recording turns the shutdown report into a "
+                        "partial list that still reads as complete; it must carry the fact")
+
+    def test_an_untruncated_run_does_not_claim_truncation(self) -> None:
+        client = self.client([{"id": "srv-1", "method": "item/tool/call", "params": {}},
+                              {"method": "turn/completed", "params": {}}])
+        self.drain(client, 1)
+        self.assertFalse(client.observed_methods_truncated)
 
     def test_a_hostile_method_NAME_cannot_evade_the_cap_by_being_huge(self) -> None:
         """Capping the count of names is useless if one name can be arbitrarily long."""

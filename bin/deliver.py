@@ -697,24 +697,36 @@ def main():
         "resolved_target_session_id": args.target_session_id,
         "autobridge_ready": autobridge_ready,
         "autobridge_refusal_reason": autobridge_refusal_reason,
+        # An explicit machine-readable blocker, because every wake flag AND activation_unavailable
+        # are false in this state and a caller reading only those would see nothing to act on.
+        "binding_unreadable_blocker": binding_unreadable,
         "autobridge_session_id": autobridge_target.get("session_id") if autobridge_target else None,
     }
     print(json.dumps(result, indent=2))
 
-    if autobridge_target is not None and not autobridge_ready and autobridge_refusal_reason:
+    # `autobridge_target is not None` was the banner's gate, and the unreadable-binding path sets
+    # the target to None -- so the one refusal a sender can do nothing about printed no banner at
+    # all, while every wake flag and activation_unavailable were also false. A sender following the
+    # documented flags saw no required action for a packet that will wake nobody.
+    if binding_unreadable or (autobridge_target is not None and not autobridge_ready
+                              and autobridge_refusal_reason):
         border = "━" * 60
         print(f"\n{border}", file=sys.stderr)
         print("⚠️  DURABLE WRITE OK — RUNTIME DISPATCH REFUSED", file=sys.stderr)
+        if binding_unreadable:
+            print("blocker: the recipient's binding could not be READ (not missing). Nothing will "
+                  "wake them by any lane until it is repaired or removed.", file=sys.stderr)
         print(border, file=sys.stderr)
         print(f"reason: {autobridge_refusal_reason}", file=sys.stderr)
         print(
             f"packet repo_targets: {packet_repo_targets(args) or '[] (none declared)'}",
             file=sys.stderr,
         )
-        print(
-            f"subscriber repo_targets: {autobridge_target.get('repo_targets')}",
-            file=sys.stderr,
-        )
+        if autobridge_target is not None:
+            print(
+                f"subscriber repo_targets: {autobridge_target.get('repo_targets')}",
+                file=sys.stderr,
+            )
         print(file=sys.stderr)
         print(
             "The message IS in the mailbox and readable with inbox.py. It will NOT be "
