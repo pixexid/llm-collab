@@ -7,8 +7,10 @@ running app-server process, so the spelling stored at registration is load-beari
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -50,7 +52,32 @@ class CanonicalRuntimeHomeTest(unittest.TestCase):
 
 
 class RegisterRuntimeHomeTest(unittest.TestCase):
-    """End-to-end register, for an Amiga and a non-Amiga project."""
+    """End-to-end register, for an Amiga and a non-Amiga project.
+
+    Runs against a TEMPORARY workspace. An earlier version invoked the production CLI
+    with cwd=ROOT and then unlinked fixed session/binding paths from the real
+    State/session_autobridge tree -- which live watchers read concurrently, and which a
+    parallel suite process would race. find_workspace_root walks up for
+    collab.config.json, so pointing cwd at a fixture root is enough to isolate it.
+    """
+
+    def setUp(self) -> None:
+        self.workspace = Path(tempfile.mkdtemp(prefix="lc-rh-", dir="/tmp"))
+        self.addCleanup(shutil.rmtree, self.workspace, True)
+        (self.workspace / "collab.config.json").write_text(json.dumps({
+            "workspace_name": "rh-fixture",
+            "schema_version": 2,
+            "workspace_id": "ws_rh",
+            "projects_root": str(self.workspace),
+            "project_state_root": str(self.workspace / "project-state"),
+            "poll_interval_seconds": 15,
+            "notifications_enabled": False,
+        }), encoding="utf-8")
+        (self.workspace / "projects.json").write_text(json.dumps({"projects": [
+            {"id": "amiga", "display_name": "Amiga", "repos": {"llm-collab": "."}},
+            {"id": "nuvyr", "display_name": "Nuvyr", "repos": {"llm-collab": "."}},
+        ]}), encoding="utf-8")
+        shutil.copy(ROOT / "agents.json", self.workspace / "agents.json")
 
     def _register(self, session: str, project: str, home: str) -> dict:
         result = subprocess.run(
@@ -66,31 +93,33 @@ class RegisterRuntimeHomeTest(unittest.TestCase):
                 "--runtime-home", home,
                 "--ttl-seconds", "60", "--json",
             ],
-            capture_output=True, text=True, timeout=60, cwd=str(ROOT),
+            capture_output=True, text=True, timeout=60, cwd=str(self.workspace),
         )
         self.assertEqual(0, result.returncode, result.stderr[:400])
         return json.loads(result.stdout[result.stdout.index("{"):])
 
-    def _cleanup(self, session: str, project: str) -> None:
-        (ROOT / "State" / "session_autobridge" / "sessions" / f"{session}.json").unlink(missing_ok=True)
-        binding = ROOT / "State" / "session_autobridge" / "bindings" / project / "CHAT-RH-TEST" / "codex.json"
-        binding.unlink(missing_ok=True)
-        try:
-            binding.parent.rmdir()
-        except OSError:
-            pass
+    def test_registration_never_touches_the_real_state_tree(self) -> None:
+        """The isolation itself is the assertion, not a side effect of it."""
+        self._register("SESSION-RH-ISOLATION", "amiga", "/tmp/rh-home")
+        self.assertTrue(
+            (self.workspace / "State" / "session_autobridge" / "sessions"
+             / "SESSION-RH-ISOLATION.json").exists(),
+            "the fixture workspace must be the one that received the record",
+        )
+        self.assertFalse(
+            (ROOT / "State" / "session_autobridge" / "sessions"
+             / "SESSION-RH-ISOLATION.json").exists(),
+            "the live workspace must be untouched",
+        )
 
     def test_registers_canonical_home_for_amiga_and_non_amiga_projects(self) -> None:
         for project, session in (("amiga", "SESSION-RH-AMIGA"), ("nuvyr", "SESSION-RH-OTHER")):
             with self.subTest(project=project):
-                try:
-                    # trailing slash on input must not reach storage
-                    payload = self._register(session, project, "/tmp/rh-home/")
-                    self.assertEqual("/tmp/rh-home", payload["runtime"]["home"])
-                    self.assertEqual(project, payload["project_id"])
-                    self.assertEqual("thread-rh-test", payload["runtime"]["session_id"])
-                finally:
-                    self._cleanup(session, project)
+                # trailing slash on input must not reach storage
+                payload = self._register(session, project, "/tmp/rh-home/")
+                self.assertEqual("/tmp/rh-home", payload["runtime"]["home"])
+                self.assertEqual(project, payload["project_id"])
+                self.assertEqual("thread-rh-test", payload["runtime"]["session_id"])
 
 
 if __name__ == "__main__":

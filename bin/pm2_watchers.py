@@ -100,7 +100,16 @@ def sidecar_token_is_secure(path: Path) -> bool:
         return False
     if info.st_uid != getuid():
         return False
-    return (info.st_mode & 0o077) == 0
+    if (info.st_mode & 0o077) != 0:
+        return False
+    # An empty or whitespace-only token passes every path and mode check, and the Codex
+    # CLI then exits immediately with "websocket auth secret must not be empty" -- so PM2
+    # burns its restart budget while the manager still reports the transport configured.
+    # An interrupted token rotation produces exactly this file.
+    try:
+        return bool(path.read_text(encoding="utf-8", errors="replace").strip())
+    except OSError:
+        return False
 
 
 def enabled_sidecar_ids() -> list[str]:

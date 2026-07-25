@@ -339,6 +339,52 @@ class Pm2EcosystemTest(unittest.TestCase):
             self.assertEqual(os.path.realpath(secure), os.path.realpath(passed),
                              "the launched path must be the validated one")
 
+    def test_empty_or_whitespace_token_is_refused_by_both_gates(self) -> None:
+        """Mode 600 and a clean path are not enough -- the token must have content.
+
+        An interrupted rotation leaves an empty 0600 file. Both gates classified that as
+        enabled, the Codex CLI exits with "websocket auth secret must not be empty", and
+        PM2 exhausts its restart budget while the manager reports the transport
+        configured. Verified against BOTH gates because a one-sided fix here is how the
+        manager and the config disagree.
+        """
+        sys.path.insert(0, str(ROOT / "bin"))
+        import pm2_watchers
+
+        for label, content in (("empty", ""), ("whitespace", "  \n\t ")):
+            with self.subTest(token=label):
+                with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
+                    token = Path(tmp) / "token"
+                    token.write_text(content, encoding="utf-8")
+                    token.chmod(0o600)
+                    binary = Path(tmp) / "codex"
+                    binary.write_text("#!/bin/sh\n", encoding="utf-8")
+                    env = {"LLM_COLLAB_CODEX_APP_SERVER_TOKEN_FILE": str(token),
+                           "LLM_COLLAB_CODEX_BIN": str(binary)}
+
+                    self.assertFalse(pm2_watchers.sidecar_token_is_secure(token),
+                                     "the manager gate must refuse a contentless token")
+                    with mock.patch.dict(os.environ, env):
+                        self.assertEqual([], pm2_watchers.enabled_sidecar_ids())
+                    self.assertEqual([], sidecars(load_apps(env)),
+                                     "the config must agree with the manager")
+
+    def test_a_token_with_content_still_passes_both_gates(self) -> None:
+        # the guard above must not reject a legitimate token
+        sys.path.insert(0, str(ROOT / "bin"))
+        import pm2_watchers
+
+        with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
+            token = Path(tmp) / "token"
+            token.write_text("t0ken\n", encoding="utf-8")
+            token.chmod(0o600)
+            binary = Path(tmp) / "codex"
+            binary.write_text("#!/bin/sh\n", encoding="utf-8")
+            env = {"LLM_COLLAB_CODEX_APP_SERVER_TOKEN_FILE": str(token),
+                   "LLM_COLLAB_CODEX_BIN": str(binary)}
+            self.assertTrue(pm2_watchers.sidecar_token_is_secure(token))
+            self.assertEqual(1, len(sidecars(load_apps(env))))
+
     def test_named_user_tilde_token_is_refused_identically_by_both_sides(self) -> None:
         """`~<current-user>/...` must mean the same thing to the manager and the config.
 

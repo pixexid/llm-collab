@@ -130,6 +130,15 @@ function codexAppServerApps() {
   if (stat.uid !== process.getuid()) return [];
   if ((stat.mode & 0o077) !== 0) return [];
   if (/\s/.test(tokenFile)) return [];
+  // An empty or whitespace-only token passes every path and mode check above, and the
+  // Codex CLI then exits immediately with "websocket auth secret must not be empty",
+  // leaving PM2 to exhaust its restart budget while the manager still reports the
+  // transport configured. Mirrors sidecar_token_is_secure().
+  try {
+    if (!fs.readFileSync(tokenFile, "utf8").trim()) return [];
+  } catch {
+    return [];
+  }
 
   const port = process.env.LLM_COLLAB_CODEX_APP_SERVER_PORT || "8767";
   // Canonical here too: discovery compares CODEX_HOME literally against the process
