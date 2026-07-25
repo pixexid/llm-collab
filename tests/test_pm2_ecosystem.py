@@ -181,31 +181,65 @@ class Pm2EcosystemTest(unittest.TestCase):
     def test_cjs_reserves_the_sidecar_id_against_a_registered_agent(self) -> None:
         """A registered codex-appserver agent must not yield two apps with one name.
 
-        The Python manager guard is insufficient: this config maps watcher agents and
-        appends the transport independently.
+        Loaded against a temp fixture tree: the real agents.json is the authoritative
+        registry that live watchers and commands read concurrently, and rewriting it
+        in place would expose a truncated file mid-write and could leave the shared
+        checkout altered if the process died before restoring.
         """
-        agents_path = ROOT / "agents.json"
-        original = agents_path.read_text(encoding="utf-8")
-        payload = json.loads(original)
-        payload["agents"].append(
-            {"id": "codex-appserver", "activation": {"type": "cli_session", "watcher_enabled": True}}
-        )
         with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
-            token = Path(tmp) / "token"
+            tree = Path(tmp)
+            (tree / "pm2").mkdir()
+            # copy the real config so the assertion is against production logic
+            (tree / "pm2" / "ecosystem.config.cjs").write_text(
+                CONFIG.read_text(encoding="utf-8"), encoding="utf-8"
+            )
+            (tree / "collab.config.json").write_text(
+                json.dumps({"workspace_name": "fixture"}), encoding="utf-8"
+            )
+            (tree / "agents.json").write_text(
+                json.dumps(
+                    {
+                        "agents": [
+                            {"id": "codex", "activation": {"type": "cli_session", "watcher_enabled": True}},
+                            {"id": "codex-appserver", "activation": {"type": "cli_session", "watcher_enabled": True}},
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            token = tree / "token"
             token.write_text("t0ken\n", encoding="utf-8")
             token.chmod(0o600)
-            binary = Path(tmp) / "codex"
+            binary = tree / "codex"
             binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-            try:
-                agents_path.write_text(json.dumps(payload), encoding="utf-8")
-                apps = load_apps({
+
+            result = subprocess.run(
+                [NODE, "-e", LOAD, str(tree / "pm2" / "ecosystem.config.cjs")],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                cwd=str(tree),
+                env={
+                    **os.environ,
                     "LLM_COLLAB_CODEX_APP_SERVER_TOKEN_FILE": str(token),
                     "LLM_COLLAB_CODEX_BIN": str(binary),
-                })
-            finally:
-                agents_path.write_text(original, encoding="utf-8")
-        names = [a["name"] for a in apps if a["name"].endswith(SIDECAR_SUFFIX)]
-        self.assertEqual(len(names), len(set(names)), f"duplicate PM2 app name: {names}")
+                },
+            )
+            self.assertEqual(0, result.returncode, result.stderr[:400])
+            apps = json.loads(result.stdout)
+            names = [a["name"] for a in apps if a["name"].endswith(SIDECAR_SUFFIX)]
+            self.assertEqual(len(names), len(set(names)), f"duplicate PM2 app name: {names}")
+            self.assertIn(
+                "reserved transport",
+                result.stderr,
+                "the conflict must be reported, not silently skipped",
+            )
+            # the real registry must be untouched by this test
+            self.assertNotIn(
+                "codex-appserver",
+                [a.get("id") for a in json.loads((ROOT / "agents.json").read_text())["agents"]],
+            )
+
 
 class Pm2ManagerSidecarTest(unittest.TestCase):
     """The manager's sidecar branch, forced on so a clean checkout still exercises it.
