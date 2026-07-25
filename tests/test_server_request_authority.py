@@ -996,14 +996,21 @@ class HandshakeClosesOnFailureTest(unittest.TestCase):
 
         sock = self.fragmented_pair([b"A", b"B"], gap=0.04)
         made = self.client_with_deadline(0.05)
-        sock.settimeout(made.remaining_wait())
+        # A STALE, GENEROUS socket timeout -- which is the real scenario, and the reason the
+        # deadline matters. Clamping this to remaining_wait() (0.05s) made the test both
+        # unrepresentative and FLAKY: the second byte arrives at ~80ms, so under load the recv
+        # timed out and this failed in full discovery while the focused suites stayed green.
+        # The point here is that the socket timeout does not bound the TOTAL, not that it is small.
+        sock.settimeout(5.0)
         started = _t.monotonic()
         got = autobridge._socket_read_exact(sock, 2)
         elapsed = _t.monotonic() - started
-        self.assertEqual(b"AB", got)
+        self.assertEqual(b"AB", got,
+                         "without the client the read completes, deadline or not")
         self.assertGreater(elapsed, 0.05,
                            "the unclamped read must outlast the deadline, or the pair of tests "
                            f"proves nothing: {elapsed:.3f}s")
+        self.assertIsNotNone(made.read_deadline, "the deadline existed and was simply not applied")
 
     def test_every_exact_read_in_recv_frame_carries_the_client(self) -> None:
         """Structural: each callsite passes self, including BOTH extended-length branches.
