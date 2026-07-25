@@ -315,6 +315,76 @@ class RepoEnumerationTest(unittest.TestCase):
         self.assertFalse(settled)
         self.assertIn("not checked", note)
 
+    def _scoped_projects(self) -> None:
+        (self.root / "projects.json").write_text(json.dumps({"projects": [
+            {"id": "amiga", "repos": {"app": "amiga", "docs": "amiga_docs"},
+             "github": {"repo": "pixexid/amiga"}},
+            {"id": "nuvyr", "repos": {"app": "nuvyr_app"},
+             "github": {"repo": "pixexid/nuvyr"}},
+        ]}), encoding="utf-8")
+
+    def test_the_logical_app_key_resolves_per_project(self) -> None:
+        """`repo_targets: ["app"]` means a different repo in each project.
+
+        amiga's app is amiga; nuvyr's app is nuvyr_app. A global alias table cannot tell them
+        apart, which is why resolution must happen inside the packet's project scope.
+        """
+        self._scoped_projects()
+        self.assertEqual("pixexid/amiga",
+                         operator_digest.resolve_repo_target("app", "amiga"))
+        self.assertEqual("pixexid/nuvyr_app",
+                         operator_digest.resolve_repo_target("app", "nuvyr"))
+        self.assertEqual("pixexid/amiga_docs",
+                         operator_digest.resolve_repo_target("docs", "amiga"))
+
+    def test_a_project_id_named_app_cannot_retarget_any_projects_app_key(self) -> None:
+        """The retargeting hazard, stated as a test.
+
+        Registering a project whose id happens to be `app` would, under a global alias table,
+        silently redirect every project's `app` packet to that repo.
+        """
+        (self.root / "projects.json").write_text(json.dumps({"projects": [
+            {"id": "amiga", "repos": {"app": "amiga"}, "github": {"repo": "pixexid/amiga"}},
+            {"id": "nuvyr", "repos": {"app": "nuvyr_app"}, "github": {"repo": "pixexid/nuvyr"}},
+            {"id": "app", "github": {"repo": "pixexid/hijack"}},
+        ]}), encoding="utf-8")
+        self.assertEqual("pixexid/amiga",
+                         operator_digest.resolve_repo_target("app", "amiga"))
+        self.assertEqual("pixexid/nuvyr_app",
+                         operator_digest.resolve_repo_target("app", "nuvyr"))
+        # the id alias remains reachable only where no project scope claims the key
+        self.assertEqual("pixexid/hijack",
+                         operator_digest.resolve_repo_target("app", None))
+
+    def test_a_logical_key_absent_from_that_project_falls_back_to_global(self) -> None:
+        self._scoped_projects()
+        self.assertEqual("pixexid/llm-collab",
+                         operator_digest.resolve_repo_target("llm-collab", "amiga"))
+
+    def test_an_app_packet_resolves_its_own_projects_repo(self) -> None:
+        self._scoped_projects()
+        packet = self.root / "packet.md"
+        packet.write_text('---\nproject_id: nuvyr\nrepo_targets: ["app"]\n---\nHeld on #170.',
+                          encoding="utf-8")
+        seen = []
+
+        def run(argv, **kwargs):
+            seen.append(argv[argv.index("--repo") + 1])
+            return mock.Mock(stdout=json.dumps({"state": "MERGED"}))
+
+        with mock.patch.object(operator_digest.subprocess, "run", side_effect=run):
+            settled, _ = operator_digest.resolution_hint("packet.md")
+        self.assertEqual(["pixexid/nuvyr_app"], seen,
+                         "the packet's own project scope decides which repo `app` means")
+        self.assertTrue(settled)
+
+    def test_a_project_with_no_github_owner_resolves_nothing(self) -> None:
+        (self.root / "projects.json").write_text(json.dumps({"projects": [
+            {"id": "orphan", "repos": {"app": "somewhere"}},
+        ]}), encoding="utf-8")
+        self.assertIsNone(operator_digest.resolve_repo_target("app", "orphan"),
+                          "a logical key with no owner must not be half-resolved")
+
     def test_open_prs_labels_each_row_and_reports_unreachable_repos(self) -> None:
         def run(argv, **kwargs):
             slug = argv[argv.index("--repo") + 1]

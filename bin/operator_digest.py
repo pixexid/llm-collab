@@ -157,12 +157,45 @@ def sender_of(relpath: str) -> str:
     return "?"
 
 
+def load_projects() -> list[dict]:
+    try:
+        payload = json.loads((ROOT / "projects.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    projects = payload.get("projects")
+    return projects if isinstance(projects, list) else []
+
+
+def resolve_repo_target(target: str, project_id: str | None) -> str | None:
+    """Resolve one repo_targets entry, project scope FIRST.
+
+    `repo_targets: ["app"]` is a LOGICAL key inside that project's `repos` map, not a global
+    name: amiga's `app` is amiga while nuvyr's `app` is nuvyr_app. Resolving such a key from a
+    global alias table is wrong twice over -- it cannot distinguish the two, and registering a
+    project whose id happens to be `app` would retarget every project's `app` packet at once.
+
+    Only if the target is not a logical key of the packet's own project does it fall back to
+    the unambiguous global aliases: a full owner/name, a repo basename, or a project id.
+    """
+    if project_id:
+        for project in load_projects():
+            if str(project.get("id")) != str(project_id):
+                continue
+            repos = project.get("repos")
+            if isinstance(repos, dict) and target in repos:
+                name = repos[target]
+                owner = str((project.get("github") or {}).get("repo", "")).split("/")[0]
+                return f"{owner}/{name}" if owner and name else None
+            break
+    return known_repo_targets().get(target)
+
+
 def declared_repo(text: str) -> str | None:
     """The single repo a packet's frontmatter attributes its bare PR numbers to.
 
-    `repo_targets: ["llm-collab"]` IS an explicit attribution -- it is the field the
-    delivery contract uses for exactly this. Ignoring it left every real packet's hint
-    inert. Two or more targets stay ambiguous, and an unknown name is not guessed.
+    `repo_targets: ["llm-collab"]` IS an explicit attribution -- it is the field the delivery
+    contract uses for exactly this. Ignoring it left every real packet's hint inert. Two or
+    more targets stay ambiguous, and an unknown name is not guessed.
     """
     declared = re.search(r"^repo_targets:\s*\[(.*?)\]", text, re.MULTILINE)
     if not declared or not declared.group(1).strip():
@@ -170,7 +203,11 @@ def declared_repo(text: str) -> str | None:
     named = [t.strip().strip('"\'') for t in declared.group(1).split(",") if t.strip()]
     if len(named) != 1:
         return None
-    return known_repo_targets().get(named[0])
+    scope = re.search(r"^project_id:\s*(\S+)", text, re.MULTILINE)
+    project_id = scope.group(1).strip('"\'') if scope else None
+    if project_id in {"null", "None", ""}:
+        project_id = None
+    return resolve_repo_target(named[0], project_id)
 
 
 def qualified_pr_refs(text: str) -> tuple[list[tuple[str, int]], int]:
