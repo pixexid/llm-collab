@@ -152,6 +152,7 @@ class LifecycleTest(unittest.TestCase):
         self.addCleanup(patcher.stop)
 
     def reserve(self, store: LedgerStore, active_subject: LifecycleSubject):
+        self.provision(store, active_subject, self.core.provider)
         return self.core.reserve(
             store,
             active_subject,
@@ -160,6 +161,50 @@ class LifecycleTest(unittest.TestCase):
             expires_at_utc=AT_EXPIRY,
             correlation_id="corr_reserve",
             trusted_project_root=self.trusted_root,
+        )
+
+    def provision(
+        self,
+        store: LedgerStore,
+        active_subject: LifecycleSubject,
+        provider: FakeLifecycleProvider,
+    ) -> None:
+        descriptor = provider.descriptor()
+        store._connection.execute(
+            """
+            INSERT INTO conversation_participants
+            (workspace_id, scope_kind, scope_identity, conversation_id, participant_id, agent_id, created_at_utc)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                active_subject.workspace_id,
+                active_subject.scope_kind,
+                active_subject.scope_identity,
+                active_subject.conversation_id,
+                active_subject.participant_id,
+                active_subject.agent_id,
+                NOW,
+            ),
+        )
+        store._connection.execute(
+            """
+            INSERT OR IGNORE INTO lifecycle_provider_registry
+            (
+                workspace_id, provider_id, provider_revision, trust_class,
+                supported_operations_json, challenge_algorithm, challenge_ttl_seconds, created_at_utc
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                active_subject.workspace_id,
+                descriptor["provider_id"],
+                descriptor["provider_revision"],
+                descriptor["trust_class"],
+                descriptor["supported_operations_json"],
+                descriptor["challenge_algorithm"],
+                descriptor["challenge_ttl_seconds"],
+                NOW,
+            ),
         )
 
     def consume(self, store: LedgerStore, active_subject: LifecycleSubject, challenge):
@@ -205,11 +250,250 @@ class LifecycleTest(unittest.TestCase):
                 1,
             )
 
+    def test_consume_requires_the_preprovisioned_participant_agent(self) -> None:
+        active_subject = subject()
+        other_agent = subject(agent_id="agent_claude")
+        with LedgerStore.open_writer(self.paths) as store:
+            challenge = self.reserve(store, active_subject)
+            before = row_counts(store)
+            with self.assertRaisesRegex(CanonicalConflictError, "not pending or does not match"):
+                self.consume(store, other_agent, challenge)
+            self.assertEqual(row_counts(store), before)
+            self.assertEqual(
+                store._connection.execute(
+                    "SELECT challenge_state FROM session_binding_challenges"
+                ).fetchone()[0],
+                "pending",
+            )
+
+    def test_reserve_requires_preprovisioned_provider_and_participant(self) -> None:
+        active_subject = subject()
+        with LedgerStore.open_writer(self.paths) as store:
+            before = row_counts(store)
+            with self.assertRaisesRegex(CanonicalConflictError, "pre-provisioned"):
+                self.core.reserve(
+                    store,
+                    active_subject,
+                    runtime_home=self.runtime_home,
+                    created_at_utc=NOW,
+                    expires_at_utc=AT_EXPIRY,
+                    correlation_id="corr_missing_identity",
+                    trusted_project_root=self.trusted_root,
+                )
+            self.assertEqual(row_counts(store), before)
+
+            self.provision(store, active_subject, self.core.provider)
+            altered = FakeLifecycleProvider(trust_class="native_attached")
+            altered_core = SessionLifecycleCore(altered, token_factory=lambda: "token-altered")
+            before = row_counts(store)
+            with self.assertRaisesRegex(CanonicalConflictError, "not allowlisted"):
+                altered_core.reserve(
+                    store,
+                    active_subject,
+                    runtime_home=self.runtime_home,
+                    created_at_utc=NOW,
+                    expires_at_utc=AT_EXPIRY,
+                    correlation_id="corr_altered_descriptor",
+                    trusted_project_root=self.trusted_root,
+                )
+            self.assertEqual(row_counts(store), before)
+
+    def test_workspace_scope_cannot_register_attached_session(self) -> None:
+        workspace_subject = subject(scope_kind="workspace", scope_identity="workspace")
+        with LedgerStore.open_writer(self.paths) as store:
+            before = row_counts(store)
+            with self.assertRaisesRegex(SessionLifecycleError, "requires project scope"):
+                self.core.reserve(
+                    store,
+                    workspace_subject,
+                    runtime_home=self.runtime_home,
+                    created_at_utc=NOW,
+                    expires_at_utc=AT_EXPIRY,
+                    correlation_id="corr_workspace_scope",
+                )
+            self.assertEqual(row_counts(store), before)
+
+            descriptor = self.core.provider.descriptor()
+            with self.assertRaisesRegex(
+                CanonicalConflictError, "requires project scope"
+            ):
+                store.reserve_session_binding_challenge(
+                    workspace_id=WORKSPACE,
+                    scope_kind="workspace",
+                    scope_identity="workspace",
+                    conversation_id="CHAT-SAMEID",
+                    participant_id="participant_codex",
+                    agent_id="agent_codex",
+                    provider_descriptor=descriptor,
+                    endpoint_id="endpoint_codex",
+                    session_ref_id="session_ref_workspace",
+                    native_session_id="native_session_one",
+                    runtime_instance_id="runtime_one",
+                    challenge_id="challenge_workspace",
+                    challenge_token_sha256="a" * 64,
+                    expires_at_utc=AT_EXPIRY,
+                    created_at_utc=NOW,
+                )
+            with self.assertRaisesRegex(
+                CanonicalConflictError, "requires project scope"
+            ):
+                store.consume_session_binding_challenge(
+                    workspace_id=WORKSPACE,
+                    scope_kind="workspace",
+                    scope_identity="workspace",
+                    conversation_id="CHAT-SAMEID",
+                    participant_id="participant_codex",
+                    agent_id="agent_codex",
+                    challenge_id="challenge_workspace",
+                    challenge_token_sha256="a" * 64,
+                    provider_id="provider_codex",
+                    provider_revision="revision_1",
+                    endpoint_id="endpoint_codex",
+                    session_ref_id="session_ref_workspace",
+                    session_owner_key="owner_" + "a" * 32,
+                    native_session_id="native_session_one",
+                    runtime_instance_id="runtime_one",
+                    consumed_at_utc=BEFORE_EXPIRY,
+                )
+            self.assertEqual(row_counts(store), before)
+
+    def test_consume_uses_reserved_agent_when_participant_row_changes(self) -> None:
+        active_subject = subject()
+        with LedgerStore.open_writer(self.paths) as store:
+            challenge = self.reserve(store, active_subject)
+            store._connection.execute(
+                """
+                UPDATE conversation_participants SET agent_id = 'agent_claude'
+                WHERE workspace_id = ? AND scope_kind = ? AND scope_identity = ?
+                  AND conversation_id = ? AND participant_id = ?
+                """,
+                (
+                    active_subject.workspace_id,
+                    active_subject.scope_kind,
+                    active_subject.scope_identity,
+                    active_subject.conversation_id,
+                    active_subject.participant_id,
+                ),
+            )
+            resolved = self.consume(store, active_subject, challenge)
+            self.assertTrue(resolved["resolved"])
+            self.assertEqual(
+                store._connection.execute(
+                    "SELECT agent_id FROM session_binding_challenges WHERE challenge_id = ?",
+                    (challenge.challenge_id,),
+                ).fetchone()[0],
+                "agent_codex",
+            )
+
+    def test_consume_rejects_wrong_agent_with_valid_reserved_token(self) -> None:
+        active_subject = subject()
+        wrong_agent = subject(agent_id="agent_claude")
+        with LedgerStore.open_writer(self.paths) as store:
+            challenge = self.reserve(store, active_subject)
+            before = row_counts(store)
+            with self.assertRaisesRegex(
+                CanonicalConflictError, "not pending or does not match"
+            ):
+                self.consume(store, wrong_agent, challenge)
+            self.assertEqual(row_counts(store), before)
+            self.assertEqual(
+                store._connection.execute(
+                    "SELECT challenge_state FROM session_binding_challenges"
+                ).fetchone()[0],
+                "pending",
+            )
+            self.assertEqual(
+                store._connection.execute(
+                    "SELECT count(*) FROM conversation_bindings"
+                ).fetchone()[0],
+                0,
+            )
+
+    def test_subset_provider_operations_support_reserve_and_consume(self) -> None:
+        active_subject = subject()
+        provider = FakeLifecycleProvider(supported_operations_json='["reserve","attach"]')
+        core = SessionLifecycleCore(provider, token_factory=lambda: "token-subset")
+        with LedgerStore.open_writer(self.paths) as store:
+            self.provision(store, active_subject, provider)
+            challenge = core.reserve(
+                store,
+                active_subject,
+                runtime_home=self.runtime_home,
+                created_at_utc=NOW,
+                expires_at_utc=AT_EXPIRY,
+                correlation_id="corr_subset_reserve",
+                trusted_project_root=self.trusted_root,
+            )
+            resolved = core.consume(
+                store,
+                active_subject,
+                challenge,
+                runtime_home=self.runtime_home,
+                consumed_at_utc=BEFORE_EXPIRY,
+                correlation_id="corr_subset_consume",
+                trusted_project_root=self.trusted_root,
+            )
+            self.assertTrue(resolved["resolved"])
+
+    def test_same_native_session_cannot_become_two_project_owners(self) -> None:
+        active_subject = subject()
+        other_repo = self.outside / "other-repo"
+        other_repo.mkdir()
+        other_cwd = other_repo / "work"
+        other_cwd.mkdir()
+        other_root = TrustedProjectRoot(OTHER_PROJECT, "repo_other", str(other_repo), str(other_cwd))
+        other_subject = subject(scope_identity=OTHER_PROJECT)
+        with LedgerStore.open_writer(self.paths) as store:
+            first = self.reserve(store, active_subject)
+            first_binding = self.consume(store, active_subject, first)
+            self.provision(store, other_subject, self.core.provider)
+            second = self.core.reserve(
+                store,
+                other_subject,
+                runtime_home=self.runtime_home,
+                created_at_utc=NOW,
+                expires_at_utc=AT_EXPIRY,
+                correlation_id="corr_other_project",
+                trusted_project_root=other_root,
+            )
+            with self.assertRaises(sqlite3.IntegrityError):
+                self.core.consume(
+                    store,
+                    other_subject,
+                    second,
+                    runtime_home=self.runtime_home,
+                    consumed_at_utc=BEFORE_EXPIRY,
+                    correlation_id="corr_other_project_consume",
+                    trusted_project_root=other_root,
+                )
+            self.assertEqual(
+                store._connection.execute(
+                    "SELECT challenge_state FROM session_binding_challenges WHERE challenge_id = ?",
+                    (second.challenge_id,),
+                ).fetchone()[0],
+                "pending",
+            )
+            self.assertEqual(
+                store._connection.execute("SELECT count(*) FROM conversation_bindings").fetchone()[0],
+                1,
+            )
+            second_owner = store._connection.execute(
+                "SELECT agent_id FROM session_binding_challenges WHERE challenge_id = ?",
+                (second.challenge_id,),
+            ).fetchone()[0]
+            first_owner = store._connection.execute(
+                "SELECT owner_key FROM conversation_bindings WHERE binding_id = ?",
+                (first_binding["binding_id"],),
+            ).fetchone()[0]
+            self.assertEqual(second_owner, active_subject.agent_id)
+            self.assertRegex(first_owner, r"^owner_[0-9a-f]{32}$")
+
     def test_token_hash_is_stored_not_token_and_default_uses_secrets(self) -> None:
         active_subject = subject()
         with LedgerStore.open_writer(self.paths) as store:
             with patch("secrets.token_urlsafe", return_value="secret-token") as token_urlsafe:
                 core = SessionLifecycleCore(FakeLifecycleProvider())
+                self.provision(store, active_subject, core.provider)
                 challenge = core.reserve(
                     store,
                     active_subject,

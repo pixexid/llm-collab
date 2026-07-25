@@ -135,6 +135,30 @@ def build_session_ref(
     return deepcopy(candidate)
 
 
+def derive_session_owner_key(
+    *,
+    workspace_id: str,
+    endpoint_id: str,
+    native_session_id: str,
+    runtime_home: RuntimeHomeIdentity,
+    authority: SessionAuthority,
+) -> str:
+    """Derive the scope-independent key used only for owner uniqueness."""
+
+    seed = {
+        "schema_version": 1,
+        "workspace_id": workspace_id,
+        "endpoint_id": endpoint_id,
+        "native_session_id": native_session_id,
+        "runtime_home": {
+            "runtime_home_realpath": runtime_home.runtime_home_realpath,
+            "runtime_home_id": runtime_home.runtime_home_id,
+        },
+        "authority": _authority_dict(authority),
+    }
+    return "owner_" + _digest(seed)[:32]
+
+
 def validate_session_ref(
     candidate: Mapping[str, Any],
     *,

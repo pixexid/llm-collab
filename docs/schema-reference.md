@@ -722,8 +722,8 @@ containment.
 
 ### Implemented ledger versions
 
-The exact current ledger is `PRAGMA user_version = 11`
-(`llm_collab.ledger.store.SCHEMA_VERSION == 11`):
+The exact current ledger is `PRAGMA user_version = 12`
+(`llm_collab.ledger.store.SCHEMA_VERSION == 12`):
 
 | Version | Landed in | Tables, triggers, and constraints |
 |---|---|
@@ -738,6 +738,7 @@ The exact current ledger is `PRAGMA user_version = 11`
 | v9 | GH-271 Child 5 | 1 table plus 1 support index and 2 triggers: `canonical_delivery_attempt_binding_freezes` stores one immutable `(binding_id, generation)` freeze for a canonical delivery attempt. The freeze references the exact conversation participant and binding tuple, is append-only, and does not change the adapter `DeliveryV1` wire shape. |
 | v10 | GH-271 Child 6 | 1 table plus 2 triggers: `conversation_binding_transition_audit` records explicit rebind/handoff transitions. The successor must pre-exist in a non-active state; the transition atomically supersedes the predecessor, activates the successor, records zero transferred pending work, and counts preserved predecessor freezes. Audit rows are append-only. |
 | v11 | GH-271 Child 7 | 1 additive table plus 2 triggers: `legacy_autobridge_provenance_imports` records hash-only provenance for the legacy autobridge `bindings` and `thread_pairs` trees. Released v1-v10 SQL remains byte-unchanged; v11 does not rebuild or widen the v3 `legacy_provenance_imports` `record_kind` constraint. Exact-project projections read both provenance tables so `session`, `activation_lease`, `binding`, and `thread_pair` rows cannot be partially surfaced. |
+| v12 | GH-294 registration repair | Adds a nullable persisted challenge `agent_id` for immutable reservation ownership, a nullable scope-independent `conversation_bindings.owner_key` for cross-project native-session uniqueness, and a coalescing owner index that preserves legacy rows while enforcing new registrations. |
 
 The migration checksums and schema fingerprints are code authority in
 `llm_collab/ledger/store.py` and are verified on open. Current values are:

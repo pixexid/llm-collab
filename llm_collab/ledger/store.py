@@ -18,7 +18,7 @@ from pathlib import Path
 from .paths import LedgerPaths, validate_project_id, validate_registry_token, validate_workspace_id
 
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 BUSY_TIMEOUT_MS = 5_000
 SYNCHRONOUS_FULL = 2
 MIGRATION_TOOL_VERSION = "llm-collab-ledger/1"
@@ -76,6 +76,7 @@ V8_TABLES = V7_TABLES | frozenset(
 V9_TABLES = V8_TABLES | frozenset({"canonical_delivery_attempt_binding_freezes"})
 V10_TABLES = V9_TABLES | frozenset({"conversation_binding_transition_audit"})
 V11_TABLES = V10_TABLES | frozenset({"legacy_autobridge_provenance_imports"})
+V12_TABLES = V11_TABLES
 
 
 class SQLiteSafetyError(RuntimeError):
@@ -98,6 +99,11 @@ class CanonicalIntegrityError(RuntimeError):
     pass
 
 
+LIFECYCLE_PROVIDER_OPERATIONS = frozenset(
+    {"reserve", "start", "attach", "inspect", "heartbeat", "retire", "open_ui"}
+)
+
+
 _CANONICAL_AGENT_ID = re.compile(r"agent_[A-Za-z0-9][A-Za-z0-9_-]{2,127}\Z")
 _CANONICAL_MESSAGE_ID = re.compile(r"msg_[0-9a-f]{64}\Z")
 _CANONICAL_DELIVERY_ID = re.compile(r"delivery_[0-9a-f]{64}\Z")
@@ -106,6 +112,7 @@ _CANONICAL_RECEIPT_ID = re.compile(r"receipt_[0-9a-f]{64}\Z")
 _CANONICAL_MANIFEST_ID = re.compile(r"manifest_[A-Za-z0-9][A-Za-z0-9_-]{2,127}\Z")
 _CANONICAL_ENDPOINT_ID = re.compile(r"endpoint_[A-Za-z0-9][A-Za-z0-9_-]{2,127}\Z")
 _CANONICAL_SESSION_REF_ID = re.compile(r"session_[A-Za-z0-9][A-Za-z0-9_-]{2,127}\Z")
+_CANONICAL_OWNER_KEY = re.compile(r"owner_[0-9a-f]{32}\Z")
 _CANONICAL_REGISTRY_REVISION = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _CANONICAL_TOKEN = re.compile(r"[A-Za-z][A-Za-z0-9._-]{0,127}\Z")
 _CANONICAL_EVIDENCE_ID = re.compile(r"evidence_[A-Za-z0-9][A-Za-z0-9_-]{2,127}\Z")
@@ -227,6 +234,68 @@ def _canonical_agent_id(value: object, name: str) -> str:
     return value
 
 
+def _validate_supported_operations(
+    supported_operations_json: str,
+    *,
+    required_operations: frozenset[str],
+) -> None:
+    try:
+        supported_operations = json.loads(supported_operations_json)
+    except json.JSONDecodeError as exc:
+        raise ValueError("supported_operations_json must be valid JSON") from exc
+    if (
+        not isinstance(supported_operations, list)
+        or any(not isinstance(operation, str) for operation in supported_operations)
+        or len(set(supported_operations)) != len(supported_operations)
+        or not set(supported_operations) <= LIFECYCLE_PROVIDER_OPERATIONS
+        or not required_operations <= set(supported_operations)
+    ):
+        required = ", ".join(sorted(required_operations))
+        raise ValueError(
+            "supported_operations_json must be a unique subset of the closed "
+            f"lifecycle capability set containing {required}"
+        )
+
+
+def _provider_descriptor(
+    value: Mapping[str, object],
+    *,
+    required_operations: frozenset[str],
+) -> tuple[str, str, str, str, str, int]:
+    if not isinstance(value, Mapping):
+        raise ValueError("provider_descriptor must be a mapping")
+    provider_id = _conversation_binding_text(value.get("provider_id"), "provider_id", 128)
+    provider_revision = _conversation_binding_text(
+        value.get("provider_revision"), "provider_revision", 128
+    )
+    trust_class = _conversation_binding_text(value.get("trust_class"), "trust_class", 32)
+    supported_operations_json = _bounded_text(
+        value.get("supported_operations_json"), "supported_operations_json", 4096
+    )
+    _validate_supported_operations(
+        supported_operations_json,
+        required_operations=required_operations,
+    )
+    challenge_algorithm = _conversation_binding_text(
+        value.get("challenge_algorithm"), "challenge_algorithm", 64
+    )
+    challenge_ttl_seconds = value.get("challenge_ttl_seconds")
+    if (
+        isinstance(challenge_ttl_seconds, bool)
+        or not isinstance(challenge_ttl_seconds, int)
+        or not 1 <= challenge_ttl_seconds <= 3600
+    ):
+        raise ValueError("challenge_ttl_seconds must be an integer between 1 and 3600")
+    return (
+        provider_id,
+        provider_revision,
+        trust_class,
+        supported_operations_json,
+        challenge_algorithm,
+        challenge_ttl_seconds,
+    )
+
+
 def _canonical_message_id(value: object, name: str) -> str:
     if not isinstance(value, str) or _CANONICAL_MESSAGE_ID.fullmatch(value) is None:
         raise ValueError(f"{name} must be a canonical msg_ identifier")
@@ -327,6 +396,12 @@ def _optional_session_ref_id(value: object) -> str | None:
         return None
     if not isinstance(value, str) or _CANONICAL_SESSION_REF_ID.fullmatch(value) is None:
         raise ValueError("session_ref_id must be a session_ identifier")
+    return value
+
+
+def _canonical_owner_key(value: object, name: str = "session_owner_key") -> str:
+    if not isinstance(value, str) or _CANONICAL_OWNER_KEY.fullmatch(value) is None:
+        raise ValueError(f"{name} must be an owner_ key")
     return value
 
 
@@ -2898,6 +2973,61 @@ V11_SQL = (
 )
 V11_MIGRATION_CHECKSUM = "sha256:4b61d82c2a2578fdd25f39ea42f73cc5545edf40460df45c0ef986eae84c57fe"
 V11_SCHEMA_FINGERPRINT = "sha256:decb92cd78ac700383cf7e1b5a7b2c5137e37978b2b06a1cc108bcb9da559081"
+V12_SQL = (
+    """
+    ALTER TABLE conversation_bindings
+    ADD COLUMN owner_key TEXT
+        CHECK (
+            owner_key IS NULL
+            OR (
+                instr(owner_key, char(0)) = 0
+                AND length(CAST(owner_key AS BLOB)) = 38
+                AND substr(owner_key, 1, 6) = 'owner_'
+                AND substr(owner_key, 7) NOT GLOB '*[^0-9a-f]*'
+            )
+        )
+    """,
+    """
+    ALTER TABLE session_binding_challenges
+    ADD COLUMN agent_id TEXT
+        CHECK (
+            agent_id IS NULL
+            OR (
+                instr(agent_id, char(0)) = 0
+                AND length(CAST(agent_id AS BLOB)) BETWEEN 9 AND 134
+                AND substr(agent_id, 1, 6) = 'agent_'
+                AND substr(agent_id, 7, 1) GLOB '[A-Za-z0-9]'
+                AND substr(agent_id, 7) NOT GLOB '*[^A-Za-z0-9_-]*'
+            )
+        )
+    """,
+    """
+    UPDATE session_binding_challenges
+    SET agent_id = (
+        SELECT conversation_participants.agent_id
+        FROM conversation_participants
+        WHERE conversation_participants.workspace_id = session_binding_challenges.workspace_id
+          AND conversation_participants.scope_kind = session_binding_challenges.scope_kind
+          AND conversation_participants.scope_identity = session_binding_challenges.scope_identity
+          AND conversation_participants.conversation_id = session_binding_challenges.conversation_id
+          AND conversation_participants.participant_id = session_binding_challenges.participant_id
+    )
+    WHERE agent_id IS NULL
+    """,
+    """
+    DROP INDEX IF EXISTS conversation_bindings_one_mutation_owner_per_native_session
+    """,
+    """
+    CREATE UNIQUE INDEX conversation_bindings_one_mutation_owner_per_native_session
+    ON conversation_bindings (
+        workspace_id, provider_id, endpoint_id, COALESCE(owner_key, session_ref_id),
+        native_session_id, runtime_instance_id
+    )
+    WHERE mutation_capable = 1 AND state IN ('active', 'draining')
+    """,
+)
+V12_MIGRATION_CHECKSUM = "sha256:c8ce8b30824ec939e5e7a50ed4ab70cc79b2057befe5010526c1cced2cb49f1e"
+V12_SCHEMA_FINGERPRINT = "sha256:1d67d6fed6d3959029184c4cf9cf9055ac13baac6476f7c694e99991e6e05347"
 MIGRATIONS = (
     (1, V1_SQL),
     (2, V2_SQL),
@@ -2910,6 +3040,7 @@ MIGRATIONS = (
     (9, V9_SQL),
     (10, V10_SQL),
     (11, V11_SQL),
+    (12, V12_SQL),
 )
 
 
@@ -3073,6 +3204,29 @@ def _v11_schema_fingerprint_from_sql() -> str:
             *V9_SQL,
             *V10_SQL,
             *V11_SQL,
+        ):
+            connection.execute(statement)
+        return _schema_fingerprint(connection)
+    finally:
+        connection.close()
+
+
+def _v12_schema_fingerprint_from_sql() -> str:
+    connection = sqlite3.connect(":memory:", isolation_level=None)
+    try:
+        for statement in (
+            *V1_SQL,
+            *V2_SQL,
+            *V3_SQL,
+            *V4_SQL,
+            *V5_SQL,
+            *V6_SQL,
+            *V7_SQL,
+            *V8_SQL,
+            *V9_SQL,
+            *V10_SQL,
+            *V11_SQL,
+            *V12_SQL,
         ):
             connection.execute(statement)
         return _schema_fingerprint(connection)
@@ -3445,6 +3599,9 @@ class LedgerStore:
         if claimed == 10:
             cls._validate_released_v10(connection, paths)
             return
+        if claimed == 11:
+            cls._validate_released_v11(connection, paths)
+            return
         cls._validate_schema(connection, paths)
 
     @staticmethod
@@ -3510,8 +3667,12 @@ class LedgerStore:
                 raise MigrationError("released v11 migration checksum is incoherent")
             if _v11_schema_fingerprint_from_sql() != V11_SCHEMA_FINGERPRINT:
                 raise MigrationError("released v11 schema fingerprint is incoherent")
+            if _migration_checksum(V12_SQL) != V12_MIGRATION_CHECKSUM:
+                raise MigrationError("released v12 migration checksum is incoherent")
+            if _v12_schema_fingerprint_from_sql() != V12_SCHEMA_FINGERPRINT:
+                raise MigrationError("released v12 schema fingerprint is incoherent")
             rows = cls._migration_rows(connection)
-            if [row[0] for row in rows] != [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]:
+            if [row[0] for row in rows] != [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]:
                 raise MigrationError("ledger migration metadata is incoherent")
             cls._validate_migration_row(rows[0], V1_MIGRATION_CHECKSUM, 0, paths)
             cls._validate_migration_row(rows[1], V2_MIGRATION_CHECKSUM, 1, paths)
@@ -3524,15 +3685,16 @@ class LedgerStore:
             cls._validate_migration_row(rows[8], V9_MIGRATION_CHECKSUM, 8, paths)
             cls._validate_migration_row(rows[9], V10_MIGRATION_CHECKSUM, 9, paths)
             cls._validate_migration_row(rows[10], V11_MIGRATION_CHECKSUM, 10, paths)
+            cls._validate_migration_row(rows[11], V12_MIGRATION_CHECKSUM, 11, paths)
             actual_tables = cls._table_names(connection)
-            if actual_tables != V11_TABLES:
+            if actual_tables != V12_TABLES:
                 raise MigrationError(
-                    "ledger v11 table set is incoherent: "
-                    f"missing={sorted(V11_TABLES - actual_tables)}, "
-                    f"extra={sorted(actual_tables - V11_TABLES)}"
+                    "ledger v12 table set is incoherent: "
+                    f"missing={sorted(V12_TABLES - actual_tables)}, "
+                    f"extra={sorted(actual_tables - V12_TABLES)}"
                 )
-            if _schema_fingerprint(connection) != V11_SCHEMA_FINGERPRINT:
-                raise MigrationError("ledger v11 schema fingerprint is incoherent")
+            if _schema_fingerprint(connection) != V12_SCHEMA_FINGERPRINT:
+                raise MigrationError("ledger v12 schema fingerprint is incoherent")
         except sqlite3.DatabaseError as exc:
             raise MigrationError("ledger schema is corrupt or incoherent") from exc
 
@@ -3589,6 +3751,50 @@ class LedgerStore:
                 )
             if _schema_fingerprint(connection) != V10_SCHEMA_FINGERPRINT:
                 raise MigrationError("ledger v10 schema fingerprint is incoherent")
+        except sqlite3.DatabaseError as exc:
+            raise MigrationError("ledger schema is corrupt or incoherent") from exc
+
+    @classmethod
+    def _validate_released_v11(
+        cls, connection: sqlite3.Connection, paths: LedgerPaths
+    ) -> None:
+        """Accept only the exact released v11 long enough for the v12 migration."""
+        try:
+            cls._validate_database_health(connection)
+            if connection.execute("PRAGMA user_version").fetchone()[0] != 11:
+                raise MigrationError("ledger is not released schema v11")
+            released = (
+                (V1_SQL, V1_MIGRATION_CHECKSUM, V1_SCHEMA_FINGERPRINT, _v1_schema_fingerprint_from_sql),
+                (V2_SQL, V2_MIGRATION_CHECKSUM, V2_SCHEMA_FINGERPRINT, _v2_schema_fingerprint_from_sql),
+                (V3_SQL, V3_MIGRATION_CHECKSUM, V3_SCHEMA_FINGERPRINT, _v3_schema_fingerprint_from_sql),
+                (V4_SQL, V4_MIGRATION_CHECKSUM, V4_SCHEMA_FINGERPRINT, _v4_schema_fingerprint_from_sql),
+                (V5_SQL, V5_MIGRATION_CHECKSUM, V5_SCHEMA_FINGERPRINT, _v5_schema_fingerprint_from_sql),
+                (V6_SQL, V6_MIGRATION_CHECKSUM, V6_SCHEMA_FINGERPRINT, _v6_schema_fingerprint_from_sql),
+                (V7_SQL, V7_MIGRATION_CHECKSUM, V7_SCHEMA_FINGERPRINT, _v7_schema_fingerprint_from_sql),
+                (V8_SQL, V8_MIGRATION_CHECKSUM, V8_SCHEMA_FINGERPRINT, _v8_schema_fingerprint_from_sql),
+                (V9_SQL, V9_MIGRATION_CHECKSUM, V9_SCHEMA_FINGERPRINT, _v9_schema_fingerprint_from_sql),
+                (V10_SQL, V10_MIGRATION_CHECKSUM, V10_SCHEMA_FINGERPRINT, _v10_schema_fingerprint_from_sql),
+                (V11_SQL, V11_MIGRATION_CHECKSUM, V11_SCHEMA_FINGERPRINT, _v11_schema_fingerprint_from_sql),
+            )
+            for statements, checksum, fingerprint, fingerprint_from_sql in released:
+                if _migration_checksum(statements) != checksum:
+                    raise MigrationError("released migration checksum is incoherent")
+                if fingerprint_from_sql() != fingerprint:
+                    raise MigrationError("released schema fingerprint is incoherent")
+            rows = cls._migration_rows(connection)
+            if [row[0] for row in rows] != list(range(1, 12)):
+                raise MigrationError("ledger migration metadata is incoherent")
+            for index, (_statements, checksum, _fingerprint, _fingerprint_from_sql) in enumerate(released):
+                cls._validate_migration_row(rows[index], checksum, index, paths)
+            actual_tables = cls._table_names(connection)
+            if actual_tables != V11_TABLES:
+                raise MigrationError(
+                    "ledger v11 table set is incoherent: "
+                    f"missing={sorted(V11_TABLES - actual_tables)}, "
+                    f"extra={sorted(actual_tables - V11_TABLES)}"
+                )
+            if _schema_fingerprint(connection) != V11_SCHEMA_FINGERPRINT:
+                raise MigrationError("ledger v11 schema fingerprint is incoherent")
         except sqlite3.DatabaseError as exc:
             raise MigrationError("ledger schema is corrupt or incoherent") from exc
 
@@ -3872,6 +4078,7 @@ class LedgerStore:
                     9: V9_MIGRATION_CHECKSUM,
                     10: V10_MIGRATION_CHECKSUM,
                     11: V11_MIGRATION_CHECKSUM,
+                    12: V12_MIGRATION_CHECKSUM,
                 }.get(version)
                 if expected_checksum is None or checksum != expected_checksum:
                     raise MigrationError(f"migration {version} does not match its released checksum")
@@ -3901,6 +4108,7 @@ class LedgerStore:
                     9: V9_SCHEMA_FINGERPRINT,
                     10: V10_SCHEMA_FINGERPRINT,
                     11: V11_SCHEMA_FINGERPRINT,
+                    12: V12_SCHEMA_FINGERPRINT,
                 }[version]
                 if _schema_fingerprint(self._connection) != expected_fingerprint:
                     raise MigrationError(f"migration {version} produced an incoherent schema")
@@ -6085,8 +6293,7 @@ class LedgerStore:
         conversation_id: str,
         participant_id: str,
         agent_id: str,
-        provider_id: str,
-        provider_revision: str,
+        provider_descriptor: Mapping[str, object],
         endpoint_id: str,
         session_ref_id: str,
         native_session_id: str,
@@ -6095,12 +6302,8 @@ class LedgerStore:
         challenge_token_sha256: str,
         expires_at_utc: str,
         created_at_utc: str,
-        trust_class: str = "managed",
-        supported_operations_json: str = '["reserve","start","attach","inspect","heartbeat","retire","open_ui"]',
-        challenge_algorithm: str = "sha256",
-        challenge_ttl_seconds: int = 60,
     ) -> None:
-        """Create the inert v8 participant/provider/challenge rows."""
+        """Reserve a challenge for pre-provisioned participant/provider state."""
 
         self._ensure_thread()
         if self._read_only:
@@ -6108,15 +6311,26 @@ class LedgerStore:
         workspace_id, scope_kind, scope_identity = _canonical_scope(
             workspace_id, scope_kind, scope_identity
         )
+        if scope_kind != "project":
+            raise CanonicalConflictError(
+                "attached-session lifecycle registration requires project scope"
+            )
         self._validate_canonical_scope(workspace_id, scope_kind, scope_identity)
         conversation_id = _conversation_binding_text(
             conversation_id, "conversation_id", 128
         )
         participant_id = _conversation_binding_text(participant_id, "participant_id", 128)
         agent_id = _canonical_agent_id(agent_id, "agent_id")
-        provider_id = _conversation_binding_text(provider_id, "provider_id", 128)
-        provider_revision = _conversation_binding_text(
-            provider_revision, "provider_revision", 128
+        (
+            provider_id,
+            provider_revision,
+            trust_class,
+            supported_operations_json,
+            challenge_algorithm,
+            challenge_ttl_seconds,
+        ) = _provider_descriptor(
+            provider_descriptor,
+            required_operations=frozenset({"reserve"}),
         )
         endpoint_id = _canonical_endpoint_id(endpoint_id, "endpoint_id")
         session_ref_id = _optional_session_ref_id(session_ref_id)
@@ -6132,20 +6346,52 @@ class LedgerStore:
         _canonical_sha256(challenge_token_sha256, "challenge_token_sha256")
         _utc_timestamp(expires_at_utc, "expires_at_utc")
         _utc_timestamp(created_at_utc, "created_at_utc")
-        trust_class = _conversation_binding_text(trust_class, "trust_class", 32)
-        _bounded_text(supported_operations_json, "supported_operations_json", 4096)
-        challenge_algorithm = _conversation_binding_text(
-            challenge_algorithm, "challenge_algorithm", 64
-        )
-        if not isinstance(challenge_ttl_seconds, int) or challenge_ttl_seconds <= 0:
-            raise ValueError("challenge_ttl_seconds must be a positive integer")
         self._connection.execute("BEGIN IMMEDIATE")
         try:
+            participant = self._connection.execute(
+                """
+                SELECT agent_id FROM conversation_participants
+                WHERE workspace_id = ? AND scope_kind = ? AND scope_identity = ?
+                  AND conversation_id = ? AND participant_id = ?
+                """,
+                (
+                    workspace_id,
+                    scope_kind,
+                    scope_identity,
+                    conversation_id,
+                    participant_id,
+                ),
+            ).fetchone()
+            if participant is None or participant[0] != agent_id:
+                raise CanonicalConflictError(
+                    "participant is not pre-provisioned or agent does not match"
+                )
+            provider = self._connection.execute(
+                """
+                SELECT trust_class, supported_operations_json,
+                       challenge_algorithm, challenge_ttl_seconds
+                FROM lifecycle_provider_registry
+                WHERE workspace_id = ? AND provider_id = ? AND provider_revision = ?
+                """,
+                (workspace_id, provider_id, provider_revision),
+            ).fetchone()
+            if provider is None or tuple(provider) != (
+                trust_class,
+                supported_operations_json,
+                challenge_algorithm,
+                challenge_ttl_seconds,
+            ):
+                raise CanonicalConflictError("provider descriptor is not allowlisted")
             self._connection.execute(
                 """
-                INSERT OR IGNORE INTO conversation_participants
-                (workspace_id, scope_kind, scope_identity, conversation_id, participant_id, agent_id, created_at_utc)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO session_binding_challenges
+                (
+                    workspace_id, scope_kind, scope_identity, conversation_id, participant_id,
+                    agent_id, challenge_id, challenge_state, provider_id, provider_revision, endpoint_id,
+                    session_ref_id, native_session_id, runtime_instance_id, challenge_token_sha256,
+                    expires_at_utc, created_at_utc, consumed_at_utc
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
                 """,
                 (
                     workspace_id,
@@ -6154,46 +6400,6 @@ class LedgerStore:
                     conversation_id,
                     participant_id,
                     agent_id,
-                    created_at_utc,
-                ),
-            )
-            self._connection.execute(
-                """
-                INSERT OR IGNORE INTO lifecycle_provider_registry
-                (
-                    workspace_id, provider_id, provider_revision, trust_class,
-                    supported_operations_json, challenge_algorithm, challenge_ttl_seconds, created_at_utc
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    workspace_id,
-                    provider_id,
-                    provider_revision,
-                    trust_class,
-                    supported_operations_json,
-                    challenge_algorithm,
-                    challenge_ttl_seconds,
-                    created_at_utc,
-                ),
-            )
-            self._connection.execute(
-                """
-                INSERT INTO session_binding_challenges
-                (
-                    workspace_id, scope_kind, scope_identity, conversation_id, participant_id,
-                    challenge_id, challenge_state, provider_id, provider_revision, endpoint_id,
-                    session_ref_id, native_session_id, runtime_instance_id, challenge_token_sha256,
-                    expires_at_utc, created_at_utc, consumed_at_utc
-                )
-                VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
-                """,
-                (
-                    workspace_id,
-                    scope_kind,
-                    scope_identity,
-                    conversation_id,
-                    participant_id,
                     challenge_id,
                     provider_id,
                     provider_revision,
@@ -6222,12 +6428,14 @@ class LedgerStore:
         scope_identity: str,
         conversation_id: str,
         participant_id: str,
+        agent_id: str,
         challenge_id: str,
         challenge_token_sha256: str,
         provider_id: str,
         provider_revision: str,
         endpoint_id: str,
         session_ref_id: str,
+        session_owner_key: str,
         native_session_id: str,
         runtime_instance_id: str,
         consumed_at_utc: str,
@@ -6240,11 +6448,16 @@ class LedgerStore:
         workspace_id, scope_kind, scope_identity = _canonical_scope(
             workspace_id, scope_kind, scope_identity
         )
+        if scope_kind != "project":
+            raise CanonicalConflictError(
+                "attached-session lifecycle registration requires project scope"
+            )
         self._validate_canonical_scope(workspace_id, scope_kind, scope_identity)
         conversation_id = _conversation_binding_text(
             conversation_id, "conversation_id", 128
         )
         participant_id = _conversation_binding_text(participant_id, "participant_id", 128)
+        agent_id = _canonical_agent_id(agent_id, "agent_id")
         challenge_id = _conversation_binding_text(challenge_id, "challenge_id", 128)
         _canonical_sha256(challenge_token_sha256, "challenge_token_sha256")
         provider_id = _conversation_binding_text(provider_id, "provider_id", 128)
@@ -6255,6 +6468,7 @@ class LedgerStore:
         session_ref_id = _optional_session_ref_id(session_ref_id)
         if session_ref_id is None:
             raise ValueError("session_ref_id must be a session_ identifier")
+        session_owner_key = _canonical_owner_key(session_owner_key)
         native_session_id = _conversation_binding_text(
             native_session_id, "native_session_id", 256
         )
@@ -6264,15 +6478,35 @@ class LedgerStore:
         consumed_at_utc = _utc_timestamp(consumed_at_utc, "consumed_at_utc")
         self._connection.execute("BEGIN IMMEDIATE")
         try:
+            provider_capabilities = self._connection.execute(
+                """
+                SELECT supported_operations_json
+                FROM lifecycle_provider_registry
+                WHERE workspace_id = ? AND provider_id = ? AND provider_revision = ?
+                """,
+                (workspace_id, provider_id, provider_revision),
+            ).fetchone()
+            if provider_capabilities is None:
+                raise CanonicalConflictError("provider descriptor is not allowlisted")
+            try:
+                _validate_supported_operations(
+                    provider_capabilities[0],
+                    required_operations=frozenset({"attach"}),
+                )
+            except ValueError as exc:
+                raise CanonicalConflictError(
+                    "provider does not support session binding attach"
+                ) from exc
             challenge = self._connection.execute(
                 """
-                SELECT expires_at_utc FROM session_binding_challenges
+                SELECT expires_at_utc, agent_id FROM session_binding_challenges
                 WHERE workspace_id = ? AND scope_kind = ? AND scope_identity = ?
                   AND conversation_id = ? AND participant_id = ?
                   AND challenge_id = ? AND challenge_state = 'pending'
                   AND provider_id = ? AND provider_revision = ? AND endpoint_id = ?
                   AND session_ref_id = ? AND native_session_id = ?
                   AND runtime_instance_id = ? AND challenge_token_sha256 = ?
+                  AND session_binding_challenges.agent_id = ?
                 """,
                 (
                     workspace_id,
@@ -6288,6 +6522,7 @@ class LedgerStore:
                     native_session_id,
                     runtime_instance_id,
                     challenge_token_sha256,
+                    agent_id,
                 ),
             ).fetchone()
             if challenge is None:
@@ -6339,10 +6574,10 @@ class LedgerStore:
                 (
                     workspace_id, scope_kind, scope_identity, conversation_id, participant_id,
                     binding_id, generation, state, mutation_capable, provider_id,
-                    provider_revision, endpoint_id, session_ref_id, native_session_id,
+                    provider_revision, endpoint_id, session_ref_id, owner_key, native_session_id,
                     runtime_instance_id, registered_at_utc
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, 'active', 1, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'active', 1, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     workspace_id,
@@ -6356,6 +6591,7 @@ class LedgerStore:
                     provider_revision,
                     endpoint_id,
                     session_ref_id,
+                    session_owner_key,
                     native_session_id,
                     runtime_instance_id,
                     consumed_at_utc,

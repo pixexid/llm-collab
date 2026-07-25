@@ -20,6 +20,7 @@ from llm_collab.codex_session_ref import (
     SessionAuthority,
     SessionRefError,
     build_session_ref,
+    derive_session_owner_key,
     validate_session_ref,
 )
 
@@ -147,6 +148,64 @@ class CodexSessionRefTests(unittest.TestCase):
                 correlation_id="corr_session_beta",
                 expected_evidence_integrity=session_ref["evidence"]["integrity"],
             )
+
+    def test_session_ref_identity_preserves_scope_and_owner_key_is_scope_independent(self):
+        _session_ref, identity, _repo, _cwd, _binding = self.build()
+        session_ref = build_session_ref(
+            workspace_id="ws_alpha",
+            scope={"kind": "project", "project_id": "proj"},
+            endpoint_id="endpoint_alpha",
+            native_session_id="native-session-alpha",
+            runtime_home=identity,
+            authority=self.authority(),
+            observed_at_utc="2026-07-23T00:00:00Z",
+            correlation_id="corr_session_proj",
+        )
+        other = build_session_ref(
+            workspace_id="ws_alpha",
+            scope={"kind": "project", "project_id": "other"},
+            endpoint_id="endpoint_alpha",
+            native_session_id="native-session-alpha",
+            runtime_home=identity,
+            authority=self.authority(),
+            observed_at_utc="2026-07-23T00:00:00Z",
+            correlation_id="corr_session_other",
+        )
+
+        self.assertNotEqual(session_ref["session_ref_id"], other["session_ref_id"])
+        project_owner_key = derive_session_owner_key(
+            workspace_id="ws_alpha",
+            endpoint_id="endpoint_alpha",
+            native_session_id="native-session-alpha",
+            runtime_home=identity,
+            authority=self.authority(),
+        )
+        other_owner_key = derive_session_owner_key(
+            workspace_id="ws_alpha",
+            endpoint_id="endpoint_alpha",
+            native_session_id="native-session-alpha",
+            runtime_home=identity,
+            authority=self.authority(),
+        )
+        self.assertEqual(project_owner_key, other_owner_key)
+        self.assertNotEqual(session_ref["evidence"]["scope"], other["evidence"]["scope"])
+        self.assertNotEqual(session_ref["evidence"]["evidence_id"], other["evidence"]["evidence_id"])
+
+    def test_expected_session_ref_id_accepts_the_stable_scoped_derivation(self):
+        session_ref, identity, _repo, _cwd, binding = self.build()
+        rebuilt = build_session_ref(
+            workspace_id="ws_alpha",
+            scope={"kind": "project", "project_id": "proj"},
+            endpoint_id="endpoint_alpha",
+            native_session_id="native-session-alpha",
+            runtime_home=identity,
+            authority=self.authority(),
+            observed_at_utc="2026-07-23T00:00:00Z",
+            correlation_id="corr_session_alpha",
+            repository_binding=binding,
+            expected_session_ref_id=session_ref["session_ref_id"],
+        )
+        self.assertEqual(rebuilt["session_ref_id"], session_ref["session_ref_id"])
 
     def test_schema_and_semantic_drift_fail_closed(self):
         session_ref, identity, _repo, _cwd, binding = self.build()
