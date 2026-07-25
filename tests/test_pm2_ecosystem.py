@@ -7,6 +7,7 @@ and its exact launch arguments would otherwise be unverified.
 from __future__ import annotations
 
 import contextlib
+import getpass
 import io
 import json
 import os
@@ -337,6 +338,37 @@ class Pm2EcosystemTest(unittest.TestCase):
             passed = found[0]["args"][found[0]["args"].index("--ws-token-file") + 1]
             self.assertEqual(os.path.realpath(secure), os.path.realpath(passed),
                              "the launched path must be the validated one")
+
+    def test_named_user_tilde_token_is_refused_identically_by_both_sides(self) -> None:
+        """`~<current-user>/...` must mean the same thing to the manager and the config.
+
+        os.path.expanduser accepts `~user` and the CJS mirror cannot, so the manager
+        canonicalized a real secure token under /Users/<user>/ and enabled the sidecar
+        while the config resolved <repo>/~<user>/ and emitted nothing -- the
+        validate-one-path/use-another defect again. One tilde grammar: named-user forms
+        stay literal on BOTH sides, so both refuse.
+        """
+        sys.path.insert(0, str(ROOT / "bin"))
+        import pm2_watchers
+
+        with tempfile.TemporaryDirectory(dir=Path.home()) as home_tmp:
+            secure = Path(home_tmp) / "token"
+            secure.write_text("t0ken\n", encoding="utf-8")
+            secure.chmod(0o600)
+            binary = Path(home_tmp) / "codex"
+            binary.write_text("#!/bin/sh\n", encoding="utf-8")
+            named = f"~{getpass.getuser()}/{secure.relative_to(Path.home())}"
+            self.assertTrue(secure.exists(), "the real token must exist under $HOME")
+
+            env = {"LLM_COLLAB_CODEX_APP_SERVER_TOKEN_FILE": named,
+                   "LLM_COLLAB_CODEX_BIN": str(binary)}
+            with mock.patch.dict(os.environ, env):
+                manager_enabled = pm2_watchers.enabled_sidecar_ids()
+            emitted = sidecars(load_apps(env))
+
+        self.assertEqual([], manager_enabled,
+                         "the manager must not expand a form the config leaves literal")
+        self.assertEqual([], emitted, "the config must agree with the manager")
 
 class Pm2ManagerSidecarTest(unittest.TestCase):
     """The manager's sidecar branch, forced on so a clean checkout still exercises it.

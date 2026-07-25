@@ -14,6 +14,7 @@ exists to prevent.
 
 from __future__ import annotations
 
+import getpass
 import json
 import shutil
 import subprocess
@@ -45,6 +46,11 @@ CASES = [
     "~/.codex/",
     "/tmp/./a/../codex-home",
     "/tmp/codex-home//",
+    # os.path.expanduser also accepts ~user; the CJS mirror handles only ~ and ~/.
+    # One grammar: named-user forms stay literal on BOTH sides.
+    f"~{getpass.getuser()}",
+    f"~{getpass.getuser()}/.codex",
+    "~nosuchuser/.codex",
 ]
 
 # load the REAL exported function, never a reimplementation
@@ -94,7 +100,8 @@ class PathInvariantParityTest(unittest.TestCase):
         found an endpoint and delivery failed with no diagnostic.
         """
         # cross the boundary for each case, including the tilde that used to diverge
-        for case in ("/tmp/codex-home/", "~/.codex", "~"):
+        for case in ("/tmp/codex-home/", "~/.codex", "~",
+                     f"~{getpass.getuser()}/.codex"):
             with self.subTest(case=case):
                 registered = session_autobridge.canonical_runtime_home(case)
                 launched = cjs_canonical([case], base=str(ROOT))[0]
