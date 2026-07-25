@@ -204,11 +204,15 @@ any review-fix patch. When the operator has authorized the merge path, merge
 from the current thread only after the exact current head has green required
 checks, the PR is mergeable with clean merge state, the independent exact-head
 review is clean, and the full current comment/review/thread payload has no
-actionable finding. The GitHub Codex signal is clean when either the latest
+actionable finding. Reviews are MANUAL ONLY as of 2026-07-25; nothing arrives unrequested, and whether
+a change must be reviewed is decided by the Tier A/B/C rule in `llm-collab#310`
+and restated in
+[commit-push-prs.md](commit-push-prs.md#explicit-requested-review-precedence).
+The GitHub Codex signal is clean when either the latest
 `chatgpt-codex-connector` review/comment explicitly covers that exact OID with
-no actionable issues or the watcher observed the connector's eyes-to-`+1`
-(`thumbs-up`) transition on the latest head, the `+1` postdates that head, and no
-subsequent push occurred. Either signal is terminal for the bot wait on that
+no actionable issues, or a connector-authored `+1` (`thumbs-up`) sits on the exact
+manual-review request comment while the head still equals the SHA that request
+named. A bare `eyes` reaction is accepted-and-in-progress, never a verdict. Either signal is terminal for the bot wait on that
 head, and these remain the only two exact-head terminal signal sources. Their
 post-signal handling differs. A terminal signal stops waiting for further
 artifacts or the fallback timeout only; it does not waive the handling below:
@@ -226,9 +230,12 @@ artifacts or the fallback timeout only; it does not waive the handling below:
   15-minute fallback itself. Required CI, mergeability, independent review,
   and full comment/review/thread inspection still apply.
 
-For requested-review silence versus the fallback, follow the canonical
+For requested-review silence, follow the canonical
 [Explicit requested-review precedence](commit-push-prs.md#explicit-requested-review-precedence).
-Do not apply the 15-minute fallback to an explicitly requested review.
+Do not apply any fallback clock to an explicitly requested review, and note that
+under manual-only there is no fallback for an UNREQUESTED review either: a Tier A
+head waits without one and never merges on silence, while a Tier B/C head with no
+request does not wait at all.
 Automation may issue exactly one re-trigger, and no further automatic retry is
 allowed. The canonical section is the sole authority for both request-anchored
 clocks, current-head invalidation, the post-timeout disposition choices, and

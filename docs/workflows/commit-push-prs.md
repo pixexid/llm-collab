@@ -203,17 +203,44 @@ rerun verification, push, and then request/inspect review again.
 
 ### GitHub Codex review policy
 
+> **Reviews are MANUAL ONLY (operator decision, 2026-07-25).** Automatic review is
+> off account-wide. Nothing arrives unless someone asks for it, so the question is
+> no longer "how long do we wait" but "must this change be reviewed at all". That
+> is decided by the Tier A/B/C rule in `llm-collab#310`:
+>
+> - **Tier A** (credentials/auth/authority; money/provider/idempotency; untrusted
+>   parse, read or enumeration and resource/deadline bounds; shared code changing an
+>   observable contract; concurrency/ordering/partial-state/TOCTOU/atomicity;
+>   migrations/DDL/grants/RLS; repo incident families; tests or docs that govern or
+>   can weaken a Tier A invariant) — a manual review **must** be requested on the
+>   candidate final head. Failing to request is itself a gate violation.
+> - **Tier B/C** — if no review was requested, do **not** wait for one.
+> - At every tier, any finding that does arrive must be adjudicated in writing.
+>
+> "Request once" means **once per candidate final head**, not once per PR: any
+> amendment stales the review and requires a new request.
+
 Use `local_required_github_codex_opportunistic` as the default queue-runner
 policy:
 
 - the orchestrator's local review and required project gates are mandatory
-- automatic GitHub Codex review/comments are consumed when they appear
+- GitHub Codex review/comments are consumed when they appear; under manual-only
+  they appear because they were requested
 - a clean `chatgpt-codex-connector` review/comment that explicitly covers the
   exact current OID is terminal for that head
-- a connector `+1` (`thumbs-up`) is terminal only when it postdates the latest
-  head, no subsequent push occurred, and the watcher observed the connector's
-  eyes-to-`+1` lifecycle on that head. Timestamp alone or a `+1` on an older or
-  unrelated artifact is not head-attributable
+- a connector-authored `+1` (`thumbs-up`) **on the exact manual-review request
+  comment** is terminal CLEAN, after pickup, while the PR head still equals the SHA
+  that request named. Verify all four: the actor is the connector, the reaction is
+  on that request comment, the requested SHA, and the current head. Any head change
+  voids it and requires a new request. An ambiguous or removed reaction is
+  non-terminal, and a bare `eyes` reaction or the request comment itself is never a
+  verdict — `eyes` means accepted and in progress
+- the meaning of `+1` does **not** vary by tier. Tier A takes its strength from the
+  mandatory final-head request, independent exact-head P0–P2 review, mutation and
+  verification evidence, and settle plus adjudication. Requiring a posted text
+  review for Tier A would deadlock whenever the connector's clean protocol is
+  reaction-only, and the request plus a connector-authored `+1` is already a durable
+  GitHub artifact
 - these are the only two exact-head terminal signal models; no other review,
   comment, or reaction artifact is terminal
 - a head-named clean connector verdict is not merge-immediate. Hold an
@@ -227,12 +254,14 @@ policy:
 - report the exact verdict or the latest-head eyes-to-`+1` transition with its
   timestamps and confirm that no later push occurred
 - any push creates a new head and invalidates every prior verdict and reaction
-  lifecycle. Start or reset the 15-minute fallback clock at the later of the
-  final push to that head and the time that head becomes reviewable: the PR is
-  open, any draft is marked ready, and the PR is visible for review. An explicit
-  review request is NOT required for a head to be reviewable; absence of an
-  explicit request neither pre-expires the fallback nor extends it (see the
-  absent-request variant below)
+  lifecycle
+- **there is no silence fallback for an unrequested review.** Under manual-only,
+  waiting out a clock for a review nobody asked for is a path that always ends in
+  silence. A Tier A head waits, without a fallback, for a terminal connector
+  outcome; if none ever completes, retry explicitly or obtain an operator waiver,
+  and never merge on silence. A Tier B/C head with no request does not wait at all.
+  The requested-review clock and single re-trigger below still govern a review that
+  WAS requested
 - GitHub Codex silence must not become an infinite wait: the resettable
   15-minute settle is the fallback only for the three named
   no-terminal-artifact variants enumerated below, when no bot review is
