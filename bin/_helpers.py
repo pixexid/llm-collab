@@ -730,31 +730,48 @@ def latest_chat() -> Path | None:
     return chats[-1] if chats else None
 
 
-CHAT_ID_PATTERN = re.compile(r"^CHAT-[0-9A-Za-z]+$")
+CHAT_ID_SUFFIX = re.compile(r"CHAT-[0-9A-Za-z]+$")
+
+
+def chat_id_of(chat_dir: Path) -> str | None:
+    """The chat id a directory actually carries, from its trailing token."""
+    found = CHAT_ID_SUFFIX.search(chat_dir.name)
+    return found.group(0) if found else None
 
 
 def find_chat_by_partial(partial: str) -> Path | None:
     """Resolve a chat selector to one directory.
 
-    A loose partial matching several chats keeps newest-wins, which is fine for
-    human lookup. An exact chat id matching several directories is different: chat
-    ids must be unique, so two matches mean the workspace is corrupt, and picking
-    the newest silently routed delivery into whichever directory sorted last. That
-    is how mail reaches the wrong receiver -- and how a chat whose duplicate lacked
-    meta.json blocked delivery entirely with an error naming a directory the sender
-    never chose. Refuse instead of guessing.
+    Two matches for one chat id mean the workspace is corrupt: ids must be unique, and
+    picking the newest silently routed delivery into whichever directory sorted last.
+    That is how mail reaches the wrong receiver -- and how a chat whose duplicate lacked
+    meta.json blocked delivery entirely with an error naming a directory the sender never
+    chose. Refuse instead of guessing.
+
+    The decision is made by comparing the id each directory ACTUALLY carries, never by
+    the shape of the selector. Testing the selector's shape got all three edge cases
+    wrong at once: a lowercase selector failed the uppercase pattern and bypassed the
+    refusal entirely, an id-shaped prefix like `CHAT-89` was refused although it is an
+    ordinary loose match, and a directory whose title merely mentions another id counted
+    toward the collision. Loose partials keep newest-wins -- that is human lookup, not
+    delivery addressing.
     """
     if partial == "last":
         return latest_chat()
     matches = find_chats(partial)
     if not matches:
         return None
-    if len(matches) > 1 and CHAT_ID_PATTERN.match(partial.strip()):
-        names = "\n  ".join(sorted(d.name for d in matches))
+
+    selector = partial.strip().casefold()
+    exact = [d for d in matches if (chat_id_of(d) or "").casefold() == selector]
+    if len(exact) > 1:
+        names = "\n  ".join(sorted(d.name for d in exact))
         raise ValueError(
-            f"chat id {partial} matches {len(matches)} directories; ids must be unique:\n  {names}\n"
+            f"chat id {partial} matches {len(exact)} directories; ids must be unique:\n  {names}\n"
             "Merge or re-id the duplicates before sending -- delivery will not guess."
         )
+    if exact:
+        return exact[0]
     return matches[-1]
 
 

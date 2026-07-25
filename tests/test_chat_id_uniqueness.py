@@ -51,6 +51,30 @@ class ChatIdUniquenessTest(unittest.TestCase):
             found = _helpers.find_chat_by_partial("gh-90")
         self.assertEqual("2026-07-21_gh-90_y__CHAT-BBBB2222", found.name)
 
+    def test_lowercase_selector_for_an_uppercase_duplicate_still_refuses(self) -> None:
+        """The decision must come from the directory's id, not the selector's shape.
+
+        Testing the selector against an uppercase pattern let `chat-8976eecb` bypass the
+        refusal completely and deliver into whichever duplicate sorted last.
+        """
+        with self._chats("2026-07-20_a__CHAT-8976EECB", "2026-07-21_b__CHAT-8976EECB"):
+            with self.assertRaises(ValueError):
+                _helpers.find_chat_by_partial("chat-8976eecb")
+
+    def test_id_shaped_prefix_is_an_ordinary_loose_match_not_a_collision(self) -> None:
+        # `CHAT-89` looks like an id but is a prefix; refusing it would break human lookup
+        with self._chats("2026-07-20_a__CHAT-8976EECB", "2026-07-21_b__CHAT-8912ABCD"):
+            found = _helpers.find_chat_by_partial("CHAT-89")
+        self.assertEqual("2026-07-21_b__CHAT-8912ABCD", found.name)
+
+    def test_a_title_mentioning_another_id_does_not_count_as_a_collision(self) -> None:
+        # only the TRAILING token is the directory's id
+        with self._chats("2026-07-20_re-CHAT-8976EECB-followup__CHAT-0000AAAA",
+                         "2026-07-21_b__CHAT-8976EECB"):
+            found = _helpers.find_chat_by_partial("CHAT-8976EECB")
+        self.assertEqual("2026-07-21_b__CHAT-8976EECB", found.name,
+                         "the real bearer of the id must win over an incidental mention")
+
     def test_lowercase_legacy_ids_are_covered_by_the_same_rule(self) -> None:
         with self._chats("2026-04-01_a__CHAT-e71d34ff", "2026-04-02_b__CHAT-e71d34ff"):
             with self.assertRaises(ValueError):
