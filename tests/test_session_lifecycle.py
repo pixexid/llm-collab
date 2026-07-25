@@ -385,6 +385,30 @@ class LifecycleTest(unittest.TestCase):
                 "agent_codex",
             )
 
+    def test_consume_rejects_wrong_agent_with_valid_reserved_token(self) -> None:
+        active_subject = subject()
+        wrong_agent = subject(agent_id="agent_claude")
+        with LedgerStore.open_writer(self.paths) as store:
+            challenge = self.reserve(store, active_subject)
+            before = row_counts(store)
+            with self.assertRaisesRegex(
+                CanonicalConflictError, "not pending or does not match"
+            ):
+                self.consume(store, wrong_agent, challenge)
+            self.assertEqual(row_counts(store), before)
+            self.assertEqual(
+                store._connection.execute(
+                    "SELECT challenge_state FROM session_binding_challenges"
+                ).fetchone()[0],
+                "pending",
+            )
+            self.assertEqual(
+                store._connection.execute(
+                    "SELECT count(*) FROM conversation_bindings"
+                ).fetchone()[0],
+                0,
+            )
+
     def test_subset_provider_operations_support_reserve_and_consume(self) -> None:
         active_subject = subject()
         provider = FakeLifecycleProvider(supported_operations_json='["reserve","attach"]')
