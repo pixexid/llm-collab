@@ -14,6 +14,7 @@ import io
 import json
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -77,6 +78,19 @@ class ResolveThreadTest(unittest.TestCase):
         with self.assertRaises(SystemExit) as caught:
             codex_stream.resolve_thread(self.args(agent="codex"))
         self.assertIn("--project is required", str(caught.exception))
+
+    def test_an_unreadable_or_empty_registry_fails_closed(self) -> None:
+        """The one configuration where we cannot verify a project must not accept any name.
+
+        `if registered and project not in registered` skipped the check entirely when the
+        registry was empty or unreadable, so a fabricated directory was admitted precisely when
+        there was nothing to check it against.
+        """
+        binding(self.root, "ghost", "CHAT-AAA", "codex", "thread-1")
+        with mock.patch.object(codex_stream, "registered_project_ids", return_value=set()):
+            with self.assertRaises(SystemExit) as caught:
+                codex_stream.resolve_thread(self.args(agent="codex", project="ghost"))
+        self.assertIn("cannot be verified", str(caught.exception))
 
     def test_an_unregistered_project_is_refused(self) -> None:
         """Existing as a directory is not the same as being a registered project."""
@@ -327,7 +341,7 @@ class FailClosedCandidateTest(unittest.TestCase):
                 binding(self.root, "amiga", f"CHAT-{i}", "codex", f"t{i}")
             with self.assertRaises(SystemExit) as caught:
                 codex_stream.resolve_thread(self.args(agent="codex", project="amiga"))
-        self.assertIn("scan budget", str(caught.exception))
+        self.assertIn("more than", str(caught.exception))
 
     def test_a_named_chat_skips_the_scan_budget_entirely(self) -> None:
         with mock.patch.object(codex_stream, "MAX_SCANNED_CHATS", 1):
@@ -479,6 +493,37 @@ class RuntimeFamilyGateTest(unittest.TestCase):
         self.assertEqual("t1", thread)
 
 
+class MessageStartDetectionTest(unittest.TestCase):
+    """Only item/started proves we were there from the beginning."""
+
+    def test_an_agent_message_start_is_reported(self) -> None:
+        self.assertEqual("msg-1", codex_stream.message_started_id(
+            "item/started", {"item": {"type": "agentMessage", "id": "msg-1"}}))
+
+    def test_a_delta_is_not_a_start(self) -> None:
+        """The defect: the first delta SEEN was treated as the first delta SENT."""
+        self.assertIsNone(codex_stream.message_started_id(
+            "item/agentMessage/delta", {"itemId": "msg-1", "delta": "tail only"}))
+
+    def test_a_non_message_item_start_is_not_reported(self) -> None:
+        for kind in ("commandExecution", "fileChange", "reasoning"):
+            with self.subTest(kind=kind):
+                self.assertIsNone(codex_stream.message_started_id(
+                    "item/started", {"item": {"type": kind, "id": "x"}}))
+
+    def test_a_start_without_an_id_is_not_reported(self) -> None:
+        self.assertIsNone(codex_stream.message_started_id(
+            "item/started", {"item": {"type": "agentMessage"}}))
+
+    def test_the_loop_populates_the_set_only_from_starts(self) -> None:
+        # structural: the delta branch must not add to streamed_from_start
+        source = (ROOT / "bin" / "codex_stream.py").read_text(encoding="utf-8")
+        delta_branch = source[source.index('if method == "item/agentMessage/delta":'):
+                              source.index('if method == "item/completed"')]
+        self.assertNotIn("streamed_from_start", delta_branch)
+        self.assertIn("started_id = message_started_id(method, params)", source)
+
+
 class MessageReconciliationTest(unittest.TestCase):
     """A message that began before subscription must be recovered, once.
 
@@ -570,37 +615,80 @@ class LiveBindingSelectionTest(unittest.TestCase):
         self.assertEqual("old-thread", thread)
 
 
-class ReadTimeoutClampTest(unittest.TestCase):
-    """The socket wait must never exceed what the caller's deadline allows."""
+class DeadlineTest(unittest.TestCase):
+    """The deadline is absolute, so nothing on the wire can extend it."""
 
-    def client(self):
+    def client(self, frames=()):
         made = codex_stream.ObserverClient.__new__(codex_stream.ObserverClient)
         made.observed_requests = []
+        made.read_deadline = None
         made.timeout_seconds = 5
         made.sock = mock.Mock()
+        made.sent = []
+        made.send_json = made.sent.append
+        made._send_frame = lambda payload, opcode=0x1: None
+        made.queue = list(frames)
+
+        def recv_frame():
+            if not made.queue:
+                raise ConnectionError("closed")
+            return made.queue.pop(0)
+
+        made._recv_frame = recv_frame
         return made
 
-    def test_a_short_remaining_window_shortens_the_wait(self) -> None:
+    def test_a_near_deadline_shortens_the_socket_wait(self) -> None:
         made = self.client()
-        made.set_read_timeout(0.1)
-        made.sock.settimeout.assert_called_once()
-        self.assertAlmostEqual(0.1, made.sock.settimeout.call_args[0][0], places=6)
-
-    def test_the_idle_cap_still_applies_when_plenty_remains(self) -> None:
-        made = self.client()
-        made.set_read_timeout(600)
-        self.assertEqual(5, made.sock.settimeout.call_args[0][0])
+        made.set_deadline(time.monotonic() + 0.1)
+        made._clamp_socket()
+        self.assertLessEqual(made.sock.settimeout.call_args[0][0], 0.1)
 
     def test_no_deadline_uses_the_idle_cap(self) -> None:
         made = self.client()
-        made.set_read_timeout(None)
+        made.set_deadline(None)
+        made._clamp_socket()
+        self.assertEqual(5, made.sock.settimeout.call_args[0][0])
+
+    def test_a_distant_deadline_still_respects_the_idle_cap(self) -> None:
+        made = self.client()
+        made.set_deadline(time.monotonic() + 600)
+        made._clamp_socket()
         self.assertEqual(5, made.sock.settimeout.call_args[0][0])
 
     def test_an_exhausted_window_never_becomes_a_blocking_wait(self) -> None:
-        # settimeout(0) would make the socket non-blocking, which is a different failure
+        # settimeout(0) makes the socket non-blocking, which is a different failure
         made = self.client()
-        made.set_read_timeout(-3)
+        made.set_deadline(time.monotonic() - 3)
+        made._clamp_socket()
         self.assertGreater(made.sock.settimeout.call_args[0][0], 0)
+
+    def test_a_ping_storm_cannot_extend_the_deadline(self) -> None:
+        """The reported repro: pings are consumed INSIDE the frame loop.
+
+        With the base client's loop, a peer sending them steadily reset the wait each time and
+        a 0.1s budget returned after roughly 0.21s. The deadline is absolute now, so a ping
+        costs time against it.
+        """
+        pings = [(0x9, b"") for _ in range(500)]
+        made = self.client(pings)
+        made.set_deadline(time.monotonic() - 0.001)  # already expired
+        with self.assertRaises(TimeoutError):
+            made.recv_json()
+
+    def test_an_expired_deadline_raises_before_reading_any_frame(self) -> None:
+        made = self.client([(0x1, json.dumps({"method": "turn/completed"}).encode())])
+        made.set_deadline(time.monotonic() - 1)
+        with self.assertRaises(TimeoutError):
+            made.recv_json()
+        self.assertEqual(1, len(made.queue), "the frame must not have been consumed")
+
+    def test_a_ping_is_answered_with_a_pong_and_the_loop_continues(self) -> None:
+        frames = [(0x9, b"hb"), (0x1, json.dumps({"method": "turn/completed"}).encode())]
+        made = self.client(frames)
+        sent_opcodes = []
+        made._send_frame = lambda payload, opcode=0x1: sent_opcodes.append(opcode)
+        self.assertEqual("turn/completed", made.recv_json()["method"])
+        self.assertEqual([0xA], sent_opcodes, "a ping must be ponged")
 
 
 class StreamLoopContractTest(unittest.TestCase):
@@ -618,10 +706,11 @@ class StreamLoopContractTest(unittest.TestCase):
         self.assertIn("time.monotonic()", source)
         self.assertNotIn("time.time() + args.seconds", source)
 
-    def test_the_receive_wait_is_clamped_each_iteration(self) -> None:
+    def test_the_receive_wait_is_bounded_by_an_absolute_deadline(self) -> None:
         source = self.source()
-        loop = source[source.index("        while True:"):source.index("    if text_line_open:")]
-        self.assertIn("set_read_timeout(remaining)", loop)
+        self.assertNotIn("set_read_timeout", source,
+                         "the per-iteration timeout was replaced by an absolute deadline")
+        self.assertIn("client.set_deadline(deadline)", source)
 
     def test_the_recovery_hint_names_no_command_that_does_not_exist(self) -> None:
         """The old hint printed a command that exits `Unknown agent` in this repo."""
@@ -658,20 +747,28 @@ class ObserverAnswersNothingTest(unittest.TestCase):
     """
 
     def client(self, incoming: list[dict]) -> codex_stream.ObserverClient:
+        """A client whose frame source is a queue, since it owns its own frame loop now."""
         client = codex_stream.ObserverClient.__new__(codex_stream.ObserverClient)
         client.observed_requests = []
+        client.read_deadline = None
+        client.timeout_seconds = 5
+        client.sock = mock.Mock()
         client.sent: list[dict] = []
-        client.queue = list(incoming)
+        client.queue = [json.dumps(m).encode("utf-8") for m in incoming]
         client.send_json = client.sent.append
+        client._send_frame = lambda payload, opcode=0x1: None
+
+        def recv_frame():
+            if not client.queue:
+                raise ConnectionError("websocket closed")
+            return 0x1, client.queue.pop(0)
+
+        client._recv_frame = recv_frame
         return client
 
     def drain(self, client, count: int) -> list[dict]:
-        def base_recv(_self=None):
-            return client.queue.pop(0)
-        with mock.patch.object(codex_stream.autobridge.JsonRpcWebSocketClient,
-                               "recv_json", base_recv):
-            with contextlib.redirect_stderr(io.StringIO()) as captured:
-                got = [client.recv_json() for _ in range(count)]
+        with contextlib.redirect_stderr(io.StringIO()) as captured:
+            got = [client.recv_json() for _ in range(count)]
         self.stderr = captured.getvalue()
         return got
 

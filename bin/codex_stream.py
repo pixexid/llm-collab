@@ -30,6 +30,7 @@ require_python()
 
 import argparse
 import json
+import os
 import socket
 import time
 
@@ -72,18 +73,42 @@ class ObserverClient(autobridge.JsonRpcWebSocketClient):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.observed_requests: list[str] = []
+        self.read_deadline: float | None = None
 
-    def set_read_timeout(self, remaining: float | None) -> None:
-        """Never wait longer than the caller's own deadline allows."""
+    def set_deadline(self, deadline: float | None) -> None:
+        """The absolute monotonic instant after which no further frame may be awaited."""
+        self.read_deadline = deadline
+
+    def _clamp_socket(self) -> None:
+        cap = float(self.timeout_seconds or DEFAULT_IDLE_TIMEOUT_SECONDS)
         if self.sock is None:
             return
-        cap = float(self.timeout_seconds or DEFAULT_IDLE_TIMEOUT_SECONDS)
-        wait = cap if remaining is None else max(0.01, min(cap, remaining))
-        self.sock.settimeout(wait)
+        if self.read_deadline is None:
+            self.sock.settimeout(cap)
+            return
+        self.sock.settimeout(max(0.01, min(cap, self.read_deadline - time.monotonic())))
 
     def recv_json(self) -> dict:
+        """Read one JSON message, rechecking the deadline on every frame.
+
+        Its own frame loop rather than the base client's, because ping frames are consumed
+        inside that loop: a peer sending them steadily reset the wait each time and a 0.1s
+        budget returned after roughly 0.21s. The deadline is absolute, so pings, control
+        frames and refused server requests all cost time against it instead of extending it.
+        """
         while True:
-            message = super().recv_json()
+            if self.read_deadline is not None and time.monotonic() >= self.read_deadline:
+                raise TimeoutError("read deadline reached")
+            self._clamp_socket()
+            opcode, payload = self._recv_frame()
+            if opcode == 0x8:
+                raise ConnectionError("websocket closed")
+            if opcode == 0x9:
+                self._send_frame(payload, opcode=0xA)
+                continue
+            if opcode != 0x1:
+                continue
+            message = json.loads(payload.decode("utf-8"))
             if message.get("id") is not None and message.get("method"):
                 method = str(message["method"])
                 self.observed_requests.append(method)
@@ -95,6 +120,7 @@ class ObserverClient(autobridge.JsonRpcWebSocketClient):
                       file=sys.stderr)
                 continue
             return message
+
 
 
 def parse_args() -> argparse.Namespace:
@@ -210,7 +236,15 @@ def resolve_thread(args: argparse.Namespace) -> tuple[str, str, str | None]:
         )
     project = one_path_component(args.project, field="project")
     registered = registered_project_ids()
-    if registered and project not in registered:
+    if not registered:
+        # Fail CLOSED. `if registered and ...` skipped the check entirely when the registry
+        # was unreadable or empty, so the one configuration where we cannot verify a project
+        # was the one where any name was accepted -- including a fabricated `ghost` directory.
+        raise SystemExit(
+            "[error] cannot read any registered project from projects.json, so "
+            f"{project!r} cannot be verified; refusing rather than trusting the directory"
+        )
+    if project not in registered:
         raise SystemExit(
             f"[error] project {project!r} is not registered in projects.json "
             f"(known: {', '.join(sorted(registered))})"
@@ -224,19 +258,25 @@ def resolve_thread(args: argparse.Namespace) -> tuple[str, str, str | None]:
     if chat_named:
         candidates = [project_dir / args.chat / f"{agent}.json"]
     else:
-        # One cumulative budget over an untrusted directory: a workspace with very many
-        # entries would otherwise sort and stat all of them before the ambiguity check.
-        candidates = []
+        # The budget has to stop the work, not describe it afterwards. Materialising and
+        # sorting every entry and THEN counting still did the unbounded work first, which is
+        # the whole cost being guarded against. Enumerate lazily and abort on the entry that
+        # exceeds the budget.
+        entries = []
         try:
-            entries = sorted(d for d in project_dir.iterdir() if d.is_dir())
+            with os.scandir(project_dir) as scan:
+                for entry in scan:
+                    if not entry.is_dir():
+                        continue
+                    if len(entries) >= MAX_SCANNED_CHATS:
+                        raise SystemExit(
+                            f"[error] more than {MAX_SCANNED_CHATS} chat directories under "
+                            f"{project!r}; name one with --chat"
+                        )
+                    entries.append(Path(entry.path))
         except OSError:
             entries = []
-        if len(entries) > MAX_SCANNED_CHATS:
-            raise SystemExit(
-                f"[error] {len(entries)} chat directories under {project!r} exceeds the "
-                f"{MAX_SCANNED_CHATS} scan budget; name one with --chat"
-            )
-        candidates = [d / f"{agent}.json" for d in entries]
+        candidates = [d / f"{agent}.json" for d in sorted(entries)]
 
     bindings = []
     for path in candidates:
@@ -246,15 +286,21 @@ def resolve_thread(args: argparse.Namespace) -> tuple[str, str, str | None]:
         # a skip. Silently discarding one can leave a partial set that looks unambiguous, so
         # a concurrent non-atomic write to a sibling binding could suppress the refusal and
         # get the remaining thread watched.
+        # Size first, from metadata: reading the file and then measuring it has already paid
+        # the cost the limit exists to avoid.
+        try:
+            size = path.stat().st_size
+        except OSError as error:
+            raise SystemExit(f"[error] cannot stat candidate binding {path}: {error}")
+        if size > MAX_BINDING_BYTES:
+            raise SystemExit(
+                f"[error] binding {path} is {size} bytes, over the {MAX_BINDING_BYTES} "
+                "limit; refusing to read it"
+            )
         try:
             raw = path.read_bytes()
         except OSError as error:
             raise SystemExit(f"[error] cannot read candidate binding {path}: {error}")
-        if len(raw) > MAX_BINDING_BYTES:
-            raise SystemExit(
-                f"[error] binding {path} is {len(raw)} bytes, over the "
-                f"{MAX_BINDING_BYTES} limit; refusing to parse it"
-            )
         try:
             record = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
@@ -313,6 +359,22 @@ def resolve_thread(args: argparse.Namespace) -> tuple[str, str, str | None]:
     return (str(record["runtime_session_id"]),
             f"{record.get('project_id')}/{record.get('chat_id')}",
             str(runtime_home) if runtime_home else None)
+
+
+def message_started_id(method: str, params: dict) -> str | None:
+    """The agentMessage id this event announces the START of, if any.
+
+    item/started is the ONLY evidence that we were present from a message's beginning. Marking
+    the first delta we happen to SEE instead labelled a suffix-only subscription as complete,
+    which then suppressed the completion payload carrying the text we missed -- so a late
+    observer printed the tail and never the rest.
+    """
+    if method != "item/started":
+        return None
+    item = params.get("item") or {}
+    if item.get("type") != "agentMessage":
+        return None
+    return str(item.get("id") or "") or None
 
 
 def unstreamed_message_text(item: dict, streamed_from_start: set[str]) -> str | None:
@@ -450,6 +512,9 @@ def main() -> None:
         )
         client.notify("initialized")
         client.request("thread/resume", {"threadId": thread_id})
+        # The deadline is absolute and lives on the client, so pings, control frames and
+        # refused server requests all cost time against it rather than extending it.
+        client.set_deadline(deadline)
         print("[stream] subscribed; Ctrl-C to stop")
 
         while True:
@@ -457,11 +522,6 @@ def main() -> None:
             if remaining is not None and remaining <= 0:
                 break
             try:
-                # Clamp the socket wait to what the caller actually asked for. With a fixed
-                # idle timeout, `--seconds 0.1` blocked for the whole timeout before the
-                # deadline was rechecked, and a stream of ping frames could keep the receive
-                # looping internally for longer still.
-                client.set_read_timeout(remaining)
                 message = client.recv_json()
             except (TimeoutError, socket.timeout):
                 continue
@@ -484,13 +544,12 @@ def main() -> None:
                 print(json.dumps(message, default=str))
                 continue
 
+            started_id = message_started_id(method, params)
+            if started_id:
+                streamed_from_start.add(started_id)
+
             if method == "item/agentMessage/delta":
                 chunk = params.get("delta") or params.get("text") or ""
-                item_id = params.get("itemId")
-                if item_id and not text_line_open:
-                    # first delta we have seen for this item: we are following it from here,
-                    # but we cannot know whether it began before we subscribed
-                    streamed_from_start.add(str(item_id))
                 sys.stdout.write(chunk)
                 sys.stdout.flush()
                 text_line_open = True
