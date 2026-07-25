@@ -1348,10 +1348,29 @@ def discover_codex_app_server(runtime_home: str | None) -> dict[str, Any] | None
     return None
 
 
-def _socket_read_exact(sock: socket.socket, count: int) -> bytes:
+def _socket_read_exact(sock: socket.socket, count: int, client=None) -> bytes:
+    """Read exactly `count` bytes.
+
+    When a client is supplied, the absolute deadline is checked and the socket re-clamped before
+    EVERY recv. Without that, one frame whose payload arrives a byte at a time is unbounded no
+    matter what the caller checked beforehand: a 50ms deadline returned a frame after 795ms,
+    because each recv succeeded inside its own timeout and nothing looked at the clock in between.
+    Bounding a loop means checking inside it.
+
+    Mutation-proved at this head for the two call sites where it is observable: removing this
+    check, or the payload read's client, both fail the byte-trickle test. Removing it from the
+    header, extended-length or mask reads does NOT fail, and cannot: recv_json() has already
+    clamped the socket to the remaining budget, so any read that finishes within one timeout
+    window behaves identically either way. Those three are fixed-size reads of 2, 8 and 4 bytes.
+    They pass the client for uniformity -- a future longer read gets the bound for free -- but
+    the guarantee is only demonstrable on the loop that actually iterates.
+    """
     chunks: list[bytes] = []
     remaining = count
     while remaining > 0:
+        if client is not None:
+            client._check_deadline("while reading a frame")
+            sock.settimeout(client.remaining_wait())
         chunk = sock.recv(remaining)
         if not chunk:
             raise ConnectionError("websocket connection closed")
@@ -1490,16 +1509,16 @@ class JsonRpcWebSocketClient:
     def _recv_frame(self) -> tuple[int, bytes]:
         if not self.sock:
             raise ConnectionError("websocket is not connected")
-        first, second = _socket_read_exact(self.sock, 2)
+        first, second = _socket_read_exact(self.sock, 2, self)
         opcode = first & 0x0F
         masked = bool(second & 0x80)
         length = second & 0x7F
         if length == 126:
-            length = int.from_bytes(_socket_read_exact(self.sock, 2), "big")
+            length = int.from_bytes(_socket_read_exact(self.sock, 2, self), "big")
         elif length == 127:
-            length = int.from_bytes(_socket_read_exact(self.sock, 8), "big")
-        mask = _socket_read_exact(self.sock, 4) if masked else b""
-        payload = _socket_read_exact(self.sock, length) if length else b""
+            length = int.from_bytes(_socket_read_exact(self.sock, 8, self), "big")
+        mask = _socket_read_exact(self.sock, 4, self) if masked else b""
+        payload = _socket_read_exact(self.sock, length, self) if length else b""
         if masked:
             payload = bytes(byte ^ mask[index % 4] for index, byte in enumerate(payload))
         return opcode, payload

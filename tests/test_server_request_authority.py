@@ -369,6 +369,139 @@ class HandshakeClosesOnFailureTest(unittest.TestCase):
                         f"a 1ms trickle must still be bounded by the deadline: {elapsed:.3f}s")
         self.assertEqual([], left)
 
+    def serve_ws_then_trickle_frame(self, payload: bytes, gap: float):
+        """Complete a real handshake, then dribble ONE text frame a byte at a time."""
+        import base64 as _b64
+        import hashlib as _hashlib
+        import re as _re
+        import socket as _socket
+        import threading
+        import time as _time
+
+        listener = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+        listener.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        self.addCleanup(listener.close)
+
+        def run():
+            try:
+                conn, _ = listener.accept()
+            except OSError:
+                return
+            try:
+                request = conn.recv(4096).decode("iso-8859-1")
+                key = _re.search(r"Sec-WebSocket-Key: (\S+)", request).group(1)
+                accept = _b64.b64encode(_hashlib.sha1(
+                    (key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode("ascii")).digest()
+                ).decode("ascii")
+                conn.sendall(
+                    b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n"
+                    b"Connection: Upgrade\r\nSec-WebSocket-Accept: "
+                    + accept.encode("ascii") + b"\r\n\r\n")
+                # proper length encoding: a payload over 125 bytes needs the 126 marker plus a
+                # 2-byte big-endian length. Writing bytes([0x81, len(payload)]) overflowed and
+                # killed this thread, which made the client fail instantly -- a test passing
+                # because its fixture crashed
+                if len(payload) < 126:
+                    header = bytes([0x81, len(payload)])
+                else:
+                    header = bytes([0x81, 126]) + len(payload).to_bytes(2, "big")
+                frame = header + payload
+                for i in range(len(frame)):
+                    _time.sleep(gap)
+                    conn.sendall(frame[i:i + 1])
+                # linger: closing straight after the last byte races the client's read and made
+                # this helper flaky rather than the code under test
+                _time.sleep(1.0)
+            except (OSError, AttributeError):
+                pass
+            finally:
+                conn.close()
+
+        threading.Thread(target=run, daemon=True).start()
+        return listener.getsockname()[1]
+
+    def test_a_byte_trickled_frame_cannot_outlast_the_deadline(self) -> None:
+        """Your reproduction: one valid frame, payload a byte every 1ms, 50ms deadline.
+
+        recv_json() checked the deadline once and then handed off to the exact-read loop, which
+        called recv() as many times as the frame had bytes without ever looking at the clock. The
+        frame was returned NORMALLY after 795ms. Checking before a loop is not bounding it.
+        """
+        import json as _json
+        import time as _time
+
+        # The payload must be long enough that the LOOP is what runs long, not a single read.
+        # A short payload finishes inside the one timeout recv_json already set, so the inner
+        # check makes no observable difference and the proof is hollow -- which is exactly what
+        # my first version of this test did.
+        payload = _json.dumps({"method": "turn/completed",
+                               "params": {"pad": "x" * 500}}).encode()
+        port = self.serve_ws_then_trickle_frame(payload, gap=0.001)
+        made = autobridge.JsonRpcWebSocketClient(f"ws://127.0.0.1:{port}", token=None,
+                                                 timeout_seconds=5)
+        with made:
+            made.set_deadline(_time.monotonic() + 0.05)
+            started = _time.monotonic()
+            with self.assertRaises((TimeoutError, ConnectionError, OSError)):
+                made.recv_json()
+            elapsed = _time.monotonic() - started
+        # ~500 bytes at 1ms each is roughly 0.5s of trickle against a 0.05s budget, so an
+        # unbounded loop is an order of magnitude over this bound
+        self.assertLess(elapsed, 0.2,
+                        f"a byte-trickled frame must be bounded: took {elapsed:.3f}s")
+
+    def test_a_slowly_trickled_frame_HEADER_is_also_bounded(self) -> None:
+        """The header read needs the check too, and my payload test could not see that.
+
+        With a 1ms gap the two header bytes arrive well inside a 50ms budget, so removing the
+        check from the header read changed nothing that test could observe. A gap large enough
+        to exhaust the budget on the header itself is what distinguishes them.
+        """
+        import json as _json
+        import time as _time
+
+        payload = _json.dumps({"method": "turn/completed", "params": {}}).encode()
+        port = self.serve_ws_then_trickle_frame(payload, gap=0.06)
+        made = autobridge.JsonRpcWebSocketClient(f"ws://127.0.0.1:{port}", token=None,
+                                                 timeout_seconds=5)
+        with made:
+            made.set_deadline(_time.monotonic() + 0.05)
+            started = _time.monotonic()
+            with self.assertRaises((TimeoutError, ConnectionError, OSError)):
+                made.recv_json()
+            elapsed = _time.monotonic() - started
+        self.assertLess(elapsed, 0.4,
+                        f"the budget must expire on the header: took {elapsed:.3f}s")
+
+    def test_a_frame_that_arrives_promptly_is_still_returned(self) -> None:
+        # the bound must not break the ordinary case
+        import json as _json
+        import time as _time
+
+        payload = _json.dumps({"method": "turn/started", "params": {}}).encode()
+        port = self.serve_ws_then_trickle_frame(payload, gap=0.0005)
+        made = autobridge.JsonRpcWebSocketClient(f"ws://127.0.0.1:{port}", token=None,
+                                                 timeout_seconds=5)
+        with made:
+            # a generous deadline: the point is that bounding does not break the ordinary case
+            made.set_deadline(_time.monotonic() + 5.0)
+            message = made.recv_json()
+        self.assertEqual("turn/started", message["method"])
+
+    def test_a_trickled_frame_with_no_deadline_is_still_read(self) -> None:
+        """The None default must keep the historical behaviour for existing callers."""
+        import json as _json
+
+        payload = _json.dumps({"method": "turn/started", "params": {}}).encode()
+        port = self.serve_ws_then_trickle_frame(payload, gap=0.001)
+        made = autobridge.JsonRpcWebSocketClient(f"ws://127.0.0.1:{port}", token=None,
+                                                 timeout_seconds=5)
+        with made:
+            self.assertIsNone(made.read_deadline)
+            self.assertEqual("turn/started", made.recv_json()["method"])
+
     def test_the_default_has_no_deadline_so_existing_callers_are_unchanged(self) -> None:
         made = autobridge.JsonRpcWebSocketClient("ws://127.0.0.1:1", timeout_seconds=30)
         self.assertIsNone(made.read_deadline)
