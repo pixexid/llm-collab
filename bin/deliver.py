@@ -108,11 +108,21 @@ def allocate_activation_packet_paths(
 from _session_autobridge import (
     EXACT_BINDING_MISMATCH_REASON,
     load_binding,
+    repo_scope_matches,
     resolve_exact_dispatch_target,
     resolve_thread_pair_session_id,
     session_target_ids,
     update_thread_pair,
 )
+
+
+def packet_repo_targets(args) -> list[str]:
+    """The packet's declared repo scope.
+
+    One definition, used by both the frontmatter writer and the preflight. Parsing the same
+    argument in two places is how a preflight ends up disagreeing with the packet it is checking.
+    """
+    return [r.strip() for r in args.repo_targets.split(",") if r.strip()]
 
 
 def parse_args():
@@ -169,7 +179,7 @@ def read_body(body_file: str) -> str:
 
 def build_message(args, body: str, chat_id: str, packet_name: str | None = None) -> str:
     tags = [t.strip() for t in args.tags.split(",") if t.strip()]
-    repo_targets = [r.strip() for r in args.repo_targets.split(",") if r.strip()]
+    repo_targets = packet_repo_targets(args)
     path_targets = [p.strip() for p in args.path_targets.split(",") if p.strip()]
     codex_self_target = is_codex_self_target(args.sender, args.recipient)
 
@@ -424,6 +434,21 @@ def main():
         and args.target_session_id
         and str(args.target_session_id) in session_target_ids(autobridge_target)
     )
+    # Resolving the target is not the same as being able to route to it. The watcher applies the
+    # repo-scope contract at dispatch time and silently refuses a packet that does not satisfy it;
+    # reporting autobridge_ready here without applying the SAME rule is what let 27 packets be
+    # written, reported as ready, and never delivered. This adds no second routing rule -- it runs
+    # the existing one early so the sender is told the truth.
+    if autobridge_ready:
+        routable, scope_reason = repo_scope_matches(
+            autobridge_target.get("repo_targets"),
+            packet_repo_targets(args),
+            subscriber_project=autobridge_target.get("project_id"),
+            packet_project=args.project,
+        )
+        if not routable:
+            autobridge_ready = False
+            autobridge_refusal_reason = scope_reason
 
     body = read_body(args.body_file)
     recipient_agent = get_agent(args.recipient)
@@ -644,6 +669,32 @@ def main():
         "autobridge_session_id": autobridge_target.get("session_id") if autobridge_target else None,
     }
     print(json.dumps(result, indent=2))
+
+    if autobridge_target is not None and not autobridge_ready and autobridge_refusal_reason:
+        border = "━" * 60
+        print(f"\n{border}", file=sys.stderr)
+        print("⚠️  DURABLE WRITE OK — RUNTIME DISPATCH REFUSED", file=sys.stderr)
+        print(border, file=sys.stderr)
+        print(f"reason: {autobridge_refusal_reason}", file=sys.stderr)
+        print(
+            f"packet repo_targets: {packet_repo_targets(args) or '[] (none declared)'}",
+            file=sys.stderr,
+        )
+        print(
+            f"subscriber repo_targets: {autobridge_target.get('repo_targets')}",
+            file=sys.stderr,
+        )
+        print(file=sys.stderr)
+        print(
+            "The message IS in the mailbox and readable with inbox.py. It will NOT be "
+            "dispatched to the running worker.",
+            file=sys.stderr,
+        )
+        print(
+            "If the recipient declares a repo scope, the packet must declare a subset of it: "
+            "re-send with --repo-targets <ids>.",
+            file=sys.stderr,
+        )
 
     if thread_coordination_required:
         border = "━" * 60

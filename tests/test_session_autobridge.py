@@ -2504,6 +2504,103 @@ class SessionAutobridgeTest(unittest.TestCase):
         frontmatter, _ = parse_frontmatter(delivered_candidates[-1].read_text())
         self.assertIsNone(frontmatter["target_session_id"])
 
+    def deliver_with_scope(self, root, chat_id, *, repo_targets=None):
+        """Run deliver.py and return its JSON payload plus stderr."""
+        argv = [
+            sys.executable, str(DELIVER_SCRIPT),
+            "--chat", chat_id, "--from", "codex", "--to", "claude",
+            "--project", "amiga", "--title", "Scope preflight probe",
+            "--sender-session-id", "codex-session-9", "--body-file", "-",
+        ]
+        if repo_targets is not None:
+            argv += ["--repo-targets", repo_targets]
+        done = subprocess.run(argv, cwd=root, text=True, input="scope probe",
+                              capture_output=True, check=True)
+        return json.loads(done.stdout.split("\n\n", 1)[0]), done.stderr
+
+    def scoped_subscriber_workspace(self, *, subscriber_repo_targets):
+        """A claude session bound to CHAT-SCOPE1, optionally declaring a repo scope."""
+        root = self.make_workspace()
+        for agent in ("codex", "claude"):
+            self.add_agent(root, {
+                "id": agent,
+                "display_name": agent.title(),
+                "activation": {"type": "cli_session", "watcher_enabled": True},
+            })
+        chat_dir = self.create_chat(
+            root,
+            chat_dir_name="2026-07-25_scope-preflight__CHAT-SCOPE1",
+            chat_id="CHAT-SCOPE1",
+            project_id="amiga",
+        )
+        register = [
+            "register", "--session", "SESSION-CLAUDE-SCOPED", "--agent", "claude",
+            "--project", "amiga", "--chat", "CHAT-SCOPE1", "--mode", "notify",
+            "--runtime-family", "claude_app",
+            "--runtime-session-id", "claude-scoped-session",
+            "--runtime-session-source", "first_read",
+        ]
+        for target in subscriber_repo_targets or []:
+            register += ["--repo-target", target]
+        self.run_cli(root, *register)
+        return root, chat_dir
+
+    # --- deliver.py must apply the SAME routing contract the watcher will apply -------------
+    #
+    # 27 packets were written, reported autobridge_ready: true, and never dispatched, because
+    # deliver.py resolved the target session without ever running repo_scope_matches against it.
+    # The three cases below are the contract, not a new rule: fail-closed for a scoped subscriber
+    # with an empty packet scope, accept a declared subset, and leave unscoped acceptance alone.
+
+    def test_scoped_subscriber_refuses_an_empty_packet_scope(self):
+        root, _chat_dir = self.scoped_subscriber_workspace(
+            subscriber_repo_targets=["llm-collab"])
+        payload, stderr = self.deliver_with_scope(root, "CHAT-SCOPE1")
+        self.assertFalse(payload["autobridge_ready"],
+                         "a packet the watcher will refuse must not be reported as ready")
+        self.assertEqual("route_ambiguous", payload["autobridge_refusal_reason"])
+        self.assertIn("DURABLE WRITE OK", stderr)
+        self.assertIn("RUNTIME DISPATCH REFUSED", stderr)
+        self.assertIn("--repo-targets", stderr,
+                      "the operator must be told how to fix it, not just that it failed")
+
+    def test_scoped_subscriber_accepts_a_declared_subset(self):
+        root, _chat_dir = self.scoped_subscriber_workspace(
+            subscriber_repo_targets=["llm-collab", "amiga"])
+        payload, stderr = self.deliver_with_scope(root, "CHAT-SCOPE1",
+                                                 repo_targets="llm-collab")
+        self.assertTrue(payload["autobridge_ready"])
+        self.assertIsNone(payload["autobridge_refusal_reason"])
+        self.assertNotIn("RUNTIME DISPATCH REFUSED", stderr)
+
+    def test_scoped_subscriber_refuses_a_packet_outside_its_scope(self):
+        root, _chat_dir = self.scoped_subscriber_workspace(
+            subscriber_repo_targets=["llm-collab"])
+        payload, _stderr = self.deliver_with_scope(root, "CHAT-SCOPE1",
+                                                  repo_targets="some-other-repo")
+        self.assertFalse(payload["autobridge_ready"])
+        self.assertEqual("route_ambiguous", payload["autobridge_refusal_reason"])
+
+    def test_unscoped_subscriber_still_accepts_an_empty_packet_scope(self):
+        """The rule Codex insisted on preserving: do NOT make --repo-targets globally required."""
+        root, _chat_dir = self.scoped_subscriber_workspace(subscriber_repo_targets=None)
+        payload, stderr = self.deliver_with_scope(root, "CHAT-SCOPE1")
+        self.assertTrue(payload["autobridge_ready"],
+                        "an unscoped subscriber accepts an unscoped packet, as before")
+        self.assertIsNone(payload["autobridge_refusal_reason"])
+        self.assertNotIn("RUNTIME DISPATCH REFUSED", stderr)
+
+    def test_a_refused_packet_is_still_written_to_the_mailbox(self):
+        """Fail-closed on DISPATCH must not mean losing the durable record."""
+        root, chat_dir = self.scoped_subscriber_workspace(
+            subscriber_repo_targets=["llm-collab"])
+        payload, _stderr = self.deliver_with_scope(root, "CHAT-SCOPE1")
+        self.assertFalse(payload["autobridge_ready"])
+        written = sorted(chat_dir.glob("*_to-claude_*.md"))
+        self.assertTrue(written, "the packet must remain readable with inbox.py")
+        frontmatter, _ = parse_frontmatter(written[-1].read_text())
+        self.assertEqual([], frontmatter["repo_targets"])
+
     def test_deliver_uses_canonical_binding_for_target_session_id(self):
         root = self.make_workspace()
         self.add_agent(
