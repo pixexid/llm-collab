@@ -313,6 +313,104 @@ class LifecycleTest(unittest.TestCase):
                 )
             self.assertEqual(row_counts(store), before)
 
+            descriptor = self.core.provider.descriptor()
+            with self.assertRaisesRegex(
+                CanonicalConflictError, "requires project scope"
+            ):
+                store.reserve_session_binding_challenge(
+                    workspace_id=WORKSPACE,
+                    scope_kind="workspace",
+                    scope_identity="workspace",
+                    conversation_id="CHAT-SAMEID",
+                    participant_id="participant_codex",
+                    agent_id="agent_codex",
+                    provider_descriptor=descriptor,
+                    endpoint_id="endpoint_codex",
+                    session_ref_id="session_ref_workspace",
+                    native_session_id="native_session_one",
+                    runtime_instance_id="runtime_one",
+                    challenge_id="challenge_workspace",
+                    challenge_token_sha256="a" * 64,
+                    expires_at_utc=AT_EXPIRY,
+                    created_at_utc=NOW,
+                )
+            with self.assertRaisesRegex(
+                CanonicalConflictError, "requires project scope"
+            ):
+                store.consume_session_binding_challenge(
+                    workspace_id=WORKSPACE,
+                    scope_kind="workspace",
+                    scope_identity="workspace",
+                    conversation_id="CHAT-SAMEID",
+                    participant_id="participant_codex",
+                    agent_id="agent_codex",
+                    challenge_id="challenge_workspace",
+                    challenge_token_sha256="a" * 64,
+                    provider_id="provider_codex",
+                    provider_revision="revision_1",
+                    endpoint_id="endpoint_codex",
+                    session_ref_id="session_ref_workspace",
+                    session_owner_key="owner_" + "a" * 32,
+                    native_session_id="native_session_one",
+                    runtime_instance_id="runtime_one",
+                    consumed_at_utc=BEFORE_EXPIRY,
+                )
+            self.assertEqual(row_counts(store), before)
+
+    def test_consume_uses_reserved_agent_when_participant_row_changes(self) -> None:
+        active_subject = subject()
+        with LedgerStore.open_writer(self.paths) as store:
+            challenge = self.reserve(store, active_subject)
+            store._connection.execute(
+                """
+                UPDATE conversation_participants SET agent_id = 'agent_claude'
+                WHERE workspace_id = ? AND scope_kind = ? AND scope_identity = ?
+                  AND conversation_id = ? AND participant_id = ?
+                """,
+                (
+                    active_subject.workspace_id,
+                    active_subject.scope_kind,
+                    active_subject.scope_identity,
+                    active_subject.conversation_id,
+                    active_subject.participant_id,
+                ),
+            )
+            resolved = self.consume(store, active_subject, challenge)
+            self.assertTrue(resolved["resolved"])
+            self.assertEqual(
+                store._connection.execute(
+                    "SELECT agent_id FROM session_binding_challenges WHERE challenge_id = ?",
+                    (challenge.challenge_id,),
+                ).fetchone()[0],
+                "agent_codex",
+            )
+
+    def test_subset_provider_operations_support_reserve_and_consume(self) -> None:
+        active_subject = subject()
+        provider = FakeLifecycleProvider(supported_operations_json='["reserve","attach"]')
+        core = SessionLifecycleCore(provider, token_factory=lambda: "token-subset")
+        with LedgerStore.open_writer(self.paths) as store:
+            self.provision(store, active_subject, provider)
+            challenge = core.reserve(
+                store,
+                active_subject,
+                runtime_home=self.runtime_home,
+                created_at_utc=NOW,
+                expires_at_utc=AT_EXPIRY,
+                correlation_id="corr_subset_reserve",
+                trusted_project_root=self.trusted_root,
+            )
+            resolved = core.consume(
+                store,
+                active_subject,
+                challenge,
+                runtime_home=self.runtime_home,
+                consumed_at_utc=BEFORE_EXPIRY,
+                correlation_id="corr_subset_consume",
+                trusted_project_root=self.trusted_root,
+            )
+            self.assertTrue(resolved["resolved"])
+
     def test_same_native_session_cannot_become_two_project_owners(self) -> None:
         active_subject = subject()
         other_repo = self.outside / "other-repo"
@@ -355,11 +453,16 @@ class LifecycleTest(unittest.TestCase):
                 store._connection.execute("SELECT count(*) FROM conversation_bindings").fetchone()[0],
                 1,
             )
-            second_ref = store._connection.execute(
-                "SELECT session_ref_id FROM session_binding_challenges WHERE challenge_id = ?",
+            second_owner = store._connection.execute(
+                "SELECT agent_id FROM session_binding_challenges WHERE challenge_id = ?",
                 (second.challenge_id,),
             ).fetchone()[0]
-            self.assertEqual(first_binding["session_ref_id"], second_ref)
+            first_owner = store._connection.execute(
+                "SELECT owner_key FROM conversation_bindings WHERE binding_id = ?",
+                (first_binding["binding_id"],),
+            ).fetchone()[0]
+            self.assertEqual(second_owner, active_subject.agent_id)
+            self.assertRegex(first_owner, r"^owner_[0-9a-f]{32}$")
 
     def test_token_hash_is_stored_not_token_and_default_uses_secrets(self) -> None:
         active_subject = subject()

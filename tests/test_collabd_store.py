@@ -46,6 +46,8 @@ from llm_collab.ledger.store import (
     V10_SCHEMA_FINGERPRINT,
     V11_MIGRATION_CHECKSUM,
     V11_SCHEMA_FINGERPRINT,
+    V12_MIGRATION_CHECKSUM,
+    V12_SCHEMA_FINGERPRINT,
     MigrationError,
     V1_SQL,
     V2_SQL,
@@ -58,6 +60,7 @@ from llm_collab.ledger.store import (
     V9_SQL,
     V10_SQL,
     V11_SQL,
+    V12_SQL,
     CanonicalIntegrityError,
     _close_connection_and_pin,
     _connection_fd_snapshot,
@@ -76,6 +79,7 @@ from llm_collab.ledger.store import (
     _v9_schema_fingerprint_from_sql,
     _v10_schema_fingerprint_from_sql,
     _v11_schema_fingerprint_from_sql,
+    _v12_schema_fingerprint_from_sql,
     require_safe_sqlite,
 )
 
@@ -400,6 +404,26 @@ def v11_fingerprint_with_v4(statements: tuple[str, ...]) -> str:
         return store_module._schema_fingerprint(connection)
 
 
+def v12_fingerprint_with_v4(statements: tuple[str, ...]) -> str:
+    with closing(sqlite3.connect(":memory:", isolation_level=None)) as connection:
+        for statement in (
+            *V1_SQL,
+            *V2_SQL,
+            *V3_SQL,
+            *statements,
+            *V5_SQL,
+            *V6_SQL,
+            *V7_SQL,
+            *V8_SQL,
+            *V9_SQL,
+            *V10_SQL,
+            *V11_SQL,
+            *V12_SQL,
+        ):
+            connection.execute(statement)
+        return store_module._schema_fingerprint(connection)
+
+
 def mutate_v4(old: str, new: str, *, occurrence: int = 1) -> tuple[str, ...]:
     statements = list(V4_SQL)
     matches = [index for index, statement in enumerate(statements) if old in statement]
@@ -421,6 +445,7 @@ def open_mutated_v4(paths: LedgerPaths, statements: tuple[str, ...]):
     v9_fingerprint = v9_fingerprint_with_v4(statements)
     v10_fingerprint = v10_fingerprint_with_v4(statements)
     v11_fingerprint = v11_fingerprint_with_v4(statements)
+    v12_fingerprint = v12_fingerprint_with_v4(statements)
     with (
         patch.object(store_module, "V4_SQL", statements),
         patch.object(store_module, "V4_MIGRATION_CHECKSUM", checksum),
@@ -432,6 +457,7 @@ def open_mutated_v4(paths: LedgerPaths, statements: tuple[str, ...]):
         patch.object(store_module, "V9_SCHEMA_FINGERPRINT", v9_fingerprint),
         patch.object(store_module, "V10_SCHEMA_FINGERPRINT", v10_fingerprint),
         patch.object(store_module, "V11_SCHEMA_FINGERPRINT", v11_fingerprint),
+        patch.object(store_module, "V12_SCHEMA_FINGERPRINT", v12_fingerprint),
         LedgerStore.open_writer(
             paths,
             migrations=(
@@ -446,6 +472,7 @@ def open_mutated_v4(paths: LedgerPaths, statements: tuple[str, ...]):
                 (9, V9_SQL),
                 (10, V10_SQL),
                 (11, V11_SQL),
+                (12, V12_SQL),
             ),
         ) as store,
     ):
@@ -812,15 +839,16 @@ class LedgerStoreTest(unittest.TestCase):
                 with self.assertRaisesRegex(OSError, "fd surface unavailable"):
                     LedgerStore.open_writer(paths)
             with LedgerStore.open_writer(paths) as writer:
-                self.assertEqual(writer.schema_version(), 11)
+                self.assertEqual(writer.schema_version(), 12)
 
     def test_all_file_backed_connects_use_one_verified_noncreating_open(self) -> None:
         source = inspect.getsource(store_module)
-        self.assertEqual(source.count("sqlite3.connect("), 12)
+        self.assertEqual(source.count("sqlite3.connect("), 13)
         self.assertEqual(source.count("_close_connection_and_pin("), 8)
         self.assertIn("def _v9_schema_fingerprint_from_sql", source)
         self.assertIn("def _v10_schema_fingerprint_from_sql", source)
         self.assertIn("def _v11_schema_fingerprint_from_sql", source)
+        self.assertIn("def _v12_schema_fingerprint_from_sql", source)
         self.assertIn('path.as_uri() + ("?mode=ro" if read_only else "?mode=rw")', source)
         self.assertNotIn(".resolve().as_uri()", source)
         self.assertNotIn(".chmod(", source)
@@ -869,7 +897,7 @@ class LedgerStoreTest(unittest.TestCase):
                 self.assertEqual(connection.execute("PRAGMA busy_timeout").fetchone()[0], BUSY_TIMEOUT_MS)
                 self.assertEqual(connection.execute("PRAGMA synchronous").fetchone()[0], 2)
                 self.assertEqual(connection.execute("PRAGMA query_only").fetchone()[0], 0)
-                self.assertEqual(store.schema_version(), 11)
+                self.assertEqual(store.schema_version(), 12)
                 self.assertEqual(store.integrity_check(), "ok")
                 for suffix in ("-wal", "-shm"):
                     sidecar = paths.ledger.with_name(paths.ledger.name + suffix)
@@ -943,6 +971,7 @@ class LedgerStoreTest(unittest.TestCase):
                     "ledger-8-20260721T080506123456Z.sqlite3",
                     "ledger-9-20260721T080506123456Z.sqlite3",
                     "ledger-10-20260721T080506123456Z.sqlite3",
+                    "ledger-11-20260721T080506123456Z.sqlite3",
                 ],
             )
             for version, backup in enumerate(backups):
@@ -1023,6 +1052,12 @@ class LedgerStoreTest(unittest.TestCase):
                             MIGRATION_TOOL_VERSION,
                             backups[10].name,
                         ),
+                        (
+                            V12_MIGRATION_CHECKSUM,
+                            FIXED_TIME.isoformat(),
+                            MIGRATION_TOOL_VERSION,
+                            backups[11].name,
+                        ),
                     ],
                 )
             self.assertEqual(_migration_checksum(V1_SQL), V1_MIGRATION_CHECKSUM)
@@ -1047,6 +1082,8 @@ class LedgerStoreTest(unittest.TestCase):
             self.assertEqual(_v10_schema_fingerprint_from_sql(), V10_SCHEMA_FINGERPRINT)
             self.assertEqual(_migration_checksum(V11_SQL), V11_MIGRATION_CHECKSUM)
             self.assertEqual(_v11_schema_fingerprint_from_sql(), V11_SCHEMA_FINGERPRINT)
+            self.assertEqual(_migration_checksum(V12_SQL), V12_MIGRATION_CHECKSUM)
+            self.assertEqual(_v12_schema_fingerprint_from_sql(), V12_SCHEMA_FINGERPRINT)
 
             source = inspect.getsource(__import__("llm_collab.ledger.store", fromlist=["*"]))
             self.assertIn(".backup(", source)
@@ -1058,6 +1095,99 @@ class LedgerStoreTest(unittest.TestCase):
                     "\n".join(V1_SQL),
                 )
             )
+
+    def test_v11_to_v12_migration_preserves_legacy_session_ref_and_backfills_agent(self) -> None:
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            paths = LedgerPaths.derive(tmp, "ws_alpha")
+            paths.ensure_directories()
+            stamp = FIXED_TIME.strftime("%Y%m%dT%H%M%S%fZ")
+            applied_at = FIXED_TIME.isoformat()
+            with closing(sqlite3.connect(paths.ledger)) as connection, connection:
+                connection.execute("PRAGMA foreign_keys = ON")
+                for _version, statements in store_module.MIGRATIONS[:-1]:
+                    for statement in statements:
+                        connection.execute(statement)
+                connection.execute(
+                    """
+                    INSERT INTO conversation_participants
+                    (workspace_id, scope_kind, scope_identity, conversation_id, participant_id, agent_id, created_at_utc)
+                    VALUES ('ws_alpha', 'project', 'amiga', 'CHAT-SAMEID', 'participant_codex', 'agent_codex', ?)
+                    """,
+                    (applied_at,),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO lifecycle_provider_registry
+                    (workspace_id, provider_id, provider_revision, trust_class,
+                     supported_operations_json, challenge_algorithm, challenge_ttl_seconds, created_at_utc)
+                    VALUES ('ws_alpha', 'provider_codex', 'revision_1', 'managed',
+                            '["reserve","attach"]', 'sha256', 60, ?)
+                    """,
+                    (applied_at,),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO conversation_bindings
+                    (workspace_id, scope_kind, scope_identity, conversation_id, participant_id,
+                     binding_id, generation, state, mutation_capable, provider_id, provider_revision,
+                     endpoint_id, session_ref_id, native_session_id, runtime_instance_id, registered_at_utc)
+                    VALUES ('ws_alpha', 'project', 'amiga', 'CHAT-SAMEID', 'participant_codex',
+                            'binding_legacy', 1, 'active', 1, 'provider_codex', 'revision_1',
+                            'endpoint_codex', 'session_legacy', 'native_legacy', 'runtime_legacy', ?)
+                    """,
+                    (applied_at,),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO session_binding_challenges
+                    (workspace_id, scope_kind, scope_identity, conversation_id, participant_id,
+                     challenge_id, challenge_state, provider_id, provider_revision, endpoint_id,
+                     session_ref_id, native_session_id, runtime_instance_id, challenge_token_sha256,
+                     expires_at_utc, created_at_utc, consumed_at_utc)
+                    VALUES ('ws_alpha', 'project', 'amiga', 'CHAT-SAMEID', 'participant_codex',
+                            'challenge_legacy', 'pending', 'provider_codex', 'revision_1',
+                            'endpoint_codex', 'session_legacy', 'native_legacy', 'runtime_legacy',
+                            ?, ?, ?, NULL)
+                    """,
+                    ("a" * 64, "2026-07-23T00:01:00+00:00", applied_at),
+                )
+                for version, _statements in store_module.MIGRATIONS[:-1]:
+                    connection.execute(
+                        """
+                        INSERT INTO schema_migrations
+                        (version, migration_checksum, applied_at_utc, tool_version, backup_reference)
+                        VALUES (?, ?, ?, ?, ?)
+                        """,
+                        (
+                            version,
+                            getattr(store_module, f"V{version}_MIGRATION_CHECKSUM"),
+                            applied_at,
+                            MIGRATION_TOOL_VERSION,
+                            f"ledger-{version - 1}-{stamp}.sqlite3",
+                        ),
+                    )
+                connection.execute("PRAGMA user_version = 11")
+            for version in range(11):
+                backup = paths.backups / f"ledger-{version}-{stamp}.sqlite3"
+                with closing(sqlite3.connect(paths.ledger)) as source, closing(
+                    sqlite3.connect(backup)
+                ) as destination:
+                    source.backup(destination)
+            with patch.object(store_module, "_linked_sqlite_version_info", return_value=SAFE_VERSION):
+                with LedgerStore.open_writer(paths, clock=lambda: FIXED_TIME) as store:
+                    self.assertEqual(store.schema_version(), 12)
+                    self.assertEqual(
+                        store._connection.execute(
+                            "SELECT session_ref_id, owner_key FROM conversation_bindings"
+                        ).fetchone(),
+                        ("session_legacy", None),
+                    )
+                    self.assertEqual(
+                        store._connection.execute(
+                            "SELECT agent_id FROM session_binding_challenges"
+                        ).fetchone()[0],
+                        "agent_codex",
+                    )
 
     def test_v6_manifest_recording_is_idempotent_append_only_and_writes_no_v5_rows(self) -> None:
         with TemporaryDirectory(dir="/tmp") as tmp:
@@ -2086,7 +2216,7 @@ class LedgerStoreTest(unittest.TestCase):
             with self.assertRaisesRegex(MigrationError, "unsupported ledger schema version 1"):
                 LedgerStore.open_reader(paths)
             with LedgerStore.open_writer(paths, clock=lambda: FIXED_TIME) as writer:
-                self.assertEqual(writer.schema_version(), 11)
+                self.assertEqual(writer.schema_version(), 12)
                 self.assertEqual(writer.integrity_check(), "ok")
             v1_backup = paths.backup_path(
                 1, FIXED_TIME.strftime("%Y%m%dT%H%M%S%fZ")
@@ -2112,7 +2242,7 @@ class LedgerStoreTest(unittest.TestCase):
                     },
                 )
             with LedgerStore.open_reader(paths) as reader:
-                self.assertEqual(reader.schema_version(), 11)
+                self.assertEqual(reader.schema_version(), 12)
 
     def test_exact_released_v2_migrates_to_v7_and_failed_v3_restores_v2(self) -> None:
         with TemporaryDirectory(dir="/tmp") as tmp:
@@ -2121,7 +2251,7 @@ class LedgerStoreTest(unittest.TestCase):
             with self.assertRaisesRegex(MigrationError, "unsupported ledger schema version 2"):
                 LedgerStore.open_reader(paths)
             with LedgerStore.open_writer(paths, clock=lambda: FIXED_TIME) as writer:
-                self.assertEqual(writer.schema_version(), 11)
+                self.assertEqual(writer.schema_version(), 12)
             v2_backup = paths.backup_path(2, FIXED_TIME.strftime("%Y%m%dT%H%M%S%fZ"))
             with closing(sqlite3.connect(v2_backup)) as backup:
                 self.assertEqual(backup.execute("PRAGMA user_version").fetchone()[0], 2)
@@ -2153,7 +2283,7 @@ class LedgerStoreTest(unittest.TestCase):
             with self.assertRaisesRegex(MigrationError, "unsupported ledger schema version 3"):
                 LedgerStore.open_reader(paths)
             with LedgerStore.open_writer(paths, clock=lambda: FIXED_TIME) as writer:
-                self.assertEqual(writer.schema_version(), 11)
+                self.assertEqual(writer.schema_version(), 12)
             v3_backup = paths.backup_path(3, FIXED_TIME.strftime("%Y%m%dT%H%M%S%fZ"))
             with closing(sqlite3.connect(v3_backup)) as backup:
                 self.assertEqual(backup.execute("PRAGMA user_version").fetchone()[0], 3)
@@ -3026,7 +3156,7 @@ class LedgerStoreTest(unittest.TestCase):
                         self.assertEqual(outside.read_bytes(), b"operator-owned")
                     else:
                         self.assertFalse(outside.exists())
-                    self.assertEqual(writer.schema_version(), 11)
+                    self.assertEqual(writer.schema_version(), 12)
 
     @unittest.skipUnless(hasattr(os, "O_NOFOLLOW"), "no-follow opens unavailable")
     def test_restore_source_refuses_swap_then_restore_to_outside_targets(self) -> None:
@@ -3068,7 +3198,7 @@ class LedgerStoreTest(unittest.TestCase):
                         self.assertEqual(outside.read_bytes(), b"operator-owned")
                     else:
                         self.assertFalse(outside.exists())
-                    self.assertEqual(writer.schema_version(), 11)
+                    self.assertEqual(writer.schema_version(), 12)
 
     def test_foreign_keys_prevent_cross_scope_source_rows(self) -> None:
         with TemporaryDirectory(dir="/tmp") as tmp:
@@ -3636,7 +3766,7 @@ class LedgerStoreTest(unittest.TestCase):
                 close_thread.join()
                 self.assertEqual(len(close_errors), 1)
                 self.assertIsInstance(close_errors[0], sqlite3.ProgrammingError)
-                self.assertEqual(writer.schema_version(), 11)
+                self.assertEqual(writer.schema_version(), 12)
 
             with LedgerStore.open_reader(paths) as reader:
                 self.assertEqual(reader._connection.execute("PRAGMA query_only").fetchone()[0], 1)
@@ -3664,7 +3794,7 @@ class LedgerStoreTest(unittest.TestCase):
             self.assertIsNone(store_reference())
             self.assertIsNone(lock_reference())
             with LedgerStore.open_writer(paths) as reopened:
-                self.assertEqual(reopened.schema_version(), 11)
+                self.assertEqual(reopened.schema_version(), 12)
 
     def test_failed_migration_restores_verified_pre_migration_database(self) -> None:
         with TemporaryDirectory(dir="/tmp") as tmp:
@@ -3743,7 +3873,7 @@ class LedgerStoreTest(unittest.TestCase):
                     paths.ensure_directories()
                     if kind == "unsupported":
                         with closing(sqlite3.connect(paths.ledger)) as connection, connection:
-                            connection.execute("PRAGMA user_version = 12")
+                            connection.execute("PRAGMA user_version = 13")
                         expected = "unsupported ledger schema version"
                     else:
                         if kind == "corrupt":

@@ -12,6 +12,7 @@ from llm_collab.codex_session_ref import (
     RepositoryBinding,
     SessionAuthority,
     build_session_ref,
+    derive_session_owner_key,
 )
 from llm_collab.ledger import LedgerStore
 from llm_collab.ledger.store import CanonicalConflictError
@@ -216,6 +217,13 @@ class SessionLifecycleCore:
             correlation_id=correlation_id,
             trusted_project_root=trusted_project_root,
         )
+        session_owner_key = derive_session_owner_key(
+            workspace_id=subject.workspace_id,
+            endpoint_id=subject.endpoint_id,
+            native_session_id=subject.native_session_id,
+            runtime_home=runtime_home,
+            authority=self.provider.authority(),
+        )
         return store.consume_session_binding_challenge(
             workspace_id=subject.workspace_id,
             scope_kind=subject.scope_kind,
@@ -229,6 +237,7 @@ class SessionLifecycleCore:
             provider_revision=self.provider.provider_revision,
             endpoint_id=subject.endpoint_id,
             session_ref_id=str(session_ref["session_ref_id"]),
+            session_owner_key=session_owner_key,
             native_session_id=subject.native_session_id,
             runtime_instance_id=subject.runtime_instance_id,
             consumed_at_utc=consumed_at_utc,
