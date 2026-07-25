@@ -1,0 +1,267 @@
+#!/usr/bin/env python3
+"""
+codex_appserver.py — operator/worker access to a Codex worker over the App Server.
+
+Delivery, live observation, and mid-turn control for an exact Codex thread,
+without AX and without depending on the desktop renderer.
+
+  status                 what the worker is doing right now
+  tail                   stream reasoning/output/plan/diff until interrupted
+  send    --text ...     start a new turn (returns once accepted, does not block)
+  steer   --text ...     inject input into the RUNNING turn
+  interrupt              cancel the running turn
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent))
+from _python_runtime import require_python
+
+require_python()
+
+import argparse
+import json
+import time
+
+from _session_autobridge import (
+    JsonRpcWebSocketClient,
+    _codex_app_server_token,
+    discover_codex_app_server,
+    load_session,
+)
+
+# ponytail: only the notifications a human actually wants to watch. Everything
+# else stays available via --raw rather than growing a filter config.
+INTERESTING = {
+    "item/reasoning/textDelta": "think",
+    "item/reasoning/summaryTextDelta": "think",
+    "item/agentMessage/delta": "say",
+    "item/commandExecution/outputDelta": "exec",
+    "item/plan/delta": "plan",
+    "turn/plan/updated": "plan",
+    "turn/diff/updated": "diff",
+    "item/started": "item+",
+    "item/completed": "item-",
+    "thread/status/changed": "status",
+    "thread/tokenUsage/updated": "tokens",
+    "thread/goal/updated": "goal",
+    "turn/started": "turn+",
+    "turn/completed": "turn-",
+    "turn/failed": "turn!",
+}
+TERMINAL = {"turn/completed", "turn/failed", "turn/cancelled"}
+
+
+def resolve_target(args) -> tuple[str, str]:
+    """Return (runtime_home, thread_id) from an explicit pair or a session record."""
+    if args.session:
+        session = load_session(args.session)
+        runtime = session.get("runtime") or {}
+        home = args.runtime_home or runtime.get("home")
+        thread = args.thread or runtime.get("session_id")
+    else:
+        home, thread = args.runtime_home, args.thread
+    if not home or not thread:
+        raise SystemExit(
+            "need --session (with a registered runtime) or both --runtime-home and --thread"
+        )
+    return str(home), str(thread)
+
+
+def connect(runtime_home: str, timeout: int) -> JsonRpcWebSocketClient:
+    endpoint = discover_codex_app_server(runtime_home)
+    if endpoint is None:
+        raise SystemExit(
+            f"no codex app-server listening on ws:// for CODEX_HOME={runtime_home}. "
+            "Start it with: pm2 start pm2/ecosystem.config.cjs --only <workspace>-codex-appserver"
+        )
+    token = _codex_app_server_token(endpoint.get("token_file"))
+    client = JsonRpcWebSocketClient(endpoint["url"], token=token, timeout_seconds=timeout)
+    return client
+
+
+def handshake(client: JsonRpcWebSocketClient, thread_id: str | None = None) -> None:
+    client.request(
+        "initialize",
+        {"clientInfo": {"name": "llm-collab-cli", "title": "llm-collab", "version": "0.1"}},
+    )
+    client.notify("initialized")
+    if thread_id:
+        client.request("thread/resume", {"threadId": thread_id})
+
+
+def text_of(params: object) -> str:
+    """Pull the human-meaningful line out of a notification payload."""
+    if not isinstance(params, dict):
+        return ""
+    for key in ("delta", "text", "summary"):
+        value = params.get(key)
+        if isinstance(value, str):
+            return value
+
+    goal = params.get("goal")
+    if isinstance(goal, dict):
+        # the signal that told us Codex was stuck on an already-merged PR
+        return f"[{goal.get('status')}] {goal.get('objective') or ''}"
+
+    usage = params.get("tokenUsage")
+    if isinstance(usage, dict):
+        last = usage.get("last") or {}
+        return (
+            f"turn={last.get('totalTokens')} "
+            f"total={(usage.get('total') or {}).get('totalTokens')} "
+            f"window={usage.get('modelContextWindow')}"
+        )
+
+    limits = params.get("rateLimits")
+    if isinstance(limits, dict):
+        primary = limits.get("primary") or {}
+        return f"{primary.get('usedPercent')}% used, plan={limits.get('planType')}"
+
+    item = params.get("item")
+    if isinstance(item, dict):
+        for key in ("text", "command", "title", "type"):
+            value = item.get(key)
+            if isinstance(value, str):
+                return f"{item.get('type')}: {value}" if key != "type" else value
+    for key in ("status", "plan", "diff"):
+        value = params.get(key)
+        if isinstance(value, str):
+            return value
+        if isinstance(value, (dict, list)):
+            return json.dumps(value)[:300]
+    return ""
+
+
+def pump(client: JsonRpcWebSocketClient, *, deadline: float, raw: bool, stop_on_terminal: bool) -> str | None:
+    """Print notifications until deadline or a terminal turn event. Returns last terminal."""
+    while time.monotonic() < deadline:
+        try:
+            message = client.recv_json()
+        except Exception:
+            return None
+        if message.get("id") and message.get("method"):
+            # server->client request: acknowledge so the turn is not blocked on us
+            client.send_json({"jsonrpc": "2.0", "id": message["id"], "result": {}})
+            continue
+        method = str(message.get("method") or "")
+        if not method:
+            continue
+        if raw:
+            print(json.dumps(message)[:600], flush=True)
+        elif method in INTERESTING:
+            body = text_of(message.get("params")).replace("\n", " ")
+            label = INTERESTING[method]
+            print(f"[{label}] {body[:400]}" if body else f"[{label}]", flush=True)
+        if stop_on_terminal and method in TERMINAL:
+            return method
+    return None
+
+
+def observe_running_turn(client: JsonRpcWebSocketClient, *, seconds: int) -> str | None:
+    """Read notifications briefly and return the turnId of the turn actually running."""
+    deadline = time.monotonic() + max(seconds, 1)
+    while time.monotonic() < deadline:
+        try:
+            message = client.recv_json()
+        except Exception:
+            return None
+        if message.get("id") and message.get("method"):
+            client.send_json({"jsonrpc": "2.0", "id": message["id"], "result": {}})
+            continue
+        method = str(message.get("method") or "")
+        params = message.get("params")
+        if method in TERMINAL:
+            return None
+        if isinstance(params, dict) and params.get("turnId"):
+            return str(params["turnId"])
+    return None
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("command", choices=("status", "tail", "send", "steer", "interrupt"))
+    parser.add_argument("--session", default=None, help="Registered llm-collab session to resolve the target from")
+    parser.add_argument("--runtime-home", default=None, help="Exact CODEX_HOME of the worker")
+    parser.add_argument("--thread", default=None, help="Exact native thread id")
+    parser.add_argument("--text", default=None, help="Message body for send/steer")
+    parser.add_argument("--seconds", type=int, default=0, help="tail: stop after N seconds (0 = until turn ends)")
+    parser.add_argument("--turn", default=None, help="steer: exact turn id (default: observe the running turn)")
+    parser.add_argument("--observe", type=int, default=10, help="steer: seconds to observe for the running turn")
+    parser.add_argument("--raw", action="store_true", help="Print every notification verbatim")
+    parser.add_argument("--timeout", type=int, default=30, help="Socket timeout in seconds")
+    args = parser.parse_args()
+
+    runtime_home, thread_id = resolve_target(args)
+
+    if args.command == "status":
+        with connect(runtime_home, args.timeout) as client:
+            handshake(client)
+            listing = client.request("thread/list", {})
+            row = next((t for t in listing.get("data", []) if t.get("id") == thread_id), None)
+            if row is None:
+                raise SystemExit(f"thread {thread_id} not found under {runtime_home}")
+            print(json.dumps({
+                "thread": thread_id,
+                "runtime_home": runtime_home,
+                "updated_at": row.get("updatedAt"),
+                "preview": (row.get("preview") or "")[:200],
+            }, indent=2))
+        return
+
+    if args.command == "interrupt":
+        with connect(runtime_home, args.timeout) as client:
+            handshake(client, thread_id)
+            print(json.dumps(client.request("turn/interrupt", {"threadId": thread_id}))[:400])
+        return
+
+    if args.command in ("send", "steer"):
+        if not args.text:
+            raise SystemExit(f"{args.command} requires --text")
+        method = "turn/start" if args.command == "send" else "turn/steer"
+        with connect(runtime_home, args.timeout) as client:
+            handshake(client, thread_id)
+            payload = {"threadId": thread_id, "input": [{"type": "text", "text": args.text}]}
+            if method == "turn/steer":
+                # steer is fail-closed: it requires the exact turn being steered, so a
+                # race cannot land our input in a different turn. Observe it rather
+                # than guess it.
+                turn_id = args.turn or observe_running_turn(client, seconds=args.observe)
+                if not turn_id:
+                    raise SystemExit(
+                        "no running turn observed to steer — use `send` to start one, "
+                        "or pass --turn if you already know the id"
+                    )
+                payload["expectedTurnId"] = turn_id
+                print(f"[steer] targeting turn {turn_id}", flush=True)
+            result = client.request(method, payload)
+            turn = result.get("turn") if isinstance(result, dict) else None
+            # ponytail: confirm ACCEPTANCE, never wait for turn/completed — a turn can
+            # run for minutes and blocking here would stall the caller (and the watcher).
+            print(json.dumps({
+                "accepted": True,
+                "method": method,
+                "turn_id": (turn or {}).get("id"),
+                "status": (turn or {}).get("status"),
+            }, indent=2))
+            pump(client, deadline=time.monotonic() + 5, raw=False, stop_on_terminal=False)
+        return
+
+    # tail
+    with connect(runtime_home, max(args.timeout, 120)) as client:
+        handshake(client, thread_id)
+        print(f"[tail] {thread_id} @ {runtime_home} — ctrl-c to stop", flush=True)
+        deadline = time.monotonic() + args.seconds if args.seconds else float("inf")
+        try:
+            terminal = pump(client, deadline=deadline, raw=args.raw, stop_on_terminal=bool(args.seconds == 0))
+            if terminal:
+                print(f"[end] {terminal}", flush=True)
+        except KeyboardInterrupt:
+            print("[tail] stopped", flush=True)
+
+
+if __name__ == "__main__":
+    main()
