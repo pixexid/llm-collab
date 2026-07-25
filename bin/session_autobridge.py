@@ -24,7 +24,7 @@ import json
 import os
 
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent))
-from _helpers import ensure_project, get_agent, now_utc, utc_iso
+from _helpers import canonical_path, ensure_project, get_agent, now_utc, utc_iso
 from _session_autobridge import (
     HEURISTIC_RUNTIME_DISCOVERY_FAMILIES,
     HEURISTIC_RUNTIME_DISCOVERY_REFUSED_REASON,
@@ -204,22 +204,19 @@ def emit(payload: dict, json_output: bool) -> None:
 
 
 def canonical_runtime_home(value: str | None) -> str | None:
-    """Normalise a runtime home so discovery can match it.
+    """Normalise a runtime home using the ONE shared path invariant.
 
-    Delivery resolves an endpoint by matching `CODEX_HOME=<value>` literally against
-    the running process, so a trailing separator, an unexpanded `~` from a non-shell
-    caller, or a redundant `.`/`..` segment silently prevents any match and delivery
-    fails with no endpoint and no diagnostic. Symlinks are deliberately NOT resolved:
-    the comparison target is the spelling the runtime was launched with.
+    Delivery resolves an endpoint by matching `CODEX_HOME=<value>` literally against the
+    running process, so registration and launch must agree exactly. A separate
+    implementation here previously stored a relative `.codex` verbatim while the
+    ecosystem launched `<repo>/.codex`, so the two never matched.
     """
     if value is None:
         return None
     text = str(value).strip()
     if not text:
         return None
-    expanded = os.path.expanduser(text)
-    normalised = os.path.normpath(expanded)
-    return normalised
+    return str(canonical_path(text))
 
 
 def register_session(args) -> dict:

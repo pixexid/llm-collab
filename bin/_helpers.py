@@ -892,3 +892,23 @@ def print_handoff_prompt(
     print(build_handoff_prompt(agent, sender_id=sender_id, first_time=first_time))
     print()
     print(border)
+
+def canonical_path(value, base=None):
+    """The single path invariant shared by every llm-collab path comparison.
+
+    Absolute (resolved against the repository root, never the caller's cwd), redundant
+    segments collapsed, no trailing separator, symlinks deliberately unresolved because
+    delivery discovery matches the launched spelling literally.
+
+    This lives here, imported by both bin/pm2_watchers.py and bin/session_autobridge.py
+    and mirrored by canonicalPath() in pm2/ecosystem.config.cjs, because six separate
+    defects came from normalizing one side of a two-sided comparison and calling the
+    concern closed. A second copy is how the seventh happens.
+    """
+    import os as _os
+
+    text = _os.path.expanduser(str(value).strip())
+    root = str(base) if base is not None else str(ROOT)
+    joined = text if _os.path.isabs(text) else _os.path.join(root, text)
+    normalised = _os.path.normpath(joined)
+    return Path(normalised)

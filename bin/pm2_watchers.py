@@ -31,7 +31,7 @@ import subprocess
 
 sys.path.insert(0, str(Path(__file__).parent))
 from _ax_trust import format_ax_status, probe_ax_trust
-from _helpers import ROOT, agent_ids, config_get, get_agent, watcher_enabled_agents
+from _helpers import ROOT, agent_ids, canonical_path, config_get, get_agent, watcher_enabled_agents
 
 COMMANDS = ("start", "restart", "ensure", "stop", "delete", "status", "logs")
 DEFAULT_PM2_TIMEOUT_SECONDS = 15
@@ -61,23 +61,6 @@ def app_name(agent_id: str) -> str:
 # app_name() already resolves them, and gated on the same preconditions the
 # ecosystem config uses so `--all` never targets an app the config omits.
 SIDECAR_APP_IDS = ("codex-appserver",)
-
-
-def canonical_path(value: str | os.PathLike[str], base: Path | None = None) -> Path:
-    """The single path invariant, matching pm2/ecosystem.config.cjs canonicalPath().
-
-    Absolute (resolved against the repository root, NOT the caller's cwd), redundant
-    segments collapsed, no trailing separator, symlinks deliberately unresolved because
-    discovery matches the launched spelling literally.
-
-    Both sides must agree: the manager previously resolved relative overrides against
-    the caller's cwd while the config resolved against the root, so the manager could
-    report a sidecar enabled that the real config omitted.
-    """
-    text = os.path.expanduser(str(value).strip())
-    root = base or ROOT
-    joined = text if os.path.isabs(text) else os.path.join(str(root), text)
-    return Path(os.path.normpath(joined))
 
 
 def sidecar_token_file() -> Path:

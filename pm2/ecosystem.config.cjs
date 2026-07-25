@@ -182,4 +182,8 @@ const watcherApps = watcherAgents.map((agent) => {
 
 module.exports = {
   apps: [...watcherApps, ...codexAppServerApps()],
+  // Exported for the cross-language parity test: it must exercise THIS function, not a
+  // copy of it. A test that reimplements the logic it checks cannot detect drift, which
+  // is the entire failure mode the parity test exists to catch. PM2 reads only `apps`.
+  canonicalPath,
 };
