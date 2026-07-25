@@ -97,7 +97,20 @@ def run_cli(argv, fake):
 
 
 def turn_notification(turn_id=TURN):
-    return {"method": "turn/started", "params": {"threadId": THREAD, "turnId": turn_id}}
+    """The REAL TurnStartedNotification shape: {threadId, turn} with a nested id.
+
+    The previous helper put the id at params.turnId, which the generated
+    TurnStartedNotification contract does not define. Every test built on it was
+    asserting against an invented protocol.
+    """
+    return {"method": "turn/started",
+            "params": {"threadId": THREAD, "turn": {"id": turn_id, "status": "inProgress"}}}
+
+
+def legacy_turn_notification(turn_id=TURN):
+    """A notification carrying only a top-level turnId, as deltas do."""
+    return {"method": "thread/tokenUsage/updated",
+            "params": {"threadId": THREAD, "turnId": turn_id}}
 
 
 BASE = ["--runtime-home", "/tmp/codex-home", "--thread", THREAD]
@@ -266,6 +279,23 @@ class CodexAppServerCliTest(unittest.TestCase):
                 with contextlib.redirect_stdout(out):
                     cli.main()  # must return, not loop forever
         self.assertNotIn("[transport]", out.getvalue())
+
+
+    def test_turn_id_is_read_from_the_nested_turn_object(self) -> None:
+        # TurnStartedNotification puts the id at params.turn.id; reading only turnId
+        # meant turn/started alone never yielded a turn.
+        self.assertEqual(TURN, cli.active_turn_id({"threadId": THREAD, "turn": {"id": TURN}}))
+
+    def test_turn_id_still_accepts_a_top_level_turnid(self) -> None:
+        # deltas and usage notifications do carry a top-level turnId
+        self.assertEqual(TURN, cli.active_turn_id({"threadId": THREAD, "turnId": TURN}))
+
+    def test_steer_discovers_the_turn_from_turn_started_alone(self) -> None:
+        fake = FakeClient(responses={"turn/steer": {"turnId": TURN}},
+                          notifications=[turn_notification()])
+        text = run_cli(BASE + ["steer", "--text", "x"], fake)
+        self.assertEqual(TURN, fake.params_for("turn/steer")["expectedTurnId"])
+        self.assertIn(TURN, text)
 
 
 if __name__ == "__main__":

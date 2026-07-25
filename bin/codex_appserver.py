@@ -234,8 +234,28 @@ def observe_running_turn(client: JsonRpcWebSocketClient, *, seconds: int) -> str
         params = message.get("params")
         if method in TERMINAL:
             return None
-        if isinstance(params, dict) and params.get("turnId"):
-            return str(params["turnId"])
+        turn_id = active_turn_id(params)
+        if turn_id:
+            return turn_id
+    return None
+
+
+def active_turn_id(params: object) -> str | None:
+    """Extract a turn id from a notification, honouring both shapes in the contract.
+
+    TurnStartedNotification is {threadId, turn} with the id at params.turn.id, NOT a
+    top-level params.turnId. Reading only turnId meant a turn was never discovered
+    when turn/started was the sole evidence -- and the hand-written test fixture used
+    the invalid top-level shape, so the tests validated an invented contract rather
+    than the real one.
+    """
+    if not isinstance(params, dict):
+        return None
+    turn = params.get("turn")
+    if isinstance(turn, dict) and turn.get("id"):
+        return str(turn["id"])
+    if params.get("turnId"):
+        return str(params["turnId"])
     return None
 
 
