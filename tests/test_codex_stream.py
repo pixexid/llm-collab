@@ -87,6 +87,33 @@ class ResolveThreadTest(unittest.TestCase):
         with self.assertRaises(SystemExit):
             codex_stream.resolve_thread(self.args(agent="codex", project="amiga"))
 
+    def test_chat_without_project_still_narrows_to_that_chat(self) -> None:
+        """A supplied --chat must be honoured even when --project is omitted.
+
+        With exactly one active binding elsewhere, ignoring --chat returned that other
+        thread and no ambiguity error fired, because there was nothing to be ambiguous
+        about. Only the wrong-chat negative case exposes this; a two-binding fixture masks
+        it behind the refusal.
+        """
+        binding(self.root, "amiga", "CHAT-OTHER", "codex", "other-thread")
+        with self.assertRaises(SystemExit) as caught:
+            codex_stream.resolve_thread(self.args(agent="codex", chat="CHAT-WANTED"))
+        self.assertIn("no binding", str(caught.exception).lower())
+
+    def test_chat_without_project_resolves_its_own_binding(self) -> None:
+        binding(self.root, "amiga", "CHAT-OTHER", "codex", "other-thread")
+        binding(self.root, "nuvyr", "CHAT-WANTED", "codex", "wanted-thread")
+        thread, provenance = codex_stream.resolve_thread(
+            self.args(agent="codex", chat="CHAT-WANTED"))
+        self.assertEqual("wanted-thread", thread)
+        self.assertIn("CHAT-WANTED", provenance)
+
+    def test_project_without_chat_still_narrows_to_that_project(self) -> None:
+        binding(self.root, "amiga", "CHAT-A", "codex", "amiga-thread")
+        binding(self.root, "nuvyr", "CHAT-B", "codex", "nuvyr-thread")
+        thread, _ = codex_stream.resolve_thread(self.args(agent="codex", project="nuvyr"))
+        self.assertEqual("nuvyr-thread", thread)
+
     def test_explicit_thread_bypasses_binding_lookup(self) -> None:
         thread, provenance = codex_stream.resolve_thread(self.args(thread="thread-x"))
         self.assertEqual("thread-x", thread)

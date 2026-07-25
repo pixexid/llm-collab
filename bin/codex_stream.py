@@ -110,12 +110,13 @@ def resolve_thread(args: argparse.Namespace) -> tuple[str, str]:
     if not args.agent:
         raise SystemExit("[error] pass --thread, or --agent with --project/--chat")
 
-    candidates: list[Path] = []
-    if args.project and args.chat and args.chat != "last":
-        candidates = [BINDINGS_DIR / args.project / args.chat / f"{args.agent}.json"]
-    else:
-        pattern = f"{args.project}/*/{args.agent}.json" if args.project else f"*/*/{args.agent}.json"
-        candidates = sorted(BINDINGS_DIR.glob(pattern))
+    # Every supplied selector narrows the search, independently. An earlier version only
+    # honoured --chat when --project came with it, so `--agent codex --chat CHAT-WANTED`
+    # silently searched every chat and, with exactly one active binding elsewhere, returned
+    # that other thread without any ambiguity error to warn the caller.
+    project_glob = args.project or "*"
+    chat_glob = args.chat if args.chat and args.chat != "last" else "*"
+    candidates = sorted(BINDINGS_DIR.glob(f"{project_glob}/{chat_glob}/{args.agent}.json"))
 
     bindings = []
     for path in candidates:
