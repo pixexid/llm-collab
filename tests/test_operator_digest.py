@@ -530,4 +530,3 @@ class PathHelperDelegationTest(unittest.TestCase):
         with mock.patch.object(operator_digest, "resolve_project_repo_path",
                                side_effect=SystemExit(1)):
             self.assertIsNone(operator_digest.resolved_repo_path("amiga", "app"))
-
