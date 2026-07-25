@@ -60,6 +60,16 @@ MAX_SCANNED_CHATS = 2000
 # file's size are capped.
 MAX_SCANNED_SESSIONS = 5000
 MAX_SESSION_BYTES = 256 * 1024
+# projects.json is workspace-local and therefore untrusted like the trees above. read_text()
+# allocated and parsed all of it before any lookup limit existed, so the earliest parse boundary in
+# the whole run was also the only unbounded one -- AGENTS.md:165-168 puts the budget exactly there.
+MAX_REGISTRY_BYTES = 256 * 1024
+# Notifications buffered while initialize/thread/resume is in flight. A server that stalls a
+# response while still emitting events would otherwise grow this list without limit, and the
+# default run has no duration at all. Aborting beats silently dropping: a dropped event at the
+# subscription boundary is the exact loss this buffer exists to prevent.
+MAX_PENDING_EVENTS = 4096
+MAX_PENDING_EVENT_BYTES = 8 * 1024 * 1024
 BINDINGS_DIR = ROOT / "State" / "session_autobridge" / "bindings"
 
 
@@ -97,6 +107,7 @@ class ObserverClient(autobridge.JsonRpcWebSocketClient):
         # for the thread but before thread/resume answered was silently lost -- exactly at the
         # subscription boundary, where turn/started and the first items live.
         self.pending_events: list[dict] = []
+        self.pending_event_bytes = 0
 
     def request(self, method: str, params: dict | None = None, **kwargs) -> object:
         """Correlate a response while BUFFERING anything else that arrives.
@@ -119,11 +130,34 @@ class ObserverClient(autobridge.JsonRpcWebSocketClient):
                     raise RuntimeError(f"{method}: {error.get('message', 'unknown error')}")
                 return message.get("result")
             if message.get("method"):
-                self.pending_events.append(message)
+                self.buffer_pending_event(message)
+
+    def buffer_pending_event(self, message: dict) -> None:
+        """Retain one setup-window notification, under a cumulative count and byte budget.
+
+        Charged on both axes because either alone is evadable: many tiny notifications exhaust the
+        count, one enormous one exhausts memory. Raising aborts setup with no partial state, which
+        AGENTS.md:165-168 requires over trimming the queue -- the events at the subscription
+        boundary are precisely the ones this buffer exists to keep.
+        """
+        size = len(json.dumps(message, separators=(",", ":")))
+        if len(self.pending_events) + 1 > MAX_PENDING_EVENTS:
+            raise SystemExit(
+                f"[error] more than {MAX_PENDING_EVENTS} notifications arrived while setup was "
+                "still in flight; aborting rather than buffering without limit"
+            )
+        if self.pending_event_bytes + size > MAX_PENDING_EVENT_BYTES:
+            raise SystemExit(
+                f"[error] setup-window notifications exceeded {MAX_PENDING_EVENT_BYTES} bytes; "
+                "aborting rather than buffering without limit"
+            )
+        self.pending_events.append(message)
+        self.pending_event_bytes += size
 
     def take_pending_events(self) -> list[dict]:
         """Hand over anything buffered during setup, so the loop can replay it in order."""
         drained, self.pending_events = self.pending_events, []
+        self.pending_event_bytes = 0
         return drained
 
     def recv_json(self) -> dict:
@@ -226,9 +260,22 @@ def one_path_component(value: str, *, field: str) -> str:
 
 def registered_project_ids() -> set[str]:
     """Project ids from projects.json, so an unregistered directory cannot be watched."""
+    path = ROOT / "projects.json"
     try:
-        payload = json.loads((ROOT / "projects.json").read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        with path.open("rb") as handle:
+            raw = handle.read(MAX_REGISTRY_BYTES + 1)
+    except OSError:
+        return set()
+    if len(raw) > MAX_REGISTRY_BYTES:
+        # Raise rather than return empty: an unreadable registry and an oversized one are
+        # different failures, and the caller turns an empty set into "cannot verify the project",
+        # which would misreport this one.
+        raise SystemExit(
+            f"[error] {path} exceeds the {MAX_REGISTRY_BYTES} byte limit; refusing to parse it"
+        )
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
         return set()
     projects = payload.get("projects")
     if not isinstance(projects, list):

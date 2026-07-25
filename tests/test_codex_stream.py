@@ -1043,16 +1043,97 @@ class TricklingHandshakeTest(unittest.TestCase):
         self.assertIn("before connecting", str(caught.exception))
 
 
+class ProjectRegistryBudgetTest(unittest.TestCase):
+    """projects.json is workspace-local, so it is untrusted like the trees around it.
+
+    read_text() allocated and parsed the whole file before any lookup limit existed, which made the
+    earliest parse boundary in the run the only unbounded one. Tested against a REAL oversized file,
+    because the defect is in what read does, and a mocked reader would prove nothing about it.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory(dir="/tmp")
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+        patcher = mock.patch.object(codex_stream, "ROOT", self.root)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def write_registry(self, text: str) -> Path:
+        path = self.root / "projects.json"
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def test_an_oversized_registry_is_refused_before_it_is_parsed(self) -> None:
+        padding = "z" * (codex_stream.MAX_REGISTRY_BYTES + 1024)
+        self.write_registry(json.dumps({"projects": [{"id": "amiga", "pad": padding}]}))
+        with self.assertRaises(SystemExit) as caught:
+            codex_stream.registered_project_ids()
+        self.assertIn(str(codex_stream.MAX_REGISTRY_BYTES), str(caught.exception))
+
+    def test_the_read_itself_is_bounded_not_just_the_verdict(self) -> None:
+        """A read-all-then-measure implementation gives the same verdict and the same exhaustion.
+
+        Asserted on the argument passed to read(), because that is the difference between refusing
+        an oversized file and allocating it first and then complaining.
+        """
+        self.write_registry(json.dumps({"projects": [{"id": "amiga"}]}))
+        seen = []
+        real_open = Path.open
+
+        def recording_open(self_path, *args, **kwargs):
+            handle = real_open(self_path, *args, **kwargs)
+            if self_path.name == "projects.json":
+                real_read = handle.read
+
+                def read(*read_args):
+                    seen.append(read_args)
+                    return real_read(*read_args)
+
+                handle.read = read
+            return handle
+
+        with mock.patch.object(Path, "open", recording_open):
+            codex_stream.registered_project_ids()
+        self.assertTrue(seen, "projects.json was not read through a bounded read at all")
+        self.assertEqual((codex_stream.MAX_REGISTRY_BYTES + 1,), seen[0],
+                         f"the read must be capped, got {seen[0]}")
+
+    def test_a_registry_at_the_limit_still_parses(self) -> None:
+        entry = {"projects": [{"id": "amiga"}]}
+        body = json.dumps(entry)
+        pad = codex_stream.MAX_REGISTRY_BYTES - len(body) - len('", "pad": ""')
+        self.write_registry(json.dumps({"projects": [{"id": "amiga", "pad": "q" * max(pad, 0)}]})
+                            if pad > 0 else body)
+        self.assertEqual({"amiga"}, codex_stream.registered_project_ids())
+
+    def test_a_missing_registry_still_returns_empty_rather_than_raising(self) -> None:
+        """Unchanged: callers turn an empty set into an explicit refusal to verify the project."""
+        self.assertEqual(set(), codex_stream.registered_project_ids())
+
+    def test_malformed_json_still_returns_empty(self) -> None:
+        self.write_registry("{not json")
+        self.assertEqual(set(), codex_stream.registered_project_ids())
+
+    def test_non_utf8_bytes_return_empty_rather_than_crashing(self) -> None:
+        (self.root / "projects.json").write_bytes(b'{"projects": [{"id": "\xff\xfe"}]}')
+        self.assertEqual(set(), codex_stream.registered_project_ids())
+
+    def test_a_normal_registry_lists_its_projects(self) -> None:
+        self.write_registry(json.dumps({"projects": [{"id": "amiga"}, {"id": "nuvyr"}]}))
+        self.assertEqual({"amiga", "nuvyr"}, codex_stream.registered_project_ids())
+
+
 class SetupBoundaryTest(unittest.TestCase):
     """Setup is inside the deadline, and nothing emitted during it is lost."""
 
     def client(self, frames):
-        made = codex_stream.ObserverClient.__new__(codex_stream.ObserverClient)
-        made.observed_requests = []
-        made.read_deadline = None
-        made.pending_events = []
-        made.timeout_seconds = 5
-        made.counter = 0
+        # The REAL constructor, not __new__ plus hand-set attributes. The old version listed the
+        # fields it thought mattered, so adding pending_event_bytes to __init__ broke two tests
+        # with AttributeError -- the stub had quietly become a second, divergent definition of the
+        # object. __init__ does not touch the network (only __enter__ connects), so there was never
+        # a reason to skip it.
+        made = codex_stream.ObserverClient("ws://127.0.0.1:1", token=None, timeout_seconds=5)
         made.sock = mock.Mock()
         made.sent = []
         made.send_json = made.sent.append
@@ -1066,6 +1147,56 @@ class SetupBoundaryTest(unittest.TestCase):
 
         made._recv_frame = recv_frame
         return made
+
+    # --- the setup buffer is bounded on BOTH axes ------------------------------------------
+    #
+    # Either axis alone is evadable: many tiny notifications exhaust the count while staying far
+    # under the byte cap, and one enormous notification exhausts memory while the count stays at 1.
+
+    def test_too_many_setup_notifications_abort_instead_of_buffering(self) -> None:
+        flood = [{"method": "item/updated", "params": {"n": i}}
+                 for i in range(codex_stream.MAX_PENDING_EVENTS + 5)]
+        client = self.client(flood + [{"id": "llm-collab-1", "result": {}}])
+        with self.assertRaises(SystemExit) as caught:
+            client.request("thread/resume", {"threadId": "T1"})
+        self.assertIn(str(codex_stream.MAX_PENDING_EVENTS), str(caught.exception))
+        self.assertLessEqual(len(client.pending_events), codex_stream.MAX_PENDING_EVENTS)
+
+    def test_one_enormous_setup_notification_aborts_on_the_byte_budget(self) -> None:
+        """The count stays at 1 here, so only the byte axis can catch this."""
+        huge = {"method": "item/updated",
+                "params": {"blob": "x" * (codex_stream.MAX_PENDING_EVENT_BYTES + 1024)}}
+        client = self.client([huge, {"id": "llm-collab-1", "result": {}}])
+        with self.assertRaises(SystemExit) as caught:
+            client.request("thread/resume", {"threadId": "T1"})
+        self.assertIn(str(codex_stream.MAX_PENDING_EVENT_BYTES), str(caught.exception))
+        self.assertEqual([], client.pending_events,
+                         "nothing may be retained once the budget is blown")
+
+    def test_many_medium_notifications_are_charged_cumulatively(self) -> None:
+        """Each is well under the cap; together they exceed it. Per-message checks miss this."""
+        one_eighth = codex_stream.MAX_PENDING_EVENT_BYTES // 8
+        stream = [{"method": "item/updated", "params": {"blob": "y" * one_eighth}}
+                  for _ in range(12)]
+        client = self.client(stream + [{"id": "llm-collab-1", "result": {}}])
+        with self.assertRaises(SystemExit):
+            client.request("thread/resume", {"threadId": "T1"})
+
+    def test_a_normal_setup_window_is_unaffected(self) -> None:
+        events = [{"method": "turn/started", "params": {"turn": {"id": f"u{i}"}}}
+                  for i in range(20)]
+        client = self.client(events + [{"id": "llm-collab-1", "result": {}}])
+        client.request("thread/resume", {"threadId": "T1"})
+        self.assertEqual(20, len(client.pending_events))
+
+    def test_draining_resets_the_byte_charge(self) -> None:
+        """Otherwise a long-lived client would accumulate toward the cap across setups."""
+        client = self.client([{"method": "turn/started", "params": {}},
+                              {"id": "llm-collab-1", "result": {}}])
+        client.request("thread/resume", {"threadId": "T1"})
+        self.assertGreater(client.pending_event_bytes, 0)
+        client.take_pending_events()
+        self.assertEqual(0, client.pending_event_bytes)
 
     def test_a_notification_arriving_before_the_response_is_buffered_not_dropped(self) -> None:
         """The subscription boundary: turn/started and the first items live exactly here.
