@@ -272,6 +272,72 @@ class Pm2EcosystemTest(unittest.TestCase):
             self.assertEqual([], sidecars(apps), "sidecar must be disabled, not crash")
             self.assertTrue(apps, "unrelated watcher apps must still be emitted")
 
+    def test_reservation_covers_agents_that_are_not_watcher_enabled(self) -> None:
+        """A collaborator owns its id regardless of watcher_enabled.
+
+        Filtering only watcherAgents let an agent registered with
+        watcher_enabled:false slip through, so the direct ecosystem path would start
+        the transport under that collaborator's PM2 identity.
+        """
+        with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
+            tree = Path(tmp)
+            (tree / "pm2").mkdir()
+            (tree / "pm2" / "ecosystem.config.cjs").write_text(
+                CONFIG.read_text(encoding="utf-8"), encoding="utf-8")
+            (tree / "collab.config.json").write_text(
+                json.dumps({"workspace_name": "fixture"}), encoding="utf-8")
+            (tree / "agents.json").write_text(json.dumps({"agents": [
+                {"id": "codex", "activation": {"type": "cli_session", "watcher_enabled": True}},
+                # NOT watcher-enabled, so it never appears in watcherAgents
+                {"id": "codex-appserver", "activation": {"type": "cli_session", "watcher_enabled": False}},
+            ]}), encoding="utf-8")
+            token = tree / "token"; token.write_text("t\n", encoding="utf-8"); token.chmod(0o600)
+            binary = tree / "codex"; binary.write_text("#!/bin/sh\n", encoding="utf-8")
+            result = subprocess.run(
+                [NODE, "-e", LOAD, str(tree / "pm2" / "ecosystem.config.cjs")],
+                capture_output=True, text=True, timeout=30, cwd=str(tree),
+                env={**os.environ,
+                     "LLM_COLLAB_CODEX_APP_SERVER_TOKEN_FILE": str(token),
+                     "LLM_COLLAB_CODEX_BIN": str(binary)})
+            self.assertEqual(0, result.returncode, result.stderr[:300])
+            self.assertEqual([], sidecars(json.loads(result.stdout)),
+                             "a reserved id held by any registered agent must block the sidecar")
+
+    def test_relative_token_override_is_resolved_before_validation(self) -> None:
+        """Validation and launch must see the same path.
+
+        A relative override was validated against the invoker's cwd while the spawned
+        app runs with cwd: root, so the gate could approve one file while Codex opened
+        another.
+        """
+        with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
+            tree = Path(tmp)
+            (tree / "pm2").mkdir()
+            (tree / "pm2" / "ecosystem.config.cjs").write_text(
+                CONFIG.read_text(encoding="utf-8"), encoding="utf-8")
+            (tree / "collab.config.json").write_text(
+                json.dumps({"workspace_name": "fixture"}), encoding="utf-8")
+            (tree / "agents.json").write_text(json.dumps({"agents": [
+                {"id": "codex", "activation": {"type": "cli_session", "watcher_enabled": True}}]}),
+                encoding="utf-8")
+            secure = tree / "secure-token"
+            secure.write_text("t\n", encoding="utf-8"); secure.chmod(0o600)
+            binary = tree / "codex"; binary.write_text("#!/bin/sh\n", encoding="utf-8")
+            # run from a DIFFERENT cwd so a cwd-relative reading would miss the file
+            elsewhere = tree / "elsewhere"; elsewhere.mkdir()
+            result = subprocess.run(
+                [NODE, "-e", LOAD, str(tree / "pm2" / "ecosystem.config.cjs")],
+                capture_output=True, text=True, timeout=30, cwd=str(elsewhere),
+                env={**os.environ,
+                     "LLM_COLLAB_CODEX_APP_SERVER_TOKEN_FILE": "secure-token",
+                     "LLM_COLLAB_CODEX_BIN": str(binary)})
+            self.assertEqual(0, result.returncode, result.stderr[:300])
+            found = sidecars(json.loads(result.stdout))
+            self.assertEqual(1, len(found), "the override must resolve against root")
+            passed = found[0]["args"][found[0]["args"].index("--ws-token-file") + 1]
+            self.assertEqual(os.path.realpath(secure), os.path.realpath(passed),
+                             "the launched path must be the validated one")
+
 class Pm2ManagerSidecarTest(unittest.TestCase):
     """The manager's sidecar branch, forced on so a clean checkout still exercises it.
 
@@ -388,11 +454,13 @@ class Pm2ManagerSidecarTest(unittest.TestCase):
             self.assertEqual([], pm2_watchers.enabled_sidecar_ids(),
                              "start must be gated once the token is gone")
             with mock.patch.object(pm2_watchers, "sidecar_is_pm2_registered", return_value=True):
-                for command in ("stop", "delete", "status", "logs", "restart"):
+                for command in ("stop", "delete", "status", "logs"):
                     self.assertEqual(
                         ["codex-appserver"], pm2_watchers.sidecar_ids_for_command(command),
                         f"{command} --all must still reach a PM2-registered orphan",
                     )
+                # restart relaunches, so it is gated even for a registered orphan
+                self.assertEqual([], pm2_watchers.sidecar_ids_for_command("restart"))
             for command in ("start", "ensure"):
                 self.assertEqual(
                     [], pm2_watchers.sidecar_ids_for_command(command),
@@ -465,6 +533,38 @@ class Pm2ManagerSidecarTest(unittest.TestCase):
                         pm2_watchers.main()
         ax = [l for l in out.getvalue().splitlines() if l.startswith("[ax]")]
         self.assertEqual(2, len(ax), f"one AX line per agent must precede PM2: {ax}")
+
+    def test_restart_requires_the_security_gate(self) -> None:
+        """restart relaunches, so it must not bypass the token gate.
+
+        Classifying it as non-creating let a sidecar whose token became group- or
+        world-readable be restarted with that insecure token still in place.
+        """
+        self.assertNotIn("restart", pm2_watchers.NON_CREATING_COMMANDS)
+        self.token.chmod(0o644)  # now insecure
+        with mock.patch.dict(os.environ, {
+            "LLM_COLLAB_CODEX_APP_SERVER_TOKEN_FILE": str(self.token),
+            "LLM_COLLAB_CODEX_BIN": str(self.binary),
+        }):
+            self.assertEqual([], pm2_watchers.sidecar_ids_for_command("restart"),
+                             "an insecure token must not be restartable")
+
+    def test_direct_sidecar_start_is_refused_when_not_enabled(self) -> None:
+        """A direct --agent target bypassed the gate and exited 0 on failure."""
+        with mock.patch.dict(os.environ, {
+            "LLM_COLLAB_CODEX_APP_SERVER_TOKEN_FILE": str(Path(self._tmp.name) / "absent"),
+            "LLM_COLLAB_CODEX_BIN": str(self.binary),
+        }):
+            for command in ("start", "ensure", "restart"):
+                with mock.patch.object(sys, "argv",
+                                       ["pm2_watchers.py", command, "--agent", "codex-appserver"]):
+                    with mock.patch.object(pm2_watchers, "config_get", return_value="llm-collab"):
+                        with mock.patch.object(pm2_watchers, "pm2_run") as ran:
+                            with self.assertRaises(SystemExit) as caught:
+                                with contextlib.redirect_stdout(io.StringIO()):
+                                    pm2_watchers.main()
+                            self.assertEqual(2, caught.exception.code, command)
+                            ran.assert_not_called()
 
     def test_absent_token_keeps_the_sidecar_out_of_manager_targets(self) -> None:
         with mock.patch.dict(

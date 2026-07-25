@@ -60,7 +60,10 @@ function codexAppServerApps() {
   // agent literally named `codex-appserver` would emit two apps with one PM2 name.
   // Skip rather than throw — throwing would take the watchers down with it — and
   // warn, while the Python manager exits loudly on the path operators actually use.
-  const reserved = watcherAgents.filter((a) => a.id === "codex-appserver");
+  // Full roster, not just watcherAgents: an agent registered with
+  // watcher_enabled:false still owns that identity, and the direct ecosystem path
+  // would otherwise start the transport under a collaborator's PM2 name.
+  const reserved = agents.filter((a) => a.id === "codex-appserver");
   if (reserved.length > 0) {
     console.error(
       "[ecosystem] agents.json registers 'codex-appserver', a reserved transport " +
@@ -70,9 +73,14 @@ function codexAppServerApps() {
     return [];
   }
 
-  const tokenFile =
-    process.env.LLM_COLLAB_CODEX_APP_SERVER_TOKEN_FILE ||
-    path.join(root, ".secrets", "codex_app_server_ws_token");
+  // Resolve BEFORE validating. A relative override is validated against the
+  // invoker's cwd, but the spawned app runs with cwd: root and would receive the
+  // unchanged relative path -- so the gate could check one file while Codex opens
+  // another. Resolve against root so validation and launch see the same path.
+  const configuredToken = process.env.LLM_COLLAB_CODEX_APP_SERVER_TOKEN_FILE;
+  const tokenFile = configuredToken
+    ? path.resolve(root, configuredToken)
+    : path.join(root, ".secrets", "codex_app_server_ws_token");
   const codexBin =
     process.env.LLM_COLLAB_CODEX_BIN ||
     "/Applications/ChatGPT.app/Contents/Resources/codex";

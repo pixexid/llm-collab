@@ -21,6 +21,7 @@ require_python()
 
 import argparse
 import json
+import os
 
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent))
 from _helpers import ensure_project, get_agent, now_utc, utc_iso
@@ -74,7 +75,15 @@ def parse_args():
     register.add_argument("--runtime-family", default=None, help="Runtime family, e.g. codex_app, claude_app, gemini_cli")
     register.add_argument("--runtime-session-id", default=None, help="Current runtime-native session identifier")
     register.add_argument("--runtime-session-source", default=None, help="Where the runtime session identifier came from")
-    register.add_argument("--runtime-home", default=None, help="Exact runtime home (e.g. CODEX_HOME) used to resolve the delivery transport")
+    register.add_argument(
+        "--runtime-home",
+        default=None,
+        help=(
+            "Exact runtime home (e.g. CODEX_HOME) used to resolve the delivery "
+            "transport. Canonicalised on write; must match the value the runtime was "
+            "launched with, since discovery matches CODEX_HOME literally."
+        ),
+    )
     register.add_argument("--supersedes-session", default=None, help="Older llm-collab session replaced by this registration")
     register.add_argument(
         "--runtime-command",
@@ -194,6 +203,25 @@ def emit(payload: dict, json_output: bool) -> None:
     print(json.dumps(payload, indent=2, sort_keys=True))
 
 
+def canonical_runtime_home(value: str | None) -> str | None:
+    """Normalise a runtime home so discovery can match it.
+
+    Delivery resolves an endpoint by matching `CODEX_HOME=<value>` literally against
+    the running process, so a trailing separator, an unexpanded `~` from a non-shell
+    caller, or a redundant `.`/`..` segment silently prevents any match and delivery
+    fails with no endpoint and no diagnostic. Symlinks are deliberately NOT resolved:
+    the comparison target is the spelling the runtime was launched with.
+    """
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    expanded = os.path.expanduser(text)
+    normalised = os.path.normpath(expanded)
+    return normalised
+
+
 def register_session(args) -> dict:
     agent = get_agent(args.agent)
     now = now_utc()
@@ -216,7 +244,7 @@ def register_session(args) -> dict:
         runtime["session_id"] = args.runtime_session_id
     if args.runtime_session_source is not None:
         runtime["session_source"] = args.runtime_session_source
-    runtime_home = getattr(args, "runtime_home", None)
+    runtime_home = canonical_runtime_home(getattr(args, "runtime_home", None))
     if runtime_home is None and runtime.get("family") and runtime.get("session_source"):
         runtime_home = runtime_home_from_source(str(runtime["family"]), runtime.get("session_source"))
     if runtime_home is not None:

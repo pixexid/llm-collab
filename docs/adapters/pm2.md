@@ -327,7 +327,9 @@ Addressed as `codex-appserver` through the normal manager, and included in
 ```bash
 python bin/pm2_watchers.py start --agent codex-appserver
 python bin/pm2_watchers.py status --agent codex-appserver
-python bin/pm2_watchers.py restart --agent codex-appserver
+# NOTE: `restart` reuses PM2's stored definition and does NOT re-read this config,
+# so changing CODEX_HOME, the port, the token path, or the binary needs a reload:
+pm2 startOrRestart pm2/ecosystem.config.cjs --only <workspace>-codex-appserver
 python bin/pm2_watchers.py logs --agent codex-appserver
 python bin/pm2_watchers.py stop --agent codex-appserver
 ```

@@ -115,7 +115,10 @@ def enabled_sidecar_ids() -> list[str]:
 # live server unreachable by `stop --all` / `delete --all` / `status --all`, which is
 # the opposite of what the docs' "token presence is the enable switch" implies:
 # removing the token does not stop a server that already loaded the bearer token.
-NON_CREATING_COMMANDS = frozenset({"stop", "delete", "status", "logs", "restart"})
+# restart deliberately EXCLUDED: it relaunches the process, so it must satisfy the
+# security gate. Treating it as non-creating let a sidecar whose token had become
+# group/world-readable be restarted with that insecure token still in place.
+NON_CREATING_COMMANDS = frozenset({"stop", "delete", "status", "logs"})
 
 
 def sidecar_is_pm2_registered(agent_id: str) -> bool:
@@ -258,6 +261,21 @@ def main():
         if args.agent not in agent_ids() and not is_sidecar(args.agent):
             print(f"[error] Unknown agent: {args.agent!r}", file=sys.stderr)
             sys.exit(1)
+        # A direct target bypassed the gate entirely, so `start --agent codex-appserver`
+        # with an absent or insecure token reached PM2, which silently omitted the app
+        # while the manager exited 0 reporting success.
+        if (
+            is_sidecar(args.agent)
+            and args.command not in NON_CREATING_COMMANDS
+            and args.agent not in enabled_sidecar_ids()
+        ):
+            print(
+                f"[error] {args.agent} is not startable: the token file must be a "
+                "regular file owned by you with mode 600 and no whitespace in its "
+                "path, and the Codex binary must exist.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
         targets = [args.agent]
     else:
         print("[error] Specify --agent or --all", file=sys.stderr)
