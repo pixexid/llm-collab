@@ -4,11 +4,13 @@ Two behaviours carry real risk. Resolving `--agent codex` when several bindings 
 would silently watch one of several threads, which is the wrong-thread failure the
 exact-dispatch contract exists to prevent. Answering a server-initiated request --
 an approval -- would vote on the operator's behalf on a turn this observer does not
-own; the observer must refuse it explicitly on the same socket.
+own; the observer must answer nothing at all.
 """
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import sys
 import tempfile
@@ -91,18 +93,19 @@ class ResolveThreadTest(unittest.TestCase):
         self.assertEqual("--thread", provenance)
 
 
-class ObserverRefusesServerRequestsTest(unittest.TestCase):
-    """The safety contract must hold on the wire, not only in the docstring.
+class ObserverAnswersNothingTest(unittest.TestCase):
+    """The observer must send zero response frames for a server request.
 
-    The base client answers any interleaved server request with {"result": {}}, so an
-    approval arriving during initialize/resume would be APPROVED. And a request read in
-    the steady-state loop cannot be deferred to another client: a JSON-RPC response belongs
-    on the connection that received it, so refusing here is the only coherent answer.
+    The base client answers any interleaved request with {"result": {}} -- invalid for all
+    ten ServerRequest methods, since no Response schema in the bundle permits an empty
+    object. An automatic JSON-RPC error is also wrong on this socket: a pending request can
+    be resolved by the FIRST client to answer, so an observer's error could abort work the
+    operator initiated in the desktop app. Right for a turn's owner, wrong for a watcher.
     """
 
     def client(self, incoming: list[dict]) -> codex_stream.ObserverClient:
         client = codex_stream.ObserverClient.__new__(codex_stream.ObserverClient)
-        client.refused = []
+        client.observed_requests = []
         client.sent: list[dict] = []
         client.queue = list(incoming)
         client.send_json = client.sent.append
@@ -113,41 +116,78 @@ class ObserverRefusesServerRequestsTest(unittest.TestCase):
             return client.queue.pop(0)
         with mock.patch.object(codex_stream.autobridge.JsonRpcWebSocketClient,
                                "recv_json", base_recv):
-            return [client.recv_json() for _ in range(count)]
+            with contextlib.redirect_stderr(io.StringIO()) as captured:
+                got = [client.recv_json() for _ in range(count)]
+        self.stderr = captured.getvalue()
+        return got
 
-    def test_an_approval_request_is_answered_with_an_error_never_a_result(self) -> None:
+    def test_an_approval_request_produces_zero_response_frames(self) -> None:
         approval = {"id": "srv-1", "method": "item/commandExecution/requestApproval",
-                    "params": {"command": "rm -rf /"}}
+                    "params": {"threadId": "T1", "turnId": "U1", "command": "rm -rf /"}}
         event = {"method": "turn/completed", "params": {}}
-        got = self.client([approval, event])
-        delivered = self.drain(got, 1)
+        client = self.client([approval, event])
+        delivered = self.drain(client, 1)
 
         self.assertEqual([event], delivered, "the request must not surface as an event")
-        self.assertEqual(1, len(got.sent), "exactly one response must go out")
-        reply = got.sent[0]
-        self.assertEqual("srv-1", reply["id"], "the reply must correlate to the request")
-        self.assertIn("error", reply)
-        self.assertNotIn("result", reply,
-                         "a result is an approval; an observer must never send one")
-        self.assertEqual(codex_stream.METHOD_NOT_FOUND, reply["error"]["code"])
-        self.assertEqual(["item/commandExecution/requestApproval"], got.refused)
+        self.assertEqual([], client.sent,
+                         "an observer must send NO frame at all -- not a result, not an error")
+        self.assertEqual(["item/commandExecution/requestApproval"], client.observed_requests)
+        self.assertIn("srv-1", self.stderr, "the request must be reported with its id")
+        self.assertIn("T1", self.stderr, "and with the thread it belongs to")
 
-    def test_a_request_interleaved_before_a_response_is_still_refused(self) -> None:
-        # this is the initialize/resume window, where the base client would answer {}
+    def test_a_request_interleaved_before_a_response_is_also_unanswered(self) -> None:
+        # the initialize/resume window, where the base client would answer {}
         approval = {"id": "srv-2", "method": "item/fileChange/requestApproval", "params": {}}
         response = {"id": "llm-collab-1", "result": {"ok": True}}
-        got = self.client([approval, response])
-        delivered = self.drain(got, 1)
+        client = self.client([approval, response])
+        self.assertEqual([response], self.drain(client, 1))
+        self.assertEqual([], client.sent)
 
-        self.assertEqual([response], delivered)
-        self.assertIn("error", got.sent[0])
-        self.assertEqual("srv-2", got.sent[0]["id"])
+    def test_every_generated_server_request_method_is_left_unanswered(self) -> None:
+        methods = [
+            "account/chatgptAuthTokens/refresh", "applyPatchApproval",
+            "attestation/generate", "execCommandApproval",
+            "item/commandExecution/requestApproval", "item/fileChange/requestApproval",
+            "item/permissions/requestApproval", "item/tool/call",
+            "item/tool/requestUserInput", "mcpServer/elicitation/request",
+        ]
+        incoming = [{"id": f"srv-{i}", "method": m, "params": {}}
+                    for i, m in enumerate(methods)]
+        incoming.append({"method": "turn/completed", "params": {}})
+        client = self.client(incoming)
+        self.drain(client, 1)
+        self.assertEqual([], client.sent, "no member of the union may be answered")
+        self.assertEqual(sorted(methods), sorted(client.observed_requests))
 
     def test_a_plain_notification_is_passed_through_untouched(self) -> None:
         note = {"method": "item/agentMessage/delta", "params": {"delta": "hi"}}
-        got = self.client([note])
-        self.assertEqual([note], self.drain(got, 1))
-        self.assertEqual([], got.sent, "notifications need no response at all")
+        client = self.client([note])
+        self.assertEqual([note], self.drain(client, 1))
+        self.assertEqual([], client.sent)
+
+    def test_a_request_with_id_zero_is_still_treated_as_a_request(self) -> None:
+        """0 is a legal JSON-RPC id, so the check must be is-not-None, not truthiness.
+
+        Under truthiness, id 0 is falsy: the request falls through as if it were a
+        notification and is handed to the caller as an event, which for a delivery client
+        is the difference between refusing and silently ignoring an approval.
+        """
+        request = {"id": 0, "method": "item/tool/call", "params": {}}
+        event = {"method": "turn/completed", "params": {}}
+        client = self.client([request, event])
+        delivered = self.drain(client, 1)
+        self.assertEqual([event], delivered,
+                         "a request with id 0 must not surface as an event")
+        self.assertEqual(["item/tool/call"], client.observed_requests)
+        self.assertEqual([], client.sent)
+
+    def test_the_cli_entry_point_is_intact(self) -> None:
+        # unit tests all passed once while main() raised NameError on a deleted helper
+        import subprocess
+        result = subprocess.run([sys.executable, str(ROOT / "bin" / "codex_stream.py"), "--help"],
+                                capture_output=True, text=True, timeout=30)
+        self.assertEqual(0, result.returncode, result.stderr[:300])
+        self.assertIn("--seconds", result.stdout)
 
 
 class RecordIdentityTest(unittest.TestCase):
@@ -219,7 +259,7 @@ class InterruptExitCodeTest(unittest.TestCase):
         source = (ROOT / "bin" / "codex_stream.py").read_text(encoding="utf-8")
         self.assertNotIn("left for the turn owner", source)
         self.assertNotIn("never\nanswers a server-initiated request", source)
-        self.assertIn("never a result", source)
+        self.assertIn("not a result, not an error", source)
 
 
 class DescribeTest(unittest.TestCase):

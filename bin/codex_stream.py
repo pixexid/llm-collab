@@ -7,9 +7,10 @@ turn/completed. So "what is Codex doing right now" needs no Accessibility
 automation, no foreground window, and no shared-daemon refactor -- only a second
 WebSocket connection to the App Server we already run.
 
-Observation only. This never starts, steers, or interrupts a turn, and answers
-every server-initiated request with a JSON-RPC error -- never a result. A result is
-an approval, and approving here would vote on the operator's behalf.
+Observation only. This never starts, steers, or interrupts a turn, and sends NO
+response of any kind to a server-initiated request -- not a result, not an error.
+A pending request can be resolved by the first client to answer it, so an observer
+that replied could abort work the operator initiated in the desktop app.
 
 Usage:
   python bin/codex_stream.py --agent codex --project amiga --chat CHAT-8976EECB
@@ -37,42 +38,45 @@ from _helpers import ROOT
 
 DEFAULT_IDLE_TIMEOUT_SECONDS = 5
 BINDINGS_DIR = ROOT / "State" / "session_autobridge" / "bindings"
-METHOD_NOT_FOUND = -32601
 
 
 class ObserverClient(autobridge.JsonRpcWebSocketClient):
-    """A connection that refuses every server-initiated request.
+    """A connection that answers nothing at all.
 
-    The base client answers any interleaved server request with `{"result": {}}`, so an
-    `item/commandExecution/requestApproval` arriving while `initialize` or `thread/resume`
-    is in flight would be APPROVED by an observer that promised never to vote. Printing
-    Deferring instead does not work either: a JSON-RPC response belongs on the connection
-    that received the request, so no other client can answer one delivered here -- it would
-    simply hang. Every server request therefore gets an explicit error reply on THIS socket,
-    correlated to its id. Refusing IS answering; what it never does is approve.
+    The base client answers any interleaved server request with `{"result": {}}`. Every
+    member of the generated ServerRequest union is authority- or data-bearing -- command,
+    file, and permission approvals, tool calls, user input, MCP elicitation, auth refresh,
+    attestation -- and NO Response schema in the bundle permits an empty object. So that
+    envelope is invalid for all ten methods, and for an observer it is indefensible.
 
-    Refusing inside recv_json covers both cases at once, because every read path goes
-    through it: the request/response loop and the steady-state event loop.
+    Refusing with a JSON-RPC error is also wrong HERE, though it is right for the client
+    that owns a turn. App Server fans a pending request to the subscribed connections, and
+    the first response -- result or error -- can resolve it. An observer that auto-errors
+    can therefore abort work the operator initiated in ChatGPT.app before the UI is
+    answered. The risk is asymmetric: if requests fan out, silence protects the operator
+    and an error harms them; if they only ever reach the turn owner, this connection never
+    sees one and silence costs nothing. Silence is never worse.
+
+    So: log the request with its identity, respond nothing, keep reading. Receiving one at
+    all is itself evidence of fan-out and is reported as such.
     """
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        self.refused: list[str] = []
+        self.observed_requests: list[str] = []
 
     def recv_json(self) -> dict:
         while True:
             message = super().recv_json()
             if message.get("id") is not None and message.get("method"):
-                self.refused.append(str(message["method"]))
-                self.send_json({
-                    "jsonrpc": "2.0",
-                    "id": message["id"],
-                    "error": {
-                        "code": METHOD_NOT_FOUND,
-                        "message": ("llm-collab codex_stream is a read-only observer; "
-                                    "it refuses all requests and never approves"),
-                    },
-                })
+                method = str(message["method"])
+                self.observed_requests.append(method)
+                params = message.get("params") or {}
+                print(f"[request] {method} id={message['id']} "
+                      f"thread={params.get('threadId', '?')} turn={params.get('turnId', '?')}",
+                      file=sys.stderr)
+                print("[action] observer answers nothing; only the turn's owner may respond",
+                      file=sys.stderr)
                 continue
             return message
 
@@ -253,9 +257,11 @@ def main() -> None:
 
     if pending_text:
         sys.stdout.write("\n")
-    if client.refused:
-        print(f"[stream] refused {len(client.refused)} server request(s): "
-              f"{', '.join(sorted(set(client.refused)))}", file=sys.stderr)
+    if client.observed_requests:
+        print(f"[stream] saw {len(client.observed_requests)} server request(s) on this "
+              f"observer socket and answered none: "
+              f"{', '.join(sorted(set(client.observed_requests)))}. Receiving these here "
+              f"means App Server fans requests to non-owner clients.", file=sys.stderr)
     if failed:
         raise SystemExit(1)
 
