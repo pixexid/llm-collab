@@ -2518,14 +2518,19 @@ class SessionAutobridgeTest(unittest.TestCase):
                               capture_output=True, check=True)
         return json.loads(done.stdout.split("\n\n", 1)[0]), done.stderr
 
-    def scoped_subscriber_workspace(self, *, subscriber_repo_targets):
+    def scoped_subscriber_workspace(self, *, subscriber_repo_targets, claude_ax_app=None):
         """A claude session bound to CHAT-SCOPE1, optionally declaring a repo scope."""
         root = self.make_workspace()
         for agent in ("codex", "claude"):
+            activation = {"type": "cli_session", "watcher_enabled": True}
+            if agent == "claude" and claude_ax_app:
+                # The real shape that makes this a doorbell target: a cli_session recipient with an
+                # explicit activation.ax_app. Codex reproduced the wrong-wake with exactly this.
+                activation["ax_app"] = claude_ax_app
             self.add_agent(root, {
                 "id": agent,
                 "display_name": agent.title(),
-                "activation": {"type": "cli_session", "watcher_enabled": True},
+                "activation": activation,
             })
         chat_dir = self.create_chat(
             root,
@@ -2551,6 +2556,75 @@ class SessionAutobridgeTest(unittest.TestCase):
     # deliver.py resolved the target session without ever running repo_scope_matches against it.
     # The three cases below are the contract, not a new rule: fail-closed for a scoped subscriber
     # with an empty packet scope, accept a declared subset, and leave unscoped acceptance alone.
+
+    # --- a scope refusal is TERMINAL: no lane may wake the recipient ------------------------
+    #
+    # Every wake lane was gated on `not autobridge_ready`, which means "autobridge cannot take it,
+    # try another way to wake them". Setting that flag for a scope refusal therefore turned a silent
+    # drop into a WRONG WAKE: the refused packet raised ax_doorbell_required with a prompt telling
+    # the recipient to go read it. The scope contract says this packet does not reach this
+    # subscriber by ANY lane.
+
+    WAKE_FLAGS = ("ax_doorbell_required", "ax_attended_recovery_required",
+                  "desktop_bridge_required", "operator_relay_required")
+    WAKE_PROMPTS = ("ax_doorbell_prompt", "ax_attended_recovery_prompt", "desktop_bridge_prompt")
+
+    def test_a_scope_refusal_wakes_the_recipient_by_no_lane_at_all(self):
+        """Codex's reproduction: scoped cli_session + activation.ax_app, empty packet scope."""
+        root, _chat_dir = self.scoped_subscriber_workspace(
+            subscriber_repo_targets=["llm-collab"], claude_ax_app="Claude")
+        payload, stderr = self.deliver_with_scope(root, "CHAT-SCOPE1")
+        self.assertFalse(payload["autobridge_ready"])
+        self.assertEqual("route_ambiguous", payload["autobridge_refusal_reason"])
+        for flag in self.WAKE_FLAGS:
+            self.assertFalse(payload.get(flag),
+                             f"{flag} must be false for a refused packet, got {payload.get(flag)!r}")
+        for prompt in self.WAKE_PROMPTS:
+            self.assertIsNone(payload.get(prompt),
+                              f"{prompt} must be null, got {payload.get(prompt)!r}")
+        self.assertIn("RUNTIME DISPATCH REFUSED", stderr)
+
+    def test_the_same_agent_shape_DOES_get_a_doorbell_when_scope_matches(self):
+        """Otherwise the test above would pass by disabling the doorbell entirely."""
+        root, _chat_dir = self.scoped_subscriber_workspace(
+            subscriber_repo_targets=["llm-collab"], claude_ax_app="Claude")
+        payload, _stderr = self.deliver_with_scope(root, "CHAT-SCOPE1",
+                                                  repo_targets="llm-collab")
+        self.assertTrue(payload["autobridge_ready"])
+        self.assertFalse(payload["ax_doorbell_required"],
+                         "a dispatchable packet needs no doorbell either -- autobridge has it")
+
+    def test_an_ax_app_recipient_with_no_live_session_still_gets_its_doorbell(self):
+        """The lane must remain reachable for its real purpose: no session bound at all.
+
+        This is the control that proves the gate is narrow. If this ever goes false, the fix has
+        broken the doorbell rather than confined it to non-refusal cases.
+        """
+        root = self.make_workspace()
+        for agent, activation in (
+            ("codex", {"type": "cli_session", "watcher_enabled": True}),
+            ("claude", {"type": "cli_session", "watcher_enabled": True, "ax_app": "Claude"}),
+        ):
+            self.add_agent(root, {"id": agent, "display_name": agent.title(),
+                                  "activation": activation})
+        self.create_chat(root, chat_dir_name="2026-07-25_no-session__CHAT-NOSESS",
+                         chat_id="CHAT-NOSESS", project_id="amiga")
+        payload, _stderr = self.deliver_with_scope(root, "CHAT-NOSESS")
+        self.assertFalse(payload["autobridge_ready"])
+        self.assertTrue(payload["ax_doorbell_required"],
+                        "with no bound session there is nothing to refuse, so the doorbell stands")
+        self.assertIsNotNone(payload["ax_doorbell_prompt"])
+
+    def test_no_wake_lane_re_derives_the_flag_it_must_not_use(self):
+        """Structural: five lanes each gated on `not autobridge_ready` is five chances to miss one.
+
+        They now share one predicate, so a lane added later cannot quietly opt out by writing the
+        old condition again.
+        """
+        source = (REPO_ROOT / "bin" / "deliver.py").read_text(encoding="utf-8")
+        self.assertNotIn("        and not autobridge_ready\n", source,
+                         "a wake lane is gating on autobridge_ready directly again")
+        self.assertGreaterEqual(source.count("and wake_fallback_allowed"), 5)
 
     def test_scoped_subscriber_refuses_an_empty_packet_scope(self):
         root, _chat_dir = self.scoped_subscriber_workspace(

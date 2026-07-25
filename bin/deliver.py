@@ -439,6 +439,7 @@ def main():
     # reporting autobridge_ready here without applying the SAME rule is what let 27 packets be
     # written, reported as ready, and never delivered. This adds no second routing rule -- it runs
     # the existing one early so the sender is told the truth.
+    dispatch_scope_refused = False
     if autobridge_ready:
         routable, scope_reason = repo_scope_matches(
             autobridge_target.get("repo_targets"),
@@ -449,6 +450,17 @@ def main():
         if not routable:
             autobridge_ready = False
             autobridge_refusal_reason = scope_reason
+            # TERMINAL, not merely "autobridge cannot take it". Every wake lane below is gated on
+            # `not autobridge_ready`, which means "fall back to another way of waking them" -- so
+            # reusing that flag for a scope refusal turned a silent drop into a WRONG WAKE: a
+            # refused packet raised ax_doorbell_required with a prompt telling the recipient to go
+            # read it. The scope contract says this packet does not reach this subscriber at all,
+            # by any lane, so the refusal has to be its own state.
+            dispatch_scope_refused = True
+
+    # One predicate for every wake lane, so a refusal cannot reach any of them and a lane added
+    # later cannot silently miss the gate by re-deriving `not autobridge_ready` on its own.
+    wake_fallback_allowed = not autobridge_ready and not dispatch_scope_refused
 
     body = read_body(args.body_file)
     recipient_agent = get_agent(args.recipient)
@@ -491,7 +503,7 @@ def main():
     # can fail closed pre-write.
     ax_doorbell_required = (
         args.recipient != "operator"
-        and not autobridge_ready
+        and wake_fallback_allowed
         and is_ax_doorbell_target(
             recipient_agent,
             args.recipient,
@@ -588,7 +600,7 @@ def main():
             )
     ax_attended_recovery_required = (
         args.recipient != "operator"
-        and not autobridge_ready
+        and wake_fallback_allowed
         and is_ax_attended_recovery_target(
             recipient_agent,
             args.recipient,
@@ -605,7 +617,7 @@ def main():
     desktop_bridge_required = (
         args.recipient != "operator"
         and not thread_coordination_required
-        and not autobridge_ready
+        and wake_fallback_allowed
         and not ax_doorbell_required
         and not ax_attended_recovery_required
         and is_claude_desktop_bridge_target(args.project, recipient_agent, args.recipient)
@@ -618,7 +630,7 @@ def main():
     operator_relay_required = (
         args.recipient != "operator"
         and not thread_coordination_required
-        and not autobridge_ready
+        and wake_fallback_allowed
         and not desktop_bridge_required
         and not ax_doorbell_required
         and not ax_attended_recovery_required
@@ -627,7 +639,7 @@ def main():
     activation_unavailable = (
         args.recipient != "operator"
         and not thread_coordination_required
-        and not autobridge_ready
+        and wake_fallback_allowed
         and not desktop_bridge_required
         and not ax_doorbell_required
         and not ax_attended_recovery_required
