@@ -37,6 +37,10 @@ import _session_autobridge as autobridge
 from _helpers import ROOT
 
 DEFAULT_IDLE_TIMEOUT_SECONDS = 5
+# Cumulative budgets over an untrusted bindings tree. Exceeding either fails closed with a
+# message naming the limit, rather than consuming unbounded CPU or memory first.
+MAX_SCANNED_CHATS = 2000
+MAX_BINDING_BYTES = 64 * 1024
 BINDINGS_DIR = ROOT / "State" / "session_autobridge" / "bindings"
 
 
@@ -87,7 +91,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--project", help="Project id (with --agent)")
     p.add_argument("--chat", help="Chat id, or 'last' for the newest binding (with --agent)")
     p.add_argument("--thread", help="Exact runtime thread id, bypassing binding lookup")
-    p.add_argument("--runtime-home", default="/Users/pixexid/.codex", help="CODEX_HOME to discover")
+    # NO default. Discovery matches CODEX_HOME exactly, so defaulting to one author's home
+    # made this work on exactly one machine: any binding under a custom or secondary
+    # CODEX_HOME either found no endpoint or connected to the wrong server. The selected
+    # binding already records the right home; this flag is an explicit override only.
+    p.add_argument("--runtime-home", help="Override the CODEX_HOME to discover (default: the "
+                                         "selected binding's own runtime_home)")
     p.add_argument("--seconds", type=float, help="Stop after this long (default: until Ctrl-C)")
     p.add_argument("--raw", action="store_true", help="Print every notification as JSON")
     return p.parse_args()
@@ -123,79 +132,137 @@ def record_matches_path(record: dict, path: Path, agent: str) -> bool:
     )
 
 
-def resolve_thread(args: argparse.Namespace) -> tuple[str, str]:
-    """Return (thread_id, provenance). Exact bindings only -- never a heuristic guess."""
+def registered_project_ids() -> set[str]:
+    """Project ids from projects.json, so an unregistered directory cannot be watched."""
+    try:
+        payload = json.loads((ROOT / "projects.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return set()
+    projects = payload.get("projects")
+    if not isinstance(projects, list):
+        return set()
+    return {str(p["id"]) for p in projects if isinstance(p, dict) and p.get("id")}
+
+
+def resolve_thread(args: argparse.Namespace) -> tuple[str, str, str | None]:
+    """Return (thread_id, provenance, runtime_home) for ONE registered project's binding.
+
+    Cross-project selection is not an opt-in ambiguity mode. It used to be: omitting
+    --project enumerated every project directory, so `--chat last` could select a worker
+    thread belonging to a different project, and a supplied project was never checked
+    against projects.json at all -- a fabricated or stale directory was accepted on the
+    strength of existing.
+    """
     if args.thread:
-        return args.thread, "--thread"
+        return args.thread, "--thread", args.runtime_home
 
     if not args.agent:
-        raise SystemExit("[error] pass --thread, or --agent with --project/--chat")
+        raise SystemExit("[error] pass --thread, or --agent with --project")
 
-    # Every supplied selector narrows the search independently, and is used as a LITERAL
-    # path segment. Two bugs lived here in turn: --chat was ignored unless --project came
-    # with it, so a named chat silently searched every chat; then the fix interpolated the
-    # selectors into a glob pattern, where `CHAT-[A]` became a character class matching
-    # CHAT-A and `--project '*'` matched every project. A selector is a name, not a
-    # pattern, so only OMITTED levels are enumerated.
-    def children(directory: Path) -> list[str]:
-        try:
-            return sorted(d.name for d in directory.iterdir() if d.is_dir())
-        except OSError:
-            return []
-
-    # `is not None` distinguishes NOT SUPPLIED from SUPPLIED EMPTY. Under truthiness,
-    # `--chat ""` skipped validation and fell through to "every chat" -- a supplied selector
-    # silently dropped, which is the original defect of this function wearing a third face.
+    # Every supplied selector is a LITERAL path segment. Three bugs lived here in turn:
+    # --chat ignored unless --project came with it; then the fix interpolated selectors into
+    # a glob, where `CHAT-[A]` became a character class; then `--chat ""` fell through to
+    # every chat. A selector is one name -- asserted once, up front, for all fields.
     agent = one_path_component(args.agent, field="agent")
-    if args.project is not None:
-        one_path_component(args.project, field="project")
-    # `last` is the one reserved control value; every other chat selector is a name.
+    if args.project is None:
+        raise SystemExit(
+            "[error] --project is required: this watches one project's worker, and "
+            "enumerating every project could select a thread you did not name"
+        )
+    project = one_path_component(args.project, field="project")
+    registered = registered_project_ids()
+    if registered and project not in registered:
+        raise SystemExit(
+            f"[error] project {project!r} is not registered in projects.json "
+            f"(known: {', '.join(sorted(registered))})"
+        )
     if args.chat is not None and args.chat != "last":
         one_path_component(args.chat, field="chat")
 
     chat_named = args.chat is not None and args.chat != "last"
-    projects = [args.project] if args.project is not None else children(BINDINGS_DIR)
-    candidates: list[Path] = []
-    for project in projects:
-        project_dir = BINDINGS_DIR / project
-        chats = [args.chat] if chat_named else children(project_dir)
-        for chat in chats:
-            candidate = project_dir / chat / f"{agent}.json"
-            if candidate.is_file():
-                candidates.append(candidate)
-    candidates.sort()
+    project_dir = BINDINGS_DIR / project
+
+    if chat_named:
+        candidates = [project_dir / args.chat / f"{agent}.json"]
+    else:
+        # One cumulative budget over an untrusted directory: a workspace with very many
+        # entries would otherwise sort and stat all of them before the ambiguity check.
+        candidates = []
+        try:
+            entries = sorted(d for d in project_dir.iterdir() if d.is_dir())
+        except OSError:
+            entries = []
+        if len(entries) > MAX_SCANNED_CHATS:
+            raise SystemExit(
+                f"[error] {len(entries)} chat directories under {project!r} exceeds the "
+                f"{MAX_SCANNED_CHATS} scan budget; name one with --chat"
+            )
+        candidates = [d / f"{agent}.json" for d in entries]
 
     bindings = []
     for path in candidates:
-        if not path.exists():
+        if not path.is_file():
             continue
+        # A candidate that EXISTS but cannot be read or validated is a lookup failure, never
+        # a skip. Silently discarding one can leave a partial set that looks unambiguous, so
+        # a concurrent non-atomic write to a sibling binding could suppress the refusal and
+        # get the remaining thread watched.
         try:
-            record = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        if not isinstance(record, dict) or not record.get("runtime_session_id"):
-            continue
-        # A record at the expected path is not proof of what the record IS. One claiming
-        # a different project/chat/agent was admitted on its claims alone and its thread
-        # watched, which crosses a project boundary rather than mislabelling a heading.
-        if not record_matches_path(record, path, args.agent):
+            raw = path.read_bytes()
+        except OSError as error:
+            raise SystemExit(f"[error] cannot read candidate binding {path}: {error}")
+        if len(raw) > MAX_BINDING_BYTES:
+            raise SystemExit(
+                f"[error] binding {path} is {len(raw)} bytes, over the "
+                f"{MAX_BINDING_BYTES} limit; refusing to parse it"
+            )
+        try:
+            record = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise SystemExit(f"[error] candidate binding {path} is unreadable: {error}")
+        if not isinstance(record, dict):
+            raise SystemExit(f"[error] candidate binding {path} is not a JSON object")
+        if not record_matches_path(record, path, agent):
+            raise SystemExit(
+                f"[error] binding {path} claims "
+                f"{record.get('project_id')}/{record.get('chat_id')}/{record.get('agent_id')}, "
+                "which is not where it lives"
+            )
+        if not record.get("runtime_session_id"):
             continue
         bindings.append((record, path))
 
     if not bindings:
-        raise SystemExit(f"[error] no binding with a runtime_session_id for agent {args.agent!r}")
+        raise SystemExit(
+            f"[error] no binding with a runtime_session_id for agent {agent!r} in {project!r}"
+        )
 
-    # An ambiguous --agent lookup must not silently watch one of several threads.
     active = [b for b in bindings if b[0].get("status") == "active"]
     chosen = active or bindings
     if len(chosen) > 1 and args.chat != "last":
         names = "\n  ".join(f"{b[0].get('project_id')}/{b[0].get('chat_id')}" for b in chosen)
         raise SystemExit(
-            f"[error] {len(chosen)} bindings match agent {args.agent!r}; name one with "
-            f"--project/--chat, or pass --chat last:\n  {names}"
+            f"[error] {len(chosen)} bindings match agent {agent!r} in {project!r}; name one "
+            f"with --chat, or pass --chat last:\n  {names}"
         )
     record, path = max(chosen, key=lambda b: str(b[0].get("updated_utc") or ""))
-    return str(record["runtime_session_id"]), f"{record.get('project_id')}/{record.get('chat_id')}"
+    # The binding's own home wins unless explicitly overridden: discovery matches it exactly.
+    runtime_home = args.runtime_home or record.get("runtime_home")
+    return (str(record["runtime_session_id"]),
+            f"{record.get('project_id')}/{record.get('chat_id')}",
+            str(runtime_home) if runtime_home else None)
+
+
+def elide(value: object, limit: int = 160) -> str:
+    """Shorten for display, but never let a shortened value look complete.
+
+    A command or path cut at the limit still read like the whole thing, which can hide the
+    distinguishing -- or destructive -- suffix of what a worker is actually running.
+    """
+    text = str(value)
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit]}… [+{len(text) - limit} chars truncated]"
 
 
 def describe(method: str, params: dict) -> str | None:
@@ -212,9 +279,9 @@ def describe(method: str, params: dict) -> str | None:
         item = params.get("item", {})
         kind = item.get("type", "item")
         if kind == "commandExecution":
-            return f"  $ {str(item.get('command', ''))[:160]}"
+            return f"  $ {elide(item.get('command', ''))}"
         if kind == "fileChange":
-            return f"  edit {str(item.get('path', ''))[:160]}"
+            return f"  edit {elide(item.get('path', ''))}"
         return f"  {kind} started"
     if method == "item/completed":
         item = params.get("item", {})
@@ -232,13 +299,18 @@ def describe(method: str, params: dict) -> str | None:
 
 def main() -> None:
     args = parse_args()
-    thread_id, provenance = resolve_thread(args)
+    thread_id, provenance, runtime_home = resolve_thread(args)
+    if not runtime_home:
+        raise SystemExit(
+            "[error] the selected binding records no runtime_home, and none was supplied. "
+            "Pass --runtime-home explicitly, or re-register the session with one."
+        )
 
-    endpoint = autobridge.discover_codex_app_server(args.runtime_home)
+    endpoint = autobridge.discover_codex_app_server(runtime_home)
     if endpoint is None:
         raise SystemExit(
             "[error] no Codex App Server endpoint found for CODEX_HOME "
-            f"{args.runtime_home}. Start the sidecar: "
+            f"{runtime_home}. Start the sidecar: "
             "python bin/pm2_watchers.py start --agent codex-appserver"
         )
 
