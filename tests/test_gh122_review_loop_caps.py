@@ -614,11 +614,21 @@ class ReviewLoopCapContractTest(unittest.TestCase):
         reading "Still unresolved: <url>" close a thread. A mention is not a closure,
         and prose is not a protocol.
         """
+        # `isResolved` is METADATA, not adjudication. It never removes a thread from an
+        # output: a thread someone clicked Resolve on with nothing recorded is still an
+        # arriving finding that owes a written outcome, and dropping it from both counts is
+        # the one way to lose one silently. Origin and current-head are classified
+        # mechanically; whether a written disposition closed anything stays a human
+        # judgement and is deliberately not computed here.
+        at_head = [t for t in threads if self.originating_commit_oid(t) == head_oid]
         return {
-            "exact_head_findings": len([
-                t for t in threads
-                if not t["isResolved"] and self.originating_commit_oid(t) == head_oid
-            ]),
+            # Every finding raised at this head, whatever its resolution state.
+            "exact_head_findings": len(at_head),
+            # Reported alongside rather than instead of: the gate needs to know which of
+            # them are still open, and the human needs to know the total it must account
+            # for in writing.
+            "exact_head_unresolved": len([t for t in at_head if not t["isResolved"]]),
+            "arriving_total": len(threads),
             "unresolved_total": len([t for t in threads if not t["isResolved"]]),
         }
 
@@ -738,7 +748,11 @@ class ReviewLoopCapContractTest(unittest.TestCase):
             node(None, "head999", "head999", resolved=False, outdated=False),
         ]
         actual = self.classify(threads, "head999")
-        self.assertEqual(2, actual["exact_head_findings"])
+        # Three findings ARRIVED at this head; two are still open. The resolved one is
+        # counted, because `isResolved` is metadata and a thread someone closed with
+        # nothing recorded still owes a written outcome.
+        self.assertEqual(3, actual["exact_head_findings"])
+        self.assertEqual(2, actual["exact_head_unresolved"])
         self.assertEqual(3, actual["unresolved_total"])
         self.assertEqual("old111", self.originating_commit_oid(threads[0]))
         self.assertEqual("head999", self.originating_commit_oid(threads[3]))
@@ -903,7 +917,8 @@ class ReviewLoopCapContractTest(unittest.TestCase):
             self.strict_thread("head999", resolved=False, decorated=False, backed=False),
         ]
         baseline = self.classify(plain, "head999")
-        self.assertEqual(2, baseline["exact_head_findings"])
+        self.assertEqual(3, baseline["exact_head_findings"])
+        self.assertEqual(2, baseline["exact_head_unresolved"])
         self.assertEqual(3, baseline["unresolved_total"])
 
         decorated = [
@@ -1047,6 +1062,44 @@ class ReviewLoopCapContractTest(unittest.TestCase):
                 # And the corollary the supersession rule must not swallow: a re-review is
                 # still completable by a reaction on its own request.
                 self.assertIn("does **not** disable the reaction path", text)
+
+    def test_resolution_state_never_removes_a_thread_from_an_output(self):
+        """`isResolved` is metadata, not adjudication.
+
+        Filtering both outputs on it meant a thread someone clicked Resolve on with nothing
+        recorded appeared in neither -- so the gate could not see it and the human had no
+        total to account for. That is the silent-loss path the whole section exists to
+        close, and the classifier modelling it was the last place it survived.
+        """
+        def node(oid, resolved):
+            return {
+                "isResolved": resolved,
+                "isOutdated": False,
+                "comments": {"nodes": [{
+                    "commit": {"oid": "MUTABLE-MUST-NOT-BE-READ"},
+                    "originalCommit": {"oid": oid},
+                    "pullRequestReview": {"commit": {"oid": oid}},
+                }]},
+            }
+
+        threads = [node("head999", True), node("head999", False), node("old111", True)]
+        actual = self.classify(threads, "head999")
+        self.assertEqual(
+            3, actual["arriving_total"],
+            "every arriving finding is counted, whatever its resolution state",
+        )
+        self.assertEqual(
+            2, actual["exact_head_findings"],
+            "a resolved thread raised at this head is still a finding at this head",
+        )
+        self.assertEqual(1, actual["exact_head_unresolved"])
+        self.assertEqual(1, actual["unresolved_total"])
+
+        # The load-bearing property, stated as a difference: resolving everything must not
+        # empty the enumeration.
+        all_resolved = self.classify([node("head999", True), node("head999", True)], "head999")
+        self.assertEqual(2, all_resolved["exact_head_findings"])
+        self.assertEqual(0, all_resolved["exact_head_unresolved"])
 
     def test_the_reviewed_artifact_set_is_written_exactly_once(self):
         """Nine sites had drifted into five spellings; four omitted reactions and three
