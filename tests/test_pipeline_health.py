@@ -413,6 +413,92 @@ class PipelineHealthTest(unittest.TestCase):
         )
         self.assertEqual(0, code)
 
+    def test_no_report_carries_an_aggregate_verdict(self) -> None:
+        """Dropping the exit gate while keeping the roll-up moved the verdict, not removed it.
+
+        `report["status"] == "ok"` reads as permission to send however the exit code
+        behaves, so there is no report-wide `status` at all -- only the worst single
+        observation, named as such.
+        """
+        root = self.workspace()
+        self.add_session(root, "SESSION-LIVE", lease_delta=3600)
+        self.add_binding(root, "SESSION-LIVE")
+        for args in (
+            ("--project", "amiga", "--chat", "CHAT-HEALTH", "--agent", "cdx2"),
+            ("--agent", "cdx2"),
+        ):
+            with self.subTest(args=args):
+                _, payload = self.run_presend(root, *args)
+                self.assertNotIn("status", payload)
+                self.assertNotIn("status", payload["agents"][0])
+                self.assertIn("worst_observation", payload["agents"][0])
+
+    def test_an_unregistered_project_is_refused_before_the_lookup(self) -> None:
+        """`deliver.py` refuses at `ensure_project` before it resolves a chat.
+
+        Binding resolution took the CLI project on trust, so a typo -- or stale state for a
+        removed project -- could resolve a live pair under an ID the workspace does not
+        register and be reported as an ordinary observation.
+        """
+        root = self.workspace()
+        self.add_session(root, "SESSION-LIVE", lease_delta=3600)
+        self.add_binding(root, "SESSION-LIVE")
+        _, payload = self.run_presend(
+            root, "--project", "amigo", "--chat", "CHAT-HEALTH", "--agent", "cdx2")
+        project = self.presend_checks(payload)["project"]
+        self.assertEqual(FAIL, project["status"])
+        self.assertIn("not in projects.json", project["detail"])
+
+    def test_inventory_mode_validates_the_agent_too(self) -> None:
+        """Only exact mode checked the recipient, so a disabled agent read as dispatchable."""
+        root = self.workspace()
+        agents_path = root / "agents.json"
+        agents = json.loads(agents_path.read_text())
+        agents["agents"][0]["disabled"] = True
+        write_json(agents_path, agents)
+        self.add_session(root, "SESSION-LIVE", lease_delta=3600)
+        _, payload = self.run_health(root)
+        self.assertEqual(FAIL, self.check(payload, "agent")["status"])
+
+    def test_a_chat_whose_only_sessions_are_dead_is_not_called_unbound(self) -> None:
+        """Two different facts were reported as one.
+
+        A packet for a chat whose only registered session is expired is not "a chat with no
+        session" -- and folding it into that note hid it entirely whenever some other chat
+        had a live session.
+        """
+        root = self.workspace()
+        self.add_session(root, "SESSION-LIVE", lease_delta=3600)
+        path = root / "State" / "session_autobridge" / "sessions" / "SESSION-DEADCHAT.json"
+        write_json(path, {
+            "session_id": "SESSION-DEADCHAT", "agent_id": "cdx2", "project_id": "amiga",
+            "chat_id": "CHAT-OTHER", "status": "active", "mode": "auto-read",
+            "wake_strategy": "runtime_trigger", "repo_targets": ["app"],
+            "lease_expires_utc": iso(-600),
+            "runtime": {"family": "gemini_cli", "session_id": "SESSION-DEADCHAT-runtime"},
+            "processed_messages": [],
+        })
+        rel = "Chats/2026-07-26_o__CHAT-OTHER/2026-07-26T00-00-00_to-cdx2_p.md"
+        packet = root / rel
+        packet.parent.mkdir(parents=True, exist_ok=True)
+        packet.write_text("\n".join([
+            "---", "chat_id: CHAT-OTHER", "from: claude", "to: cdx2", "title: packet",
+            "priority: normal", "project_id: amiga", 'repo_targets: ["app"]',
+            "target_session_id: SESSION-DEADCHAT-runtime",
+            "sent_utc: 2026-07-26T00:00:00+00:00", "---", "", "Body.",
+        ]), encoding="utf-8")
+        write_json(root / "Chats" / packet.parent.name / "meta.json",
+                   {"chat_id": "CHAT-OTHER", "project_id": "amiga"})
+        inbox_path = root / "agents" / "cdx2" / "inbox.json"
+        inbox = json.loads(inbox_path.read_text())
+        inbox["unread"].append(rel)
+        write_json(inbox_path, inbox)
+
+        _, payload = self.run_health(root)
+        backlog = self.check(payload, "backlog")
+        self.assertIn("CHAT-OTHER", backlog.get("dead_chats", []))
+        self.assertIn("expired or\nstopped".replace("\n", " "), backlog["detail"])
+
     def test_a_second_project_is_observed_independently(self) -> None:
         """Every other case in this file is built on `amiga` alone.
 
@@ -476,7 +562,7 @@ class PipelineHealthTest(unittest.TestCase):
             root, "--agent", "cdx2", "--project", "amiga", "--chat", "CHAT-NOT-BOUND")
         report = payload["agents"][0]
         self.assertEqual(0, code, report)
-        self.assertEqual(FAIL, report["status"])
+        self.assertEqual(FAIL, report["worst_observation"])
         pair = next(c for c in report["checks"] if c["check"] == "exact-pair")
         self.assertEqual("fail", pair["status"])
         self.assertIn("not evidence", pair["detail"])
@@ -504,7 +590,7 @@ class PipelineHealthTest(unittest.TestCase):
         self.add_session(root, "SESSION-DEAD", lease_delta=-60)
         code, payload = self.run_health(root)
         self.assertEqual(0, code)
-        self.assertEqual(FAIL, self.agent(payload)["status"])
+        self.assertEqual(FAIL, self.agent(payload)["worst_observation"])
         self.assertIn("lease_expired", json.dumps(payload))
 
     def test_one_live_session_is_reported_dispatchable_despite_dead_ones(self) -> None:
@@ -598,7 +684,7 @@ class PipelineHealthTest(unittest.TestCase):
         root = self.workspace()
         code, payload = self.run_health(root)
         self.assertEqual(0, code)
-        self.assertEqual(FAIL, self.agent(payload)["status"])
+        self.assertEqual(FAIL, self.agent(payload)["worst_observation"])
         self.assertIn("will not wake anything", self.check(payload, "session")["detail"])
 
     def test_the_watcher_observation_does_not_decide_dispatchability(self) -> None:
@@ -622,7 +708,7 @@ class PipelineHealthTest(unittest.TestCase):
         )
         self.assertEqual(0, code, "an observation reports; it does not gate")
         if watcher["status"] == FAIL:
-            self.assertEqual("fail", payload["status"], "still visible in the report")
+            self.assertEqual("fail", payload["agents"][0]["worst_observation"], "still visible in the report")
 
     def test_a_packet_for_an_unbound_chat_is_not_counted_as_broken(self) -> None:
         """Dispatch filters by project/chat BEFORE the target predicate.
@@ -667,6 +753,9 @@ class ActivityAndWatchTest(unittest.TestCase):
         import pipeline_health
 
         self.mod = pipeline_health
+        # The session snapshot is per RUN; in-process tests share the module, so each one
+        # starts its own run.
+        pipeline_health.reset_scan_budget()
 
     def test_activity_wording_is_not_a_health_verdict(self) -> None:
         self.assertEqual("active", self.mod.activity_shape(0))
@@ -681,6 +770,9 @@ class ActivityAndWatchTest(unittest.TestCase):
         updated = int(self.mod.now_utc().timestamp()) - age_seconds
 
         class FakeClient:
+            def set_deadline(self_inner, *a, **k):
+                return None
+
             def __enter__(self_inner):
                 return self_inner
 
@@ -688,6 +780,9 @@ class ActivityAndWatchTest(unittest.TestCase):
                 return False
 
             def notify(self_inner, *a, **k):
+                return None
+
+            def set_deadline(self_inner, *a, **k):
                 return None
 
             def request(self_inner, method, params=None):
@@ -713,6 +808,9 @@ class ActivityAndWatchTest(unittest.TestCase):
         from unittest import mock
 
         class FakeClient:
+            def set_deadline(self_inner, *a, **k):
+                return None
+
             def __enter__(self_inner):
                 return self_inner
 
@@ -720,6 +818,9 @@ class ActivityAndWatchTest(unittest.TestCase):
                 return False
 
             def notify(self_inner, *a, **k):
+                return None
+
+            def set_deadline(self_inner, *a, **k):
                 return None
 
             def request(self_inner, method, params=None):
@@ -888,6 +989,52 @@ class ActivityAndWatchTest(unittest.TestCase):
         self.assertEqual(self.mod.FAIL, check["status"])
         self.assertIn("another checkout", check["detail"])
 
+    def test_a_longer_agent_id_does_not_satisfy_a_shorter_one(self) -> None:
+        """`--me codex2` satisfied a substring search for `--me codex`.
+
+        With this checkout's absolute script path that read as OK, so inspecting the
+        shorter of two registered IDs reported the longer one's watcher as its own.
+        """
+        other = f"python3 {self.mod.ROOT / 'bin' / 'watch_inbox.py'} --me cdx2extra --json"
+        check = self.watcher_with_listing(f"/bin/zsh\n{other}\n")
+        self.assertEqual(self.mod.FAIL, check["status"])
+
+    def test_thread_list_pagination_is_followed(self) -> None:
+        """The schema paginates; reading one page reported a listed thread as absent."""
+        from unittest import mock
+
+        pages = [
+            {"data": [{"id": "other-1", "updatedAt": 0}], "nextCursor": "c1"},
+            {"data": [{"id": "thread-x", "updatedAt": int(self.mod.now_utc().timestamp())}],
+             "nextCursor": None},
+        ]
+        calls: list[object] = []
+
+        class PagingClient:
+            def __init__(self, *a, **k): pass
+            def set_deadline(self, *a, **k): pass
+            def __enter__(self): return self
+            def __exit__(self, *exc): return False
+            def notify(self, *a, **k): return None
+            def request(self, method, params=None):
+                if method == "thread/list":
+                    calls.append((params or {}).get("cursor"))
+                    return pages[len(calls) - 1]
+                return {}
+
+        with mock.patch.object(
+            self.mod, "discover_codex_app_server",
+            return_value={"url": "ws://127.0.0.1:1", "token_file": None},
+        ), mock.patch.object(
+            self.mod, "_codex_app_server_token", return_value=None
+        ), mock.patch.object(self.mod, "JsonRpcWebSocketClient", PagingClient):
+            check = self.mod._activity_check(
+                {"runtime": {"family": "codex_app", "session_id": "thread-x",
+                             "home": "/home"}}
+            )
+        self.assertEqual(self.mod.OK, check["status"], check)
+        self.assertEqual([None, "c1"], calls, "the second page was not requested")
+
     def test_a_relatively_named_watcher_is_reported_as_unattributable(self) -> None:
         """`ps` does not carry the process cwd, so a relative argument names nothing.
 
@@ -913,6 +1060,9 @@ class ActivityAndWatchTest(unittest.TestCase):
         seen: dict[str, object] = {}
 
         class FakeClient:
+            def set_deadline(self_inner, *a, **k):
+                return None
+
             def __enter__(self_inner):
                 return self_inner
 
@@ -920,6 +1070,9 @@ class ActivityAndWatchTest(unittest.TestCase):
                 return False
 
             def notify(self_inner, *a, **k):
+                return None
+
+            def set_deadline(self_inner, *a, **k):
                 return None
 
             def request(self_inner, method, params=None):
@@ -965,6 +1118,9 @@ class ActivityAndWatchTest(unittest.TestCase):
         from unittest import mock
 
         class FakeClient:
+            def set_deadline(self_inner, *a, **k):
+                return None
+
             def __enter__(self_inner): return self_inner
             def __exit__(self_inner, *exc): return False
             def notify(self_inner, *a, **k): return None
@@ -999,9 +1155,11 @@ class ActivityAndWatchTest(unittest.TestCase):
 
         class RecordingClient:
             def __init__(self, url, token=None, timeout_seconds=None,
-                         server_request_policy=None):
+                         server_request_policy=None, max_frame_bytes=None):
                 captured["policy"] = server_request_policy
+                captured["max_frame_bytes"] = max_frame_bytes
 
+            def set_deadline(self, *a, **k): captured["deadline_set"] = True
             def __enter__(self): return self
             def __exit__(self, *exc): return False
             def notify(self, *a, **k): return None
@@ -1020,6 +1178,31 @@ class ActivityAndWatchTest(unittest.TestCase):
             self.mod.SERVER_REQUEST_IGNORE, captured["policy"],
             "the refuse default sends an error frame and can abort operator work",
         )
+        # The probe reads another process's output -- genuinely input we do not control --
+        # so it carries a frame ceiling and one absolute deadline rather than a per-read
+        # timeout a peer can renew forever by trickling bytes.
+        self.assertEqual(self.mod.PROBE_MAX_FRAME_BYTES, captured["max_frame_bytes"])
+        self.assertTrue(captured.get("deadline_set"), "no absolute deadline was installed")
+
+    def test_an_exact_mode_scan_refusal_is_not_reported_as_an_observation(self) -> None:
+        """A refused snapshot means the observation could not be made.
+
+        Swallowing it into an `exact-pair` finding produced exit 0 for a check that never
+        ran -- the one thing the exit status is defined to report.
+        """
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            for index in range(12):
+                (directory / f"sess_{index}.json").write_text("{}", encoding="utf-8")
+            with mock.patch.object(self.mod, "SESSIONS_DIR", directory), \
+                    mock.patch.object(self.mod, "SESSION_SCAN_LIMIT", 5):
+                self.mod.reset_scan_budget()
+                with self.assertRaises(RuntimeError):
+                    self.mod.target_report(
+                        "amiga", "CHAT-HEALTH", "cdx2", min_lease_seconds=1800
+                    )
 
     def test_a_jsonrpc_error_degrades_to_warn_rather_than_crashing(self) -> None:
         """request() raises RuntimeError for an error reply; it escaped the whole preflight."""
@@ -1027,6 +1210,7 @@ class ActivityAndWatchTest(unittest.TestCase):
 
         class ErroringClient:
             def __init__(self, *a, **k): pass
+            def set_deadline(self, *a, **k): pass
             def __enter__(self): return self
             def __exit__(self, *exc): return False
             def notify(self, *a, **k): return None
@@ -1053,6 +1237,7 @@ class ActivityAndWatchTest(unittest.TestCase):
             with self.subTest(result=bad):
                 class OddClient:
                     def __init__(self, *a, **k): pass
+                    def set_deadline(self, *a, **k): pass
                     def __enter__(self): return self
                     def __exit__(self, *exc): return False
                     def notify(self, *a, **k): return None

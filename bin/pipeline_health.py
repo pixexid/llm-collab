@@ -44,9 +44,18 @@ import argparse
 import json
 import os
 import subprocess
+import time
 
 sys.path.insert(0, str(Path(__file__).parent))
-from _helpers import ROOT, agent_ids, get_agent, is_agent_disabled, load_agent_inbox, parse_frontmatter
+from _helpers import (
+    ROOT,
+    agent_ids,
+    get_agent,
+    is_agent_disabled,
+    load_agent_inbox,
+    load_projects,
+    parse_frontmatter,
+)
 from _session_autobridge import (
     BindingUnreadable,
     SERVER_REQUEST_IGNORE,
@@ -109,8 +118,27 @@ def _bounded_session_paths() -> list[Path]:
     return sorted(paths)
 
 
+_SESSION_SNAPSHOT: list[dict] | None = None
+
+
+def reset_scan_budget() -> None:
+    """Start a fresh run. The snapshot is per invocation, not per process."""
+    global _SESSION_SNAPSHOT
+    _SESSION_SNAPSHOT = None
+
+
+
 def _bounded_sessions() -> list[dict]:
-    """One bounded snapshot, shared by the inventory and the exact resolver."""
+    """One bounded snapshot per run, shared by the inventory and the exact resolver.
+
+    Each `agent_report()` used to start a fresh budget, so `--all` rescanned and reparsed
+    the same directory once per agent and each target independently permitted another full
+    backlog -- the ceiling multiplied by the number of registered agents. Scanned once and
+    reused, so the bound is the run's.
+    """
+    global _SESSION_SNAPSHOT
+    if _SESSION_SNAPSHOT is not None:
+        return _SESSION_SNAPSHOT
     sessions: list[dict] = []
     for path in _bounded_session_paths():
         try:
@@ -119,6 +147,7 @@ def _bounded_sessions() -> list[dict]:
             continue
         if session:
             sessions.append(session)
+    _SESSION_SNAPSHOT = sessions
     return sessions
 
 
@@ -224,6 +253,15 @@ def _endpoint_check(session: dict) -> dict:
 
 # Mirrors execute_codex_app_server_trigger exactly. A probe that negotiates differently
 # from the dispatcher is observing a different connection than the one that matters.
+PROBE_DEADLINE_SECONDS = 20
+# Pages, not entries: a peer that always returns a cursor would otherwise page forever
+# inside one observation.
+THREAD_LIST_MAX_PAGES = 50
+# The app server is another process's output. Declared locally rather than imported
+# because the dispatcher's own ceiling lands on the branch in llm-collab#316; the values
+# match deliberately and should become one constant once that merges.
+PROBE_MAX_FRAME_BYTES = 16 * 1024 * 1024
+
 CODEX_APP_SERVER_INITIALIZE_PARAMS = {
     "protocolVersion": "2024-11-05",
     "clientInfo": {"name": "llm-collab-session-autobridge", "version": "0.0.0"},
@@ -266,12 +304,18 @@ def _activity_check(session: dict) -> dict:
         # answers first -- so a "read-only" probe would abort work the operator started
         # in the desktop app. codex_stream.py carries the same contract for the same
         # reason. Observation must emit nothing at all.
+        # The app server is another process's output -- genuinely input we do not control,
+        # unlike this workspace. An unbounded frame length drives an equally large
+        # allocation, and a per-read timeout lets a peer trickle bytes forever, so the
+        # probe carries the dispatcher's frame ceiling and one absolute deadline.
         with JsonRpcWebSocketClient(
             str(endpoint["url"]),
             token=token,
             timeout_seconds=20,
             server_request_policy=SERVER_REQUEST_IGNORE,
+            max_frame_bytes=PROBE_MAX_FRAME_BYTES,
         ) as client:
+            client.set_deadline(time.monotonic() + PROBE_DEADLINE_SECONDS)
             stage = "initialize"
             # The dispatcher's payload, not a second protocol shape. A weaker probe can be
             # accepted by a server that rejects the real handshake, or rejected by one that
@@ -280,7 +324,24 @@ def _activity_check(session: dict) -> dict:
             client.request("initialize", CODEX_APP_SERVER_INITIALIZE_PARAMS)
             client.notify("initialized")
             stage = "thread/list"
-            listed = client.request("thread/list", {})
+            # Paginated: an empty request takes a server-selected page size, and a non-null
+            # nextCursor means more remain. Reading only the first page reported an older
+            # registered thread as "not listed by the app-server", which is a wrong
+            # observation rather than a missing one.
+            rows, listed, pages = [], None, 0
+            cursor = None
+            while pages < THREAD_LIST_MAX_PAGES:
+                pages += 1
+                listed = client.request(
+                    "thread/list", {"cursor": cursor} if cursor else {}
+                )
+                page = listed.get("data") if isinstance(listed, dict) else None
+                if not isinstance(page, list):
+                    break
+                rows.extend(page)
+                cursor = listed.get("nextCursor") if isinstance(listed, dict) else None
+                if not cursor:
+                    break
     except (OSError, ValueError, TimeoutError, RuntimeError) as exc:
         # RuntimeError is what request() raises for a JSON-RPC error reply, so an
         # app-server answering "method not supported" used to crash the whole preflight
@@ -301,8 +362,7 @@ def _activity_check(session: dict) -> dict:
             }
         return {"check": "activity", "status": WARN,
                 "detail": f"thread probe failed: {type(exc).__name__}: {exc}"}
-    rows = listed.get("data") if isinstance(listed, dict) else None
-    if not isinstance(rows, list):
+    if not isinstance(listed, dict) or not isinstance(listed.get("data"), list):
         # Validate before indexing: a malformed result reached .get and raised.
         return {"check": "activity", "status": WARN,
                 "detail": f"thread/list returned {type(listed).__name__}, not a result object"}
@@ -343,6 +403,16 @@ def _watcher_check(agent_id: str) -> dict:
     except (OSError, subprocess.SubprocessError) as exc:
         return {"check": "watcher", "status": WARN,
                 "detail": f"could not inspect processes: {exc}"}
+    # Whole arguments, not a substring: `--me codex2` satisfied a search for `--me codex`,
+    # so inspecting the shorter of two registered IDs reported the longer one's watcher as
+    # its own -- and with this checkout's absolute script path it read as OK.
+    def polls_this_agent(line: str) -> bool:
+        parts = line.split()
+        return any(
+            part == "--me" and index + 1 < len(parts) and parts[index + 1] == agent_id
+            for index, part in enumerate(parts)
+        ) and any(part.endswith("watch_inbox.py") for part in parts)
+
     needle = f"watch_inbox.py --me {agent_id}"
     # Two ways to get this wrong, and the previous two versions each picked one. Matching
     # the basename alone counted a watcher polling a DIFFERENT checkout's mailbox as ours.
@@ -362,7 +432,7 @@ def _watcher_check(agent_id: str) -> dict:
     foreign: list[str] = []
     unattributable: list[str] = []
     for line in listing.splitlines():
-        if needle not in line:
+        if not polls_this_agent(line):
             continue
         argument = next(
             (part for part in line.split() if part.endswith("watch_inbox.py")), ""
@@ -453,6 +523,7 @@ def _backlog_check(
     reasons: dict[str, int] = {}
     undeliverable: list[str] = []
     unbound_chats: set[str] = set()
+    dead_chats: set[str] = set()
     for message in unread:
         frontmatter = message.get("frontmatter", {})
         # Mirror the prefilter dispatch applies before the target predicate. Without it
@@ -465,7 +536,19 @@ def _backlog_check(
             and session.get("chat_id") == frontmatter.get("chat_id")
         ]
         if not candidates:
-            unbound_chats.add(str(frontmatter.get("chat_id", "?")))
+            # "No session for this chat" and "only dead sessions for this chat" are
+            # different facts. Folding the second into the first hid a targeted packet for
+            # an expired session behind an "unbound chat" note whenever some OTHER chat had
+            # a live one.
+            chat = str(frontmatter.get("chat_id", "?"))
+            if any(
+                session.get("project_id") == frontmatter.get("project_id")
+                and session.get("chat_id") == frontmatter.get("chat_id")
+                for session in (all_sessions or sessions)
+            ):
+                dead_chats.add(chat)
+            else:
+                unbound_chats.add(chat)
             continue
         verdicts = [message_targets_session(session, message) for session in candidates]
         if any(matched for matched, _ in verdicts):
@@ -478,8 +561,18 @@ def _backlog_check(
     detail = f"{len(unread)} unread"
     if unbound_chats:
         detail += f", {len(unbound_chats)} chat(s) with no session registered"
+    if dead_chats:
+        detail += (
+            f", {len(dead_chats)} chat(s) whose only registered sessions are expired or "
+            "stopped"
+        )
     if not undeliverable:
-        return {"check": "backlog", "status": OK, "detail": detail}
+        return {
+            "check": "backlog",
+            "status": WARN if dead_chats else OK,
+            "dead_chats": sorted(dead_chats),
+            "detail": detail,
+        }
     breakdown = ", ".join(f"{count}x {reason}" for reason, count in sorted(reasons.items()))
     return {
         "check": "backlog",
@@ -491,6 +584,30 @@ def _backlog_check(
             f"{detail}; {len(undeliverable)} addressed to a bound chat that no session "
             f"will accept ({breakdown}). Those never dispatch; they can only be read "
             "manually or re-sent."
+        ),
+    }
+
+
+def _project_registered_check(project_id: str) -> dict:
+    """`deliver.py` refuses at `ensure_project` before it resolves a chat.
+
+    Binding resolution takes the project ID on trust, so a typo -- or stale state for a
+    removed project -- could resolve a live pair under an ID the workspace does not
+    register, and be reported as an ordinary observation.
+    """
+    try:
+        registered = {str(project["id"]) for project in load_projects()}
+    except Exception as exc:
+        return {"check": "project", "status": FAIL,
+                "detail": f"could not read the project registry: {type(exc).__name__}: {exc}"}
+    if project_id in registered:
+        return {"check": "project", "status": OK, "detail": f"project {project_id!r} is registered"}
+    return {
+        "check": "project",
+        "status": FAIL,
+        "detail": (
+            f"project {project_id!r} is not in projects.json ({sorted(registered)}); "
+            "deliver.py refuses at ensure_project before resolving the chat"
         ),
     }
 
@@ -592,7 +709,7 @@ def target_report(
     mailbox is durable-first, so `deliver.py` writes the packet either way and its result,
     with the watcher events that follow, is the authority on the outcome.
     """
-    checks: list[dict] = [_agent_enabled_check(agent_id)]
+    checks: list[dict] = [_project_registered_check(project_id), _agent_enabled_check(agent_id)]
     try:
         # The resolver falls back to an UNBOUNDED iter_sessions() when given no snapshot,
         # so the budget was absent from the one mode workers are told to trust.
@@ -604,8 +721,12 @@ def target_report(
         # meant automation got a traceback and no JSON at all -- worse than a false green,
         # because the promised diagnostic shape simply is not there.
         pair, reason = None, f"binding unreadable: {exc}"
-    except RuntimeError as exc:
-        pair, reason = None, str(exc)
+    # A scan-limit refusal is NOT an observation: the snapshot could not be produced, so
+    # there is nothing to report about the pair. Exit nonzero is defined for exactly this
+    # -- an invocation this command could not carry out -- and swallowing it into an
+    # ordinary finding produced exit 0 for a check that never ran.
+    except RuntimeError:
+        raise
     if pair is None:
         checks.append({
             "check": "exact-pair",
@@ -635,12 +756,14 @@ def target_report(
             checks.append({**check, "session_id": session["session_id"]})
 
     checks.append(_watcher_check(agent_id))
-    status = max((c["status"] for c in checks), key=lambda s: _RANK[s])
     return {
         "agent_id": agent_id,
         "project_id": project_id,
         "chat_id": chat_id,
-        "status": status,
+        # No report-wide status. An aggregate `ok` reads as permission to send however the
+        # exit code behaves, and dropping the exit gate while keeping the roll-up moved the
+        # verdict rather than removing it. Each check reports itself.
+        "worst_observation": max((c["status"] for c in checks), key=lambda s: _RANK[s]),
         "session_id": session["session_id"] if session else None,
         "checks": checks,
     }
@@ -655,10 +778,13 @@ def agent_report(agent_id: str, *, min_lease_seconds: int) -> dict:
     dispatchable session is enough to describe the lane as usable; the rest are reported
     as clutter to prune.
     """
+    # Inventory mode validated nothing about the ID, so a disabled recipient with a live
+    # session read as dispatchable and a misspelled or path-like value read as a real agent
+    # with no sessions.
+    checks: list[dict] = [_agent_enabled_check(agent_id)]
     sessions = _sessions_for(agent_id)
     live: list[dict] = []
     dead: list[dict] = []
-    checks: list[dict] = []
 
     failures: list[dict] = []
     for session in sessions:
@@ -736,10 +862,9 @@ def agent_report(agent_id: str, *, min_lease_seconds: int) -> dict:
         advisory.insert(0, {**_activity_check(session), "session_id": session["session_id"]})
     checks.extend(advisory)
 
-    status = max((c["status"] for c in checks), key=lambda s: _RANK[s])
     return {
         "agent_id": agent_id,
-        "status": status,
+        "worst_observation": max((c["status"] for c in checks), key=lambda s: _RANK[s]),
         "dispatchable_sessions": [s["session_id"] for s in live],
         "undispatchable_sessions": [s["session_id"] for s in dead],
         "checks": checks,
@@ -783,6 +908,7 @@ def main() -> int:
     )
     parser.add_argument("--json", dest="json_output", action="store_true")
     args = parser.parse_args()
+    reset_scan_budget()
 
     for name, value in (("--project", args.project), ("--chat", args.chat)):
         if value is not _UNSET and not str(value).strip():
@@ -808,11 +934,10 @@ def main() -> int:
         )
         reports = [report]
         if args.json_output:
-            print(json.dumps({"status": report["status"], "agents": reports},
-                             indent=2, sort_keys=True))
+            print(json.dumps({"agents": reports}, indent=2, sort_keys=True))
         else:
             marks = {OK: "ok  ", WARN: "WARN", FAIL: "FAIL"}
-            print(f"\n{marks[report['status']]} {args.project}/{args.chat}"
+            print(f"\n{marks[report['worst_observation']]} {args.project}/{args.chat}"
                   f" -> {report['agent_id']}")
             for check in report["checks"]:
                 where = f" [{check['session_id']}]" if check.get("session_id") else ""
@@ -837,14 +962,13 @@ def main() -> int:
         agent_report(agent, min_lease_seconds=args.min_lease_seconds)
         for agent in targets
     ]
-    worst = max((r["status"] for r in reports), key=lambda s: _RANK[s])
 
     if args.json_output:
-        print(json.dumps({"status": worst, "agents": reports}, indent=2, sort_keys=True))
+        print(json.dumps({"agents": reports}, indent=2, sort_keys=True))
     else:
         marks = {OK: "ok  ", WARN: "WARN", FAIL: "FAIL"}
         for report in reports:
-            print(f"\n{marks[report['status']]} {report['agent_id']}")
+            print(f"\n{marks[report['worst_observation']]} {report['agent_id']}")
             for check in report["checks"]:
                 where = f" [{check['session_id']}]" if "session_id" in check else ""
                 print(f"  {marks[check['status']]} {check['check']}{where}: {check['detail']}")
