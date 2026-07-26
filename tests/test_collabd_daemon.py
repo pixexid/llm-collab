@@ -88,11 +88,35 @@ class DaemonTest(unittest.TestCase):
         server = DaemonServer(self.paths, **kwargs)
         thread = threading.Thread(target=server.run)
         thread.start()
-        deadline = time.monotonic() + 2
-        while not self.paths.socket.exists() and time.monotonic() < deadline:
-            time.sleep(0.01)
-        self.assertTrue(self.paths.socket.exists())
+        self.wait_until_accepting()
         return server, thread
+
+    def wait_until_accepting(self, timeout: float = 5.0) -> None:
+        """Wait until the daemon ACCEPTS, not until its socket file appears.
+
+        `_open_listener` binds -- which creates the file -- then restores the umask,
+        chmods, stats for its identity, and only then calls listen(). Connecting inside
+        that window raises ECONNREFUSED, because a bound-but-unlistening AF_UNIX socket
+        refuses. Polling `socket.exists()` therefore returned true while the daemon was
+        still unreachable, and under full-suite load the test won the race often enough
+        to fail roughly one run in three (llm-collab#320).
+
+        Connectability is the property the tests actually need, so it is the one polled.
+        """
+        deadline = time.monotonic() + timeout
+        last: OSError | None = None
+        while time.monotonic() < deadline:
+            probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            probe.settimeout(0.5)
+            try:
+                probe.connect(os.fspath(self.paths.socket))
+                return
+            except (FileNotFoundError, ConnectionRefusedError, OSError) as exc:
+                last = exc
+                time.sleep(0.01)
+            finally:
+                probe.close()
+        self.fail(f"daemon never began accepting within {timeout}s: {last!r}")
 
     def wait_for_log(self) -> Path:
         deadline = time.monotonic() + 2
@@ -100,6 +124,92 @@ class DaemonTest(unittest.TestCase):
             time.sleep(0.01)
         self.assertTrue(self.paths.log.exists(), "daemon started log was not written")
         return self.paths.log
+
+    def test_start_survives_a_widened_bind_to_listen_window(self) -> None:
+        """The race, made deterministic instead of waited for.
+
+        Rather than run the suite until load happens to open the real bind->listen
+        window, this widens it on purpose. A readiness probe that waits for the socket
+        FILE returns during the window and the first request hits ECONNREFUSED; a probe
+        that waits for a successful connect does not.
+
+        Without this the fix was only supported by 8 consecutive green full-suite runs,
+        which under the measured 1-in-3 failure rate could happen by chance about 4% of
+        the time. This fails outright on the old probe.
+        """
+        import llm_collab.daemon.server as server_module
+
+        real_open = server_module.DaemonServer._open_listener
+
+        def slow_open(inner_self):
+            inner_self._recover_stale_socket()
+            old_mask = os.umask(0o077)
+            try:
+                listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                listener.bind(os.fspath(inner_self.paths.socket))
+            finally:
+                os.umask(old_mask)
+            # The window that exists for real -- umask restore, chmod, stat -- widened
+            # so the test does not depend on scheduling luck.
+            time.sleep(0.3)
+            os.chmod(inner_self.paths.socket, 0o600)
+            inner_self._socket_identity = server_module._identity(inner_self.paths.socket)
+            listener.listen(8)
+            listener.settimeout(0.1)
+            return listener
+
+        with patch.object(server_module.DaemonServer, "_open_listener", slow_open):
+            server, thread = self.start()
+            # The first request must land on a listening socket, not a bound one.
+            self.assertTrue(self.request(b'{"version":1,"op":"status"}')["running"])
+            self.stop(thread)
+        self.assertIs(real_open, server_module.DaemonServer._open_listener)
+
+    def test_readiness_waits_for_accept_not_for_the_socket_file(self) -> None:
+        """The race this harness had, pinned deterministically.
+
+        _open_listener() binds -- creating the socket file -- then restores the umask,
+        chmods and stats before calling listen(). A bound-but-unlistening AF_UNIX socket
+        refuses connections, so a probe that waits for the FILE returns while the daemon
+        is still unreachable. Under full-suite load that window was won often enough to
+        fail about one run in three (llm-collab#320).
+
+        Rather than time the real window, this reproduces its shape directly: a socket
+        that is bound and not yet listening must refuse, which is what makes file
+        existence the wrong readiness signal.
+        """
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            path = Path(tmp) / "probe.sock"
+            listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            self.addCleanup(listener.close)
+            listener.bind(os.fspath(path))
+
+            self.assertTrue(path.exists(), "bind() alone makes the file appear")
+            probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            probe.settimeout(1)
+            self.addCleanup(probe.close)
+            with self.assertRaises(ConnectionRefusedError):
+                probe.connect(os.fspath(path))
+
+            listener.listen(8)
+            accepted = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            accepted.settimeout(1)
+            self.addCleanup(accepted.close)
+            accepted.connect(os.fspath(path))
+
+    def test_the_readiness_probe_reports_failure_rather_than_hanging(self) -> None:
+        """A readiness helper that waits forever turns a fast failure into a stall."""
+        from types import SimpleNamespace
+
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            original = self.paths
+            self.paths = SimpleNamespace(socket=Path(tmp) / "never-created.sock")
+            try:
+                with self.assertRaises(AssertionError) as caught:
+                    self.wait_until_accepting(timeout=0.3)
+                self.assertIn("never began accepting", str(caught.exception))
+            finally:
+                self.paths = original
 
     def request(self, value: bytes) -> dict:
         client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
