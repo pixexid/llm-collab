@@ -6912,6 +6912,29 @@ class UnobservedTurnIsNotRedeliveredTest(unittest.TestCase):
         self.assertEqual(sorted(kept), kept)
         self.assertGreater(min(kept), 4, f"kept the oldest events instead: {kept}")
 
+    def test_the_correlation_buffer_is_bounded_by_bytes_not_only_entries(self) -> None:
+        """512 entries of a decoded frame each is gigabytes; entries bounded one factor.
+
+        The budget is charged at retention time, oldest evicted first, and a single frame
+        larger than the whole budget is counted and never retained.
+        """
+        client = session_autobridge_lib.JsonRpcWebSocketClient("ws://127.0.0.1:1")
+        big = {"jsonrpc": "2.0", "method": "item/noise", "params": {"pad": "x" * 200_000}}
+        with patch.object(session_autobridge_lib, "PENDING_NOTIFICATION_BYTES", 500_000):
+            for _ in range(20):
+                client._hold_notification(big)
+            self.assertLessEqual(client.pending_notification_bytes, 500_000)
+            self.assertGreater(client.pending_notifications_dropped, 0)
+
+            oversized = {"jsonrpc": "2.0", "method": "item/huge",
+                         "params": {"pad": "y" * 900_000}}
+            before = len(client.pending_notifications)
+            client._hold_notification(oversized)
+            self.assertEqual(
+                before, len(client.pending_notifications),
+                "a frame larger than the whole budget must not be retained",
+            )
+
     def test_the_deadline_is_installed_before_the_first_request(self) -> None:
         """Setup must be inside the budget, not before it starts.
 

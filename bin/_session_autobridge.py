@@ -1571,8 +1571,9 @@ class JsonRpcWebSocketClient:
         # late to matter. A length is a claim, and this is where the claim is first believed.
         self.max_frame_bytes = max_frame_bytes
         # A deque, so the replay is linear rather than quadratic in popleft.
-        self.pending_notifications: deque[dict[str, Any]] = deque()
+        self.pending_notifications: deque[tuple[dict[str, Any], int]] = deque()
         self.pending_notifications_dropped = 0
+        self.pending_notification_bytes = 0
         # Bytes already pulled off the socket but not yet consumed. The handshake is read with
         # recv(4096), so when the peer's upgrade response and its first frame land in one segment,
         # those frame bytes arrive in the SAME read -- and everything after the \r\n\r\n used to be
@@ -1779,6 +1780,30 @@ class JsonRpcWebSocketClient:
     def notify(self, method: str, params: dict[str, Any] | None = None) -> None:
         self.send_json({"jsonrpc": "2.0", "method": method, "params": params or {}})
 
+    def _hold_notification(self, message: dict[str, Any]) -> None:
+        """Retain a notification seen while a correlated response is outstanding.
+
+        Bounded by BOTH entries and bytes: each retained frame can be a whole decoded
+        object, so 512 of them is gigabytes and the entry count alone bounded one factor of
+        a product. Oldest evicted first, because the frames nearest whatever went wrong are
+        the ones worth replaying.
+        """
+        size = len(json.dumps(message, default=str))
+        if size > PENDING_NOTIFICATION_BYTES:
+            # Decided BEFORE evicting: a frame that cannot fit must not first destroy the
+            # entries that do. Counted so the drop is visible.
+            self.pending_notifications_dropped += 1
+            return
+        while self.pending_notifications and (
+            len(self.pending_notifications) >= PENDING_NOTIFICATION_LIMIT
+            or self.pending_notification_bytes + size > PENDING_NOTIFICATION_BYTES
+        ):
+            _evicted, evicted_size = self.pending_notifications.popleft()
+            self.pending_notification_bytes -= evicted_size
+            self.pending_notifications_dropped += 1
+        self.pending_notifications.append((message, size))
+        self.pending_notification_bytes += size
+
     def request(
         self,
         method: str,
@@ -1812,10 +1837,20 @@ class JsonRpcWebSocketClient:
                 # this without limit -- an OOM before delivery state is even known, which
                 # redelivers the packet. The newest are kept, since those are the ones
                 # nearest whatever went wrong.
-                if len(self.pending_notifications) >= PENDING_NOTIFICATION_LIMIT:
-                    self.pending_notifications.popleft()
+                size = len(json.dumps(message, default=str))
+                while self.pending_notifications and (
+                    len(self.pending_notifications) >= PENDING_NOTIFICATION_LIMIT
+                    or self.pending_notification_bytes + size > PENDING_NOTIFICATION_BYTES
+                ):
+                    evicted = self.pending_notifications.popleft()
+                    self.pending_notification_bytes -= evicted[1]
                     self.pending_notifications_dropped += 1
-                self.pending_notifications.append(message)
+                if size <= PENDING_NOTIFICATION_BYTES:
+                    self.pending_notifications.append((message, size))
+                    self.pending_notification_bytes += size
+                else:
+                    # One frame larger than the whole budget: counted, never retained.
+                    self.pending_notifications_dropped += 1
 
 
 # Mirrors TOKEN_BLANK_CHARS in bin/pm2_watchers.py. Python's default strip() removes the
@@ -2022,6 +2057,9 @@ CODEX_APP_SERVER_NOTIFICATION_RETENTION = 4096
 # real method approaches, which bounds the product rather than one factor of it.
 CODEX_APP_SERVER_METHOD_CHARS = 200
 PENDING_NOTIFICATION_LIMIT = 512
+# Entries bounded one factor; each retained frame can be a whole decoded object, so 512 of
+# them is gigabytes. The byte budget bounds the product, charged at retention time.
+PENDING_NOTIFICATION_BYTES = 4 * 1024 * 1024
 
 
 def _notification_turn_id(params: Any) -> str | None:
@@ -2200,12 +2238,13 @@ def execute_codex_app_server_trigger(
 
         # Notifications the turn/start correlation loop saw before its reply. Replayed
         # first, in arrival order, so a turn that answered that fast is still observed.
-        replay = list(client.pending_notifications)
+        replay = [held for held, _size in client.pending_notifications]
         # Frames discarded at the correlation boundary are notifications that were seen and
         # dropped, so they belong in the same count -- a bound nobody can observe reads
         # exactly like no bound at all.
         notifications_dropped += client.pending_notifications_dropped
         client.pending_notifications.clear()
+        client.pending_notification_bytes = 0
 
         deadline = time.monotonic() + timeout_seconds
         # Absolute, not per-read. The outer condition is only checked BETWEEN frames, and
