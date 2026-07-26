@@ -1,4 +1,30 @@
+<!-- CONTRACT_VERSION: 2 -->
 # AGENTS.md
+
+## This file is the source of truth
+
+This file plus `docs/workflows/` is the canonical worker contract. Memory files,
+skills, project notes and branch-local docs must **point at it, never restate it** — a
+restated command is a cached copy that goes stale without telling anyone.
+
+Not theoretical: on 2026-07-25 all eight agent memory files still taught the
+`deliver.py` invocation **without `--repo-targets`**, the exact command that had just
+silently dropped 27 packets over eleven hours, and several taught `--chat last`, which
+addresses the wrong lane once a second project is active.
+
+`python bin/contract_drift.py --agent <you>` reports your own stale copies;
+`session_bootstrap.py` runs it for you and prints the contract version at session start.
+
+### Recent contract changes
+
+Read these if your last session predates them.
+
+- **v2 (2026-07-25)** — Codex review is **manual only**: nothing arrives unless
+  requested, and the Tier A/B/C rule below decides when you must ask. `--repo-targets`
+  is effectively mandatory on `deliver.py`. New: `docs/workflows/collab-thread-quickstart.md`
+  for the end-to-end collab path, and `bin/codex_stream.py` to watch a peer's thread live.
+- **v1** — everything before that.
+
 
 This repository is the shared `llm-collab` coordination runtime. It is not the
 Amiga workspace, the Nuvyr workspace, or any other product repository.
