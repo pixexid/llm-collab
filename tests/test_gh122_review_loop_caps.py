@@ -573,7 +573,7 @@ class ReviewLoopCapContractTest(unittest.TestCase):
         self.assert_scenario_cases("canonical_wait_gate", check)
 
     THREAD_FIXTURE = (
-        REPO_ROOT / "tests" / "fixtures" / "review_thread_binding" / "pr313_at_5b28b0a.json"
+        REPO_ROOT / "tests" / "fixtures" / "review_thread_binding" / "pr313_threads_raw.json"
     )
 
     @staticmethod
@@ -583,8 +583,7 @@ class ReviewLoopCapContractTest(unittest.TestCase):
         `comments.nodes[0].commit.oid` is mutable: GitHub advances it to the current
         head while the thread stays non-outdated. Reading it reports every live stale
         thread as a current-head finding -- twelve of them on this very PR. The review
-        commit is stable, and originalCommit is the fallback when a thread has no
-        backing review.
+        commit is stable, and originalCommit is the fallback when there is no review.
         """
         comment = (thread.get("comments") or {}).get("nodes", [{}])[0]
         review = (comment.get("pullRequestReview") or {}).get("commit") or {}
@@ -598,67 +597,38 @@ class ReviewLoopCapContractTest(unittest.TestCase):
         comment = (thread.get("comments") or {}).get("nodes", [{}])[0]
         return (comment.get("commit") or {}).get("oid")
 
-    @staticmethod
-    def dispositioned_thread_ids(artifacts, authorized_actors, threads):
-        """Thread IDs closed by an AUTHORIZED disposition artifact that names them.
+    def classify(self, threads, head_oid):
+        """Two mechanical questions only.
 
-        Derived, never asserted. A synthetic hasWrittenDisposition boolean -- the
-        previous version of this fixture -- let any thread be declared closed with no
-        artifact, no actor and no mapping, which is the same pre-resolved-answer defect
-        as storing a computed origin OID.
-
-        The shape is the real one: llm-collab#317's adjudication is a single top-level
-        issue comment that groups findings and lists the threads it disposes. It is not
-        attached to each thread node, so closure has to be resolved through the mapping.
+        Whether a written disposition has closed an unresolved thread is a MANUAL,
+        human-verified judgement -- see the runbook rule that a disposition must
+        identify each thread it closes. It is deliberately not computed here. Four
+        attempts to model it each relocated the authority decision somewhere the test
+        could not see; the last would have let an authorized comment on a DIFFERENT PR
+        reading "Still unresolved: <url>" close a thread. A mention is not a closure,
+        and prose is not a protocol.
         """
-        closed = set()
-        for artifact in artifacts:
-            if artifact.get("actor") not in authorized_actors:
-                continue
-            body = artifact.get("body") or ""
-            for thread in threads:
-                identifiers = [
-                    thread["id"],
-                    thread["comments"]["nodes"][0].get("url") or "\x00never",
-                ]
-                if any(ident in body for ident in identifiers):
-                    closed.add(thread["id"])
-        return closed
-
-    def is_open(self, thread, closed_ids=frozenset()):
-        """Two independent closure paths: GitHub resolution, or a mapped disposition."""
-        if thread["isResolved"]:
-            return False
-        return thread.get("id") not in closed_ids
-
-    def classify(self, threads, head_oid, closed_ids=frozenset()):
         return {
             "exact_head_findings": len([
                 t for t in threads
-                if self.is_open(t, closed_ids)
-                and self.originating_commit_oid(t) == head_oid
+                if not t["isResolved"] and self.originating_commit_oid(t) == head_oid
             ]),
-            "unresolved_needing_adjudication": len([
-                t for t in threads if self.is_open(t, closed_ids)
-            ]),
+            "unresolved_total": len([t for t in threads if not t["isResolved"]]),
         }
-
-    def closed_ids(self, fixture):
-        return self.dispositioned_thread_ids(
-            fixture["disposition_artifacts"],
-            fixture["authorized_actors"],
-            fixture["threads"],
-        )
 
     def load_threads(self):
         fixture = json.loads(self.THREAD_FIXTURE.read_text(encoding="utf-8"))
+        self.assertNotIn(
+            "disposition_artifacts", fixture,
+            "closure by written disposition is a manual gate; modelling it here has "
+            "produced an authority bypass every time it was attempted",
+        )
         for thread in fixture["threads"]:
             # The extraction decision is what is under test, so the fixture must carry
-            # the raw nested shapes and never a pre-resolved origin field.
-            self.assertNotIn("originating_commit_oid", thread)
-            self.assertNotIn("hasWrittenDisposition", thread)
-            self.assertNotIn("disposes_thread_ids", thread)
-            self.assertIn("id", thread)
+            # the raw nested shapes and never a pre-resolved answer of any kind.
+            for banned in ("originating_commit_oid", "hasWrittenDisposition",
+                           "disposes_thread_ids", "isOpen"):
+                self.assertNotIn(banned, thread)
             self.assertIn("comments", thread)
         return fixture
 
@@ -674,153 +644,35 @@ class ReviewLoopCapContractTest(unittest.TestCase):
         head, threads = fixture["head_oid"], fixture["threads"]
         expected = fixture["expected"]
 
-        closed = self.closed_ids(fixture)
         naive = [
             t for t in threads
-            if self.is_open(t, closed) and self.naive_comment_commit_oid(t) == head
+            if not t["isResolved"] and self.naive_comment_commit_oid(t) == head
         ]
         self.assertEqual(expected["naive_comment_commit_count"], len(naive))
         self.assertTrue(naive, "fixture must contain the crossed shape")
 
-        actual = self.classify(threads, head, closed)
+        actual = self.classify(threads, head)
         self.assertEqual(expected["exact_head_findings"], actual["exact_head_findings"])
         self.assertNotEqual(
             len(naive), actual["exact_head_findings"],
             "the two field choices must disagree here, or the fixture proves nothing",
         )
-        # Every crossed thread's stable fields must genuinely differ from the head.
         for thread in naive:
             self.assertNotEqual(head, self.originating_commit_oid(thread))
 
     def test_outdated_is_not_the_exclusion_criterion_on_real_graphql_shapes(self):
         fixture = self.load_threads()
-        head, threads = fixture["head_oid"], fixture["threads"]
-        expected = fixture["expected"]
-
-        closed = self.closed_ids(fixture)
-        actual = self.classify(threads, head, closed)
-        self.assertEqual(
-            expected["unresolved_needing_adjudication"],
-            actual["unresolved_needing_adjudication"],
-        )
-        dropped = [t for t in threads if self.is_open(t, closed) and t["isOutdated"]]
+        threads, expected = fixture["threads"], fixture["expected"]
+        actual = self.classify(threads, fixture["head_oid"])
+        self.assertEqual(expected["unresolved_total"], actual["unresolved_total"])
+        dropped = [t for t in threads if not t["isResolved"] and t["isOutdated"]]
         self.assertEqual(expected["unresolved_outdated"], len(dropped))
         self.assertTrue(dropped, "fixture must contain an unresolved OUTDATED thread")
-        # Those unadjudicated threads are exactly what the retired rule discarded.
-        self.assertLess(
-            actual["exact_head_findings"], actual["unresolved_needing_adjudication"]
-        )
-
-    def test_closure_is_derived_from_a_mapped_authorized_disposition(self):
-        """Both closure paths, derived from evidence rather than asserted.
-
-        #317's twelve prior-head threads were closed by a written adjudication, not the
-        resolve button, so a classifier keyed on isResolved alone would hold that PR
-        open forever. But trusting a boolean is the opposite failure: any thread could
-        be declared closed with no artifact behind it.
-        """
-        fixture = self.load_threads()
-        threads, expected = fixture["threads"], fixture["expected"]
-        closed = self.closed_ids(fixture)
-
-        self.assertEqual(expected["closed_by_disposition"], len(closed))
-        self.assertTrue(closed, "fixture must carry a real grouped disposition")
-        for thread in threads:
-            if thread["id"] in closed:
-                self.assertFalse(thread["isResolved"], "must be closed by DISPOSITION")
-                self.assertFalse(self.is_open(thread, closed))
-
-        by_resolved_only = len([t for t in threads if not t["isResolved"]])
-        actual = self.classify(threads, fixture["head_oid"], closed)
-        self.assertEqual(
-            expected["unresolved_needing_adjudication"],
-            actual["unresolved_needing_adjudication"],
-        )
-        self.assertLess(
-            actual["unresolved_needing_adjudication"], by_resolved_only,
-            "reading isResolved alone must give a different, larger answer",
-        )
-
-    def test_a_grouped_disposition_closes_only_the_threads_its_body_identifies(self):
-        fixture = self.load_threads()
-        closed = self.closed_ids(fixture)
-        self.assertEqual(set(fixture["expected"]["closed_thread_ids"]), closed)
-        unnamed = [t for t in fixture["threads"] if t["id"] not in closed]
-        self.assertTrue(unnamed, "fixture must contain threads the disposition omits")
-        for thread in unnamed:
-            if not thread["isResolved"]:
-                self.assertTrue(self.is_open(thread, closed))
-
-    def test_a_prose_adjudication_naming_no_thread_closes_nothing(self):
-        """The real artifact, and the reason the invented mapping was wrong.
-
-        llm-collab#317's adjudication is prose plus a findings table. It contains no
-        thread node IDs and no discussion_r URLs, so there is nothing to map it to a
-        thread. A fixture that stored disposes_thread_ids for it was asserting a
-        mapping the artifact does not carry -- my own adjudication did not, in fact,
-        mechanically close anything.
-        """
-        fixture = self.load_threads()
-        real = next(
-            a for a in fixture["disposition_artifacts"]
-            if a["id"] == "IC_real_grouped_no_ids"
-        )
-        self.assertIn(real["actor"], fixture["authorized_actors"])
-        closed_by_real = self.dispositioned_thread_ids(
-            [real], fixture["authorized_actors"], fixture["threads"]
-        )
-        self.assertEqual(
-            fixture["expected"]["real_grouped_artifact_closes"], len(closed_by_real)
-        )
-        self.assertEqual(set(), closed_by_real)
-
-    def test_an_unauthorized_disposition_does_not_close_anything(self):
-        """A drive-by comment naming a thread URL is not an adjudication."""
-        fixture = self.load_threads()
-        closed = self.closed_ids(fixture)
-        victim = fixture["expected"]["unauthorized_named_thread_id"]
-        self.assertNotIn(victim, closed)
-        thread = next(t for t in fixture["threads"] if t["id"] == victim)
-        self.assertTrue(self.is_open(thread, closed))
-        # It names a real thread, so only the actor check keeps it out.
-        without_actor_check = self.dispositioned_thread_ids(
-            fixture["disposition_artifacts"],
-            fixture["authorized_actors"] + ["some-drive-by-account"],
-            fixture["threads"],
-        )
-        self.assertIn(victim, without_actor_check)
-
-    def test_an_arbitrary_flag_on_a_thread_cannot_close_it(self):
-        """The defect this replaced: a synthetic boolean with nothing behind it."""
-        fixture = self.load_threads()
-        closed = self.closed_ids(fixture)
-        victim = next(
-            t for t in fixture["threads"]
-            if not t["isResolved"] and t["id"] not in closed
-        )
-        victim["hasWrittenDisposition"] = True
-        victim["dispositioned"] = True
-        self.assertTrue(
-            self.is_open(victim, closed),
-            "closure must come from a mapped artifact, never from a field on the thread",
-        )
-
-    def test_github_resolution_remains_an_independent_closure_path(self):
-        thread = {
-            "id": "PRRT_resolved",
-            "isResolved": True,
-            "isOutdated": False,
-            "comments": {"nodes": [{"commit": {"oid": "x"},
-                                    "originalCommit": {"oid": "x"},
-                                    "pullRequestReview": {"commit": {"oid": "x"}}}]},
-        }
-        self.assertFalse(self.is_open(thread, frozenset()),
-                         "resolution closes without any disposition artifact")
+        self.assertLess(actual["exact_head_findings"], actual["unresolved_total"])
 
     def test_a_thread_from_an_older_review_is_not_an_exact_head_finding(self):
         def node(review_oid, original_oid, comment_oid, *, resolved, outdated):
             return {
-                "id": f"PRRT_{review_oid}_{original_oid}_{comment_oid}_{resolved}_{outdated}",
                 "isResolved": resolved,
                 "isOutdated": outdated,
                 "comments": {"nodes": [{
@@ -837,16 +689,55 @@ class ReviewLoopCapContractTest(unittest.TestCase):
             node("old111", "old111", "head999", resolved=False, outdated=False),
             # Outdated but genuinely raised on this head -- still a finding.
             node("head999", "head999", "head999", resolved=False, outdated=True),
-            # Resolved on this head -- closed.
+            # Resolved on this head -- closed by GitHub, no judgement needed.
             node("head999", "head999", "head999", resolved=True, outdated=False),
             # No backing review: originalCommit is the fallback authority.
             node(None, "head999", "head999", resolved=False, outdated=False),
         ]
         actual = self.classify(threads, "head999")
         self.assertEqual(2, actual["exact_head_findings"])
-        self.assertEqual(3, actual["unresolved_needing_adjudication"])
+        self.assertEqual(3, actual["unresolved_total"])
         self.assertEqual("old111", self.originating_commit_oid(threads[0]))
         self.assertEqual("head999", self.originating_commit_oid(threads[3]))
+
+    def test_closure_by_written_disposition_is_not_automated(self):
+        """Deleting this classifier was the fix, so the deletion needs a guard.
+
+        A machine rule over free-form prose cannot establish that an authorized person
+        closed a specific finding on THIS pull request. Every version tried let
+        something through: an arbitrary boolean, an invented id mapping, a preselected
+        artifact list, and finally a bare mention -- an authorized comment on a
+        different PR reading "Still unresolved: <url>" would have closed the thread.
+        The runbook carries the requirement and a human applies it.
+
+        Asserted by introspection rather than by grepping this file, which would match
+        the names written in this docstring.
+        """
+        import inspect
+
+        for banned in ("dispositioned_thread_ids", "closed_ids", "is_open"):
+            self.assertFalse(
+                hasattr(type(self), banned),
+                f"{banned} reintroduces automated closure over prose",
+            )
+        params = list(inspect.signature(type(self).classify).parameters)
+        self.assertEqual(
+            ["self", "threads", "head_oid"], params,
+            "classify must take no closure input; a disposition argument is the "
+            "authority decision re-entering through the caller",
+        )
+        fixture = self.load_threads()
+        self.assertEqual(
+            {"source", "why", "head_oid", "threads", "expected"}, set(fixture),
+            "the fixture holds raw GraphQL evidence only",
+        )
+        # The requirement itself must survive in the runbook, unautomated.
+        section = contract_section(
+            WORKFLOW_DOC.read_text(encoding="utf-8"),
+            "- **bind an exact-head finding through its initiating review commit",
+            "- a head-named clean connector verdict is not merge-immediate.",
+        )
+        self.assertIn("that identifies the thread", section)
 
     def test_the_merge_checklist_does_not_inherit_the_origin_rule_narrowing(self):
         """The hole the origin rule opened in the checklist below it.

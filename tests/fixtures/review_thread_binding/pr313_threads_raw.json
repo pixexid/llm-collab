@@ -1,11 +1,7 @@
 {
   "source": "llm-collab#313 reviewThreads, captured 2026-07-26 at head 5b28b0a594",
-  "why": "Three pre-resolved answers were removed from this fixture in succession: a computed originating_commit_oid, a synthetic hasWrittenDisposition boolean, and an invented disposes_thread_ids mapping. The last one was disproved by the real artifact it claimed to model -- llm-collab#317's adjudication comment contains NO thread identifiers, so under any content-derived rule it closes nothing. Closure is now read out of the artifact body.",
+  "why": "Raw GraphQL evidence for two questions only: which head a thread was raised on, and whether it is still unresolved. Closure by written disposition is a MANUAL, human-verified step and is deliberately not modelled here. Four attempts to encode it -- a computed origin OID, a boolean, an invented id mapping, and a preselected artifact list -- each moved the authority decision somewhere the test could not see, ending with a matcher that would let a comment on another PR saying \"Still unresolved: <url>\" close a thread. Parsing free-form prose to automate a manual gate manufactures authority that does not exist.",
   "head_oid": "5b28b0a59496b1ad0de5be5e07e20c27c8a124cd",
-  "authorized_actors": [
-    "pixexid",
-    "codex"
-  ],
   "threads": [
     {
       "id": "PRRT_kwDOR8xQ286Tzfud",
@@ -512,38 +508,10 @@
       }
     }
   ],
-  "disposition_artifacts": [
-    {
-      "id": "IC_real_grouped_no_ids",
-      "url": "https://github.com/pixexid/llm-collab/pull/317#issuecomment-5082195564",
-      "actor": "pixexid",
-      "body": "## Thread adjudication at head b20c146\n\nTwelve unresolved review threads exist on this PR... | Origin | Finding | Disposition |\n| a44dbd0 | Substitute the actual repository scope | Fixed at b52c130 |\n(prose and finding titles only -- no thread identifiers)"
-    },
-    {
-      "id": "IC_grouped_with_ids",
-      "url": "https://github.com/pixexid/llm-collab/pull/313#issuecomment-enumerated",
-      "actor": "pixexid",
-      "body": "Adjudication. These threads are dispositioned:\n- https://github.com/pixexid/llm-collab/pull/313#discussion_r3651385553 \u2014 superseded by the rewrite\n- https://github.com/pixexid/llm-collab/pull/313#discussion_r3651395693 \u2014 superseded by the rewrite"
-    },
-    {
-      "id": "IC_unauthorized_with_ids",
-      "url": "https://example.invalid/drive-by",
-      "actor": "some-drive-by-account",
-      "body": "Looks fine to me: https://github.com/pixexid/llm-collab/pull/313#discussion_r3651395697"
-    }
-  ],
   "expected": {
-    "closed_by_disposition": 2,
-    "closed_thread_ids": [
-      "PRRT_kwDOR8xQ286Tzfuk",
-      "PRRT_kwDOR8xQ286TzhnH"
-    ],
-    "real_grouped_artifact_closes": 0,
-    "unauthorized_named_thread_id": "PRRT_kwDOR8xQ286TzhnL",
-    "unresolved_needing_adjudication": 19,
     "exact_head_findings": 0,
+    "unresolved_total": 21,
     "naive_comment_commit_count": 16,
-    "unresolved_outdated": 3,
-    "resolved_count": 0
+    "unresolved_outdated": 5
   }
 }
