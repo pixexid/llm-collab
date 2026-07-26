@@ -493,18 +493,52 @@ class Gh1549FallbackFixturesTest(unittest.TestCase):
         # be able to describe; what it still may not do is describe the deleted one. The
         # narrowing is by ANCHOR rather than by vocabulary: a clock attached to a request
         # artifact is legitimate, a clock attached to silence or to a push is not.
+        # `expire` is back in the forbidden set (GH-313 re-review P2). Dropping it
+        # entirely to make room for request expiry let a fixture reintroduce the deleted
+        # policy as "silence expires after the wait" -- no `fallback`, no `clock`, no
+        # `elapsed`, and this guard would have passed it.
+        #
+        # A request artifact's own `phase` is request-anchored BY CONSTRUCTION, so it is
+        # exempted structurally rather than by a regex that guesses the prose around it:
+        # the exemption follows the JSON position, and only for phase vocabulary the
+        # model actually declares. Prose is still scanned, which is where "silence
+        # expires" would live.
         sanctioned = re.compile(
             r"no elapsed time makes the head merge-eligible"
             r"|request-anchored clocks?"
             r"|(?:initial request|re-trigger)(?:'s)?(?: own)? clock"
+            r"|(?:an? )?expired (?:initial request|re-trigger)"
+            r"|(?:initial request|re-trigger)(?:'s)? expir\w*"
             r"|clocks are tier-agnostic",
             re.I,
         )
-        forbidden = re.compile(r"fallback|clock|elapsed", re.I)
+        forbidden = re.compile(r"fallback|clock|elapsed|expir", re.I)
+
+        request_phases = set(self.REQUEST_PHASES) | {"stale_for_this_head"}
+
+        def scannable(node, key=None, parent_key=None):
+            """Every string in the fixture except a request artifact's declared phase."""
+            if isinstance(node, dict):
+                return " ".join(
+                    scannable(value, name, key) for name, value in node.items()
+                )
+            if isinstance(node, list):
+                return " ".join(scannable(item, key, parent_key) for item in node)
+            if isinstance(node, str):
+                if key == "phase" and parent_key == "review_requests" and node in {
+                    "pending", "expired"
+                }:
+                    return ""
+                if key == "request_phase" and node in request_phases:
+                    return ""
+                return node
+            return ""
+
         offenders: dict[str, list[str]] = {}
         for filename in self.VARIANT_FILES.values():
-            raw = (FIXTURES_DIR / filename).read_text(encoding="utf-8")
-            hits = sorted({m.group(0).lower() for m in forbidden.finditer(sanctioned.sub("", raw))})
+            path = FIXTURES_DIR / filename
+            text = scannable(json.loads(path.read_text(encoding="utf-8")))
+            hits = sorted({m.group(0).lower() for m in forbidden.finditer(sanctioned.sub("", text))})
             if hits:
                 offenders[filename] = hits
         self.assertFalse(
@@ -555,6 +589,72 @@ class Gh1549FallbackFixturesTest(unittest.TestCase):
         # treat the escalation itself as terminal and merge.
         "escalated_awaiting_disposition": "blocked_pending_operator_disposition",
     }
+
+    # GH-313 re-review P1. A stale request used to resolve to the tier's NO-REQUEST
+    # answer, so at Tier B/C an amendment made an outstanding review vanish:
+    # `no_review_pending`, exactly as though nobody had ever asked. An amendment stales a
+    # request -- it does not withdraw the requirement, and only an explicit withdrawal
+    # does. Tier A keeps the sharper name because failing to request there is itself the
+    # gate violation; at B/C nothing was violated, but a new exact-head request is still
+    # owed before the head can move.
+    STALE_REQUEST_DISPOSITION = {
+        "A": "gate_violation_request_required",
+        "B": "rerequest_required_at_new_head",
+        "C": "rerequest_required_at_new_head",
+    }
+
+    def stale_disposition(self, tier, state):
+        if state.get("review_requirement_withdrawn"):
+            return "no_review_pending"
+        return self.STALE_REQUEST_DISPOSITION[tier]
+
+    def test_an_amendment_does_not_withdraw_a_tier_bc_review_requirement(self) -> None:
+        """The tier decides whether a review must be REQUESTED, not whether one survives.
+
+        Reading a stale request as the tier's no-request answer meant a voluntarily
+        requested Tier B/C review disappeared on the next push. The reviewer had been
+        asked, might already be reading the diff, and the gate had stopped waiting.
+        """
+        for tier in ("B", "C"):
+            with self.subTest(tier=tier):
+                self.assertNotEqual(
+                    "no_review_pending",
+                    self.stale_disposition(tier, {}),
+                    "an amendment must not silently retire a requested review",
+                )
+                self.assertEqual(
+                    self.DISPOSITION_BY_TIER_AND_REQUEST[(tier, False)],
+                    "no_review_pending",
+                    "...which is precisely the answer this used to fall back to",
+                )
+        # Withdrawal is the one thing that does retire it, and it must be explicit.
+        self.assertEqual(
+            "no_review_pending",
+            self.stale_disposition("B", {"review_requirement_withdrawn": True}),
+        )
+        self.assertEqual(
+            "gate_violation_request_required", self.stale_disposition("A", {})
+        )
+
+    def test_every_modelled_request_phase_is_reachable_in_a_fixture(self) -> None:
+        """A phase that exists only in this map certifies nothing.
+
+        The fixture's own description claimed every phase was a reachable case; none of
+        them used `initial_expired`, so the transition where the initial window runs out
+        and the single re-trigger must be issued was never exercised. A consumer that
+        skips that recovery entirely -- escalating straight to the operator -- satisfied
+        every scenario in the file.
+        """
+        seen = {
+            case["pr_state"].get("request_phase")
+            for variant in self.VARIANT_FILES
+            for case in self._project_cases(variant)
+        }
+        missing = sorted(set(self.REQUEST_PHASES) - seen)
+        self.assertEqual(
+            [], missing,
+            f"these phases are modelled but no fixture reaches them: {missing}",
+        )
 
     def test_the_flow_has_a_state_after_escalating(self) -> None:
         """Escalation is a request for a decision, not the decision.
@@ -700,11 +800,8 @@ class Gh1549FallbackFixturesTest(unittest.TestCase):
                         )
                         continue
                     if phase == "stale_for_this_head":
-                        # A request naming a prior head is not pending for THIS head, so it
-                        # falls back to the no-request answer for the tier -- which at Tier A
-                        # is the gate violation, not a wait.
                         self.assertEqual(
-                            self.DISPOSITION_BY_TIER_AND_REQUEST[(case["tier"], False)],
+                            self.stale_disposition(case["tier"], state),
                             case["expected"]["disposition"],
                         )
                         continue
@@ -771,7 +868,21 @@ class Gh1549FallbackFixturesTest(unittest.TestCase):
         self.assertTrue(
             requested, "no fixture exercises a voluntarily requested Tier B review"
         )
-        for case in requested:
+        # A stale request is requested but NOT pending for this head -- that is what
+        # stale means, and it is the one case this claim does not cover. It is asserted
+        # here rather than filtered away silently, because dropping it from the list
+        # without saying so is how a requested review would quietly stop being checked.
+        stale = [
+            case for case in requested
+            if case["pr_state"].get("request_phase") == "stale_for_this_head"
+        ]
+        self.assertTrue(stale, "no fixture exercises a Tier B request staled by a push")
+        for case in stale:
+            self.assertFalse(case["expected"]["review_is_pending"])
+            self.assertEqual(
+                "rerequest_required_at_new_head", case["expected"]["disposition"]
+            )
+        for case in [c for c in requested if c not in stale]:
             with self.subTest(project_id=case["project_id"]):
                 self.assertTrue(case["expected"]["review_is_pending"])
                 # Pending, and its ACTION comes from the phase exactly as Tier A's does --

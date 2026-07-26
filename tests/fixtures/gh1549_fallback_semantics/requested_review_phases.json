@@ -229,6 +229,137 @@
         "disposition": "wait_out_the_re_trigger",
         "merge_eligible_on_silence": false
       }
+    },
+    {
+      "project_id": "amiga",
+      "tier": "A",
+      "description": "The initial request's own window has run out and no re-trigger has been issued yet. The single re-trigger is owed here; escalating instead skips the recovery step the contract requires, and waiting longer waits on nothing.",
+      "pr_state": {
+        "head_oid": "amiga-abc200",
+        "pr_open": true,
+        "draft_ready": true,
+        "explicit_review_request": true,
+        "review_requests": [
+          {
+            "kind": "initial",
+            "head_oid": "amiga-abc200",
+            "phase": "expired"
+          }
+        ],
+        "request_phase": "initial_expired"
+      },
+      "artifacts_for_current_head": [],
+      "expected": {
+        "terminal_signal_present": false,
+        "review_is_pending": true,
+        "disposition": "issue_the_single_re_trigger",
+        "merge_eligible_on_silence": false
+      }
+    },
+    {
+      "project_id": "amiga",
+      "tier": "B",
+      "description": "A Tier B review was requested voluntarily, then the head was amended. The request named the prior head so nothing is pending for this one, but the requirement was never withdrawn: a new exact-head request is owed. Reading this as the tier's no-request answer retired a review someone had already been asked for.",
+      "pr_state": {
+        "head_oid": "amiga-abc200",
+        "pr_open": true,
+        "draft_ready": true,
+        "explicit_review_request": true,
+        "review_requests": [
+          {
+            "kind": "initial",
+            "head_oid": "amiga-abc100",
+            "phase": "expired"
+          }
+        ],
+        "request_phase": "stale_for_this_head"
+      },
+      "artifacts_for_current_head": [],
+      "expected": {
+        "terminal_signal_present": false,
+        "review_is_pending": false,
+        "disposition": "rerequest_required_at_new_head",
+        "merge_eligible_on_silence": false
+      }
+    },
+    {
+      "project_id": "nuvyr",
+      "tier": "A",
+      "description": "The initial request's own window has run out and no re-trigger has been issued yet. The single re-trigger is owed here; escalating instead skips the recovery step the contract requires, and waiting longer waits on nothing.",
+      "pr_state": {
+        "head_oid": "nuvyr-abc200",
+        "pr_open": true,
+        "draft_ready": true,
+        "explicit_review_request": true,
+        "review_requests": [
+          {
+            "kind": "initial",
+            "head_oid": "nuvyr-abc200",
+            "phase": "expired"
+          }
+        ],
+        "request_phase": "initial_expired"
+      },
+      "artifacts_for_current_head": [],
+      "expected": {
+        "terminal_signal_present": false,
+        "review_is_pending": true,
+        "disposition": "issue_the_single_re_trigger",
+        "merge_eligible_on_silence": false
+      }
+    },
+    {
+      "project_id": "nuvyr",
+      "tier": "B",
+      "description": "A Tier B review was requested voluntarily, then the head was amended. The request named the prior head so nothing is pending for this one, but the requirement was never withdrawn: a new exact-head request is owed. Reading this as the tier's no-request answer retired a review someone had already been asked for.",
+      "pr_state": {
+        "head_oid": "nuvyr-abc200",
+        "pr_open": true,
+        "draft_ready": true,
+        "explicit_review_request": true,
+        "review_requests": [
+          {
+            "kind": "initial",
+            "head_oid": "nuvyr-abc100",
+            "phase": "expired"
+          }
+        ],
+        "request_phase": "stale_for_this_head"
+      },
+      "artifacts_for_current_head": [],
+      "expected": {
+        "terminal_signal_present": false,
+        "review_is_pending": false,
+        "disposition": "rerequest_required_at_new_head",
+        "merge_eligible_on_silence": false
+      }
+    },
+    {
+      "project_id": "amiga",
+      "tier": "C",
+      "description": "A Tier C request the operator explicitly withdrew before the amendment. This is the one way a stale request stops being owed, and it is recorded rather than inferred -- without a case for it, 'withdrawal retires the requirement' would be an unreachable branch and any consumer could implement it as anything.",
+      "pr_state": {
+        "head_oid": "amiga-abc200",
+        "pr_open": true,
+        "draft_ready": true,
+        "explicit_review_request": true,
+        "review_requests": [
+          {
+            "kind": "initial",
+            "head_oid": "amiga-abc100",
+            "phase": "expired"
+          }
+        ],
+        "request_phase": "stale_for_this_head",
+        "review_requirement_withdrawn": true
+      },
+      "artifacts_for_current_head": [],
+      "expected": {
+        "terminal_signal_present": false,
+        "review_is_pending": false,
+        "disposition": "no_review_pending",
+        "merge_eligible_on_silence": false
+      }
     }
   ]
 }
