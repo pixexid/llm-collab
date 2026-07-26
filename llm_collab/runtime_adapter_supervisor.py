@@ -170,7 +170,7 @@ class StdioSupervisor:
             return
         while True:
             try:
-                line = stdout.readline(MAX_MESSAGE_BYTES + 2)
+                line = stdout.readline(MAX_MESSAGE_BYTES + 1)
             except (OSError, ValueError):
                 self._stdout.put(None)
                 return

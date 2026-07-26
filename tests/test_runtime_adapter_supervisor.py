@@ -369,6 +369,15 @@ class RuntimeAdapterSupervisorTests(unittest.TestCase):
         ]
         self.assertEqual(1, len(readlines), "one bounded stdout read")
         self.assertEqual(1, len(readlines[0].args), "readline must carry its limit")
+        # The VALUE, not merely its presence. The normative limit is to stop buffering
+        # after MAX_MESSAGE_BYTES + 1, and readline counts the newline, so +1 already
+        # admits the largest valid payload plus its terminator and still identifies an
+        # unterminated oversized frame. +2 buffered one byte past the contract, and
+        # asserting only that a limit exists could not see that.
+        limit = readlines[0].args[0]
+        self.assertIsInstance(limit, ast.BinOp)
+        self.assertEqual("MAX_MESSAGE_BYTES", limit.left.id)
+        self.assertEqual(1, limit.right.value, "the bound must be MAX_MESSAGE_BYTES + 1")
 
     def test_oversized_stdout_frame_is_bounded_and_closes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
