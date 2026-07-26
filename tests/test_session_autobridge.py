@@ -1203,6 +1203,151 @@ class SessionAutobridgeTest(unittest.TestCase):
         turn_start = next(frame for frame in request_log if frame.get("method") == "turn/start")
         self.assertEqual("gpt-test", turn_start["params"]["model"])
 
+    def test_a_non_object_json_frame_after_turn_start_does_not_redeliver(self):
+        """A valid-JSON, non-object frame is still a delivered turn.
+
+        `[]` decodes fine and then reaches `_handle_server_request`, whose `.get` raised
+        AttributeError -- a type the turn loop's post-accept handling did not catch, so
+        the packet stayed unprocessed and the next poll issued a SECOND turn. The whole
+        point of this PR is that a delivered packet is never sent twice, so the frame is
+        rejected at the parse boundary as a ValueError like any other malformed input.
+
+        Asserted at dispatch level: the message must be marked processed exactly once.
+        A test that only checked the helper's return would pass while the packet was
+        still eligible for redelivery.
+        """
+        root = self.make_workspace()
+        self.add_agent(
+            root,
+            {
+                "id": "cdx2",
+                "display_name": "CDX2",
+                "activation": {"type": "human_relay", "watcher_enabled": False},
+            },
+        )
+        message_rel = self.add_message(
+            root,
+            agent_id="cdx2",
+            chat_id="CHAT-ARRAY-FRAME",
+            project_id="amiga",
+            title="Array frame",
+            target_session_id="codex-thread-array",
+        )
+
+        ready = threading.Event()
+        server = socket.socket()
+        server.bind(("127.0.0.1", 0))
+        server.listen(1)
+        port = server.getsockname()[1]
+
+        def read_exact(conn, count):
+            chunks, remaining = [], count
+            while remaining:
+                chunk = conn.recv(remaining)
+                if not chunk:
+                    raise ConnectionError("closed")
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            return b"".join(chunks)
+
+        def read_frame(conn):
+            _, second = read_exact(conn, 2)
+            length = second & 0x7F
+            if length == 126:
+                length = int.from_bytes(read_exact(conn, 2), "big")
+            mask = read_exact(conn, 4) if second & 0x80 else b""
+            payload = read_exact(conn, length) if length else b""
+            if mask:
+                payload = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
+            return json.loads(payload.decode("utf-8"))
+
+        def write_raw(conn, text):
+            body = text.encode("utf-8")
+            header = bytearray([0x81])
+            if len(body) < 126:
+                header.append(len(body))
+            else:
+                header.extend([126, (len(body) >> 8) & 0xFF, len(body) & 0xFF])
+            conn.sendall(bytes(header) + body)
+
+        def serve():
+            ready.set()
+            conn, _ = server.accept()
+            try:
+                request = b""
+                while b"\r\n\r\n" not in request:
+                    request += conn.recv(4096)
+                key = next(
+                    line.split(":", 1)[1].strip()
+                    for line in request.decode("iso-8859-1").splitlines()
+                    if line.lower().startswith("sec-websocket-key:")
+                )
+                accept = base64.b64encode(
+                    hashlib.sha1((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode()).digest()
+                ).decode()
+                conn.sendall(
+                    ("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n"
+                     f"Connection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\n\r\n").encode()
+                )
+                while True:
+                    frame = read_frame(conn)
+                    method, rid = frame.get("method"), frame.get("id")
+                    if not rid:
+                        continue
+                    if method == "model/list":
+                        write_raw(conn, json.dumps({"jsonrpc": "2.0", "id": rid,
+                                                    "result": {"data": [{"id": "m", "isDefault": True}]}}))
+                    elif method == "turn/start":
+                        write_raw(conn, json.dumps({"jsonrpc": "2.0", "id": rid,
+                                                    "result": {"turn": {"id": "t", "status": "inProgress"}}}))
+                        # Valid JSON, not an object. This is the whole test.
+                        write_raw(conn, "[]")
+                        break
+                    else:
+                        write_raw(conn, json.dumps({"jsonrpc": "2.0", "id": rid, "result": {}}))
+            except (OSError, ConnectionError, StopIteration, ValueError):
+                pass
+            finally:
+                conn.close()
+                server.close()
+
+        thread = threading.Thread(target=serve, daemon=True)
+        thread.start()
+        ready.wait(timeout=2)
+
+        self.run_cli(
+            root, "register", "--session", "SESSION-ARRAY", "--agent", "cdx2",
+            "--project", "amiga", "--chat", "CHAT-ARRAY-FRAME", "--mode", "auto-read",
+            "--wake-strategy", "runtime_trigger", "--runtime-family", "codex_app",
+            "--runtime-session-id", "codex-thread-array",
+            "--runtime-session-source", "first_read",
+        )
+
+        env = {"LLM_COLLAB_CODEX_APP_SERVER_URL": f"ws://127.0.0.1:{port}"}
+        first = self.run_cli_with_env(root, env, "dispatch", "--session", "SESSION-ARRAY")
+        thread.join(timeout=5)
+
+        action = first["actions"][0]
+        self.assertEqual("runtime_trigger", action["effective_action"])
+        self.assertEqual(0, action["runtime_result"]["returncode"])
+        self.assertEqual("unobserved", action["runtime_result"]["terminal_status"])
+
+        session_payload = self.run_cli(root, "show", "--session", "SESSION-ARRAY")
+        self.assertIn(
+            message_rel, session_payload["processed_messages"],
+            "a delivered packet must be marked processed, or the next poll resends it",
+        )
+
+        # The actual guarantee: a second poll must not wake anyone again.
+        second = self.run_cli_with_env(root, env, "dispatch", "--session", "SESSION-ARRAY")
+        redispatched = [
+            a for a in second["actions"]
+            if a.get("effective_action") == "runtime_trigger"
+            and a.get("message_path") == message_rel
+            and not (a.get("runtime_result") or {}).get("skipped")
+        ]
+        self.assertEqual([], redispatched, second)
+
     def test_codex_app_server_discovery_matches_exact_codex_home(self):
         rows = [
             {

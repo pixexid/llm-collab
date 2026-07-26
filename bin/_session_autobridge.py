@@ -1712,6 +1712,17 @@ class JsonRpcWebSocketClient:
                 continue
             if opcode == 0x1:
                 message = json.loads(payload.decode("utf-8"))
+                if not isinstance(message, dict):
+                    # A JSON-RPC message is an object. `[]`, `"x"` and `3` all decode
+                    # happily and then blow up in _handle_server_request's .get with an
+                    # AttributeError -- an exception type no caller expects from a parse
+                    # step, so it escaped the turn loop's post-accept handling and left a
+                    # delivered packet eligible for redelivery. Rejecting it here makes
+                    # every read path fail the same way: ValueError, like any other
+                    # malformed frame.
+                    raise ValueError(
+                        f"JSON-RPC frame must be an object, got {type(message).__name__}"
+                    )
                 if self._handle_server_request(message):
                     continue
                 return message
