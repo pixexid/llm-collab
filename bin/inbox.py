@@ -87,7 +87,7 @@ def parse_args():
     )
     p.add_argument("--publish-session", action="store_true", help="Publish current runtime session identity before showing inbox")
     p.add_argument("--session", default=None, help="Stable llm-collab session id to update when publishing runtime identity")
-    p.add_argument("--runtime-family", default=None, choices=("codex_app", "claude_app", "gemini_cli"), help="Runtime family for session discovery")
+    p.add_argument("--runtime-family", default=None, choices=("codex_app", "claude_app", "gemini_cli", "zcode_cli"), help="Runtime family for session discovery")
     p.add_argument("--project-path", default=None, help="Optional runtime project path hint for session discovery")
     p.add_argument("--json", dest="json_output", action="store_true", help="Emit JSON output")
     args = p.parse_args()

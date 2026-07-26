@@ -73,7 +73,7 @@ def parse_args():
     register.add_argument("--lease-owner", default=None, help="Who activated this session")
     register.add_argument("--ttl-seconds", type=int, default=3600, help="Lease TTL in seconds")
     register.add_argument("--allowed-action", dest="allowed_actions", action="append", default=[])
-    register.add_argument("--runtime-family", default=None, help="Runtime family, e.g. codex_app, claude_app, gemini_cli")
+    register.add_argument("--runtime-family", default=None, help="Runtime family, e.g. codex_app, claude_app, gemini_cli, zcode_cli")
     register.add_argument("--runtime-session-id", default=None, help="Current runtime-native session identifier")
     register.add_argument("--runtime-session-source", default=None, help="Where the runtime session identifier came from")
     register.add_argument(
@@ -95,14 +95,14 @@ def parse_args():
     register.add_argument("--json", dest="json_output", action="store_true")
 
     discover = subparsers.add_parser("discover-runtime", help="Discover current runtime session metadata")
-    discover.add_argument("--runtime-family", required=True, choices=("codex_app", "claude_app", "gemini_cli"))
+    discover.add_argument("--runtime-family", required=True, choices=("codex_app", "claude_app", "gemini_cli", "zcode_cli"))
     discover.add_argument("--project-path", default=None, help="Optional project path hint for runtime discovery")
     discover.add_argument("--json", dest="json_output", action="store_true")
 
     publish = subparsers.add_parser("publish-current", help="Discover and publish current runtime session into a session lease")
     publish.add_argument("--session", required=True, help="Stable llm-collab session identifier")
     publish.add_argument("--agent", required=True, help="Agent ID the parked session belongs to")
-    publish.add_argument("--runtime-family", required=True, choices=("codex_app", "claude_app", "gemini_cli"))
+    publish.add_argument("--runtime-family", required=True, choices=("codex_app", "claude_app", "gemini_cli", "zcode_cli"))
     publish.add_argument("--project", default=None, help="Optional project_id filter")
     publish.add_argument("--chat", default=None, help="Optional chat_id filter")
     publish.add_argument(

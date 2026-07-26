@@ -376,6 +376,31 @@ watcher marks each packet processed without ever calling the App Server. The
 result is silently dropped messages.
 
 The native thread id must be the worker's own exact id, self-reported. Do not use
-`publish-current` for this: it refuses `codex_app`, `claude_app`, and
-`gemini_cli` precisely because disk discovery is heuristic and can resolve a
+`publish-current` for this: it refuses `codex_app`, `claude_app`, `gemini_cli`,
+and `zcode_cli` precisely because disk discovery is heuristic and can resolve a
 stale session from an unrelated project.
+
+### ZCode CLI workers
+
+A ZCode worker needs no App Server and no AX doorbell: the watcher wakes it by
+resuming its CLI session directly.
+
+```bash
+python bin/session_autobridge.py register --session <id> --agent zcode \
+  --project <project> --chat <chat> --repo-target <repo> \
+  --mode auto-read --status active --wake-strategy runtime_trigger \
+  --runtime-family zcode_cli --runtime-session-id sess_<uuid> \
+  --runtime-home ~/.zcode
+```
+
+`--runtime-session-id` is the worker's artifact directory name under
+`<ZCODE_HOME>/cli/artifacts/`; `discover-runtime --runtime-family zcode_cli`
+reports the newest one as a read-only hint, skipping `sess_subagent_*`.
+
+Dispatch runs `node <zcode.cjs> --resume <id> --prompt <prompt> --cwd <checkout>`.
+The launcher is an argv **prefix**, overridable with `LLM_COLLAB_ZCODE_BIN` (parsed
+with `shlex`, so an override may carry its own interpreter). `--cwd` comes from the
+one repo target the activation names, resolved through `projects.json`. An
+activation that does not name exactly one known, existing checkout is refused
+rather than resumed in a guessed tree — so `--repo-target` is required for ZCode,
+not optional.

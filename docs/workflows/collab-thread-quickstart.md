@@ -52,7 +52,10 @@ was retired deliberately: a wrong guess binds someone else's thread. Read the id
 register it explicitly.
 
 Repeat step 2 for the other worker, with its own `--runtime-family`
-(`codex_app`, `claude_app`, `gemini_cli`) and its own session id.
+(`codex_app`, `claude_app`, `gemini_cli`, `zcode_cli`) and its own session id.
+A ZCode worker's id is its artifact directory name, `sess_<uuid>` under
+`~/.zcode/cli/artifacts/` — `discover-runtime --runtime-family zcode_cli` prints the
+newest one, but the worker must confirm it is looking at its own before registering it.
 
 **That is the whole "sharing a session id" question.** Nobody pastes an id to anybody.
 Registration publishes it to the shared registry; `deliver.py` resolves the recipient's

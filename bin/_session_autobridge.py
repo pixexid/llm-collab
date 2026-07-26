@@ -6,6 +6,7 @@ import os
 import stat
 import tempfile
 import re
+import shlex
 import signal
 import base64
 import hashlib
@@ -15,7 +16,7 @@ import sys
 import time
 import urllib.parse
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -27,7 +28,7 @@ EXACT_BINDING_AMBIGUOUS_REASON = "exact_binding_ambiguous"
 EXACT_BINDING_MISMATCH_REASON = "exact_binding_mismatch"
 HEURISTIC_RUNTIME_DISCOVERY_REFUSED_REASON = "heuristic_runtime_discovery_refused"
 HEURISTIC_RUNTIME_DISCOVERY_FAMILIES = frozenset(
-    {"codex_app", "claude_app", "gemini_cli"}
+    {"codex_app", "claude_app", "gemini_cli", "zcode_cli"}
 )
 
 from _helpers import (
@@ -38,6 +39,7 @@ from _helpers import (
     get_unread_messages,
     now_utc,
     project_state_root,
+    resolve_project_repo_path,
     utc_iso,
     write_file,
     write_chat_note,
@@ -426,6 +428,12 @@ def runtime_home_from_source(runtime_family: str, session_source: str | None) ->
             if current.name == "tmp":
                 return str(current.parent)
             current = current.parent
+    if runtime_family == "zcode_cli":
+        current = source_path
+        while current != current.parent:
+            if current.name == "artifacts" and current.parent.name == "cli":
+                return str(current.parent.parent)
+            current = current.parent
     return None
 
 
@@ -434,6 +442,7 @@ def runtime_binary_env_var(runtime_family: str) -> str | None:
         "codex_app": "LLM_COLLAB_CODEX_BIN",
         "claude_app": "LLM_COLLAB_CLAUDE_BIN",
         "gemini_cli": "LLM_COLLAB_GEMINI_BIN",
+        "zcode_cli": "LLM_COLLAB_ZCODE_BIN",
     }
     return mapping.get(runtime_family)
 
@@ -454,6 +463,31 @@ def runtime_binary(runtime_family: str) -> str:
     return runtime_binary_default(runtime_family)
 
 
+ZCODE_ARGV_DEFAULT = ("node", "/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs")
+
+
+def runtime_binary_argv(runtime_family: str) -> list[str]:
+    """The argv PREFIX that launches this runtime, not a single executable.
+
+    ZCode CLI ships as a script, so its launcher is two argv elements. Collapsing them into
+    one string makes subprocess look for a file literally named "node /Applications/...cjs",
+    which cannot exist. Every other family stays a one-element prefix, so the existing
+    single-string env overrides keep their exact meaning: a path, never a shell fragment.
+    """
+    env_var = runtime_binary_env_var(runtime_family)
+    override = os.environ.get(env_var) if env_var else None
+    if runtime_family != "zcode_cli":
+        return [runtime_binary(runtime_family)]
+    if override:
+        # shlex, so an override can carry its own interpreter -- but the result is still argv
+        # handed straight to execve. Nothing is passed through a shell.
+        argv = shlex.split(override)
+        if not argv:
+            raise ValueError(f"{env_var} is set but parses to an empty command")
+        return argv
+    return list(ZCODE_ARGV_DEFAULT)
+
+
 def codex_home() -> Path:
     return Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))).expanduser()
 
@@ -464,6 +498,10 @@ def claude_home() -> Path:
 
 def gemini_home() -> Path:
     return Path(os.environ.get("GEMINI_HOME", str(Path.home() / ".gemini"))).expanduser()
+
+
+def zcode_home() -> Path:
+    return Path(os.environ.get("ZCODE_HOME", str(Path.home() / ".zcode"))).expanduser()
 
 
 def _parse_jsonl_last_object(path: Path) -> dict[str, Any] | None:
@@ -571,6 +609,50 @@ def discover_gemini_runtime_session(project_path: str | None = None) -> dict[str
     raise FileNotFoundError("No Gemini session files found")
 
 
+ZCODE_SUBAGENT_PREFIX = "sess_subagent_"
+
+
+def discover_zcode_runtime_session() -> dict[str, Any]:
+    """The most recently active MAIN ZCode session on disk.
+
+    Read-only, like every other family's discovery: newest-mtime cannot tell one worker's
+    session from a stale one in another project, so it may not feed a binding. It is here to
+    show a worker the id it should then self-report through `register --runtime-session-id`.
+
+    Subagent artifacts share the directory and are never resumable as a worker session, so
+    they are excluded by name rather than by mtime -- a chatty subagent is routinely the
+    newest entry.
+    """
+    artifacts_root = zcode_home() / "cli" / "artifacts"
+    newest: tuple[float, Path] | None = None
+    try:
+        with os.scandir(artifacts_root) as scan:
+            for entry in scan:
+                if not entry.name.startswith("sess_"):
+                    continue
+                if entry.name.startswith(ZCODE_SUBAGENT_PREFIX):
+                    continue
+                if not entry.is_dir():
+                    continue
+                mtime = entry.stat().st_mtime
+                if newest is None or mtime > newest[0]:
+                    newest = (mtime, Path(entry.path))
+    except (FileNotFoundError, NotADirectoryError):
+        raise FileNotFoundError(f"No ZCode artifacts directory at {artifacts_root}")
+    except OSError as error:
+        raise FileNotFoundError(f"Cannot read ZCode artifacts at {artifacts_root}: {error}")
+
+    if newest is None:
+        raise FileNotFoundError(f"No ZCode session artifacts under {artifacts_root}")
+    return {
+        "family": "zcode_cli",
+        "session_id": newest[1].name,
+        "session_source": str(newest[1]),
+        "home": str(zcode_home()),
+        "seen_at": datetime.fromtimestamp(newest[0], tz=timezone.utc).isoformat().replace("+00:00", "Z"),
+    }
+
+
 def discover_runtime_session(runtime_family: str, project_path: str | None = None) -> dict[str, Any]:
     if runtime_family == "codex_app":
         return discover_codex_runtime_session()
@@ -578,6 +660,8 @@ def discover_runtime_session(runtime_family: str, project_path: str | None = Non
         return discover_claude_runtime_session(project_path=project_path)
     if runtime_family == "gemini_cli":
         return discover_gemini_runtime_session(project_path=project_path)
+    if runtime_family == "zcode_cli":
+        return discover_zcode_runtime_session()
     raise ValueError(f"Unsupported runtime family: {runtime_family}")
 
 
@@ -1233,6 +1317,33 @@ def build_resume_prompt(session: dict, message: dict) -> str:
     return "\n".join(lines)
 
 
+def activation_workdir(session: dict, message: dict) -> Path | None:
+    """The one checkout this activation is scoped to, or None.
+
+    Derived from the repo target the packet activates -- the packet's if it names one, else
+    the session's subscription -- and resolved through the project registry, the same
+    authority every other repo path in this tool comes from.
+
+    None whenever that is not exactly one existing checkout: an unscoped session, a packet
+    spanning two repos, or a target the registry does not resolve. A caller that needs a
+    working directory must refuse, not fall back to a guess -- resuming a worker in the wrong
+    tree is worse than not resuming it.
+    """
+    project_id = session.get("project_id")
+    if not isinstance(project_id, str) or not project_id:
+        return None
+    frontmatter = message.get("frontmatter", {}) if isinstance(message, dict) else {}
+    targets = _repo_target_set(frontmatter.get("repo_targets"))
+    if targets is None:
+        targets = _repo_target_set(session.get("repo_targets"))
+    if targets is None or len(targets) != 1:
+        return None
+    path = resolve_project_repo_path(project_id, next(iter(targets)))
+    if path is None or not path.is_dir():
+        return None
+    return path
+
+
 def derived_runtime_command(session: dict, message: dict) -> list[str] | None:
     runtime = runtime_metadata(session)
     runtime_family = runtime.get("family")
@@ -1241,6 +1352,20 @@ def derived_runtime_command(session: dict, message: dict) -> list[str] | None:
         return None
 
     prompt = build_resume_prompt(session, message)
+    if runtime_family == "zcode_cli":
+        workdir = activation_workdir(session, message)
+        if workdir is None:
+            return None
+        return [
+            *runtime_binary_argv("zcode_cli"),
+            "--resume",
+            str(runtime_session_id),
+            "--prompt",
+            prompt,
+            "--cwd",
+            str(workdir),
+        ]
+
     binary = runtime_binary(str(runtime_family))
 
     if runtime_family == "codex_app":
@@ -2085,6 +2210,8 @@ def execute_runtime_trigger(session: dict, message: dict) -> dict[str, Any]:
             env["CLAUDE_HOME"] = str(runtime_home)
         elif runtime_family == "gemini_cli":
             env["GEMINI_HOME"] = str(runtime_home)
+        elif runtime_family == "zcode_cli":
+            env["ZCODE_HOME"] = str(runtime_home)
     result = subprocess.run(
         command,
         input=json.dumps(payload),

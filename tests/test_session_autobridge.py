@@ -1992,7 +1992,7 @@ class SessionAutobridgeTest(unittest.TestCase):
             },
         )
 
-        for runtime_family in ("codex_app", "claude_app", "gemini_cli"):
+        for runtime_family in sorted(session_autobridge_lib.HEURISTIC_RUNTIME_DISCOVERY_FAMILIES):
             with self.subTest(runtime_family=runtime_family):
                 result = self.run_cli(
                     root,
@@ -2056,7 +2056,7 @@ class SessionAutobridgeTest(unittest.TestCase):
             title="Inbox publish refusal",
         )
 
-        for runtime_family in ("codex_app", "claude_app", "gemini_cli"):
+        for runtime_family in sorted(session_autobridge_lib.HEURISTIC_RUNTIME_DISCOVERY_FAMILIES):
             with self.subTest(runtime_family=runtime_family):
                 result = subprocess.run(
                     [
@@ -5973,3 +5973,194 @@ class RenamedCodexBinaryDiscoveryTest(unittest.TestCase):
             "/Applications/ChatGPT.app/Contents/Resources/codex "
             "-c features.code_mode_host=true app-server --analytics-default-enabled",
         ]))
+
+
+class ZCodeRuntimeTest(unittest.TestCase):
+    """ZCode CLI as a first-class runtime family: discovery, launcher argv, and resume dispatch."""
+
+    def setUp(self) -> None:
+        self.home = Path(tempfile.mkdtemp(prefix="zcode-", dir="/tmp"))
+        self.artifacts = self.home / "cli" / "artifacts"
+
+    def make_session_dir(self, name: str, mtime: float) -> Path:
+        path = self.artifacts / name
+        path.mkdir(parents=True, exist_ok=True)
+        os.utime(path, (mtime, mtime))
+        return path
+
+    def discover(self):
+        with patch.dict(os.environ, {"ZCODE_HOME": str(self.home)}, clear=False):
+            return session_autobridge_lib.discover_zcode_runtime_session()
+
+    # --- the launcher is an argv prefix, not one executable -------------------------------
+
+    def test_the_default_zcode_launcher_is_exactly_two_argv_elements(self) -> None:
+        """One string would make execve look for a file named "node /Applications/...cjs"."""
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("LLM_COLLAB_ZCODE_BIN", None)
+            argv = session_autobridge_lib.runtime_binary_argv("zcode_cli")
+        self.assertEqual(
+            ["node", "/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs"], argv
+        )
+
+    def test_the_zcode_override_parses_into_a_preserved_argv_prefix(self) -> None:
+        with patch.dict(
+            os.environ, {"LLM_COLLAB_ZCODE_BIN": "/usr/bin/node /opt/zcode/zcode.cjs"}, clear=False
+        ):
+            self.assertEqual(
+                ["/usr/bin/node", "/opt/zcode/zcode.cjs"],
+                session_autobridge_lib.runtime_binary_argv("zcode_cli"),
+            )
+
+    def test_a_zcode_override_that_parses_to_nothing_is_refused(self) -> None:
+        with patch.dict(os.environ, {"LLM_COLLAB_ZCODE_BIN": "   "}, clear=False):
+            with self.assertRaises(ValueError):
+                session_autobridge_lib.runtime_binary_argv("zcode_cli")
+
+    def test_other_families_keep_their_single_element_path_semantics(self) -> None:
+        """Their override is a PATH, so a space in it must not split into two arguments."""
+        with patch.dict(
+            os.environ, {"LLM_COLLAB_CODEX_BIN": "/opt/my tools/codex"}, clear=False
+        ):
+            self.assertEqual(
+                ["/opt/my tools/codex"],
+                session_autobridge_lib.runtime_binary_argv("codex_app"),
+            )
+
+    # --- discovery ------------------------------------------------------------------------
+
+    def test_discovery_selects_the_newest_main_session(self) -> None:
+        self.make_session_dir("sess_old", 1000)
+        newest = self.make_session_dir("sess_new", 2000)
+        found = self.discover()
+        self.assertEqual("sess_new", found["session_id"])
+        self.assertEqual(str(newest), found["session_source"])
+        self.assertEqual("zcode_cli", found["family"])
+        self.assertEqual(str(self.home), found["home"])
+
+    def test_discovery_ignores_a_subagent_artifact_even_when_it_is_newest(self) -> None:
+        """Subagent artifacts share the directory and are not resumable worker sessions."""
+        self.make_session_dir("sess_main", 1000)
+        self.make_session_dir("sess_subagent_chatty", 9000)
+        self.assertEqual("sess_main", self.discover()["session_id"])
+
+    def test_discovery_ignores_files_and_foreign_names(self) -> None:
+        self.artifacts.mkdir(parents=True, exist_ok=True)
+        write(self.artifacts / "sess_not_a_dir.json", "{}")
+        os.utime(self.artifacts / "sess_not_a_dir.json", (9000, 9000))
+        self.make_session_dir("notes", 8000)
+        self.make_session_dir("sess_real", 1000)
+        self.assertEqual("sess_real", self.discover()["session_id"])
+
+    def test_a_missing_or_empty_artifacts_root_fails_closed(self) -> None:
+        with self.assertRaises(FileNotFoundError):
+            self.discover()
+        self.artifacts.mkdir(parents=True)
+        with self.assertRaises(FileNotFoundError):
+            self.discover()
+
+    def test_zcode_home_defaults_under_the_user_home(self) -> None:
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("ZCODE_HOME", None)
+            self.assertEqual(Path.home() / ".zcode", session_autobridge_lib.zcode_home())
+
+    def test_the_runtime_home_is_recoverable_from_an_artifact_path(self) -> None:
+        self.assertEqual(
+            "/somewhere/.zcode",
+            session_autobridge_lib.runtime_home_from_source(
+                "zcode_cli", "/somewhere/.zcode/cli/artifacts/sess_abc"
+            ),
+        )
+
+    # --- heuristic discovery may not feed a binding ----------------------------------------
+
+    def test_zcode_publish_stays_behind_the_heuristic_refusal(self) -> None:
+        """Newest-mtime cannot tell this worker's session from another project's.
+
+        The same reason codex_app, claude_app and gemini_cli were retired from publish. The
+        family set is asserted whole, so adding a family without deciding this is a failure.
+        """
+        self.assertEqual(
+            {"codex_app", "claude_app", "gemini_cli", "zcode_cli"},
+            set(session_autobridge_lib.HEURISTIC_RUNTIME_DISCOVERY_FAMILIES),
+        )
+
+    # --- dispatch --------------------------------------------------------------------------
+
+    def session(self, **overrides) -> dict:
+        payload = {
+            "session_id": "SESSION-ZCODE",
+            "agent_id": "zcode",
+            "project_id": "nuvyr",
+            "chat_id": "CHAT-2F67567D",
+            "repo_targets": ["app"],
+            "runtime": {
+                "family": "zcode_cli",
+                "session_id": "sess_e478e59e",
+                "home": str(self.home),
+            },
+        }
+        payload.update(overrides)
+        return payload
+
+    def message(self, repo_targets=None) -> dict:
+        frontmatter = {
+            "title": "Wake up",
+            "from": "codex",
+            "project_id": "nuvyr",
+            "chat_id": "CHAT-2F67567D",
+        }
+        if repo_targets is not None:
+            frontmatter["repo_targets"] = repo_targets
+        return {"path": "Chats/x/msg.md", "frontmatter": frontmatter, "body": "Body"}
+
+    def with_project(self, repos: dict):
+        import _helpers
+
+        return patch.object(
+            _helpers, "_projects_cache", [{"id": "nuvyr", "display_name": "Nuvyr", "repos": repos}]
+        )
+
+    def derive(self, session, message, repos):
+        with self.with_project(repos):
+            with patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("LLM_COLLAB_ZCODE_BIN", None)
+                return session_autobridge_lib.derived_runtime_command(session, message)
+
+    def test_dispatch_emits_the_intact_prefix_then_resume_prompt_and_exact_cwd(self) -> None:
+        checkout = Path(tempfile.mkdtemp(prefix="nuvyr-app-", dir="/tmp"))
+        command = self.derive(self.session(), self.message(["app"]), {"app": str(checkout)})
+        self.assertEqual(
+            ["node", "/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs"], command[:2]
+        )
+        self.assertEqual("--resume", command[2])
+        self.assertEqual("sess_e478e59e", command[3])
+        self.assertEqual("--prompt", command[4])
+        self.assertIn("Wake up", command[5])
+        self.assertEqual(["--cwd", str(checkout.resolve())], command[6:])
+
+    def test_dispatch_falls_back_to_the_session_scope_when_the_packet_names_none(self) -> None:
+        checkout = Path(tempfile.mkdtemp(prefix="nuvyr-app-", dir="/tmp"))
+        command = self.derive(self.session(), self.message(), {"app": str(checkout)})
+        self.assertEqual(["--cwd", str(checkout.resolve())], command[-2:])
+
+    def test_dispatch_refuses_rather_than_guess_a_checkout(self) -> None:
+        checkout = Path(tempfile.mkdtemp(prefix="nuvyr-app-", dir="/tmp"))
+        repos = {"app": str(checkout), "docs": str(checkout)}
+        cases = {
+            "an unscoped session and packet": (self.session(repo_targets=None), self.message()),
+            "two repositories in one activation": (self.session(), self.message(["app", "docs"])),
+            "a target the registry does not know": (
+                self.session(repo_targets=["ghost"]),
+                self.message(["ghost"]),
+            ),
+        }
+        for label, (session, message) in cases.items():
+            with self.subTest(label):
+                self.assertIsNone(self.derive(session, message, repos))
+
+    def test_dispatch_refuses_when_the_registered_checkout_is_absent(self) -> None:
+        missing = Path(tempfile.mkdtemp(prefix="nuvyr-gone-", dir="/tmp")) / "removed"
+        self.assertIsNone(
+            self.derive(self.session(), self.message(["app"]), {"app": str(missing)})
+        )
