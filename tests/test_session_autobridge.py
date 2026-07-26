@@ -555,7 +555,20 @@ class SessionAutobridgeTest(unittest.TestCase):
         self.assertEqual(message_rel, runtime_payload["message_path"])
 
         dispatch_again = self.run_cli(root, "dispatch", "--session", "SESSION-RUNTIME")
-        self.assertEqual([], dispatch_again["actions"])
+        # The trigger runs once -- the worker script wrote its payload once and is not
+        # invoked again. But a packet that is processed AND still unread has to be
+        # REPORTED, or nothing ever reconciles the inbox and it stays unread forever:
+        # this branch used to suppress it silently on every later poll. The action says
+        # already_processed and skipped, so it cannot be mistaken for a second delivery.
+        self.assertEqual(1, len(dispatch_again["actions"]))
+        replay = dispatch_again["actions"][0]
+        self.assertEqual("already_processed", replay["reason"])
+        self.assertTrue(replay["runtime_result"]["skipped"])
+        self.assertEqual(0, replay["runtime_result"]["returncode"])
+        self.assertEqual(
+            runtime_payload, json.loads(output_file.read_text()),
+            "the runtime command must not have run a second time",
+        )
 
     def test_activation_lookup_requires_exact_scope_during_search(self):
         root = self.make_workspace()
@@ -6898,6 +6911,64 @@ class UnobservedTurnIsNotRedeliveredTest(unittest.TestCase):
         kept = [int(method.rsplit("/", 1)[1]) for method in result["notifications"]]
         self.assertEqual(sorted(kept), kept)
         self.assertGreater(min(kept), 4, f"kept the oldest events instead: {kept}")
+
+    def test_the_deadline_is_installed_before_the_first_request(self) -> None:
+        """Setup must be inside the budget, not before it starts.
+
+        Installed after turn/start, a peer could send notifications, pings, binary frames
+        or handled server requests indefinitely -- each resetting the per-read timeout
+        inside request(), which never returns -- and hang the watcher during setup, before
+        any delivery state existed. Asserted as an ordering in the source because the
+        behavioural version of this test is a hang: that is precisely the defect.
+        """
+        import ast
+        import inspect
+        import textwrap
+
+        tree = ast.parse(
+            textwrap.dedent(
+                inspect.getsource(session_autobridge_lib.execute_codex_app_server_trigger)
+            )
+        )
+        first_deadline = None
+        first_request = None
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+                continue
+            if node.func.attr == "set_deadline" and first_deadline is None:
+                first_deadline = node.lineno
+            if node.func.attr == "request" and first_request is None:
+                first_request = node.lineno
+        self.assertIsNotNone(first_deadline, "no deadline is installed at all")
+        self.assertIsNotNone(first_request)
+        self.assertLess(
+            first_deadline, first_request,
+            "the first correlated request runs outside any deadline",
+        )
+
+    def test_retained_server_request_methods_are_bounded(self) -> None:
+        """Peer-controlled strings, bounded in both directions like every other retention.
+
+        A flood of valid server requests before the turn/start reply could otherwise
+        exhaust memory before acceptance was recorded.
+        """
+        client = session_autobridge_lib.JsonRpcWebSocketClient("ws://127.0.0.1:1")
+        limit = session_autobridge_lib.PENDING_NOTIFICATION_LIMIT
+        for index in range(limit * 2):
+            client.server_requests.append("x" * 5000 + str(index))
+        self.assertEqual(limit, len(client.server_requests))
+
+    def test_a_shortened_method_is_reported_as_truncated(self) -> None:
+        """Shortening an entry is a truncation too.
+
+        Reporting only evictions let a short history containing one oversized method read
+        as complete, so a consumer could not tell the altered method from the peer's event.
+        """
+        port, thread, _ = self.serve(after_turn_start="giant_methods", deltas=0)
+        result = self.trigger(port)
+        thread.join(timeout=5)
+        self.assertGreater(result["notification_methods_shortened"], 0)
+        self.assertTrue(result["notifications_truncated"])
 
     def test_a_giant_method_name_is_truncated_before_it_is_retained(self) -> None:
         """Counting entries bounded one factor of the product, not the product.

@@ -1581,7 +1581,10 @@ class JsonRpcWebSocketClient:
         self._buffered_bytes = b""
         self.sock: socket.socket | None = None
         self.counter = 0
-        self.server_requests: list[str] = []
+        # Peer-controlled method strings, so bounded in both directions like every other
+        # retention here: a flood of valid server requests before the turn/start reply could
+        # otherwise exhaust memory before acceptance was recorded.
+        self.server_requests: deque[str] = deque(maxlen=PENDING_NOTIFICATION_LIMIT)
         # An optional ABSOLUTE instant after which no blocking operation may still be waiting.
         # None keeps the historical behaviour exactly: every wait gets the full timeout_seconds.
         # A per-call timeout cannot bound a handshake, because a peer trickling bytes resets it
@@ -1760,7 +1763,7 @@ class JsonRpcWebSocketClient:
         if message.get("id") is None or not message.get("method"):
             return False
         method = str(message["method"])
-        self.server_requests.append(method)
+        self.server_requests.append(method[:CODEX_APP_SERVER_METHOD_CHARS])
         if self.server_request_policy == SERVER_REQUEST_REFUSE:
             self.send_json({
                 "jsonrpc": "2.0",
@@ -2039,6 +2042,7 @@ def _notification_report(
     *,
     dropped: int = 0,
     text_truncated: bool = False,
+    methods_shortened: int = 0,
 ) -> dict[str, Any]:
     """The kept tail, and whether it is a tail.
 
@@ -2051,8 +2055,11 @@ def _notification_report(
     return {
         "notifications": retained[-limit:],
         "notifications_total": len(retained) + dropped,
-        "notifications_truncated": len(retained) > limit or bool(dropped),
+        "notifications_truncated": (
+            len(retained) > limit or bool(dropped) or bool(methods_shortened)
+        ),
         "notifications_dropped": dropped,
+        "notification_methods_shortened": methods_shortened,
         "stdout_truncated": text_truncated,
     }
 
@@ -2089,6 +2096,7 @@ def execute_codex_app_server_trigger(
     # frames nearest a terminal condition -- the ones a diagnostic tail exists for.
     notifications: deque[str] = deque(maxlen=CODEX_APP_SERVER_NOTIFICATION_RETENTION)
     notifications_dropped = 0
+    methods_shortened = 0
     assistant_text = ""
     assistant_text_truncated = False
     terminal: dict[str, Any] | None = None
@@ -2099,6 +2107,11 @@ def execute_codex_app_server_trigger(
         timeout_seconds=timeout_seconds,
         max_frame_bytes=CODEX_APP_SERVER_MAX_FRAME_BYTES,
     ) as client:
+        # Before initialize, not after turn/start. Installed later, a peer could send
+        # notifications, pings, binary frames or handled server requests indefinitely --
+        # each one resetting the per-read timeout inside request(), which never returns --
+        # and hang the watcher during setup, before any delivery state existed.
+        client.set_deadline(time.monotonic() + timeout_seconds)
         client.request(
             "initialize",
             {
@@ -2181,6 +2194,7 @@ def execute_codex_app_server_trigger(
                     notifications,
                     dropped=notifications_dropped,
                     text_truncated=assistant_text_truncated,
+                    methods_shortened=methods_shortened,
                 ),
             }
 
@@ -2199,6 +2213,8 @@ def execute_codex_app_server_trigger(
         # requests -- never return here, so each one silently granted the next read a
         # fresh full timeout. A chatty peer could hang the watcher indefinitely on an
         # accepted turn that was never marked processed.
+        # Re-armed for the observation window, which gets its own full budget: setup and
+        # waiting for a turn are different operations and the deadline above bounded setup.
         client.set_deadline(deadline)
         while time.monotonic() < deadline:
             if replay:
@@ -2217,6 +2233,10 @@ def execute_codex_app_server_trigger(
                 continue
             if len(notifications) == CODEX_APP_SERVER_NOTIFICATION_RETENTION:
                 notifications_dropped += 1
+            if len(method) > CODEX_APP_SERVER_METHOD_CHARS:
+                # Shortening an entry is a truncation too. Reporting only evictions let a
+                # consumer read an altered method as the peer's complete event.
+                methods_shortened += 1
             notifications.append(method[:CODEX_APP_SERVER_METHOD_CHARS])
             params = message_payload.get("params")
             # Output is attributed BEFORE it is collected, not after. A second turn on the
@@ -2295,6 +2315,7 @@ def execute_codex_app_server_trigger(
             notifications,
             dropped=notifications_dropped,
             text_truncated=assistant_text_truncated,
+            methods_shortened=methods_shortened,
         ),
     }
 
@@ -2963,6 +2984,13 @@ def dispatch_session(
                 message_needs_canonical_materialization(session, message)
                 and message["path"] in canonical_settled_message_paths(session)
             ):
+                completed_settlements.append(message)
+            else:
+                # A crash between saving the processed marker and marking the inbox read
+                # leaves the packet processed AND unread forever: this branch suppressed it
+                # silently on every later poll, so nothing ever reported it and nothing ever
+                # read it. Reporting it as already-consumed is what lets the watcher's
+                # mark_messages_read reconcile the inbox.
                 completed_settlements.append(message)
             continue
         target_match, target_reason = message_targets_session(
