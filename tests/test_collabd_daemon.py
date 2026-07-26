@@ -177,6 +177,49 @@ class DaemonTest(unittest.TestCase):
                 self.stop(thread)
         self.assertIs(real_open, server_module.DaemonServer._open_listener)
 
+    def test_no_launched_daemon_thread_can_escape_cleanup(self) -> None:
+        """Every `thread.start()` must be followed immediately by a try/finally.
+
+        A non-daemon thread left in its accept loop turns a reported failure into a hung
+        run, so the failure is never seen. Three sites were fixed and two direct launches
+        were missed; asserted structurally because the alternative is discovering the next
+        one by hanging.
+        """
+        import ast
+
+        tree = ast.parse(Path(__file__).resolve().read_text(encoding="utf-8"))
+        unprotected: list[str] = []
+        for function in ast.walk(tree):
+            if not isinstance(function, ast.FunctionDef) or function.name == "start":
+                # `start()` hands the thread to its caller, so protection belongs there.
+                continue
+            launches = [
+                node.lineno
+                for node in ast.walk(function)
+                if isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "Thread"
+                and any(
+                    isinstance(keyword.value, ast.Attribute)
+                    and keyword.value.attr == "run"
+                    for keyword in node.keywords
+                )
+            ]
+            if not launches:
+                continue
+            protections = [
+                node.lineno
+                for node in ast.walk(function)
+                if isinstance(node, ast.Try) and node.finalbody
+            ]
+            for line in launches:
+                if not any(protection > line for protection in protections):
+                    unprotected.append(f"{function.name}:{line}")
+        self.assertEqual(
+            [], unprotected,
+            "a daemon server thread is launched with no try/finally after it",
+        )
+
     def test_the_harness_has_exactly_one_readiness_mechanism(self) -> None:
         """A second readiness mechanism is a second chance to get it wrong.
 
@@ -349,13 +392,19 @@ class DaemonTest(unittest.TestCase):
         with patch.object(LedgerStore, "open_writer", side_effect=AssertionError("must not open")):
             thread = threading.Thread(target=server.run)
             thread.start()
-            self.wait_until_accepting()
-            status = self.request(b'{"version":1,"op":"status"}')
-            self.assertFalse(status["observation_gate"]["effective"])
-            self.assertEqual(status["ledger"]["state"], "absent")
-            self.assertFalse(self.paths.ledger.exists())
-            self.assertEqual(list(self.paths.backups.iterdir()), [])
-            self.stop(thread)
+            # From immediately after start(), not after the assertions: a readiness
+            # failure raises before any of them and would otherwise leave this non-daemon
+            # thread in its accept loop, hanging the run instead of reporting.
+            try:
+                self.wait_until_accepting()
+                status = self.request(b'{"version":1,"op":"status"}')
+                self.assertFalse(status["observation_gate"]["effective"])
+                self.assertEqual(status["ledger"]["state"], "absent")
+                self.assertFalse(self.paths.ledger.exists())
+                self.assertEqual(list(self.paths.backups.iterdir()), [])
+            finally:
+                if thread.is_alive():
+                    self.stop(thread)
         self.assertFalse(self.paths.ledger.exists())
 
     def test_each_false_gate_and_all_false_perform_no_observation_reads_or_ledger_open(self) -> None:
@@ -407,12 +456,17 @@ class DaemonTest(unittest.TestCase):
                 ):
                     thread = threading.Thread(target=server.run)
                     thread.start()
-                    self.wait_until_accepting()
-                    status = self.request(b'{"version":1,"op":"status"}')
-                    self.assertFalse(status["observation_gate"]["effective"])
-                    self.assertEqual(status["observation"]["state"], "gated_off")
-                    self.assertEqual(status["observation"]["source_reachability"], "not_checked")
-                    self.stop(thread)
+                    try:
+                        self.wait_until_accepting()
+                        status = self.request(b'{"version":1,"op":"status"}')
+                        self.assertFalse(status["observation_gate"]["effective"])
+                        self.assertEqual(status["observation"]["state"], "gated_off")
+                        self.assertEqual(
+                            status["observation"]["source_reachability"], "not_checked"
+                        )
+                    finally:
+                        if thread.is_alive():
+                            self.stop(thread)
                     open_writer.assert_not_called()
                     registry_read.assert_not_called()
                     watchdog_load.assert_not_called()
