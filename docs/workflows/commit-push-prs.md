@@ -456,7 +456,8 @@ Proceed only when all of these are true:
   prior-head thread nobody answered is unadjudicated, not closed — reading
   "for the current head" here is the silent drop this section already forbids
 - full PR comments, review bodies, review threads, and inline comments contain
-  no unresolved actionable feedback bound to the current head
+  no unresolved actionable feedback, whatever head it was raised on — prose
+  feedback is dropped by a "current head" reading exactly as a thread is
 - the project/operator has authorized auto-merge for this PR or queue class
 
 Read current review bodies and reactions directly. Do not infer the current
