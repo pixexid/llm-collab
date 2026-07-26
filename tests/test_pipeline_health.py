@@ -327,6 +327,21 @@ class PipelineHealthTest(unittest.TestCase):
             "in it is silently skipped on a direct run",
         )
 
+    def test_a_backlog_is_never_absolved_by_a_session_that_cannot_receive(self) -> None:
+        """`message_targets_session` answers addressing, not wakeability.
+
+        Passing every session in when none was live let a dead session "match" a packet,
+        so a fully broken lane reported an empty backlog -- suppressing the one line that
+        would have shown the packets were stuck.
+        """
+        root = self.workspace()
+        self.add_session(root, "SESSION-DEAD", lease_delta=-600)
+        self.add_unread(root, "stuck", target="SESSION-DEAD-runtime")
+        _, payload = self.run_health(root)
+        backlog = self.check(payload, "backlog")
+        self.assertIn("no session to route them to", backlog["detail"])
+        self.assertFalse(payload["agents"][0]["can_wake"])
+
     def test_agent_wide_mode_is_an_inventory_not_a_send_verdict(self) -> None:
         """Kept, but it must not be the thing consulted before a send."""
         root = self.workspace_with_two_sessions()
@@ -699,6 +714,42 @@ class ActivityAndWatchTest(unittest.TestCase):
         with mock.patch.object(self.mod, "SESSIONS_DIR", FewPaths()), \
                 mock.patch.object(self.mod, "load_session", return_value=None):
             self.assertEqual([], self.mod._sessions_for("cdx2"))
+
+    def watcher_with_listing(self, listing: str) -> dict:
+        from unittest import mock
+
+        class Result:
+            stdout = listing
+
+        with mock.patch.object(self.mod.subprocess, "run", return_value=Result()):
+            return self.mod._watcher_check("cdx2")
+
+    def test_a_watcher_polling_another_checkout_is_not_this_workspaces_watcher(self) -> None:
+        """Matching the basename counted someone else's mailbox poller as ours.
+
+        The check passed while nothing read packets written here, which is the exact
+        false green this tool exists to prevent.
+        """
+        foreign = "/Users/x/other-collab/bin/watch_inbox.py --me cdx2 --json"
+        check = self.watcher_with_listing(f"/bin/zsh\n{foreign}\n")
+        self.assertEqual(self.mod.FAIL, check["status"])
+        self.assertIn("another checkout", check["detail"])
+
+    def test_a_watcher_from_this_workspace_counts(self) -> None:
+        mine = f"python3 {self.mod.ROOT / 'bin' / 'watch_inbox.py'} --me cdx2 --json"
+        check = self.watcher_with_listing(f"/bin/zsh\n{mine}\n")
+        self.assertEqual(self.mod.OK, check["status"])
+
+    def test_the_unread_queue_is_bounded_like_the_session_directory(self) -> None:
+        """The other untrusted enumeration, read and parsed in full."""
+        from unittest import mock
+
+        many = [{"path": f"Chats/x/{i}.md", "frontmatter": {}, "body": ""} for i in range(20)]
+        with mock.patch.object(self.mod, "get_unread_messages", return_value=many), \
+                mock.patch.object(self.mod, "UNREAD_SCAN_LIMIT", 5):
+            with self.assertRaises(RuntimeError) as caught:
+                self.mod._backlog_check("cdx2", [])
+        self.assertIn("partial backlog", str(caught.exception))
 
     def test_a_long_idle_worker_is_reported_but_never_failed(self) -> None:
         """Quiet is not broken. Failing on it would make the view cry wolf hourly.

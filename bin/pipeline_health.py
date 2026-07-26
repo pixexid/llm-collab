@@ -68,6 +68,9 @@ _RANK = {OK: 0, WARN: 1, FAIL: 2}
 # one that refuses, so this fails closed rather than reporting a partial inventory --
 # a partial answer here looks exactly like a complete one.
 SESSION_SCAN_LIMIT = 5000
+# The same rule for the other untrusted enumeration: an unbounded unread queue is read
+# and parsed in full by the backlog check.
+UNREAD_SCAN_LIMIT = 5000
 
 
 def _sessions_for(agent_id: str) -> list[dict]:
@@ -295,8 +298,27 @@ def _watcher_check(agent_id: str) -> dict:
         return {"check": "watcher", "status": WARN,
                 "detail": f"could not inspect processes: {exc}"}
     needle = f"watch_inbox.py --me {agent_id}"
-    if any(needle in line for line in listing.splitlines()):
-        return {"check": "watcher", "status": OK, "detail": "watcher running"}
+    # Matching the basename alone counted a watcher polling a DIFFERENT checkout's
+    # mailbox as this workspace's watcher, so the check passed while nothing read these
+    # packets. The script path is what ties the process to this ROOT.
+    this_workspace = str((ROOT / "bin" / "watch_inbox.py").resolve())
+    mine = [
+        line for line in listing.splitlines()
+        if needle in line and this_workspace in line
+    ]
+    if mine:
+        return {"check": "watcher", "status": OK,
+                "detail": f"watcher running from {this_workspace}"}
+    elsewhere = [line for line in listing.splitlines() if needle in line]
+    if elsewhere:
+        return {
+            "check": "watcher",
+            "status": FAIL,
+            "detail": (
+                f"a `{needle}` process exists but not from {this_workspace}; it polls "
+                "another checkout's mailbox, so nothing reads a packet written here."
+            ),
+        }
     return {
         "check": "watcher",
         "status": FAIL,
@@ -318,6 +340,11 @@ def _backlog_check(agent_id: str, sessions: list[dict]) -> dict:
     only one that can answer "will this packet ever be delivered".
     """
     unread = get_unread_messages(agent_id)
+    if len(unread) > UNREAD_SCAN_LIMIT:
+        raise RuntimeError(
+            f"unread queue holds {len(unread)} messages, above the {UNREAD_SCAN_LIMIT} "
+            "limit; refusing to classify a partial backlog as the whole one."
+        )
     if not sessions:
         return {"check": "backlog", "status": OK,
                 "detail": f"{len(unread)} unread; no session to route them to"}
@@ -569,7 +596,11 @@ def agent_report(agent_id: str, *, min_lease_seconds: int) -> dict:
             ),
         })
 
-    advisory = [_watcher_check(agent_id), _backlog_check(agent_id, live or sessions)]
+    # Only sessions that can actually receive may absolve a packet. Falling back to every
+    # session let a dead one "match" a packet -- message_targets_session answers
+    # addressing, not wakeability -- so a fully broken lane reported an empty backlog,
+    # the one line that would have shown the packets were stuck.
+    advisory = [_watcher_check(agent_id), _backlog_check(agent_id, live)]
     for session in live:
         advisory.insert(0, {**_activity_check(session), "session_id": session["session_id"]})
     checks.extend(advisory)
