@@ -33,6 +33,7 @@ REFUSE_FINGERPRINT_MISMATCH = "pi_fingerprint_mismatch"
 REFUSE_FINGERPRINT_UNPROVEN = "pi_fingerprint_unproven"
 REFUSE_DUPLICATE_NATIVE_SESSION = "pi_duplicate_native_session"
 REFUSE_FINGERPRINT_INCOMPLETE = "pi_fingerprint_incomplete"
+REFUSE_REASONING_LEVEL_UNSUPPORTED = "pi_reasoning_level_unsupported"
 
 
 class PiFingerprintRefused(RuntimeError):
@@ -94,6 +95,45 @@ def observed_fingerprint(effective: Any) -> dict[str, str]:
                 observed[field] = value.strip()
                 break
     return observed
+
+
+def assert_reasoning_level_supported(runtime: Any, thinking_level_map: Any) -> None:
+    """A pinned reasoning level the model cannot serve is a pin on nothing.
+
+    Pi's model records carry a sparse `thinkingLevelMap`: a key mapped to null means the
+    model does not support that level, an absent key means no override, and a key mapped to
+    another level means it is silently remapped. Read from the model record rather than
+    re-derived, because the three levels differ per model -- `k3` maps `medium` to null
+    while `gpt-5.6-sol` does not mention it at all, so the same string means "unsupported"
+    for one worker and "passes through" for another.
+
+    A binding pinning a null-mapped level would compare a level the model never runs
+    against whatever it actually ran, and refuse forever. A binding pinning a REMAPPED
+    level has the mirror problem: it pins `minimal` and the live session honestly reports
+    `low`. Both are caught here, at registration, rather than at every wake.
+    """
+    pinned = pinned_fingerprint(runtime)
+    if not pinned or not isinstance(thinking_level_map, dict):
+        return
+    level = pinned["reasoning_level"]
+    if level not in thinking_level_map:
+        # Absent means no override: the level passes through unchanged.
+        return
+    mapped = thinking_level_map[level]
+    if mapped is None:
+        raise PiFingerprintRefused(
+            REFUSE_REASONING_LEVEL_UNSUPPORTED,
+            f"this model maps reasoning level {level!r} to null, meaning it does not "
+            "support it -- pinning it would compare a level the model never runs against "
+            "whatever it actually ran",
+        )
+    if mapped != level:
+        raise PiFingerprintRefused(
+            REFUSE_REASONING_LEVEL_UNSUPPORTED,
+            f"this model remaps reasoning level {level!r} to {mapped!r}, so a live session "
+            f"honestly reports {mapped!r} and a pin of {level!r} would never match; pin the "
+            "effective level instead",
+        )
 
 
 def assert_fingerprint_matches(runtime: Any, effective: Any) -> dict[str, str]:

@@ -26,9 +26,11 @@ from _pi_fingerprint import (  # noqa: E402
     REFUSE_FINGERPRINT_INCOMPLETE,
     REFUSE_FINGERPRINT_MISMATCH,
     REFUSE_FINGERPRINT_UNPROVEN,
+    REFUSE_REASONING_LEVEL_UNSUPPORTED,
     PiFingerprintRefused,
     assert_fingerprint_matches,
     assert_native_session_is_exclusive,
+    assert_reasoning_level_supported,
     observed_fingerprint,
     pinned_fingerprint,
 )
@@ -142,10 +144,11 @@ class PiFingerprintTest(unittest.TestCase):
         workers = {
             "glim": {"provider": "zai", "model": "glm-5.2", "reasoning_level": "max"},
             "kimi": {"provider": "kimi-coding", "model": "k3", "reasoning_level": "max"},
+            # Operator's choice, 2026-07-26: Sol at medium.
             "relay": {
                 "provider": "openai-codex",
-                "model": "gpt-5.3-codex-spark",
-                "reasoning_level": "high",
+                "model": "gpt-5.6-sol",
+                "reasoning_level": "medium",
             },
         }
         for name, fingerprint in workers.items():
@@ -214,16 +217,79 @@ class PiNativeSessionExclusivityTest(unittest.TestCase):
                     assert_native_session_is_exclusive(native, [])
                 self.assertEqual(REFUSE_FINGERPRINT_INCOMPLETE, caught.exception.reason)
 
+    def test_a_level_the_model_maps_to_null_is_refused_at_registration(self):
+        """`k3` maps `medium` to null: the model does not support it.
+
+        Pinning it would compare a level the model never runs against whatever it actually
+        ran, and refuse at every wake instead of once at registration.
+        """
+        k3_map = {"off": None, "minimal": None, "low": "low", "medium": None,
+                  "high": "high", "xhigh": None, "max": "max"}
+        pinned = {"provider": "kimi-coding", "model": "k3", "reasoning_level": "medium"}
+        with self.assertRaises(PiFingerprintRefused) as caught:
+            assert_reasoning_level_supported(runtime(pinned), k3_map)
+        self.assertEqual(REFUSE_REASONING_LEVEL_UNSUPPORTED, caught.exception.reason)
+        # The two unsupported cases share a reason code, so the MESSAGE is what tells an
+        # operator which remedy applies: an unsupported level needs a different level, a
+        # remapped one needs the effective level. Asserting only the code cannot tell them
+        # apart, and a mutation collapsing one into the other would pass.
+        self.assertIn("does not support", caught.exception.detail)
+        self.assertNotIn("remaps", caught.exception.detail)
+        # And the level it DOES support is accepted.
+        ok = {"provider": "kimi-coding", "model": "k3", "reasoning_level": "max"}
+        assert_reasoning_level_supported(runtime(ok), k3_map)
+
+    def test_a_remapped_level_is_refused_because_it_could_never_match(self):
+        """`gpt-5.6-sol` remaps `minimal` to `low`.
+
+        A live session honestly reports `low`, so a pin of `minimal` never matches -- the
+        mirror of the null case, and caught in the same place.
+        """
+        sol_map = {"xhigh": "xhigh", "max": "max", "minimal": "low"}
+        pinned = {"provider": "openai-codex", "model": "gpt-5.6-sol",
+                  "reasoning_level": "minimal"}
+        with self.assertRaises(PiFingerprintRefused) as caught:
+            assert_reasoning_level_supported(runtime(pinned), sol_map)
+        self.assertEqual(REFUSE_REASONING_LEVEL_UNSUPPORTED, caught.exception.reason)
+        self.assertIn("low", caught.exception.detail)
+
+    def test_relays_configured_level_passes_through_unchanged(self):
+        """Sol at medium, the operator's choice: absent from the map, so no override.
+
+        A key mapped to null means unsupported and a key mapped elsewhere means remapped,
+        so ABSENT is the case that passes through -- which is why `medium` is valid here
+        and not on `k3`. Read from the model record rather than assumed either way.
+        """
+        sol_map = {"xhigh": "xhigh", "max": "max", "minimal": "low"}
+        relay = {"provider": "openai-codex", "model": "gpt-5.6-sol",
+                 "reasoning_level": "medium"}
+        assert_reasoning_level_supported(runtime(relay), sol_map)
+        self.assertEqual(relay, assert_fingerprint_matches(runtime(relay), dict(relay)))
+
+    def test_glims_max_survives_its_models_remapping(self):
+        """`glm-5.2` maps max to max, so Glim's pin is stable; low and medium are not."""
+        glm_map = {"minimal": None, "low": "high", "medium": "high", "high": "high",
+                   "max": "max"}
+        assert_reasoning_level_supported(runtime(GLIM), glm_map)
+        for unstable in ("low", "medium"):
+            with self.subTest(level=unstable):
+                with self.assertRaises(PiFingerprintRefused):
+                    assert_reasoning_level_supported(
+                        runtime({**GLIM, "reasoning_level": unstable}), glm_map
+                    )
+
     def test_every_refusal_reason_is_distinct(self):
-        """Four refusals, four codes: an operator reading a drift record needs to know
-        which one happened, because the remedies differ."""
+        """Five refusals, five codes: an operator reading a drift record needs to know
+        which one happened, because the remedies differ -- re-register, fix the thread
+        binding, pin the effective level, or investigate why the live config is unreadable."""
         codes = {
             REFUSE_FINGERPRINT_MISMATCH,
             REFUSE_FINGERPRINT_UNPROVEN,
+    REFUSE_REASONING_LEVEL_UNSUPPORTED,
             REFUSE_DUPLICATE_NATIVE_SESSION,
             REFUSE_FINGERPRINT_INCOMPLETE,
         }
-        self.assertEqual(4, len(codes))
+        self.assertEqual(5, len(codes))
         self.assertEqual(3, len(FINGERPRINT_FIELDS))
 
 
