@@ -9,9 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-import os
 import queue
-import select
 import subprocess
 import threading
 
@@ -20,9 +18,7 @@ from llm_collab.runtime_adapter_manifest import ManifestResolutionError, Resolve
 
 MAX_MESSAGE_BYTES = 1_048_576
 MAX_STDERR_BYTES_PER_CONNECTION = 65_536
-# A pipe holds at most 64 KiB today, but a single read is not promised to
-# empty it, so the drain loops until the descriptor would block.
-PIPE_READ_BYTES = 65_536
+STDERR_READ_BYTES = 4096
 
 
 @dataclass(frozen=True)
@@ -42,11 +38,12 @@ class StdioSupervisor:
             raise TypeError("resolved must be a ResolvedAdapter")
         self._resolved = resolved
         self._process: subprocess.Popen[bytes] | None = None
-        self._stdout: queue.Queue[tuple[bytes, bool] | None] = queue.Queue()
+        self._stdout: queue.Queue[tuple[bytes, bool, bytes] | None] = queue.Queue()
         self._stderr = bytearray()
         self._stderr_truncated = False
         self._stderr_lock = threading.Lock()
-        self._pump_thread: threading.Thread | None = None
+        self._stdout_thread: threading.Thread | None = None
+        self._stderr_thread: threading.Thread | None = None
 
     @property
     def pid(self) -> int | None:
@@ -66,8 +63,16 @@ class StdioSupervisor:
             shell=False,
         )
         self._process = process
-        self._pump_thread = threading.Thread(target=self._pump, daemon=True)
-        self._pump_thread.start()
+        # Two threads, because the protocol requires stderr to be drained
+        # "continuously, independently of stdout and request processing, until process
+        # exit or hard kill". A single pump that ordered stderr ahead of each published
+        # frame bought a chronology the protocol never asks for and broke the
+        # independence it does: a noisy child starved stdout, and a child that closed
+        # stdout first had its cleanup diagnostics abandoned mid-write.
+        self._stdout_thread = threading.Thread(target=self._read_stdout, daemon=True)
+        self._stderr_thread = threading.Thread(target=self._drain_stderr, daemon=True)
+        self._stdout_thread.start()
+        self._stderr_thread.start()
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
@@ -91,17 +96,25 @@ class StdioSupervisor:
             return self._outcome(fault="REQUEST_TIMEOUT", should_close=True)
         if published is None:
             return self._outcome(fault="PROCESS_CLOSED", should_close=True)
-        raw, truncated_when_published = published
+        raw, truncated_when_published, stderr_when_published = published
+        published_diagnostics = {
+            "stderr": stderr_when_published,
+            "stderr_truncated": truncated_when_published,
+        }
         if len(raw) > MAX_MESSAGE_BYTES + 1 or not raw.endswith(b"\n"):
             self.close()
-            return self._outcome(fault="MESSAGE_TOO_LARGE", should_close=True)
+            return self._outcome(fault="MESSAGE_TOO_LARGE", should_close=True,
+                                 diagnostics=published_diagnostics)
         if truncated_when_published:
-            return self._outcome(fault="STDERR_LIMIT_EXCEEDED", should_close=True)
+            return self._outcome(fault="STDERR_LIMIT_EXCEEDED", should_close=True,
+                                 diagnostics=published_diagnostics)
         try:
-            return self._outcome(response=raw[:-1].decode("utf-8"))
+            return self._outcome(response=raw[:-1].decode("utf-8"),
+                                 diagnostics=published_diagnostics)
         except UnicodeDecodeError:
             self.close()
-            return self._outcome(fault="INVALID_FRAMING", should_close=True)
+            return self._outcome(fault="INVALID_FRAMING", should_close=True,
+                                 diagnostics=published_diagnostics)
 
     def close(self) -> None:
         process = self._process
@@ -125,8 +138,9 @@ class StdioSupervisor:
                     stream.close()
                 except OSError:
                     pass
-        if self._pump_thread is not None:
-            self._pump_thread.join(timeout=1)
+        for thread in (self._stdout_thread, self._stderr_thread):
+            if thread is not None:
+                thread.join(timeout=1)
 
     def _validate_spawn_paths(self) -> None:
         if not Path(self._resolved.executable).is_absolute():
@@ -140,89 +154,68 @@ class StdioSupervisor:
             raise RuntimeError("supervisor process is not running")
         return process
 
-    def _pump(self) -> None:
-        """Consume both child streams from one thread, stderr always first.
+    def _read_stdout(self) -> None:
+        """Frames only, bounded by the protocol's exact stop limit.
 
-        A response is only published after every stderr byte that was readable
-        at that moment has been recorded. The child writes its stderr before
-        the response, so those bytes reach the pipe first and are therefore
-        readable no later than the response is; draining them ahead of the
-        publish makes the truncation verdict a consequence of stream order
-        rather than of how promptly a second thread happened to be scheduled.
+        `readline` with a byte limit is what enforces "the reader MUST stop buffering a
+        frame after MAX_MESSAGE_BYTES + 1 bytes". Assembling lines from fixed-size raw
+        reads overshot that bound by up to one read, and taking the raw descriptor also
+        removed the file object's synchronisation with `close()` -- a closed fd whose
+        number the host had since reused would have been read as adapter output.
         """
         process = self._process
         stdout = process.stdout if process is not None else None
-        stderr = process.stderr if process is not None else None
         if stdout is None:
             self._stdout.put(None)
             return
-        pending = bytearray()
-        open_streams = [stream for stream in (stdout, stderr) if stream is not None]
-        while open_streams:
+        while True:
             try:
-                ready, _, _ = select.select(open_streams, [], [])
+                line = stdout.readline(MAX_MESSAGE_BYTES + 2)
             except (OSError, ValueError):
-                break
-            if stderr in ready and not self._drain_stderr(stderr):
-                open_streams.remove(stderr)
-            if stdout in ready:
-                chunk = self._read_available(stdout)
-                if chunk:
-                    pending.extend(chunk)
-                    self._publish_frames(pending)
-                    continue
-                if pending:
-                    self._publish(bytes(pending))
                 self._stdout.put(None)
                 return
-        self._stdout.put(None)
+            if line == b"":
+                self._stdout.put(None)
+                return
+            self._publish(line)
 
-    def _drain_stderr(self, stderr) -> bool:
-        """Record everything readable on stderr now. False once it is at EOF."""
+    def _drain_stderr(self) -> None:
+        """Drain to stderr EOF, whatever stdout is doing.
+
+        Independent of stdout by requirement: a child may close stdout and then write
+        cleanup diagnostics, and abandoning the descriptor there can block it mid-write.
+        `read1` returns as soon as bytes are available rather than waiting for a full
+        buffer, so the retained diagnostic tracks what the child has actually written.
+        """
+        process = self._process
+        stderr = process.stderr if process is not None else None
+        if stderr is None:
+            return
         while True:
-            chunk = self._read_available(stderr)
+            try:
+                chunk = stderr.read1(STDERR_READ_BYTES)
+            except (OSError, ValueError):
+                return
             if not chunk:
-                return False
+                return
             with self._stderr_lock:
                 remaining = MAX_STDERR_BYTES_PER_CONNECTION - len(self._stderr)
                 if remaining > 0:
                     self._stderr.extend(chunk[:remaining])
                 if len(chunk) > remaining:
                     self._stderr_truncated = True
-            try:
-                if not select.select([stderr], [], [], 0)[0]:
-                    return True
-            except (OSError, ValueError):
-                return False
-
-    @staticmethod
-    def _read_available(stream) -> bytes:
-        try:
-            return os.read(stream.fileno(), PIPE_READ_BYTES)
-        except (OSError, ValueError):
-            return b""
-
-    def _publish_frames(self, pending: bytearray) -> None:
-        while True:
-            newline = pending.find(b"\n")
-            if newline >= 0:
-                self._publish(bytes(pending[: newline + 1]))
-                del pending[: newline + 1]
-                continue
-            if len(pending) > MAX_MESSAGE_BYTES + 1:
-                self._publish(bytes(pending))
-                pending.clear()
-            return
 
     def _publish(self, frame: bytes) -> None:
-        """Enqueue a frame with the stderr verdict taken in the drain's own lock.
+        """Enqueue a frame with the diagnostics as they stood when it was published.
 
-        The verdict travels with the frame instead of being read from shared
-        state by the requesting thread, so a caller cannot observe a stderr
-        overflow that this frame preceded, nor miss one that it followed.
+        The whole snapshot travels with the frame, not just the fault decision. Carrying
+        only the flag left `_outcome` to re-read the live buffer, so a caller could get a
+        successful response alongside stderr bytes that arrived after it -- the opposite
+        of the guarantee. The budget is per connection and bounded, so copying the
+        retained diagnostic per frame is bounded too.
         """
         with self._stderr_lock:
-            self._stdout.put((frame, self._stderr_truncated))
+            self._stdout.put((frame, self._stderr_truncated, bytes(self._stderr)))
 
     def _outcome(
         self,
@@ -230,12 +223,21 @@ class StdioSupervisor:
         response: str | None = None,
         fault: str | None = None,
         should_close: bool = False,
+        diagnostics: dict | None = None,
     ) -> SupervisorOutcome:
-        with self._stderr_lock:
-            return SupervisorOutcome(
-                response=response,
-                fault=fault,
-                should_close=should_close,
-                stderr=bytes(self._stderr),
-                stderr_truncated=self._stderr_truncated,
-            )
+        # A frame carries the diagnostics it was published with. Only outcomes that have
+        # no frame -- a timeout, a closed process -- read the live buffer, because for
+        # those there is nothing published to be consistent with.
+        if diagnostics is None:
+            with self._stderr_lock:
+                diagnostics = {
+                    "stderr": bytes(self._stderr),
+                    "stderr_truncated": self._stderr_truncated,
+                }
+        return SupervisorOutcome(
+            response=response,
+            fault=fault,
+            should_close=should_close,
+            stderr=diagnostics["stderr"],
+            stderr_truncated=diagnostics["stderr_truncated"],
+        )

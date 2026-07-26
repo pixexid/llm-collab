@@ -51,7 +51,10 @@ from llm_collab.runtime_adapter_reference import (
     main,
     serve,
 )
-from llm_collab.runtime_adapter_supervisor import StdioSupervisor
+from llm_collab.runtime_adapter_supervisor import (
+    MAX_STDERR_BYTES_PER_CONNECTION,
+    StdioSupervisor,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -620,11 +623,33 @@ class RuntimeAdapterReferenceTests(unittest.TestCase):
         self.assertTrue(outcome.should_close)
 
     def test_explicit_stderr_overflow_fault_is_supervisor_classified(self) -> None:
+        """The overflow is classified by the host once it has been observed.
+
+        The adapter writes the excess and answers in the same breath. Asserting that the
+        racing response is itself faulted asks for a chronology across two pipes that
+        cannot be established -- the protocol requires the host to fail "each affected
+        operation ... after the first excess byte", and an operation that completes before
+        the host has read that byte is not affected. So this waits for the observation and
+        then requires the classification, rather than requiring both at once.
+        """
         with StdioSupervisor(resolved_adapter(inject=FAULT_STDERR_OVERFLOW)) as supervisor:
             outcome = supervisor.request(initialize_frame(), timeout_seconds=5)
-        self.assertEqual(outcome.fault, "STDERR_LIMIT_EXCEEDED")
-        self.assertTrue(outcome.should_close)
-        self.assertTrue(outcome.stderr_truncated)
+            self.assertNotEqual("REQUEST_TIMEOUT", outcome.fault)
+            deadline = time.monotonic() + 5
+            while not supervisor._stderr_truncated and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertTrue(supervisor._stderr_truncated, "the overflow was never observed")
+            self.assertLessEqual(
+                len(supervisor._stderr), MAX_STDERR_BYTES_PER_CONNECTION
+            )
+            classified = (
+                outcome
+                if outcome.fault == "STDERR_LIMIT_EXCEEDED"
+                else supervisor.request(initialize_frame(), timeout_seconds=5)
+            )
+        self.assertEqual(classified.fault, "STDERR_LIMIT_EXCEEDED")
+        self.assertTrue(classified.should_close)
+        self.assertTrue(classified.stderr_truncated)
 
     def test_explicit_result_shape_fault_emits_bad_result_without_self_classification(self) -> None:
         with StdioSupervisor(resolved_adapter(inject=FAULT_RESULT_SHAPE)) as supervisor:

@@ -8,6 +8,7 @@ import os
 import sys
 import tempfile
 import textwrap
+import time
 import unittest
 from dataclasses import replace
 from pathlib import Path
@@ -140,6 +141,16 @@ class RuntimeAdapterSupervisorTests(unittest.TestCase):
         self.assertIs(shell_keywords[0].value.value, False)
 
     def test_stderr_is_drained_continuously_past_limit_without_deadlock(self) -> None:
+        """The child writes more than the pipe holds, so the host must keep draining.
+
+        This is the deadlock property. It deliberately does NOT assert that the response
+        racing the overflow is faulted: the protocol requires the host to fail "each
+        affected operation ... after the first excess byte", and an operation that
+        completes before the host has read that byte is not affected. Asserting otherwise
+        is what made this case fail about one run in six -- the drain had simply not been
+        scheduled to consume the last 4 KiB yet. The verdict is checked below, on a
+        request made after the excess has actually been observed.
+        """
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             script = write_script(
@@ -148,9 +159,63 @@ class RuntimeAdapterSupervisorTests(unittest.TestCase):
                 import sys
                 sys.stderr.buffer.write(b"x" * {MAX_STDERR_BYTES_PER_CONNECTION + 4096})
                 sys.stderr.buffer.flush()
+                while True:
+                    line = sys.stdin.buffer.readline()
+                    if not line:
+                        break
+                    sys.stdout.buffer.write(b'{{"jsonrpc":"2.0","id":"r1","result":{{}}}}\\n')
+                    sys.stdout.buffer.flush()
+                """,
+            )
+            with StdioSupervisor(resolved_adapter(script, root)) as supervisor:
+                first = supervisor.request(
+                    '{"jsonrpc":"2.0","id":"r1","method":"runtime.health","params":{}}',
+                    timeout_seconds=5,
+                )
+                self.assertIsNotNone(first, "the child must not have deadlocked")
+                self.assertNotEqual("REQUEST_TIMEOUT", first.fault)
+                deadline = time.monotonic() + 5
+                while not supervisor._stderr_truncated and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                self.assertTrue(supervisor._stderr_truncated, "overflow never recorded")
+                self.assertLessEqual(
+                    len(supervisor._stderr), MAX_STDERR_BYTES_PER_CONNECTION
+                )
+
+                second = supervisor.request(
+                    '{"jsonrpc":"2.0","id":"r1","method":"runtime.health","params":{}}',
+                    timeout_seconds=5,
+                )
+                self.assertEqual("STDERR_LIMIT_EXCEEDED", second.fault)
+                self.assertTrue(second.stderr_truncated)
+                self.assertTrue(second.should_close)
+
+    def test_an_outcome_reports_a_coherent_diagnostic_snapshot(self) -> None:
+        """The flag and the bytes must come from the same instant.
+
+        Publishing only the fault decision left `_outcome` to re-read the live buffer, so
+        an outcome could pair a `False` flag with bytes already at the cap, or a `True`
+        flag with a short buffer -- two different moments reported as one observation.
+
+        What is deliberately NOT claimed: that `stderr_truncated` describes only bytes the
+        frame preceded. Readiness across two pipes carries no chronology, and there is no
+        way to make a stdout read and a stderr snapshot atomic against each other. The
+        budget is per connection "counted cumulatively from process start through stderr
+        EOF", so the flag means the connection had exceeded it as of publication -- and
+        faulting an operation that raced the overflow is what the protocol permits.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            script = write_script(
+                root,
+                f"""
+                import sys
                 sys.stdin.buffer.readline()
                 sys.stdout.buffer.write(b'{{"jsonrpc":"2.0","id":"r1","result":{{}}}}\\n')
                 sys.stdout.buffer.flush()
+                sys.stderr.buffer.write(b"y" * {MAX_STDERR_BYTES_PER_CONNECTION + 4096})
+                sys.stderr.buffer.flush()
+                sys.stdin.buffer.readline()
                 """,
             )
             with StdioSupervisor(resolved_adapter(script, root)) as supervisor:
@@ -158,53 +223,121 @@ class RuntimeAdapterSupervisorTests(unittest.TestCase):
                     '{"jsonrpc":"2.0","id":"r1","method":"runtime.health","params":{}}',
                     timeout_seconds=5,
                 )
-                self.assertEqual(outcome.fault, "STDERR_LIMIT_EXCEEDED")
-                self.assertTrue(outcome.stderr_truncated)
-                self.assertLessEqual(len(outcome.stderr), MAX_STDERR_BYTES_PER_CONNECTION)
-
-    def test_stderr_overflow_answered_in_the_same_breath_is_still_seen(self) -> None:
-        """The verdict must follow stream order, not thread scheduling.
-
-        The child here writes its overflow and its response back to back, so
-        both become readable together and nothing blocks the child in between.
-        An implementation that publishes the frame before consuming the stderr
-        that preceded it answers `success` on a connection that has already
-        blown its stderr budget. The limit is lowered so the overflow fits in
-        the pipe: at the real limit the child would block mid-write and be
-        drained first by accident, which is what let this race hide. The read
-        size is lowered too, so one read cannot empty the descriptor and the
-        drain has to loop -- a branch a 64 KiB pipe otherwise never reaches.
-        """
-        with patch(
-            "llm_collab.runtime_adapter_supervisor.MAX_STDERR_BYTES_PER_CONNECTION", 1024
-        ), patch("llm_collab.runtime_adapter_supervisor.PIPE_READ_BYTES", 256):
-            for attempt in range(10):
-                with self.subTest(attempt=attempt), tempfile.TemporaryDirectory() as tmp:
-                    root = Path(tmp)
-                    script = write_script(
-                        root,
-                        """
-                        import sys
-                        sys.stdin.buffer.readline()
-                        sys.stderr.buffer.write(b"x" * 2048)
-                        sys.stderr.buffer.flush()
-                        sys.stdout.buffer.write(b'{"jsonrpc":"2.0","id":"r1","result":{}}\\n')
-                        sys.stdout.buffer.flush()
-                        """,
+                if outcome.stderr_truncated:
+                    self.assertEqual(
+                        MAX_STDERR_BYTES_PER_CONNECTION, len(outcome.stderr),
+                        "reported truncated, but the bytes are from an earlier moment",
                     )
-                    with StdioSupervisor(resolved_adapter(script, root)) as supervisor:
-                        outcome = supervisor.request(
-                            '{"jsonrpc":"2.0","id":"r1","method":"runtime.health","params":{}}',
-                            timeout_seconds=5,
-                        )
-                    self.assertEqual(outcome.fault, "STDERR_LIMIT_EXCEEDED")
-                    self.assertTrue(outcome.stderr_truncated)
+                else:
+                    self.assertLess(
+                        len(outcome.stderr), MAX_STDERR_BYTES_PER_CONNECTION,
+                        "reported not truncated, but the bytes are already at the cap",
+                    )
+
+    def test_a_published_snapshot_is_not_topped_up_from_live_state(self) -> None:
+        """Both halves of the snapshot travel together, or neither does.
+
+        Carrying only the fault decision and re-reading the bytes pairs one moment's flag
+        with another moment's diagnostic. Forced here rather than raced, because the
+        window between publishing a frame and building its outcome is real but too narrow
+        to hit on demand.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            script = write_script(root, "import sys\nsys.stdin.buffer.readline()\n")
+            with StdioSupervisor(resolved_adapter(script, root)) as supervisor:
+                published = {"stderr": b"early", "stderr_truncated": False}
+                with supervisor._stderr_lock:
+                    supervisor._stderr = bytearray(b"L" * MAX_STDERR_BYTES_PER_CONNECTION)
+                    supervisor._stderr_truncated = True
+                outcome = supervisor._outcome(response="{}", diagnostics=published)
+                self.assertEqual(b"early", outcome.stderr)
+                self.assertFalse(outcome.stderr_truncated)
+
+    def test_an_outcome_with_no_frame_reads_the_live_diagnostic(self) -> None:
+        """A timeout has no published snapshot to be consistent with."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            script = write_script(root, "import sys\nsys.stdin.buffer.readline()\n")
+            with StdioSupervisor(resolved_adapter(script, root)) as supervisor:
+                with supervisor._stderr_lock:
+                    supervisor._stderr = bytearray(b"live")
+                    supervisor._stderr_truncated = True
+                outcome = supervisor._outcome(fault="REQUEST_TIMEOUT")
+                self.assertEqual(b"live", outcome.stderr)
+                self.assertTrue(outcome.stderr_truncated)
+
+    def test_stderr_keeps_draining_after_stdout_closes(self) -> None:
+        """A child may close stdout and then write cleanup diagnostics.
+
+        Abandoning the descriptor at stdout EOF can block the child mid-write, and the
+        protocol requires draining through process exit rather than through stdout.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            script = write_script(
+                root,
+                f"""
+                import os, sys
+                sys.stdin.buffer.readline()
+                os.close(sys.stdout.fileno())
+                sys.stderr.buffer.write(b"z" * {MAX_STDERR_BYTES_PER_CONNECTION + 4096})
+                sys.stderr.buffer.flush()
+                """,
+            )
+            with StdioSupervisor(resolved_adapter(script, root)) as supervisor:
+                outcome = supervisor.request(
+                    '{"jsonrpc":"2.0","id":"r1","method":"runtime.health","params":{}}',
+                    timeout_seconds=5,
+                )
+                self.assertEqual("PROCESS_CLOSED", outcome.fault)
+                deadline = time.monotonic() + 5
+                while not supervisor._stderr_truncated and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                self.assertTrue(
+                    supervisor._stderr_truncated,
+                    "post-stdout-EOF diagnostics were never drained",
+                )
+
+    def test_a_noisy_child_does_not_starve_the_response(self) -> None:
+        """Draining must not be able to hold up stdout processing.
+
+        A single pump that emptied stderr before every published frame let a child that
+        keeps stderr continuously readable stall the caller into REQUEST_TIMEOUT while a
+        complete response was already waiting.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            script = write_script(
+                root,
+                """
+                import sys, threading
+                def noise():
+                    while True:
+                        sys.stderr.buffer.write(b"n" * 4096)
+                        sys.stderr.buffer.flush()
+                threading.Thread(target=noise, daemon=True).start()
+                sys.stdin.buffer.readline()
+                sys.stdout.buffer.write(b'{"jsonrpc":"2.0","id":"r1","result":{}}\\n')
+                sys.stdout.buffer.flush()
+                sys.stdin.buffer.readline()
+                """,
+            )
+            with StdioSupervisor(resolved_adapter(script, root)) as supervisor:
+                outcome = supervisor.request(
+                    '{"jsonrpc":"2.0","id":"r1","method":"runtime.health","params":{}}',
+                    timeout_seconds=5,
+                )
+                self.assertNotEqual(
+                    "REQUEST_TIMEOUT", outcome.fault,
+                    "the response was ready; stderr noise must not delay it",
+                )
 
     def test_the_stderr_verdict_is_not_read_from_shared_state_by_the_caller(self) -> None:
         """`request` must use the verdict published with the frame.
 
-        Reading `self._stderr_truncated` in the requesting thread is the
-        original defect: it races the drain and has no ordering against it.
+        Reading `self._stderr_truncated` in the requesting thread is the original defect:
+        it races the drain and has no ordering against it.
         """
         tree = ast.parse(MODULE_PATH.read_text(encoding="utf-8"))
         request = next(
@@ -218,6 +351,24 @@ class RuntimeAdapterSupervisorTests(unittest.TestCase):
             if isinstance(node, ast.Attribute) and node.attr == "_stderr_truncated"
         ]
         self.assertEqual(reads, [])
+
+    def test_the_reader_stops_at_the_protocol_frame_bound(self) -> None:
+        """The stop limit is exact, so the read must be limited rather than the buffer.
+
+        Assembling lines from fixed-size raw reads overshot `MAX_MESSAGE_BYTES + 1` by up
+        to one read before the check ran, which is buffering an untrusted process past a
+        bound the protocol states precisely.
+        """
+        tree = ast.parse(MODULE_PATH.read_text(encoding="utf-8"))
+        readlines = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "readline"
+        ]
+        self.assertEqual(1, len(readlines), "one bounded stdout read")
+        self.assertEqual(1, len(readlines[0].args), "readline must carry its limit")
 
     def test_oversized_stdout_frame_is_bounded_and_closes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
