@@ -83,6 +83,21 @@ class PipelineHealthTest(unittest.TestCase):
             },
         )
 
+    def add_binding(self, root: Path, session_id: str, *, family: str = "gemini_cli") -> None:
+        """The exact binding the router requires; a session alone resolves to no pair."""
+        write_json(
+            root / "State" / "session_autobridge" / "bindings" / "amiga"
+            / "CHAT-HEALTH" / "cdx2.json",
+            {
+                "project_id": "amiga",
+                "chat_id": "CHAT-HEALTH",
+                "agent_id": "cdx2",
+                "session_id": session_id,
+                "runtime_session_id": f"{session_id}-runtime",
+                "runtime_family": family,
+            },
+        )
+
     def add_unread(self, root: Path, name: str, *, target: str | None) -> str:
         rel = f"Chats/2026-07-26_h__CHAT-HEALTH/2026-07-26T00-00-00_to-cdx2_{name}.md"
         lines = [
@@ -162,6 +177,155 @@ class PipelineHealthTest(unittest.TestCase):
         self.add_session(root, "SESSION-LIVE", lease_delta=3600)
         self.add_session(root, "SESSION-DEAD", lease_delta=-600)
         return root
+
+    def presend_checks(self, payload: dict) -> dict:
+        return {c["check"]: c for c in payload["agents"][0]["checks"]}
+
+    def add_agent(self, root: Path, agent_id: str, **fields) -> None:
+        agents_path = root / "agents.json"
+        agents = json.loads(agents_path.read_text())
+        agents["agents"].append({"id": agent_id, "display_name": agent_id.upper(), **fields})
+        write_json(agents_path, agents)
+
+    def test_a_pre_send_check_blocks_when_nothing_polls_the_inbox(self) -> None:
+        """The watcher check says in its own words that nobody will read the packet.
+
+        The agent-wide report keeps this advisory because it answers "is the lane
+        configured". This report answers "may I send THIS packet now", and returning exit
+        0 with can_wake=true while no watcher is polling is the false green the tool
+        exists to prevent. That the process could exit a moment after inspection is true
+        of every preflight check.
+        """
+        root = self.workspace()
+        self.add_session(root, "SESSION-LIVE", lease_delta=3600)
+        self.add_binding(root, "SESSION-LIVE")
+        code, payload = self.run_presend(
+            root, "--project", "amiga", "--chat", "CHAT-HEALTH", "--agent", "cdx2")
+        checks = self.presend_checks(payload)
+        self.assertEqual(FAIL, checks["watcher"]["status"])
+        self.assertFalse(payload["agents"][0]["can_wake"])
+        self.assertEqual(2, code)
+
+    def test_a_packet_outside_the_session_repo_scope_is_refused(self) -> None:
+        """The pair resolver validates identity; delivery also applies repo scope."""
+        root = self.workspace()
+        self.add_session(root, "SESSION-LIVE", lease_delta=3600)
+        self.add_binding(root, "SESSION-LIVE")
+        _, mismatched = self.run_presend(
+            root, "--project", "amiga", "--chat", "CHAT-HEALTH", "--agent", "cdx2",
+            "--repo-targets", "web")
+        self.assertEqual(FAIL, self.presend_checks(mismatched)["repo-scope"]["status"])
+        self.assertFalse(mismatched["agents"][0]["can_wake"])
+
+        _, matched = self.run_presend(
+            root, "--project", "amiga", "--chat", "CHAT-HEALTH", "--agent", "cdx2",
+            "--repo-targets", "app")
+        self.assertEqual(OK, self.presend_checks(matched)["repo-scope"]["status"])
+
+    def test_an_unscoped_pre_send_check_says_it_did_not_check_the_scope(self) -> None:
+        """Silence about a check that was not run is how a false green reads as a pass."""
+        root = self.workspace()
+        self.add_session(root, "SESSION-LIVE", lease_delta=3600)
+        self.add_binding(root, "SESSION-LIVE")
+        _, payload = self.run_presend(
+            root, "--project", "amiga", "--chat", "CHAT-HEALTH", "--agent", "cdx2")
+        scope = self.presend_checks(payload)["repo-scope"]
+        self.assertEqual(OK, scope["status"])
+        self.assertIn("--repo-targets", scope["detail"])
+
+    def test_a_session_that_would_not_wake_the_runtime_is_not_wakeable(self) -> None:
+        """`session_is_dispatchable` checks status and lease, not the wake action.
+
+        A `mode: manual` session records the packet in processed_messages without waking
+        anything, and it is not re-dispatched once the mode is fixed.
+        """
+        root = self.workspace()
+        self.add_session(root, "SESSION-MANUAL", lease_delta=3600)
+        path = root / "State" / "session_autobridge" / "sessions" / "SESSION-MANUAL.json"
+        session = json.loads(path.read_text())
+        session["mode"] = "manual"
+        write_json(path, session)
+        self.add_binding(root, "SESSION-MANUAL")
+        _, payload = self.run_presend(
+            root, "--project", "amiga", "--chat", "CHAT-HEALTH", "--agent", "cdx2")
+        action = self.presend_checks(payload)["wake-action"]
+        self.assertEqual(FAIL, action["status"])
+        self.assertIn("manual_noop", action["detail"])
+        self.assertFalse(payload["agents"][0]["can_wake"])
+
+    def test_a_disabled_recipient_is_refused_before_anything_else(self) -> None:
+        """deliver.py refuses a disabled recipient before it resolves the chat."""
+        root = self.workspace()
+        agents_path = root / "agents.json"
+        agents = json.loads(agents_path.read_text())
+        agents["agents"][0]["disabled"] = True
+        write_json(agents_path, agents)
+        self.add_session(root, "SESSION-LIVE", lease_delta=3600)
+        self.add_binding(root, "SESSION-LIVE")
+        _, payload = self.run_presend(
+            root, "--project", "amiga", "--chat", "CHAT-HEALTH", "--agent", "cdx2")
+        agent_check = self.presend_checks(payload)["agent"]
+        self.assertEqual(FAIL, agent_check["status"])
+        self.assertFalse(payload["agents"][0]["can_wake"])
+
+    def test_an_empty_scope_is_a_mistake_not_a_wildcard(self) -> None:
+        """`--project "$PROJECT"` with the variable unset used to mean "every project".
+
+        Both booleans were false, the command silently entered agent-wide inventory mode,
+        and a live session for any project produced exit 0 -- while the caller believed an
+        exact pair had been checked.
+        """
+        root = self.workspace()
+        self.add_session(root, "SESSION-LIVE", lease_delta=3600)
+        for args in (
+            ("--project", "", "--chat", "CHAT-HEALTH", "--agent", "cdx2"),
+            ("--project", "amiga", "--chat", "", "--agent", "cdx2"),
+            ("--project", "", "--chat", "", "--agent", "cdx2"),
+        ):
+            with self.subTest(args=args):
+                result = self.presend_cli(root, *args)
+                self.assertNotEqual(0, result.returncode, result.stdout)
+                self.assertIn("empty", result.stderr)
+
+    def test_the_nearest_problem_names_the_check_that_actually_failed(self) -> None:
+        """Re-running the lease check reported a healthy lease as the nearest problem.
+
+        For a stopped session with an unexpired lease the diagnostic said "valid for
+        ...", hiding the dispatchability failure and sending the worker to repair
+        something that was not broken.
+        """
+        root = self.workspace()
+        self.add_session(root, "SESSION-STOPPED", lease_delta=3600, status="stopped")
+        _, payload = self.run_health(root)
+        session_check = self.check(payload, "session")
+        self.assertEqual(FAIL, session_check["status"])
+        self.assertNotIn("valid for", session_check["detail"])
+        self.assertIn("dispatchable", session_check["failing_checks"])
+
+    def test_the_entry_point_comes_after_every_test_class(self) -> None:
+        """A mid-file `unittest.main()` exits before the classes below it are defined.
+
+        `python tests/test_pipeline_health.py` then reported a confident green with an
+        entire class absent, while discovery-based runs happened to include it, which is
+        what hid it. Checked structurally rather than by running this file again -- that
+        would recurse through this very case.
+        """
+        import ast
+
+        source = Path(__file__).resolve().read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        classes = [n for n in tree.body if isinstance(n, ast.ClassDef)]
+        mains = [
+            n for n in tree.body
+            if isinstance(n, ast.If) and ast.dump(n.test).find("__main__") != -1
+        ]
+        self.assertTrue(classes)
+        self.assertEqual(1, len(mains), "exactly one __main__ guard")
+        self.assertGreater(
+            mains[0].lineno, classes[-1].lineno,
+            f"the entry point runs before {classes[-1].name} is defined, so every test "
+            "in it is silently skipped on a direct run",
+        )
 
     def test_agent_wide_mode_is_an_inventory_not_a_send_verdict(self) -> None:
         """Kept, but it must not be the thing consulted before a send."""
@@ -355,10 +519,6 @@ class PipelineHealthTest(unittest.TestCase):
         self.assertEqual({"route_ambiguous": 1}, backlog["reasons"])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class ActivityAndWatchTest(unittest.TestCase):
     """The live-view surface: is this worker running right now?
 
@@ -412,6 +572,133 @@ class ActivityAndWatchTest(unittest.TestCase):
                 {"runtime": {"family": "codex_app", "session_id": "thread-x",
                              "home": "/home"}}
             )
+
+    def probe_row(self, row, *, fail_stage: str | None = None) -> dict:
+        """Drive _activity_check with an arbitrary thread/list row, or a failing stage."""
+        from unittest import mock
+
+        class FakeClient:
+            def __enter__(self_inner):
+                return self_inner
+
+            def __exit__(self_inner, *exc):
+                return False
+
+            def notify(self_inner, *a, **k):
+                return None
+
+            def request(self_inner, method, params=None):
+                if fail_stage and method == fail_stage:
+                    raise RuntimeError("app-server said no")
+                if method == "thread/list":
+                    return {"data": [row] if row is not None else []}
+                return {}
+
+        with mock.patch.object(
+            self.mod, "discover_codex_app_server",
+            return_value={"url": "ws://127.0.0.1:1", "token_file": None},
+        ), mock.patch.object(
+            self.mod, "_codex_app_server_token", return_value=None
+        ), mock.patch.object(
+            self.mod, "JsonRpcWebSocketClient", lambda *a, **k: FakeClient()
+        ):
+            return self.mod._activity_check(
+                {"runtime": {"family": "codex_app", "session_id": "thread-x",
+                             "home": "/home"}}
+            )
+
+    def test_a_malformed_activity_timestamp_warns_instead_of_reading_healthy(self) -> None:
+        """`int(None or 0)` dated the thread to 1970 and still reported ok.
+
+        A non-numeric value raised outside the handler and aborted the whole preflight,
+        and a future timestamp produced a negative age that read as "active". A row that
+        did not answer the question is not a healthy answer to it.
+        """
+        cases = {
+            "missing": {"id": "thread-x"},
+            "null": {"id": "thread-x", "updatedAt": None},
+            "text": {"id": "thread-x", "updatedAt": "yesterday"},
+            "container": {"id": "thread-x", "updatedAt": {"seconds": 5}},
+        }
+        for name, row in cases.items():
+            with self.subTest(row=name):
+                check = self.probe_row(row)
+                self.assertEqual(self.mod.WARN, check["status"], check)
+
+    def test_a_future_activity_timestamp_is_not_reported_as_active(self) -> None:
+        future = int(self.mod.now_utc().timestamp()) + 86_400
+        check = self.probe_row({"id": "thread-x", "updatedAt": future})
+        self.assertEqual(self.mod.WARN, check["status"])
+        self.assertIn("future", check["detail"])
+
+    def test_a_rejected_initialization_fails_instead_of_warning(self) -> None:
+        """Real dispatch performs the same initialize, so a rejection is not advisory.
+
+        Degrading it to WARN reported a lane nothing can wake as sendable, because only
+        FAIL blocks.
+        """
+        check = self.probe_row({"id": "thread-x", "updatedAt": 0}, fail_stage="initialize")
+        self.assertEqual(self.mod.FAIL, check["status"])
+        self.assertIn("initialize", check["detail"])
+
+    def test_a_rejected_thread_list_stays_advisory(self) -> None:
+        """The other half of the same rule: an optional probe failing is not a blocker."""
+        check = self.probe_row({"id": "thread-x", "updatedAt": 0}, fail_stage="thread/list")
+        self.assertEqual(self.mod.WARN, check["status"])
+
+    def test_the_probe_follows_the_endpoint_dispatch_would_choose(self) -> None:
+        """A home-scoped probe passed while the watcher would use a stale env override.
+
+        `execute_codex_app_server_trigger` resolves the endpoint with
+        LLM_COLLAB_CODEX_APP_SERVER_URL honoured, so a preflight that ignored it reported
+        healthy for a different server than the one that would be dispatched to.
+        """
+        from unittest import mock
+
+        seen = {}
+
+        def fake_discover(home, **kwargs):
+            seen.update({"home": home, "kwargs": kwargs})
+            return None
+
+        with mock.patch.object(self.mod, "discover_codex_app_server", fake_discover):
+            self.mod._endpoint_check(
+                {"runtime": {"family": "codex_app", "session_id": "t", "home": "/home"}})
+        self.assertNotIn("allow_unscoped_env", seen["kwargs"],
+                         "the probe must not opt out of the override dispatch honours")
+
+    def test_the_session_scan_fails_closed_rather_than_reporting_a_partial_inventory(self) -> None:
+        """A partial inventory looks exactly like a complete one.
+
+        The directory is untrusted input and was enumerated without any budget, so a
+        pathological one could stall the preflight or exhaust memory. The charge is at the
+        enumeration boundary, before the agent filter, because filtering first hides the
+        cost of the entries that were rejected.
+        """
+        from unittest import mock
+
+        class ManyPaths:
+            def glob(self_inner, pattern):
+                return [Path(f"/tmp/nonexistent/sess_{i}.json") for i in range(20)]
+
+        with mock.patch.object(self.mod, "SESSIONS_DIR", ManyPaths()), \
+                mock.patch.object(self.mod, "SESSION_SCAN_LIMIT", 5), \
+                mock.patch.object(self.mod, "load_session", return_value=None):
+            with self.assertRaises(RuntimeError) as caught:
+                self.mod._sessions_for("cdx2")
+        self.assertIn("refusing to scan further", str(caught.exception))
+
+    def test_a_normal_session_directory_is_well_under_the_budget(self) -> None:
+        """The budget must not be so tight that ordinary use trips it."""
+        from unittest import mock
+
+        class FewPaths:
+            def glob(self_inner, pattern):
+                return [Path(f"/tmp/nonexistent/sess_{i}.json") for i in range(50)]
+
+        with mock.patch.object(self.mod, "SESSIONS_DIR", FewPaths()), \
+                mock.patch.object(self.mod, "load_session", return_value=None):
+            self.assertEqual([], self.mod._sessions_for("cdx2"))
 
     def test_a_long_idle_worker_is_reported_but_never_failed(self) -> None:
         """Quiet is not broken. Failing on it would make the view cry wolf hourly.
@@ -571,3 +858,12 @@ class ActivityAndWatchTest(unittest.TestCase):
         )
         self.assertNotEqual(0, result.returncode)
         self.assertIn("unrecognized arguments", result.stderr)
+
+
+# Last, after every class. Sitting mid-file, this ran and exited before
+# ActivityAndWatchTest was even defined, so `python tests/test_pipeline_health.py`
+# reported a confident green with the whole activity-probe, malformed-shape,
+# server-request-policy and RuntimeError class absent. Discovery-based runs happened to
+# include them, which is what hid it.
+if __name__ == "__main__":
+    unittest.main()

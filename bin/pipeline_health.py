@@ -38,7 +38,7 @@ import json
 import subprocess
 
 sys.path.insert(0, str(Path(__file__).parent))
-from _helpers import ROOT, agent_ids, get_unread_messages
+from _helpers import ROOT, agent_ids, get_agent, get_unread_messages, is_agent_disabled
 from _session_autobridge import (
     SERVER_REQUEST_IGNORE,
     SESSIONS_DIR,
@@ -50,17 +50,37 @@ from _session_autobridge import (
     parse_iso8601,
     runtime_metadata,
     message_targets_session,
+    repo_scope_matches,
+    resolve_effective_action,
     resolve_exact_dispatch_pair,
     session_is_dispatchable,
 )
+
+_UNSET = object()
 
 OK, WARN, FAIL = "ok", "warn", "fail"
 _RANK = {OK: 0, WARN: 1, FAIL: 2}
 
 
+# Charged at the enumeration boundary, before any filtering: the session directory is
+# untrusted input, and filtering first hides the cost of the entries that were rejected.
+# A preflight that stalls or exhausts memory on a pathological directory is worse than
+# one that refuses, so this fails closed rather than reporting a partial inventory --
+# a partial answer here looks exactly like a complete one.
+SESSION_SCAN_LIMIT = 5000
+
+
 def _sessions_for(agent_id: str) -> list[dict]:
     sessions = []
+    examined = 0
     for path in sorted(SESSIONS_DIR.glob("*.json")):
+        examined += 1
+        if examined > SESSION_SCAN_LIMIT:
+            raise RuntimeError(
+                f"session directory holds more than {SESSION_SCAN_LIMIT} entries; "
+                "refusing to scan further rather than report a partial inventory as "
+                "complete. Prune it or raise SESSION_SCAN_LIMIT deliberately."
+            )
         session = load_session(path.stem)
         if session and session.get("agent_id") == agent_id:
             sessions.append(session)
@@ -107,13 +127,44 @@ def _dispatchable_check(session: dict) -> dict:
     }
 
 
+def _wake_action_check(session: dict) -> dict:
+    """A dispatchable session is not the same as a session that will WAKE.
+
+    `session_is_dispatchable` checks status and lease only. The watcher then asks
+    `resolve_effective_action`, which turns `mode: manual` into `manual_noop` and
+    `mode: notify` into `notify_only` -- and a manual session records the packet in
+    `processed_messages` without waking anything, so fixing the mode afterwards does not
+    make that session pick the packet up. Reporting can_wake for those is the false green
+    this tool exists to prevent.
+    """
+    try:
+        action, reason = resolve_effective_action(session, {})
+    except Exception as exc:  # a malformed session must not abort the preflight
+        return {"check": "wake-action", "status": FAIL,
+                "detail": f"could not resolve the wake action: {type(exc).__name__}: {exc}"}
+    if action == "runtime_trigger":
+        return {"check": "wake-action", "status": OK, "detail": f"{action} ({reason})"}
+    return {
+        "check": "wake-action",
+        "status": FAIL,
+        "detail": (
+            f"the watcher would resolve this session to {action} ({reason}), not "
+            "runtime_trigger. The packet is recorded as handled without waking the "
+            "runtime, and it is not re-dispatched once the mode is fixed."
+        ),
+    }
+
+
 def _endpoint_check(session: dict) -> dict:
     runtime = runtime_metadata(session)
     family = str(runtime.get("family", ""))
     if family != "codex_app":
         return {"check": "endpoint", "status": OK,
                 "detail": f"{family or 'no family'}: no endpoint probe for this family"}
-    endpoint = discover_codex_app_server(runtime.get("home"), allow_unscoped_env=False)
+    # Dispatch resolves the endpoint with the env override honoured, so a preflight that
+    # ignored it probed a healthy home-scoped sidecar while the watcher would dispatch to
+    # a stale override -- healthy here, failing there.
+    endpoint = discover_codex_app_server(runtime.get("home"))
     if endpoint is None:
         return {
             "check": "endpoint",
@@ -123,8 +174,13 @@ def _endpoint_check(session: dict) -> dict:
                 "The binding is intact but nothing can be woken through it."
             ),
         }
+    scope = (
+        " (workspace-wide LLM_COLLAB_CODEX_APP_SERVER_URL override, not home-scoped)"
+        if endpoint.get("source") == "env"
+        else ""
+    )
     return {"check": "endpoint", "status": OK,
-            "detail": f"app-server {endpoint.get('url')} (pid {endpoint.get('pid')})"}
+            "detail": f"app-server {endpoint.get('url')} (pid {endpoint.get('pid')}){scope}"}
 
 
 ACTIVE_WITHIN_SECONDS = 90
@@ -151,10 +207,11 @@ def _activity_check(session: dict) -> dict:
     runtime = runtime_metadata(session)
     if str(runtime.get("family", "")) != "codex_app":
         return {"check": "activity", "status": OK, "detail": "no thread probe for this family"}
-    endpoint = discover_codex_app_server(runtime.get("home"), allow_unscoped_env=False)
+    endpoint = discover_codex_app_server(runtime.get("home"))
     if endpoint is None:
         return {"check": "activity", "status": OK, "detail": "no endpoint to probe"}
     thread_id = str(runtime.get("session_id") or "")
+    stage = "connect"
     try:
         token = _codex_app_server_token(endpoint.get("token_file"))
         # SERVER_REQUEST_IGNORE, not the REFUSE default: refusing SENDS a correlated
@@ -168,15 +225,31 @@ def _activity_check(session: dict) -> dict:
             timeout_seconds=20,
             server_request_policy=SERVER_REQUEST_IGNORE,
         ) as client:
+            stage = "initialize"
             client.request("initialize", {"clientInfo": {"name": "pipeline-health",
                                                          "title": "llm-collab",
                                                          "version": "0.1"}})
             client.notify("initialized")
+            stage = "thread/list"
             listed = client.request("thread/list", {})
     except (OSError, ValueError, TimeoutError, RuntimeError) as exc:
         # RuntimeError is what request() raises for a JSON-RPC error reply, so an
         # app-server answering "method not supported" used to crash the whole preflight
         # instead of degrading one advisory check.
+        #
+        # But only a thread/list failure is advisory. Real dispatch performs the same
+        # initialize, so an authentication or protocol-negotiation rejection means the
+        # watcher cannot wake this thread either -- degrading that to WARN reported a
+        # dead lane as sendable.
+        if stage != "thread/list":
+            return {
+                "check": "activity",
+                "status": FAIL,
+                "detail": (
+                    f"app-server rejected {stage}: {type(exc).__name__}: {exc}. Dispatch "
+                    "performs the same initialization, so nothing can be woken here."
+                ),
+            }
         return {"check": "activity", "status": WARN,
                 "detail": f"thread probe failed: {type(exc).__name__}: {exc}"}
     rows = listed.get("data") if isinstance(listed, dict) else None
@@ -190,8 +263,25 @@ def _activity_check(session: dict) -> dict:
     if row is None:
         return {"check": "activity", "status": WARN,
                 "detail": f"thread {thread_id[:8]} not listed by the app-server"}
-    updated = int(row.get("updatedAt") or 0)
+    raw_updated = row.get("updatedAt")
+    # `int(None or 0)` produced 0, which dates the thread to 1970 and still reported ok;
+    # a non-numeric value raised outside the handler and aborted the whole preflight; and
+    # a future timestamp produced a negative age that `activity_shape` called "active".
+    # A malformed row is a probe that did not answer, not a healthy one.
+    try:
+        updated = int(raw_updated)
+    except (TypeError, ValueError):
+        # Covers missing, null, text and container values alike -- an earlier separate
+        # None branch was unreachable, since int(None) lands here anyway.
+        return {"check": "activity", "status": WARN,
+                "detail": f"thread {thread_id[:8]} reported updatedAt={raw_updated!r}"}
     age = int(now_utc().timestamp()) - updated
+    if age < 0:
+        return {"check": "activity", "status": WARN, "idle_seconds": age,
+                "detail": (
+                    f"thread {thread_id[:8]} reports activity {-age}s in the future; "
+                    "the clocks disagree and the age cannot be trusted"
+                )}
     return {"check": "activity", "status": OK, "idle_seconds": age,
             "detail": f"{activity_shape(age)}: last thread activity {age}s ago"}
 
@@ -277,7 +367,73 @@ def _backlog_check(agent_id: str, sessions: list[dict]) -> dict:
     }
 
 
-def target_report(project_id: str, chat_id: str, agent_id: str, *, min_lease_seconds: int) -> dict:
+def _agent_enabled_check(agent_id: str) -> dict:
+    """`deliver.py` refuses a disabled recipient before it resolves the chat at all.
+
+    A disabled agent can keep an active binding and an unexpired lease, so every session
+    check passed and the preflight disagreed with the very command it predicts.
+    """
+    try:
+        agent = get_agent(agent_id)
+    except Exception as exc:
+        return {"check": "agent", "status": FAIL,
+                "detail": f"could not read agent {agent_id!r}: {type(exc).__name__}: {exc}"}
+    if is_agent_disabled(agent):
+        return {
+            "check": "agent",
+            "status": FAIL,
+            "detail": (
+                f"agent {agent_id!r} is disabled. deliver.py refuses this recipient before "
+                "resolving the chat, so no packet is written and nothing is woken."
+            ),
+        }
+    return {"check": "agent", "status": OK, "detail": f"agent {agent_id!r} is enabled"}
+
+
+def _repo_scope_check(session: dict, packet_repo_targets: list[str] | None) -> dict:
+    """The scope test real delivery applies, which the pair resolver does not.
+
+    `resolve_exact_dispatch_pair` validates binding identity only. `deliver.py` and the
+    watcher additionally run `repo_scope_matches`, so a session scoped to one repo was
+    reported wakeable for a packet naming another -- and both of those refuse it as
+    `route_ambiguous`. Predicting delivery means applying delivery's whole predicate.
+    """
+    if packet_repo_targets is None:
+        return {
+            "check": "repo-scope",
+            "status": OK,
+            "detail": (
+                "no --repo-targets given; pass the packet's scope to have it checked, "
+                "since an unscoped check cannot see a route_ambiguous refusal"
+            ),
+        }
+    matched, reason = repo_scope_matches(
+        session.get("repo_targets"),
+        packet_repo_targets,
+        subscriber_project=session.get("project_id"),
+        packet_project=session.get("project_id"),
+    )
+    if matched:
+        return {"check": "repo-scope", "status": OK, "detail": reason}
+    return {
+        "check": "repo-scope",
+        "status": FAIL,
+        "detail": (
+            f"packet scope {packet_repo_targets} against session scope "
+            f"{session.get('repo_targets')}: {reason}. deliver.py and the watcher both "
+            "refuse this packet."
+        ),
+    }
+
+
+def target_report(
+    project_id: str,
+    chat_id: str,
+    agent_id: str,
+    *,
+    min_lease_seconds: int,
+    packet_repo_targets: list[str] | None = None,
+) -> dict:
     """Can a packet for THIS project/chat/agent wake its exact binding right now?
 
     The agent-wide report answers a different and weaker question. It says can_wake as
@@ -290,7 +446,7 @@ def target_report(project_id: str, chat_id: str, agent_id: str, *, min_lease_sec
     router uses, never by inventory.
     """
     pair, reason = resolve_exact_dispatch_pair(project_id, chat_id, agent_id)
-    checks: list[dict] = []
+    checks: list[dict] = [_agent_enabled_check(agent_id)]
     if pair is None:
         checks.append({
             "check": "exact-pair",
@@ -312,16 +468,22 @@ def target_report(project_id: str, chat_id: str, agent_id: str, *, min_lease_sec
         for check in (
             _dispatchable_check(session),
             _lease_check(session, min_lease_seconds),
+            _wake_action_check(session),
+            _repo_scope_check(session, packet_repo_targets),
             _endpoint_check(session),
             _activity_check(session),
         ):
             checks.append({**check, "session_id": session["session_id"]})
 
     checks.append(_watcher_check(agent_id))
-    blocking = [
-        c for c in checks
-        if c["status"] == FAIL and c["check"] not in {"endpoint", "watcher"}
-    ]
+    # Every FAIL blocks here, endpoint and watcher included. The agent-wide report keeps
+    # them advisory because it answers "is this lane configured", and a process
+    # observation there is stale the instant it is taken. This report answers "may I send
+    # THIS packet now", and both of those checks say in their own words that nothing will
+    # read the packet or wake from it. That an observation can go stale after inspection
+    # is true of every preflight check and is not a reason to call a known-unreachable
+    # lane sendable.
+    blocking = [c for c in checks if c["status"] == FAIL]
     status = max((c["status"] for c in checks), key=lambda s: _RANK[s])
     return {
         "agent_id": agent_id,
@@ -347,10 +509,12 @@ def agent_report(agent_id: str, *, min_lease_seconds: int) -> dict:
     dead: list[dict] = []
     checks: list[dict] = []
 
+    failures: list[dict] = []
     for session in sessions:
         session_checks = [
             _dispatchable_check(session),
             _lease_check(session, min_lease_seconds),
+            _wake_action_check(session),
             _endpoint_check(session),
         ]
         # Endpoint reachability is ADVISORY, as the can_wake comment below states: it is
@@ -363,16 +527,28 @@ def agent_report(agent_id: str, *, min_lease_seconds: int) -> dict:
         (live if wakeable else dead).append(session)
         if wakeable:
             checks.extend({**c, "session_id": session["session_id"]} for c in session_checks)
+        else:
+            failures.extend(
+                {**c, "session_id": session["session_id"]}
+                for c in session_checks
+                if c["status"] == FAIL and c["check"] != "endpoint"
+            )
 
     if not live:
         if dead:
-            worst = _lease_check(dead[0], min_lease_seconds)
+            # Re-running _lease_check on the first sorted session reported "valid for ..."
+            # as the nearest problem whenever the real failure was status=stopped or a
+            # non-triggering mode -- hiding the actionable fault and sending the worker to
+            # repair a lease that was already healthy. Report the check that actually
+            # failed.
+            nearest = failures[0]["detail"] if failures else "no failing check recorded"
             checks.append({
                 "check": "session",
                 "status": FAIL,
+                "failing_checks": [f["check"] for f in failures],
                 "detail": (
                     f"{len(dead)} registered session(s), none wakeable. Nearest problem: "
-                    f"{worst['detail']}"
+                    f"{nearest}"
                 ),
             })
         else:
@@ -421,15 +597,28 @@ def main() -> int:
     )
     parser.add_argument("--agent", action="append", dest="agents", default=None)
     parser.add_argument("--all", action="store_true", help="Every known agent")
+    # An empty value is a MISTAKE, not a wildcard: `--project "$PROJECT"` with the
+    # variable unset used to leave both booleans false, drop into agent-wide inventory
+    # mode, and return exit 0 on a live session for some other project -- while the caller
+    # believed an exact pair had been checked. The sentinel separates "not passed" from
+    # "passed empty".
     parser.add_argument(
         "--project",
-        default=None,
+        default=_UNSET,
         help="Pre-send mode: the packet's project. Requires --chat and one --agent.",
     )
     parser.add_argument(
         "--chat",
-        default=None,
+        default=_UNSET,
         help="Pre-send mode: the packet's chat. Requires --project and one --agent.",
+    )
+    parser.add_argument(
+        "--repo-targets",
+        default=None,
+        help=(
+            "Pre-send mode: the packet's repo_targets, comma-separated. Without it the "
+            "repo-scope refusal that real delivery applies cannot be predicted."
+        ),
     )
     parser.add_argument(
         "--min-lease-seconds",
@@ -440,14 +629,27 @@ def main() -> int:
     parser.add_argument("--json", dest="json_output", action="store_true")
     args = parser.parse_args()
 
-    if bool(args.project) != bool(args.chat):
+    for name, value in (("--project", args.project), ("--chat", args.chat)):
+        if value is not _UNSET and not str(value).strip():
+            parser.error(
+                f"{name} was passed with an empty value. An empty scope is not a wildcard; "
+                "check the variable you interpolated."
+            )
+    given = [args.project is not _UNSET, args.chat is not _UNSET]
+    if any(given) and not all(given):
         parser.error("--project and --chat are the pre-send pair; pass both or neither")
-    if args.project:
+    if all(given):
         if args.all or not args.agents or len(args.agents) != 1:
             parser.error("pre-send mode needs exactly one --agent, and not --all")
+        packet_repo_targets = (
+            [part.strip() for part in args.repo_targets.split(",") if part.strip()]
+            if args.repo_targets is not None
+            else None
+        )
         report = target_report(
             args.project, args.chat, args.agents[0],
             min_lease_seconds=args.min_lease_seconds,
+            packet_repo_targets=packet_repo_targets,
         )
         reports = [report]
         if args.json_output:
