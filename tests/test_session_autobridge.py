@@ -1452,11 +1452,35 @@ class SessionAutobridgeTest(unittest.TestCase):
         self.assertEqual("failed", failure["terminal_status"])
         self.assertIn("model refused", failure["error"])
         self.assertIs(False, failure["retried"])
+        self.assertIs(False, failure["error_truncated"])
+        self.assertEqual(len(failure["error"]), failure["error_length"])
         # Delivered exactly once: consumed, never retried.
         self.assertIn("autobridge_consumed", names)
         consumed = next(e for e in events if e["event"] == "autobridge_consumed")
         self.assertIs(False, consumed["turn_succeeded"])
         self.assertEqual("failed", consumed["terminal_status"])
+
+    def test_an_over_limit_error_is_capped_and_says_so(self) -> None:
+        """A silent cap reads as the whole error, inside the event that exists to show it.
+
+        The previous slice dropped everything past 2,000 characters with no flag, no
+        length, and no marker -- and the short-error test stayed green with the slice
+        removed, so the bound was unproved in both directions.
+        """
+        limit = watch_inbox_lib.TURN_ERROR_LIMIT
+        filler = "E" * (limit * 2)
+        events = self.run_watcher_against({
+            "method": "turn/failed",
+            "params": {"turn": {"id": "t-1", "status": "failed"},
+                       "error": {"message": filler + "TAIL-MARKER"}},
+        })
+        failure = next(e for e in events if e["event"] == "autobridge_turn_failed")
+        self.assertEqual(limit, len(failure["error"]), "the cap must still apply")
+        self.assertIs(True, failure["error_truncated"])
+        self.assertGreater(failure["error_length"], limit)
+        self.assertNotIn("TAIL-MARKER", failure["error"])
+        # The packet is still delivered exactly once regardless of error size.
+        self.assertIn("autobridge_consumed", [e["event"] for e in events])
 
     def test_a_successful_turn_emits_no_failure_event(self) -> None:
         """Otherwise the failure signal means nothing."""

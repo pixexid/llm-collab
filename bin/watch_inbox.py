@@ -111,6 +111,11 @@ def autobridge_session_ids(agent_id: str, project_id: str | None = None) -> list
     return session_ids
 
 
+# How much of a failed turn's error the event carries. Truncation is always reported
+# alongside it, never applied silently.
+TURN_ERROR_LIMIT = 2000
+
+
 def dispatch_autobridge(
     agent_id: str,
     json_output: bool,
@@ -195,6 +200,13 @@ def dispatch_autobridge(
                 # was marked read with no failure signal anywhere. At-most-once delivery
                 # must not mean at-most-once VISIBILITY.
                 if runtime_result.get("turn_succeeded") is False:
+                    # The cap stays -- an unbounded error would swamp the log -- but a
+                    # silent slice reads as the whole error. This event exists to make a
+                    # failure visible, so hiding part of it inside the visibility fix
+                    # defeats the fix, and "bounded work fails closed and never
+                    # truncates" is this repo's rule besides.
+                    raw_error = runtime_result.get("stderr") or ""
+                    truncated = len(raw_error) > TURN_ERROR_LIMIT
                     emit(
                         {
                             "ts": utc_now_str(),
@@ -205,7 +217,9 @@ def dispatch_autobridge(
                             "message_path": action["message_path"],
                             "terminal_status": runtime_result.get("terminal_status"),
                             "delivery_observed": runtime_result.get("delivery_observed"),
-                            "error": (runtime_result.get("stderr") or "")[:2000],
+                            "error": raw_error[:TURN_ERROR_LIMIT],
+                            "error_truncated": truncated,
+                            "error_length": len(raw_error),
                             "retried": False,
                         },
                         json_output,
