@@ -136,6 +136,73 @@ class PipelineHealthTest(unittest.TestCase):
         self.assertEqual(1, len(matches), f"{name}: {matches}")
         return matches[0]
 
+    def run_presend(self, root, *args: str) -> tuple[int, dict]:
+        """Like run_health, but without the implicit --agent, so mode flags are explicit."""
+        result = subprocess.run(
+            [sys.executable, str(HEALTH_SCRIPT), *args, "--json"],
+            cwd=root, text=True, capture_output=True,
+            env={**os.environ, "PYTHONPATH": os.pathsep.join(
+                [str(root), str(REPO_ROOT), str(REPO_ROOT / "bin"),
+                 os.environ.get("PYTHONPATH", "")])},
+        )
+        self.assertTrue(result.stdout.strip(), result.stderr)
+        return result.returncode, json.loads(result.stdout)
+
+    def presend_cli(self, root, *args: str):
+        return subprocess.run(
+            [sys.executable, str(HEALTH_SCRIPT), *args],
+            cwd=root, text=True, capture_output=True,
+            env={**os.environ, "PYTHONPATH": os.pathsep.join(
+                [str(root), str(REPO_ROOT), str(REPO_ROOT / "bin"),
+                 os.environ.get("PYTHONPATH", "")])},
+        )
+
+    def workspace_with_two_sessions(self):
+        root = self.workspace()
+        self.add_session(root, "SESSION-LIVE", lease_delta=3600)
+        self.add_session(root, "SESSION-DEAD", lease_delta=-600)
+        return root
+
+    def test_agent_wide_mode_is_an_inventory_not_a_send_verdict(self) -> None:
+        """Kept, but it must not be the thing consulted before a send."""
+        root = self.workspace_with_two_sessions()
+        code, payload = self.run_presend(root, "--agent", "cdx2")
+        self.assertEqual(0, code)
+        self.assertTrue(payload["agents"][0]["can_wake"])
+        # It reports BOTH, which is the honest inventory answer.
+        self.assertEqual(["SESSION-LIVE"], payload["agents"][0]["wakeable_sessions"])
+        self.assertEqual(["SESSION-DEAD"], payload["agents"][0]["unwakeable_sessions"])
+
+    def test_pre_send_mode_refuses_when_the_exact_pair_is_not_wakeable(self) -> None:
+        """Codex's reproduction: a live sibling session is not evidence for this packet."""
+        root = self.workspace_with_two_sessions()
+        code, payload = self.run_presend(
+            root, "--agent", "cdx2", "--project", "amiga", "--chat", "CHAT-NOT-BOUND")
+        report = payload["agents"][0]
+        self.assertEqual(2, code, report)
+        self.assertFalse(report["can_wake"])
+        pair = next(c for c in report["checks"] if c["check"] == "exact-pair")
+        self.assertEqual("fail", pair["status"])
+        self.assertIn("not evidence", pair["detail"])
+
+    def test_pre_send_mode_requires_both_project_and_chat(self) -> None:
+        root = self.workspace_with_two_sessions()
+        for args in (("--project", "amiga"), ("--chat", "CHAT-X")):
+            with self.subTest(args=args):
+                result = self.presend_cli(root, "--agent", "cdx2", *args)
+                self.assertNotEqual(0, result.returncode)
+                self.assertIn("pre-send pair", result.stderr)
+
+    def test_pre_send_mode_refuses_all_and_multiple_agents(self) -> None:
+        """A send has exactly one recipient; a fan-out verdict would be meaningless."""
+        root = self.workspace_with_two_sessions()
+        for extra in (["--all"], ["--agent", "other"]):
+            with self.subTest(extra=extra):
+                result = self.presend_cli(root, "--agent", "cdx2",
+                                          "--project", "amiga", "--chat", "CHAT-X", *extra)
+                self.assertNotEqual(0, result.returncode)
+                self.assertIn("exactly one --agent", result.stderr)
+
     def test_an_expired_lease_is_reported_as_cannot_wake(self) -> None:
         root = self.workspace()
         self.add_session(root, "SESSION-DEAD", lease_delta=-60)
@@ -160,6 +227,28 @@ class PipelineHealthTest(unittest.TestCase):
         self.assertEqual(["SESSION-LIVE"], self.agent(payload)["wakeable_sessions"])
         self.assertEqual(["SESSION-OLD-PROBE"], self.agent(payload)["unwakeable_sessions"])
         self.assertEqual("warn", self.check(payload, "stale-sessions")["status"])
+
+    def test_an_unreachable_endpoint_does_not_make_a_session_unwakeable(self) -> None:
+        """The advertised rule, now actually tested.
+
+        The return comment says can_wake is keyed to session state alone, because a live
+        observation is stale the instant it is taken -- but endpoint FAIL was
+        participating in the `live` classification, so an active leased session with an
+        unreachable app-server reported can_wake=False. Code and comment disagreed and
+        the advertised rule was untested.
+
+        No mock: a codex_app session whose home has no app-server fails the endpoint
+        probe on its own.
+        """
+        root = self.workspace()
+        self.add_session(root, "SESSION-LIVE", lease_delta=3600, family="codex_app")
+        code, payload = self.run_health(root)
+        report = self.agent(payload)
+        endpoint = self.check(payload, "endpoint")
+        self.assertEqual("fail", endpoint["status"], "still reported")
+        self.assertTrue(report["can_wake"], "but advisory, exactly as documented")
+        self.assertEqual(["SESSION-LIVE"], report["wakeable_sessions"])
+        self.assertEqual(0, code, "an advisory failure must not block a send")
 
     def test_a_warning_never_blocks_the_send(self) -> None:
         """A gate that fails on advisory noise gets wrapped in `|| true` and ignored."""
@@ -364,6 +453,90 @@ class ActivityAndWatchTest(unittest.TestCase):
             )
         self.assertEqual(self.mod.WARN, check["status"])
         self.assertIn("not listed", check["detail"])
+
+    def test_the_probe_sends_nothing_when_a_server_request_arrives(self) -> None:
+        """Observation must emit no frame at all.
+
+        The client's default policy is SERVER_REQUEST_REFUSE, which SENDS a correlated
+        error. A pending server request can be resolved by whichever client answers
+        first, so a "read-only" probe answering one would abort work the operator
+        started in the desktop app -- the same contract codex_stream.py carries.
+        """
+        from unittest import mock
+
+        captured = {}
+
+        class RecordingClient:
+            def __init__(self, url, token=None, timeout_seconds=None,
+                         server_request_policy=None):
+                captured["policy"] = server_request_policy
+
+            def __enter__(self): return self
+            def __exit__(self, *exc): return False
+            def notify(self, *a, **k): return None
+            def request(self, method, params=None):
+                return {"data": []} if method == "thread/list" else {}
+
+        with mock.patch.object(
+            self.mod, "discover_codex_app_server",
+            return_value={"url": "ws://127.0.0.1:1", "token_file": None},
+        ), mock.patch.object(self.mod, "_codex_app_server_token", return_value=None), \
+             mock.patch.object(self.mod, "JsonRpcWebSocketClient", RecordingClient):
+            self.mod._activity_check(
+                {"runtime": {"family": "codex_app", "session_id": "t", "home": "/h"}}
+            )
+        self.assertEqual(
+            self.mod.SERVER_REQUEST_IGNORE, captured["policy"],
+            "the refuse default sends an error frame and can abort operator work",
+        )
+
+    def test_a_jsonrpc_error_degrades_to_warn_rather_than_crashing(self) -> None:
+        """request() raises RuntimeError for an error reply; it escaped the whole preflight."""
+        from unittest import mock
+
+        class ErroringClient:
+            def __init__(self, *a, **k): pass
+            def __enter__(self): return self
+            def __exit__(self, *exc): return False
+            def notify(self, *a, **k): return None
+            def request(self, method, params=None):
+                if method == "thread/list":
+                    raise RuntimeError("method not supported")
+                return {}
+
+        with mock.patch.object(
+            self.mod, "discover_codex_app_server",
+            return_value={"url": "ws://127.0.0.1:1", "token_file": None},
+        ), mock.patch.object(self.mod, "_codex_app_server_token", return_value=None), \
+             mock.patch.object(self.mod, "JsonRpcWebSocketClient", ErroringClient):
+            check = self.mod._activity_check(
+                {"runtime": {"family": "codex_app", "session_id": "t", "home": "/h"}}
+            )
+        self.assertEqual(self.mod.WARN, check["status"])
+        self.assertIn("RuntimeError", check["detail"])
+
+    def test_a_malformed_thread_list_result_is_validated_before_indexing(self) -> None:
+        from unittest import mock
+
+        for bad in ([], "nope", None, {"data": "not-a-list"}):
+            with self.subTest(result=bad):
+                class OddClient:
+                    def __init__(self, *a, **k): pass
+                    def __enter__(self): return self
+                    def __exit__(self, *exc): return False
+                    def notify(self, *a, **k): return None
+                    def request(self, method, params=None):
+                        return bad if method == "thread/list" else {}
+
+                with mock.patch.object(
+                    self.mod, "discover_codex_app_server",
+                    return_value={"url": "ws://127.0.0.1:1", "token_file": None},
+                ), mock.patch.object(self.mod, "_codex_app_server_token", return_value=None), \
+                     mock.patch.object(self.mod, "JsonRpcWebSocketClient", OddClient):
+                    check = self.mod._activity_check(
+                        {"runtime": {"family": "codex_app", "session_id": "t", "home": "/h"}}
+                    )
+                self.assertEqual(self.mod.WARN, check["status"])
 
     def test_a_family_without_a_thread_probe_is_not_guessed_at(self) -> None:
         for family in ("zcode_cli", "claude_app", "gemini_cli", ""):

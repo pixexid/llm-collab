@@ -40,6 +40,7 @@ import subprocess
 sys.path.insert(0, str(Path(__file__).parent))
 from _helpers import ROOT, agent_ids, get_unread_messages
 from _session_autobridge import (
+    SERVER_REQUEST_IGNORE,
     SESSIONS_DIR,
     JsonRpcWebSocketClient,
     _codex_app_server_token,
@@ -49,6 +50,7 @@ from _session_autobridge import (
     parse_iso8601,
     runtime_metadata,
     message_targets_session,
+    resolve_exact_dispatch_pair,
     session_is_dispatchable,
 )
 
@@ -155,16 +157,36 @@ def _activity_check(session: dict) -> dict:
     thread_id = str(runtime.get("session_id") or "")
     try:
         token = _codex_app_server_token(endpoint.get("token_file"))
-        with JsonRpcWebSocketClient(str(endpoint["url"]), token=token, timeout_seconds=20) as client:
+        # SERVER_REQUEST_IGNORE, not the REFUSE default: refusing SENDS a correlated
+        # error frame, and a pending server request can be resolved by whichever client
+        # answers first -- so a "read-only" probe would abort work the operator started
+        # in the desktop app. codex_stream.py carries the same contract for the same
+        # reason. Observation must emit nothing at all.
+        with JsonRpcWebSocketClient(
+            str(endpoint["url"]),
+            token=token,
+            timeout_seconds=20,
+            server_request_policy=SERVER_REQUEST_IGNORE,
+        ) as client:
             client.request("initialize", {"clientInfo": {"name": "pipeline-health",
                                                          "title": "llm-collab",
                                                          "version": "0.1"}})
             client.notify("initialized")
-            rows = client.request("thread/list", {}).get("data", [])
-    except (OSError, ValueError, TimeoutError) as exc:
+            listed = client.request("thread/list", {})
+    except (OSError, ValueError, TimeoutError, RuntimeError) as exc:
+        # RuntimeError is what request() raises for a JSON-RPC error reply, so an
+        # app-server answering "method not supported" used to crash the whole preflight
+        # instead of degrading one advisory check.
         return {"check": "activity", "status": WARN,
                 "detail": f"thread probe failed: {type(exc).__name__}: {exc}"}
-    row = next((r for r in rows if r.get("id") == thread_id), None)
+    rows = listed.get("data") if isinstance(listed, dict) else None
+    if not isinstance(rows, list):
+        # Validate before indexing: a malformed result reached .get and raised.
+        return {"check": "activity", "status": WARN,
+                "detail": f"thread/list returned {type(listed).__name__}, not a result object"}
+    row = next(
+        (r for r in rows if isinstance(r, dict) and r.get("id") == thread_id), None
+    )
     if row is None:
         return {"check": "activity", "status": WARN,
                 "detail": f"thread {thread_id[:8]} not listed by the app-server"}
@@ -255,6 +277,63 @@ def _backlog_check(agent_id: str, sessions: list[dict]) -> dict:
     }
 
 
+def target_report(project_id: str, chat_id: str, agent_id: str, *, min_lease_seconds: int) -> dict:
+    """Can a packet for THIS project/chat/agent wake its exact binding right now?
+
+    The agent-wide report answers a different and weaker question. It says can_wake as
+    soon as ANY session for the agent is live, and a packet addressed to a different,
+    expired or rebound session cannot be retargeted to that live one -- so the tool
+    could return exit 0 while its own backlog line said the packet was undeliverable.
+    That is precisely the false green it exists to prevent.
+
+    Send-time questions are answered through the same exact dispatch-pair resolver the
+    router uses, never by inventory.
+    """
+    pair, reason = resolve_exact_dispatch_pair(project_id, chat_id, agent_id)
+    checks: list[dict] = []
+    if pair is None:
+        checks.append({
+            "check": "exact-pair",
+            "status": FAIL,
+            "detail": (
+                f"no exact dispatch pair for {project_id}/{chat_id}/{agent_id}: {reason}. "
+                "Another session for this agent is not evidence that this packet can wake."
+            ),
+        })
+        session = None
+    else:
+        session, _binding = pair
+        checks.append({
+            "check": "exact-pair",
+            "status": OK,
+            "session_id": session["session_id"],
+            "detail": f"bound to {session['session_id']}",
+        })
+        for check in (
+            _dispatchable_check(session),
+            _lease_check(session, min_lease_seconds),
+            _endpoint_check(session),
+            _activity_check(session),
+        ):
+            checks.append({**check, "session_id": session["session_id"]})
+
+    checks.append(_watcher_check(agent_id))
+    blocking = [
+        c for c in checks
+        if c["status"] == FAIL and c["check"] not in {"endpoint", "watcher"}
+    ]
+    status = max((c["status"] for c in checks), key=lambda s: _RANK[s])
+    return {
+        "agent_id": agent_id,
+        "project_id": project_id,
+        "chat_id": chat_id,
+        "status": status,
+        "can_wake": not blocking,
+        "session_id": session["session_id"] if session else None,
+        "checks": checks,
+    }
+
+
 def agent_report(agent_id: str, *, min_lease_seconds: int) -> dict:
     """Can a packet wake this agent NOW -- not: is every session it ever had healthy.
 
@@ -274,7 +353,13 @@ def agent_report(agent_id: str, *, min_lease_seconds: int) -> dict:
             _lease_check(session, min_lease_seconds),
             _endpoint_check(session),
         ]
-        wakeable = all(c["status"] != FAIL for c in session_checks)
+        # Endpoint reachability is ADVISORY, as the can_wake comment below states: it is
+        # a live observation that is stale the instant it is taken. Letting it decide
+        # `live` made the advertised rule false and untested -- an active, leased session
+        # with a momentarily unreachable app-server reported can_wake=False.
+        wakeable = all(
+            c["status"] != FAIL for c in session_checks if c["check"] != "endpoint"
+        )
         (live if wakeable else dead).append(session)
         if wakeable:
             checks.extend({**c, "session_id": session["session_id"]} for c in session_checks)
@@ -337,6 +422,16 @@ def main() -> int:
     parser.add_argument("--agent", action="append", dest="agents", default=None)
     parser.add_argument("--all", action="store_true", help="Every known agent")
     parser.add_argument(
+        "--project",
+        default=None,
+        help="Pre-send mode: the packet's project. Requires --chat and one --agent.",
+    )
+    parser.add_argument(
+        "--chat",
+        default=None,
+        help="Pre-send mode: the packet's chat. Requires --project and one --agent.",
+    )
+    parser.add_argument(
         "--min-lease-seconds",
         type=int,
         default=1800,
@@ -344,6 +439,29 @@ def main() -> int:
     )
     parser.add_argument("--json", dest="json_output", action="store_true")
     args = parser.parse_args()
+
+    if bool(args.project) != bool(args.chat):
+        parser.error("--project and --chat are the pre-send pair; pass both or neither")
+    if args.project:
+        if args.all or not args.agents or len(args.agents) != 1:
+            parser.error("pre-send mode needs exactly one --agent, and not --all")
+        report = target_report(
+            args.project, args.chat, args.agents[0],
+            min_lease_seconds=args.min_lease_seconds,
+        )
+        reports = [report]
+        if args.json_output:
+            print(json.dumps({"status": report["status"], "agents": reports},
+                             indent=2, sort_keys=True))
+        else:
+            marks = {OK: "ok  ", WARN: "WARN", FAIL: "FAIL"}
+            print(f"\n{marks[report['status']]} {args.project}/{args.chat}"
+                  f" -> {report['agent_id']}  (can_wake={report['can_wake']})")
+            for check in report["checks"]:
+                where = f" [{check['session_id']}]" if check.get("session_id") else ""
+                print(f"  {marks[check['status']]} {check['check']}{where}: {check['detail']}")
+            print()
+        return 0 if report["can_wake"] else 2
 
     if args.all:
         targets = list(agent_ids())
