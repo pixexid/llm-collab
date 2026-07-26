@@ -363,6 +363,9 @@ class Gh1549FallbackFixturesTest(unittest.TestCase):
         "absent_request": "absent_request.json",
         "eyes_only_current_head": "eyes_only_current_head.json",
         "prior_head_artifacts_only": "prior_head_artifacts_only.json",
+        # A request that exists, at each point of its flow -- the others classify
+        # non-signals, this one classifies progress through the request-anchored clocks.
+        "requested_review_phases": "requested_review_phases.json",
     }
     REQUIRED_PROJECTS = ("amiga", "nuvyr")
 
@@ -484,8 +487,20 @@ class Gh1549FallbackFixturesTest(unittest.TestCase):
         # the denial -- a mutation restoring the "reviewability clock starts at the later
         # of the final push" anchor passed straight through the first version of this
         # guard.
-        sanctioned = re.compile(r"no elapsed time makes the head merge-eligible", re.I)
-        forbidden = re.compile(r"fallback|clock|elapsed|expire", re.I)
+        # Widened 2026-07-26 with the phase model: the REQUEST-ANCHORED clocks were never
+        # deleted -- only the silence fallback's clock for a review nobody asked for. So a
+        # fixture may say a request expired, because that is a retained mechanism it must
+        # be able to describe; what it still may not do is describe the deleted one. The
+        # narrowing is by ANCHOR rather than by vocabulary: a clock attached to a request
+        # artifact is legitimate, a clock attached to silence or to a push is not.
+        sanctioned = re.compile(
+            r"no elapsed time makes the head merge-eligible"
+            r"|request-anchored clocks?"
+            r"|(?:initial request|re-trigger)(?:'s)?(?: own)? clock"
+            r"|clocks are tier-agnostic",
+            re.I,
+        )
+        forbidden = re.compile(r"fallback|clock|elapsed", re.I)
         offenders: dict[str, list[str]] = {}
         for filename in self.VARIANT_FILES.values():
             raw = (FIXTURES_DIR / filename).read_text(encoding="utf-8")
@@ -579,13 +594,39 @@ class Gh1549FallbackFixturesTest(unittest.TestCase):
                     if not state["explicit_review_request"]:
                         continue
                     self.assertIn(
-                        "review_request_head_oid", state,
-                        "a request in a fixture must name the head it was issued for",
+                        "review_requests", state,
+                        "a request in a fixture must be an artifact naming its own head",
                     )
+                    requests = state["review_requests"]
+                    self.assertTrue(requests, "explicit_review_request with no artifact")
+                    for request in requests:
+                        self.assertIn(request["kind"], {"initial", "re_trigger"})
+                        self.assertIn("head_oid", request)
+                        self.assertIn("phase", request)
+                    kinds = [r["kind"] for r in requests]
                     self.assertEqual(
-                        state["head_oid"], state["review_request_head_oid"],
-                        "a request naming another head is stale and is not pending here",
+                        sorted(set(kinds)), sorted(kinds),
+                        "each request kind appears at most once; the re-trigger is single",
                     )
+                    if "re_trigger" in kinds:
+                        self.assertIn(
+                            "initial", kinds,
+                            "a re-trigger without an initial request is not a recovery",
+                        )
+                    # Pending for THIS head requires a request naming THIS head. A request
+                    # for a prior head is stale and is modelled as such rather than banned.
+                    for_this_head = [r for r in requests if r["head_oid"] == state["head_oid"]]
+                    if state.get("request_phase") == "stale_for_this_head":
+                        self.assertEqual(
+                            [], for_this_head,
+                            "a stale case must name only prior heads",
+                        )
+                        self.assertFalse(case["expected"]["review_is_pending"])
+                    else:
+                        self.assertTrue(
+                            for_this_head,
+                            "a pending case must name the current head",
+                        )
 
     def test_a_requested_review_has_phases_not_one_disposition(self) -> None:
         """Escalation is the END of the request-anchored flow, not the whole of it."""
@@ -630,9 +671,18 @@ class Gh1549FallbackFixturesTest(unittest.TestCase):
             self.assertIn(phrase, doc)
 
     def test_disposition_follows_from_tier_and_request_not_from_the_variant(self) -> None:
+        """Two questions, answered by two models, and conflating them was the defect.
+
+        The tier matrix answers **is anything pending** -- a property of the tier and of
+        whether a request exists at all. `REQUEST_PHASES` answers **what to do now** -- a
+        property of how far the request-anchored clocks have run. Mapping every requested
+        review straight to `escalate_stuck_review` collapsed the second question into the
+        first, so a just-posted request and an exhausted one were indistinguishable.
+        """
         for variant in self.VARIANT_FILES:
             for case in self._project_cases(variant):
-                key = (case["tier"], case["pr_state"]["explicit_review_request"])
+                state = case["pr_state"]
+                key = (case["tier"], state["explicit_review_request"])
                 with self.subTest(
                     variant=variant, project_id=case["project_id"], tier=case["tier"]
                 ):
@@ -641,9 +691,29 @@ class Gh1549FallbackFixturesTest(unittest.TestCase):
                         self.DISPOSITION_BY_TIER_AND_REQUEST,
                         f"{variant} declares an unmodelled tier/request pair {key}",
                     )
+                    phase = state.get("request_phase")
+                    if phase is None:
+                        # No request-anchored clock: the tier answer is the whole answer.
+                        self.assertEqual(
+                            self.DISPOSITION_BY_TIER_AND_REQUEST[key],
+                            case["expected"]["disposition"],
+                        )
+                        continue
+                    if phase == "stale_for_this_head":
+                        # A request naming a prior head is not pending for THIS head, so it
+                        # falls back to the no-request answer for the tier -- which at Tier A
+                        # is the gate violation, not a wait.
+                        self.assertEqual(
+                            self.DISPOSITION_BY_TIER_AND_REQUEST[(case["tier"], False)],
+                            case["expected"]["disposition"],
+                        )
+                        continue
+                    self.assertIn(
+                        phase, self.REQUEST_PHASES,
+                        f"{variant} declares an unmodelled request phase {phase!r}",
+                    )
                     self.assertEqual(
-                        self.DISPOSITION_BY_TIER_AND_REQUEST[key],
-                        case["expected"]["disposition"],
+                        self.REQUEST_PHASES[phase], case["expected"]["disposition"]
                     )
 
     def test_every_variant_covers_both_a_tier_a_and_a_tier_bc_case(self) -> None:
@@ -704,9 +774,15 @@ class Gh1549FallbackFixturesTest(unittest.TestCase):
         for case in requested:
             with self.subTest(project_id=case["project_id"]):
                 self.assertTrue(case["expected"]["review_is_pending"])
-                self.assertEqual(
-                    "escalate_stuck_review", case["expected"]["disposition"]
+                # Pending, and its ACTION comes from the phase exactly as Tier A's does --
+                # that is the whole claim. Asserting `escalate_stuck_review` here would
+                # re-collapse the flow into its last step for Tier B only.
+                phase = case["pr_state"].get("request_phase")
+                expected = (
+                    self.REQUEST_PHASES[phase] if phase
+                    else self.DISPOSITION_BY_TIER_AND_REQUEST[(case["tier"], True)]
                 )
+                self.assertEqual(expected, case["expected"]["disposition"])
 
     def test_no_case_is_terminal_and_only_a_pending_review_can_be_stuck(self) -> None:
         for variant in self.VARIANT_FILES:
@@ -715,11 +791,18 @@ class Gh1549FallbackFixturesTest(unittest.TestCase):
                 with self.subTest(variant=variant, project_id=case["project_id"]):
                     # Every one of these variants is defined as the ABSENCE of a signal.
                     self.assertIs(False, expected["terminal_signal_present"])
-                    # A review is outstanding exactly when one was requested.
-                    self.assertIs(
-                        case["pr_state"]["explicit_review_request"],
-                        expected["review_is_pending"],
-                    )
+                    # A review is outstanding exactly when a request exists **for this
+                    # head**. "A request exists" and "a review is pending" are different
+                    # facts once a push has happened, and conflating them is what let a
+                    # stale prior-head request read as pending -- Tier A could then walk to
+                    # the waiver without ever issuing the mandatory new-head request.
+                    state = case["pr_state"]
+                    requests = state.get("review_requests") or []
+                    if requests:
+                        pending = any(r["head_oid"] == state["head_oid"] for r in requests)
+                    else:
+                        pending = state["explicit_review_request"]
+                    self.assertIs(pending, expected["review_is_pending"])
                     if expected["disposition"] == "escalate_stuck_review":
                         self.assertTrue(
                             expected["review_is_pending"],

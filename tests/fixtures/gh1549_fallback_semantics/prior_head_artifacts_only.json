@@ -10,7 +10,19 @@
         "pr_open": true,
         "draft_ready": true,
         "explicit_review_request": true,
-        "review_request_head_oid": "amiga-abc301"
+        "review_requests": [
+          {
+            "kind": "initial",
+            "head_oid": "amiga-abc301",
+            "phase": "expired"
+          },
+          {
+            "kind": "re_trigger",
+            "head_oid": "amiga-abc301",
+            "phase": "expired"
+          }
+        ],
+        "request_phase": "retrigger_expired"
       },
       "stale_artifacts_for_prior_head": [
         {
@@ -67,7 +79,19 @@
         "pr_open": true,
         "draft_ready": true,
         "explicit_review_request": true,
-        "review_request_head_oid": "nuvyr-abc301"
+        "review_requests": [
+          {
+            "kind": "initial",
+            "head_oid": "nuvyr-abc301",
+            "phase": "expired"
+          },
+          {
+            "kind": "re_trigger",
+            "head_oid": "nuvyr-abc301",
+            "phase": "expired"
+          }
+        ],
+        "request_phase": "retrigger_expired"
       },
       "stale_artifacts_for_prior_head": [
         {
@@ -124,7 +148,19 @@
         "pr_open": true,
         "draft_ready": true,
         "explicit_review_request": true,
-        "review_request_head_oid": "nuvyr-abd301"
+        "review_requests": [
+          {
+            "kind": "initial",
+            "head_oid": "nuvyr-abd301",
+            "phase": "expired"
+          },
+          {
+            "kind": "re_trigger",
+            "head_oid": "nuvyr-abd301",
+            "phase": "expired"
+          }
+        ],
+        "request_phase": "retrigger_expired"
       },
       "stale_artifacts_for_prior_head": [
         {

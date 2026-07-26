@@ -10,7 +10,20 @@
         "pr_open": true,
         "draft_ready": true,
         "explicit_review_request": true,
-        "review_request_head_oid": "amiga-abc200"
+        "review_request_head_oid": "amiga-abc200",
+        "review_requests": [
+          {
+            "kind": "initial",
+            "head_oid": "amiga-abc200",
+            "phase": "expired"
+          },
+          {
+            "kind": "re_trigger",
+            "head_oid": "amiga-abc200",
+            "phase": "pending"
+          }
+        ],
+        "request_phase": "retrigger_pending"
       },
       "artifacts_for_current_head": [
         {
@@ -22,7 +35,7 @@
       "expected": {
         "terminal_signal_present": false,
         "review_is_pending": true,
-        "disposition": "escalate_stuck_review",
+        "disposition": "wait_out_the_re_trigger",
         "merge_eligible_on_silence": false
       }
     },
@@ -57,7 +70,20 @@
         "pr_open": true,
         "draft_ready": true,
         "explicit_review_request": true,
-        "review_request_head_oid": "nuvyr-abc200"
+        "review_request_head_oid": "nuvyr-abc200",
+        "review_requests": [
+          {
+            "kind": "initial",
+            "head_oid": "nuvyr-abc200",
+            "phase": "expired"
+          },
+          {
+            "kind": "re_trigger",
+            "head_oid": "nuvyr-abc200",
+            "phase": "pending"
+          }
+        ],
+        "request_phase": "retrigger_pending"
       },
       "artifacts_for_current_head": [
         {
@@ -69,7 +95,7 @@
       "expected": {
         "terminal_signal_present": false,
         "review_is_pending": true,
-        "disposition": "escalate_stuck_review",
+        "disposition": "wait_out_the_re_trigger",
         "merge_eligible_on_silence": false
       }
     },
@@ -104,7 +130,20 @@
         "pr_open": true,
         "draft_ready": true,
         "explicit_review_request": true,
-        "review_request_head_oid": "nuvyr-abd200"
+        "review_request_head_oid": "nuvyr-abd200",
+        "review_requests": [
+          {
+            "kind": "initial",
+            "head_oid": "nuvyr-abd200",
+            "phase": "expired"
+          },
+          {
+            "kind": "re_trigger",
+            "head_oid": "nuvyr-abd200",
+            "phase": "pending"
+          }
+        ],
+        "request_phase": "retrigger_pending"
       },
       "artifacts_for_current_head": [
         {
@@ -116,7 +155,7 @@
       "expected": {
         "terminal_signal_present": false,
         "review_is_pending": true,
-        "disposition": "escalate_stuck_review",
+        "disposition": "wait_out_the_re_trigger",
         "merge_eligible_on_silence": false
       }
     }
