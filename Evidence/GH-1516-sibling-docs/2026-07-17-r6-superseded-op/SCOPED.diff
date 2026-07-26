@@ -1,0 +1,19 @@
+diff -ru before/marketing/service_notes_system_spec.md after/marketing/service_notes_system_spec.md
+--- before/marketing/service_notes_system_spec.md	2026-07-17 10:28:22
++++ after/marketing/service_notes_system_spec.md	2026-07-17 10:28:22
+@@ -167,9 +167,12 @@
+    answer PROVES settlement. An unknown transport outcome retains; a **same-key in-progress 409** and a
+    **pre-claim 429** retain too, because neither proves the original operation settled (the rate limit
+    is checked before the body is even parsed); every other deterministic answer rotates. A retained key
+-   is reused for a NEW authorised start only until authority reports that exact operation terminally
+-   settled (`succeeded | failed | blocked`) — then a fresh key is minted so the new start is not a
+-   replay of a settled run. Pre-provider `lease_expired` is reclaimable under the same key.
++   is reused for a NEW authorised start only while authority still supports that its operation may be
++   unsettled; a fresh key is minted once authority reports that exact operation terminally settled
++   (`succeeded | failed | blocked`) **or** reports a DIFFERENT current operation with `safeToStart:true`
++   (the retained op was superseded), so the new start is never a replay of a settled or stale run. Only
++   a `null` operation (no settlement evidence at all) preserves an older ambiguous key. Pre-provider
++   `lease_expired` on the same operation is reclaimable under the same key.
+    **Fail-closed on a terminal 403 (C2 UI).** The review GET stays readable for any operational
+    account, but a refused mutation (**403** from `requireOperationalWriter` — an account without write
+    access) fails the panel closed: all mutation controls and edit fields disable, the drafts stay

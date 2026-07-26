@@ -1,0 +1,24 @@
+--- /Users/pixexid/Projects/llm-collab/Evidence/GH-1516-sibling-docs/2026-07-17-service-notes-spec-key-rule/before_service_notes_system_spec.md	2026-07-17 13:30:18
++++ /Users/pixexid/Projects/llm-collab/Evidence/GH-1516-sibling-docs/2026-07-17-service-notes-spec-key-rule/after_service_notes_system_spec.md	2026-07-17 13:30:18
+@@ -167,12 +167,15 @@
+    answer PROVES settlement. An unknown transport outcome retains; a **same-key in-progress 409** and a
+    **pre-claim 429** retain too, because neither proves the original operation settled (the rate limit
+    is checked before the body is even parsed); every other deterministic answer rotates. A retained key
+-   is reused for a NEW authorised start only while authority still supports that its operation may be
+-   unsettled; a fresh key is minted once authority reports that exact operation terminally settled
+-   (`succeeded | failed | blocked`) **or** reports a DIFFERENT current operation with `safeToStart:true`
+-   (the retained op was superseded), so the new start is never a replay of a settled or stale run. Only
+-   a `null` operation (no settlement evidence at all) preserves an older ambiguous key. Pre-provider
+-   `lease_expired` on the same operation is reclaimable under the same key.
++   is reused for a NEW authorised start unless authority PROVES that exact operation reached a PAID
++   terminal settlement — a fresh key is minted **only** when authority reports the retained operation's
++   own id terminally settled (`succeeded | failed | blocked`). A DIFFERENT reported current operation
++   does **not** prove the retained one settled: after an ambiguous transport the client does not reload
++   authority before the retry, so the reported op may be the *stale pre-submit* operation, and minting
++   fresh there could drop a still-live paid run (409) or buy a second one. So a different reported op, a
++   `null` operation, and any non-terminal matching status **all preserve** the retained key; only a
++   matching terminal settlement rotates it. Pre-provider `lease_expired` on the same operation is
++   reclaimable under the same key.
+    **Fail-closed on a terminal 403 (C2 UI).** The review GET stays readable for any operational
+    account, but a refused mutation (**403** from `requireOperationalWriter` — an account without write
+    access) fails the panel closed: all mutation controls and edit fields disable, the drafts stay

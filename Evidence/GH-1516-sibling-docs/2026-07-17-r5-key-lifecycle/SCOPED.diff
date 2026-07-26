@@ -1,0 +1,18 @@
+diff -ru before/marketing/service_notes_system_spec.md after/marketing/service_notes_system_spec.md
+--- before/marketing/service_notes_system_spec.md	2026-07-17 09:58:03
++++ after/marketing/service_notes_system_spec.md	2026-07-17 09:58:03
+@@ -162,6 +162,14 @@
+    `safeToStart:true` on `succeeded` means the source rotated, so the copy states plainly that
+    generating **replaces** the current reviewed set and its decisions. Generation writes drafts for
+    review only — nothing is scheduled, published, or sent.
++   **The generation idempotency-key lifecycle is settlement-evidence, not HTTP-status.** The key IS the
++   operation id, so it is retained while its operation may still be unsettled and rotated only when the
++   answer PROVES settlement. An unknown transport outcome retains; a **same-key in-progress 409** and a
++   **pre-claim 429** retain too, because neither proves the original operation settled (the rate limit
++   is checked before the body is even parsed); every other deterministic answer rotates. A retained key
++   is reused for a NEW authorised start only until authority reports that exact operation terminally
++   settled (`succeeded | failed | blocked`) — then a fresh key is minted so the new start is not a
++   replay of a settled run. Pre-provider `lease_expired` is reclaimable under the same key.
+    **Fail-closed on a terminal 403 (C2 UI).** The review GET stays readable for any operational
+    account, but a refused mutation (**403** from `requireOperationalWriter` — an account without write
+    access) fails the panel closed: all mutation controls and edit fields disable, the drafts stay

@@ -1,0 +1,33 @@
+--- /Users/pixexid/Projects/llm-collab/Evidence/GH-1516-sibling-docs/2026-07-17-provenance-split/before.md	2026-07-17 14:40:43
++++ /Users/pixexid/Projects/llm-collab/Evidence/GH-1516-sibling-docs/2026-07-17-provenance-split/after.md	2026-07-17 14:40:43
+@@ -166,16 +166,20 @@
+    operation id, so it is retained while its operation may still be unsettled and rotated only when the
+    answer PROVES settlement. An unknown transport outcome retains; a **same-key in-progress 409** and a
+    **pre-claim 429** retain too, because neither proves the original operation settled (the rate limit
+-   is checked before the body is even parsed); every other deterministic answer rotates. A retained key
+-   is reused for a NEW authorised start unless authority PROVES that exact operation reached a PAID
+-   terminal settlement — a fresh key is minted **only** when authority reports the retained operation's
+-   own id terminally settled (`succeeded | failed | blocked`). A DIFFERENT reported current operation
+-   does **not** prove the retained one settled: after an ambiguous transport the client does not reload
+-   authority before the retry, so the reported op may be the *stale pre-submit* operation, and minting
+-   fresh there could drop a still-live paid run (409) or buy a second one. So a different reported op, a
+-   `null` operation, and any non-terminal matching status **all preserve** the retained key; only a
+-   matching terminal settlement rotates it. Pre-provider `lease_expired` on the same operation is
+-   reclaimable under the same key.
++   is checked before the body is even parsed); every other deterministic answer rotates. Reuse of a
++   retained key turns on PROVENANCE, because a `transport` retains the key WITHOUT reloading authority,
++   so the authority in hand may still be the *stale pre-submit snapshot*. The retained key carries the
++   load epoch it was submitted against, and reuse compares it to the current authority read's epoch:
++   - **Matching operation id** (authority reports the retained op itself): provenance-independent — a
++     matching TERMINAL settlement (`succeeded | failed | blocked`) under a new authorised start rotates
++     (reusing would replay the settled run); a matching NON-terminal (e.g. `provider_outcome_unknown`,
++     `lease_expired`) is the recovery/settlement path and reuses the same key.
++   - **Null or a DIFFERENT reported id**: reuse UNLESS a SUCCESSFUL authority read *issued after the key
++     was retained* (a strictly newer load epoch) reports that different/absent latest operation — that
++     fresh read proves the ambiguous request did not become the latest live operation, so rotate and
++     allow the newly offered run. A same/older/unreadable snapshot, or missing provenance, FAILS CLOSED
++     and reuses: rotating against a stale snapshot could replay/duplicate a paid run.
++   Provenance is a monotonic load epoch, never wall-clock time or operation-id ordering.
+    **Fail-closed on a terminal 403 (C2 UI).** The review GET stays readable for any operational
+    account, but a refused mutation (**403** from `requireOperationalWriter` — an account without write
+    access) fails the panel closed: all mutation controls and edit fields disable, the drafts stay

@@ -1,0 +1,38 @@
+diff -ru before/marketing/social_content_program.md after/marketing/social_content_program.md
+--- before/marketing/social_content_program.md	2026-07-17 12:42:52
++++ after/marketing/social_content_program.md	2026-07-17 12:42:52
+@@ -9,9 +9,15 @@
+ > no provider call, no publication**. Lane C2 (direct-app review UI) is **implemented and under exact-head review (repair round in progress)** under
+ > GH-1493/TASK-56A85C. **GH-1515 adds the backend-only, admin-authenticated generation-status read
+ > prerequisite** (`claimed | running | succeeded | failed | blocked | lease_expired | provider_outcome_unknown`
+-> plus a server-derived
+-> `safeToStart` boolean); it adds no UI, provider call, scheduling, delivery, or publication. The P4
+-> affordance remains separate. The accepted Lane B contract in §§2, 3, and 5.2–5.3 remains implementation authority.
++> plus a server-derived `safeToStart` boolean); GH-1515 itself adds no UI, provider call, scheduling,
++> delivery, or publication. **GH-1516 / TASK-58FDE1 (the P4 UI child) now SHIPS the direct-app
++> affordance on that authority**: on a published note's social panel an admin sees a **Generate drafts**
++> control **if and only if** the server reports `safeToStart=true`, and — while `safeToStart=false` for a
++> `provider_outcome_unknown` operation whose exact retained idempotency key this session still holds — a
++> **Recover last run** control that settles that original operation without starting or paying for a
++> second run. There is **no automatic recovery** (no sweeper/cron settles `provider_outcome_unknown`),
++> and the UI still makes **no scheduling, delivery, publication, or Postiz call** — it writes drafts for
++> review only. The accepted Lane B contract in §§2, 3, and 5.2–5.3 remains implementation authority.
+ 
+ > **⛔ DOWNSTREAM RE-PROVIDER (2026-07-15) — Radaar is dropped; Postiz-integration boundary frozen by Codex.** The downstream
+ > delivery/scheduling platform is now self-hosted **Postiz** (https://github.com/gitroomhq/postiz-app + Postiz Agent; local-dev-first;
+@@ -553,8 +559,13 @@
+   (shipped), Lane C1 review authority (merged), Lane C2 review UI (implemented, under exact-head review), S2b Lane D
+   delivery, S4 media briefs, and OpenClaw sync touch internal drafting/approval territory. C1 adds no
+   bot tool or autonomous approval path; the bot must not imply that approval schedules or publishes.
+-  GH-1515 adds server authority only, not a bot tool or generation affordance: until P4 ships, the bot
+-  must still not direct an operator to a UI control that does not exist.
++  GH-1515 adds server authority only (not a bot tool); GH-1516 ships the P4 UI on that authority. The
++  bot must describe it truthfully and owns no generation tool itself: **Generate drafts** is offered
++  only when the server reports `safeToStart=true`; **Recover last run** only when the session holds the
++  exact retained key for a `provider_outcome_unknown` operation; there is no automatic recovery; and
++  neither control schedules, delivers, publishes, or calls Postiz. The bot must not imply it can
++  generate, nor advise waiting for an automatic recovery, nor direct an operator to a control the
++  server has not offered.
+ - **`amiga-concierge`**: pointer-only for C1/C2. Public Service Notes behavior is unchanged and
+   private review state must not be exposed. It becomes directly impacted only if later
+   public-page/pricing/promo work changes customer-facing facts.

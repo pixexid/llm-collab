@@ -162,9 +162,9 @@ than evidence that product verification failed. Refresh the PR body only after
 the amended head passes its required review.
 
 There is no automatic GitHub Codex review flow to rely on: automatic review is off
-account-wide. A review exists because someone requested it. Consume any
-review/comment/reaction that appears, and see the policy below for when requesting one
-is mandatory.
+account-wide. A review exists because someone requested it. Consume
+everything in [the reviewed artifact set](#reviewed-artifact-set) that appears, and see
+the policy below for when requesting one is mandatory.
 
 ## PR requirements
 
@@ -246,8 +246,8 @@ policy:
   review for Tier A would deadlock whenever the connector's clean protocol is
   reaction-only, and the request plus a connector-authored `+1` is already a durable
   GitHub artifact
-- these are the only two exact-head terminal signal models; no other review,
-  comment, or reaction artifact is terminal
+- these are the only two exact-head terminal signal models; nothing else in
+  [the reviewed artifact set](#reviewed-artifact-set) is terminal
 - **a connector review body that lists no findings is not a clean verdict.** The
   connector posts its findings as inline review threads, and the review body can be
   boilerplate — a heading, the reviewed commit, and a collapsed "About Codex"
@@ -304,8 +304,9 @@ policy:
 place the review happens, so a registered project with no GitHub surface still owes the
 same review — it satisfies it with durable **mailbox request and verdict packets** naming
 the exact repository commit OID, the project, the repository scope, the requester and the
-reviewer. GitHub reviews, threads and reactions are that project's *implementation* of this
-gate, not the gate itself.
+reviewer. What GitHub exposes is that project's *implementation* of this gate, not the gate
+itself — see [the reviewed artifact set](#reviewed-artifact-set) for what each lane's
+implementation consists of.
 
 One asymmetry, and it is not an oversight: **a non-GitHub lane has no reaction-only
 terminal path.** A reaction is terminal because it sits on an identifiable request artifact
@@ -318,7 +319,10 @@ project, which reads as an exemption and is not one.
 <a id="reviewed-artifact-set"></a>
 
 **Every instruction in this repository that says to read, re-read or inspect review state
-means exactly these five, and this is the only place the list is written:**
+means the set below for the lane that change is on, and this is the only place either list
+is written.**
+
+**On a GitHub-backed lane, exactly these five:**
 
 1. top-level PR comments
 2. review bodies
@@ -326,7 +330,17 @@ means exactly these five, and this is the only place the list is written:**
 4. inline review comments
 5. reactions
 
-Referenced, never restated. Nine sites used to enumerate this and they had drifted into at
+**On a lane with no GitHub surface, exactly these two:** every durable **review request
+packet** and every durable **verdict packet** in the mailbox naming the exact commit OID
+under review. The count differs because GitHub splits one conversation across five
+artifacts and a mailbox does not; what does not differ is that *all* of the lane's review
+surface is read, which is the only property any instruction here relies on.
+
+Naming five GitHub artifacts unconditionally would have made Tier A unsatisfiable on the
+mailbox lane defined directly above — the gate would demand artifacts that cannot exist
+there, which reads as an exemption and is not one.
+
+Referenced, never restated. Twelve sites used to enumerate this and they had drifted into at
 least five different versions -- some omitting comments, which is where a re-review request
 lives, and some omitting reactions, which is where a terminal `+1` lives. Each omission was
 a working path to merging on a superseded signal, and each was fixed one site at a time
@@ -456,8 +470,8 @@ absent-request variant, where there is nothing to drop.
 
 If the PR is waiting only for remote checks or remote review state, keep it open
 and create or update a Codex heartbeat attached to the current thread with a
-6-minute cadence. Each heartbeat must re-check the PR checks, review state, review
-threads/comments, connector reactions, and merge state. "Automatic" is dropped
+6-minute cadence. Each heartbeat must re-check the PR checks, merge state, and
+[the reviewed artifact set](#reviewed-artifact-set) in full. "Automatic" is dropped
 deliberately: reactions arrive because a review was requested, and a heartbeat that
 waits for an automatic one waits forever.
 
@@ -479,7 +493,7 @@ When the operator has authorized the merge path for the PR or PR class, the
 heartbeat may complete the wait after it verifies the exact current head has
 green required checks, the PR is mergeable with clean `mergeStateStatus`, the
 independent exact-head review is clean, and the full current comment, review,
-inline-comment, and thread payload has no actionable finding. Treat the GitHub
+payload of [the reviewed artifact set](#reviewed-artifact-set) has no actionable finding. Treat the GitHub
 Codex review signal as clean when either:
 
 - the latest top-level `chatgpt-codex-connector` review/comment explicitly
@@ -496,8 +510,9 @@ Codex review signal as clean when either:
   head when the required gates above remain clean, and it receives the same
   approximately five-minute post-clean settle and full re-read as a text verdict.
 
-The re-read that follows a reaction covers **top-level PR comments as well as
-reviews, threads and reactions**, and revalidates all six reaction conditions. A
+The re-read that follows a reaction covers
+**all of [the reviewed artifact set](#reviewed-artifact-set)**, and
+revalidates all six reaction conditions. A
 re-review request posted during the settle becomes the latest request for this head
 and supersedes the older request's `+1`, so a re-read that skipped comments could
 merge on a reaction that no longer passes the latest-request check.

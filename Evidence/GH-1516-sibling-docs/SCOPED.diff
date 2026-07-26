@@ -1,0 +1,95 @@
+diff -ru before/marketing/service_notes_system_spec.md after/marketing/service_notes_system_spec.md
+--- before/marketing/service_notes_system_spec.md	2026-07-17 01:25:51
++++ after/marketing/service_notes_system_spec.md	2026-07-17 01:25:51
+@@ -124,14 +124,17 @@
+    Lane B final-draft validator (price equality, channel profile, disclosure in postText **and**
+    imageBrief, PII/secret/address rails). Approval sets **no** `scheduled_at` and triggers no delivery —
+    C1 ends at review authority.
+-   **C2 is review-only; the empty state offers no action (2026-07-16).** C2 is a pure consumer of C1
+-   *review* authority: it adds no schema, no approval authority, no generation, and no
+-   delivery/Postiz call. A published note with no current set renders a truthful non-action empty
+-   state ("Drafts aren't generated from this screen") with **no control and no link** — no shipped UI
+-   can generate social drafts today; the only trigger is `POST operations.service-notes.social.generate`.
+-   An empty-state Generate affordance was built and then **deliberately split out** of C2 because the
+-   original server contract could not prove settlement. GH-1515 adds the backend prerequisite without
+-   restoring the UI: authenticated admins can read
++   **The review panel can generate social drafts, on server authority (GH-1516, 2026-07-17).**
++   C2 remains a pure consumer of C1 *review* authority — it adds no schema, no approval authority,
++   and no delivery/Postiz call — but it is no longer review-only: a published note's social panel
++   offers a **Generate drafts** control, and it does so **if and only if the server says a run is
++   safe to start**. The retired copy "Drafts aren't generated from this screen" is gone; it was true
++   only while no shipped surface could generate, and it died in the same change that restored the
++   control.
++   The affordance was originally built, then **deliberately split out**, because the server contract
++   could not prove settlement to a client (one 409 meaning both "our run" and "a competing run"). It
++   returns now because GH-1515 fixed that at the source rather than papering over it in the client.
++   Authenticated admins read
+    `GET /api/operations/service-notes/social/generate?sourceNoteId=<uuid>`, which returns only
+    `sourceNoteId`, `safeToStart`, and either no operation or `{id,status}`. The bounded status vocabulary
+    is `claimed | running | succeeded | failed | blocked | lease_expired | provider_outcome_unknown`;
+@@ -142,8 +145,17 @@
+    provider-started expiry returns `provider_outcome_unknown` and fails closed until explicit recovery
+    settles the original operation; a succeeded set
+    is startable again only after its source fingerprint is no longer current. The existing POST remains
+-   the mutation/idempotency authority and still resolves races. No shipped UI invokes this GET yet;
+-   the affordance remains the separate P4 child.
++   the mutation/idempotency authority and still resolves races.
++   **The UI rule, and the reason the client stayed simple:** `safeToStart` **alone** decides whether
++   the control is offered; `status` selects the wording and never participates in that decision. The
++   panel needs one boolean to decide and the status only to explain, so it does no inference and no
++   polling. An unrecognised future status degrades to generic copy with the gate unchanged; an
++   authority that cannot be read withholds the control entirely rather than guessing. Two consequences
++   are load-bearing: `provider_outcome_unknown` always carries `safeToStart:false` and renders an
++   honest "outcome unknown, recovering" state that never invites another run (a second run would be
++   paid for twice); and `safeToStart:true` on `succeeded` means the source rotated, so the copy states
++   plainly that generating **replaces** the current reviewed set and its decisions. Generation writes
++   drafts for review only — nothing is scheduled, published, or sent.
+    **Fail-closed on a terminal 403 (C2 UI).** The review GET stays readable for any operational
+    account, but a refused mutation (**403** from `requireOperationalWriter` — an account without write
+    access) fails the panel closed: all mutation controls and edit fields disable, the drafts stay
+diff -ru before/openclaw_bots/amiga-operator-cmo.md after/openclaw_bots/amiga-operator-cmo.md
+--- before/openclaw_bots/amiga-operator-cmo.md	2026-07-17 01:25:51
++++ after/openclaw_bots/amiga-operator-cmo.md	2026-07-17 01:25:51
+@@ -129,11 +129,34 @@
+ - Edits are validated client-side as a mirror of the shipped server authority — UTF-8 byte bounds, the per-channel word/sentence profile, and hashtag shape/count/deduplication — so Save is blocked with an accessible reason instead of a server 400; the server remains the sole authority.
+ - Per-channel **approve / reject / reopen** and an atomic **approve-all** are available. Approval is review-only: it never schedules, publishes, sends, or otherwise delivers anything. Downstream external delivery remains the deferred Lane D (self-hosted Postiz) and is out of scope here.
+ - **Fail-closed on a terminal 403.** A refused mutation (403 from `requireOperationalWriter` — an account without write access) locks the panel: every mutation control (approve/reject/reopen/approve-all, the edit fields, save/discard) disables, the drafts stay readable, and it shows *"Your account can't make changes here. These drafts are read-only for you."* The lock is recorded against the refused authority, so it survives closing/reopening the panel and a plain Refresh, and clears only when the acting authority actually changes. Retrying with the same authority would be refused again, so the panel never re-offers the action. The server remains the authority. **Bot behavior: a 403 here means the account lacks write access — say that plainly. Never tell an operator to exit a View-as mode: View-as was removed in the GH-1518 sunset and does not exist.**
+-- **The empty state offers NO generation (2026-07-16).** C2 is **review-only**. A published note with no current set shows a truthful non-action empty state — "Drafts aren't generated from this screen" — with **no button and no link**. Do not tell an operator they can generate social drafts from the review panel, or from anywhere else in the app: **no shipped UI can generate them today.** The only trigger is `POST operations.service-notes.social.generate`. (The editorial hub's "Generate draft" is a different thing — it generates the *story brief*, not social drafts.) Historically, the affordance was split out because the server contract could not prove settlement; GH-1515 now supplies that backend authority, while the visible Generate control remains deferred to P4. Approval/scheduling/publication are unaffected: nothing is scheduled, published, or sent.
+-- The surface adds no new schema, approval authority, generation, or delivery/Postiz call. Review/approve/reject/reopen/edit are pure C1-consumer actions, and they are the ONLY server-mutating paths it introduces — the split-out generation affordance is not one of them (see above).
+-- **Backend generation authority exists, but the affordance remains deferred (GH-1515).** The app now
+-  has an admin-authenticated, read-only generation-status contract with bounded
+-  `claimed | running | succeeded | failed | blocked | lease_expired | provider_outcome_unknown` states and a server-derived
+-  `safeToStart` decision. This does not add a bot tool, provider call, scheduling, delivery, publication,
+-  or a visible Generate control. Until the separate P4 UI child ships, do not tell an operator that the
+-  Service Notes review panel can generate social drafts.
++- **The review panel CAN generate social drafts (GH-1516, 2026-07-17).** This REPLACES the previous
++  "no shipped UI can generate them" guidance, which is now false — an admin on a published note's
++  social panel sees a **Generate drafts** control whenever the server says a run is safe to start.
++  The retired empty-state copy "Drafts aren't generated from this screen" is gone. (The editorial
++  hub's "Generate draft" is still a *different* thing — it generates the *story brief*, not social
++  drafts. Do not conflate them.) Generation writes drafts **for review only**: nothing is scheduled,
++  published, or sent.
++- **Bot behavior for generation — the operator sees exactly what the server decided.** The control is
++  offered **if and only if** the server's `safeToStart` is true; the operation `status` only chooses
++  the wording. So:
++  - **Never tell an operator to "just generate again" when the panel is not offering it.** If the
++    control is absent, the server refused, and the panel is already saying why.
++  - **`provider_outcome_unknown` is the case to be most careful about.** A paid run started and its
++    outcome is not yet known. The panel says the outcome isn't known and it is being recovered
++    automatically, and it offers **no** control. Do not suggest retrying, refreshing to force it, or
++    starting another run — a second run can be **billed twice**. The correct advice is to wait for
++    recovery to settle it.
++  - **`claimed` / `running`** mean a run is under way; the panel says so and offers nothing. Same
++    advice: wait.
++  - **When the control IS offered on a note that already has drafts**, generating **replaces** the
++    existing set and any approve/reject decisions on it. The panel says this. Do not describe it as
++    additive or as a harmless refresh.
++  - If the panel says it could not check whether drafts can be generated, that is an unreadable
++    authority, not a refusal — the control is withheld deliberately rather than guessed at.
++- The surface adds no new schema, no approval authority, and no delivery/Postiz call. Review/approve/
++  reject/reopen/edit remain pure C1-consumer actions; generation is a server-authoritative POST the
++  panel may now trigger, and it is the only additional mutating path it introduces.
++- **The backend authority behind it (GH-1515).** An admin-authenticated, read-only generation-status
++  contract with bounded `claimed | running | succeeded | failed | blocked | lease_expired |
++  provider_outcome_unknown` states and a server-derived `safeToStart` decision. This still does not add
++  a bot tool: the bot cannot generate anything itself, and must not imply it can.

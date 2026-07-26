@@ -1,0 +1,192 @@
+diff -ru before/Business_related_docs/consent_legal_copy_drafts_826bcd.md after/Business_related_docs/consent_legal_copy_drafts_826bcd.md
+--- before/Business_related_docs/consent_legal_copy_drafts_826bcd.md	2026-07-16 23:32:10
++++ after/Business_related_docs/consent_legal_copy_drafts_826bcd.md	2026-07-16 23:36:30
+@@ -2,7 +2,7 @@
+ 
+ > ⚠️ **DRAFTS FOR LEGAL REVIEW — not legal advice.** Claude authored these as a starting point for the operator's counsel to review, edit, and approve before any of it ships. Each copy block lives (or will live) in a single versioned constant so legal can refine wording without code churn, mirroring the shipped `TERMS_VERSION` (GH-825) and `SMS_CONSENT_VERSION` (GH-833) pattern.
+ 
+-Status: GH-826 was split into four children. **826a (TCPA SMS opt-in) shipped (GH-833); its account-side consent management shipped as the GH-834 follow-up** — `/app/account` → Notifications now reads the truthful effective SMS state (phone-bound: consent present AND not suppressed) and lets a user grant or withdraw via authenticated, caller-scoped endpoints (`/api/account/sms-consent`), reusing `sms_consents` + `sms_opt_outs` with no new DDL. Granting from the account clears any prior opt-out so it takes effect (opt-out otherwise wins); writes are blocked under read-only impersonation; the booking-flow `SMS_CONSENT_LABEL` / `SMS_CONSENT_DISCLOSURE` are reused verbatim. This doc covers the remaining three children, each its own lane, each blocked on legal sign-off of the copy below.
++Status: GH-826 was split into four children. **826a (TCPA SMS opt-in) shipped (GH-833); its account-side consent management shipped as the GH-834 follow-up** — `/app/account` → Notifications now reads the truthful effective SMS state (phone-bound: consent present AND not suppressed) and lets a user grant or withdraw via authenticated, caller-scoped endpoints (`/api/account/sms-consent`), reusing `sms_consents` + `sms_opt_outs` with no new DDL. Granting from the account clears any prior opt-out so it takes effect (opt-out otherwise wins); the booking-flow `SMS_CONSENT_LABEL` / `SMS_CONSENT_DISCLOSURE` are reused verbatim. This doc covers the remaining three children, each its own lane, each blocked on legal sign-off of the copy below.
+ 
+ ---
+ 
+@@ -36,7 +36,7 @@
+ 
+ ## GH-826c — Marketing / communication preferences
+ 
+-**STATUS: SHIPPED (GH-838).** Account → "Marketing & promotions" section (a distinct card below Notifications) with two default-OFF toggles (Marketing email, Marketing texts), the approved copy below, and an honest "nothing is sent yet" note. Persistence is additive + ISOLATED from transactional consent: `communication_preferences` (marketing_email/sms_opt_in booleans) + a SEPARATE append-only `marketing_sms_consents` proof table (NOT `sms_consents` — the GH-834 transactional read path has no source filter, so a marketing row there would falsely enable transactional SMS). Marketing SMS uses its own `MARKETING_SMS_CONSENT_VERSION` + disclosure. Endpoint `/api/account/communication-preferences` (authenticated, caller-scoped, writes blocked under impersonation). No sender wired — honest scaffolding.
++**STATUS: SHIPPED (GH-838).** Account → "Marketing & promotions" section (a distinct card below Notifications) with two default-OFF toggles (Marketing email, Marketing texts), the approved copy below, and an honest "nothing is sent yet" note. Persistence is additive + ISOLATED from transactional consent: `communication_preferences` (marketing_email/sms_opt_in booleans) + a SEPARATE append-only `marketing_sms_consents` proof table (NOT `sms_consents` — the GH-834 transactional read path has no source filter, so a marketing row there would falsely enable transactional SMS). Marketing SMS uses its own `MARKETING_SMS_CONSENT_VERSION` + disclosure. Endpoint `/api/account/communication-preferences` (authenticated, caller-scoped). No sender wired — honest scaffolding.
+ 
+ **Where it lives:** the Account → Notifications surface (separate from the transactional SMS consent toggle, which is GH-834). This governs **marketing** messages (promotions, tips, seasonal offers) — distinct from transactional service messages (reminders, receipts), which customers always receive about their own bookings.
+ 
+diff -ru before/booking_quote_system/api_services.md after/booking_quote_system/api_services.md
+--- before/booking_quote_system/api_services.md	2026-07-16 23:32:10
++++ after/booking_quote_system/api_services.md	2026-07-16 23:36:02
+@@ -109,7 +109,7 @@
+ - **Server behavior (existing booking):** validates token + booking ownership, checks the booking is still eligible for payment, creates a Stripe `Customer` + `SetupIntent` through the fetch-based REST wrapper, stamps binding metadata for the authenticated profile + booking id, and records `payment_setup_intent_created`
+ - **Server behavior (public quote flow):** validates token + quote payload, creates a Stripe `Customer` + `SetupIntent`, stamps binding metadata for the authenticated profile + quote fingerprint, and returns the setup client secret plus the browser publishable key without creating the booking yet
+ - **Response:** inline setup payload (`setupIntentClientSecret`, `setupIntentId`, `publishableKey`, `amount`) for the Stripe Elements flow
+-- **Customer booking-confirmation retry (GH-716):** the customer `/app/bookings/$bookingId` surface renders a `Retry payment` PillBtn anchored under step 1 of the status tracker when the customer-visible payment is in attention and the booking is still payment-eligible (`pending`/`confirmed`). It reuses this existing `{ bookingId }` path verbatim — no new endpoint — and opens the existing `CustomerPaymentSetupDialog` on the returned `SetupIntent`. If authorization returns a non-OK response before the dialog opens, the customer view shows the standard payment-save failure message inline on the booking detail page. In read-only View-as, the button is visible but disabled with an explanatory caption; the server `rejectWriteUnderImpersonation` guard remains the hard block.
++- **Customer booking-confirmation retry (GH-716):** the customer `/app/bookings/$bookingId` surface renders a `Retry payment` PillBtn anchored under step 1 of the status tracker when the customer-visible payment is in attention and the booking is still payment-eligible (`pending`/`confirmed`). It reuses this existing `{ bookingId }` path verbatim — no new endpoint — and opens the existing `CustomerPaymentSetupDialog` on the returned `SetupIntent`. If authorization returns a non-OK response before the dialog opens, the customer view shows the standard payment-save failure message inline on the booking detail page.
+ 
+ ### Booking Payment Confirm Endpoint
+ - **Use:** Confirm either a legacy hosted Checkout session or a newly completed inline setup step for an existing booking
+@@ -123,7 +123,7 @@
+ - **Browser Endpoint:** `GET /api/account/communication-preferences`, `POST /api/account/communication-preferences`
+ - **Auth:** `Authorization: Bearer <supabase access token>`
+ - **Payload (`POST`):** `{ field: "marketing_email" | "marketing_sms", optIn: boolean }`
+-- **Server behavior:** validates the caller, rejects writes during read-only impersonation, and uses the service-role client to read/write `communication_preferences`. Marketing email and marketing SMS default OFF. Marketing SMS opt-in requires a normalized phone number on the profile and records proof in `marketing_sms_consents`.
++- **Server behavior:** validates the caller and uses the service-role client to read/write `communication_preferences`. Marketing email and marketing SMS default OFF. Marketing SMS opt-in requires a normalized phone number on the profile and records proof in `marketing_sms_consents`.
+ - **Consent isolation:** marketing SMS proof must never be written to `sms_consents`; the transactional SMS account state from GH-834 reads `sms_consents` without a marketing source filter, so marketing proof has its own table and cannot enable booking/service texts.
+ - **Current sender state:** no marketing email/SMS sender is wired. The endpoint records a future preference only; it does not dispatch marketing messages.
+ 
+diff -ru before/booking_quote_system/db_notes.md after/booking_quote_system/db_notes.md
+--- before/booking_quote_system/db_notes.md	2026-07-16 23:32:10
++++ after/booking_quote_system/db_notes.md	2026-07-16 23:36:02
+@@ -444,5 +444,5 @@
+   - `DELETE /api/messages`
+   - request: `{ "messageId": "<message_uuid>" }`
+   - response: `{ "ok": true }`
+-  - rejects unauthenticated, impersonated, malformed, and non-admin calls.
++  - rejects unauthenticated, malformed, and non-admin calls.
+ - Realtime propagation uses the existing `messages`, `message_threads`, and `message_attachments` publication entries; UI should remove/tombstone on message DELETE events.
+diff -ru before/marketing/service_notes_system_spec.md after/marketing/service_notes_system_spec.md
+--- before/marketing/service_notes_system_spec.md	2026-07-16 23:32:10
++++ after/marketing/service_notes_system_spec.md	2026-07-16 23:36:02
+@@ -144,13 +144,15 @@
+    is startable again only after its source fingerprint is no longer current. The existing POST remains
+    the mutation/idempotency authority and still resolves races. No shipped UI invokes this GET yet;
+    the affordance remains the separate P4 child.
+-   **Read-only under View-as (C2 UI, 2026-07-16).** The review GET is readable during an active View-as
+-   session (`requireOperationalUser` only blocks mutations), but every mutation is refused with **403**
+-   `impersonation_read_only` (`requireOperationalWriter`). The C2 panel fails closed on that refusal:
+-   all mutation controls and edit fields disable, the drafts stay readable, and it surfaces
+-   *"Exit View as to make changes."* The lock is bound to the refused authority — it survives a panel
+-   close/reopen and a plain refetch, and releases only when the acting authority changes. A
+-   non-impersonation 403 (account without write access) renders the honest variant instead. Per F2, a
++   **Fail-closed on a terminal 403 (C2 UI).** The review GET stays readable for any operational
++   account, but a refused mutation (**403** from `requireOperationalWriter` — an account without write
++   access) fails the panel closed: all mutation controls and edit fields disable, the drafts stay
++   readable, and it surfaces *"Your account can't make changes here. These drafts are read-only for
++   you."* The lock is bound to the refused authority — it survives a panel close/reopen and a plain
++   refetch, and releases only when the acting authority changes. Retrying with the same authority would
++   be refused again, so the panel never re-offers the action. (View-as was removed in the GH-1518
++   sunset; there is no `impersonation_read_only` cause and no in-app recovery to route to — a 403 has
++   one meaning here.) Per F2, a
+    transport-ambiguity idempotency key is retained per target and rotated on any copy/payload change,
+    cancel, or deterministic result — never reused across changed copy.
+ 8. **Downstream delivery — DEFERRED Lane D (self-hosted Postiz integration).** Not built yet. When built,
+@@ -511,7 +513,7 @@
+ `GET /api/operations/tasks?assignedToMe=true` is A2's authoritative job-picker read contract. Its
+ self-filter accepts only `task_assignments.assignment_role='assignee'`: admin self-reads add that
+ predicate only when `assignedToMe=true`, while staff add it for `history=true` or
+-`assignedToMe=true`. The filter keeps the existing `effectiveUserId` / read-only View-as identity.
++`assignedToMe=true`. The filter keeps the existing `effectiveUserId`, which is now always the authenticated actor (View-as was removed in the GH-1518 sunset; nothing substitutes identity).
+ Admin full-list/history reads without `assignedToMe` and legacy non-history staff reads without
+ `assignedToMe` retain their existing scope.
+ 
+diff -ru before/openclaw_bots/amiga-concierge.md after/openclaw_bots/amiga-concierge.md
+--- before/openclaw_bots/amiga-concierge.md	2026-07-16 23:32:10
++++ after/openclaw_bots/amiga-concierge.md	2026-07-16 23:36:02
+@@ -91,9 +91,8 @@
+ - No specialty selector exists anywhere in the quote flow; do not describe or promise one. For anything beyond these scope facts, hand off to a human (preserves the intentional-silence rail).
+ - Canonical `OpenClaw_bots` concierge-spec sync for this disclosure is tracked separately as GH-1455; this pointer is the local truth until that lands.
+ 
+-## View-as customer disclosure rail (GH-496)
++## View-as — REMOVED (sunset 2026-07-16)
+ 
+-- **Status: LOW DIRECT IMPACT.** The public concierge should stay silent by default about internal View-as tooling.
+-- If a customer asks whether an Amiga operator viewed their account, do not expose internal security mechanics or speculate from logs. Hand off to a human.
+-- Banned customer-facing phrasings: `log in as`, `sign in as`, `take over your account`, `Act as`, or any copy implying credential takeover.
+-- Event-specific disclosure is handled by the app's in-app `impersonation_disclosure` notification after a View-as session ends.
++- **Status: NOT IMPACTED — the feature does not exist.** View-as was removed by operator decision in the GH-1518 sunset (2026-07-16). There is no operator tooling to view a customer's account, so there is nothing to stay silent about.
++- If a customer asks whether an Amiga operator viewed their account, **hand off to a human**. Do not speculate from logs and do not describe internal security mechanics. (Customers viewed *before* the sunset may still hold a historical in-app disclosure notification; a human handles those questions.)
++- Banned customer-facing phrasings remain banned: `log in as`, `sign in as`, `take over your account`, `Act as`, or any copy implying credential takeover — and do not offer or describe account viewing as a capability.
+diff -ru before/openclaw_bots/amiga-operator-cmo.md after/openclaw_bots/amiga-operator-cmo.md
+--- before/openclaw_bots/amiga-operator-cmo.md	2026-07-16 23:32:10
++++ after/openclaw_bots/amiga-operator-cmo.md	2026-07-16 23:36:02
+@@ -102,12 +102,12 @@
+ - Runtime boundary: the bot can summarize these as customer requests pending review on a booking, call out the linked booking/task context, and distinguish review states (`pending`, `approved`, `rejected`, `applied`) for operator questions.
+ - Decision rail: the bot must not claim that cadence changes or end-series decisions automatically rewrote the recurring schedule in this lane. Those decisions remain review records until an operator performs any follow-up schedule work separately. `skip_visit` may only point to the existing linked-task skip/cancel path when a task already exists for that visit.
+ 
+-## View-as runtime (GH-496)
++## View-as — REMOVED (sunset 2026-07-16)
+ 
+-- **Status: IMPACTED.** Admins can start read-only View-as sessions for `client` and `staff` targets. In v1, `staff` is also the crew-lead-equivalent target because Amiga has no separate `crew-lead` role.
+-- Canonical runbook: `/Users/pixexid/Projects/amiga_house_cleaning_company_docs/operations/security/impersonation.md`.
+-- Bot behavior: pause all operator-cmo tools while the operator has an active View-as session. Surface the pause as: `Paused while you're viewing as <Name>. Exit View as to resume.`
+-- Boundary: do not call this `Act as`, do not imply writes are allowed, and do not present admin accounts as reachable targets. True owner and crew-lead roles are follow-up role-system lanes.
++- **Status: NOT IMPACTED — the feature does not exist.** View-as (GH-496) was removed by operator decision under umbrella GH-1518. There are no View-as sessions to start, detect, pause for, or exit.
++- **There is NO tool-pause rail.** The bot must never pause tools for View-as, never emit `Paused while you're viewing as <Name>`, and never reason about an active session.
++- **Never tell an operator they can view as a customer or staff member.** No such capability ships. If asked, say it does not exist rather than describing it as unavailable, disabled, or coming back.
++- Sunset record: `/Users/pixexid/Projects/amiga_house_cleaning_company_docs/operations/security/impersonation.md`.
+ 
+ ## Recurring series identity (GH-924, Phase 1 — display-layer)
+ 
+@@ -128,7 +128,7 @@
+ - The admin reviews the deterministic three-channel set (Google Business / Instagram / LinkedIn) that Lane C1 generates: each draft shows its server-owned metadata (revision, decision actor/time, price mode, canonical URL, narrative, source fingerprint) as read-only, with editable allowlisted copy (post text, hashtags, image brief).
+ - Edits are validated client-side as a mirror of the shipped server authority — UTF-8 byte bounds, the per-channel word/sentence profile, and hashtag shape/count/deduplication — so Save is blocked with an accessible reason instead of a server 400; the server remains the sole authority.
+ - Per-channel **approve / reject / reopen** and an atomic **approve-all** are available. Approval is review-only: it never schedules, publishes, sends, or otherwise delivers anything. Downstream external delivery remains the deferred Lane D (self-hosted Postiz) and is out of scope here.
+-- **Read-only under View-as (2026-07-16).** Locking is **proactive, from first render** — not a reaction to being refused. The panel derives an active View-as session from the app shell (the same derivation the booking detail uses) and disables every mutation control (approve/reject/reopen/approve-all, the edit fields, save/discard) **before any interaction**, keeps the drafts readable, and shows *"You're in View as, which is read-only. Exit View as to make changes."* The operator is never invited to attempt a write the server is already certain to refuse. The server remains the authority: every mutation is still refused server-side (`requireOperationalWriter` → 403 `impersonation_read_only`), and that terminal 403 is recorded against the refused authority so it survives closing/reopening the panel and a plain Refresh, clearing only when the authority actually changes (exiting View-as). A 403 that is **not** impersonation (an account without write access) reports the honest variant instead and never tells the operator to exit a mode they are not in. Note the reachability limit: the editorial notes GET and the social-review GET are admin-only, so an active View-as switches effective authority and the populated panel does not render at all through live navigation — the immediate lock is defensive cover for retained/stale state (e.g. a second tab), not a routine path. Bot behavior: this reinforces the View-as pause above — never advise or attempt a social review/approve action while a View-as session is active; direct the operator to exit View as first.
++- **Fail-closed on a terminal 403.** A refused mutation (403 from `requireOperationalWriter` — an account without write access) locks the panel: every mutation control (approve/reject/reopen/approve-all, the edit fields, save/discard) disables, the drafts stay readable, and it shows *"Your account can't make changes here. These drafts are read-only for you."* The lock is recorded against the refused authority, so it survives closing/reopening the panel and a plain Refresh, and clears only when the acting authority actually changes. Retrying with the same authority would be refused again, so the panel never re-offers the action. The server remains the authority. **Bot behavior: a 403 here means the account lacks write access — say that plainly. Never tell an operator to exit a View-as mode: View-as was removed in the GH-1518 sunset and does not exist.**
+ - **The empty state offers NO generation (2026-07-16).** C2 is **review-only**. A published note with no current set shows a truthful non-action empty state — "Drafts aren't generated from this screen" — with **no button and no link**. Do not tell an operator they can generate social drafts from the review panel, or from anywhere else in the app: **no shipped UI can generate them today.** The only trigger is `POST operations.service-notes.social.generate`. (The editorial hub's "Generate draft" is a different thing — it generates the *story brief*, not social drafts.) Historically, the affordance was split out because the server contract could not prove settlement; GH-1515 now supplies that backend authority, while the visible Generate control remains deferred to P4. Approval/scheduling/publication are unaffected: nothing is scheduled, published, or sent.
+ - The surface adds no new schema, approval authority, generation, or delivery/Postiz call. Review/approve/reject/reopen/edit are pure C1-consumer actions, and they are the ONLY server-mutating paths it introduces — the split-out generation affordance is not one of them (see above).
+ - **Backend generation authority exists, but the affordance remains deferred (GH-1515).** The app now
+diff -ru before/operations/security/impersonation.md after/operations/security/impersonation.md
+--- before/operations/security/impersonation.md	2026-07-16 23:32:10
++++ after/operations/security/impersonation.md	2026-07-16 23:36:02
+@@ -1,30 +1,20 @@
+-# View-as / impersonation operations runbook
++# View-as / impersonation — REMOVED (sunset 2026-07-16)
+ 
+-Runtime source: GH-496 / TASK-8E65CE.
++**There is no View-as feature in Amiga. This file is a sunset record, not a runbook.**
+ 
+-## V1 policy
++## The sunset
+ 
+-- V1 ships **View as** only: read-only shadowing for operator triage.
+-- Supabase auth sessions are not swapped. The real operator remains the authenticated principal; View-as state is a short-lived server-validated claim and cookie.
+-- `admin` is the current Amiga owner-equivalent for initiating View-as, reviewing sessions, and force-revoking sessions. A separate true owner/entitlement role is a future role-system lane.
+-- Reachable targets in the current role model are `client` and `staff`. `staff` covers crew-lead-equivalent behavior for v1 because Amiga does not have a distinct `crew-lead` auth/profile role today.
+-- `admin` targets are forbidden.
++- View-as (read-only operator shadowing, GH-496 / TASK-8E65CE) was **never delivered as a working product surface** — the entry point was a no-op.
++- It was **removed on 2026-07-16 by operator decision** (umbrella GH-1518): client surfaces in GH-1519, the server/API and the authorization branch in GH-1520, this documentation and the bot pointers in GH-1522, and the database tables in GH-1521.
++- **It is not coming back without a new lane.**
+ 
+-## Runtime controls
++## What that means operationally
+ 
+-- `/app/security/impersonation` is the admin-only session review surface.
+-- Active View-as sessions render an amber banner and a persistent footer chip showing the target identity, read-only status, reason, session slug, expiry, and exit affordance.
+-- Sessions are valid for at most 60 minutes, expire after 15 minutes of inactivity, and are tied to the initiating operator bearer session.
+-- Mutation routes must reject writes under active View-as with `impersonation_read_only` and record an attempted-write event.
+-- Exiting or force-revoking a session closes the audit row, clears the cookie, and creates an in-app disclosure notification for the target user.
++- There is no `/app/security/impersonation` surface, no View-as banner or footer chip, no session cookie, and no `impersonation_read_only` refusal. There is nothing to start, review, revoke, or exit.
++- Effective identity is always the **authenticated operator**. No path substitutes one user for another.
++- Neither bot has a View-as rail: `amiga-operator-cmo` has no tool-pause rule for it, and `amiga-concierge` has nothing to stay silent about.
++- If an operator needs to see what a customer sees, that is a **new product decision** — not a dormant capability waiting to be re-enabled.
+ 
+-## Bot disposition
++## Historical record that survives on purpose
+ 
+-- `amiga-operator-cmo` must pause tools while an operator has an active View-as session. It can explain the audit/read-only policy from this runbook.
+-- `amiga-concierge` stays silent by default about the feature's existence. If a customer asks whether their account was viewed, it should hand off to a human rather than expose internal security mechanics.
+-
+-## Follow-up gaps
+-
+-- Add a true owner/entitlement role if product needs admin-vs-owner separation.
+-- Add a distinct crew-lead role/entitlement if product needs crew-lead targets to differ from staff targets.
+-- Expand customer-facing disclosure channels beyond in-app notification only if policy requires email/SMS.
++Customers whose accounts were viewed before the sunset still have their `impersonation_disclosure` notification in `app_notifications`. Those rows stay readable — a customer is entitled to the disclosure that their account was viewed. The notification **type** is retained for that reason alone; **nothing produces it any more**.
+diff -ru before/operations/stripe_finances_backfill_runbook.md after/operations/stripe_finances_backfill_runbook.md
+--- before/operations/stripe_finances_backfill_runbook.md	2026-07-16 23:32:10
++++ after/operations/stripe_finances_backfill_runbook.md	2026-07-16 23:36:02
+@@ -29,7 +29,6 @@
+ 
+ - Requires an authenticated **admin** operator (`requireOperationalWriter`,
+   then an explicit `role === "admin"` check → `403` otherwise).
+-- View-as / impersonation read-only sessions are rejected.
+ - Rate limited per operator (`admin_stripe_backfill`).
+ 
+ ### Request body (all optional)

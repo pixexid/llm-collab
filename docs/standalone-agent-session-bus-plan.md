@@ -849,8 +849,8 @@ Every implementation slice follows this sequence:
     security, verification, migration, and rollback evidence;
 11. merge only the reviewed exact head after the full PR Review Wait Gate in
     `docs/workflows/commit-push-prs.md` passes, including its two exact-head
-    terminal-signal models, post-clean settle and full review/thread/reaction
-    re-read; then reconcile task/issue state. There is no silence fallback for an
+    terminal-signal models, post-clean settle and full re-read of the reviewed
+    artifact set defined there; then reconcile task/issue state. There is no silence fallback for an
     unrequested review -- see the Tier A/B/C rule in AGENTS.md.
 
 A worker/reviewer task is never reused for a later phase or a different write

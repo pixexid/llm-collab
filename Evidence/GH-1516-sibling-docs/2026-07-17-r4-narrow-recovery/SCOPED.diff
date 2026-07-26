@@ -1,0 +1,74 @@
+diff -ru before/marketing/service_notes_system_spec.md after/marketing/service_notes_system_spec.md
+--- before/marketing/service_notes_system_spec.md	2026-07-17 09:29:39
++++ after/marketing/service_notes_system_spec.md	2026-07-17 09:29:39
+@@ -146,16 +146,22 @@
+    settles the original operation; a succeeded set
+    is startable again only after its source fingerprint is no longer current. The existing POST remains
+    the mutation/idempotency authority and still resolves races.
+-   **The UI rule, and the reason the client stayed simple:** `safeToStart` **alone** decides whether
+-   the control is offered; `status` selects the wording and never participates in that decision. The
+-   panel needs one boolean to decide and the status only to explain, so it does no inference and no
+-   polling. An unrecognised future status degrades to generic copy with the gate unchanged; an
+-   authority that cannot be read withholds the control entirely rather than guessing. Two consequences
+-   are load-bearing: `provider_outcome_unknown` always carries `safeToStart:false` and renders an
+-   honest "outcome unknown, recovering" state that never invites another run (a second run would be
+-   paid for twice); and `safeToStart:true` on `succeeded` means the source rotated, so the copy states
+-   plainly that generating **replaces** the current reviewed set and its decisions. Generation writes
+-   drafts for review only — nothing is scheduled, published, or sent.
++   **The UI rule:** `safeToStart` **alone** decides whether a NEW generation run may be STARTED — that
++   is what the **Generate drafts** control is gated on, and `status` selects the wording and never
++   participates in that decision. There is exactly one action offered while `safeToStart:false`, and it
++   is a settlement, not a start: when the server reports `provider_outcome_unknown` for an operation
++   whose id equals the idempotency key this session still holds, the panel offers **"Recover last run"**
++   — an exact-key replay that settles that original operation (the key IS the operation id) without
++   starting or paying for a second run. It is scoped to `provider_outcome_unknown`; `claimed`/`running`
++   are a live run under way and stay withheld as "run is under way." Nothing else settles
++   `provider_outcome_unknown` — there is no sweeper or cron over the operations table — so if the
++   session does not hold the matching key, the panel withholds every control and says plainly that
++   recovery needs the original request or a backend fix; it never promises an automatic recovery, which
++   would strand the note forever. An unrecognised future status degrades to generic copy with the gate
++   unchanged; an authority that cannot be read withholds the control entirely rather than guessing.
++   `safeToStart:true` on `succeeded` means the source rotated, so the copy states plainly that
++   generating **replaces** the current reviewed set and its decisions. Generation writes drafts for
++   review only — nothing is scheduled, published, or sent.
+    **Fail-closed on a terminal 403 (C2 UI).** The review GET stays readable for any operational
+    account, but a refused mutation (**403** from `requireOperationalWriter` — an account without write
+    access) fails the panel closed: all mutation controls and edit fields disable, the drafts stay
+diff -ru before/openclaw_bots/amiga-operator-cmo.md after/openclaw_bots/amiga-operator-cmo.md
+--- before/openclaw_bots/amiga-operator-cmo.md	2026-07-17 09:29:39
++++ after/openclaw_bots/amiga-operator-cmo.md	2026-07-17 09:29:39
+@@ -136,16 +136,26 @@
+   hub's "Generate draft" is still a *different* thing — it generates the *story brief*, not social
+   drafts. Do not conflate them.) Generation writes drafts **for review only**: nothing is scheduled,
+   published, or sent.
+-- **Bot behavior for generation — the operator sees exactly what the server decided.** The control is
+-  offered **if and only if** the server's `safeToStart` is true; the operation `status` only chooses
+-  the wording. So:
++- **Bot behavior for generation — the operator sees exactly what the server decided.** The **Generate
++  drafts** control (a NEW run) is offered **if and only if** the server's `safeToStart` is true; the
++  operation `status` only chooses the wording, never whether a new run is startable. The one action
++  offered while `safeToStart` is false is the separate exact-key **"Recover last run"** settlement
++  described below (scoped to `provider_outcome_unknown`), never a new start. So:
+   - **Never tell an operator to "just generate again" when the panel is not offering it.** If the
+     control is absent, the server refused, and the panel is already saying why.
+-  - **`provider_outcome_unknown` is the case to be most careful about.** A paid run started and its
+-    outcome is not yet known. The panel says the outcome isn't known and it is being recovered
+-    automatically, and it offers **no** control. Do not suggest retrying, refreshing to force it, or
+-    starting another run — a second run can be **billed twice**. The correct advice is to wait for
+-    recovery to settle it.
++  - **`provider_outcome_unknown` is the case to be most careful about, and NOTHING settles it on its
++    own.** A paid run started and its outcome is not known. There is no sweeper, cron, or reaper over
++    the generation-operations table: the **only** thing that settles that row is an exact-key replay
++    of the original request (the idempotency key IS the operation id, so replaying it settles the run
++    without starting or paying for a second one).
++    - If the operator's session still holds that key, the panel offers **"Recover last run"**. That
++      is the fix — it is not a new run and is not billed again.
++    - If it does not (a different browser, or a reload before the key was held), the panel offers
++      **no** control and says so. That note needs the original request or a backend fix.
++    - **Never tell an operator to wait for an automatic recovery — there isn't one**, and waiting
++      leaves the note stuck indefinitely. Equally, never suggest starting a *new* run to clear it: a
++      second run can be **billed twice**. (`claimed` / `running` are different — a run is genuinely
++      under way there, so waiting IS correct.)
+   - **`claimed` / `running`** mean a run is under way; the panel says so and offers nothing. Same
+     advice: wait.
+   - **When the control IS offered on a note that already has drafts**, generating **replaces** the
