@@ -1102,40 +1102,103 @@ class ReviewLoopCapContractTest(unittest.TestCase):
         self.assertEqual(0, all_resolved["exact_head_unresolved"])
 
     def test_the_reviewed_artifact_set_is_written_exactly_once(self):
-        """Nine sites had drifted into five spellings; four omitted reactions and three
-        omitted comments.
+        """Twelve sites had drifted into five spellings; the first pin could only see two.
 
         A re-review request lives in a comment and a terminal `+1` lives in a reaction, so
-        each omission was a live path to merging on a superseded signal. Fixing them one at
-        a time is what produced five spellings, so this pins the shape rather than the
-        wording: the list exists in exactly one place and every other site references it.
-        Without this the sixth spelling appears the next time anyone writes a re-read
-        instruction, which is precisely how the five happened.
+        each omission was a live path to merging on a superseded signal.
+
+        The first version of this pin read two documents and matched fixed spellings one
+        line at a time, and three restatements walked straight through it -- including
+        `commit-push-prs.md`'s own "top-level PR comments as well as reviews, threads and
+        reactions", which escaped twice over: it wrapped across a line break, and it used
+        the short forms. That is the same defect as the drift it was pinning, one level up:
+        the rule was re-derived from what a restatement was assumed to look like instead of
+        read from what restatements actually are.
+
+        So: every markdown document, whitespace-normalized so a line break hides nothing,
+        short and plural forms recognized, and the threshold is *naming three or more of
+        the kinds* rather than matching any particular wording. Sites naming one or two are
+        left alone -- prose has to be able to say "review threads" -- but three is an
+        enumeration no matter how it is spelled.
         """
+        import re
+
+        # What makes a site a restatement is that it ENUMERATES -- three artifact heads in
+        # a run joined by list separators. Merely counting mentions flagged prose that
+        # explains one artifact in terms of another ("the connector posts its findings as
+        # inline review threads, and the review body can be boilerplate"), which is not a
+        # copy of the list and must stay sayable. Spelled-out phrases were tried first and
+        # let `review/thread/reaction` through, so the heads are matched as word stems and
+        # `review` is discounted where it modifies another head.
+        HEAD = r"(?:comments?|bodies|body|threads?|reactions?|reviews?)"
+        ITEM = rf"(?:(?:top-level|PR|inline|connector|full|review|the)[ -])*{HEAD}"
+        SEP = r"(?:\s*/\s*|,\s+(?:and\s+|or\s+)?|\s+(?:and|or|as well as)\s+)"
+        RUN = re.compile(rf"{ITEM}(?:{SEP}{ITEM}){{2,}}", re.I)
+
+        def kinds(sentence):
+            run = RUN.search(sentence)
+            if not run:
+                return set()
+            text = re.sub(r"review(?=[ -](?:thread|comment|bod))", "", run.group(0), flags=re.I)
+            return {h for h in ("comment", "review", "bod", "thread", "reaction")
+                    if re.search(rf"\b{h}\w*", text, re.I)}
         block = "<a id=\"reviewed-artifact-set\"></a>"
         workflow = WORKFLOW_DOC.read_text(encoding="utf-8")
-        handoff = HANDOFF_DOC.read_text(encoding="utf-8")
         self.assertEqual(1, workflow.count(block), "the normative block must exist once")
-        self.assertNotIn(block, handoff, "the list must not be duplicated across documents")
 
-        # Any site naming two or more of the five artifacts is a restatement. The normative
-        # block itself is excluded by construction: it is the one place allowed to list them.
-        start = workflow.index(block)
-        end = workflow.index("- a head-named clean connector verdict", start)
-        artifacts = ("review threads", "review bodies", "inline review comments",
-                     "inline comments", "reactions")
+        documents = sorted(REPO_ROOT.glob("docs/**/*.md")) + sorted(REPO_ROOT.glob("*.md"))
+        self.assertIn(WORKFLOW_DOC, documents, "the scan must cover the canonical document")
+        self.assertGreater(len(documents), 2, "the scan must reach beyond the two originals")
+
         offenders = []
-        for document, text, name in (
-            ("workflow", workflow[:start] + workflow[end:], "commit-push-prs.md"),
-            ("handoff", handoff, "review-and-handoff.md"),
-        ):
-            for number, line in enumerate(text.splitlines(), start=1):
-                named = [a for a in artifacts if a in line]
-                if len(named) >= 2:
-                    offenders.append(f"{name}: {line.strip()[:80]}")
+        for document in documents:
+            text = document.read_text(encoding="utf-8")
+            if document == WORKFLOW_DOC:
+                start = text.index(block)
+                end = text.index("Referenced, never restated.", start)
+                text = text[:start] + text[end:]
+            # Split into blocks BEFORE normalizing whitespace. Normalizing the whole
+            # document first ran adjacent bullets together, and two unrelated bullets that
+            # each name two kinds then read as one four-kind enumeration -- a false
+            # positive that would have been "fixed" by weakening the real rule.
+            blocks = re.split(r"\n\s*\n|\n(?=\s*(?:[-*]|\d+\.)\s)", text)
+            sentences = []
+            for chunk in blocks:
+                sentences.extend(re.split(r"(?<=[.:;]) ", re.sub(r"\s+", " ", chunk)))
+            for sentence in sentences:
+                # A sentence that links the canonical set is a reference, not a copy: the
+                # artifact names around it are that reference's rationale ("...because a
+                # request lives in a comment"), and forbidding those words would forbid
+                # explaining why the rule exists.
+                if "reviewed-artifact-set" in sentence:
+                    continue
+                named = kinds(sentence)
+                if len(named) >= 3:
+                    offenders.append(f"{document.name}: {sentence.strip()[:110]}")
         self.assertEqual(
             [], offenders,
-            "these sites restate the artifact list instead of referencing it",
+            "these sites restate the artifact list instead of referencing the one place it "
+            "is written",
+        )
+
+    def test_the_artifact_set_is_defined_for_a_lane_with_no_github(self):
+        """Naming five GitHub artifacts unconditionally made Tier A unsatisfiable.
+
+        The section directly above defines a registered project with no GitHub surface and
+        says it owes the same review. If every read-review-state instruction then means
+        five GitHub-only artifacts, that lane is required to read artifacts that cannot
+        exist -- a gate nobody can pass reads as an exemption, which is the one thing the
+        section says it is not.
+        """
+        workflow = WORKFLOW_DOC.read_text(encoding="utf-8")
+        start = workflow.index("<a id=\"reviewed-artifact-set\"></a>")
+        section = workflow[start:workflow.index("Referenced, never restated.", start)]
+        self.assertIn("no GitHub surface", section)
+        self.assertIn("review request", section)
+        self.assertIn("verdict packet", section)
+        self.assertRegex(
+            section, r"means the set below for the lane",
+            "the set must be selected by lane rather than stated unconditionally",
         )
 
     def test_the_rule_heading_covers_resolved_threads(self):
@@ -1188,8 +1251,16 @@ class ReviewLoopCapContractTest(unittest.TestCase):
         comments -- which is where a request lives -- so it could merge on a reaction that
         no longer passed the latest-request check.
         """
-        text = WORKFLOW_DOC.read_text(encoding="utf-8")
-        self.assertIn("top-level PR comments as well as", text)
+        # Whitespace-normalized deliberately. Two earlier versions of this assertion
+        # pinned the exact line wrapping and broke when the sentence was reflowed -- the
+        # same mistake as the drift being pinned, since where a line happens to break
+        # carries no meaning and a rule that depends on it is a rule about layout.
+        import re
+
+        text = re.sub(r"\s+", " ", WORKFLOW_DOC.read_text(encoding="utf-8"))
+        self.assertIn(
+            "covers **all of [the reviewed artifact set](#reviewed-artifact-set)**", text
+        )
         self.assertIn("revalidates all six reaction conditions", text)
 
     def test_the_quickstart_does_not_paraphrase_the_tier_lists(self):
@@ -1454,8 +1525,11 @@ class ReviewLoopCapContractTest(unittest.TestCase):
             self.assertIn(
                 "two exact-head terminal-signal models", sources["plan"]
             )
+            # Pinned by reference rather than by spelling: this sentence used to restate
+            # the artifact list itself, and restating it is the defect the canonical block
+            # exists to prevent. What must survive is that step 11 demands the FULL set.
             self.assertIn(
-                "post-clean settle and full review/thread/reaction re-read",
+                "post-clean settle and full re-read of the reviewed",
                 sources["plan"],
             )
             # Updated 2026-07-26: the plan pinned "resettable 15-minute fallback", which
