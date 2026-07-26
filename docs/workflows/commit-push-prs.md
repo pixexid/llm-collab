@@ -218,8 +218,12 @@ rerun verification, push, and then request/inspect review again.
 > request is itself a gate violation, **Tier B/C do not wait** when nothing was
 > requested, and any finding that does arrive is adjudicated in writing at every tier.
 >
-> "Request once" means **once per candidate final head**, not once per PR: any
-> amendment stales the review and requires a new request.
+> "Request once" means **one initial request per candidate final head**, not once
+> per PR: any amendment stales the review and requires a new request. The limit
+> governs *initial* requests only — the single request-anchored re-trigger below is
+> an explicit exemption, and is the only recovery for a silently dropped request.
+> Read as absolute it leaves a Tier A worker choosing between violating it and
+> having no recovery at all.
 
 Use `local_required_github_codex_opportunistic` as the default queue-runner
 policy:
@@ -263,12 +267,17 @@ policy:
     reports every live stale thread as a current-head finding.
   - *is this finding still open?* Only GitHub resolution, or a written disposition
     **that identifies the thread**, closes it. Identifying means the disposition
-    contains the thread's node ID or its `#discussion_r...` comment URL. Grouped
-    prose that names findings by title reads like an adjudication and closes
-    nothing — there is no way to check which thread it answered, so it cannot be
-    audited later by anyone, including its author. **A push is not an
-    adjudication**, and neither is a summary that does not say which thread it
-    disposes.
+    contains the thread's node ID or its `#discussion_r...` comment URL.
+    Identification is **necessary and not sufficient**: a human must also validate
+    that the disposition came from someone authorised on *this* pull request, that it
+    concerns this PR rather than merely mentioning the thread from elsewhere, and that
+    it states an actual closing outcome. A comment reading "Still unresolved: `<url>`"
+    identifies the thread perfectly and closes nothing. Closure is never derived
+    mechanically from a body — the identifier exists so a human's decision can be
+    audited afterwards, not so a consumer can skip the human. Grouped prose naming
+    findings by title closes nothing either, because there is no way to check which
+    thread it answered, including for its author. **A push is not an adjudication**,
+    and neither is a summary that does not say which thread it disposes.
   `isOutdated` answers neither. It is diff-position metadata — whether the thread
   still maps onto the current diff — and using it as the exclusion criterion is
   wrong in both directions. llm-collab#313 disproves it directly: at `9822524`,
@@ -282,8 +291,15 @@ policy:
   approximately five-minute post-clean settle, then perform a full re-read of
   reviews, review threads, and reactions before merge because the connector
   can emit multiple reviews for the same head
+- **a reaction counts only on the latest, unedited request artifact.** GitHub keeps
+  reactions across an edit, so a request comment edited to swap an old SHA for the
+  current one still carries the `+1` the connector left for the *old* head, and all
+  four checks then pass on a review that never happened. If the request artifact has
+  been edited since the reaction was left, or is not the most recent request for this
+  head, the reaction is not terminal — issue a fresh request instead
 - when a re-review was explicitly requested, that re-review supersedes older
-  same-head clean artifacts for the clean-verdict path. Only the explicit
+  same-head clean artifacts **and older same-head reactions**, not the verdict path
+  alone. Only the explicit
   re-review verdict can satisfy that path, and it receives the same
   approximately five-minute post-clean settle and full re-read
 - report the exact verdict, or the connector-authored `+1` on the manual-review

@@ -1,4 +1,4 @@
-<!-- CONTRACT_VERSION: 3 -->
+<!-- CONTRACT_VERSION: 4 -->
 # AGENTS.md
 
 ## This file is the source of truth
@@ -19,6 +19,19 @@ addresses the wrong lane once a second project is active.
 
 Read these if your last session predates them.
 
+- **v4 (2026-07-26)** — the merge gate is rewritten and the old rules are unsafe to
+  cache. The silence fallback is **deleted**: no elapsed time is ever a terminal
+  signal, and nothing ripens by waiting. A review request must name the exact head
+  SHA; one *initial* request per candidate final head, with a single request-anchored
+  re-trigger as the only exempted recovery. A connector review **body** listing no
+  findings is not a clean verdict — the findings are inline threads. Bind a finding to
+  a head through `pullRequestReview.commit.oid` (falling back to
+  `originalCommit.oid`), **never** the mutable `comment.commit.oid`. Adjudicate every
+  unresolved thread whatever head raised it: a push is not an adjudication, and a
+  written disposition must identify the thread *and* be validated by a human. A
+  reaction counts only on the latest unedited request artifact. If your session
+  predates this, discard any cached copy of the old fallback, reaction lifecycle,
+  request shape, or authority rules.
 - **v3 (2026-07-26)** — workers own their own setup: project registration, agent
   entries, chats, session registration, watchers and environment repair are worker work,
   not operator work. See "Workers own their own setup" for what genuinely is the
@@ -192,8 +205,11 @@ Request with `@codex review for <focus>`, naming **every** Tier A family the dif
 touches, asking for the full diff through those lenses, and **stating the exact head
 SHA the request is for**. The SHA is not decoration: a connector `+1` is terminal only
 while the head still equals the SHA that request named, so a request without one leaves
-the reaction path unsatisfiable and there is nothing to bind the verdict to. Request **once per
-candidate final head** — an amendment stales the review and needs a new request. Any
+the reaction path unsatisfiable and there is nothing to bind the verdict to. Issue **one initial request per
+candidate final head** — an amendment stales the review and needs a new request. That
+limit is on *initial* requests; the single request-anchored re-trigger in
+`docs/workflows/commit-push-prs.md` is an explicit exemption and the only recovery for
+a request the connector silently dropped. Any
 finding that arrives must be adjudicated in writing at every tier. A review is
 P0/P1-scoped, so it complements and never replaces independent exact-head
 verification and defect-verbatim mutation proof.

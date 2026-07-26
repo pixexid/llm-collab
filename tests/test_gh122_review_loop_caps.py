@@ -562,8 +562,8 @@ class ReviewLoopCapContractTest(unittest.TestCase):
                 sources["canonical_clean_verdict"],
             )
             self.assertIn(
-                "that re-review supersedes older same-head clean artifacts for "
-                "the clean-verdict path",
+                "that re-review supersedes older same-head clean artifacts "
+                "**and older same-head reactions**, not the verdict path alone",
                 sources["canonical_rereview"],
             )
             self.assertIn(
@@ -715,77 +715,82 @@ class ReviewLoopCapContractTest(unittest.TestCase):
         "state": "RESOLVED",
     }
 
-    CLASSIFY_MAY_READ = frozenset({"isResolved", "comments"})
+    class StrictMapping(Mapping):
+        """A read-only Mapping that refuses every key outside its allowlist.
 
-    class StrictThread(Mapping):
-        """A read-only Mapping that refuses every key classify() has no business reading.
+        Five versions of this guard have been defeated, each by the same move at a new
+        depth: banned helper names (beaten from inside the method), enumerated closure
+        field names (beaten by an unlisted name), a dict subclass overriding two methods
+        (beaten by inherited setdefault), iteration yielding allowed keys (inert in the
+        harness, live in production), and a top-level-only guard (beaten by reading
+        `comments.nodes[0]`, an ordinary nested dict).
 
-        Four versions of this guard have now been defeated, each by the same move at a
-        different depth:
-
-        1. introspection for banned helper names -- beaten by putting the exclusion
-           inside classify(), where no banned identifier appears;
-        2. a positive contract over enumerated closure field names -- beaten by
-           `manualDisposition`, a name not on the list;
-        3. a dict subclass overriding __getitem__ and get -- beaten by
-           `t.setdefault("reviewDisposition", False)`, because every OTHER mapping
-           method was inherited straight from dict and never saw the guard.
-
-        Subclassing dict was the mistake: it hands the caller setdefault, pop,
-        __contains__, iteration and mutation for free, so guarding two methods guards
-        two methods. collections.abc.Mapping supplies no storage and no back doors --
-        get, __contains__, keys, items and values are all mixin methods routed through
-        __getitem__, and setdefault/pop/__setitem__ do not exist at all, so reaching for
-        one raises rather than quietly succeeding.
+        So the constraint is applied at every level the origin helper walks, not just
+        the outermost one. Iteration and len raise rather than yielding permitted keys,
+        because a scan that finds nothing here would still find the field against a real
+        GraphQL dict in production.
         """
 
-        ALLOWED = frozenset({"isResolved", "comments"})
-
-        def __init__(self, data):
+        def __init__(self, data, allowed, label):
             self._data = dict(data)
+            self._allowed = frozenset(allowed)
+            self._label = label
 
         def __getitem__(self, key):
-            if key not in self.ALLOWED:
+            if key not in self._allowed:
                 raise AssertionError(
-                    f"classify() read {key!r}; it may consult only {sorted(self.ALLOWED)}"
+                    f"read {key!r} on {self._label}; only {sorted(self._allowed)} allowed"
                 )
             return self._data[key]
 
         def __iter__(self):
-            # Iteration raises rather than yielding the permitted keys. Yielding them
-            # made a scan -- `any(k.startswith("review") for k in t)` -- inert in the
-            # test while it would still suppress findings against a real GraphQL dict
-            # in production: a mutation that cannot fail here but bites there is worse
-            # than one that is simply uncaught. classify() has no legitimate reason to
-            # enumerate a thread's keys, so enumerating is itself the violation.
             raise AssertionError(
-                "classify() iterated a thread's keys; it may consult only "
-                f"{sorted(self.ALLOWED)} by direct access"
+                f"iterated {self._label}; keys must be read directly, not enumerated"
             )
 
         def __len__(self):
-            raise AssertionError("classify() measured a thread; it may only read keys")
+            raise AssertionError(f"measured {self._label}")
+
+        def __bool__(self):
+            # Mapping falls back to __len__ for truthiness, and the origin helper's
+            # `thread.get("comments") or {}` is a legitimate presence check rather than
+            # an enumeration. Answering it directly keeps len() closed as a probe while
+            # letting production-shaped code run unchanged.
+            return True
 
         def hidden(self):
-            """Test-only view of what is stored but unreadable."""
-            return {k: v for k, v in self._data.items() if k not in self.ALLOWED}
+            return {k: v for k, v in self._data.items() if k not in self._allowed}
 
     def strict_thread(self, oid, *, resolved, decorated):
-        data = {
-            "isResolved": resolved,
-            "comments": {"nodes": [{
-                "commit": {"oid": oid},
-                "originalCommit": {"oid": oid},
-                "pullRequestReview": {"commit": {"oid": oid}},
-            }]},
+        """A thread guarded at EVERY level the origin helper walks.
+
+        `commit` is deliberately forbidden on the comment node: it is the mutable field
+        the origin rule must never consult, so reading it fails loudly here rather than
+        silently returning the current head.
+        """
+        review = dict(self.CLOSURE_LOOKING_FIELDS) if decorated else {}
+        review["commit"] = {"oid": oid}
+        comment = {
+            "commit": {"oid": "MUTABLE-MUST-NOT-BE-READ"},
+            "originalCommit": {"oid": oid},
+            "pullRequestReview": self.StrictMapping(
+                review, {"commit"}, "pullRequestReview"
+            ),
         }
         if decorated:
-            # Present in the underlying store but unreadable through any access path,
-            # so a lookup raises rather than quietly returning a falsy default.
+            comment.update(self.CLOSURE_LOOKING_FIELDS)
+            comment["someFieldNobodyHasThoughtOfYet"] = True
+        comments = {"nodes": [
+            self.StrictMapping(comment, {"originalCommit", "pullRequestReview"}, "comment")
+        ]}
+        data = {
+            "isResolved": resolved,
+            "comments": self.StrictMapping(comments, {"nodes"}, "comments"),
+        }
+        if decorated:
             data.update(self.CLOSURE_LOOKING_FIELDS)
             data["someFieldNobodyHasThoughtOfYet"] = True
-        node = self.StrictThread(data)
-        return node
+        return self.StrictMapping(data, {"isResolved", "comments"}, "thread")
 
     def test_classify_consults_only_isresolved_and_origin(self):
         """Proved by access, not by enumeration.
@@ -887,6 +892,80 @@ class ReviewLoopCapContractTest(unittest.TestCase):
             "- a head-named clean connector verdict is not merge-immediate.",
         )
         self.assertIn("that identifies the thread", section)
+
+    def test_identification_is_necessary_but_not_sufficient_for_closure(self):
+        """A mechanical consumer must not read "identifies the thread" as "closes it".
+
+        `Still unresolved: <url>` identifies a thread perfectly. Without the human
+        validation clause the rule reads as a recipe a consumer could implement, which
+        is the same bypass the deleted classifier kept reinventing.
+        """
+        section = contract_section(
+            WORKFLOW_DOC.read_text(encoding="utf-8"),
+            "- **bind an exact-head finding through its initiating review commit",
+            "- a head-named clean connector verdict is not merge-immediate.",
+        )
+        for phrase in (
+            "necessary and not sufficient",
+            "someone authorised on *this* pull request",
+            "Still unresolved:",
+            "Closure is never derived mechanically from a body",
+            "not so a consumer can skip the human",
+        ):
+            self.assertIn(phrase, section)
+
+    def test_the_request_limit_exempts_the_single_re_trigger(self):
+        """The absolute reading forbids the only recovery the same file mandates.
+
+        `Request once per candidate final head` and `issue exactly one re-trigger` are
+        contradictory as written, leaving a worker to violate one of them.
+        """
+        # normalized(): the phrases wrap across lines in both documents.
+        for doc in (WORKFLOW_DOC, AGENTS_DOC):
+            text = normalized(doc.read_text(encoding="utf-8"))
+            with self.subTest(doc=doc.name):
+                self.assertIn("one initial request per candidate final head", text)
+                self.assertNotIn("Request **once per candidate final head**", text)
+        workflow = normalized(WORKFLOW_DOC.read_text(encoding="utf-8"))
+        self.assertIn("the single request-anchored re-trigger below is", workflow)
+        self.assertIn("explicit exemption", workflow)
+        self.assertIn(
+            "the single request-anchored re-trigger in",
+            normalized(AGENTS_DOC.read_text(encoding="utf-8")),
+        )
+
+    def test_a_reaction_is_bound_to_the_latest_unedited_request(self):
+        """GitHub preserves reactions across an edit.
+
+        A request comment edited to swap an old SHA for the current one carries the
+        `+1` the connector left for the OLD head, and all four checks then pass on a
+        review that never happened.
+        """
+        for doc in (WORKFLOW_DOC, HANDOFF_DOC):
+            text = normalized(doc.read_text(encoding="utf-8"))
+            with self.subTest(doc=doc.name):
+                self.assertIn("latest, unedited request artifact", text)
+                self.assertIn("older same-head reactions", text)
+
+    def test_the_contract_version_advanced_with_the_gate_rewrite(self):
+        """A cached copy of the old gate can produce a wrong merge.
+
+        Workers bootstrapped on v3 get no signal that the fallback, reaction lifecycle,
+        request shape and authority rules changed underneath them.
+        """
+        text = AGENTS_DOC.read_text(encoding="utf-8")
+        self.assertIn("<!-- CONTRACT_VERSION: 4 -->", text)
+        self.assertNotIn("<!-- CONTRACT_VERSION: 3 -->", text)
+        entry = contract_section(text, "- **v4 (2026-07-26)**", "- **v3 (2026-07-26)**")
+        for phrase in (
+            "silence fallback is **deleted**",
+            "one *initial* request per candidate final head",
+            "body** listing no findings is not a clean verdict",
+            "never** the mutable `comment.commit.oid`",
+            "a push is not an adjudication",
+            "latest unedited request artifact",
+        ):
+            self.assertIn(normalized(phrase), entry)
 
     def test_the_merge_checklist_does_not_inherit_the_origin_rule_narrowing(self):
         """The hole the origin rule opened in the checklist below it.
@@ -992,7 +1071,8 @@ class ReviewLoopCapContractTest(unittest.TestCase):
             "a connector `+1` is terminal only while the head still equals the SHA "
             "that request named",
             "a request without one leaves the reaction path unsatisfiable",
-            "Request **once per candidate final head**",
+            "Issue **one initial request per candidate final head**",
+            "the single request-anchored re-trigger",
         ):
             self.assertIn(phrase, section)
 
@@ -1156,8 +1236,8 @@ class ReviewLoopCapContractTest(unittest.TestCase):
                 "full re-read of reviews, review threads, and reactions", handoff
             )
             self.assertIn(
-                "that re-review supersedes older same-head clean artifacts for "
-                "the clean-verdict path",
+                "that re-review supersedes older same-head clean artifacts "
+                "**and older same-head reactions**, not the verdict path alone",
                 handoff,
             )
             self.assertIn("it receives the same settle and full re-read", handoff)

@@ -512,6 +512,12 @@ class Gh1549FallbackFixturesTest(unittest.TestCase):
         # imply that anything below Tier A has nothing to wait for.
         ("B", True): "escalate_stuck_review",
         ("B", False): "no_review_pending",
+        # A Tier C change nobody had to request can still BE requested -- by an operator
+        # or another contributor. Requested-review precedence does not consult the tier,
+        # so that request is pending like any other and its findings must be adjudicated.
+        # Omitting the pair let a consumer treat it as (C, False) and merge with a review
+        # outstanding.
+        ("C", True): "escalate_stuck_review",
         ("C", False): "no_review_pending",
     }
 
@@ -541,6 +547,29 @@ class Gh1549FallbackFixturesTest(unittest.TestCase):
                 self.assertTrue(
                     tiers - {"A"}, f"{variant} models Tier A only: {sorted(tiers)}"
                 )
+
+    def test_a_request_is_pending_whatever_tier_prompted_it(self) -> None:
+        """Requested-review precedence does not consult the tier.
+
+        The matrix held only (A, *) and (B/C, False), so every below-Tier-A fixture said
+        nothing-pending. Tier decides whether a review must be REQUESTED, not what
+        happens once one exists.
+        """
+        for tier in ("A", "B", "C"):
+            with self.subTest(tier=tier):
+                self.assertEqual(
+                    "escalate_stuck_review",
+                    self.DISPOSITION_BY_TIER_AND_REQUEST[(tier, True)],
+                    "a requested review is pending regardless of tier",
+                )
+        self.assertEqual(
+            "gate_violation_request_required",
+            self.DISPOSITION_BY_TIER_AND_REQUEST[("A", False)],
+        )
+        for tier in ("B", "C"):
+            self.assertEqual(
+                "no_review_pending", self.DISPOSITION_BY_TIER_AND_REQUEST[(tier, False)]
+            )
 
     def test_a_requested_tier_b_review_is_pending_like_any_other(self) -> None:
         """Tier B is discretionary to REQUEST, not discretionary once requested.

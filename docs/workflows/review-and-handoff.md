@@ -220,9 +220,11 @@ artifacts only; it does not waive the handling below:
   approximately five-minute mandatory post-clean settle, then perform a full
   re-read of reviews, review threads, and reactions because the connector can
   emit multiple reviews for one head. When a re-review was explicitly
-  requested, that re-review supersedes older same-head clean artifacts for the
-  clean-verdict path; only its verdict can satisfy that path, and it receives
-  the same settle and full re-read.
+  requested, that re-review supersedes older same-head clean artifacts **and older
+  same-head reactions**, not the verdict path alone; only its verdict can satisfy
+  that path, and it receives the same settle and full re-read. A reaction counts
+  only on the latest, unedited request artifact -- GitHub keeps reactions across an
+  edit, so an edited request comment can still carry a `+1` left for an older head.
 - A connector-authored `+1` on the exact manual-review request comment is
   terminal CLEAN once all four checks hold (actor, that request comment, the
   requested SHA, the current head). It receives **the same approximately
