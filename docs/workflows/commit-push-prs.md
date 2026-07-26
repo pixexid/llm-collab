@@ -254,17 +254,24 @@ policy:
   finding list
 - **bind an exact-head finding through its initiating review commit, and adjudicate
   every unresolved thread regardless of `isOutdated`.** Two distinct questions:
-  - *is this finding about the current head?* Only if the thread's initiating
-    review or comment commit OID equals the current head OID.
+  - *is this finding about the current head?* Only if the thread's **initiating
+    review commit OID** equals the current head OID. Read it from
+    `comments.nodes[0].pullRequestReview.commit.oid`, falling back to
+    `comments.nodes[0].originalCommit.oid` for a thread with no backing review.
+    **Never `comments.nodes[0].commit.oid`** — that field is mutable and GitHub
+    advances it to the current head for a thread that is still non-outdated, so it
+    reports every live stale thread as a current-head finding.
   - *is this finding still open?* Only resolution or an explicit written
     disposition closes it. **A push is not an adjudication.**
   `isOutdated` answers neither. It is diff-position metadata — whether the thread
   still maps onto the current diff — and using it as the exclusion criterion is
-  wrong in both directions. llm-collab#313 at `07db478` disproves it directly:
-  thirteen unresolved non-outdated threads, but twelve of them initiated at
-  `a54e33f` or `82ae7e9`, so the rule counts twelve stale threads as current-head
-  findings; and four unresolved outdated threads, which the rule drops silently
-  though nobody ever answered them
+  wrong in both directions. llm-collab#313 disproves it directly: at `9822524`,
+  twelve unresolved non-outdated threads initiated at `a54e33f` or `82ae7e9`, so
+  the rule counts twelve stale threads as current-head findings; five unresolved
+  outdated threads, which the rule drops silently though nobody ever answered
+  them; and **zero** threads actually initiated at the current head. Those same
+  twelve report `comments.nodes[0].commit.oid` as `9822524`, which is why the
+  field matters as much as the rule
 - a head-named clean connector verdict is not merge-immediate. Hold an
   approximately five-minute post-clean settle, then perform a full re-read of
   reviews, review threads, and reactions before merge because the connector

@@ -1,0 +1,370 @@
+{
+  "source": "llm-collab#313 reviewThreads, captured 2026-07-26 at head 9822524b8d",
+  "why": "comments.nodes[0].commit.oid is MUTABLE -- for a non-outdated thread GitHub advances it to the current head. Twelve threads here report it as the current head while pullRequestReview.commit.oid and originalCommit.oid stay at the review that raised them. Selecting the obvious comment field therefore reproduces the exact misclassification the binding rule exists to prevent, and a fixture storing a pre-computed origin cannot detect that choice at all.",
+  "head_oid": "9822524b8d27c782efd5e49aea535f801f450cfe",
+  "threads": [
+    {
+      "isResolved": false,
+      "isOutdated": false,
+      "comments": {
+        "nodes": [
+          {
+            "commit": {
+              "oid": "9822524b8d27c782efd5e49aea535f801f450cfe"
+            },
+            "originalCommit": {
+              "oid": "a54e33fcd94bce301040ded2a6b70ecb401cd41e"
+            },
+            "pullRequestReview": {
+              "commit": {
+                "oid": "a54e33fcd94bce301040ded2a6b70ecb401cd41e"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "isResolved": false,
+      "isOutdated": false,
+      "comments": {
+        "nodes": [
+          {
+            "commit": {
+              "oid": "9822524b8d27c782efd5e49aea535f801f450cfe"
+            },
+            "originalCommit": {
+              "oid": "a54e33fcd94bce301040ded2a6b70ecb401cd41e"
+            },
+            "pullRequestReview": {
+              "commit": {
+                "oid": "a54e33fcd94bce301040ded2a6b70ecb401cd41e"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "isResolved": false,
+      "isOutdated": true,
+      "comments": {
+        "nodes": [
+          {
+            "commit": {
+              "oid": "a54e33fcd94bce301040ded2a6b70ecb401cd41e"
+            },
+            "originalCommit": {
+              "oid": "a54e33fcd94bce301040ded2a6b70ecb401cd41e"
+            },
+            "pullRequestReview": {
+              "commit": {
+                "oid": "a54e33fcd94bce301040ded2a6b70ecb401cd41e"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "isResolved": false,
+      "isOutdated": false,
+      "comments": {
+        "nodes": [
+          {
+            "commit": {
+              "oid": "9822524b8d27c782efd5e49aea535f801f450cfe"
+            },
+            "originalCommit": {
+              "oid": "a54e33fcd94bce301040ded2a6b70ecb401cd41e"
+            },
+            "pullRequestReview": {
+              "commit": {
+                "oid": "a54e33fcd94bce301040ded2a6b70ecb401cd41e"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "isResolved": false,
+      "isOutdated": false,
+      "comments": {
+        "nodes": [
+          {
+            "commit": {
+              "oid": "9822524b8d27c782efd5e49aea535f801f450cfe"
+            },
+            "originalCommit": {
+              "oid": "a54e33fcd94bce301040ded2a6b70ecb401cd41e"
+            },
+            "pullRequestReview": {
+              "commit": {
+                "oid": "a54e33fcd94bce301040ded2a6b70ecb401cd41e"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "isResolved": false,
+      "isOutdated": false,
+      "comments": {
+        "nodes": [
+          {
+            "commit": {
+              "oid": "9822524b8d27c782efd5e49aea535f801f450cfe"
+            },
+            "originalCommit": {
+              "oid": "a54e33fcd94bce301040ded2a6b70ecb401cd41e"
+            },
+            "pullRequestReview": {
+              "commit": {
+                "oid": "a54e33fcd94bce301040ded2a6b70ecb401cd41e"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "isResolved": false,
+      "isOutdated": false,
+      "comments": {
+        "nodes": [
+          {
+            "commit": {
+              "oid": "9822524b8d27c782efd5e49aea535f801f450cfe"
+            },
+            "originalCommit": {
+              "oid": "a54e33fcd94bce301040ded2a6b70ecb401cd41e"
+            },
+            "pullRequestReview": {
+              "commit": {
+                "oid": "a54e33fcd94bce301040ded2a6b70ecb401cd41e"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "isResolved": false,
+      "isOutdated": true,
+      "comments": {
+        "nodes": [
+          {
+            "commit": {
+              "oid": "a54e33fcd94bce301040ded2a6b70ecb401cd41e"
+            },
+            "originalCommit": {
+              "oid": "a54e33fcd94bce301040ded2a6b70ecb401cd41e"
+            },
+            "pullRequestReview": {
+              "commit": {
+                "oid": "a54e33fcd94bce301040ded2a6b70ecb401cd41e"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "isResolved": false,
+      "isOutdated": false,
+      "comments": {
+        "nodes": [
+          {
+            "commit": {
+              "oid": "9822524b8d27c782efd5e49aea535f801f450cfe"
+            },
+            "originalCommit": {
+              "oid": "a54e33fcd94bce301040ded2a6b70ecb401cd41e"
+            },
+            "pullRequestReview": {
+              "commit": {
+                "oid": "a54e33fcd94bce301040ded2a6b70ecb401cd41e"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "isResolved": false,
+      "isOutdated": true,
+      "comments": {
+        "nodes": [
+          {
+            "commit": {
+              "oid": "a54e33fcd94bce301040ded2a6b70ecb401cd41e"
+            },
+            "originalCommit": {
+              "oid": "a54e33fcd94bce301040ded2a6b70ecb401cd41e"
+            },
+            "pullRequestReview": {
+              "commit": {
+                "oid": "a54e33fcd94bce301040ded2a6b70ecb401cd41e"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "isResolved": false,
+      "isOutdated": false,
+      "comments": {
+        "nodes": [
+          {
+            "commit": {
+              "oid": "9822524b8d27c782efd5e49aea535f801f450cfe"
+            },
+            "originalCommit": {
+              "oid": "a54e33fcd94bce301040ded2a6b70ecb401cd41e"
+            },
+            "pullRequestReview": {
+              "commit": {
+                "oid": "a54e33fcd94bce301040ded2a6b70ecb401cd41e"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "isResolved": false,
+      "isOutdated": true,
+      "comments": {
+        "nodes": [
+          {
+            "commit": {
+              "oid": "82ae7e92ded3591e55cfc8762ddc0ce537c6f7a1"
+            },
+            "originalCommit": {
+              "oid": "82ae7e92ded3591e55cfc8762ddc0ce537c6f7a1"
+            },
+            "pullRequestReview": {
+              "commit": {
+                "oid": "82ae7e92ded3591e55cfc8762ddc0ce537c6f7a1"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "isResolved": false,
+      "isOutdated": false,
+      "comments": {
+        "nodes": [
+          {
+            "commit": {
+              "oid": "9822524b8d27c782efd5e49aea535f801f450cfe"
+            },
+            "originalCommit": {
+              "oid": "82ae7e92ded3591e55cfc8762ddc0ce537c6f7a1"
+            },
+            "pullRequestReview": {
+              "commit": {
+                "oid": "82ae7e92ded3591e55cfc8762ddc0ce537c6f7a1"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "isResolved": false,
+      "isOutdated": false,
+      "comments": {
+        "nodes": [
+          {
+            "commit": {
+              "oid": "9822524b8d27c782efd5e49aea535f801f450cfe"
+            },
+            "originalCommit": {
+              "oid": "82ae7e92ded3591e55cfc8762ddc0ce537c6f7a1"
+            },
+            "pullRequestReview": {
+              "commit": {
+                "oid": "82ae7e92ded3591e55cfc8762ddc0ce537c6f7a1"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "isResolved": false,
+      "isOutdated": false,
+      "comments": {
+        "nodes": [
+          {
+            "commit": {
+              "oid": "9822524b8d27c782efd5e49aea535f801f450cfe"
+            },
+            "originalCommit": {
+              "oid": "82ae7e92ded3591e55cfc8762ddc0ce537c6f7a1"
+            },
+            "pullRequestReview": {
+              "commit": {
+                "oid": "82ae7e92ded3591e55cfc8762ddc0ce537c6f7a1"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "isResolved": false,
+      "isOutdated": false,
+      "comments": {
+        "nodes": [
+          {
+            "commit": {
+              "oid": "9822524b8d27c782efd5e49aea535f801f450cfe"
+            },
+            "originalCommit": {
+              "oid": "82ae7e92ded3591e55cfc8762ddc0ce537c6f7a1"
+            },
+            "pullRequestReview": {
+              "commit": {
+                "oid": "82ae7e92ded3591e55cfc8762ddc0ce537c6f7a1"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "isResolved": false,
+      "isOutdated": true,
+      "comments": {
+        "nodes": [
+          {
+            "commit": {
+              "oid": "07db4787e0bef743a8384ca869bd5b8a5cac4373"
+            },
+            "originalCommit": {
+              "oid": "07db4787e0bef743a8384ca869bd5b8a5cac4373"
+            },
+            "pullRequestReview": {
+              "commit": {
+                "oid": "07db4787e0bef743a8384ca869bd5b8a5cac4373"
+              }
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "expected": {
+    "exact_head_findings": 0,
+    "unresolved_needing_adjudication": 17,
+    "naive_comment_commit_count": 12,
+    "unresolved_outdated": 5
+  }
+}

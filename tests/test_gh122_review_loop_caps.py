@@ -573,69 +573,129 @@ class ReviewLoopCapContractTest(unittest.TestCase):
         self.assert_scenario_cases("canonical_wait_gate", check)
 
     THREAD_FIXTURE = (
-        REPO_ROOT / "tests" / "fixtures" / "review_thread_binding" / "pr313_at_07db478.json"
+        REPO_ROOT / "tests" / "fixtures" / "review_thread_binding" / "pr313_at_9822524.json"
     )
 
     @staticmethod
-    def classify(threads, head_oid):
-        """The documented contract, applied.
+    def originating_commit_oid(thread):
+        """The AUTHORITATIVE origin of a review thread.
 
-        Two independent questions, and `isOutdated` answers neither: is the finding about
-        THIS head (initiating commit OID == head), and is it still open (only resolution
-        or an explicit disposition closes it).
+        `comments.nodes[0].commit.oid` is mutable: GitHub advances it to the current
+        head while the thread stays non-outdated. Reading it reports every live stale
+        thread as a current-head finding -- twelve of them on this very PR. The review
+        commit is stable, and originalCommit is the fallback when a thread has no
+        backing review.
         """
+        comment = (thread.get("comments") or {}).get("nodes", [{}])[0]
+        review = (comment.get("pullRequestReview") or {}).get("commit") or {}
+        if review.get("oid"):
+            return review["oid"]
+        return (comment.get("originalCommit") or {}).get("oid")
+
+    @staticmethod
+    def naive_comment_commit_oid(thread):
+        """The obvious wrong choice, kept so a test can prove it is wrong."""
+        comment = (thread.get("comments") or {}).get("nodes", [{}])[0]
+        return (comment.get("commit") or {}).get("oid")
+
+    def classify(self, threads, head_oid):
         return {
             "exact_head_findings": len([
                 t for t in threads
-                if not t["isResolved"] and t.get("originating_commit_oid") == head_oid
+                if not t["isResolved"] and self.originating_commit_oid(t) == head_oid
             ]),
             "unresolved_needing_adjudication": len([
                 t for t in threads if not t["isResolved"]
             ]),
         }
 
-    def test_outdated_is_not_the_exclusion_criterion_on_real_graphql_shapes(self):
-        """Behavioural, on the payload that disproved the first version of this rule.
-
-        `unresolved && !isOutdated` was wrong in both directions, and llm-collab#313
-        showed both at once: it counts threads initiated at older heads as current-head
-        findings, and silently drops unresolved outdated ones nobody adjudicated.
-        """
+    def load_threads(self):
         fixture = json.loads(self.THREAD_FIXTURE.read_text(encoding="utf-8"))
+        for thread in fixture["threads"]:
+            # The extraction decision is what is under test, so the fixture must carry
+            # the raw nested shapes and never a pre-resolved origin field.
+            self.assertNotIn("originating_commit_oid", thread)
+            self.assertIn("comments", thread)
+        return fixture
+
+    def test_the_mutable_comment_commit_field_is_not_the_thread_origin(self):
+        """The crossed live shape: comment.commit is current, review/original are old.
+
+        Twelve threads on this PR report comments.nodes[0].commit.oid as the current
+        head while pullRequestReview.commit.oid and originalCommit.oid stay at the
+        review that raised them. Picking the obvious field recreates exactly the
+        misclassification the binding rule exists to prevent.
+        """
+        fixture = self.load_threads()
+        head, threads = fixture["head_oid"], fixture["threads"]
+        expected = fixture["expected"]
+
+        naive = [
+            t for t in threads
+            if not t["isResolved"] and self.naive_comment_commit_oid(t) == head
+        ]
+        self.assertEqual(expected["naive_comment_commit_count"], len(naive))
+        self.assertTrue(naive, "fixture must contain the crossed shape")
+
+        actual = self.classify(threads, head)
+        self.assertEqual(expected["exact_head_findings"], actual["exact_head_findings"])
+        self.assertNotEqual(
+            len(naive), actual["exact_head_findings"],
+            "the two field choices must disagree here, or the fixture proves nothing",
+        )
+        # Every crossed thread's stable fields must genuinely differ from the head.
+        for thread in naive:
+            self.assertNotEqual(head, self.originating_commit_oid(thread))
+
+    def test_outdated_is_not_the_exclusion_criterion_on_real_graphql_shapes(self):
+        fixture = self.load_threads()
         head, threads = fixture["head_oid"], fixture["threads"]
         expected = fixture["expected"]
 
         actual = self.classify(threads, head)
-        self.assertEqual(expected["exact_head_findings"], actual["exact_head_findings"])
         self.assertEqual(
             expected["unresolved_needing_adjudication"],
             actual["unresolved_needing_adjudication"],
         )
-
-        wrong = [t for t in threads if not t["isResolved"] and not t["isOutdated"]]
-        self.assertEqual(expected["wrong_rule_exact_head_count"], len(wrong))
-        self.assertNotEqual(
-            actual["exact_head_findings"], len(wrong),
-            "the retired rule must not agree with the contract on this payload, or the "
-            "fixture no longer demonstrates the defect",
-        )
         dropped = [t for t in threads if not t["isResolved"] and t["isOutdated"]]
-        self.assertEqual(expected["wrong_rule_silently_excluded"], len(dropped))
+        self.assertEqual(expected["unresolved_outdated"], len(dropped))
         self.assertTrue(dropped, "fixture must contain an unresolved OUTDATED thread")
+        # Those unadjudicated threads are exactly what the retired rule discarded.
+        self.assertLess(
+            actual["exact_head_findings"], actual["unresolved_needing_adjudication"]
+        )
 
     def test_a_thread_from_an_older_review_is_not_an_exact_head_finding(self):
+        def node(review_oid, original_oid, comment_oid, *, resolved, outdated):
+            return {
+                "isResolved": resolved,
+                "isOutdated": outdated,
+                "comments": {"nodes": [{
+                    "commit": {"oid": comment_oid},
+                    "originalCommit": {"oid": original_oid},
+                    "pullRequestReview": (
+                        {"commit": {"oid": review_oid}} if review_oid else None
+                    ),
+                }]},
+            }
+
         threads = [
-            {"isResolved": False, "isOutdated": False, "originating_commit_oid": "old111"},
-            {"isResolved": False, "isOutdated": True, "originating_commit_oid": "head999"},
-            {"isResolved": True, "isOutdated": False, "originating_commit_oid": "head999"},
-            {"isResolved": False, "isOutdated": False, "originating_commit_oid": "head999"},
+            # Crossed: comment.commit says head, the review says otherwise.
+            node("old111", "old111", "head999", resolved=False, outdated=False),
+            # Outdated but genuinely raised on this head -- still a finding.
+            node("head999", "head999", "head999", resolved=False, outdated=True),
+            # Resolved on this head -- closed.
+            node("head999", "head999", "head999", resolved=True, outdated=False),
+            # No backing review: originalCommit is the fallback authority.
+            node(None, "head999", "head999", resolved=False, outdated=False),
         ]
         actual = self.classify(threads, "head999")
-        # Outdated-but-current-head counts; non-outdated-but-old-head does not.
         self.assertEqual(2, actual["exact_head_findings"])
         self.assertEqual(3, actual["unresolved_needing_adjudication"])
+        self.assertEqual("old111", self.originating_commit_oid(threads[0]))
+        self.assertEqual("head999", self.originating_commit_oid(threads[3]))
 
-    def test_the_doc_states_the_binding_contract_and_rejects_the_retired_rule(self):
+    def test_the_doc_names_the_authoritative_field_and_rejects_the_mutable_one(self):
         text = WORKFLOW_DOC.read_text(encoding="utf-8")
         section = contract_section(
             text,
@@ -643,7 +703,10 @@ class ReviewLoopCapContractTest(unittest.TestCase):
             "- a head-named clean connector verdict is not merge-immediate.",
         )
         for phrase in (
-            "initiating review or comment commit OID equals the current head OID",
+            "`comments.nodes[0].pullRequestReview.commit.oid`",
+            "`comments.nodes[0].originalCommit.oid`",
+            "**Never `comments.nodes[0].commit.oid`**",
+            "that field is mutable",
             "A push is not an adjudication.",
             "diff-position metadata",
             "wrong in both directions",
