@@ -4,6 +4,7 @@ import json
 import os
 import base64
 import hashlib
+import shlex
 import socket
 import subprocess
 import sys
@@ -13,6 +14,7 @@ import unittest
 from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, Mock, patch
 
 
@@ -5984,7 +5986,7 @@ class ResumePromptNamesTheReplyChannelTest(unittest.TestCase):
     so the reply never reached the sender and the operator had to relay it by hand.
     """
 
-    def prompt(self, *, body: str = "Do the lane.") -> str:
+    def prompt(self, *, repo_targets: Any = ["llm-collab"]) -> str:
         session = {
             "session_id": "SESSION-REPLY",
             "agent_id": "codex",
@@ -5992,19 +5994,38 @@ class ResumePromptNamesTheReplyChannelTest(unittest.TestCase):
             "chat_id": "CHAT-REPLY",
             "runtime": {"family": "codex_app", "session_id": "runtime-reply"},
         }
+        frontmatter = {
+            "from": "claude",
+            "sender_agent_id": "claude",
+            "to": "codex",
+            "title": "Review handoff",
+            "project_id": "amiga",
+            "chat_id": "CHAT-REPLY",
+        }
+        if repo_targets is not None:
+            frontmatter["repo_targets"] = repo_targets
         message = {
             "path": "Chats/2026-07-26_x__CHAT-REPLY/2026-07-26T00-00-00_to-codex_packet.md",
-            "frontmatter": {
-                "from": "claude",
-                "sender_agent_id": "claude",
-                "to": "codex",
-                "title": "Review handoff",
-                "project_id": "amiga",
-                "chat_id": "CHAT-REPLY",
-            },
-            "body": body,
+            "frontmatter": frontmatter,
+            "body": "Do the lane.",
         }
         return session_autobridge_lib.build_resume_prompt(session, message)
+
+    def command_argv(self, prompt: str) -> list[str]:
+        """The emitted line as a shell would actually split it.
+
+        shlex.split is the point of this helper: the defect it guards was a literal
+        `<repo>` placeholder, which is a redirection to a nonexistent file, not an
+        argument. Asserting that a flag appears in the text cannot see that.
+        """
+        line = next(
+            raw for raw in prompt.splitlines() if raw.strip().startswith("bin/deliver.py")
+        )
+        return shlex.split(line)
+
+    def flag_value(self, argv: list[str], flag: str) -> str:
+        self.assertIn(flag, argv)
+        return argv[argv.index(flag) + 1]
 
     def test_the_prompt_carries_the_packet_path(self) -> None:
         self.assertIn(
@@ -6018,19 +6039,50 @@ class ResumePromptNamesTheReplyChannelTest(unittest.TestCase):
         self.assertIn("Reply through the mailbox", prompt)
         self.assertIn("only channel the sender reads", prompt)
 
-    def test_the_prompt_spells_out_a_runnable_reply_command(self) -> None:
-        """A named channel with no command is guidance; this has to be copyable."""
-        prompt = self.prompt()
-        self.assertIn("bin/deliver.py", prompt)
-        for flag in ("--chat CHAT-REPLY", "--from codex", "--to claude", "--project amiga"):
-            self.assertIn(flag, prompt)
-        # deliver.py silently drops a packet that declares no repo scope.
-        self.assertIn("--repo-targets", prompt)
+    def test_the_emitted_command_is_shell_safe_and_carries_the_real_scope(self) -> None:
+        argv = self.command_argv(self.prompt())
+        self.assertEqual("bin/deliver.py", argv[0])
+        self.assertEqual("CHAT-REPLY", self.flag_value(argv, "--chat"))
+        self.assertEqual("codex", self.flag_value(argv, "--from"))
+        self.assertEqual("claude", self.flag_value(argv, "--to"))
+        self.assertEqual("amiga", self.flag_value(argv, "--project"))
+        self.assertEqual("llm-collab", self.flag_value(argv, "--repo-targets"))
+
+    def test_no_argument_is_a_shell_metacharacter(self) -> None:
+        """`<repo>` split to a redirection, not an argument. Nothing may do that again."""
+        line = next(
+            raw for raw in self.prompt().splitlines()
+            if raw.strip().startswith("bin/deliver.py")
+        )
+        for bad in ("<", ">", "|", "&", "$(", "`"):
+            self.assertNotIn(bad, line.replace("--body-file -", ""))
+
+    def test_several_repo_targets_render_comma_separated_as_deliver_parses_them(self) -> None:
+        argv = self.command_argv(self.prompt(repo_targets=["llm-collab", "amiga"]))
+        rendered = self.flag_value(argv, "--repo-targets")
+        self.assertEqual("llm-collab,amiga", rendered)
+        # The value must survive deliver.py's own parser, not merely look plausible.
+        self.assertEqual(
+            ["llm-collab", "amiga"],
+            [token.strip() for token in rendered.split(",") if token.strip()],
+        )
+
+    def test_a_packet_with_no_scope_does_not_pretend_the_command_is_runnable(self) -> None:
+        for empty in (None, [], ""):
+            with self.subTest(repo_targets=empty):
+                prompt = self.prompt(repo_targets=empty)
+                self.assertIn("declares no usable repo scope", prompt)
+                self.assertIn("NOT", prompt)
+                self.assertNotIn("--repo-targets", self.command_argv(prompt))
+
+    def test_a_malformed_scope_token_is_dropped_rather_than_emitted(self) -> None:
+        """A token with whitespace would split into two argv entries and corrupt the flag."""
+        prompt = self.prompt(repo_targets=["llm collab"])
+        self.assertIn("declares no usable repo scope", prompt)
+        self.assertNotIn("--repo-targets", self.command_argv(prompt))
 
     def test_the_prompt_says_a_pr_comment_does_not_reach_the_sender(self) -> None:
-        self.assertIn(
-            "does NOT reach the sender", self.prompt(),
-        )
+        self.assertIn("does NOT reach the sender", self.prompt())
 
     def test_the_prompt_still_permits_a_pr_post_alongside_the_packet(self) -> None:
         """Connector review requests live on the PR; the rule is 'as well as', not 'never'."""

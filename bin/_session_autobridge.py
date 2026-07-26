@@ -1187,6 +1187,45 @@ def build_runtime_payload(session: dict, message: dict) -> dict[str, Any]:
     }
 
 
+def _reply_command_lines(session: dict, fm: dict) -> list[str]:
+    """The mailbox reply instruction, runnable only when it is actually runnable.
+
+    An earlier version emitted a literal `--repo-targets <repo>` placeholder. In zsh
+    `<repo>` is input redirection, so the "copy this" line died as
+    `zsh: no such file or directory: repo` before deliver.py ever ran -- the reply path
+    this text exists to repair was unusable by anyone who followed it.
+
+    So the packet's own repo_targets are rendered as the comma-separated value
+    deliver.py parses. When the packet declares no usable scope there is no runnable
+    command to offer, and claiming otherwise is what caused the defect: the worker is
+    told what it must supply instead.
+    """
+    targets = [
+        token
+        for token in _frontmatter_strings(fm.get("repo_targets"))
+        if token and not any(ch.isspace() for ch in token)
+    ]
+    head = (
+        f"  bin/deliver.py --chat {fm.get('chat_id', '')} "
+        f"--from {session['agent_id']} "
+        f"--to {fm.get('sender_agent_id', fm.get('from', ''))} "
+        f"--project {fm.get('project_id', '')}"
+    )
+    tail = "--title '...' --body-file -"
+    if not targets:
+        return [
+            "Reply through the mailbox. It is the only channel the sender reads.",
+            "This packet declares no usable repo scope, so the command below is NOT",
+            "complete: add --repo-targets with your own comma-separated repo ids, or",
+            "deliver.py will drop the reply silently.",
+            f"{head} {tail}",
+        ]
+    return [
+        "Reply through the mailbox. It is the only channel the sender reads:",
+        f"{head} --repo-targets {','.join(targets)} {tail}",
+    ]
+
+
 def build_resume_prompt(session: dict, message: dict) -> str:
     fm = message["frontmatter"]
     body = message.get("body", "").strip()
@@ -1228,12 +1267,7 @@ def build_resume_prompt(session: dict, message: dict) -> str:
             "Message body:",
             body or "(no body)",
             "",
-            "Reply through the mailbox. It is the only channel the sender reads:",
-            f"  bin/deliver.py --chat {fm.get('chat_id', '')} "
-            f"--from {session['agent_id']} "
-            f"--to {fm.get('sender_agent_id', fm.get('from', ''))} "
-            f"--project {fm.get('project_id', '')} --repo-targets <repo> "
-            "--title '...' --body-file -",
+            *_reply_command_lines(session, fm),
             "A PR comment, a code-review body or a desktop nudge does NOT reach the sender.",
             "Post to a PR only when the PR itself is the artifact -- a connector review",
             "request, or evidence a human will read there -- and deliver the packet as well.",
