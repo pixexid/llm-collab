@@ -6119,11 +6119,36 @@ class ResumePromptNamesTheReplyChannelTest(unittest.TestCase):
         self.assertEqual("amiga", self.flag_value(argv, "--project"))
         self.assertEqual("llm-collab", self.flag_value(argv, "--repo-targets"))
 
-    def test_no_argument_is_a_shell_metacharacter(self) -> None:
-        """`<repo>` split to a redirection, not an argument. Nothing may do that again."""
-        line = self.command_line(self.prompt())
-        for bad in ("<", ">", "|", "&", "$(", "`"):
-            self.assertNotIn(bad, line.replace("--body-file -", ""))
+    def test_the_router_is_the_authority_on_what_scope_is_valid(self) -> None:
+        """No repo-id grammar is re-derived here.
+
+        A local regex forbidding `/` rejected `pixexid/amiga` -- a scope
+        `_repo_target_set` accepts and durable packets already carry -- so a routable
+        reply was declared unusable and silently lost its scope. Every scope the router
+        accepts must stay runnable; shell safety is shlex.join's job, not the grammar's.
+        """
+        canonical = [
+            ["pixexid/amiga"],
+            ["pixexid/amiga", "llm-collab"],
+            ["app"],
+            ["a.b_c-d"],
+            ["UPPER", "lower"],
+            ["llm collab"],
+        ]
+        for scope in canonical:
+            with self.subTest(scope=scope):
+                self.assertIsNotNone(
+                    session_autobridge_lib._repo_target_set(scope),
+                    "fixture must be a scope the canonical validator accepts",
+                )
+                argv = self.command_argv(self.prompt(repo_targets=scope))
+                self.assertEqual(",".join(scope), self.flag_value(argv, "--repo-targets"))
+
+    def test_declared_order_is_preserved_rather_than_set_ordered(self) -> None:
+        """_repo_target_set returns a set; rendering from it would scramble the scope."""
+        scope = ["zzz-last", "aaa-first", "mmm-mid"]
+        argv = self.command_argv(self.prompt(repo_targets=scope))
+        self.assertEqual("zzz-last,aaa-first,mmm-mid", self.flag_value(argv, "--repo-targets"))
 
     def test_several_repo_targets_render_comma_separated_as_deliver_parses_them(self) -> None:
         argv = self.command_argv(self.prompt(repo_targets=["llm-collab", "amiga"]))
@@ -6143,31 +6168,46 @@ class ResumePromptNamesTheReplyChannelTest(unittest.TestCase):
                 self.assertIn("NOT", prompt)
                 self.assertNotIn("--repo-targets", self.command_argv(prompt))
 
-    def test_a_malformed_scope_token_is_dropped_rather_than_emitted(self) -> None:
-        """A token with whitespace would split into two argv entries and corrupt the flag."""
-        prompt = self.prompt(repo_targets=["llm collab"])
+    def test_a_scope_the_router_rejects_yields_no_runnable_command(self) -> None:
+        """Rejection is delegated, not duplicated: whatever the router refuses, so does this."""
+        for scope in ([""], ["llm-collab", ""], ["dup", "dup"], [" pad "], ["llm-collab", 7]):
+            with self.subTest(scope=scope):
+                self.assertIsNone(
+                    session_autobridge_lib._repo_target_set(scope),
+                    "fixture must be a scope the canonical validator rejects",
+                )
+                prompt = self.prompt(repo_targets=scope)
+                self.assertIn("declares no usable repo scope", prompt)
+                self.assertNotIn("--repo-targets", self.command_argv(prompt))
+
+    def test_a_comma_in_a_token_cannot_round_trip_so_no_command_is_offered(self) -> None:
+        """The one constraint this call site owns, and it is about the CLI encoding.
+
+        deliver.py splits --repo-targets on commas, so `a,b` would come back as two
+        scopes and silently WIDEN what the reply claims. The router accepts it because
+        commas are fine in a repo id; only this encoding cannot carry it.
+        """
+        scope = ["llm-collab", "a,b"]
+        self.assertIsNotNone(session_autobridge_lib._repo_target_set(scope))
+        prompt = self.prompt(repo_targets=scope)
         self.assertIn("declares no usable repo scope", prompt)
         self.assertNotIn("--repo-targets", self.command_argv(prompt))
 
-    HOSTILE_TOKENS = [
-        "safe;echo",
-        "safe&&echo",
-        "safe|echo",
-        "$(echo)",
-        "`echo`",
-        "safe\nrm",
-        "safe target",
-        "--body-file",
-        "",
-    ]
+    def test_a_hostile_token_the_router_accepts_is_carried_quoted_not_dropped(self) -> None:
+        """Shell safety comes from quoting, so a routable scope is never discarded.
 
-    def test_a_hostile_scope_token_rejects_the_runnable_command_path(self) -> None:
-        """Not filtered out quietly: a scope we cannot trust yields no scoped command."""
-        for token in self.HOSTILE_TOKENS:
+        `safe;echo` is structurally valid to `_repo_target_set`. Dropping it would make
+        the reply unroutable to defend against a shell problem that quoting already
+        solves -- the mistake the local regex made with `pixexid/amiga`.
+        """
+        for token in ("safe;echo", "safe&&echo", "safe|echo", "$(echo)", "`echo`"):
             with self.subTest(token=token):
-                prompt = self.prompt(repo_targets=["llm-collab", token])
-                self.assertIn("declares no usable repo scope", prompt)
-                self.assertNotIn("--repo-targets", self.command_argv(prompt))
+                scope = ["llm-collab", token]
+                self.assertIsNotNone(session_autobridge_lib._repo_target_set(scope))
+                argv = self.command_argv(self.prompt(repo_targets=scope))
+                self.assertEqual(
+                    f"llm-collab,{token}", self.flag_value(argv, "--repo-targets")
+                )
 
     def test_a_hostile_generated_line_runs_as_exactly_one_command_in_a_real_shell(self) -> None:
         """The proof shlex.split cannot give: run it, in a shell, and count the commands.
@@ -6189,7 +6229,10 @@ class ResumePromptNamesTheReplyChannelTest(unittest.TestCase):
                 self.assertFalse(breach.exists(), f"injected command executed for {token!r}")
                 runs = json.loads(argv_log.read_text())
                 self.assertEqual(1, len(runs), f"{len(runs)} commands ran for {token!r}")
-                self.assertNotIn("--repo-targets", runs[0])
+                # Carried, quoted, and intact -- not sacrificed to buy shell safety.
+                self.assertEqual(
+                    f"llm-collab,{token}", runs[0][runs[0].index("--repo-targets") + 1]
+                )
 
     def test_every_dynamic_value_is_quoted_not_just_the_validated_scope(self) -> None:
         """repo_targets is validated; chat_id, project_id and the agent ids are not.

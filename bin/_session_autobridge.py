@@ -1188,9 +1188,6 @@ def build_runtime_payload(session: dict, message: dict) -> dict[str, Any]:
     }
 
 
-REPO_TARGET_TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
-
-
 def _reply_command_lines(session: dict, fm: dict) -> list[str]:
     """The mailbox reply instruction, as a command a shell can safely run.
 
@@ -1199,22 +1196,27 @@ def _reply_command_lines(session: dict, fm: dict) -> list[str]:
     interpolated. A packet declaring repo_targets ["llm-collab", "safe;echo"] used to
     emit `--repo-targets llm-collab,safe;echo`, and the `;` is a control operator: the
     shell ran `echo` as a second command. shlex.split cannot see that -- it is a
-    tokenizer, not a shell -- so the earlier metacharacter check passed while the
+    tokenizer, not a shell -- so an earlier metacharacter check passed while the
     injection was live.
 
-    Two independent defences, because either alone has failed here already:
-    quoting, and rejecting the whole runnable-command path when any scope token is not
-    a plain repo id. Malformed tokens are NOT filtered out silently; a packet whose
-    scope cannot be trusted does not get a command claiming to carry its scope.
+    Shell safety is shlex.join's job alone. Structural validity is `_repo_target_set`'s,
+    the same predicate the router applies -- NOT a grammar re-derived here. A local
+    regex forbidding `/` rejected `pixexid/amiga`, a scope the router accepts and
+    durable packets already carry, so a perfectly routable reply was declared unusable
+    and lost its scope. Any narrower repo-id grammar belongs in that one shared
+    contract, not at this call site.
     """
-    # Read the RAW value, not _frontmatter_strings: that helper drops falsy entries, so
-    # repo_targets ["llm-collab", ""] would arrive here as a clean one-element scope and
-    # the emitted command would claim a narrower scope than the packet declared -- the
-    # silent filtering this path must not do.
     raw = fm.get("repo_targets")
-    declared = list(raw) if isinstance(raw, list) else ([raw] if raw is not None else [])
-    usable = bool(declared) and all(
-        isinstance(token, str) and REPO_TARGET_TOKEN_RE.match(token) for token in declared
+    declared = list(raw) if isinstance(raw, list) else []
+    # _repo_target_set is the routing authority: it rejects non-lists, empties, blank or
+    # untrimmed entries, non-strings and duplicates. Order is not its concern, so the
+    # rendering below uses `declared`, not the set it returns.
+    # Short-circuits deliberately: the comma check below assumes strings, and only the
+    # router's verdict establishes that. The one constraint this call site owns is about
+    # the CLI ENCODING, not repo ids -- deliver.py splits --repo-targets on commas, so a
+    # token containing one cannot round-trip and would silently widen the scope.
+    usable = _repo_target_set(raw) is not None and all(
+        "," not in token for token in declared
     )
     argv = [
         # ABSOLUTE, resolved from the llm-collab workspace root. A relative bin/deliver.py
