@@ -419,8 +419,13 @@ Proceed only when all of these are true:
 - the independent exact-head review found no actionable issues
 - required checks are green on the latest head
 - the PR is mergeable and `mergeStateStatus` is clean
+- **every** unresolved actionable thread is resolved or explicitly dispositioned
+  in writing, whatever head it was initiated on. The origin rule above decides
+  which findings are *about* this head; it does not narrow this checklist. A
+  prior-head thread nobody answered is unadjudicated, not closed — reading
+  "for the current head" here is the silent drop this section already forbids
 - full PR comments, review bodies, review threads, and inline comments contain
-  no unresolved actionable feedback for the current head
+  no unresolved actionable feedback bound to the current head
 - the project/operator has authorized auto-merge for this PR or queue class
 
 Read current review bodies and reactions directly. Do not infer the current

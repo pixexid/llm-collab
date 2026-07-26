@@ -598,14 +598,25 @@ class ReviewLoopCapContractTest(unittest.TestCase):
         comment = (thread.get("comments") or {}).get("nodes", [{}])[0]
         return (comment.get("commit") or {}).get("oid")
 
+    @staticmethod
+    def is_open(thread):
+        """EITHER closure mechanism counts.
+
+        The contract closes a thread on resolution OR an explicit written disposition.
+        A classifier reading only `isResolved` reports every replied-to-but-unresolved
+        thread as permanently pending, which makes the gate unsatisfiable on any PR
+        whose findings were answered in prose rather than by clicking resolve.
+        """
+        return not thread["isResolved"] and not thread.get("hasWrittenDisposition", False)
+
     def classify(self, threads, head_oid):
         return {
             "exact_head_findings": len([
                 t for t in threads
-                if not t["isResolved"] and self.originating_commit_oid(t) == head_oid
+                if self.is_open(t) and self.originating_commit_oid(t) == head_oid
             ]),
             "unresolved_needing_adjudication": len([
-                t for t in threads if not t["isResolved"]
+                t for t in threads if self.is_open(t)
             ]),
         }
 
@@ -632,7 +643,7 @@ class ReviewLoopCapContractTest(unittest.TestCase):
 
         naive = [
             t for t in threads
-            if not t["isResolved"] and self.naive_comment_commit_oid(t) == head
+            if self.is_open(t) and self.naive_comment_commit_oid(t) == head
         ]
         self.assertEqual(expected["naive_comment_commit_count"], len(naive))
         self.assertTrue(naive, "fixture must contain the crossed shape")
@@ -657,12 +668,43 @@ class ReviewLoopCapContractTest(unittest.TestCase):
             expected["unresolved_needing_adjudication"],
             actual["unresolved_needing_adjudication"],
         )
-        dropped = [t for t in threads if not t["isResolved"] and t["isOutdated"]]
+        dropped = [t for t in threads if self.is_open(t) and t["isOutdated"]]
         self.assertEqual(expected["unresolved_outdated"], len(dropped))
         self.assertTrue(dropped, "fixture must contain an unresolved OUTDATED thread")
         # Those unadjudicated threads are exactly what the retired rule discarded.
         self.assertLess(
             actual["exact_head_findings"], actual["unresolved_needing_adjudication"]
+        )
+
+    def test_a_written_disposition_closes_a_thread_github_still_calls_unresolved(self):
+        """Both closure mechanisms, or the gate cannot be satisfied.
+
+        #317's twelve prior-head threads were closed by a written adjudication, not by
+        the resolve button. A classifier keyed only on `isResolved` would hold that PR
+        open forever while the contract says it is adjudicated.
+        """
+        fixture = self.load_threads()
+        threads = fixture["threads"]
+        expected = fixture["expected"]
+
+        dispositioned = [
+            t for t in threads
+            if not t["isResolved"] and t.get("hasWrittenDisposition")
+        ]
+        self.assertEqual(expected["closed_by_written_disposition"], len(dispositioned))
+        self.assertTrue(dispositioned, "fixture must carry a dispositioned-but-unresolved thread")
+        for thread in dispositioned:
+            self.assertFalse(self.is_open(thread))
+
+        by_resolved_only = len([t for t in threads if not t["isResolved"]])
+        actual = self.classify(threads, fixture["head_oid"])
+        self.assertEqual(
+            expected["unresolved_needing_adjudication"],
+            actual["unresolved_needing_adjudication"],
+        )
+        self.assertLess(
+            actual["unresolved_needing_adjudication"], by_resolved_only,
+            "reading isResolved alone must give a different, larger answer",
         )
 
     def test_a_thread_from_an_older_review_is_not_an_exact_head_finding(self):
@@ -694,6 +736,48 @@ class ReviewLoopCapContractTest(unittest.TestCase):
         self.assertEqual(3, actual["unresolved_needing_adjudication"])
         self.assertEqual("old111", self.originating_commit_oid(threads[0]))
         self.assertEqual("head999", self.originating_commit_oid(threads[3]))
+
+    def test_the_merge_checklist_does_not_inherit_the_origin_rule_narrowing(self):
+        """The hole the origin rule opened in the checklist below it.
+
+        Binding findings to the initiating commit answers "is this about this head".
+        The final checklist asked only for no unresolved feedback "for the current
+        head", so once the origin rule narrowed that phrase, a worker could satisfy the
+        checklist with prior-head threads nobody had answered -- recreating the silent
+        drop the same section forbids.
+        """
+        section = contract_section(
+            WORKFLOW_DOC.read_text(encoding="utf-8"),
+            "Proceed only when all of these are true:",
+            "Read current review bodies and reactions directly.",
+        )
+        for phrase in (
+            "**every** unresolved actionable thread is resolved or explicitly "
+            "dispositioned in writing, whatever head it was initiated on",
+            "it does not narrow this checklist",
+            "A prior-head thread nobody answered is unadjudicated, not closed",
+        ):
+            self.assertIn(phrase, section)
+
+    def test_the_compact_handoff_requires_a_new_request_after_a_fix_push(self):
+        """With automatic review off, nothing replaces an invalidated signal.
+
+        The compact handoff still told a worker to evaluate the amended head's
+        "automatic artifacts". A fix push invalidates every prior-head signal and
+        produces no replacement on its own, so that instruction waits forever.
+        """
+        section = contract_section(
+            HANDOFF_DOC.read_text(encoding="utf-8"),
+            "If GitHub Codex comments on the PR",
+            "Do not substitute a resolved older thread",
+        )
+        for phrase in (
+            "issue a new exact-head request for",
+            "Automatic review is off, so nothing arrives unrequested",
+            "waits forever",
+        ):
+            self.assertIn(phrase, section)
+        self.assertNotIn("automatic artifacts from scratch", section)
 
     def test_the_doc_names_the_authoritative_field_and_rejects_the_mutable_one(self):
         text = WORKFLOW_DOC.read_text(encoding="utf-8")

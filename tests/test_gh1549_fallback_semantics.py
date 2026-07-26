@@ -506,6 +506,12 @@ class Gh1549FallbackFixturesTest(unittest.TestCase):
     DISPOSITION_BY_TIER_AND_REQUEST = {
         ("A", False): "gate_violation_request_required",
         ("A", True): "escalate_stuck_review",
+        # A Tier B review is discretionary to REQUEST; once requested it is pending
+        # exactly like a Tier A one, and requested-review precedence keeps it pending
+        # until a terminal signal or a disposition. Omitting this pair let the fixtures
+        # imply that anything below Tier A has nothing to wait for.
+        ("B", True): "escalate_stuck_review",
+        ("B", False): "no_review_pending",
         ("C", False): "no_review_pending",
     }
 
@@ -534,6 +540,35 @@ class Gh1549FallbackFixturesTest(unittest.TestCase):
                 self.assertIn("A", tiers)
                 self.assertTrue(
                     tiers - {"A"}, f"{variant} models Tier A only: {sorted(tiers)}"
+                )
+
+    def test_a_requested_tier_b_review_is_pending_like_any_other(self) -> None:
+        """Tier B is discretionary to REQUEST, not discretionary once requested.
+
+        The matrix previously held only ("A", *) and ("C", False), so every non-A
+        fixture said nothing-pending and the suite could not distinguish "no review was
+        owed" from "a review was asked for and never came".
+        """
+        self.assertEqual(
+            "escalate_stuck_review", self.DISPOSITION_BY_TIER_AND_REQUEST[("B", True)]
+        )
+        self.assertEqual(
+            "no_review_pending", self.DISPOSITION_BY_TIER_AND_REQUEST[("B", False)]
+        )
+        requested = [
+            case
+            for variant in self.VARIANT_FILES
+            for case in self._project_cases(variant)
+            if case["tier"] == "B" and case["pr_state"]["explicit_review_request"]
+        ]
+        self.assertTrue(
+            requested, "no fixture exercises a voluntarily requested Tier B review"
+        )
+        for case in requested:
+            with self.subTest(project_id=case["project_id"]):
+                self.assertTrue(case["expected"]["review_is_pending"])
+                self.assertEqual(
+                    "escalate_stuck_review", case["expected"]["disposition"]
                 )
 
     def test_no_case_is_terminal_and_only_a_pending_review_can_be_stuck(self) -> None:

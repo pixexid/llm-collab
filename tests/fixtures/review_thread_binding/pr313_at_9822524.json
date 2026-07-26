@@ -1,6 +1,6 @@
 {
   "source": "llm-collab#313 reviewThreads, captured 2026-07-26 at head 9822524b8d",
-  "why": "comments.nodes[0].commit.oid is MUTABLE -- for a non-outdated thread GitHub advances it to the current head. Twelve threads here report it as the current head while pullRequestReview.commit.oid and originalCommit.oid stay at the review that raised them. Selecting the obvious comment field therefore reproduces the exact misclassification the binding rule exists to prevent, and a fixture storing a pre-computed origin cannot detect that choice at all.",
+  "why": "comments.nodes[0].commit.oid is MUTABLE -- for a non-outdated thread GitHub advances it to the current head. Twelve threads here report it as the current head while pullRequestReview.commit.oid and originalCommit.oid stay at the review that raised them. Selecting the obvious comment field therefore reproduces the exact misclassification the binding rule exists to prevent, and a fixture storing a pre-computed origin cannot detect that choice at all. Threads also carry hasWrittenDisposition, because the contract closes a thread on EITHER resolution or an explicit written disposition; a classifier reading only isResolved reports every replied-to thread as permanently pending.",
   "head_oid": "9822524b8d27c782efd5e49aea535f801f450cfe",
   "threads": [
     {
@@ -22,7 +22,8 @@
             }
           }
         ]
-      }
+      },
+      "hasWrittenDisposition": false
     },
     {
       "isResolved": false,
@@ -43,7 +44,8 @@
             }
           }
         ]
-      }
+      },
+      "hasWrittenDisposition": false
     },
     {
       "isResolved": false,
@@ -64,7 +66,8 @@
             }
           }
         ]
-      }
+      },
+      "hasWrittenDisposition": true
     },
     {
       "isResolved": false,
@@ -85,7 +88,8 @@
             }
           }
         ]
-      }
+      },
+      "hasWrittenDisposition": false
     },
     {
       "isResolved": false,
@@ -106,7 +110,8 @@
             }
           }
         ]
-      }
+      },
+      "hasWrittenDisposition": false
     },
     {
       "isResolved": false,
@@ -127,7 +132,8 @@
             }
           }
         ]
-      }
+      },
+      "hasWrittenDisposition": false
     },
     {
       "isResolved": false,
@@ -148,7 +154,8 @@
             }
           }
         ]
-      }
+      },
+      "hasWrittenDisposition": false
     },
     {
       "isResolved": false,
@@ -169,7 +176,8 @@
             }
           }
         ]
-      }
+      },
+      "hasWrittenDisposition": true
     },
     {
       "isResolved": false,
@@ -190,7 +198,8 @@
             }
           }
         ]
-      }
+      },
+      "hasWrittenDisposition": false
     },
     {
       "isResolved": false,
@@ -211,7 +220,8 @@
             }
           }
         ]
-      }
+      },
+      "hasWrittenDisposition": false
     },
     {
       "isResolved": false,
@@ -232,7 +242,8 @@
             }
           }
         ]
-      }
+      },
+      "hasWrittenDisposition": false
     },
     {
       "isResolved": false,
@@ -253,7 +264,8 @@
             }
           }
         ]
-      }
+      },
+      "hasWrittenDisposition": false
     },
     {
       "isResolved": false,
@@ -274,7 +286,8 @@
             }
           }
         ]
-      }
+      },
+      "hasWrittenDisposition": false
     },
     {
       "isResolved": false,
@@ -295,7 +308,8 @@
             }
           }
         ]
-      }
+      },
+      "hasWrittenDisposition": false
     },
     {
       "isResolved": false,
@@ -316,7 +330,8 @@
             }
           }
         ]
-      }
+      },
+      "hasWrittenDisposition": false
     },
     {
       "isResolved": false,
@@ -337,7 +352,8 @@
             }
           }
         ]
-      }
+      },
+      "hasWrittenDisposition": false
     },
     {
       "isResolved": false,
@@ -358,13 +374,15 @@
             }
           }
         ]
-      }
+      },
+      "hasWrittenDisposition": false
     }
   ],
   "expected": {
     "exact_head_findings": 0,
-    "unresolved_needing_adjudication": 17,
+    "unresolved_needing_adjudication": 15,
     "naive_comment_commit_count": 12,
-    "unresolved_outdated": 5
+    "unresolved_outdated": 3,
+    "closed_by_written_disposition": 2
   }
 }

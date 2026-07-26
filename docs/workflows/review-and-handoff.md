@@ -257,8 +257,11 @@ Tier B/C there is nothing to wait for. This compact handoff rule must not define
 a competing timer or disposition rule.
 
 If GitHub Codex comments on the PR, fix the pointed issue, rerun the manual
-branch-diff review and required checks, then evaluate the new exact head and its
-automatic artifacts from scratch. Do not substitute a resolved older thread or
+branch-diff review and required checks, then **issue a new exact-head request for
+the amended head**. Automatic review is off, so nothing arrives unrequested: the
+fix push invalidates every prior-head signal and produces no replacement on its
+own. Waiting on the amended head's "automatic artifacts" waits forever. Evaluate
+that head from scratch once the requested signal arrives. Do not substitute a resolved older thread or
 stale inline review-thread object for current-head evidence. Delete the
 heartbeat before post-merge cleanup.
 

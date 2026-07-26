@@ -93,6 +93,29 @@
         "disposition": "no_review_pending",
         "merge_eligible_on_silence": false
       }
+    },
+    {
+      "project_id": "nuvyr",
+      "tier": "B",
+      "pr_state": {
+        "head_oid": "nuvyr-abd200",
+        "pr_open": true,
+        "draft_ready": true,
+        "explicit_review_request": true
+      },
+      "artifacts_for_current_head": [
+        {
+          "type": "reaction",
+          "reaction": "eyes",
+          "oid": "nuvyr-abd200"
+        }
+      ],
+      "expected": {
+        "terminal_signal_present": false,
+        "review_is_pending": true,
+        "disposition": "escalate_stuck_review",
+        "merge_eligible_on_silence": false
+      }
     }
   ]
 }

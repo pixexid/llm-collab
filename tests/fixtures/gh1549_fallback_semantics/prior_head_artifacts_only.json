@@ -113,6 +113,34 @@
         "disposition": "no_review_pending",
         "merge_eligible_on_silence": false
       }
+    },
+    {
+      "project_id": "nuvyr",
+      "tier": "B",
+      "pr_state": {
+        "head_oid": "nuvyr-abd301",
+        "pr_open": true,
+        "draft_ready": true,
+        "explicit_review_request": true
+      },
+      "stale_artifacts_for_prior_head": [
+        {
+          "type": "codex_review_body",
+          "verdict": "clean",
+          "oid": "nuvyr-abd300"
+        },
+        {
+          "type": "reaction",
+          "reaction": "+1",
+          "oid": "nuvyr-abd300"
+        }
+      ],
+      "expected": {
+        "terminal_signal_present": false,
+        "review_is_pending": true,
+        "disposition": "escalate_stuck_review",
+        "merge_eligible_on_silence": false
+      }
     }
   ]
 }
