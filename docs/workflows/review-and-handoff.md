@@ -218,8 +218,10 @@ artifacts only; it does not waive the handling below:
 
 - A head-named clean connector verdict is not merge-immediate. Hold an
   approximately five-minute mandatory post-clean settle, then perform a full
-  re-read of reviews, review threads, and reactions because the connector can
-  emit multiple reviews for one head. When a re-review was explicitly
+  re-read of **top-level PR comments,** reviews, review threads, and reactions because
+  the connector can emit multiple reviews for one head — and because a same-head
+  re-review request posted during the settle lives in a comment, supersedes the verdict
+  or reaction being settled, and is invisible to a re-read that skips comments. When a re-review was explicitly
   requested, that re-review supersedes older same-head clean artifacts **and older
   same-head reactions**, not the verdict path alone; only its verdict can satisfy
   that path, and it receives the same settle and full re-read. A reaction counts

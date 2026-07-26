@@ -258,7 +258,10 @@ policy:
   generated command unrunnable on macOS). `reviewThreads`, not the body, is the
   finding list
 - **bind an exact-head finding through its initiating review commit, and adjudicate
-  every unresolved thread regardless of `isOutdated`.** Two distinct questions:
+  every thread, resolved or not, regardless of `isOutdated`.** A worker who reads only
+  this heading is the one who clicks Resolve, records nothing, and then omits the thread
+  from the gate — so the heading states the rule rather than the narrower version of it.
+  Two distinct questions:
   - *is this finding about the current head?* Only if the thread's **initiating
     review commit OID** equals the current head OID. Read it from
     `comments.nodes[0].pullRequestReview.commit.oid`, falling back to
@@ -296,8 +299,10 @@ policy:
   field matters as much as the rule
 - a head-named clean connector verdict is not merge-immediate. Hold an
   approximately five-minute post-clean settle, then perform a full re-read of
-  reviews, review threads, and reactions before merge because the connector
-  can emit multiple reviews for the same head
+  **top-level PR comments,** reviews, review threads, and reactions before merge
+  because the connector can emit multiple reviews for the same head — and because a
+  same-head re-review request posted during the settle lives in a comment and
+  supersedes the artifact being settled
 - **a reaction counts only on the latest, unedited request artifact.** GitHub keeps
   reactions across an edit, so a request comment edited to swap an old SHA for the
   current one still carries the `+1` the connector left for the *old* head, and all
@@ -485,6 +490,13 @@ Proceed only when all of these are true:
 - full PR comments, review bodies, review threads, and inline comments contain
   no unresolved actionable feedback, whatever head it was raised on — prose
   feedback is dropped by a "current head" reading exactly as a thread is
+- **an actionable finding that arrived with no thread carries a written outcome too.**
+  A review body or a top-level comment has no node ID to link, so the
+  thread-identification rule cannot reach it — and "no longer unresolved" is not a
+  standard prose can meet, because nobody resolves a comment. Quote or link the comment
+  and state the outcome, in the same place the thread dispositions go. Without this a
+  finding is discharged by whoever pushes next, which is the rule this section opens by
+  rejecting
 - the project/operator has authorized auto-merge for this PR or queue class
 
 Read current review bodies and reactions directly. Do not infer the current

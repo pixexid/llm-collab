@@ -9,7 +9,8 @@
         "head_oid": "amiga-abc301",
         "pr_open": true,
         "draft_ready": true,
-        "explicit_review_request": true
+        "explicit_review_request": true,
+        "review_request_head_oid": "amiga-abc301"
       },
       "stale_artifacts_for_prior_head": [
         {
@@ -65,7 +66,8 @@
         "head_oid": "nuvyr-abc301",
         "pr_open": true,
         "draft_ready": true,
-        "explicit_review_request": true
+        "explicit_review_request": true,
+        "review_request_head_oid": "nuvyr-abc301"
       },
       "stale_artifacts_for_prior_head": [
         {
@@ -121,7 +123,8 @@
         "head_oid": "nuvyr-abd301",
         "pr_open": true,
         "draft_ready": true,
-        "explicit_review_request": true
+        "explicit_review_request": true,
+        "review_request_head_oid": "nuvyr-abd301"
       },
       "stale_artifacts_for_prior_head": [
         {

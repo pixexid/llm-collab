@@ -534,7 +534,58 @@ class Gh1549FallbackFixturesTest(unittest.TestCase):
         "initial_expired": "issue_the_single_re_trigger",
         "retrigger_pending": "wait_out_the_re_trigger",
         "retrigger_expired": "escalate_stuck_review",
+        # Escalating does not produce the disposition; it asks for one. The head stays
+        # blocked while that decision is pending, and leaving the flow to end at the
+        # escalate ACTION let a consumer either escalate again on every observation or
+        # treat the escalation itself as terminal and merge.
+        "escalated_awaiting_disposition": "blocked_pending_operator_disposition",
     }
+
+    def test_the_flow_has_a_state_after_escalating(self) -> None:
+        """Escalation is a request for a decision, not the decision.
+
+        A consumer whose last modelled state is the escalate action has nothing to do on
+        the next observation but escalate again -- or, worse, read escalation as the flow's
+        terminal state and proceed.
+        """
+        self.assertEqual(
+            "blocked_pending_operator_disposition",
+            self.REQUEST_PHASES["escalated_awaiting_disposition"],
+        )
+        self.assertNotEqual(
+            self.REQUEST_PHASES["retrigger_expired"],
+            self.REQUEST_PHASES["escalated_awaiting_disposition"],
+            "the action and the state that follows it must be distinguishable",
+        )
+        # And the blocked state is not a merge-eligible one under any tier.
+        self.assertNotIn(
+            "blocked_pending_operator_disposition",
+            set(self.DISPOSITION_BY_TIER_AND_REQUEST.values()),
+            "a tier disposition must never resolve to the pending-decision state",
+        )
+
+    def test_a_fixture_request_is_bound_to_a_head(self) -> None:
+        """An unbound boolean cannot distinguish a stale request from a pending one.
+
+        After a push, a request for the PRIOR head still satisfies
+        `explicit_review_request`, so the fixtures read it as a request for the current
+        head: Tier A could bypass the mandatory new-head request and walk to the waiver,
+        and Tier B/C could be treated as pending on a request that no longer applies.
+        """
+        for variant in self.VARIANT_FILES:
+            for case in self._project_cases(variant):
+                state = case["pr_state"]
+                with self.subTest(variant=variant, project_id=case["project_id"]):
+                    if not state["explicit_review_request"]:
+                        continue
+                    self.assertIn(
+                        "review_request_head_oid", state,
+                        "a request in a fixture must name the head it was issued for",
+                    )
+                    self.assertEqual(
+                        state["head_oid"], state["review_request_head_oid"],
+                        "a request naming another head is stale and is not pending here",
+                    )
 
     def test_a_requested_review_has_phases_not_one_disposition(self) -> None:
         """Escalation is the END of the request-anchored flow, not the whole of it."""

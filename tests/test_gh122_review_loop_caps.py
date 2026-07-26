@@ -559,7 +559,7 @@ class ReviewLoopCapContractTest(unittest.TestCase):
                 sources["canonical_clean_verdict"],
             )
             self.assertIn(
-                "full re-read of reviews, review threads, and reactions",
+                "full re-read of **top-level PR comments,** reviews, review threads, and reactions",
                 sources["canonical_clean_verdict"],
             )
             self.assertIn(
@@ -1041,6 +1041,31 @@ class ReviewLoopCapContractTest(unittest.TestCase):
                 self.assertIn("latest, unedited request artifact", text)
                 self.assertIn("older same-head reactions", text)
 
+    def test_the_rule_heading_covers_resolved_threads(self):
+        """A worker who reads only the bold heading is the one who loses a finding.
+
+        The heading said "every unresolved thread" while the requirement below it said
+        resolved threads owe an outcome too -- so Resolve-with-nothing-recorded was
+        sanctioned by the summary and forbidden by the detail.
+        """
+        text = WORKFLOW_DOC.read_text(encoding="utf-8")
+        self.assertIn("every thread, resolved or not, regardless of `isOutdated`", text)
+        self.assertNotIn("every unresolved thread regardless of `isOutdated`", text)
+
+    def test_a_threadless_finding_still_needs_a_written_outcome(self):
+        """A review body has no node ID, so the thread-linking rule cannot reach it.
+
+        And "no longer unresolved" is not a standard prose can meet, because nobody
+        resolves a comment -- so a finding raised in a body was discharged by whoever
+        pushed next.
+        """
+        text = WORKFLOW_DOC.read_text(encoding="utf-8")
+        self.assertIn(
+            "an actionable finding that arrived with no thread carries a written outcome",
+            text,
+        )
+        self.assertIn("Quote or link the comment", text)
+
     def test_every_summary_states_the_resolved_finding_rule(self):
         """One stale summary is a working instruction path to a lost finding.
 
@@ -1376,7 +1401,7 @@ class ReviewLoopCapContractTest(unittest.TestCase):
                 "approximately five-minute mandatory post-clean settle", handoff
             )
             self.assertIn(
-                "full re-read of reviews, review threads, and reactions", handoff
+                "full re-read of **top-level PR comments,** reviews, review threads, and reactions", handoff
             )
             self.assertIn(
                 "that re-review supersedes older same-head clean artifacts "
