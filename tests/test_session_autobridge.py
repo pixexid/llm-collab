@@ -1348,6 +1348,128 @@ class SessionAutobridgeTest(unittest.TestCase):
         ]
         self.assertEqual([], redispatched, second)
 
+    def run_watcher_against(self, terminal: dict) -> list[dict]:
+        root = self.make_workspace()
+        self.add_agent(root, {"id": "cdx2", "display_name": "CDX2",
+                              "activation": {"type": "cli_session", "watcher_enabled": True}})
+        self.add_message(root, agent_id="cdx2", chat_id="CHAT-OUTCOME", project_id="amiga",
+                         title="Outcome", target_session_id="thread-outcome")
+
+        ready = threading.Event()
+        server = socket.socket(); server.bind(("127.0.0.1", 0)); server.listen(1)
+        port = server.getsockname()[1]
+
+        def read_exact(conn, n):
+            out = b""
+            while len(out) < n:
+                chunk = conn.recv(n - len(out))
+                if not chunk:
+                    raise ConnectionError
+                out += chunk
+            return out
+
+        def read_frame(conn):
+            _, second = read_exact(conn, 2)
+            length = second & 0x7F
+            if length == 126:
+                length = int.from_bytes(read_exact(conn, 2), "big")
+            mask = read_exact(conn, 4) if second & 0x80 else b""
+            payload = read_exact(conn, length) if length else b""
+            if mask:
+                payload = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
+            return json.loads(payload.decode())
+
+        def write(conn, obj):
+            body = json.dumps(obj).encode()
+            head = bytearray([0x81])
+            if len(body) < 126:
+                head.append(len(body))
+            else:
+                head.extend([126, (len(body) >> 8) & 0xFF, len(body) & 0xFF])
+            conn.sendall(bytes(head) + body)
+
+        def serve():
+            ready.set()
+            conn, _ = server.accept()
+            try:
+                req = b""
+                while b"\r\n\r\n" not in req:
+                    req += conn.recv(4096)
+                key = next(l.split(":", 1)[1].strip() for l in req.decode("iso-8859-1").splitlines()
+                           if l.lower().startswith("sec-websocket-key:"))
+                acc = base64.b64encode(hashlib.sha1(
+                    (key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode()).digest()).decode()
+                conn.sendall(("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n"
+                              f"Connection: Upgrade\r\nSec-WebSocket-Accept: {acc}\r\n\r\n").encode())
+                while True:
+                    frame = read_frame(conn)
+                    rid, method = frame.get("id"), frame.get("method")
+                    if not rid:
+                        continue
+                    if method == "model/list":
+                        write(conn, {"jsonrpc": "2.0", "id": rid,
+                                     "result": {"data": [{"id": "m", "isDefault": True}]}})
+                    elif method == "turn/start":
+                        write(conn, {"jsonrpc": "2.0", "id": rid,
+                                     "result": {"turn": {"id": "t-1", "status": "inProgress"}}})
+                        write(conn, {"jsonrpc": "2.0", "method": terminal["method"],
+                                     "params": terminal["params"]})
+                        break
+                    else:
+                        write(conn, {"jsonrpc": "2.0", "id": rid, "result": {}})
+            except (OSError, ConnectionError, StopIteration, ValueError):
+                pass
+            finally:
+                conn.close(); server.close()
+
+        thread = threading.Thread(target=serve, daemon=True)
+        thread.start(); ready.wait(timeout=2)
+
+        self.run_cli(root, "register", "--session", "SESSION-OUTCOME", "--agent", "cdx2",
+                     "--project", "amiga", "--chat", "CHAT-OUTCOME", "--mode", "auto-read",
+                     "--wake-strategy", "runtime_trigger", "--runtime-family", "codex_app",
+                     "--runtime-session-id", "thread-outcome",
+                     "--runtime-session-source", "first_read")
+
+        result = subprocess.run(
+            [sys.executable, str(WATCH_INBOX_SCRIPT), "--me", "cdx2", "--max-polls", "1", "--json"],
+            cwd=root, text=True, capture_output=True, check=True,
+            env={**self.subprocess_env(root),
+                 "LLM_COLLAB_CODEX_APP_SERVER_URL": f"ws://127.0.0.1:{port}"},
+        )
+        thread.join(timeout=5)
+        return [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
+
+    def test_a_failed_turn_is_loudly_reported_and_still_consumed(self) -> None:
+        events = self.run_watcher_against({
+            "method": "turn/failed",
+            "params": {"turn": {"id": "t-1", "status": "failed"},
+                       "error": {"message": "model refused"}},
+        })
+        names = [e["event"] for e in events]
+        self.assertIn("autobridge_turn_failed", names, events)
+        failure = next(e for e in events if e["event"] == "autobridge_turn_failed")
+        self.assertEqual("failed", failure["terminal_status"])
+        self.assertIn("model refused", failure["error"])
+        self.assertIs(False, failure["retried"])
+        # Delivered exactly once: consumed, never retried.
+        self.assertIn("autobridge_consumed", names)
+        consumed = next(e for e in events if e["event"] == "autobridge_consumed")
+        self.assertIs(False, consumed["turn_succeeded"])
+        self.assertEqual("failed", consumed["terminal_status"])
+
+    def test_a_successful_turn_emits_no_failure_event(self) -> None:
+        """Otherwise the failure signal means nothing."""
+        events = self.run_watcher_against({
+            "method": "turn/completed",
+            "params": {"turn": {"id": "t-1", "status": "completed"}},
+        })
+        names = [e["event"] for e in events]
+        self.assertNotIn("autobridge_turn_failed", names, events)
+        self.assertIn("autobridge_consumed", names)
+        consumed = next(e for e in events if e["event"] == "autobridge_consumed")
+        self.assertIs(True, consumed["turn_succeeded"])
+
     def test_codex_app_server_discovery_matches_exact_codex_home(self):
         rows = [
             {
@@ -6237,6 +6359,14 @@ class UnobservedTurnIsNotRedeliveredTest(unittest.TestCase):
                                            "error": {"message": "model refused"}},
                             })
                             break
+                        if after_turn_start == "anonymous_terminal":
+                            # Schema-invalid: no turn.id. Must NOT be taken as ours.
+                            write_frame(conn, {
+                                "jsonrpc": "2.0", "method": "turn/completed",
+                                "params": {"turn": {"status": "completed"}},
+                            })
+                            time.sleep(2.5)
+                            break
                         if after_turn_start == "foreign_terminal":
                             # A DIFFERENT turn ends on the same stream first.
                             write_frame(conn, {
@@ -6391,6 +6521,23 @@ class UnobservedTurnIsNotRedeliveredTest(unittest.TestCase):
         self.assertEqual("failed", result["terminal_status"])
         self.assertIn("model refused", result["stderr"])
         self.assertTrue(result["delivery_observed"])
+
+    def test_a_terminal_event_with_no_turn_id_is_not_ours(self) -> None:
+        """Positive identity is required, not merely the absence of a conflicting one.
+
+        Skipping only a DIFFERENT id let an identity-less `turn/completed` through, and
+        the function reported completed / succeeded / observed for a turn that never
+        ended. The app-server schema requires `turn.id`, so an event without one is
+        malformed rather than an older protocol, and the turn must fall through to
+        delivered-but-unobserved.
+        """
+        port, thread, _ = self.serve(after_turn_start="anonymous_terminal")
+        result = self.trigger(port)
+        thread.join(timeout=6)
+        self.assertEqual("unobserved", result["terminal_status"])
+        self.assertFalse(result["delivery_observed"])
+        self.assertNotIn("turn_succeeded", result)
+        self.assertEqual(0, result["returncode"], "still delivered; never retried")
 
     def test_another_turns_terminal_event_is_not_ours(self) -> None:
         """Turn IDs are correlated, so a neighbour's completion cannot answer for us."""

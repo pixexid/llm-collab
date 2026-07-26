@@ -188,6 +188,28 @@ def dispatch_autobridge(
                     )
                     continue
                 consumed_paths.append(action["message_path"])
+                runtime_result = action.get("runtime_result") or {}
+                # An accepted turn that failed is still delivered, so it is consumed and
+                # never retried -- but branching on returncode alone dropped
+                # turn_succeeded, terminal_status and stderr on the floor, and the packet
+                # was marked read with no failure signal anywhere. At-most-once delivery
+                # must not mean at-most-once VISIBILITY.
+                if runtime_result.get("turn_succeeded") is False:
+                    emit(
+                        {
+                            "ts": utc_now_str(),
+                            "event": "autobridge_turn_failed",
+                            "detail": action["message_path"],
+                            "agent": agent_id,
+                            "session_id": session_id,
+                            "message_path": action["message_path"],
+                            "terminal_status": runtime_result.get("terminal_status"),
+                            "delivery_observed": runtime_result.get("delivery_observed"),
+                            "error": (runtime_result.get("stderr") or "")[:2000],
+                            "retried": False,
+                        },
+                        json_output,
+                    )
                 emit(
                     {
                         "ts": utc_now_str(),
@@ -196,6 +218,8 @@ def dispatch_autobridge(
                         "agent": agent_id,
                         "session_id": session_id,
                         "message_path": action["message_path"],
+                        "terminal_status": runtime_result.get("terminal_status"),
+                        "turn_succeeded": runtime_result.get("turn_succeeded"),
                     },
                     json_output,
                 )

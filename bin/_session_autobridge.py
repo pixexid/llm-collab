@@ -2103,7 +2103,14 @@ def execute_codex_app_server_trigger(session: dict, message: dict, runtime_home:
                     str(event_turn.get("id")) if isinstance(event_turn, dict) and event_turn.get("id")
                     else None
                 )
-                if event_turn_id is not None and event_turn_id != started_turn_id:
+                # Positive match required. Skipping only a DIFFERENT id let an
+                # identity-less terminal through, and the app-server schema requires
+                # TurnCompletedNotification.turn and Turn.id -- so a terminal with no id
+                # is malformed, not an older-protocol compatibility case. Treating it as
+                # ours reported completed/succeeded/observed for a turn that never
+                # ended. Anything unidentifiable is ignored, and if nothing identifiable
+                # arrives the turn ends as delivered-but-unobserved.
+                if event_turn_id != started_turn_id:
                     continue
                 terminal = params if isinstance(params, dict) else {"raw": params}
                 break
