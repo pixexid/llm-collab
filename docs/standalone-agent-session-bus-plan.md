@@ -774,7 +774,7 @@ Live tests use disposable sessions. Expected route quality is:
 | Claude Desktop | native bridge if supported, otherwise AX/pull | capability-specific; no universal claim |
 | pi | native attached | automatic receive when bound |
 | OpenCode | native attached | automatic receive when bound |
-| ZCode | AX/UI attached | best effort |
+| ZCode | native CLI resume when exactly bound, else AX/UI | automatic receive when exactly bound; AX only as attended recovery |
 | Unprofiled host | pull/manual | no false support claim |
 
 ## Security and trust plan

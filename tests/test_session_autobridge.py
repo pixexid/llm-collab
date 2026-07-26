@@ -1202,6 +1202,169 @@ class SessionAutobridgeTest(unittest.TestCase):
         turn_start = next(frame for frame in request_log if frame.get("method") == "turn/start")
         self.assertEqual("gpt-test", turn_start["params"]["model"])
 
+    def test_zcode_exact_registration_reaches_the_worker_end_to_end(self):
+        """The replacement acceptance path for GH-314, proved end to end.
+
+        publish-current refuses zcode_cli, so `register --runtime-session-id` IS the
+        acceptance criterion. The focused ZCode tests stop at derived_runtime_command,
+        which proves the argv and nothing about whether a registered binding actually
+        reaches a process -- including ZCODE_HOME, which only the trigger sets.
+        """
+        root = self.make_workspace()
+        self.add_agent(
+            root,
+            {
+                "id": "zcode",
+                "display_name": "ZCode",
+                "activation": {"type": "human_relay", "watcher_enabled": False},
+            },
+        )
+        message_rel = self.add_message(
+            root,
+            agent_id="zcode",
+            chat_id="CHAT-ZCODE-E2E",
+            project_id="amiga",
+            title="ZCode exact wake",
+            sender_session_id="claude-session-9",
+            target_session_id="sess_11111111-2222-3333-4444-555555555555",
+            sender_agent_id="claude",
+            repo_targets=["app"],
+        )
+
+        zcode_home = root / "zcode-home"
+        (zcode_home / "cli" / "artifacts").mkdir(parents=True, exist_ok=True)
+
+        output_file = root / "zcode-runtime-result.json"
+        runtime_script = root / "zcode-runtime.py"
+        write(
+            runtime_script,
+            "\n".join(
+                [
+                    "#!/usr/bin/env python3",
+                    "import json, os, sys",
+                    "from pathlib import Path",
+                    "payload = {",
+                    "    'argv': sys.argv[1:],",
+                    "    'env': {",
+                    "        'zcode_home': os.environ.get('ZCODE_HOME'),",
+                    "        'runtime_family': os.environ.get('LLM_COLLAB_RUNTIME_FAMILY'),",
+                    "        'runtime_session_id': os.environ.get('LLM_COLLAB_RUNTIME_SESSION_ID'),",
+                    "        'runtime_home': os.environ.get('LLM_COLLAB_RUNTIME_HOME'),",
+                    "    },",
+                    "}",
+                    f"Path({json.dumps(str(output_file))}).write_text(json.dumps(payload, indent=2))",
+                ]
+            ),
+        )
+        runtime_script.chmod(0o755)
+
+        self.run_cli(
+            root,
+            "register",
+            "--session",
+            "SESSION-ZCODE-E2E",
+            "--agent",
+            "zcode",
+            "--project",
+            "amiga",
+            "--chat",
+            "CHAT-ZCODE-E2E",
+            "--mode",
+            "auto-read",
+            "--wake-strategy",
+            "runtime_trigger",
+            "--runtime-family",
+            "zcode_cli",
+            "--runtime-session-id",
+            "sess_11111111-2222-3333-4444-555555555555",
+            "--runtime-session-source",
+            str(zcode_home / "cli" / "artifacts" / "sess_11111111-2222-3333-4444-555555555555"),
+        )
+
+        # The canonical binding the worker self-reported, read back from storage.
+        session_payload = self.run_cli(root, "show", "--session", "SESSION-ZCODE-E2E")
+        self.assertEqual("zcode_cli", session_payload["runtime"]["family"])
+        self.assertEqual(
+            "sess_11111111-2222-3333-4444-555555555555",
+            session_payload["runtime"]["session_id"],
+        )
+        self.assertEqual(str(zcode_home), session_payload["runtime"]["home"])
+
+        dispatch_result = self.run_cli_with_env(
+            root,
+            {"LLM_COLLAB_ZCODE_BIN": f"{sys.executable} {runtime_script}"},
+            "dispatch",
+            "--session",
+            "SESSION-ZCODE-E2E",
+        )
+
+        self.assertEqual(1, len(dispatch_result["actions"]))
+        action = dispatch_result["actions"][0]
+        self.assertEqual(message_rel, action["message_path"])
+        self.assertEqual("runtime_trigger", action["effective_action"])
+        self.assertTrue(action["runtime_result"]["derived_command"])
+        self.assertEqual(0, action["runtime_result"]["returncode"])
+
+        self.assertTrue(output_file.exists(), "the registered binding never reached a process")
+        runtime_payload = json.loads(output_file.read_text())
+        argv = runtime_payload["argv"]
+
+        self.assertEqual(
+            "sess_11111111-2222-3333-4444-555555555555", argv[argv.index("--resume") + 1]
+        )
+        # The one repo target on the activation is the checkout the worker resumes in.
+        # Compared resolved: /tmp is a symlink to /private/tmp on macOS.
+        self.assertEqual(root.resolve(), Path(argv[argv.index("--cwd") + 1]).resolve())
+        self.assertIn("ZCode exact wake", argv[argv.index("--prompt") + 1])
+        self.assertIn("claude-session-9", argv[argv.index("--prompt") + 1])
+
+        # ZCODE_HOME is set by the trigger alone; derived_runtime_command cannot show it.
+        self.assertEqual(str(zcode_home), runtime_payload["env"]["zcode_home"])
+        self.assertEqual("zcode_cli", runtime_payload["env"]["runtime_family"])
+        self.assertEqual(
+            "sess_11111111-2222-3333-4444-555555555555",
+            runtime_payload["env"]["runtime_session_id"],
+        )
+
+    def test_zcode_publish_current_refuses_so_registration_is_the_only_path(self):
+        """The accepted deviation, asserted where the acceptance criterion is claimed.
+
+        If publish-current ever starts succeeding for zcode_cli, the end-to-end test
+        above still passes -- it would just no longer be the only way in.
+        """
+        root = self.make_workspace()
+        self.add_agent(
+            root,
+            {
+                "id": "zcode",
+                "display_name": "ZCode",
+                "activation": {"type": "human_relay", "watcher_enabled": False},
+            },
+        )
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPT_PATH),
+                "publish-current",
+                "--agent",
+                "zcode",
+                "--project",
+                "amiga",
+                "--chat",
+                "CHAT-ZCODE-E2E",
+                "--runtime-family",
+                "zcode_cli",
+                "--json",
+            ],
+            cwd=root,
+            text=True,
+            capture_output=True,
+            env=self.subprocess_env(root),
+        )
+        self.assertNotEqual(0, result.returncode, result.stdout)
+        combined = (result.stdout + result.stderr).lower()
+        self.assertIn("zcode_cli", combined)
+
     def test_codex_app_server_discovery_matches_exact_codex_home(self):
         rows = [
             {
