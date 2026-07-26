@@ -1,4 +1,4 @@
-<!-- CONTRACT_VERSION: 2 -->
+<!-- CONTRACT_VERSION: 3 -->
 # AGENTS.md
 
 ## This file is the source of truth
@@ -19,6 +19,10 @@ addresses the wrong lane once a second project is active.
 
 Read these if your last session predates them.
 
+- **v3 (2026-07-26)** — workers own their own setup: project registration, agent
+  entries, chats, session registration, watchers and environment repair are worker work,
+  not operator work. See "Workers own their own setup" for what genuinely is the
+  operator's.
 - **v2 (2026-07-25)** — Codex review is **manual only**: nothing arrives unless
   requested, and the Tier A/B/C rule below decides when you must ask. `--repo-targets`
   is effectively mandatory on `deliver.py`. New: `docs/workflows/collab-thread-quickstart.md`
@@ -74,6 +78,24 @@ one non-Amiga project, then run the full test suite:
 ```bash
 python3.11 -m unittest discover -s tests
 ```
+
+## Workers own their own setup
+
+If a step is one you can perform and verify yourself, perform it. Do not hand it back
+to the operator and wait.
+
+That includes registering a project, adding an agent, creating a chat, publishing your
+runtime session, starting your watcher, and repairing your own environment. An operator
+naming the work — "implement X with zcode on project Y" — is the whole instruction; the
+setup it implies is yours.
+
+**Genuinely operator-owned**, and worth stopping for: anything irreversible or
+outward-facing (merging, publishing, contacting someone), credentials and account
+settings, accepting a risk, and scope or priority trade-offs. Those need a decision, not
+a pair of hands.
+
+The test is not "is this tedious" or "did they mention it" — it is whether you could do
+it and check that it worked. If you could, it is yours.
 
 ## Adding A Project
 

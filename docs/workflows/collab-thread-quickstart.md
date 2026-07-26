@@ -17,8 +17,16 @@ to and no way for anyone to reach it.
 The sequence below was run end to end against a scratch workspace; the commands are
 copied from that run, not composed from the help text.
 
-**Operator does (once per project):** make sure the project exists in `projects.json`
-and both agents exist in `agents.json`. An unregistered project is refused, not guessed.
+**The operator names the work and the collaborator. Everything below is worker work** —
+including registering the project. Do not hand setup back to the operator; if the
+project or an agent is missing, that is yours to create.
+
+**If the project is not registered yet**, follow
+[`AGENTS.md` → Adding A Project](../../AGENTS.md#adding-a-project) before anything else.
+It covers `projects.json`, the local state directory, repository-level guidance, and —
+for a GitHub-backed project — materializing and validating the issue queue. An
+unregistered project is refused by the tooling rather than guessed at, so this is not
+optional. Missing agents go in `agents.json` the same way.
 
 **Then, once per collaboration:**
 
