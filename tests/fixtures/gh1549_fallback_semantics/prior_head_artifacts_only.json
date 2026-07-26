@@ -1,15 +1,15 @@
 {
   "variant": "prior_head_artifacts_only",
-  "description": "The silence fallback is deleted (2026-07-26). This variant is a classification of a NON-signal: it says what an artifact is not. No clock starts, nothing ages, and no elapsed time makes the head merge-eligible. A prior-head Codex Review body or eyes/+1 reaction is not head-attributable for the current head and is ignored for terminal-signal purposes. The resettable fallback runs its clock on the current head, never on a stale-head artifact. Each project_cases entry is a concrete per-project scenario with its own pr_state, stale artifacts, and expected outcome.",
+  "description": "Every artifact belongs to a prior head. The variant classifies a NON-signal: a stale Codex Review body or eyes/+1 reaction is not head-attributable for the current head, so nothing terminal exists for it and no elapsed time makes the head merge-eligible. Attribution is head identity alone -- a stale artifact cannot become attributable by being recent. What to DO about it follows from the tier and from whether the current head carries its own request. A Tier A head with a request outstanding has a pending review that the stale artifact does not answer, so continued silence is a stuck review to report and escalate. A Tier B/C head with no request has nothing pending. Each project_cases entry pairs one tier with the disposition it actually produces, for amiga and for one non-Amiga project.",
   "project_cases": [
     {
       "project_id": "amiga",
+      "tier": "A",
       "pr_state": {
         "head_oid": "amiga-abc301",
         "pr_open": true,
         "draft_ready": true,
-        "explicit_review_request": false,
-        "review_visibility_exists": true
+        "explicit_review_request": true
       },
       "stale_artifacts_for_prior_head": [
         {
@@ -24,20 +24,48 @@
         }
       ],
       "expected": {
-        "prior_head_verdict_is_head_attributable_for_current_head": false,
-        "prior_head_reaction_is_head_attributable_for_current_head": false,
-        "stuck_state_remains_reported_and_escalated": true,
+        "terminal_signal_present": false,
+        "review_is_pending": true,
+        "disposition": "escalate_stuck_review",
+        "merge_eligible_on_silence": false
+      }
+    },
+    {
+      "project_id": "amiga",
+      "tier": "C",
+      "pr_state": {
+        "head_oid": "amiga-abc311",
+        "pr_open": true,
+        "draft_ready": true,
+        "explicit_review_request": false
+      },
+      "stale_artifacts_for_prior_head": [
+        {
+          "type": "codex_review_body",
+          "verdict": "clean",
+          "oid": "amiga-abc310"
+        },
+        {
+          "type": "reaction",
+          "reaction": "+1",
+          "oid": "amiga-abc310"
+        }
+      ],
+      "expected": {
+        "terminal_signal_present": false,
+        "review_is_pending": false,
+        "disposition": "no_review_pending",
         "merge_eligible_on_silence": false
       }
     },
     {
       "project_id": "nuvyr",
+      "tier": "A",
       "pr_state": {
         "head_oid": "nuvyr-abc301",
         "pr_open": true,
         "draft_ready": true,
-        "explicit_review_request": false,
-        "review_visibility_exists": true
+        "explicit_review_request": true
       },
       "stale_artifacts_for_prior_head": [
         {
@@ -52,9 +80,37 @@
         }
       ],
       "expected": {
-        "prior_head_verdict_is_head_attributable_for_current_head": false,
-        "prior_head_reaction_is_head_attributable_for_current_head": false,
-        "stuck_state_remains_reported_and_escalated": true,
+        "terminal_signal_present": false,
+        "review_is_pending": true,
+        "disposition": "escalate_stuck_review",
+        "merge_eligible_on_silence": false
+      }
+    },
+    {
+      "project_id": "nuvyr",
+      "tier": "C",
+      "pr_state": {
+        "head_oid": "nuvyr-abc311",
+        "pr_open": true,
+        "draft_ready": true,
+        "explicit_review_request": false
+      },
+      "stale_artifacts_for_prior_head": [
+        {
+          "type": "codex_review_body",
+          "verdict": "clean",
+          "oid": "nuvyr-abc310"
+        },
+        {
+          "type": "reaction",
+          "reaction": "+1",
+          "oid": "nuvyr-abc310"
+        }
+      ],
+      "expected": {
+        "terminal_signal_present": false,
+        "review_is_pending": false,
+        "disposition": "no_review_pending",
         "merge_eligible_on_silence": false
       }
     }

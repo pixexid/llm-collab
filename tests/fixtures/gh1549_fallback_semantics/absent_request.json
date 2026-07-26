@@ -1,38 +1,68 @@
 {
   "variant": "absent_request",
-  "description": "The silence fallback is deleted (2026-07-26). This variant is a classification of a NON-signal: it says what an artifact is not. No clock starts, nothing ages, and no elapsed time makes the head merge-eligible. The reviewability clock still starts at the later of the final push and the head becoming reviewable (PR open, draft ready when applicable, review visibility exists). Absence of an explicit request neither pre-expires nor indefinitely extends the resettable fallback. Each project_cases entry is a concrete per-project scenario with its own pr_state and expected outcome.",
+  "description": "No review was requested on this head. The variant classifies a NON-signal: nothing terminal exists, nothing is counting, and no elapsed time makes the head merge-eligible. What to DO about it is not a property of the variant -- it follows from the tier of the diff. Under Tier A a review is mandatory, so a missing request is the author's own gate violation to fix, not a wait to escalate. Under Tier B/C no review was ever owed, so nothing is pending and there is no stuck review at all. Each project_cases entry pairs one tier with the disposition it actually produces, for amiga and for one non-Amiga project.",
   "project_cases": [
     {
       "project_id": "amiga",
+      "tier": "A",
       "pr_state": {
         "head_oid": "amiga-abc100",
         "pr_open": true,
         "draft_ready": true,
-        "explicit_review_request": false,
-        "review_visibility_exists": true
+        "explicit_review_request": false
       },
       "expected": {
-        "fallback_blocked_by_absent_request": false,
-        "absent_request_extends_fallback_indefinitely": false,
-        "commit_age_pre_expires_fallback": false,
-        "stuck_state_remains_reported_and_escalated": true,
+        "terminal_signal_present": false,
+        "review_is_pending": false,
+        "disposition": "gate_violation_request_required",
+        "merge_eligible_on_silence": false
+      }
+    },
+    {
+      "project_id": "amiga",
+      "tier": "C",
+      "pr_state": {
+        "head_oid": "amiga-abc101",
+        "pr_open": true,
+        "draft_ready": true,
+        "explicit_review_request": false
+      },
+      "expected": {
+        "terminal_signal_present": false,
+        "review_is_pending": false,
+        "disposition": "no_review_pending",
         "merge_eligible_on_silence": false
       }
     },
     {
       "project_id": "nuvyr",
+      "tier": "A",
       "pr_state": {
         "head_oid": "nuvyr-abc100",
         "pr_open": true,
         "draft_ready": true,
-        "explicit_review_request": false,
-        "review_visibility_exists": true
+        "explicit_review_request": false
       },
       "expected": {
-        "fallback_blocked_by_absent_request": false,
-        "absent_request_extends_fallback_indefinitely": false,
-        "commit_age_pre_expires_fallback": false,
-        "stuck_state_remains_reported_and_escalated": true,
+        "terminal_signal_present": false,
+        "review_is_pending": false,
+        "disposition": "gate_violation_request_required",
+        "merge_eligible_on_silence": false
+      }
+    },
+    {
+      "project_id": "nuvyr",
+      "tier": "C",
+      "pr_state": {
+        "head_oid": "nuvyr-abc101",
+        "pr_open": true,
+        "draft_ready": true,
+        "explicit_review_request": false
+      },
+      "expected": {
+        "terminal_signal_present": false,
+        "review_is_pending": false,
+        "disposition": "no_review_pending",
         "merge_eligible_on_silence": false
       }
     }

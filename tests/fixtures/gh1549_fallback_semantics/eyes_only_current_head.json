@@ -1,54 +1,96 @@
 {
   "variant": "eyes_only_current_head",
-  "description": "The silence fallback is deleted (2026-07-26). This variant is a classification of a NON-signal: it says what an artifact is not. No clock starts, nothing ages, and no elapsed time makes the head merge-eligible. Once no review is actually pending, eyes does not block the resettable fallback, does not restart or suppress it, and is not itself a terminal signal. Each project_cases entry is a concrete per-project scenario with its own pr_state, artifacts, and expected outcome.",
+  "description": "The only artifact on the current head is an eyes reaction. The variant classifies a NON-signal: eyes is not a verdict, nothing terminal exists, and no elapsed time makes the head merge-eligible. What to DO about it follows from the tier and from whether a review was actually requested. A Tier A head with a request outstanding has a genuinely pending review, so continued silence is a stuck review to report and escalate -- never to merge through. A Tier B/C head with no request has nothing pending, so eyes changes nothing and there is no stuck review. Each project_cases entry pairs one tier with the disposition it actually produces, for amiga and for one non-Amiga project.",
   "project_cases": [
     {
       "project_id": "amiga",
+      "tier": "A",
       "pr_state": {
         "head_oid": "amiga-abc200",
         "pr_open": true,
         "draft_ready": true,
-        "explicit_review_request": false,
-        "review_visibility_exists": true
+        "explicit_review_request": true
       },
       "artifacts_for_current_head": [
         {
           "type": "reaction",
           "reaction": "eyes",
-          "oid": "amiga-abc200",
-          "utc": "2026-07-18T12:05:00Z"
+          "oid": "amiga-abc200"
         }
       ],
       "expected": {
-        "eyes_is_terminal": false,
-        "eyes_blocks_fallback_when_no_review_pending": false,
-        "eyes_restarts_or_suppresses_fallback": false,
-        "stuck_state_remains_reported_and_escalated": true,
+        "terminal_signal_present": false,
+        "review_is_pending": true,
+        "disposition": "escalate_stuck_review",
+        "merge_eligible_on_silence": false
+      }
+    },
+    {
+      "project_id": "amiga",
+      "tier": "C",
+      "pr_state": {
+        "head_oid": "amiga-abc201",
+        "pr_open": true,
+        "draft_ready": true,
+        "explicit_review_request": false
+      },
+      "artifacts_for_current_head": [
+        {
+          "type": "reaction",
+          "reaction": "eyes",
+          "oid": "amiga-abc201"
+        }
+      ],
+      "expected": {
+        "terminal_signal_present": false,
+        "review_is_pending": false,
+        "disposition": "no_review_pending",
         "merge_eligible_on_silence": false
       }
     },
     {
       "project_id": "nuvyr",
+      "tier": "A",
       "pr_state": {
         "head_oid": "nuvyr-abc200",
         "pr_open": true,
         "draft_ready": true,
-        "explicit_review_request": false,
-        "review_visibility_exists": true
+        "explicit_review_request": true
       },
       "artifacts_for_current_head": [
         {
           "type": "reaction",
           "reaction": "eyes",
-          "oid": "nuvyr-abc200",
-          "utc": "2026-07-18T14:03:00Z"
+          "oid": "nuvyr-abc200"
         }
       ],
       "expected": {
-        "eyes_is_terminal": false,
-        "eyes_blocks_fallback_when_no_review_pending": false,
-        "eyes_restarts_or_suppresses_fallback": false,
-        "stuck_state_remains_reported_and_escalated": true,
+        "terminal_signal_present": false,
+        "review_is_pending": true,
+        "disposition": "escalate_stuck_review",
+        "merge_eligible_on_silence": false
+      }
+    },
+    {
+      "project_id": "nuvyr",
+      "tier": "C",
+      "pr_state": {
+        "head_oid": "nuvyr-abc201",
+        "pr_open": true,
+        "draft_ready": true,
+        "explicit_review_request": false
+      },
+      "artifacts_for_current_head": [
+        {
+          "type": "reaction",
+          "reaction": "eyes",
+          "oid": "nuvyr-abc201"
+        }
+      ],
+      "expected": {
+        "terminal_signal_present": false,
+        "review_is_pending": false,
+        "disposition": "no_review_pending",
         "merge_eligible_on_silence": false
       }
     }

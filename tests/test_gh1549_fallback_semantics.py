@@ -7,14 +7,17 @@ fixed in the llm-collab repo:
             outside the canonical absolute executable under bin/. The
             prose-noun exemption (`axsend confirm`, `--dry-run`) is recognized
             by the absence of a following shell argument list.
-  Class D — silent-fallback ageing must explicitly name and handle the three
-            no-terminal-artifact variants: absent explicit review request,
-            eyes-only current-head artifact, and prior-head-only artifacts
-            after push invalidation.
+  Class D — the three no-terminal-artifact states must be named and handled:
+            absent explicit review request, eyes-only current-head artifact,
+            and prior-head-only artifacts after push invalidation. The silent
+            ageing GH-1549 originally specified for them was deleted on
+            2026-07-26; the three survive as a classification of non-signals,
+            and nothing merges by elapsing.
 
-The fallback-semantics fixtures under tests/fixtures/gh1549_fallback_semantics/
-encode the expected disposition for each variant so a future drift in either
-the docs or a runtime implementation that consumes these scenarios is caught.
+The fixtures under tests/fixtures/gh1549_fallback_semantics/ encode the expected
+disposition for each state so a future drift in either the docs or a runtime
+implementation that consumes these scenarios is caught. Disposition is a function
+of the diff's tier and whether a review is outstanding -- not of the state alone.
 """
 
 from __future__ import annotations
@@ -344,15 +347,16 @@ class Gh1549ClassDFallbackSemanticsTest(unittest.TestCase):
 
 
 class Gh1549FallbackFixturesTest(unittest.TestCase):
-    """Per-project fallback-semantics fixtures execute the variant assertions.
+    """Per-project non-signal fixtures execute the variant assertions.
 
-    Each fixture carries a project_cases array with concrete paired cases for
+    Each fixture carries a project_cases array with concrete cases for
     project_id="amiga" and project_id="nuvyr" (the representative non-Amiga
     project used throughout the existing test suite). llm-collab AGENTS.md
     requires focused coverage for Amiga plus at least one non-Amiga project
-    for shared contracts. subTest iterates each project case through the
-    variant-specific assertions so the shared fallback contract is executed,
-    not just declared as metadata.
+    for shared contracts. Every case also names a tier, because under the
+    manual-only gate the disposition of a non-signal is decided by the tier
+    and by whether a review is outstanding -- not by which non-signal it is.
+    subTest iterates each case so the contract is executed, not just declared.
     """
 
     VARIANT_FILES = {
@@ -464,61 +468,108 @@ class Gh1549FallbackFixturesTest(unittest.TestCase):
                         False, case["expected"]["merge_eligible_on_silence"]
                     )
 
-    def test_absent_request_variant_per_project(self) -> None:
-        # Absent explicit review request: the reviewability clock still starts
-        # at the later of the final push and the head becoming reviewable;
-        # absence neither pre-expires nor indefinitely extends the fallback;
-        # a stuck state remains reported/escalated.
-        for case in self._project_cases("absent_request"):
-            pid = case["project_id"]
-            pr = case["pr_state"]
-            expected = case["expected"]
-            with self.subTest(project_id=pid, variant="absent_request"):
-                self.assertFalse(expected["fallback_blocked_by_absent_request"])
-                self.assertFalse(
-                    expected["absent_request_extends_fallback_indefinitely"]
-                )
-                self.assertFalse(expected["commit_age_pre_expires_fallback"])
-                self.assertTrue(expected["stuck_state_remains_reported_and_escalated"])
+    def test_no_fixture_mentions_the_deleted_fallback(self) -> None:
+        """The mechanism is gone, so its vocabulary must be too.
 
-    def test_eyes_only_variant_per_project(self) -> None:
-        # Eyes-only current-head artifact: non-terminal, non-blocking once no
-        # review is pending, does not restart or suppress the fallback.
-        for case in self._project_cases("eyes_only_current_head"):
-            pid = case["project_id"]
-            expected = case["expected"]
-            with self.subTest(project_id=pid, variant="eyes_only_current_head"):
-                self.assertFalse(expected["eyes_is_terminal"])
-                self.assertFalse(
-                    expected["eyes_blocks_fallback_when_no_review_pending"]
-                )
-                self.assertFalse(expected["eyes_restarts_or_suppresses_fallback"])
-                self.assertTrue(expected["stuck_state_remains_reported_and_escalated"])
+        Added 2026-07-26 (GH-313 re-review). Deleting the clock while keeping keys like
+        `eyes_blocks_fallback_when_no_review_pending` left the fixtures asserting how a
+        non-existent mechanism behaves -- assertions no implementation can ever fail, on
+        a thing no implementation can ever have. One description even re-stated the
+        "later of the final push and the head becoming reviewable" anchor that
+        test_the_clock_anchor_is_gone_with_the_clock forbids in the document.
+        """
+        # The one sanctioned use is the denial itself. It is subtracted from the text
+        # rather than exempting the LINE that contains it: JSON puts a whole description
+        # on one line, so a line-level exemption let any forbidden word ride along beside
+        # the denial -- a mutation restoring the "reviewability clock starts at the later
+        # of the final push" anchor passed straight through the first version of this
+        # guard.
+        sanctioned = re.compile(r"no elapsed time makes the head merge-eligible", re.I)
+        forbidden = re.compile(r"fallback|clock|elapsed|expire", re.I)
+        offenders: dict[str, list[str]] = {}
+        for filename in self.VARIANT_FILES.values():
+            raw = (FIXTURES_DIR / filename).read_text(encoding="utf-8")
+            hits = sorted({m.group(0).lower() for m in forbidden.finditer(sanctioned.sub("", raw))})
+            if hits:
+                offenders[filename] = hits
+        self.assertFalse(
+            offenders,
+            "fixture still describes the deleted silence fallback:\n"
+            + "\n".join(f"{name}: {v}" for name, v in offenders.items()),
+        )
 
-    def test_prior_head_variant_per_project(self) -> None:
-        # Prior-head artifacts after a push: neither the stale verdict body
-        # nor the stale reaction is head-attributable for the current head;
-        # the clock anchors to the current head's push/reviewable time, which
-        # must postdate every prior-head artifact.
+    # The disposition of a non-signal is NOT a property of the variant: it follows from
+    # the tier of the diff and whether a review is actually outstanding. Asserting
+    # "stuck, escalate" for every case (GH-313 re-review P1) was wrong in both
+    # directions -- Tier A with no request is the author's own gate violation to fix,
+    # not a wait to escalate, and Tier B/C with no request has nothing pending at all.
+    DISPOSITION_BY_TIER_AND_REQUEST = {
+        ("A", False): "gate_violation_request_required",
+        ("A", True): "escalate_stuck_review",
+        ("C", False): "no_review_pending",
+    }
+
+    def test_disposition_follows_from_tier_and_request_not_from_the_variant(self) -> None:
+        for variant in self.VARIANT_FILES:
+            for case in self._project_cases(variant):
+                key = (case["tier"], case["pr_state"]["explicit_review_request"])
+                with self.subTest(
+                    variant=variant, project_id=case["project_id"], tier=case["tier"]
+                ):
+                    self.assertIn(
+                        key,
+                        self.DISPOSITION_BY_TIER_AND_REQUEST,
+                        f"{variant} declares an unmodelled tier/request pair {key}",
+                    )
+                    self.assertEqual(
+                        self.DISPOSITION_BY_TIER_AND_REQUEST[key],
+                        case["expected"]["disposition"],
+                    )
+
+    def test_every_variant_covers_both_a_tier_a_and_a_tier_bc_case(self) -> None:
+        """A single-tier fixture would re-hide exactly the distinction this restores."""
+        for variant in self.VARIANT_FILES:
+            tiers = {case["tier"] for case in self._project_cases(variant)}
+            with self.subTest(variant=variant):
+                self.assertIn("A", tiers)
+                self.assertTrue(
+                    tiers - {"A"}, f"{variant} models Tier A only: {sorted(tiers)}"
+                )
+
+    def test_no_case_is_terminal_and_only_a_pending_review_can_be_stuck(self) -> None:
+        for variant in self.VARIANT_FILES:
+            for case in self._project_cases(variant):
+                expected = case["expected"]
+                with self.subTest(variant=variant, project_id=case["project_id"]):
+                    # Every one of these variants is defined as the ABSENCE of a signal.
+                    self.assertIs(False, expected["terminal_signal_present"])
+                    # A review is outstanding exactly when one was requested.
+                    self.assertIs(
+                        case["pr_state"]["explicit_review_request"],
+                        expected["review_is_pending"],
+                    )
+                    if expected["disposition"] == "escalate_stuck_review":
+                        self.assertTrue(
+                            expected["review_is_pending"],
+                            "nothing that was never requested can be a stuck review",
+                        )
+
+    def test_prior_head_artifacts_are_never_the_current_head(self) -> None:
+        """Attribution is head identity alone; recency cannot revive a stale artifact."""
         for case in self._project_cases("prior_head_artifacts_only"):
-            pid = case["project_id"]
-            pr = case["pr_state"]
-            expected = case["expected"]
-            stale = case["stale_artifacts_for_prior_head"]
-            with self.subTest(project_id=pid, variant="prior_head_artifacts_only"):
-                self.assertFalse(
-                    expected["prior_head_verdict_is_head_attributable_for_current_head"]
-                )
-                self.assertFalse(
-                    expected[
-                        "prior_head_reaction_is_head_attributable_for_current_head"
-                    ]
-                )
-                self.assertTrue(expected["stuck_state_remains_reported_and_escalated"])
-                # A stale artifact cannot become attributable by being recent; there is
-                # no longer a clock to compare it against, only head identity.
-                for artifact in stale:
-                    self.assertNotEqual(artifact["oid"], pr["head_oid"])
+            with self.subTest(project_id=case["project_id"], tier=case["tier"]):
+                for artifact in case["stale_artifacts_for_prior_head"]:
+                    self.assertNotEqual(artifact["oid"], case["pr_state"]["head_oid"])
+
+    def test_eyes_only_cases_carry_an_eyes_artifact_on_the_current_head(self) -> None:
+        """Otherwise the variant's own premise goes unchecked."""
+        for case in self._project_cases("eyes_only_current_head"):
+            artifacts = case["artifacts_for_current_head"]
+            with self.subTest(project_id=case["project_id"], tier=case["tier"]):
+                self.assertTrue(artifacts)
+                for artifact in artifacts:
+                    self.assertEqual("eyes", artifact["reaction"])
+                    self.assertEqual(case["pr_state"]["head_oid"], artifact["oid"])
 
 
 if __name__ == "__main__":
