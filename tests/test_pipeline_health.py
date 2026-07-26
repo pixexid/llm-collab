@@ -268,3 +268,133 @@ class PipelineHealthTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ActivityAndWatchTest(unittest.TestCase):
+    """The live-view surface: is this worker running right now?
+
+    Binding health cannot answer that. A lease can be valid, a watcher running and an
+    endpoint reachable while the worker has been silent for an hour -- which is exactly
+    the blindness the operator reported.
+    """
+
+    def setUp(self) -> None:
+        sys.path.insert(0, str(REPO_ROOT / "bin"))
+        import pipeline_health
+
+        self.mod = pipeline_health
+
+    def test_activity_wording_is_not_a_health_verdict(self) -> None:
+        self.assertEqual("active", self.mod.activity_shape(0))
+        self.assertEqual("active", self.mod.activity_shape(self.mod.ACTIVE_WITHIN_SECONDS - 1))
+        self.assertEqual("idle", self.mod.activity_shape(self.mod.ACTIVE_WITHIN_SECONDS))
+        self.assertEqual("idle", self.mod.activity_shape(99999))
+
+    def probe(self, age_seconds: int) -> dict:
+        """Drive the real _activity_check with a thread that last moved age_seconds ago."""
+        from unittest import mock
+
+        updated = int(self.mod.now_utc().timestamp()) - age_seconds
+
+        class FakeClient:
+            def __enter__(self_inner):
+                return self_inner
+
+            def __exit__(self_inner, *exc):
+                return False
+
+            def notify(self_inner, *a, **k):
+                return None
+
+            def request(self_inner, method, params=None):
+                if method == "thread/list":
+                    return {"data": [{"id": "thread-x", "updatedAt": updated}]}
+                return {}
+
+        with mock.patch.object(
+            self.mod, "discover_codex_app_server",
+            return_value={"url": "ws://127.0.0.1:1", "token_file": None},
+        ), mock.patch.object(
+            self.mod, "_codex_app_server_token", return_value=None
+        ), mock.patch.object(
+            self.mod, "JsonRpcWebSocketClient", lambda *a, **k: FakeClient()
+        ):
+            return self.mod._activity_check(
+                {"runtime": {"family": "codex_app", "session_id": "thread-x",
+                             "home": "/home"}}
+            )
+
+    def test_a_long_idle_worker_is_reported_but_never_failed(self) -> None:
+        """Quiet is not broken. Failing on it would make the view cry wolf hourly.
+
+        The first version of this test built the result dict by hand, so it asserted
+        nothing about _activity_check and survived a mutation that failed every idle
+        worker.
+        """
+        check = self.probe(9999)
+        self.assertEqual(self.mod.OK, check["status"])
+        self.assertIn("idle", check["detail"])
+        self.assertEqual(9999, check["idle_seconds"])
+
+    def test_a_currently_running_worker_reads_as_active(self) -> None:
+        check = self.probe(3)
+        self.assertEqual(self.mod.OK, check["status"])
+        self.assertIn("active", check["detail"])
+
+    def test_a_thread_the_app_server_does_not_list_is_flagged(self) -> None:
+        from unittest import mock
+
+        class FakeClient:
+            def __enter__(self_inner): return self_inner
+            def __exit__(self_inner, *exc): return False
+            def notify(self_inner, *a, **k): return None
+            def request(self_inner, method, params=None):
+                return {"data": []} if method == "thread/list" else {}
+
+        with mock.patch.object(
+            self.mod, "discover_codex_app_server",
+            return_value={"url": "ws://127.0.0.1:1", "token_file": None},
+        ), mock.patch.object(
+            self.mod, "_codex_app_server_token", return_value=None
+        ), mock.patch.object(
+            self.mod, "JsonRpcWebSocketClient", lambda *a, **k: FakeClient()
+        ):
+            check = self.mod._activity_check(
+                {"runtime": {"family": "codex_app", "session_id": "ghost", "home": "/h"}}
+            )
+        self.assertEqual(self.mod.WARN, check["status"])
+        self.assertIn("not listed", check["detail"])
+
+    def test_a_family_without_a_thread_probe_is_not_guessed_at(self) -> None:
+        for family in ("zcode_cli", "claude_app", "gemini_cli", ""):
+            with self.subTest(family=family):
+                check = self.mod._activity_check(
+                    {"runtime": {"family": family, "session_id": "x"}}
+                )
+                self.assertEqual(self.mod.OK, check["status"])
+                self.assertIn("no thread probe", check["detail"])
+
+    def test_an_unreachable_endpoint_does_not_fail_the_activity_check(self) -> None:
+        """The endpoint check already reports that; two failures for one cause is noise."""
+        from unittest import mock
+
+        with mock.patch.object(self.mod, "discover_codex_app_server", return_value=None):
+            check = self.mod._activity_check(
+                {"runtime": {"family": "codex_app", "session_id": "x", "home": "/nope"}}
+            )
+        self.assertEqual(self.mod.OK, check["status"])
+
+    def test_the_tool_stays_a_one_shot_check_not_a_live_view(self) -> None:
+        """A refreshing terminal view was built here and removed.
+
+        The operator's blindness is about a surface they actually watch, and a
+        terminal is not one -- that need is llm-collab#319's Pi workers, whose UI
+        streams natively. Keeping a half-answer here would have been scope with no
+        reader.
+        """
+        result = subprocess.run(
+            [sys.executable, str(HEALTH_SCRIPT), "--agent", "cdx2", "--watch", "5"],
+            capture_output=True, text=True, timeout=60,
+        )
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("unrecognized arguments", result.stderr)

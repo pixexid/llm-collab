@@ -41,6 +41,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 from _helpers import ROOT, agent_ids, get_unread_messages
 from _session_autobridge import (
     SESSIONS_DIR,
+    JsonRpcWebSocketClient,
+    _codex_app_server_token,
     discover_codex_app_server,
     load_session,
     now_utc,
@@ -121,6 +123,55 @@ def _endpoint_check(session: dict) -> dict:
         }
     return {"check": "endpoint", "status": OK,
             "detail": f"app-server {endpoint.get('url')} (pid {endpoint.get('pid')})"}
+
+
+ACTIVE_WITHIN_SECONDS = 90
+
+
+def activity_shape(age_seconds: int) -> str:
+    """Live-view wording only. Deliberately not a health verdict.
+
+    A worker that has been quiet for an hour may be perfectly healthy and simply have
+    nothing to do, so this never fails a check -- it answers the operator's question
+    ("is it running right now?") and nothing else.
+    """
+    return "active" if age_seconds < ACTIVE_WITHIN_SECONDS else "idle"
+
+
+def _activity_check(session: dict) -> dict:
+    """When did this worker's runtime thread last do anything?
+
+    Answers the question the operator actually has -- "is it running right now, or has
+    it stopped?" -- which no amount of binding health can. A lease can be valid, a
+    watcher running and an endpoint reachable while the worker has been silent for an
+    hour. Read-only: `thread/list` starts nothing and steers nothing.
+    """
+    runtime = runtime_metadata(session)
+    if str(runtime.get("family", "")) != "codex_app":
+        return {"check": "activity", "status": OK, "detail": "no thread probe for this family"}
+    endpoint = discover_codex_app_server(runtime.get("home"), allow_unscoped_env=False)
+    if endpoint is None:
+        return {"check": "activity", "status": OK, "detail": "no endpoint to probe"}
+    thread_id = str(runtime.get("session_id") or "")
+    try:
+        token = _codex_app_server_token(endpoint.get("token_file"))
+        with JsonRpcWebSocketClient(str(endpoint["url"]), token=token, timeout_seconds=20) as client:
+            client.request("initialize", {"clientInfo": {"name": "pipeline-health",
+                                                         "title": "llm-collab",
+                                                         "version": "0.1"}})
+            client.notify("initialized")
+            rows = client.request("thread/list", {}).get("data", [])
+    except (OSError, ValueError, TimeoutError) as exc:
+        return {"check": "activity", "status": WARN,
+                "detail": f"thread probe failed: {type(exc).__name__}: {exc}"}
+    row = next((r for r in rows if r.get("id") == thread_id), None)
+    if row is None:
+        return {"check": "activity", "status": WARN,
+                "detail": f"thread {thread_id[:8]} not listed by the app-server"}
+    updated = int(row.get("updatedAt") or 0)
+    age = int(now_utc().timestamp()) - updated
+    return {"check": "activity", "status": OK, "idle_seconds": age,
+            "detail": f"{activity_shape(age)}: last thread activity {age}s ago"}
 
 
 def _watcher_check(agent_id: str) -> dict:
@@ -258,6 +309,8 @@ def agent_report(agent_id: str, *, min_lease_seconds: int) -> dict:
         })
 
     advisory = [_watcher_check(agent_id), _backlog_check(agent_id, live or sessions)]
+    for session in live:
+        advisory.insert(0, {**_activity_check(session), "session_id": session["session_id"]})
     checks.extend(advisory)
 
     status = max((c["status"] for c in checks), key=lambda s: _RANK[s])
