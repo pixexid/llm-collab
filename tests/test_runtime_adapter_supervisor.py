@@ -162,6 +162,63 @@ class RuntimeAdapterSupervisorTests(unittest.TestCase):
                 self.assertTrue(outcome.stderr_truncated)
                 self.assertLessEqual(len(outcome.stderr), MAX_STDERR_BYTES_PER_CONNECTION)
 
+    def test_stderr_overflow_answered_in_the_same_breath_is_still_seen(self) -> None:
+        """The verdict must follow stream order, not thread scheduling.
+
+        The child here writes its overflow and its response back to back, so
+        both become readable together and nothing blocks the child in between.
+        An implementation that publishes the frame before consuming the stderr
+        that preceded it answers `success` on a connection that has already
+        blown its stderr budget. The limit is lowered so the overflow fits in
+        the pipe: at the real limit the child would block mid-write and be
+        drained first by accident, which is what let this race hide. The read
+        size is lowered too, so one read cannot empty the descriptor and the
+        drain has to loop -- a branch a 64 KiB pipe otherwise never reaches.
+        """
+        with patch(
+            "llm_collab.runtime_adapter_supervisor.MAX_STDERR_BYTES_PER_CONNECTION", 1024
+        ), patch("llm_collab.runtime_adapter_supervisor.PIPE_READ_BYTES", 256):
+            for attempt in range(10):
+                with self.subTest(attempt=attempt), tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    script = write_script(
+                        root,
+                        """
+                        import sys
+                        sys.stdin.buffer.readline()
+                        sys.stderr.buffer.write(b"x" * 2048)
+                        sys.stderr.buffer.flush()
+                        sys.stdout.buffer.write(b'{"jsonrpc":"2.0","id":"r1","result":{}}\\n')
+                        sys.stdout.buffer.flush()
+                        """,
+                    )
+                    with StdioSupervisor(resolved_adapter(script, root)) as supervisor:
+                        outcome = supervisor.request(
+                            '{"jsonrpc":"2.0","id":"r1","method":"runtime.health","params":{}}',
+                            timeout_seconds=5,
+                        )
+                    self.assertEqual(outcome.fault, "STDERR_LIMIT_EXCEEDED")
+                    self.assertTrue(outcome.stderr_truncated)
+
+    def test_the_stderr_verdict_is_not_read_from_shared_state_by_the_caller(self) -> None:
+        """`request` must use the verdict published with the frame.
+
+        Reading `self._stderr_truncated` in the requesting thread is the
+        original defect: it races the drain and has no ordering against it.
+        """
+        tree = ast.parse(MODULE_PATH.read_text(encoding="utf-8"))
+        request = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "request"
+        )
+        reads = [
+            node
+            for node in ast.walk(request)
+            if isinstance(node, ast.Attribute) and node.attr == "_stderr_truncated"
+        ]
+        self.assertEqual(reads, [])
+
     def test_oversized_stdout_frame_is_bounded_and_closes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
