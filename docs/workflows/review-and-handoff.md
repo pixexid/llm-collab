@@ -222,9 +222,11 @@ artifacts only; it does not waive the handling below:
   and because a same-head re-review request posted during the settle lives in a comment,
   supersedes the verdict or reaction being settled, and is invisible to a re-read that
   skips comments. When a re-review was explicitly
-  requested, that re-review supersedes older same-head clean artifacts **and older
-  same-head reactions**, not the verdict path alone; only its verdict can satisfy
-  that path, and it receives the same settle and full re-read. A reaction counts
+  requested, that re-review supersedes artifacts attached to **older requests** -- clean verdicts and
+  reactions alike. It does **not** disable the reaction path: a connector `+1` on
+  the latest unedited request naming the current head is terminal for the re-review
+  exactly as a fresh textual verdict is, and either receives the same
+  settle and full re-read. A reaction counts
   only on the latest, unedited request artifact -- GitHub keeps reactions across an
   edit, so an edited request comment can still carry a `+1` left for an older head.
 - A connector-authored `+1` on the exact manual-review request comment is

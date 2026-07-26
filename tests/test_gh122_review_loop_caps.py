@@ -564,12 +564,15 @@ class ReviewLoopCapContractTest(unittest.TestCase):
                 sources["canonical_clean_verdict"],
             )
             self.assertIn(
-                "that re-review supersedes older same-head clean artifacts "
-                "**and older same-head reactions**, not the verdict path alone",
+                "that re-review supersedes artifacts attached to **older requests** -- clean verdicts and reactions alike",
                 sources["canonical_rereview"],
             )
             self.assertIn(
-                "Only the explicit re-review verdict can satisfy that path",
+                # Inverted, not restored: this pinned the claim GH-313 ruled against -- that a
+                # re-review can only be completed by text. A reaction on its own request is
+                # terminal too, and asserting otherwise made the connector's reaction-only
+                # protocol unable to satisfy a request it had answered.
+                "It does **not** disable the reaction path",
                 sources["canonical_rereview"],
             )
 
@@ -1040,7 +1043,10 @@ class ReviewLoopCapContractTest(unittest.TestCase):
             text = normalized(doc.read_text(encoding="utf-8"))
             with self.subTest(doc=doc.name):
                 self.assertIn("latest, unedited request artifact", text)
-                self.assertIn("older same-head reactions", text)
+                self.assertIn("artifacts attached to **older requests**", text)
+                # And the corollary the supersession rule must not swallow: a re-review is
+                # still completable by a reaction on its own request.
+                self.assertIn("does **not** disable the reaction path", text)
 
     def test_the_reviewed_artifact_set_is_written_exactly_once(self):
         """Nine sites had drifted into five spellings; four omitted reactions and three
@@ -1442,11 +1448,10 @@ class ReviewLoopCapContractTest(unittest.TestCase):
                 "re-read of [the reviewed artifact set](commit-push-prs.md#reviewed-artifact-set)", handoff
             )
             self.assertIn(
-                "that re-review supersedes older same-head clean artifacts "
-                "**and older same-head reactions**, not the verdict path alone",
+                "that re-review supersedes artifacts attached to **older requests** -- clean verdicts and reactions alike",
                 handoff,
             )
-            self.assertIn("it receives the same settle and full re-read", handoff)
+            self.assertIn("either receives the same settle and full re-read", handoff)
             self.assertNotIn(
                 "timestamps immediately and do not wait out the remainder", handoff
             )

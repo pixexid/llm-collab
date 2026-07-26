@@ -296,6 +296,23 @@ policy:
   them; and **zero** threads actually initiated at the current head. Those same
   twelve report `comments.nodes[0].commit.oid` as `9822524`, which is why the
   field matters as much as the rule
+### Projects without GitHub
+
+<a id="review-surface-independence"></a>
+
+**Tier A does not depend on GitHub.** The gate is a property of the change, not of the
+place the review happens, so a registered project with no GitHub surface still owes the
+same review — it satisfies it with durable **mailbox request and verdict packets** naming
+the exact repository commit OID, the project, the repository scope, the requester and the
+reviewer. GitHub reviews, threads and reactions are that project's *implementation* of this
+gate, not the gate itself.
+
+One asymmetry, and it is not an oversight: **a non-GitHub lane has no reaction-only
+terminal path.** A reaction is terminal because it sits on an identifiable request artifact
+that names a head; a mailbox lane has no equivalent, so it needs a textual verdict packet.
+Conditioning the requirement on GitHub instead would make the gate unsatisfiable for such a
+project, which reads as an exemption and is not one.
+
 ### The reviewed artifact set
 
 <a id="reviewed-artifact-set"></a>
@@ -334,11 +351,13 @@ else is a second source that goes stale the moment this one moves.
   the exact-head operator disposition. Reading this as "issue one whenever no valid
   latest request exists" produces a third same-head request every time an artifact is
   tampered with, and the single re-trigger is the only exempted recovery
-- when a re-review was explicitly requested, that re-review supersedes older
-  same-head clean artifacts **and older same-head reactions**, not the verdict path
-  alone. Only the explicit
-  re-review verdict can satisfy that path, and it receives the same
-  approximately five-minute post-clean settle and full re-read
+- when a re-review was explicitly requested, that re-review supersedes artifacts attached to **older requests** -- clean verdicts and
+  reactions alike. It does **not** disable the reaction path: a connector `+1` on
+  the latest unedited request naming the current head is terminal for the re-review
+  exactly as a fresh textual verdict is.
+  Requiring text merely because this is a re-review would leave the connector's own
+  reaction-only clean protocol unable to satisfy a request it answered. Either terminal
+  form receives the same approximately five-minute post-clean settle and full re-read
 - report the exact verdict, or the connector-authored `+1` on the manual-review
   request comment with its timestamps and the SHA that request named, and confirm
   that no later push occurred
@@ -357,6 +376,13 @@ else is a second source that goes stale the moment this one moves.
 - **no elapsed time is ever a terminal signal.** There is no resettable settle
   that ripens a head for merge. Waiting is what a Tier A head does while a
   requested review is outstanding; it is not a way to acquire the signal
+- **the worker who pushed the change owns re-requesting the amended head, at every
+  tier.** Tier decides whether a review must be *initiated*; once an operator has
+  explicitly requested one, every amended candidate head needs a new exact-head request
+  from the change owner, unless the operator explicitly withdraws the review requirement.
+  Tier C does not make an old-head artifact valid, and a requested Tier C review with no
+  named owner is how an amended head sits waiting for a re-request nobody believes is
+  theirs
 - after every review-fix push, evaluate the new exact head under the same rule:
   a clean exact-head verdict or head-attributable connector `+1` is terminal.
   If neither exists, **any head carrying an outstanding request** is not
