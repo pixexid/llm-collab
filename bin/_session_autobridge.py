@@ -1203,6 +1203,7 @@ def build_resume_prompt(session: dict, message: dict) -> str:
         f"chat_id: {fm.get('chat_id', '')}",
         f"project_id: {fm.get('project_id', '')}",
         f"title: {fm.get('title', '')}",
+        f"message_path: {message.get('path', '')}",
     ]
     if activation_lease:
         identity = activation_lease.get("identity") or {}
@@ -1226,6 +1227,16 @@ def build_resume_prompt(session: dict, message: dict) -> str:
             "",
             "Message body:",
             body or "(no body)",
+            "",
+            "Reply through the mailbox. It is the only channel the sender reads:",
+            f"  bin/deliver.py --chat {fm.get('chat_id', '')} "
+            f"--from {session['agent_id']} "
+            f"--to {fm.get('sender_agent_id', fm.get('from', ''))} "
+            f"--project {fm.get('project_id', '')} --repo-targets <repo> "
+            "--title '...' --body-file -",
+            "A PR comment, a code-review body or a desktop nudge does NOT reach the sender.",
+            "Post to a PR only when the PR itself is the artifact -- a connector review",
+            "request, or evidence a human will read there -- and deliver the packet as well.",
             "",
             "If the request is trivial, answer tersely. Do not start unrelated work.",
         ]

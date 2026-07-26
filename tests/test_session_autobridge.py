@@ -5973,3 +5973,67 @@ class RenamedCodexBinaryDiscoveryTest(unittest.TestCase):
             "/Applications/ChatGPT.app/Contents/Resources/codex "
             "-c features.code_mode_host=true app-server --analytics-default-enabled",
         ]))
+
+
+class ResumePromptNamesTheReplyChannelTest(unittest.TestCase):
+    """A woken worker must be told where its answer goes, and which packet it answers.
+
+    Observed live on 2026-07-26: codex, woken through the app-server adapter, answered a
+    review handoff by posting a PR comment and delivering nothing. The prompt carried the
+    body but neither the packet's path nor any statement that the mailbox is the channel,
+    so the reply never reached the sender and the operator had to relay it by hand.
+    """
+
+    def prompt(self, *, body: str = "Do the lane.") -> str:
+        session = {
+            "session_id": "SESSION-REPLY",
+            "agent_id": "codex",
+            "project_id": "amiga",
+            "chat_id": "CHAT-REPLY",
+            "runtime": {"family": "codex_app", "session_id": "runtime-reply"},
+        }
+        message = {
+            "path": "Chats/2026-07-26_x__CHAT-REPLY/2026-07-26T00-00-00_to-codex_packet.md",
+            "frontmatter": {
+                "from": "claude",
+                "sender_agent_id": "claude",
+                "to": "codex",
+                "title": "Review handoff",
+                "project_id": "amiga",
+                "chat_id": "CHAT-REPLY",
+            },
+            "body": body,
+        }
+        return session_autobridge_lib.build_resume_prompt(session, message)
+
+    def test_the_prompt_carries_the_packet_path(self) -> None:
+        self.assertIn(
+            "message_path: Chats/2026-07-26_x__CHAT-REPLY/"
+            "2026-07-26T00-00-00_to-codex_packet.md",
+            self.prompt(),
+        )
+
+    def test_the_prompt_names_the_mailbox_as_the_only_channel(self) -> None:
+        prompt = self.prompt()
+        self.assertIn("Reply through the mailbox", prompt)
+        self.assertIn("only channel the sender reads", prompt)
+
+    def test_the_prompt_spells_out_a_runnable_reply_command(self) -> None:
+        """A named channel with no command is guidance; this has to be copyable."""
+        prompt = self.prompt()
+        self.assertIn("bin/deliver.py", prompt)
+        for flag in ("--chat CHAT-REPLY", "--from codex", "--to claude", "--project amiga"):
+            self.assertIn(flag, prompt)
+        # deliver.py silently drops a packet that declares no repo scope.
+        self.assertIn("--repo-targets", prompt)
+
+    def test_the_prompt_says_a_pr_comment_does_not_reach_the_sender(self) -> None:
+        self.assertIn(
+            "does NOT reach the sender", self.prompt(),
+        )
+
+    def test_the_prompt_still_permits_a_pr_post_alongside_the_packet(self) -> None:
+        """Connector review requests live on the PR; the rule is 'as well as', not 'never'."""
+        prompt = self.prompt()
+        self.assertIn("connector review", prompt)
+        self.assertIn("deliver the packet as well", prompt)
