@@ -1,16 +1,22 @@
 {
-  "source": "llm-collab#313 reviewThreads, captured 2026-07-26 at head 9822524b8d",
-  "why": "comments.nodes[0].commit.oid is MUTABLE -- for a non-outdated thread GitHub advances it to the current head. Twelve threads here report it as the current head while pullRequestReview.commit.oid and originalCommit.oid stay at the review that raised them. Selecting the obvious comment field therefore reproduces the exact misclassification the binding rule exists to prevent, and a fixture storing a pre-computed origin cannot detect that choice at all. Threads also carry hasWrittenDisposition, because the contract closes a thread on EITHER resolution or an explicit written disposition; a classifier reading only isResolved reports every replied-to thread as permanently pending.",
-  "head_oid": "9822524b8d27c782efd5e49aea535f801f450cfe",
+  "source": "llm-collab#313 reviewThreads, captured 2026-07-26 at head aab95d933c",
+  "why": "Two pre-resolved answers were removed from this fixture in turn. First a computed originating_commit_oid, which hid the field-authority decision. Then a synthetic hasWrittenDisposition boolean, which let any thread be declared closed without proving an artifact, an authorized actor, or a mapping to that thread. Closure is now DERIVED from disposition artifacts shaped like the real one: llm-collab#317's adjudication is a single top-level issue comment that groups findings and names the threads it disposes -- it is not attached to each thread node.",
+  "head_oid": "aab95d933c64487338f87775ade9e9b35adca30f",
+  "authorized_actors": [
+    "pixexid",
+    "codex"
+  ],
   "threads": [
     {
+      "id": "PRRT_kwDOR8xQ286Tzfud",
       "isResolved": false,
       "isOutdated": false,
       "comments": {
         "nodes": [
           {
+            "id": "PRRC_kwDOR8xQ287Zo7jJ",
             "commit": {
-              "oid": "9822524b8d27c782efd5e49aea535f801f450cfe"
+              "oid": "aab95d933c64487338f87775ade9e9b35adca30f"
             },
             "originalCommit": {
               "oid": "a54e33fcd94bce301040ded2a6b70ecb401cd41e"
@@ -22,17 +28,18 @@
             }
           }
         ]
-      },
-      "hasWrittenDisposition": false
+      }
     },
     {
+      "id": "PRRT_kwDOR8xQ286Tzfuh",
       "isResolved": false,
       "isOutdated": false,
       "comments": {
         "nodes": [
           {
+            "id": "PRRC_kwDOR8xQ287Zo7jO",
             "commit": {
-              "oid": "9822524b8d27c782efd5e49aea535f801f450cfe"
+              "oid": "aab95d933c64487338f87775ade9e9b35adca30f"
             },
             "originalCommit": {
               "oid": "a54e33fcd94bce301040ded2a6b70ecb401cd41e"
@@ -44,15 +51,16 @@
             }
           }
         ]
-      },
-      "hasWrittenDisposition": false
+      }
     },
     {
+      "id": "PRRT_kwDOR8xQ286Tzfuk",
       "isResolved": false,
       "isOutdated": true,
       "comments": {
         "nodes": [
           {
+            "id": "PRRC_kwDOR8xQ287Zo7jR",
             "commit": {
               "oid": "a54e33fcd94bce301040ded2a6b70ecb401cd41e"
             },
@@ -66,17 +74,18 @@
             }
           }
         ]
-      },
-      "hasWrittenDisposition": true
+      }
     },
     {
+      "id": "PRRT_kwDOR8xQ286Tzful",
       "isResolved": false,
       "isOutdated": false,
       "comments": {
         "nodes": [
           {
+            "id": "PRRC_kwDOR8xQ287Zo7jS",
             "commit": {
-              "oid": "9822524b8d27c782efd5e49aea535f801f450cfe"
+              "oid": "aab95d933c64487338f87775ade9e9b35adca30f"
             },
             "originalCommit": {
               "oid": "a54e33fcd94bce301040ded2a6b70ecb401cd41e"
@@ -88,17 +97,18 @@
             }
           }
         ]
-      },
-      "hasWrittenDisposition": false
+      }
     },
     {
+      "id": "PRRT_kwDOR8xQ286TzhnC",
       "isResolved": false,
       "isOutdated": false,
       "comments": {
         "nodes": [
           {
+            "id": "PRRC_kwDOR8xQ287Zo-Bn",
             "commit": {
-              "oid": "9822524b8d27c782efd5e49aea535f801f450cfe"
+              "oid": "aab95d933c64487338f87775ade9e9b35adca30f"
             },
             "originalCommit": {
               "oid": "a54e33fcd94bce301040ded2a6b70ecb401cd41e"
@@ -110,17 +120,18 @@
             }
           }
         ]
-      },
-      "hasWrittenDisposition": false
+      }
     },
     {
+      "id": "PRRT_kwDOR8xQ286TzhnE",
       "isResolved": false,
       "isOutdated": false,
       "comments": {
         "nodes": [
           {
+            "id": "PRRC_kwDOR8xQ287Zo-Bq",
             "commit": {
-              "oid": "9822524b8d27c782efd5e49aea535f801f450cfe"
+              "oid": "aab95d933c64487338f87775ade9e9b35adca30f"
             },
             "originalCommit": {
               "oid": "a54e33fcd94bce301040ded2a6b70ecb401cd41e"
@@ -132,17 +143,18 @@
             }
           }
         ]
-      },
-      "hasWrittenDisposition": false
+      }
     },
     {
+      "id": "PRRT_kwDOR8xQ286TzhnF",
       "isResolved": false,
       "isOutdated": false,
       "comments": {
         "nodes": [
           {
+            "id": "PRRC_kwDOR8xQ287Zo-Br",
             "commit": {
-              "oid": "9822524b8d27c782efd5e49aea535f801f450cfe"
+              "oid": "aab95d933c64487338f87775ade9e9b35adca30f"
             },
             "originalCommit": {
               "oid": "a54e33fcd94bce301040ded2a6b70ecb401cd41e"
@@ -154,15 +166,16 @@
             }
           }
         ]
-      },
-      "hasWrittenDisposition": false
+      }
     },
     {
+      "id": "PRRT_kwDOR8xQ286TzhnH",
       "isResolved": false,
       "isOutdated": true,
       "comments": {
         "nodes": [
           {
+            "id": "PRRC_kwDOR8xQ287Zo-Bt",
             "commit": {
               "oid": "a54e33fcd94bce301040ded2a6b70ecb401cd41e"
             },
@@ -176,17 +189,18 @@
             }
           }
         ]
-      },
-      "hasWrittenDisposition": true
+      }
     },
     {
+      "id": "PRRT_kwDOR8xQ286TzhnK",
       "isResolved": false,
       "isOutdated": false,
       "comments": {
         "nodes": [
           {
+            "id": "PRRC_kwDOR8xQ287Zo-Bw",
             "commit": {
-              "oid": "9822524b8d27c782efd5e49aea535f801f450cfe"
+              "oid": "aab95d933c64487338f87775ade9e9b35adca30f"
             },
             "originalCommit": {
               "oid": "a54e33fcd94bce301040ded2a6b70ecb401cd41e"
@@ -198,15 +212,16 @@
             }
           }
         ]
-      },
-      "hasWrittenDisposition": false
+      }
     },
     {
+      "id": "PRRT_kwDOR8xQ286TzhnL",
       "isResolved": false,
       "isOutdated": true,
       "comments": {
         "nodes": [
           {
+            "id": "PRRC_kwDOR8xQ287Zo-Bx",
             "commit": {
               "oid": "a54e33fcd94bce301040ded2a6b70ecb401cd41e"
             },
@@ -220,17 +235,18 @@
             }
           }
         ]
-      },
-      "hasWrittenDisposition": false
+      }
     },
     {
+      "id": "PRRT_kwDOR8xQ286TzhnM",
       "isResolved": false,
       "isOutdated": false,
       "comments": {
         "nodes": [
           {
+            "id": "PRRC_kwDOR8xQ287Zo-Bz",
             "commit": {
-              "oid": "9822524b8d27c782efd5e49aea535f801f450cfe"
+              "oid": "aab95d933c64487338f87775ade9e9b35adca30f"
             },
             "originalCommit": {
               "oid": "a54e33fcd94bce301040ded2a6b70ecb401cd41e"
@@ -242,15 +258,16 @@
             }
           }
         ]
-      },
-      "hasWrittenDisposition": false
+      }
     },
     {
+      "id": "PRRT_kwDOR8xQ286Tzp0R",
       "isResolved": false,
       "isOutdated": true,
       "comments": {
         "nodes": [
           {
+            "id": "PRRC_kwDOR8xQ287ZpJfV",
             "commit": {
               "oid": "82ae7e92ded3591e55cfc8762ddc0ce537c6f7a1"
             },
@@ -264,17 +281,18 @@
             }
           }
         ]
-      },
-      "hasWrittenDisposition": false
+      }
     },
     {
+      "id": "PRRT_kwDOR8xQ286Tzp0T",
       "isResolved": false,
       "isOutdated": false,
       "comments": {
         "nodes": [
           {
+            "id": "PRRC_kwDOR8xQ287ZpJfY",
             "commit": {
-              "oid": "9822524b8d27c782efd5e49aea535f801f450cfe"
+              "oid": "aab95d933c64487338f87775ade9e9b35adca30f"
             },
             "originalCommit": {
               "oid": "82ae7e92ded3591e55cfc8762ddc0ce537c6f7a1"
@@ -286,17 +304,18 @@
             }
           }
         ]
-      },
-      "hasWrittenDisposition": false
+      }
     },
     {
+      "id": "PRRT_kwDOR8xQ286Tzp0U",
       "isResolved": false,
       "isOutdated": false,
       "comments": {
         "nodes": [
           {
+            "id": "PRRC_kwDOR8xQ287ZpJfZ",
             "commit": {
-              "oid": "9822524b8d27c782efd5e49aea535f801f450cfe"
+              "oid": "aab95d933c64487338f87775ade9e9b35adca30f"
             },
             "originalCommit": {
               "oid": "82ae7e92ded3591e55cfc8762ddc0ce537c6f7a1"
@@ -308,17 +327,18 @@
             }
           }
         ]
-      },
-      "hasWrittenDisposition": false
+      }
     },
     {
+      "id": "PRRT_kwDOR8xQ286Tzp0W",
       "isResolved": false,
       "isOutdated": false,
       "comments": {
         "nodes": [
           {
+            "id": "PRRC_kwDOR8xQ287ZpJfb",
             "commit": {
-              "oid": "9822524b8d27c782efd5e49aea535f801f450cfe"
+              "oid": "aab95d933c64487338f87775ade9e9b35adca30f"
             },
             "originalCommit": {
               "oid": "82ae7e92ded3591e55cfc8762ddc0ce537c6f7a1"
@@ -330,17 +350,18 @@
             }
           }
         ]
-      },
-      "hasWrittenDisposition": false
+      }
     },
     {
+      "id": "PRRT_kwDOR8xQ286Tzp0Y",
       "isResolved": false,
       "isOutdated": false,
       "comments": {
         "nodes": [
           {
+            "id": "PRRC_kwDOR8xQ287ZpJfd",
             "commit": {
-              "oid": "9822524b8d27c782efd5e49aea535f801f450cfe"
+              "oid": "aab95d933c64487338f87775ade9e9b35adca30f"
             },
             "originalCommit": {
               "oid": "82ae7e92ded3591e55cfc8762ddc0ce537c6f7a1"
@@ -352,15 +373,16 @@
             }
           }
         ]
-      },
-      "hasWrittenDisposition": false
+      }
     },
     {
+      "id": "PRRT_kwDOR8xQ286T0l4b",
       "isResolved": false,
       "isOutdated": true,
       "comments": {
         "nodes": [
           {
+            "id": "PRRC_kwDOR8xQ287ZqhHV",
             "commit": {
               "oid": "07db4787e0bef743a8384ca869bd5b8a5cac4373"
             },
@@ -374,15 +396,138 @@
             }
           }
         ]
-      },
-      "hasWrittenDisposition": false
+      }
+    },
+    {
+      "id": "PRRT_kwDOR8xQ286T0v7k",
+      "isResolved": false,
+      "isOutdated": false,
+      "comments": {
+        "nodes": [
+          {
+            "id": "PRRC_kwDOR8xQ287Zquv2",
+            "commit": {
+              "oid": "aab95d933c64487338f87775ade9e9b35adca30f"
+            },
+            "originalCommit": {
+              "oid": "7a402cc916e09392bc67597a090b24b140073d1f"
+            },
+            "pullRequestReview": {
+              "commit": {
+                "oid": "7a402cc916e09392bc67597a090b24b140073d1f"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "PRRT_kwDOR8xQ286T0v7l",
+      "isResolved": false,
+      "isOutdated": false,
+      "comments": {
+        "nodes": [
+          {
+            "id": "PRRC_kwDOR8xQ287Zquv3",
+            "commit": {
+              "oid": "aab95d933c64487338f87775ade9e9b35adca30f"
+            },
+            "originalCommit": {
+              "oid": "7a402cc916e09392bc67597a090b24b140073d1f"
+            },
+            "pullRequestReview": {
+              "commit": {
+                "oid": "7a402cc916e09392bc67597a090b24b140073d1f"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "PRRT_kwDOR8xQ286T0v7m",
+      "isResolved": false,
+      "isOutdated": false,
+      "comments": {
+        "nodes": [
+          {
+            "id": "PRRC_kwDOR8xQ287Zquv4",
+            "commit": {
+              "oid": "aab95d933c64487338f87775ade9e9b35adca30f"
+            },
+            "originalCommit": {
+              "oid": "7a402cc916e09392bc67597a090b24b140073d1f"
+            },
+            "pullRequestReview": {
+              "commit": {
+                "oid": "7a402cc916e09392bc67597a090b24b140073d1f"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "PRRT_kwDOR8xQ286T0v7n",
+      "isResolved": false,
+      "isOutdated": false,
+      "comments": {
+        "nodes": [
+          {
+            "id": "PRRC_kwDOR8xQ287Zquv5",
+            "commit": {
+              "oid": "aab95d933c64487338f87775ade9e9b35adca30f"
+            },
+            "originalCommit": {
+              "oid": "7a402cc916e09392bc67597a090b24b140073d1f"
+            },
+            "pullRequestReview": {
+              "commit": {
+                "oid": "7a402cc916e09392bc67597a090b24b140073d1f"
+              }
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "disposition_artifacts": [
+    {
+      "id": "IC_kwDO_adjudication_1",
+      "url": "https://github.com/pixexid/llm-collab/pull/317#issuecomment-5082195564",
+      "actor": "pixexid",
+      "kind": "grouped_issue_comment",
+      "disposes_thread_ids": [
+        "PRRT_kwDOR8xQ286Tzfuk",
+        "PRRT_kwDOR8xQ286TzhnH"
+      ]
+    },
+    {
+      "id": "IC_kwDO_unauthorized",
+      "url": "https://example.invalid/drive-by",
+      "actor": "some-drive-by-account",
+      "kind": "grouped_issue_comment",
+      "disposes_thread_ids": [
+        "PRRT_kwDOR8xQ286TzhnL"
+      ]
+    },
+    {
+      "id": "IC_kwDO_unmapped",
+      "url": "https://github.com/pixexid/llm-collab/pull/313#issuecomment-unmapped",
+      "actor": "pixexid",
+      "kind": "grouped_issue_comment",
+      "disposes_thread_ids": []
     }
   ],
   "expected": {
     "exact_head_findings": 0,
-    "unresolved_needing_adjudication": 15,
-    "naive_comment_commit_count": 12,
+    "closed_by_disposition": 2,
+    "unresolved_needing_adjudication": 19,
+    "resolved_count": 0,
+    "naive_comment_commit_count": 16,
     "unresolved_outdated": 3,
-    "closed_by_written_disposition": 2
+    "unauthorized_artifact_thread_ids": [
+      "PRRT_kwDOR8xQ286TzhnL"
+    ]
   }
 }
