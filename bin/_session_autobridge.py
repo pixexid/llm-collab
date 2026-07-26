@@ -1525,6 +1525,29 @@ SERVER_REQUEST_POLICIES = (SERVER_REQUEST_REFUSE, SERVER_REQUEST_IGNORE)
 JSONRPC_METHOD_NOT_FOUND = -32601
 
 
+def decode_jsonrpc_frame(payload: bytes) -> dict[str, Any]:
+    """Decode one text frame into a JSON-RPC message object.
+
+    Every structural failure leaves here as ValueError, because that is the one type
+    the post-accept turn handler treats as "the view was lost" rather than letting it
+    escape and re-arm redelivery of an already-delivered packet:
+
+    - a deeply nested frame raises RecursionError out of json.loads;
+    - a valid non-object frame (`[]`, `"x"`, `3`) used to reach `.get` in
+      _handle_server_request and raise AttributeError.
+
+    Neither is in any caller's expected set, and both left a delivered packet eligible
+    to be sent a second time.
+    """
+    try:
+        message = json.loads(payload.decode("utf-8"))
+    except RecursionError as exc:
+        raise ValueError(f"JSON-RPC frame is too deeply nested: {exc}") from exc
+    if not isinstance(message, dict):
+        raise ValueError(f"JSON-RPC frame must be an object, got {type(message).__name__}")
+    return message
+
+
 class JsonRpcWebSocketClient:
     def __init__(
         self,
@@ -1711,18 +1734,7 @@ class JsonRpcWebSocketClient:
                 self._send_frame(payload, opcode=0xA)
                 continue
             if opcode == 0x1:
-                message = json.loads(payload.decode("utf-8"))
-                if not isinstance(message, dict):
-                    # A JSON-RPC message is an object. `[]`, `"x"` and `3` all decode
-                    # happily and then blow up in _handle_server_request's .get with an
-                    # AttributeError -- an exception type no caller expects from a parse
-                    # step, so it escaped the turn loop's post-accept handling and left a
-                    # delivered packet eligible for redelivery. Rejecting it here makes
-                    # every read path fail the same way: ValueError, like any other
-                    # malformed frame.
-                    raise ValueError(
-                        f"JSON-RPC frame must be an object, got {type(message).__name__}"
-                    )
+                message = decode_jsonrpc_frame(payload)
                 if self._handle_server_request(message):
                     continue
                 return message
@@ -2007,6 +2019,19 @@ def execute_codex_app_server_trigger(session: dict, message: dict, runtime_home:
         if model:
             turn_payload["model"] = model
         started = client.request("turn/start", turn_payload)
+        # A response is not an acceptance. `result: null`, or a result with no turn
+        # object, means the server never demonstrated that it created the turn -- and
+        # the delivered-but-unobserved path below would then commit the packet on the
+        # strength of a request that did nothing. Fail closed instead: an unaccepted
+        # turn is not a delivery.
+        started_turn = started.get("turn") if isinstance(started, dict) else None
+        accepted = isinstance(started_turn, dict) and bool(started_turn.get("id"))
+        if not accepted:
+            raise ValueError(
+                "turn/start returned no turn id; the server did not accept the turn: "
+                f"{json.dumps(started, sort_keys=True)[:200]}"
+            )
+        started_turn_id = str(started_turn["id"])
 
         def unobserved(detail: str) -> dict[str, Any]:
             """The turn was ACCEPTED and we stopped watching it.
@@ -2043,6 +2068,12 @@ def execute_codex_app_server_trigger(session: dict, message: dict, runtime_home:
             }
 
         deadline = time.monotonic() + timeout_seconds
+        # Absolute, not per-read. The outer condition is only checked BETWEEN frames, and
+        # frames recv_json consumes internally -- pings, binary frames, handled server
+        # requests -- never return here, so each one silently granted the next read a
+        # fresh full timeout. A chatty peer could hang the watcher indefinitely on an
+        # accepted turn that was never marked processed.
+        client.set_deadline(deadline)
         while time.monotonic() < deadline:
             try:
                 message_payload = client.recv_json()
@@ -2064,6 +2095,16 @@ def execute_codex_app_server_trigger(session: dict, message: dict, runtime_home:
                 elif text:
                     assistant_text = text
             if method.lower() in {"turn/completed", "turn/failed", "turn/cancelled"}:
+                # Another turn may be live on the same event stream. Its terminal event
+                # would otherwise supply this packet's status and stdout and mark it
+                # observed, though the turn we started was never seen to end.
+                event_turn = params.get("turn") if isinstance(params, dict) else None
+                event_turn_id = (
+                    str(event_turn.get("id")) if isinstance(event_turn, dict) and event_turn.get("id")
+                    else None
+                )
+                if event_turn_id is not None and event_turn_id != started_turn_id:
+                    continue
                 terminal = params if isinstance(params, dict) else {"raw": params}
                 break
         if terminal is None:
@@ -2082,7 +2123,14 @@ def execute_codex_app_server_trigger(session: dict, message: dict, runtime_home:
             "source": endpoint.get("source"),
         },
         "timeout_seconds": timeout_seconds,
-        "returncode": 0 if status == "completed" else 1,
+        # returncode reports DELIVERY, which is what dispatch_session uses to decide
+        # whether the packet is processed. An accepted turn that later reports failed or
+        # cancelled was still delivered: resending it would duplicate the packet, which
+        # is the fault this whole change exists to remove. The terminal outcome is
+        # preserved separately in terminal_status and stderr rather than expressed as a
+        # retry.
+        "returncode": 0,
+        "turn_succeeded": status == "completed",
         "stdout": assistant_text.strip(),
         "stderr": "" if status == "completed" else json.dumps(error or terminal, sort_keys=True),
         "turn_started": started,

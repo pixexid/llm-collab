@@ -6216,6 +6216,10 @@ class UnobservedTurnIsNotRedeliveredTest(unittest.TestCase):
                             "jsonrpc": "2.0", "id": frame["id"],
                             "result": {"data": [{"id": "gpt-test", "isDefault": True}]},
                         })
+                    elif method == "turn/start" and after_turn_start == "unaccepted":
+                        # Syntactically fine, but proves no turn was created.
+                        write_frame(conn, {"jsonrpc": "2.0", "id": frame["id"], "result": None})
+                        break
                     elif method == "turn/start":
                         write_frame(conn, {
                             "jsonrpc": "2.0", "id": frame["id"],
@@ -6226,6 +6230,28 @@ class UnobservedTurnIsNotRedeliveredTest(unittest.TestCase):
                                 "jsonrpc": "2.0", "method": "item/agentMessage/delta",
                                 "params": {"item": {"type": "agentMessage", "text": f"part{index}"}},
                             })
+                        if after_turn_start == "failed":
+                            write_frame(conn, {
+                                "jsonrpc": "2.0", "method": "turn/failed",
+                                "params": {"turn": {"id": "turn-1", "status": "failed"},
+                                           "error": {"message": "model refused"}},
+                            })
+                            break
+                        if after_turn_start == "foreign_terminal":
+                            # A DIFFERENT turn ends on the same stream first.
+                            write_frame(conn, {
+                                "jsonrpc": "2.0", "method": "turn/completed",
+                                "params": {"turn": {"id": "someone-elses", "status": "completed"}},
+                            })
+                            write_frame(conn, {
+                                "jsonrpc": "2.0", "method": "item/completed",
+                                "params": {"item": {"type": "agentMessage", "text": "OURS"}},
+                            })
+                            write_frame(conn, {
+                                "jsonrpc": "2.0", "method": "turn/completed",
+                                "params": {"turn": {"id": "turn-1", "status": "completed"}},
+                            })
+                            break
                         if after_turn_start == "complete":
                             write_frame(conn, {
                                 "jsonrpc": "2.0", "method": "item/completed",
@@ -6323,14 +6349,104 @@ class UnobservedTurnIsNotRedeliveredTest(unittest.TestCase):
         thread.join(timeout=5)
         self.assertEqual(0, result["returncode"], "a delivered packet must not be retried")
         self.assertEqual("unobserved", result["terminal_status"])
-        self.assertIn("terminal event", result["unobserved_reason"])
+        # Either expiry route is correct and both must land here: the absolute deadline
+        # now bounds the read itself, so a chatty peer raises inside recv_json rather
+        # than falling out of the loop condition. What must not vary is the outcome.
+        self.assertRegex(result["unobserved_reason"], r"(?i)timed? ?out|terminal event")
         self.assertIn("item/agentMessage/delta", result["notifications"])
+        self.assertEqual(0, result["returncode"])
+        self.assertFalse(result["delivery_observed"])
 
     def test_partial_reply_text_collected_before_the_view_was_lost_is_kept(self) -> None:
         port, thread, _ = self.serve(after_turn_start="silence", deltas=2)
         result = self.trigger(port)
         thread.join(timeout=5)
         self.assertEqual("part0part1", result["stdout"])
+
+    def test_an_unaccepted_turn_start_is_not_a_delivery(self) -> None:
+        """A response is not an acceptance.
+
+        `result: null` means the server never demonstrated it created the turn. Treating
+        that as delivered would commit a packet on the strength of a request that did
+        nothing, and the packet would be silently lost rather than retried.
+        """
+        port, thread, _ = self.serve(after_turn_start="unaccepted")
+        with self.assertRaises(ValueError) as caught:
+            self.trigger(port)
+        thread.join(timeout=5)
+        self.assertIn("did not accept the turn", str(caught.exception))
+
+    def test_a_turn_that_fails_after_acceptance_is_still_delivered(self) -> None:
+        """The duplicate bug survived here: returncode 1 meant dispatch resent it.
+
+        An accepted turn that later reports failed was delivered. Resending duplicates
+        the packet, which is the entire fault this change removes. The failure is
+        preserved as terminal_status and stderr rather than expressed as a retry.
+        """
+        port, thread, _ = self.serve(after_turn_start="failed")
+        result = self.trigger(port)
+        thread.join(timeout=5)
+        self.assertEqual(0, result["returncode"], "a delivered packet must not be retried")
+        self.assertFalse(result["turn_succeeded"])
+        self.assertEqual("failed", result["terminal_status"])
+        self.assertIn("model refused", result["stderr"])
+        self.assertTrue(result["delivery_observed"])
+
+    def test_another_turns_terminal_event_is_not_ours(self) -> None:
+        """Turn IDs are correlated, so a neighbour's completion cannot answer for us."""
+        port, thread, _ = self.serve(after_turn_start="foreign_terminal")
+        result = self.trigger(port)
+        thread.join(timeout=5)
+        self.assertEqual("completed", result["terminal_status"])
+        self.assertTrue(result["turn_succeeded"])
+        # The text emitted between the foreign terminal and ours is ours.
+        self.assertEqual("OURS", result["stdout"])
+
+    def test_every_structural_decode_failure_leaves_as_value_error(self) -> None:
+        """Run the decoder, do not grep for its except clause.
+
+        Both shapes escaped as types no caller expected -- RecursionError from a deeply
+        nested frame, AttributeError from a valid non-object reaching `.get` -- and each
+        left an already-delivered packet eligible to be sent again.
+        """
+        decode = session_autobridge_lib.decode_jsonrpc_frame
+        depth = sys.getrecursionlimit() * 3
+        nested = ("[" * depth + "]" * depth).encode()
+        with self.assertRaises(ValueError) as deep:
+            decode(nested)
+        self.assertIn("too deeply nested", str(deep.exception))
+
+        for raw, shape in ((b"[]", "list"), (b'"x"', "str"), (b"3", "int")):
+            with self.subTest(frame=raw):
+                with self.assertRaises(ValueError) as caught:
+                    decode(raw)
+                self.assertIn(shape, str(caught.exception))
+
+        self.assertEqual({"jsonrpc": "2.0"}, decode(b'{"jsonrpc":"2.0"}'))
+
+    def test_a_deadline_bounds_the_total_read_not_each_one(self) -> None:
+        """Frames consumed inside recv_json never reach the outer loop condition.
+
+        Without an absolute deadline every successful frame silently granted the next
+        socket read a fresh full timeout, so a chatty peer could hang the watcher
+        indefinitely on a turn that was accepted and never marked processed.
+        """
+        client = session_autobridge_lib.JsonRpcWebSocketClient(
+            "ws://127.0.0.1:1", timeout_seconds=30
+        )
+        # No deadline: every read may wait the full timeout, forever.
+        self.assertEqual(30.0, client.remaining_wait())
+        self.assertEqual(30.0, client.remaining_wait())
+
+        client.set_deadline(time.monotonic() + 5)
+        first = client.remaining_wait()
+        self.assertLessEqual(first, 5.0)
+        self.assertGreater(first, 0)
+
+        client.set_deadline(time.monotonic() - 1)
+        self.assertEqual(0.01, client.remaining_wait(), "an expired deadline must not wait")
+        with self.assertRaises(TimeoutError):
+            client._check_deadline("in test")
 
     def test_a_completed_turn_reports_an_observed_delivery(self) -> None:
         """The flag must DISTINGUISH the two cases, or it certifies nothing.
