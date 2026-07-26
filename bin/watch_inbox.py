@@ -88,6 +88,9 @@ OUTCOME_FIELDS = (
     "terminal_status",
     "delivery_observed",
     "turn_succeeded",
+    "unobserved_reason",
+    "error",
+    "error_length",
     "error_truncated",
     "retried",
 )
@@ -254,6 +257,11 @@ def dispatch_autobridge(
                         "terminal_status": runtime_result.get("terminal_status"),
                         "turn_succeeded": runtime_result.get("turn_succeeded"),
                         "delivery_observed": runtime_result.get("delivery_observed"),
+                        # A consumed packet is never retried, so WHY the view was lost is
+                        # the only thing that distinguishes a normal deadline from a
+                        # malformed frame or a refused oversized one. Reporting that
+                        # observation was lost without the reason leaves nothing to act on.
+                        "unobserved_reason": runtime_result.get("unobserved_reason"),
                     },
                     json_output,
                 )

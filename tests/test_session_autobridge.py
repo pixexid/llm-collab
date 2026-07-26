@@ -778,7 +778,9 @@ class SessionAutobridgeTest(unittest.TestCase):
         def fenced(_session, _message, *, boundary, mutation):
             if boundary == "runtime_trigger":
                 delivered.append(boundary)
-                return True, None, {"returncode": 0, "terminal_status": "completed"}
+                # A real fence RUNS the mutation, and the recording now happens inside it,
+                # so a stub that returns a canned result would not exercise the fix.
+                return True, None, mutation()
             if delivered:
                 # The long turn outlived the lease; everything after delivery refuses.
                 return False, {"event": "activation_assert_refused", "boundary": boundary,
@@ -796,12 +798,19 @@ class SessionAutobridgeTest(unittest.TestCase):
             patch.object(session_autobridge_lib, "resolve_effective_action", return_value=("runtime_trigger", "runtime_command_available")),
             patch.object(session_autobridge_lib, "activation_fenced_mutation", side_effect=fenced),
             patch.object(session_autobridge_lib, "append_event"),
+            patch.object(
+                session_autobridge_lib, "execute_runtime_trigger",
+                return_value={"returncode": 0, "terminal_status": "completed"},
+            ),
             patch.object(session_autobridge_lib, "mark_message_processed") as mark_processed,
         ):
             result = session_autobridge_lib.dispatch_session("SESSION-ACT")
 
         mark_processed.assert_called_once_with(session, message["path"])
-        self.assertEqual("on_delivery", result["actions"][0]["processed_recorded"])
+        self.assertEqual(
+            "inside_trigger_fence", result["actions"][0]["processed_recorded"],
+            "the delivery must be recorded under the fence that authorised it",
+        )
 
     def test_an_undelivered_packet_is_still_not_recorded(self):
         """Recording delivery early must not record a delivery that did not happen."""
@@ -818,8 +827,6 @@ class SessionAutobridgeTest(unittest.TestCase):
         }
 
         def fenced(_session, _message, *, boundary, mutation):
-            if boundary == "runtime_trigger":
-                return True, None, {"returncode": 1, "stderr": "spawn failed"}
             return True, None, mutation()
 
         with (
@@ -833,6 +840,10 @@ class SessionAutobridgeTest(unittest.TestCase):
             patch.object(session_autobridge_lib, "resolve_effective_action", return_value=("runtime_trigger", "runtime_command_available")),
             patch.object(session_autobridge_lib, "activation_fenced_mutation", side_effect=fenced),
             patch.object(session_autobridge_lib, "append_event"),
+            patch.object(
+                session_autobridge_lib, "execute_runtime_trigger",
+                return_value={"returncode": 1, "stderr": "spawn failed"},
+            ),
             patch.object(session_autobridge_lib, "mark_message_processed") as mark_processed,
         ):
             session_autobridge_lib.dispatch_session("SESSION-ACT")
@@ -1254,7 +1265,7 @@ class SessionAutobridgeTest(unittest.TestCase):
                         elif method == "turn/start":
                             write_frame(conn, {"jsonrpc": "2.0", "id": frame["id"], "result": {"turn": {"id": "turn-1", "status": "inProgress"}}})
                             write_frame(conn, {"jsonrpc": "2.0", "method": "turn/started", "params": {"threadId": "codex-thread-appserver", "turn": {"id": "turn-1"}}})
-                            write_frame(conn, {"jsonrpc": "2.0", "method": "item/completed", "params": {"item": {"type": "agentMessage", "text": "APP_SERVER_OK"}}})
+                            write_frame(conn, {"jsonrpc": "2.0", "method": "item/completed", "params": {"turnId": "turn-1", "item": {"type": "agentMessage", "text": "APP_SERVER_OK"}}})
                             write_frame(conn, {"jsonrpc": "2.0", "method": "turn/completed", "params": {"turn": {"id": "turn-1", "status": "completed"}}})
                             break
                         else:
@@ -6464,6 +6475,28 @@ class UnobservedTurnIsNotRedeliveredTest(unittest.TestCase):
                             "jsonrpc": "2.0", "id": frame["id"],
                             "result": {"data": [{"id": "gpt-test", "isDefault": True}]},
                         })
+                    elif method == "turn/start" and after_turn_start == "early_notifications":
+                        # The whole turn arrives BEFORE the correlated turn/start reply.
+                        write_frame(conn, {
+                            "jsonrpc": "2.0", "method": "item/completed",
+                            "params": {"turnId": "turn-1",
+                                       "item": {"type": "agentMessage", "text": "EARLY"}},
+                        })
+                        write_frame(conn, {
+                            "jsonrpc": "2.0", "method": "turn/completed",
+                            "params": {"turn": {"id": "turn-1", "status": "completed"}},
+                        })
+                        write_frame(conn, {
+                            "jsonrpc": "2.0", "id": frame["id"],
+                            "result": {"turn": {"id": "turn-1", "status": "inProgress"}},
+                        })
+                        break
+                    elif method == "turn/start" and after_turn_start == "nonstring_turn_id":
+                        write_frame(conn, {
+                            "jsonrpc": "2.0", "id": frame["id"],
+                            "result": {"turn": {"id": ["turn-1"], "status": "inProgress"}},
+                        })
+                        break
                     elif method == "turn/start" and after_turn_start == "unaccepted":
                         # Syntactically fine, but proves no turn was created.
                         write_frame(conn, {"jsonrpc": "2.0", "id": frame["id"], "result": None})
@@ -6476,7 +6509,8 @@ class UnobservedTurnIsNotRedeliveredTest(unittest.TestCase):
                         for index in range(deltas):
                             write_frame(conn, {
                                 "jsonrpc": "2.0", "method": "item/agentMessage/delta",
-                                "params": {"item": {"type": "agentMessage", "text": f"part{index}"}},
+                                "params": {"turnId": "turn-1",
+                                           "item": {"type": "agentMessage", "text": f"part{index}"}},
                             })
                         if after_turn_start == "failed":
                             write_frame(conn, {
@@ -6501,7 +6535,8 @@ class UnobservedTurnIsNotRedeliveredTest(unittest.TestCase):
                             })
                             write_frame(conn, {
                                 "jsonrpc": "2.0", "method": "item/completed",
-                                "params": {"item": {"type": "agentMessage", "text": "OURS"}},
+                                "params": {"turnId": "turn-1",
+                                           "item": {"type": "agentMessage", "text": "OURS"}},
                             })
                             write_frame(conn, {
                                 "jsonrpc": "2.0", "method": "turn/completed",
@@ -6511,7 +6546,19 @@ class UnobservedTurnIsNotRedeliveredTest(unittest.TestCase):
                         if after_turn_start == "complete":
                             write_frame(conn, {
                                 "jsonrpc": "2.0", "method": "item/completed",
-                                "params": {"item": {"type": "agentMessage", "text": "DONE"}},
+                                "params": {"turnId": "turn-1",
+                                           "item": {"type": "agentMessage", "text": "DONE"}},
+                            })
+                            write_frame(conn, {
+                                "jsonrpc": "2.0", "method": "turn/completed",
+                                "params": {"turn": {"id": "turn-1", "status": "completed"}},
+                            })
+                            break
+                        if after_turn_start == "unidentified_item":
+                            # No turnId anywhere: unattributable, so not ours.
+                            write_frame(conn, {
+                                "jsonrpc": "2.0", "method": "item/completed",
+                                "params": {"item": {"type": "agentMessage", "text": "ORPHAN"}},
                             })
                             write_frame(conn, {
                                 "jsonrpc": "2.0", "method": "turn/completed",
@@ -6572,7 +6619,8 @@ class UnobservedTurnIsNotRedeliveredTest(unittest.TestCase):
                             while time.monotonic() < chatty_until:
                                 write_frame(conn, {
                                     "jsonrpc": "2.0", "method": "item/agentMessage/delta",
-                                    "params": {"item": {"type": "agentMessage", "text": "."}},
+                                    "params": {"turnId": "turn-1",
+                                               "item": {"type": "agentMessage", "text": "."}},
                                 })
                                 time.sleep(0.05)
                             break
@@ -6818,6 +6866,63 @@ class UnobservedTurnIsNotRedeliveredTest(unittest.TestCase):
         self.assertFalse(result["notifications_truncated"])
         self.assertEqual(len(result["notifications"]), result["notifications_total"])
 
+    def test_an_unattributable_item_is_not_our_output(self) -> None:
+        """A positive match, exactly as the terminal path requires.
+
+        The generated item notification carries turnId. Accepting an item that names no
+        turn let another turn's text on a shared stream become this turn's stdout -- the
+        same defect as the terminal case, one notification kind over.
+        """
+        port, thread, _ = self.serve(after_turn_start="unidentified_item", deltas=0)
+        result = self.trigger(port)
+        thread.join(timeout=5)
+        self.assertEqual("completed", result["terminal_status"])
+        self.assertEqual("", result["stdout"])
+
+    def test_a_turn_that_answers_before_its_start_reply_is_still_observed(self) -> None:
+        """The correlation loop used to drop notifications and lose the whole turn.
+
+        A fast turn can emit its item and terminal events before the correlated
+        turn/start response. Those frames were discarded, the observation loop began
+        afterwards with nothing left to see, and the packet was committed as unobserved
+        after waiting out the whole deadline.
+        """
+        port, thread, _ = self.serve(after_turn_start="early_notifications")
+        result = self.trigger(port)
+        thread.join(timeout=5)
+        self.assertEqual("completed", result["terminal_status"])
+        self.assertTrue(result["delivery_observed"])
+        self.assertEqual("EARLY", result["stdout"])
+
+    def test_a_non_string_turn_id_is_not_an_acceptance(self) -> None:
+        """Turn.id is a string. Anything truthy was taken as proof of acceptance.
+
+        str() then made it look like a real id, so a peer that disconnected afterwards got
+        the packet permanently marked processed on the strength of a malformed result.
+        """
+        port, thread, _ = self.serve(after_turn_start="nonstring_turn_id")
+        with self.assertRaises(ValueError) as caught:
+            self.trigger(port)
+        thread.join(timeout=5)
+        self.assertIn("did not accept the turn", str(caught.exception))
+
+    def test_retained_output_is_cumulatively_bounded(self) -> None:
+        """Per-frame ceilings do not bound a peer that sends many valid frames.
+
+        Every delta was concatenated and every method retained for the whole turn, so the
+        50-entry slice ran only after everything had been kept -- and a MemoryError there
+        escapes before the accepted packet is marked processed, which redelivers it.
+        """
+        with patch.object(session_autobridge_lib, "CODEX_APP_SERVER_NOTIFICATION_RETENTION", 10), \
+                patch.object(session_autobridge_lib, "CODEX_APP_SERVER_ASSISTANT_TEXT_LIMIT", 8):
+            port, thread, _ = self.serve(after_turn_start="flood", deltas=0)
+            result = self.trigger(port)
+            thread.join(timeout=5)
+        self.assertLessEqual(len(result["stdout"]), 8)
+        self.assertTrue(result["stdout_truncated"])
+        self.assertGreater(result["notifications_dropped"], 0)
+        self.assertTrue(result["notifications_truncated"])
+
     def test_a_completed_turn_reports_an_observed_delivery(self) -> None:
         """The flag must DISTINGUISH the two cases, or it certifies nothing.
 
@@ -6982,6 +7087,50 @@ class AnnouncementIsCommittedBeforeDispatchTest(unittest.TestCase):
         self.assertTrue(consumed, output)
         self.assertIn("terminal_status=unobserved", consumed[0])
         self.assertIn("delivery_observed=False", consumed[0])
+
+    def test_the_plain_line_carries_the_reason_observation_was_lost(self) -> None:
+        """A consumed packet is never retried, so the reason is all there is to act on.
+
+        The plain line reported that observation was lost without saying why, and the
+        failure reason for a failed turn was visible only to a `--json` caller -- which PM2
+        is not.
+        """
+        root, _ = self.workspace()
+        dispatch = "\n".join([
+            "def unobserved(*args, **kwargs):",
+            "    return {'matched_messages': 1, 'actions': [{",
+            "        'effective_action': 'runtime_trigger',",
+            "        'message_path': 'Chats/2026-04-22_watch__CHAT-WATCH/2026-04-22T00-00-00_to-cdx2_packet.md',",
+            "        'runtime_result': {'returncode': 0, 'terminal_status': 'unobserved',",
+            "                           'delivery_observed': False, 'turn_succeeded': None,",
+            "                           'unobserved_reason': 'ValueError: frame declares too much'},",
+            "    }]}",
+            "watch_inbox.autobridge_session_ids = lambda *a, **k: ['SESSION-UNOBS']",
+            "watch_inbox.dispatch_session = unobserved",
+        ])
+        output = self.run_watcher(root, polls=1, json_output=False, dispatch=dispatch)
+        consumed = next(line for line in output.splitlines() if "autobridge_consumed" in line)
+        self.assertIn("frame declares too much", consumed)
+
+    def test_the_plain_line_carries_a_failed_turns_error(self) -> None:
+        root, _ = self.workspace()
+        dispatch = "\n".join([
+            "def failed(*args, **kwargs):",
+            "    return {'matched_messages': 1, 'actions': [{",
+            "        'effective_action': 'runtime_trigger',",
+            "        'message_path': 'Chats/2026-04-22_watch__CHAT-WATCH/2026-04-22T00-00-00_to-cdx2_packet.md',",
+            "        'runtime_result': {'returncode': 0, 'terminal_status': 'failed',",
+            "                           'delivery_observed': True, 'turn_succeeded': False,",
+            "                           'stderr': 'the model refused the request'},",
+            "    }]}",
+            "watch_inbox.autobridge_session_ids = lambda *a, **k: ['SESSION-FAIL']",
+            "watch_inbox.dispatch_session = failed",
+        ])
+        output = self.run_watcher(root, polls=1, json_output=False, dispatch=dispatch)
+        failed_line = next(
+            line for line in output.splitlines() if "autobridge_turn_failed" in line
+        )
+        self.assertIn("the model refused the request", failed_line)
 
     def test_the_plain_line_still_leads_with_the_event_and_path(self) -> None:
         """The outcome is appended, not substituted -- existing log readers still work."""

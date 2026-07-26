@@ -1569,6 +1569,7 @@ class JsonRpcWebSocketClient:
         # recv(1099511627776) here, and any budget applied to the DECODED message is charged too
         # late to matter. A length is a claim, and this is where the claim is first believed.
         self.max_frame_bytes = max_frame_bytes
+        self.pending_notifications: list[dict[str, Any]] = []
         # Bytes already pulled off the socket but not yet consumed. The handshake is read with
         # recv(4096), so when the peer's upgrade response and its first frame land in one segment,
         # those frame bytes arrive in the SAME read -- and everything after the \r\n\r\n used to be
@@ -1794,7 +1795,12 @@ class JsonRpcWebSocketClient:
                     raise RuntimeError(f"{method}: {error.get('message', 'unknown error')}")
                 return message.get("result")
             # Server requests never reach here: recv_json() applies this connection's
-            # policy before returning. This loop only correlates responses.
+            # policy before returning. This loop only correlates responses -- but a
+            # notification arriving before the correlated reply used to be dropped, and a
+            # turn that finished that fast lost its answer and its terminal event and was
+            # committed as unobserved. They are held for the caller to replay instead.
+            if message.get("method") and message.get("id") is None:
+                self.pending_notifications.append(message)
 
 
 # Mirrors TOKEN_BLANK_CHARS in bin/pm2_watchers.py. Python's default strip() removes the
@@ -1990,6 +1996,12 @@ CODEX_APP_SERVER_MAX_FRAME_BYTES = 16 * 1024 * 1024
 # The last 50 notification methods are kept for diagnosis; the count says whether that is
 # the whole history or the tail of one.
 CODEX_APP_SERVER_NOTIFICATION_LIMIT = 50
+# Per-frame ceilings do not bound a peer that sends many valid frames. Every delta was
+# concatenated and every method retained for the whole turn, so the 50-entry slice ran
+# only after everything had already been kept -- and a MemoryError there escapes before
+# the accepted packet is marked processed, which redelivers it.
+CODEX_APP_SERVER_ASSISTANT_TEXT_LIMIT = 4 * 1024 * 1024
+CODEX_APP_SERVER_NOTIFICATION_RETENTION = 4096
 
 
 def _notification_turn_id(params: Any) -> str | None:
@@ -2005,7 +2017,12 @@ def _notification_turn_id(params: Any) -> str | None:
     return None
 
 
-def _notification_report(notifications: list[str]) -> dict[str, Any]:
+def _notification_report(
+    notifications: list[str],
+    *,
+    dropped: int = 0,
+    text_truncated: bool = False,
+) -> dict[str, Any]:
     """The kept tail, and whether it is a tail.
 
     Returning only the last 50 made a complete history indistinguishable from a
@@ -2015,8 +2032,10 @@ def _notification_report(notifications: list[str]) -> dict[str, Any]:
     limit = CODEX_APP_SERVER_NOTIFICATION_LIMIT
     return {
         "notifications": notifications[-limit:],
-        "notifications_total": len(notifications),
-        "notifications_truncated": len(notifications) > limit,
+        "notifications_total": len(notifications) + dropped,
+        "notifications_truncated": len(notifications) > limit or bool(dropped),
+        "notifications_dropped": dropped,
+        "stdout_truncated": text_truncated,
     }
 
 
@@ -2042,7 +2061,9 @@ def execute_codex_app_server_trigger(session: dict, message: dict, runtime_home:
     runtime_session_id = str(runtime["session_id"])
     token = _codex_app_server_token(endpoint.get("token_file"))
     notifications: list[str] = []
+    notifications_dropped = 0
     assistant_text = ""
+    assistant_text_truncated = False
     terminal: dict[str, Any] | None = None
 
     with JsonRpcWebSocketClient(
@@ -2081,13 +2102,18 @@ def execute_codex_app_server_trigger(session: dict, message: dict, runtime_home:
         # strength of a request that did nothing. Fail closed instead: an unaccepted
         # turn is not a delivery.
         started_turn = started.get("turn") if isinstance(started, dict) else None
-        accepted = isinstance(started_turn, dict) and bool(started_turn.get("id"))
+        # The generated Turn.id contract is a string. Accepting any truthy value -- a
+        # list, a number, True -- and normalising it with str() treated a malformed result
+        # as proof of acceptance, and a peer that then disconnected got the packet
+        # permanently marked processed on the strength of it.
+        turn_identifier = started_turn.get("id") if isinstance(started_turn, dict) else None
+        accepted = isinstance(turn_identifier, str) and bool(turn_identifier.strip())
         if not accepted:
             raise ValueError(
                 "turn/start returned no turn id; the server did not accept the turn: "
                 f"{json.dumps(started, sort_keys=True)[:200]}"
             )
-        started_turn_id = str(started_turn["id"])
+        started_turn_id = turn_identifier
 
         def unobserved(detail: str) -> dict[str, Any]:
             """The turn was ACCEPTED and we stopped watching it.
@@ -2120,8 +2146,17 @@ def execute_codex_app_server_trigger(session: dict, message: dict, runtime_home:
                 "terminal_status": "unobserved",
                 "delivery_observed": False,
                 "unobserved_reason": detail,
-                **_notification_report(notifications),
+                **_notification_report(
+                    notifications,
+                    dropped=notifications_dropped,
+                    text_truncated=assistant_text_truncated,
+                ),
             }
+
+        # Notifications the turn/start correlation loop saw before its reply. Replayed
+        # first, in arrival order, so a turn that answered that fast is still observed.
+        replay = list(client.pending_notifications)
+        client.pending_notifications.clear()
 
         deadline = time.monotonic() + timeout_seconds
         # Absolute, not per-read. The outer condition is only checked BETWEEN frames, and
@@ -2131,34 +2166,52 @@ def execute_codex_app_server_trigger(session: dict, message: dict, runtime_home:
         # accepted turn that was never marked processed.
         client.set_deadline(deadline)
         while time.monotonic() < deadline:
-            try:
-                message_payload = client.recv_json()
-            except (TimeoutError, OSError, ValueError) as exc:
-                # Every way this read can fail -- socket timeout, peer reset, a truncated or
-                # unparseable frame -- is a lost VIEW of a turn that is already running. They all
-                # land here so no single one of them can resurrect the packet for redelivery.
-                return unobserved(f"{type(exc).__name__}: {exc}")
+            if replay:
+                message_payload = replay.pop(0)
+            else:
+                try:
+                    message_payload = client.recv_json()
+                except (TimeoutError, OSError, ValueError) as exc:
+                    # Every way this read can fail -- socket timeout, peer reset, a truncated
+                    # or unparseable frame -- is a lost VIEW of a turn that is already
+                    # running. They all land here so no single one of them can resurrect the
+                    # packet for redelivery.
+                    return unobserved(f"{type(exc).__name__}: {exc}")
             method = str(message_payload.get("method", ""))
             if not method:
                 continue
-            notifications.append(method)
+            if len(notifications) < CODEX_APP_SERVER_NOTIFICATION_RETENTION:
+                notifications.append(method)
+            else:
+                notifications_dropped += 1
             params = message_payload.get("params")
             # Output is attributed BEFORE it is collected, not after. A second turn on the
             # same stream has its own item notifications, and skipping only its terminal
             # event let its agent message overwrite assistant_text -- this turn then
             # reported the other turn's reply as its own. An item that cannot be shown to
             # belong to this turn is not this turn's output.
-            if _notification_turn_id(params) in (started_turn_id, None):
+            # A positive match, exactly as the terminal path requires. Accepting an
+            # unidentified item let another turn's text on a shared stream become this
+            # turn's stdout, which is the same defect one notification kind over.
+            if _notification_turn_id(params) == started_turn_id:
                 item = params.get("item") if isinstance(params, dict) else None
                 if method == "item/agentMessage/delta":
                     # The delta text lives in params.delta; params.item is absent on a
                     # delta frame, so reading item.text collected nothing and an
                     # unobserved turn lost the partial reply it exists to preserve.
-                    assistant_text += _delta_text(params, item)
+                    chunk = _delta_text(params, item)
+                    room = CODEX_APP_SERVER_ASSISTANT_TEXT_LIMIT - len(assistant_text)
+                    if room > 0:
+                        assistant_text += chunk[:room]
+                    if len(chunk) > room:
+                        assistant_text_truncated = True
                 elif isinstance(item, dict) and item.get("type") == "agentMessage":
                     text = str(item.get("text", ""))
                     if text:
-                        assistant_text = text
+                        assistant_text = text[:CODEX_APP_SERVER_ASSISTANT_TEXT_LIMIT]
+                        assistant_text_truncated = (
+                            len(text) > CODEX_APP_SERVER_ASSISTANT_TEXT_LIMIT
+                        )
             if method.lower() in {"turn/completed", "turn/failed", "turn/cancelled"}:
                 # Another turn may be live on the same event stream. Its terminal event
                 # would otherwise supply this packet's status and stdout and mark it
@@ -2204,7 +2257,11 @@ def execute_codex_app_server_trigger(session: dict, message: dict, runtime_home:
         "turn_started": started,
         "terminal_status": status,
         "delivery_observed": True,
-        **_notification_report(notifications),
+        **_notification_report(
+            notifications,
+            dropped=notifications_dropped,
+            text_truncated=assistant_text_truncated,
+        ),
     }
 
 
@@ -3038,11 +3095,23 @@ def dispatch_session(
                 append_event(session_id, event)
                 actions.append(event)
                 continue
+            # Recording the delivery INSIDE the trigger's own fence, not after it. The
+            # fence releases its claim lock the moment the mutation returns, so a stale
+            # holder descheduled between the two could let another watcher take over, pass
+            # its own trigger fence and send the packet again -- and then record the path,
+            # so processed state concealed the duplicate instead of preventing it.
+            def trigger_and_record() -> dict[str, Any]:
+                result = execute_runtime_trigger(session, message)
+                if isinstance(result, dict) and result.get("returncode") == 0:
+                    mark_message_processed(session, message["path"])
+                    result = {**result, "processed_recorded": "inside_trigger_fence"}
+                return result
+
             asserted, assertion_event, runtime_result = activation_fenced_mutation(
                 session,
                 message,
                 boundary="runtime_trigger",
-                mutation=lambda: execute_runtime_trigger(session, message),
+                mutation=trigger_and_record,
             )
             if assertion_event is not None:
                 event.setdefault("activation_assertions", []).append(assertion_event)
@@ -3054,16 +3123,14 @@ def dispatch_session(
             event["runtime_result"] = runtime_result
             should_mark_processed = runtime_result.get("returncode") == 0
             if should_mark_processed:
-                # The turn is accepted and running on the server. Every step after this
-                # point -- the UI refresh, the lease re-assert on the mark itself -- can
-                # fail without undoing that, and an activation lease can expire during a
-                # long turn. Refusing to record the delivery does not recall the message;
-                # it only guarantees the next poll sends the same packet again. So the
-                # acceptance is recorded here and unfenced: the fence protects against
-                # ACTING under a stale lease, and the action has already happened.
-                mark_message_processed(session, message["path"])
-                already_marked = True
-                event["processed_recorded"] = "on_delivery"
+                # Already durable: trigger_and_record wrote it under the same fence that
+                # authorised the send. Every step after this point -- the UI refresh, the
+                # lease re-assert -- can now fail without resurrecting the packet, which is
+                # the whole point: an activation lease has a fixed TTL and is never renewed
+                # by activity, so a long turn outlives it and every post-delivery fence
+                # refuses.
+                already_marked = bool(runtime_result.get("processed_recorded"))
+                event["processed_recorded"] = runtime_result.get("processed_recorded")
                 try:
                     asserted, assertion_event, ui_refresh_result = activation_fenced_mutation(
                         session,
