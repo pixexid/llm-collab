@@ -571,6 +571,28 @@ class ReviewLoopCapContractTest(unittest.TestCase):
 
         self.assert_scenario_cases("canonical_wait_gate", check)
 
+    def test_an_empty_connector_review_body_is_not_a_clean_verdict(self):
+        """The trap that nearly defeated this gate on 2026-07-26.
+
+        The connector posts findings as inline review threads. Its review BODY can be
+        pure boilerplate -- heading, reviewed commit, collapsed "About Codex" section --
+        while unresolved P1 threads sit on the same head. On llm-collab#317 at 87e8e47
+        the body listed nothing and six live threads existed, three of them P1. Reading
+        the body as the verdict is a merge on unaddressed P1s.
+        """
+        section = contract_section(
+            WORKFLOW_DOC.read_text(encoding="utf-8"),
+            "- **a connector review body that lists no findings is not a clean verdict.**",
+            "- when a re-review was explicitly requested",
+        )
+        for phrase in (
+            "posts its findings as inline review threads",
+            "the review body can be boilerplate",
+            "unresolved and not outdated",
+            "that set, not the body, is the finding list",
+        ):
+            self.assertIn(phrase, section)
+
     def test_the_request_shape_itself_names_focus_and_the_exact_head_sha(self):
         """The source-of-truth request template, pinned.
 

@@ -244,6 +244,15 @@ policy:
   GitHub artifact
 - these are the only two exact-head terminal signal models; no other review,
   comment, or reaction artifact is terminal
+- **a connector review body that lists no findings is not a clean verdict.** The
+  connector posts its findings as inline review threads, and the review body can be
+  boilerplate — a heading, the reviewed commit, and a collapsed "About Codex"
+  section — while unresolved P1 threads sit on that exact head. Read
+  `reviewThreads` and count the nodes that are both unresolved and not outdated;
+  that set, not the body, is the finding list. An empty body with live threads
+  reads exactly like a pass (llm-collab#317 at `87e8e47`, 2026-07-26: body listed
+  nothing, six live threads including three P1s, one of which made the generated
+  command unrunnable on macOS)
 - a head-named clean connector verdict is not merge-immediate. Hold an
   approximately five-minute post-clean settle, then perform a full re-read of
   reviews, review threads, and reactions before merge because the connector
