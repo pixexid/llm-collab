@@ -850,7 +850,8 @@ Every implementation slice follows this sequence:
 11. merge only the reviewed exact head after the full PR Review Wait Gate in
     `docs/workflows/commit-push-prs.md` passes, including its two exact-head
     terminal-signal models, post-clean settle and full review/thread/reaction
-    re-read, and resettable 15-minute fallback; then reconcile task/issue state.
+    re-read; then reconcile task/issue state. There is no silence fallback for an
+    unrequested review -- see the Tier A/B/C rule in AGENTS.md.
 
 A worker/reviewer task is never reused for a later phase or a different write
 lane; within its own lane's review-fix cycles, reviewer reuse follows the

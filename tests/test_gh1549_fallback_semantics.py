@@ -235,28 +235,40 @@ class Gh1549ClassARunnableExamplesTest(unittest.TestCase):
 
 
 class Gh1549ClassDFallbackSemanticsTest(unittest.TestCase):
-    """Class D: silent-fallback ageing handles the three named variants."""
+    """Class D: silent-fallback ageing handles the named variants.
 
-    def test_commit_push_prs_doc_names_all_three_variants(self) -> None:
+    There were THREE until 2026-07-26. "No explicit review request" is deleted, not
+    renamed: with automatic review off, a clock measuring how long to wait for an
+    unrequested review always expires, and that expiry handed a Tier A worker a path to
+    merge fifteen minutes after failing to request one. Absence of a request is now a
+    gate violation to fix, not a delay to wait out.
+    """
+
+    def test_commit_push_prs_doc_names_the_surviving_variants(self) -> None:
         text = (
             REPO_ROOT / "docs" / "workflows" / "commit-push-prs.md"
         ).read_text(encoding="utf-8")
-        # The doc must explicitly enumerate the three no-terminal-artifact
-        # variants so future drift cannot silently drop one.
-        self.assertIn("No explicit review request", text)
+        # Both survivors still enumerated, so drift cannot silently drop one.
         self.assertIn("Eyes-only current-head artifact", text)
         self.assertIn("Prior-head artifacts only", text)
 
-    def test_review_and_handoff_doc_references_the_three_variants(self) -> None:
+    def test_the_unrequested_review_variant_is_gone_and_stays_gone(self) -> None:
+        """The deletion is the point, so it is pinned as hard as the survivors."""
+        text = (
+            REPO_ROOT / "docs" / "workflows" / "commit-push-prs.md"
+        ).read_text(encoding="utf-8")
+        self.assertNotIn("No explicit review request", text,
+                         "the unrequested-review fallback variant must not return")
+        self.assertIn("gate violation to fix, not a delay to wait out", text)
+
+    def test_review_and_handoff_doc_references_the_surviving_variants(self) -> None:
         text = (
             REPO_ROOT / "docs" / "workflows" / "review-and-handoff.md"
         ).read_text(encoding="utf-8")
-        # The compact mirror must name all three variants and point at the
-        # full enumeration in commit-push-prs.md.
-        self.assertIn("no explicit review request", text)
         self.assertIn("eyes-only current-head", text)
         self.assertIn("prior-head", text)
         self.assertIn("commit-push-prs.md", text)
+        self.assertNotIn("no explicit review request (the reviewability clock", text)
 
     def test_later_of_clock_anchor_is_preserved(self) -> None:
         text = (

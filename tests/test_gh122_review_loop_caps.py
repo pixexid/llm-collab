@@ -204,7 +204,7 @@ class ReviewLoopCapContractTest(unittest.TestCase):
         )
         fallback = contract_section(
             workflow_text,
-            "The resettable fallback above handles three named "
+            "The resettable fallback above handles two named "
             "no-terminal-artifact variants",
             "#### Explicit requested-review precedence",
         )
@@ -319,37 +319,36 @@ class ReviewLoopCapContractTest(unittest.TestCase):
         self.assertEqual(
             compact_precedence,
             normalized(
-                "For requested-review silence versus the fallback, follow the "
-                "canonical [Explicit requested-review precedence]"
-                "(commit-push-prs.md#explicit-requested-review-precedence). "
-                "Do not apply the 15-minute fallback to an explicitly requested "
-                "review. Automation may issue exactly one re-trigger, and no "
-                "further automatic retry is allowed. The canonical section is "
-                "the sole authority for both request-anchored clocks, "
-                "current-head invalidation, the post-timeout disposition "
-                "choices, and every effect of an exact-head operator "
-                "authorization; this compact guidance defines no separate "
-                "disposition effect. The fallback is limited to exactly three "
-                "named no-terminal-artifact variants: no explicit review "
-                "request (the reviewability clock starts at the later of the "
-                "final push and the head becoming reviewable), eyes-only "
-                "current-head artifact (which applies only when no explicit "
-                "review request is outstanding and is non-blocking once no "
-                "review is pending), and prior-head artifacts only (a stale-head "
-                "`Codex Review:` body or reaction is not head-attributable and "
-                "is ignored for terminal-signal purposes). For those fallback "
-                "variants, any push invalidates the prior signal and restarts "
-                "the fallback clock for the new head; it does not reset an "
-                "explicit request's request-anchored clock. This compact handoff "
-                "rule must not define a competing timer or disposition rule."
+                'For requested-review silence versus the fallback, follow the canonical [Explicit '
+                'requested-review precedence](commit-push-prs.md#explicit-requested-review-precedence). '
+                'Do not apply the 15-minute fallback to an explicitly requested review. Automation may '
+                'issue exactly one re-trigger, and no further automatic retry is allowed. The canonical '
+                'section is the sole authority for both request-anchored clocks, current-head '
+                'invalidation, the post-timeout disposition choices, and every effect of an exact-head '
+                'operator authorization; this compact guidance defines no separate disposition effect. '
+                'Under manual-only review the fallback is limited to exactly two named '
+                'no-terminal-artifact variants: eyes-only current-head artifact (which applies only '
+                'when no explicit review request is outstanding and is non-blocking once no review is '
+                'pending), and prior-head artifacts only (a stale-head `Codex Review:` body or reaction '
+                'is not head-attributable and is ignored for terminal-signal purposes). The former '
+                'third variant, **no explicit review request**, is deleted rather than shortened. '
+                'Nothing arrives unrequested now, so a clock measuring how long to wait for it always '
+                'expires: at Tier A the absence of a request is a **gate violation to fix, not a delay '
+                'to wait out**, and at Tier B/C there is nothing to wait for at all. For those fallback '
+                'variants, any push invalidates the prior signal and restarts the fallback clock for '
+                "the new head; it does not reset an explicit request's request-anchored clock. This "
+                'compact handoff rule must not define a competing timer or disposition rule.'
             ),
         )
 
         fallback_variants = re.findall(r"- \*\*([^*]+)\.\*\*", fallback)
+        # TWO since 2026-07-26. "No explicit review request" is deleted, not renamed:
+        # with automatic review off, a clock counting how long to wait for an unrequested
+        # review always expires, and that expiry handed a Tier A worker a path to merge
+        # fifteen minutes after failing to request one.
         self.assertEqual(
             fallback_variants,
             [
-                "No explicit review request",
                 "Eyes-only current-head artifact",
                 "Prior-head artifacts only",
             ],
@@ -689,8 +688,11 @@ class ReviewLoopCapContractTest(unittest.TestCase):
                 "post-clean settle and full review/thread/reaction re-read",
                 sources["plan"],
             )
+            # Updated 2026-07-26: the plan pinned "resettable 15-minute fallback", which
+            # under manual-only review is a clock for a review that never arrives. It now
+            # pins the rule that replaced it.
             self.assertIn(
-                "resettable 15-minute fallback", sources["plan"]
+                "no silence fallback for an unrequested review", sources["plan"]
             )
 
         self.assert_scenario_cases("standalone_publication", check)
@@ -740,12 +742,26 @@ class ReviewLoopCapContractTest(unittest.TestCase):
 
         self.assert_scenario_cases("compact_wait_gate", check)
 
-    def test_compact_eyes_signal_avoids_only_the_fallback_remainder(self):
+    def test_compact_reaction_signal_takes_the_same_settle_as_a_verdict(self):
+        """Inverted 2026-07-26. This pinned the DEFECT.
+
+        It required the reaction path to "report it immediately and do not wait out the
+        remainder of the 15-minute fallback" -- so a Tier A PR could merge the instant a
+        `+1` appeared, with no settle and no re-read. The stated justification for
+        accepting a reaction-only CLEAN at Tier A is settle plus adjudication, so
+        exempting the reaction from the settle removed the very evidence the rule rests
+        on. The reaction path now takes the same settle as a text verdict.
+        """
         def check(case, sources):
+            handoff = sources["handoff_wait"]
             self.assertIn(
-                "report it immediately and do not wait out the remainder of the "
-                "15-minute fallback itself",
-                sources["handoff_wait"],
+                "the same approximately five-minute post-clean settle and full re-read "
+                "as a text verdict",
+                handoff,
+            )
+            self.assertNotIn(
+                "report it immediately and do not wait out the remainder", handoff,
+                "the reaction path must not be exempt from the settle again",
             )
 
         self.assert_scenario_cases("compact_wait_gate", check)
@@ -792,7 +808,7 @@ class ReviewLoopCapContractTest(unittest.TestCase):
                 "ages into the 15-minute fallback",
             ),
             (
-                "fallback broadened beyond the three named variants",
+                "fallback broadened beyond the two named variants",
                 "workflow",
                 "- **Prior-head artifacts only.**",
                 "- **Explicit requested-review silence.** Broadened case.\n"

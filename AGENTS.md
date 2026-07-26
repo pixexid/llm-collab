@@ -189,7 +189,10 @@ prose and comments; additive tests with no gate, fixture or baseline change;
 single-caller behaviour-preserving edits.
 
 Request with `@codex review for <focus>`, naming **every** Tier A family the diff
-touches and asking for the full diff through those lenses. Request **once per
+touches, asking for the full diff through those lenses, and **stating the exact head
+SHA the request is for**. The SHA is not decoration: a connector `+1` is terminal only
+while the head still equals the SHA that request named, so a request without one leaves
+the reaction path unsatisfiable and there is nothing to bind the verdict to. Request **once per
 candidate final head** — an amendment stales the review and needs a new request. Any
 finding that arrives must be adjudicated in writing at every tier. A review is
 P0/P1-scoped, so it complements and never replaces independent exact-head

@@ -161,9 +161,10 @@ amendment, stale review-attestation CI is an expected transitional state rather
 than evidence that product verification failed. Refresh the PR body only after
 the amended head passes its required review.
 
-Rely on the automatic GitHub Codex review flow for ready PRs. Consume the
-automatic PR review/comment/reaction when it appears. If no automatic artifact
-appears, use the opportunistic policy below.
+There is no automatic GitHub Codex review flow to rely on: automatic review is off
+account-wide. A review exists because someone requested it. Consume any
+review/comment/reaction that appears, and see the policy below for when requesting one
+is mandatory.
 
 ## PR requirements
 
@@ -206,16 +207,16 @@ rerun verification, push, and then request/inspect review again.
 > **Reviews are MANUAL ONLY (operator decision, 2026-07-25).** Automatic review is
 > off account-wide. Nothing arrives unless someone asks for it, so the question is
 > no longer "how long do we wait" but "must this change be reviewed at all". That
-> is decided by the Tier A/B/C rule in `llm-collab#310`:
+> is decided by the Tier A/B/C rule in
+> [`AGENTS.md` → Requesting Code Review](../../AGENTS.md#requesting-code-review-all-workers-every-repository),
+> which is the **only** place that defines it. This copy previously restated the tiers
+> and went stale the moment Tier A was narrowed — the restatement still carried the
+> superseded meaning in which "untrusted" covered our own workspace. Pointing is the
+> rule this repository sets for exactly that reason.
 >
-> - **Tier A** (credentials/auth/authority; money/provider/idempotency; untrusted
->   parse, read or enumeration and resource/deadline bounds; shared code changing an
->   observable contract; concurrency/ordering/partial-state/TOCTOU/atomicity;
->   migrations/DDL/grants/RLS; repo incident families; tests or docs that govern or
->   can weaken a Tier A invariant) — a manual review **must** be requested on the
->   candidate final head. Failing to request is itself a gate violation.
-> - **Tier B/C** — if no review was requested, do **not** wait for one.
-> - At every tier, any finding that does arrive must be adjudicated in writing.
+> What matters here: **Tier A must request on the candidate final head**, failing to
+> request is itself a gate violation, **Tier B/C do not wait** when nothing was
+> requested, and any finding that does arrive is adjudicated in writing at every tier.
 >
 > "Request once" means **once per candidate final head**, not once per PR: any
 > amendment stales the review and requires a new request.
@@ -251,8 +252,9 @@ policy:
   same-head clean artifacts for the clean-verdict path. Only the explicit
   re-review verdict can satisfy that path, and it receives the same
   approximately five-minute post-clean settle and full re-read
-- report the exact verdict or the latest-head eyes-to-`+1` transition with its
-  timestamps and confirm that no later push occurred
+- report the exact verdict, or the connector-authored `+1` on the manual-review
+  request comment with its timestamps and the SHA that request named, and confirm
+  that no later push occurred
 - any push creates a new head and invalidates every prior verdict and reaction
   lifecycle
 - **there is no silence fallback for an unrequested review.** Under manual-only,
@@ -277,14 +279,16 @@ policy:
 - neither a bot verdict nor a reaction waives required CI, mergeability, the
   independent exact-head review, or full comment/review/thread inspection
 
-The resettable fallback above handles three named no-terminal-artifact variants
-explicitly, so none of them silently extends the wait:
+The resettable fallback above handles two named no-terminal-artifact variants
+explicitly, so neither silently extends the wait.
 
-- **No explicit review request.** The reviewability clock starts at the later of
-  the final push and the head becoming reviewable even when no explicit review
-  request exists on the PR (the PR is open, any draft is marked ready, and review
-  visibility exists for that head). Absence of an explicit request does not
-  pre-expire the fallback, and it does not extend it indefinitely either.
+**The former third variant, "no explicit review request", is deleted rather than
+shortened.** Under manual-only review nothing arrives unrequested, so a clock
+measuring how long to wait for it always expires -- and that expiry used to hand a
+Tier A worker a path to merge fifteen minutes after failing to request a review. An
+absent request at Tier A is a **gate violation to fix, not a delay to wait out**; at
+Tier B/C there is nothing to wait for.
+
 - **Eyes-only current-head artifact.** This fallback variant applies only when
   no explicit review request is outstanding. A current-head non-terminal
   `eyes` reaction is not blocking once no review is actually pending; it does
@@ -337,8 +341,10 @@ absent-request variant, where there is nothing to drop.
 
 If the PR is waiting only for remote checks or remote review state, keep it open
 and create or update a Codex heartbeat attached to the current thread with a
-6-minute cadence. Each heartbeat must re-check the PR checks, review state,
-review threads/comments, automatic connector reactions, and merge state.
+6-minute cadence. Each heartbeat must re-check the PR checks, review state, review
+threads/comments, connector reactions, and merge state. "Automatic" is dropped
+deliberately: reactions arrive because a review was requested, and a heartbeat that
+waits for an automatic one waits forever.
 
 PR-wait heartbeats are a safety-fuse, not the primary routing path. When a
 heartbeat or queue owner finds actionable PR feedback that needs the implementer
@@ -363,11 +369,13 @@ Codex review signal as clean when either:
 
 - the latest top-level `chatgpt-codex-connector` review/comment explicitly
   covers the exact current OID and reports no actionable or major issues, or
-- the watcher observed the connector's eyes-to-`+1` (`thumbs-up`) transition on
-  the latest head, the `+1` postdates that head, and no subsequent push occurred.
-  That attributable reaction is terminal for the bot wait on that head when the
-  required gates above remain clean; do not wait out the remainder of the
-  15-minute fallback.
+- a connector-authored `+1` (`thumbs-up`) sits on **the exact manual-review request
+  comment**, the PR head still equals the SHA that request named, and no subsequent
+  push occurred. Verify all four: the actor, that request comment, the requested SHA,
+  and the current head. A `+1` attributable only by timestamp, or sitting on any other
+  artifact, is **not** terminal. That reaction is terminal for the bot wait on that
+  head when the required gates above remain clean, and it receives the same
+  approximately five-minute post-clean settle and full re-read as a text verdict.
 
 For the clean-verdict path, do not merge immediately after the first
 head-named clean artifact. Observe the approximately five-minute post-clean
@@ -381,8 +389,7 @@ If neither a terminal GitHub Codex verdict nor a head-attributable connector
 named no-terminal-artifact variants above and only after at least 15 minutes
 have elapsed since the later of the final push to that head and the
 reviewability timestamp for that head (PR open, marked ready when applicable,
-and visible for review). Commit age cannot pre-expire the fallback before
-automatic review can begin. Eyes or another non-terminal reaction does not
+and visible for review). Eyes or another non-terminal reaction does not
 restart or suppress that fallback after review is no longer pending. Any push
 resets this clock. Explicit requested-review silence follows
 [Explicit requested-review precedence](#explicit-requested-review-precedence)
@@ -396,13 +403,14 @@ instead of this fallback. Proceed only when all of these are true:
 - the project/operator has authorized auto-merge for this PR or queue class
 
 Read current review bodies and reactions directly. Do not infer the current
-result from stale inline review-thread objects alone. The watcher must report
-the exact current-head verdict or the latest-head eyes-to-`+1` lifecycle with
-its timestamps and confirm that no later push occurred. Either terminal signal
+result from stale inline review-thread objects alone. The watcher must report the
+exact current-head verdict, or the connector-authored `+1` on the manual-review
+request comment together with the SHA that request named, with timestamps, and
+confirm that no later push occurred. Either terminal signal
 stops the heartbeat from waiting for further artifacts or a fallback timeout;
-it does not waive post-signal handling. For a head-named clean verdict, the
-approximately five-minute post-clean settle and full review/thread/reaction
-re-read remain mandatory before merge. If review feedback lands, fix or respond
+it does not waive post-signal handling. For a head-named clean verdict **and for a
+request-comment `+1` alike**, the approximately five-minute post-clean settle and full
+review/thread/reaction re-read remain mandatory before merge. If review feedback lands, fix or respond
 to it, push the update, rerun the manual branch-diff review and required
 local/CI checks, then evaluate the new exact head from scratch before
 continuing toward merge.

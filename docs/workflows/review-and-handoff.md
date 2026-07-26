@@ -204,10 +204,9 @@ any review-fix patch. When the operator has authorized the merge path, merge
 from the current thread only after the exact current head has green required
 checks, the PR is mergeable with clean merge state, the independent exact-head
 review is clean, and the full current comment/review/thread payload has no
-actionable finding. Reviews are MANUAL ONLY as of 2026-07-25; nothing arrives unrequested, and whether
-a change must be reviewed is decided by the Tier A/B/C rule in `llm-collab#310`
-and restated in
-[commit-push-prs.md](commit-push-prs.md#explicit-requested-review-precedence).
+actionable finding. Reviews are MANUAL ONLY as of 2026-07-25; nothing arrives unrequested, and whether a change must be reviewed is decided by the Tier A/B/C rule in
+[`AGENTS.md` → Requesting Code Review](../../AGENTS.md#requesting-code-review-all-workers-every-repository),
+which is the only place that defines it.
 The GitHub Codex signal is clean when either the latest
 `chatgpt-codex-connector` review/comment explicitly covers that exact OID with
 no actionable issues, or a connector-authored `+1` (`thumbs-up`) sits on the exact
@@ -224,11 +223,20 @@ artifacts or the fallback timeout only; it does not waive the handling below:
   requested, that re-review supersedes older same-head clean artifacts for the
   clean-verdict path; only its verdict can satisfy that path, and it receives
   the same settle and full re-read.
-- A watcher-observed latest-head eyes-to-`+1` lifecycle is already
-  post-artifact evidence. Once it qualifies under the exact-head conditions
-  above, report it immediately and do not wait out the remainder of the
-  15-minute fallback itself. Required CI, mergeability, independent review,
-  and full comment/review/thread inspection still apply.
+- A connector-authored `+1` on the exact manual-review request comment is
+  terminal CLEAN once all four checks hold (actor, that request comment, the
+  requested SHA, the current head). It receives **the same approximately
+  five-minute post-clean settle and full re-read as a text verdict**. The
+  rationale for accepting a reaction-only CLEAN at Tier A rests on that settle
+  plus adjudication, so exempting it from the settle would remove the evidence
+  the rule depends on. Required CI, mergeability, independent review, and full
+  comment/review/thread inspection still apply.
+
+Whether a review must be requested at all is the Tier A/B/C rule in
+[`AGENTS.md` → Requesting Code Review](../../AGENTS.md#requesting-code-review-all-workers-every-repository),
+which is the only place that defines it. The section linked below governs clocks
+and dispositions **after** a review has been requested, and answers a different
+question.
 
 For requested-review silence versus the fallback, follow the canonical
 [Explicit requested-review precedence](commit-push-prs.md#explicit-requested-review-precedence).
@@ -237,15 +245,17 @@ Automation may issue exactly one re-trigger, and no further automatic retry is
 allowed. The canonical section is the sole authority for both request-anchored
 clocks, current-head invalidation, the post-timeout disposition choices, and
 every effect of an exact-head operator authorization; this compact guidance
-defines no separate disposition effect. The fallback is limited to exactly
-three named
-no-terminal-artifact variants:
-no explicit review request (the reviewability clock starts at the later of the
-final push and the head becoming reviewable), eyes-only current-head artifact
-(which applies only when no explicit review request is outstanding and is
-non-blocking once no review is pending), and prior-head artifacts only (a
-stale-head `Codex Review:` body or reaction is not
-head-attributable and is ignored for terminal-signal purposes). For those
+defines no separate disposition effect. Under manual-only review the fallback is
+limited to exactly two named no-terminal-artifact variants: eyes-only current-head
+artifact (which applies only when no explicit review request is outstanding and is
+non-blocking once no review is pending), and prior-head artifacts only (a stale-head
+`Codex Review:` body or reaction is not head-attributable and is ignored for
+terminal-signal purposes).
+
+The former third variant, **no explicit review request**, is deleted rather than
+shortened. Nothing arrives unrequested now, so a clock measuring how long to wait for
+it always expires: at Tier A the absence of a request is a **gate violation to fix, not
+a delay to wait out**, and at Tier B/C there is nothing to wait for at all. For those
 fallback variants, any push invalidates the prior signal and restarts the
 fallback clock for the new head; it does not reset an explicit request's
 request-anchored clock. This compact handoff rule must not define a competing

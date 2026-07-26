@@ -171,8 +171,11 @@ tests must not.
 Request once, on the head you believe is final:
 
 ```
-@codex review for <every Tier A family the diff touches>
+@codex review for <every Tier A family the diff touches> at <exact head SHA>
 ```
+
+State the SHA. A connector `+1` counts as CLEAN only while the head still equals the
+SHA the request named, so a request without one cannot be satisfied by a reaction.
 
 An amendment stales the review; request again on the new final head. Any finding
 that arrives is adjudicated in writing whatever the tier.
