@@ -1219,11 +1219,14 @@ def _reply_command_lines(session: dict, fm: dict) -> list[str]:
         "," not in token for token in declared
     )
     argv = [
-        # ABSOLUTE, resolved from the llm-collab workspace root. A relative bin/deliver.py
-        # is only runnable from this checkout, and the first worker this instruction is
-        # written for is resumed by #315 with --cwd set to the packet's PRODUCT checkout,
-        # where that path does not exist -- exit 127 before deliver.py is reached.
-        str(ROOT / "bin" / "deliver.py"),
+        # The `llm-collab` LAUNCHER, absolute, not deliver.py directly. Absolute because
+        # #315 resumes a worker with --cwd in the packet's product checkout, where a
+        # relative path exits 127. Through the launcher because deliver.py's shebang
+        # resolves to whatever `python3` is first on PATH: on a stock macOS that is 3.9,
+        # and require_python() then exits before the send. The launcher picks a 3.10+
+        # interpreter.
+        str(ROOT / "bin" / "llm-collab"),
+        "deliver.py",
         "--chat", str(fm.get("chat_id", "")),
         "--from", str(session["agent_id"]),
         "--to", str(fm.get("sender_agent_id", fm.get("from", ""))),
@@ -1231,19 +1234,27 @@ def _reply_command_lines(session: dict, fm: dict) -> list[str]:
     ]
     if usable:
         argv += ["--repo-targets", ",".join(declared)]
-    argv += ["--title", "...", "--body-file", "-"]
+    # A TEMPLATE, deliberately not a command that succeeds unmodified. `--body-file -`
+    # reads EOF in a noninteractive shell, so a worker pasting the line verbatim used to
+    # send an empty body under the literal title "...", and the mailbox reported a
+    # successful reply that carried no answer. These placeholders make deliver.py fail
+    # until real content is supplied; shlex.join quotes them, so they are inert either way.
+    argv += ["--title", "REPLACE-WITH-YOUR-SUBJECT",
+             "--body-file", "REPLACE-WITH-YOUR-REPLY.md"]
     command = f"  {shlex.join(argv)}"
     if usable:
         return [
-            "Reply through the mailbox. It is the only channel the sender reads:",
+            "Reply through the mailbox. It is the only channel the sender reads.",
+            "Replace the title and body-file placeholders before running it:",
             command,
         ]
     return [
         "Reply through the mailbox. It is the only channel the sender reads.",
         "This packet declares no usable repo scope, so the command below is NOT",
-        "complete: add --repo-targets with your own comma-separated repo ids. Without",
-        "it the packet is still written durably and readable with inbox.py, but",
-        "deliver.py reports a runtime dispatch refusal and no worker is woken.",
+        "complete: add --repo-targets with your own comma-separated repo ids. If the",
+        "recipient declares a repo scope, omitting it still writes the packet durably --",
+        "readable with inbox.py -- but deliver.py reports a runtime dispatch refusal and",
+        "no worker is woken. An unscoped recipient accepts it either way.",
         command,
     ]
 

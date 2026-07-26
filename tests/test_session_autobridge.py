@@ -5977,6 +5977,12 @@ class RenamedCodexBinaryDiscoveryTest(unittest.TestCase):
         ]))
 
 
+# /bin/sh is the only shell the repository can assume: the reviewer's Linux checkout has
+# no zsh, and every real-shell test raised FileNotFoundError there before asserting
+# anything. POSIX sh is also the stricter target for the quoting these tests prove.
+POSIX_SHELL = "/bin/sh"
+
+
 class ResumePromptNamesTheReplyChannelTest(unittest.TestCase):
     """A woken worker must be told where its answer goes, and which packet it answers.
 
@@ -5987,19 +5993,19 @@ class ResumePromptNamesTheReplyChannelTest(unittest.TestCase):
     """
 
     def stub_collab_root(self) -> tuple[Path, Path, Path]:
-        """A fake llm-collab checkout holding a stub deliver.py, plus a tripwire echo.
+        """A fake llm-collab checkout holding a stub launcher, plus a tripwire echo.
 
-        The generated command must name deliver.py by ABSOLUTE path, so the stub has to
-        live where ROOT points -- not in the cwd the command runs from. Planting
-        `bin/deliver.py` in the working directory is what let the relative-path defect
-        pass: the test manufactured the very file whose absence is the bug.
+        The generated command must name the launcher by ABSOLUTE path, so the stub has
+        to live where ROOT points -- not in the cwd the command runs from. Planting it
+        in the working directory is what let the relative-path defect pass: the test
+        manufactured the very file whose absence is the bug.
         """
         collab_root = Path(tempfile.mkdtemp(prefix="collab-root-", dir="/tmp"))
         (collab_root / "bin").mkdir()
         argv_log = collab_root / "argv.json"
         breach = collab_root / "BREACH"
         write(
-            collab_root / "bin" / "deliver.py",
+            collab_root / "bin" / "llm-collab",
             "\n".join(
                 [
                     "#!/usr/bin/env python3",
@@ -6007,12 +6013,14 @@ class ResumePromptNamesTheReplyChannelTest(unittest.TestCase):
                     "from pathlib import Path",
                     f"log = Path({json.dumps(str(argv_log))})",
                     "runs = json.loads(log.read_text()) if log.exists() else []",
-                    "runs.append(sys.argv[1:])",
+                    "argv = sys.argv[1:]",
+                    "assert argv and argv[0] == 'deliver.py', argv",
+                    "runs.append(argv[1:])",
                     "log.write_text(json.dumps(runs))",
                 ]
             ),
         )
-        (collab_root / "bin" / "deliver.py").chmod(0o755)
+        (collab_root / "bin" / "llm-collab").chmod(0o755)
         write(
             collab_root / "echo",
             "\n".join(["#!/bin/sh", f"touch {shlex.quote(str(breach))}"]),
@@ -6023,7 +6031,7 @@ class ResumePromptNamesTheReplyChannelTest(unittest.TestCase):
     def run_line(self, prompt: str, collab_root: Path, cwd: Path) -> subprocess.CompletedProcess:
         line = self.command_line(prompt)
         return subprocess.run(
-            ["/bin/zsh", "-c", line],
+            [POSIX_SHELL, "-c", line],
             cwd=cwd,
             text=True,
             capture_output=True,
@@ -6041,11 +6049,22 @@ class ResumePromptNamesTheReplyChannelTest(unittest.TestCase):
         self.assertFalse((product / "bin").exists())
         return product
 
-    def prompt(self, *, repo_targets: Any = ["llm-collab"], **overrides: str) -> str:
+    # AGENTS.md:75 -- a shared contract needs focused coverage for Amiga AND at least one
+    # non-Amiga project. This prompt is shared across every runtime family and project, so
+    # a fixture hardcoded to amiga would let project-specific assumptions in unnoticed.
+    PROJECTS = ("amiga", "nuvyr")
+
+    def prompt(
+        self,
+        *,
+        repo_targets: Any = ["llm-collab"],
+        project_id: str = "amiga",
+        **overrides: str,
+    ) -> str:
         session = {
             "session_id": "SESSION-REPLY",
             "agent_id": "codex",
-            "project_id": "amiga",
+            "project_id": project_id,
             "chat_id": "CHAT-REPLY",
             "runtime": {"family": "codex_app", "session_id": "runtime-reply"},
         }
@@ -6054,7 +6073,7 @@ class ResumePromptNamesTheReplyChannelTest(unittest.TestCase):
             "sender_agent_id": "claude",
             "to": "codex",
             "title": "Review handoff",
-            "project_id": "amiga",
+            "project_id": project_id,
             "chat_id": "CHAT-REPLY",
         }
         if repo_targets is not None:
@@ -6070,14 +6089,14 @@ class ResumePromptNamesTheReplyChannelTest(unittest.TestCase):
     def command_line(self, prompt: str) -> str:
         """The one emitted COMMAND line.
 
-        Selected by "an absolute path ending in deliver.py", not by "mentions
+        Selected by "an absolute launcher path followed by deliver.py", not by "mentions
         deliver.py": the incomplete-scope prose names deliver.py too, and matching that
         first made a passing test run a nonexistent `deliver.py` from the prose.
         """
         candidates = [
             raw.strip()
             for raw in prompt.splitlines()
-            if raw.startswith("  /") and "/bin/deliver.py " in raw
+            if raw.startswith("  /") and "/bin/llm-collab deliver.py " in raw
         ]
         self.assertEqual(1, len(candidates), f"expected one command line, got {candidates}")
         return candidates[0]
@@ -6108,16 +6127,56 @@ class ResumePromptNamesTheReplyChannelTest(unittest.TestCase):
         self.assertIn("only channel the sender reads", prompt)
 
     def test_the_emitted_command_is_shell_safe_and_carries_the_real_scope(self) -> None:
-        argv = self.command_argv(self.prompt())
+        for project_id in self.PROJECTS:
+            with self.subTest(project_id=project_id):
+                argv = self.command_argv(self.prompt(project_id=project_id))
+                self.assertEqual(
+                    str(session_autobridge_lib.ROOT / "bin" / "llm-collab"), argv[0]
+                )
+                self.assertTrue(Path(argv[0]).is_absolute())
+                self.assertEqual("deliver.py", argv[1])
+                self.assertEqual("CHAT-REPLY", self.flag_value(argv, "--chat"))
+                self.assertEqual("codex", self.flag_value(argv, "--from"))
+                self.assertEqual("claude", self.flag_value(argv, "--to"))
+                self.assertEqual(project_id, self.flag_value(argv, "--project"))
+                self.assertEqual("llm-collab", self.flag_value(argv, "--repo-targets"))
+
+    def test_the_command_is_a_template_that_cannot_silently_send_an_empty_reply(self) -> None:
+        """`--body-file -` reads EOF in a noninteractive shell.
+
+        A worker pasting the line verbatim sent an empty body under the literal title
+        "...", and the mailbox reported a successful reply carrying no answer. The
+        placeholders make deliver.py fail instead.
+        """
+        for project_id in self.PROJECTS:
+            with self.subTest(project_id=project_id):
+                prompt = self.prompt(project_id=project_id)
+                argv = self.command_argv(prompt)
+                self.assertNotIn("-", [self.flag_value(argv, "--body-file")])
+                self.assertIn("REPLACE", self.flag_value(argv, "--body-file"))
+                self.assertIn("REPLACE", self.flag_value(argv, "--title"))
+                self.assertIn("Replace the title and body-file placeholders", prompt)
+
+    def test_a_non_amiga_project_gets_the_same_shared_contract(self) -> None:
+        """The prompt is shared across every project; nothing in it may be amiga-shaped."""
+        amiga = self.command_argv(self.prompt(project_id="amiga"))
+        nuvyr = self.command_argv(self.prompt(project_id="nuvyr"))
+        self.assertEqual("amiga", self.flag_value(amiga, "--project"))
+        self.assertEqual("nuvyr", self.flag_value(nuvyr, "--project"))
+        # Identical apart from the project value itself.
         self.assertEqual(
-            str(session_autobridge_lib.ROOT / "bin" / "deliver.py"), argv[0]
+            [t for t in amiga if t != "amiga"], [t for t in nuvyr if t != "nuvyr"]
         )
-        self.assertTrue(Path(argv[0]).is_absolute())
-        self.assertEqual("CHAT-REPLY", self.flag_value(argv, "--chat"))
-        self.assertEqual("codex", self.flag_value(argv, "--from"))
-        self.assertEqual("claude", self.flag_value(argv, "--to"))
-        self.assertEqual("amiga", self.flag_value(argv, "--project"))
-        self.assertEqual("llm-collab", self.flag_value(argv, "--repo-targets"))
+
+    def test_a_non_amiga_packet_scope_is_carried_and_refused_the_same_way(self) -> None:
+        for project_id in self.PROJECTS:
+            with self.subTest(project_id=project_id):
+                argv = self.command_argv(
+                    self.prompt(project_id=project_id, repo_targets=["app", "shared"])
+                )
+                self.assertEqual("app,shared", self.flag_value(argv, "--repo-targets"))
+                bad = self.prompt(project_id=project_id, repo_targets=["app", ""])
+                self.assertIn("declares no usable repo scope", bad)
 
     def test_the_router_is_the_authority_on_what_scope_is_valid(self) -> None:
         """No repo-id grammar is re-derived here.
@@ -6279,7 +6338,7 @@ class ResumePromptNamesTheReplyChannelTest(unittest.TestCase):
         with patch.object(session_autobridge_lib, "ROOT", collab_root):
             prompt = self.prompt(repo_targets=["llm-collab", "amiga"])
         line = self.command_line(prompt)
-        self.assertIn(str(collab_root / "bin" / "deliver.py"), line)
+        self.assertIn(str(collab_root / "bin" / "llm-collab"), line)
 
         result = self.run_line(prompt, collab_root, product)
         self.assertEqual(0, result.returncode, result.stderr)
@@ -6291,7 +6350,7 @@ class ResumePromptNamesTheReplyChannelTest(unittest.TestCase):
         argv = self.command_argv(self.prompt())
         self.assertTrue(Path(argv[0]).is_absolute(), argv[0])
         self.assertEqual(
-            str(session_autobridge_lib.ROOT / "bin" / "deliver.py"), argv[0]
+            str(session_autobridge_lib.ROOT / "bin" / "llm-collab"), argv[0]
         )
 
     def test_the_incomplete_command_prose_states_the_real_deliver_contract(self) -> None:
@@ -6303,9 +6362,15 @@ class ResumePromptNamesTheReplyChannelTest(unittest.TestCase):
         """
         prompt = self.prompt(repo_targets=None)
         self.assertNotIn("silently", prompt)
-        self.assertIn("written durably", prompt)
+        self.assertIn("writes the packet durably", prompt)
         self.assertIn("inbox.py", prompt)
         self.assertIn("runtime dispatch refusal", prompt)
+        # Connector P2: the refusal is conditional on the RECIPIENT declaring a scope.
+        # repo_scope_matches returns (True, "unscoped") for an unscoped subscriber, so an
+        # unconditional warning told workers a dispatch would fail when it would succeed.
+        self.assertIn("If the", prompt)
+        self.assertIn("recipient declares a repo scope", prompt)
+        self.assertIn("An unscoped recipient accepts it either way", prompt)
 
     def test_the_prompt_says_a_pr_comment_does_not_reach_the_sender(self) -> None:
         self.assertIn("does NOT reach the sender", self.prompt())
