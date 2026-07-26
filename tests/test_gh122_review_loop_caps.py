@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 import unittest
 from pathlib import Path
 
@@ -760,12 +760,14 @@ class ReviewLoopCapContractTest(unittest.TestCase):
         field names (beaten by an unlisted name), a dict subclass overriding two methods
         (beaten by inherited setdefault), iteration yielding allowed keys (inert in the
         harness, live in production), and a top-level-only guard (beaten by reading
-        `comments.nodes[0]`, an ordinary nested dict).
+        `comments.nodes[0]`, an ordinary nested dict), and a mappings-only guard
+        (beaten by `len(t["comments"]["nodes"])`, an ordinary nested list).
 
         So the constraint is applied at every level the origin helper walks, not just
-        the outermost one. Iteration and len raise rather than yielding permitted keys,
-        because a scan that finds nothing here would still find the field against a real
-        GraphQL dict in production.
+        the outermost one -- and `StrictSequence` covers the levels that are lists.
+        Iteration and len raise rather than yielding permitted keys, because a scan that
+        finds nothing here would still find the field against a real GraphQL dict in
+        production.
         """
 
         def __init__(self, data, allowed, label):
@@ -797,6 +799,38 @@ class ReviewLoopCapContractTest(unittest.TestCase):
 
         def hidden(self):
             return {k: v for k, v in self._data.items() if k not in self._allowed}
+
+    class StrictSequence(Sequence):
+        """A list that permits only the index the origin helper reads.
+
+        `comments.nodes` was the last ordinary container. Every fixture thread holds
+        exactly one node, so a closure filter like `len(t["comments"]["nodes"]) == 1`
+        could be added to both counts without tripping any guard or changing any
+        expected number -- while silently excluding every real thread that has replies.
+        Length, iteration, slices and any other index raise here.
+        """
+
+        def __init__(self, items, label):
+            self._items = list(items)
+            self._label = label
+
+        def __getitem__(self, index):
+            if index != 0:
+                raise AssertionError(
+                    f"read index {index!r} of {self._label}; only [0] is permitted"
+                )
+            return self._items[0]
+
+        def __iter__(self):
+            raise AssertionError(f"iterated {self._label}; read [0] directly")
+
+        def __len__(self):
+            raise AssertionError(
+                f"measured {self._label}; a node count is not an input to classification"
+            )
+
+        def __bool__(self):
+            return True
 
     def strict_thread(self, oid, *, resolved, decorated, backed=True):
         """A thread guarded at EVERY level the origin helper walks.
@@ -836,9 +870,10 @@ class ReviewLoopCapContractTest(unittest.TestCase):
         if decorated:
             comment.update(self.CLOSURE_LOOKING_FIELDS)
             comment["someFieldNobodyHasThoughtOfYet"] = True
-        comments = {"nodes": [
-            self.StrictMapping(comment, {"originalCommit", "pullRequestReview"}, "comment")
-        ]}
+        comments = {"nodes": self.StrictSequence(
+            [self.StrictMapping(comment, {"originalCommit", "pullRequestReview"}, "comment")],
+            "comments.nodes",
+        )}
         data = {
             "isResolved": resolved,
             "comments": self.StrictMapping(comments, {"nodes"}, "comments"),

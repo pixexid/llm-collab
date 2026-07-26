@@ -444,7 +444,11 @@ If neither a terminal GitHub Codex verdict nor a head-attributable connector
 `+1` exists for the exact current head, a Tier A head does not merge — there is
 no elapsed-time substitute. Fix the missing request, or follow
 [Explicit requested-review precedence](#explicit-requested-review-precedence)
-to the operator disposition. A Tier B/C head needs no connector signal at all.
+to the operator disposition. A Tier B/C head **for which no review was requested**
+needs no connector signal at all. A requested review is pending whatever its tier:
+once a request exists, precedence is tier-agnostic, so a voluntarily or
+operator-requested Tier B/C review is outstanding until a terminal signal or an
+exact-head operator disposition -- exactly as the fixture matrix records it.
 Proceed only when all of these are true:
 
 - the independent exact-head review found no actionable issues
@@ -464,7 +468,13 @@ Read current review bodies and reactions directly. Do not infer the current
 result from stale inline review-thread objects alone. The watcher must report the
 exact current-head verdict, or the connector-authored `+1` on the manual-review
 request comment together with the SHA that request named, with timestamps, and
-confirm that no later push occurred. Either terminal signal
+confirm that no later push occurred. Where both request-anchored clocks have expired
+and an exact-head operator disposition has lifted the missing-signal subgate, the
+watcher reports **that disposition** instead, naming the head it was given for --
+otherwise the one path the precedence section authorises for a silently dropped
+review cannot be completed, because a connector artifact is precisely what does not
+exist there. An operator disposition is not a connector terminal signal and never
+substitutes for one where a signal did arrive. Either terminal signal
 stops the heartbeat from waiting for further artifacts;
 it does not waive post-signal handling. For a head-named clean verdict **and for a
 request-comment `+1` alike**, the approximately five-minute post-clean settle and full

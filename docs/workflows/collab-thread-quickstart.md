@@ -182,10 +182,15 @@ that arrives is adjudicated in writing whatever the tier — including a finding
 thread you resolve, since the merge checklist only reads unresolved threads.
 
 The one-initial-request limit is not a ban on ever asking twice. If the connector
-silently drops your request and neither a verdict nor a reaction ever arrives, the
+silently drops your request and no **terminal** signal arrives, the
 **single request-anchored re-trigger** in
 [`commit-push-prs.md`](commit-push-prs.md) is the explicit exemption and the only
 recovery — without it a Tier A head would sit pending forever.
+
+An `eyes` reaction is not a terminal signal. It does not exit requested-review
+precedence and does not reset the request clock, so a head that got `eyes` and
+nothing else still receives the re-trigger and, if that too stays silent, the
+operator disposition. "A reaction arrived" is not the test; a *terminal* signal is.
 
 ## 8. When something looks wrong
 
