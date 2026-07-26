@@ -226,8 +226,9 @@ artifacts only; it does not waive the handling below:
   only on the latest, unedited request artifact -- GitHub keeps reactions across an
   edit, so an edited request comment can still carry a `+1` left for an older head.
 - A connector-authored `+1` on the exact manual-review request comment is
-  terminal CLEAN once all four checks hold (actor, that request comment, the
-  requested SHA, the current head). It receives **the same approximately
+  terminal CLEAN once all six checks hold (actor, that request comment, the
+  requested SHA, the current head, that this request is the latest for this head,
+  and that it has not been edited since the reaction was left). It receives **the same approximately
   five-minute post-clean settle and full re-read as a text verdict**. The
   rationale for accepting a reaction-only CLEAN at Tier A rests on that settle
   plus adjudication, so exempting it from the settle would remove the evidence

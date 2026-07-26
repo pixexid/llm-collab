@@ -235,9 +235,10 @@ policy:
   exact current OID is terminal for that head
 - a connector-authored `+1` (`thumbs-up`) **on the exact manual-review request
   comment** is terminal CLEAN, after pickup, while the PR head still equals the SHA
-  that request named. Verify all four: the actor is the connector, the reaction is
-  on that request comment, the requested SHA, and the current head. Any head change
-  voids it and requires a new request. An ambiguous or removed reaction is
+  that request named. Verify all six: the actor is the connector, the reaction is
+  on that request comment, the requested SHA, the current head, that this request is
+  the latest for this head, and that it has not been edited since the reaction was
+  left. Any head change voids it and requires a new request. An ambiguous or removed reaction is
   non-terminal, and a bare `eyes` reaction or the request comment itself is never a
   verdict — `eyes` means accepted and in progress
 - the meaning of `+1` does **not** vary by tier. Tier A takes its strength from the
@@ -302,7 +303,12 @@ policy:
   current one still carries the `+1` the connector left for the *old* head, and all
   four checks then pass on a review that never happened. If the request artifact has
   been edited since the reaction was left, or is not the most recent request for this
-  head, the reaction is not terminal — issue a fresh request instead
+  head, the reaction is not terminal. What to do next depends on which artifact is
+  at fault. If there is **no valid latest request** for this head, issue one. If a
+  valid latest request already exists — typically the allowed re-trigger — the stale
+  reaction changes nothing: let that request's clock run to its exact-head operator
+  disposition. Posting another request there would be a *third* same-head request,
+  and the single request-anchored re-trigger is the only exempted recovery
 - when a re-review was explicitly requested, that re-review supersedes older
   same-head clean artifacts **and older same-head reactions**, not the verdict path
   alone. Only the explicit
@@ -328,9 +334,11 @@ policy:
   requested review is outstanding; it is not a way to acquire the signal
 - after every review-fix push, evaluate the new exact head under the same rule:
   a clean exact-head verdict or head-attributable connector `+1` is terminal.
-  If neither exists, the head is not merge-eligible at Tier A no matter how
-  long it has been quiet; heartbeat inspections observe the wait and merge
-  nothing
+  If neither exists, **any head carrying an outstanding request** is not
+  merge-eligible no matter how long it has been quiet — the request, not the tier,
+  is what makes it pending, so an amended Tier B/C head whose review was requested
+  waits exactly as a Tier A head does. Heartbeat inspections observe the wait and
+  merge nothing
 - neither a bot verdict nor a reaction waives required CI, mergeability, the
   independent exact-head review, or full comment/review/thread inspection
 
@@ -427,9 +435,13 @@ Codex review signal as clean when either:
   covers the exact current OID and reports no actionable or major issues, or
 - a connector-authored `+1` (`thumbs-up`) sits on **the exact manual-review request
   comment**, the PR head still equals the SHA that request named, and no subsequent
-  push occurred. Verify all four: the actor, that request comment, the requested SHA,
-  and the current head. A `+1` attributable only by timestamp, or sitting on any other
-  artifact, is **not** terminal. That reaction is terminal for the bot wait on that
+  push occurred. Verify all six: the actor, that request comment, the requested SHA,
+  the current head, that this request is the **latest** one for this head, and that it
+  has **not been edited** since the reaction was left. The last two are not optional
+  refinements: GitHub preserves reactions across an edit, so a request edited to swap
+  an old SHA for the current one carries a `+1` for a review of the *old* head and the
+  first four checks all pass. A `+1` attributable only by timestamp, or sitting on any
+  other artifact, is **not** terminal. That reaction is terminal for the bot wait on that
   head when the required gates above remain clean, and it receives the same
   approximately five-minute post-clean settle and full re-read as a text verdict.
 
@@ -468,13 +480,17 @@ Read current review bodies and reactions directly. Do not infer the current
 result from stale inline review-thread objects alone. The watcher must report the
 exact current-head verdict, or the connector-authored `+1` on the manual-review
 request comment together with the SHA that request named, with timestamps, and
-confirm that no later push occurred. Where both request-anchored clocks have expired
-and an exact-head operator disposition has lifted the missing-signal subgate, the
-watcher reports **that disposition** instead, naming the head it was given for --
+confirm that no later push occurred. Where both request-anchored clocks have expired,
+an exact-head operator disposition has lifted the missing-signal subgate, **and no
+terminal connector signal has arrived since**, the watcher reports **that
+disposition** instead, naming the head it was given for --
 otherwise the one path the precedence section authorises for a silently dropped
 review cannot be completed, because a connector artifact is precisely what does not
-exist there. An operator disposition is not a connector terminal signal and never
-substitutes for one where a signal did arrive. Either terminal signal
+exist there. A signal that arrives late still wins: the disposition covered its
+absence, so once a verdict or `+1` exists for this head the watcher reports that and
+it takes the mandatory post-clean settle and full re-read. An operator disposition is
+not a connector terminal signal and never substitutes for one where a signal did
+arrive. Either terminal signal
 stops the heartbeat from waiting for further artifacts;
 it does not waive post-signal handling. For a head-named clean verdict **and for a
 request-comment `+1` alike**, the approximately five-minute post-clean settle and full
