@@ -37,6 +37,7 @@ WORKFLOW_DOC = REPO_ROOT / "docs" / "workflows" / "commit-push-prs.md"
 PLAN_DOC = REPO_ROOT / "docs" / "standalone-agent-session-bus-plan.md"
 HANDOFF_DOC = REPO_ROOT / "docs" / "workflows" / "review-and-handoff.md"
 AGENTS_DOC = REPO_ROOT / "AGENTS.md"
+QUICKSTART_DOC = REPO_ROOT / "docs" / "workflows" / "collab-thread-quickstart.md"
 REQUIRED_PROJECTS = ("amiga", "nuvyr")
 PROJECT_CASES = (
     {
@@ -1039,6 +1040,48 @@ class ReviewLoopCapContractTest(unittest.TestCase):
             with self.subTest(doc=doc.name):
                 self.assertIn("latest, unedited request artifact", text)
                 self.assertIn("older same-head reactions", text)
+
+    def test_every_summary_states_the_resolved_finding_rule(self):
+        """One stale summary is a working instruction path to a lost finding.
+
+        The checklist was corrected to enumerate every thread, and the v4 contract
+        summary, this runbook's rationale and the quickstart all still described the
+        unresolved-only model -- three alternative paths a worker could follow to resolve a
+        thread without recording its outcome and pass the gate.
+        """
+        for doc, phrases in (
+            (AGENTS_DOC, ("**arriving finding**", "resolved or not")),
+            (WORKFLOW_DOC, ("enumerates **every** thread, resolved or not",)),
+            (QUICKSTART_DOC, ("enumerates every thread, resolved or not",)),
+        ):
+            text = doc.read_text(encoding="utf-8")
+            for phrase in phrases:
+                with self.subTest(doc=doc.name, phrase=phrase):
+                    self.assertIn(phrase, text)
+
+    def test_the_reaction_path_rereads_request_comments(self):
+        """A re-review request posted during the settle supersedes the older `+1`.
+
+        The mandatory re-read covered reviews, threads and reactions but not top-level
+        comments -- which is where a request lives -- so it could merge on a reaction that
+        no longer passed the latest-request check.
+        """
+        text = WORKFLOW_DOC.read_text(encoding="utf-8")
+        self.assertIn("top-level PR comments as well as", text)
+        self.assertIn("revalidates all six reaction conditions", text)
+
+    def test_the_quickstart_does_not_paraphrase_the_tier_lists(self):
+        """Both paraphrases drifted, in opposite directions.
+
+        The Tier C one dropped the canonical qualifiers; the Tier A one omitted provider
+        and idempotency paths and the already-produced-a-finding family. A summary of a
+        tier list is a second source that goes stale the moment the first one moves.
+        """
+        text = QUICKSTART_DOC.read_text(encoding="utf-8")
+        self.assertIn(
+            "no short version, of the inclusions or the exclusions", text
+        )
+        self.assertNotIn("Short version:", text)
 
     def test_the_contract_version_advanced_with_the_gate_rewrite(self):
         """A cached copy of the old gate can produce a wrong merge.

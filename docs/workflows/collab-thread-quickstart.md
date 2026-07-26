@@ -163,16 +163,14 @@ unless someone asks. **Do not wait for a review nobody requested.**
 
 Whether you must request one is decided by the Tier A/B/C rule in
 [`AGENTS.md` → Requesting Code Review](../../AGENTS.md#requesting-code-review-all-workers-every-repository).
-Short version: credentials, authority, money, input we do not control, shared
-contract changes, concurrency and partial state, migrations, and anything that can
-weaken proof of those — **must** be requested.
-
-There is deliberately no short version of the *exclusions*. "Comments and additive
-tests must not" dropped the qualifiers the canonical rule carries: normative
-authority prose is not a comment, and a test that changes a gate, fixture or
-baseline is not additive. Both are Tier A there and were Tier C here, so a worker
-following this summary could skip a mandatory request. Read the Tier C list in
-`AGENTS.md` itself rather than a paraphrase of it.
+**There is deliberately no short version, of the inclusions or the exclusions.**
+Both paraphrases drifted. The Tier C one dropped the canonical qualifiers —
+normative authority prose is not a comment, and a test that changes a gate, fixture
+or baseline is not additive — and the Tier A one omitted provider and idempotency
+paths and "a defect family that has already produced a finding in this repository",
+so a worker could classify a mandatory change as needing no review. Read the tier
+lists in `AGENTS.md` itself; a summary of them here is a second source that goes
+stale the moment the first one moves.
 
 Issue one *initial* request, on the head you believe is final:
 
@@ -185,7 +183,8 @@ SHA the request named, so a request without one cannot be satisfied by a reactio
 
 An amendment stales the review; request again on the new final head. Any finding
 that arrives is adjudicated in writing whatever the tier — including a finding whose
-thread you resolve, since the merge checklist only reads unresolved threads.
+thread you resolve — the merge checklist enumerates every thread, resolved or not,
+precisely because a resolved-and-unanswered one is the way a finding gets lost.
 
 The one-initial-request limit is not a ban on ever asking twice. If the connector
 silently drops your request and no **terminal** signal arrives, the

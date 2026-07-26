@@ -521,6 +521,63 @@ class Gh1549FallbackFixturesTest(unittest.TestCase):
         ("C", False): "no_review_pending",
     }
 
+    # `escalate_stuck_review` is where a requested review ENDS UP, not where it starts.
+    # Collapsing every requested review to it made a just-posted request, an initial
+    # request whose clock has expired, and an expired re-trigger indistinguishable -- so
+    # these fixtures could certify a consumer that escalates immediately, or one that
+    # skips the required re-trigger and goes straight to the operator. The phases are the
+    # request-anchored ones that survived the silence-fallback deletion; the deleted thing
+    # was a clock for a review nobody asked for, and these are clocks anchored to a
+    # request that exists.
+    REQUEST_PHASES = {
+        "initial_pending": "wait_out_initial_request",
+        "initial_expired": "issue_the_single_re_trigger",
+        "retrigger_pending": "wait_out_the_re_trigger",
+        "retrigger_expired": "escalate_stuck_review",
+    }
+
+    def test_a_requested_review_has_phases_not_one_disposition(self) -> None:
+        """Escalation is the END of the request-anchored flow, not the whole of it."""
+        self.assertEqual(
+            "escalate_stuck_review",
+            self.REQUEST_PHASES["retrigger_expired"],
+            "escalation belongs to the expired re-trigger, nothing earlier",
+        )
+        self.assertNotEqual(
+            self.REQUEST_PHASES["initial_pending"],
+            self.REQUEST_PHASES["retrigger_expired"],
+            "a just-posted request must not be indistinguishable from an exhausted one",
+        )
+        self.assertEqual(
+            "issue_the_single_re_trigger",
+            self.REQUEST_PHASES["initial_expired"],
+            "the re-trigger is the only recovery, so it cannot be skipped",
+        )
+        # The tier matrix answers a different question -- is anything pending at all --
+        # and it may only ever produce the phase flow's entry point or its end, never a
+        # step in the middle.
+        for key, disposition in self.DISPOSITION_BY_TIER_AND_REQUEST.items():
+            if key[1]:
+                with self.subTest(tier=key[0]):
+                    self.assertEqual(
+                        self.REQUEST_PHASES["retrigger_expired"], disposition,
+                        "a requested review's tier disposition is the flow's END; the "
+                        "phases in between are REQUEST_PHASES, and a consumer that reads "
+                        "this matrix as the whole story escalates immediately",
+                    )
+
+    def test_the_phase_flow_is_documented_where_workers_read_it(self) -> None:
+        """The phases must be findable, or the model here is a private fiction."""
+        doc = (REPO_ROOT / "docs" / "workflows" / "commit-push-prs.md").read_text(
+            encoding="utf-8"
+        )
+        for phrase in (
+            "one initial request per candidate final head",
+            "single request-anchored re-trigger",
+            "operator disposition",
+        ):
+            self.assertIn(phrase, doc)
+
     def test_disposition_follows_from_tier_and_request_not_from_the_variant(self) -> None:
         for variant in self.VARIANT_FILES:
             for case in self._project_cases(variant):

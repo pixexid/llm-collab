@@ -27,8 +27,11 @@ Read these if your last session predates them.
   findings is not a clean verdict — the findings are inline threads. Bind a finding to
   a head through `pullRequestReview.commit.oid` (falling back to
   `originalCommit.oid`), **never** the mutable `comment.commit.oid`. Adjudicate every
-  unresolved thread whatever head raised it: a push is not an adjudication, and a
-  written disposition must identify the thread *and* be validated by a human. A
+  **arriving finding** whatever head raised it and whatever its current resolution
+  state — enumerate every thread, resolved or not, because a checklist phrased over
+  *unresolved* threads cannot see one that someone clicked Resolve on without
+  recording anything; a push is not an adjudication, and a written disposition must
+  identify the thread *and* be validated by a human. A
   reaction counts only on the latest unedited request artifact. If your session
   predates this, discard any cached copy of the old fallback, reaction lifecycle,
   request shape, or authority rules.

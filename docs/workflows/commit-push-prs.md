@@ -269,11 +269,11 @@ policy:
   - *is this finding still open?* Only GitHub resolution, or a written disposition
     **that identifies the thread**, closes it. **Resolution is not adjudication.**
     `AGENTS.md` requires every arriving finding to be adjudicated in writing at every
-    tier, and the merge checklist only inspects *unresolved* threads — so clicking
-    Resolve with nothing recorded removes the thread from the checklist while leaving
-    the finding unanswered, which is the one way to lose a finding silently. A
+    tier. A checklist phrased over *unresolved* threads could not see a thread someone
+    clicked Resolve on with nothing recorded, which is the one way to lose a finding
+    silently — so the merge checklist enumerates **every** thread, resolved or not. A
     resolved thread still owes a thread-linked written outcome; resolution closes it
-    for the checklist, the writing is what discharges it. Identifying means the
+    for GitHub, the writing is what discharges it. Identifying means the
     disposition contains the thread's node ID or its `#discussion_r...` comment URL.
     Identification is **necessary and not sufficient**: a human must also validate
     that the disposition came from someone authorised on *this* pull request, that it
@@ -446,6 +446,12 @@ Codex review signal as clean when either:
   other artifact, is **not** terminal. That reaction is terminal for the bot wait on that
   head when the required gates above remain clean, and it receives the same
   approximately five-minute post-clean settle and full re-read as a text verdict.
+
+The re-read that follows a reaction covers **top-level PR comments as well as
+reviews, threads and reactions**, and revalidates all six reaction conditions. A
+re-review request posted during the settle becomes the latest request for this head
+and supersedes the older request's `+1`, so a re-read that skipped comments could
+merge on a reaction that no longer passes the latest-request check.
 
 For the clean-verdict path, do not merge immediately after the first
 head-named clean artifact. Observe the approximately five-minute post-clean
