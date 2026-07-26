@@ -189,7 +189,31 @@ that arrives is adjudicated in writing whatever the tier.
 | `codex_stream` refuses naming two different homes | binding and session disagree on `CODEX_HOME` | re-register the session; the pair is torn |
 | Your reply reached the wrong session | replied in a different chat than the request | reply in the originating chat |
 
-## 9. Ending cleanly
+## 9. Behaviour that changed recently
+
+If your instructions predate these, they are wrong in ways that look like the tool being
+broken. Each line is a merged change and the symptom it produces.
+
+| Change | What you see if you did not know |
+|---|---|
+| Review is **manual only** | You wait indefinitely for a bot review that will never arrive. See step 7. |
+| `deliver.py` refuses an out-of-scope packet up front | `autobridge_ready: false` with `route_ambiguous`, and a loud banner. Previously it reported success and dropped the packet silently. |
+| New field `binding_unreadable_blocker` in `deliver.py` output | `true` means the recipient's binding exists but could not be **read**. Every wake flag is false and nothing will reach them until it is repaired or removed — this is the one refusal with no automatic fallback. |
+| `codex_stream.py` exists | You can watch a peer's thread live instead of guessing whether it is working. Step 6. |
+| `codex_stream` has **no** `--runtime-home` | The flag was removed: the home decides which App Server you attach to, so it comes from the validated binding and never from an argument. `session_autobridge register --runtime-home` is unaffected. |
+| `codex_stream --thread` asserts rather than bypasses | It now requires `--agent` and `--project` and refuses if the named thread is not the one the binding resolves to. |
+| `publish-current` refuses | `heuristic_runtime_discovery_refused`. Use `discover-runtime` then `register --runtime-session-id`. Step 0. |
+| Registration writes the **binding before** the session | Chosen for its failure mode; see the comment in `session_autobridge.py`. |
+
+### If you call the shared helpers directly
+
+`load_binding()` raises **`BindingUnreadable`** for an oversized or I/O-failed binding —
+deliberately *not* `FileNotFoundError`, which every caller treats as "no such binding".
+Catch it, or it propagates. `read_regular_file_bounded()` raises **`UnreadableFile`** for
+the same reasons plus a non-regular path. Both exist so a present-but-unreadable record
+is never reported as an absent one, which sends whoever is debugging to the wrong cause.
+
+## 10. Ending cleanly
 
 Leave the lane so the next worker can pick it up:
 
