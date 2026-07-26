@@ -1,4 +1,34 @@
+<!-- CONTRACT_VERSION: 3 -->
 # AGENTS.md
+
+## This file is the source of truth
+
+This file plus `docs/workflows/` is the canonical worker contract. Memory files,
+skills, project notes and branch-local docs must **point at it, never restate it** — a
+restated command is a cached copy that goes stale without telling anyone.
+
+Not theoretical: on 2026-07-25 all eight agent memory files still taught the
+`deliver.py` invocation **without `--repo-targets`**, the exact command that had just
+silently dropped 27 packets over eleven hours, and several taught `--chat last`, which
+addresses the wrong lane once a second project is active.
+
+`python bin/contract_drift.py --agent <you>` reports your own stale copies;
+`session_bootstrap.py` runs it for you and prints the contract version at session start.
+
+### Recent contract changes
+
+Read these if your last session predates them.
+
+- **v3 (2026-07-26)** — workers own their own setup: project registration, agent
+  entries, chats, session registration, watchers and environment repair are worker work,
+  not operator work. See "Workers own their own setup" for what genuinely is the
+  operator's.
+- **v2 (2026-07-25)** — Codex review is **manual only**: nothing arrives unless
+  requested, and the Tier A/B/C rule below decides when you must ask. `--repo-targets`
+  is effectively mandatory on `deliver.py`. New: `docs/workflows/collab-thread-quickstart.md`
+  for the end-to-end collab path, and `bin/codex_stream.py` to watch a peer's thread live.
+- **v1** — everything before that.
+
 
 This repository is the shared `llm-collab` coordination runtime. It is not the
 Amiga workspace, the Nuvyr workspace, or any other product repository.
@@ -10,6 +40,8 @@ Before changing shared tooling or operating a project lane, read:
 - `README.md`
 - `docs/multi-project.md`
 - `docs/workflows/session-startup.md`
+- `docs/workflows/collab-thread-quickstart.md` — starting and running a collab
+  thread end to end
 - `docs/workflows/task-intake-and-delegation.md`
 
 Then read the target project's own repository instructions and local policy
@@ -46,6 +78,24 @@ one non-Amiga project, then run the full test suite:
 ```bash
 python3.11 -m unittest discover -s tests
 ```
+
+## Workers own their own setup
+
+If a step is one you can perform and verify yourself, perform it. Do not hand it back
+to the operator and wait.
+
+That includes registering a project, adding an agent, creating a chat, publishing your
+runtime session, starting your watcher, and repairing your own environment. An operator
+naming the work — "implement X with zcode on project Y" — is the whole instruction; the
+setup it implies is yours.
+
+**Genuinely operator-owned**, and worth stopping for: anything irreversible or
+outward-facing (merging, publishing, contacting someone), credentials and account
+settings, accepting a risk, and scope or priority trade-offs. Those need a decision, not
+a pair of hands.
+
+The test is not "is this tedious" or "did they mention it" — it is whether you could do
+it and check that it worked. If you could, it is yours.
 
 ## Adding A Project
 
