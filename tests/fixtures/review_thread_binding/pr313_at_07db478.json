@@ -1,0 +1,98 @@
+{
+  "source": "llm-collab#313 reviewThreads, captured 2026-07-26 at head 07db4787e0",
+  "why": "The rule this replaces -- unresolved AND not outdated -- was disproved by the PR that introduced it. Twelve unresolved non-outdated threads originate at OLD heads, so the rule counts them as current-head findings; four unresolved OUTDATED threads would be excluded entirely, though a push is not an adjudication.",
+  "head_oid": "07db4787e0bef743a8384ca869bd5b8a5cac4373",
+  "threads": [
+    {
+      "isResolved": false,
+      "isOutdated": false,
+      "originating_commit_oid": "a54e33fcd94bce301040ded2a6b70ecb401cd41e"
+    },
+    {
+      "isResolved": false,
+      "isOutdated": false,
+      "originating_commit_oid": "a54e33fcd94bce301040ded2a6b70ecb401cd41e"
+    },
+    {
+      "isResolved": false,
+      "isOutdated": true,
+      "originating_commit_oid": "a54e33fcd94bce301040ded2a6b70ecb401cd41e"
+    },
+    {
+      "isResolved": false,
+      "isOutdated": false,
+      "originating_commit_oid": "a54e33fcd94bce301040ded2a6b70ecb401cd41e"
+    },
+    {
+      "isResolved": false,
+      "isOutdated": false,
+      "originating_commit_oid": "a54e33fcd94bce301040ded2a6b70ecb401cd41e"
+    },
+    {
+      "isResolved": false,
+      "isOutdated": false,
+      "originating_commit_oid": "a54e33fcd94bce301040ded2a6b70ecb401cd41e"
+    },
+    {
+      "isResolved": false,
+      "isOutdated": false,
+      "originating_commit_oid": "a54e33fcd94bce301040ded2a6b70ecb401cd41e"
+    },
+    {
+      "isResolved": false,
+      "isOutdated": true,
+      "originating_commit_oid": "a54e33fcd94bce301040ded2a6b70ecb401cd41e"
+    },
+    {
+      "isResolved": false,
+      "isOutdated": false,
+      "originating_commit_oid": "a54e33fcd94bce301040ded2a6b70ecb401cd41e"
+    },
+    {
+      "isResolved": false,
+      "isOutdated": true,
+      "originating_commit_oid": "a54e33fcd94bce301040ded2a6b70ecb401cd41e"
+    },
+    {
+      "isResolved": false,
+      "isOutdated": false,
+      "originating_commit_oid": "a54e33fcd94bce301040ded2a6b70ecb401cd41e"
+    },
+    {
+      "isResolved": false,
+      "isOutdated": true,
+      "originating_commit_oid": "82ae7e92ded3591e55cfc8762ddc0ce537c6f7a1"
+    },
+    {
+      "isResolved": false,
+      "isOutdated": false,
+      "originating_commit_oid": "82ae7e92ded3591e55cfc8762ddc0ce537c6f7a1"
+    },
+    {
+      "isResolved": false,
+      "isOutdated": false,
+      "originating_commit_oid": "82ae7e92ded3591e55cfc8762ddc0ce537c6f7a1"
+    },
+    {
+      "isResolved": false,
+      "isOutdated": false,
+      "originating_commit_oid": "82ae7e92ded3591e55cfc8762ddc0ce537c6f7a1"
+    },
+    {
+      "isResolved": false,
+      "isOutdated": false,
+      "originating_commit_oid": "82ae7e92ded3591e55cfc8762ddc0ce537c6f7a1"
+    },
+    {
+      "isResolved": false,
+      "isOutdated": false,
+      "originating_commit_oid": "07db4787e0bef743a8384ca869bd5b8a5cac4373"
+    }
+  ],
+  "expected": {
+    "exact_head_findings": 1,
+    "unresolved_needing_adjudication": 17,
+    "wrong_rule_exact_head_count": 13,
+    "wrong_rule_silently_excluded": 4
+  }
+}

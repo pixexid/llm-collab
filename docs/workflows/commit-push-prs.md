@@ -247,12 +247,24 @@ policy:
 - **a connector review body that lists no findings is not a clean verdict.** The
   connector posts its findings as inline review threads, and the review body can be
   boilerplate — a heading, the reviewed commit, and a collapsed "About Codex"
-  section — while unresolved P1 threads sit on that exact head. Read
-  `reviewThreads` and count the nodes that are both unresolved and not outdated;
-  that set, not the body, is the finding list. An empty body with live threads
-  reads exactly like a pass (llm-collab#317 at `87e8e47`, 2026-07-26: body listed
-  nothing, six live threads including three P1s, one of which made the generated
-  command unrunnable on macOS)
+  section — while unresolved P1 threads sit on that head. An empty body with live
+  threads reads exactly like a pass (llm-collab#317 at `87e8e47`, 2026-07-26: body
+  listed nothing, six unresolved threads including three P1s, one of which made the
+  generated command unrunnable on macOS). `reviewThreads`, not the body, is the
+  finding list
+- **bind an exact-head finding through its initiating review commit, and adjudicate
+  every unresolved thread regardless of `isOutdated`.** Two distinct questions:
+  - *is this finding about the current head?* Only if the thread's initiating
+    review or comment commit OID equals the current head OID.
+  - *is this finding still open?* Only resolution or an explicit written
+    disposition closes it. **A push is not an adjudication.**
+  `isOutdated` answers neither. It is diff-position metadata — whether the thread
+  still maps onto the current diff — and using it as the exclusion criterion is
+  wrong in both directions. llm-collab#313 at `07db478` disproves it directly:
+  thirteen unresolved non-outdated threads, but twelve of them initiated at
+  `a54e33f` or `82ae7e9`, so the rule counts twelve stale threads as current-head
+  findings; and four unresolved outdated threads, which the rule drops silently
+  though nobody ever answered them
 - a head-named clean connector verdict is not merge-immediate. Hold an
   approximately five-minute post-clean settle, then perform a full re-read of
   reviews, review threads, and reactions before merge because the connector

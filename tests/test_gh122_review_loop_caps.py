@@ -10,6 +10,7 @@ so a later edit cannot silently weaken the mechanical safeguards.
 
 from __future__ import annotations
 
+import json
 import re
 import unittest
 from pathlib import Path
@@ -571,6 +572,85 @@ class ReviewLoopCapContractTest(unittest.TestCase):
 
         self.assert_scenario_cases("canonical_wait_gate", check)
 
+    THREAD_FIXTURE = (
+        REPO_ROOT / "tests" / "fixtures" / "review_thread_binding" / "pr313_at_07db478.json"
+    )
+
+    @staticmethod
+    def classify(threads, head_oid):
+        """The documented contract, applied.
+
+        Two independent questions, and `isOutdated` answers neither: is the finding about
+        THIS head (initiating commit OID == head), and is it still open (only resolution
+        or an explicit disposition closes it).
+        """
+        return {
+            "exact_head_findings": len([
+                t for t in threads
+                if not t["isResolved"] and t.get("originating_commit_oid") == head_oid
+            ]),
+            "unresolved_needing_adjudication": len([
+                t for t in threads if not t["isResolved"]
+            ]),
+        }
+
+    def test_outdated_is_not_the_exclusion_criterion_on_real_graphql_shapes(self):
+        """Behavioural, on the payload that disproved the first version of this rule.
+
+        `unresolved && !isOutdated` was wrong in both directions, and llm-collab#313
+        showed both at once: it counts threads initiated at older heads as current-head
+        findings, and silently drops unresolved outdated ones nobody adjudicated.
+        """
+        fixture = json.loads(self.THREAD_FIXTURE.read_text(encoding="utf-8"))
+        head, threads = fixture["head_oid"], fixture["threads"]
+        expected = fixture["expected"]
+
+        actual = self.classify(threads, head)
+        self.assertEqual(expected["exact_head_findings"], actual["exact_head_findings"])
+        self.assertEqual(
+            expected["unresolved_needing_adjudication"],
+            actual["unresolved_needing_adjudication"],
+        )
+
+        wrong = [t for t in threads if not t["isResolved"] and not t["isOutdated"]]
+        self.assertEqual(expected["wrong_rule_exact_head_count"], len(wrong))
+        self.assertNotEqual(
+            actual["exact_head_findings"], len(wrong),
+            "the retired rule must not agree with the contract on this payload, or the "
+            "fixture no longer demonstrates the defect",
+        )
+        dropped = [t for t in threads if not t["isResolved"] and t["isOutdated"]]
+        self.assertEqual(expected["wrong_rule_silently_excluded"], len(dropped))
+        self.assertTrue(dropped, "fixture must contain an unresolved OUTDATED thread")
+
+    def test_a_thread_from_an_older_review_is_not_an_exact_head_finding(self):
+        threads = [
+            {"isResolved": False, "isOutdated": False, "originating_commit_oid": "old111"},
+            {"isResolved": False, "isOutdated": True, "originating_commit_oid": "head999"},
+            {"isResolved": True, "isOutdated": False, "originating_commit_oid": "head999"},
+            {"isResolved": False, "isOutdated": False, "originating_commit_oid": "head999"},
+        ]
+        actual = self.classify(threads, "head999")
+        # Outdated-but-current-head counts; non-outdated-but-old-head does not.
+        self.assertEqual(2, actual["exact_head_findings"])
+        self.assertEqual(3, actual["unresolved_needing_adjudication"])
+
+    def test_the_doc_states_the_binding_contract_and_rejects_the_retired_rule(self):
+        text = WORKFLOW_DOC.read_text(encoding="utf-8")
+        section = contract_section(
+            text,
+            "- **bind an exact-head finding through its initiating review commit",
+            "- a head-named clean connector verdict is not merge-immediate.",
+        )
+        for phrase in (
+            "initiating review or comment commit OID equals the current head OID",
+            "A push is not an adjudication.",
+            "diff-position metadata",
+            "wrong in both directions",
+        ):
+            self.assertIn(phrase, section)
+        self.assertNotIn("both unresolved and not outdated", text)
+
     def test_an_empty_connector_review_body_is_not_a_clean_verdict(self):
         """The trap that nearly defeated this gate on 2026-07-26.
 
@@ -588,8 +668,7 @@ class ReviewLoopCapContractTest(unittest.TestCase):
         for phrase in (
             "posts its findings as inline review threads",
             "the review body can be boilerplate",
-            "unresolved and not outdated",
-            "that set, not the body, is the finding list",
+            "`reviewThreads`, not the body, is the finding list",
         ):
             self.assertIn(phrase, section)
 
