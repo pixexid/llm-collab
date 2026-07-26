@@ -6,6 +6,7 @@ import os
 import stat
 import tempfile
 import re
+import shlex
 import signal
 import base64
 import hashlib
@@ -1187,42 +1188,57 @@ def build_runtime_payload(session: dict, message: dict) -> dict[str, Any]:
     }
 
 
+REPO_TARGET_TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
 def _reply_command_lines(session: dict, fm: dict) -> list[str]:
-    """The mailbox reply instruction, runnable only when it is actually runnable.
+    """The mailbox reply instruction, as a command a shell can safely run.
 
-    An earlier version emitted a literal `--repo-targets <repo>` placeholder. In zsh
-    `<repo>` is input redirection, so the "copy this" line died as
-    `zsh: no such file or directory: repo` before deliver.py ever ran -- the reply path
-    this text exists to repair was unusable by anyone who followed it.
+    This line is generated from an UNTRUSTED packet and handed to a worker as
+    something to execute, so every dynamic value is quoted by shlex.join rather than
+    interpolated. A packet declaring repo_targets ["llm-collab", "safe;echo"] used to
+    emit `--repo-targets llm-collab,safe;echo`, and the `;` is a control operator: the
+    shell ran `echo` as a second command. shlex.split cannot see that -- it is a
+    tokenizer, not a shell -- so the earlier metacharacter check passed while the
+    injection was live.
 
-    So the packet's own repo_targets are rendered as the comma-separated value
-    deliver.py parses. When the packet declares no usable scope there is no runnable
-    command to offer, and claiming otherwise is what caused the defect: the worker is
-    told what it must supply instead.
+    Two independent defences, because either alone has failed here already:
+    quoting, and rejecting the whole runnable-command path when any scope token is not
+    a plain repo id. Malformed tokens are NOT filtered out silently; a packet whose
+    scope cannot be trusted does not get a command claiming to carry its scope.
     """
-    targets = [
-        token
-        for token in _frontmatter_strings(fm.get("repo_targets"))
-        if token and not any(ch.isspace() for ch in token)
-    ]
-    head = (
-        f"  bin/deliver.py --chat {fm.get('chat_id', '')} "
-        f"--from {session['agent_id']} "
-        f"--to {fm.get('sender_agent_id', fm.get('from', ''))} "
-        f"--project {fm.get('project_id', '')}"
+    # Read the RAW value, not _frontmatter_strings: that helper drops falsy entries, so
+    # repo_targets ["llm-collab", ""] would arrive here as a clean one-element scope and
+    # the emitted command would claim a narrower scope than the packet declared -- the
+    # silent filtering this path must not do.
+    raw = fm.get("repo_targets")
+    declared = list(raw) if isinstance(raw, list) else ([raw] if raw is not None else [])
+    usable = bool(declared) and all(
+        isinstance(token, str) and REPO_TARGET_TOKEN_RE.match(token) for token in declared
     )
-    tail = "--title '...' --body-file -"
-    if not targets:
+    argv = [
+        "bin/deliver.py",
+        "--chat", str(fm.get("chat_id", "")),
+        "--from", str(session["agent_id"]),
+        "--to", str(fm.get("sender_agent_id", fm.get("from", ""))),
+        "--project", str(fm.get("project_id", "")),
+    ]
+    if usable:
+        argv += ["--repo-targets", ",".join(declared)]
+    argv += ["--title", "...", "--body-file", "-"]
+    command = f"  {shlex.join(argv)}"
+    if usable:
         return [
-            "Reply through the mailbox. It is the only channel the sender reads.",
-            "This packet declares no usable repo scope, so the command below is NOT",
-            "complete: add --repo-targets with your own comma-separated repo ids, or",
-            "deliver.py will drop the reply silently.",
-            f"{head} {tail}",
+            "Reply through the mailbox. It is the only channel the sender reads:",
+            command,
         ]
     return [
-        "Reply through the mailbox. It is the only channel the sender reads:",
-        f"{head} --repo-targets {','.join(targets)} {tail}",
+        "Reply through the mailbox. It is the only channel the sender reads.",
+        "This packet declares no usable repo scope, so the command below is NOT",
+        "complete: add --repo-targets with your own comma-separated repo ids. Without",
+        "it the packet is still written durably and readable with inbox.py, but",
+        "deliver.py reports a runtime dispatch refusal and no worker is woken.",
+        command,
     ]
 
 

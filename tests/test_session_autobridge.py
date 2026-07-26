@@ -5986,7 +5986,7 @@ class ResumePromptNamesTheReplyChannelTest(unittest.TestCase):
     so the reply never reached the sender and the operator had to relay it by hand.
     """
 
-    def prompt(self, *, repo_targets: Any = ["llm-collab"]) -> str:
+    def prompt(self, *, repo_targets: Any = ["llm-collab"], **overrides: str) -> str:
         session = {
             "session_id": "SESSION-REPLY",
             "agent_id": "codex",
@@ -6004,6 +6004,7 @@ class ResumePromptNamesTheReplyChannelTest(unittest.TestCase):
         }
         if repo_targets is not None:
             frontmatter["repo_targets"] = repo_targets
+        frontmatter.update(overrides)
         message = {
             "path": "Chats/2026-07-26_x__CHAT-REPLY/2026-07-26T00-00-00_to-codex_packet.md",
             "frontmatter": frontmatter,
@@ -6080,6 +6081,192 @@ class ResumePromptNamesTheReplyChannelTest(unittest.TestCase):
         prompt = self.prompt(repo_targets=["llm collab"])
         self.assertIn("declares no usable repo scope", prompt)
         self.assertNotIn("--repo-targets", self.command_argv(prompt))
+
+    HOSTILE_TOKENS = [
+        "safe;echo",
+        "safe&&echo",
+        "safe|echo",
+        "$(echo)",
+        "`echo`",
+        "safe\nrm",
+        "safe target",
+        "--body-file",
+        "",
+    ]
+
+    def test_a_hostile_scope_token_rejects_the_runnable_command_path(self) -> None:
+        """Not filtered out quietly: a scope we cannot trust yields no scoped command."""
+        for token in self.HOSTILE_TOKENS:
+            with self.subTest(token=token):
+                prompt = self.prompt(repo_targets=["llm-collab", token])
+                self.assertIn("declares no usable repo scope", prompt)
+                self.assertNotIn("--repo-targets", self.command_argv(prompt))
+
+    def test_a_hostile_generated_line_runs_as_exactly_one_command_in_a_real_shell(self) -> None:
+        """The proof shlex.split cannot give: run it, in a shell, and count the commands.
+
+        shlex.split is a tokenizer with no model of `;`, `&&` or `$(...)`, so the earlier
+        metacharacter assertion passed while `repo_targets: [llm-collab, "safe;echo"]`
+        emitted a line whose second command the shell would execute. This runs the
+        generated line against a stub deliver.py and asserts both that the stub is
+        invoked exactly once and that nothing else executed.
+        """
+        workdir = Path(tempfile.mkdtemp(prefix="reply-cmd-", dir="/tmp"))
+        (workdir / "bin").mkdir()
+        argv_log = workdir / "argv.json"
+        breach = workdir / "BREACH"
+        write(
+            workdir / "bin" / "deliver.py",
+            "\n".join(
+                [
+                    "#!/usr/bin/env python3",
+                    "import json, sys",
+                    "from pathlib import Path",
+                    f"log = Path({json.dumps(str(argv_log))})",
+                    "runs = json.loads(log.read_text()) if log.exists() else []",
+                    "runs.append(sys.argv[1:])",
+                    "log.write_text(json.dumps(runs))",
+                ]
+            ),
+        )
+        (workdir / "bin" / "deliver.py").chmod(0o755)
+        # Any injected command would be `echo`; make `echo` in this PATH a tripwire.
+        write(
+            workdir / "bin" / "echo",
+            "\n".join(["#!/bin/sh", f"touch {shlex.quote(str(breach))}"]),
+        )
+        (workdir / "bin" / "echo").chmod(0o755)
+
+        for token in ("safe;echo", "safe&&echo", "safe|echo", "$(echo)", "`echo`"):
+            with self.subTest(token=token):
+                argv_log.unlink(missing_ok=True)
+                breach.unlink(missing_ok=True)
+                prompt = self.prompt(repo_targets=["llm-collab", token])
+                line = next(
+                    raw for raw in prompt.splitlines()
+                    if raw.strip().startswith("bin/deliver.py")
+                ).strip()
+                result = subprocess.run(
+                    ["/bin/zsh", "-c", line],
+                    cwd=workdir,
+                    text=True,
+                    capture_output=True,
+                    input="",
+                    env={**os.environ, "PATH": f"{workdir / 'bin'}:{os.environ['PATH']}"},
+                )
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertFalse(breach.exists(), f"injected command executed for {token!r}")
+                runs = json.loads(argv_log.read_text())
+                self.assertEqual(1, len(runs), f"{len(runs)} commands ran for {token!r}")
+                self.assertNotIn("--repo-targets", runs[0])
+
+    def test_every_dynamic_value_is_quoted_not_just_the_validated_scope(self) -> None:
+        """repo_targets is validated; chat_id, project_id and the agent ids are not.
+
+        They come from the same untrusted frontmatter and are interpolated into the same
+        executable line, so quoting -- not validation -- is what protects them. Proving
+        this also proves the quoting layer itself: with only the hostile-scope tests,
+        replacing shlex.join with a plain join still passed, because validation stopped
+        every hostile token before it could reach the renderer.
+        """
+        workdir = Path(tempfile.mkdtemp(prefix="reply-quote-", dir="/tmp"))
+        (workdir / "bin").mkdir()
+        argv_log = workdir / "argv.json"
+        breach = workdir / "BREACH"
+        write(
+            workdir / "bin" / "deliver.py",
+            "\n".join(
+                [
+                    "#!/usr/bin/env python3",
+                    "import json, sys",
+                    "from pathlib import Path",
+                    f"log = Path({json.dumps(str(argv_log))})",
+                    "runs = json.loads(log.read_text()) if log.exists() else []",
+                    "runs.append(sys.argv[1:])",
+                    "log.write_text(json.dumps(runs))",
+                ]
+            ),
+        )
+        (workdir / "bin" / "deliver.py").chmod(0o755)
+        write(
+            workdir / "bin" / "echo",
+            "\n".join(["#!/bin/sh", f"touch {shlex.quote(str(breach))}"]),
+        )
+        (workdir / "bin" / "echo").chmod(0o755)
+
+        cases = [
+            ("chat_id", "CHAT-X;echo", "--chat"),
+            ("chat_id", "CHAT-X$(echo)", "--chat"),
+            ("project_id", "amiga&&echo", "--project"),
+            ("sender_agent_id", "claude|echo", "--to"),
+            ("chat_id", "CHAT-X `echo`", "--chat"),
+        ]
+        for field, hostile, flag in cases:
+            with self.subTest(field=field, value=hostile):
+                argv_log.unlink(missing_ok=True)
+                breach.unlink(missing_ok=True)
+                prompt = self.prompt(**{field: hostile})
+                line = next(
+                    raw for raw in prompt.splitlines()
+                    if raw.strip().startswith("bin/deliver.py")
+                ).strip()
+                result = subprocess.run(
+                    ["/bin/zsh", "-c", line],
+                    cwd=workdir,
+                    text=True,
+                    capture_output=True,
+                    input="",
+                    env={**os.environ, "PATH": f"{workdir / 'bin'}:{os.environ['PATH']}"},
+                )
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertFalse(breach.exists(), f"injection via {field}={hostile!r}")
+                runs = json.loads(argv_log.read_text())
+                self.assertEqual(1, len(runs), f"{len(runs)} commands ran for {field}")
+                # The hostile text must arrive as ONE argument, intact.
+                self.assertEqual(hostile, runs[0][runs[0].index(flag) + 1])
+
+    def test_a_well_formed_scope_survives_the_same_shell_round_trip(self) -> None:
+        """The hostile test would also pass if the command never carried scope at all."""
+        workdir = Path(tempfile.mkdtemp(prefix="reply-ok-", dir="/tmp"))
+        (workdir / "bin").mkdir()
+        argv_log = workdir / "argv.json"
+        write(
+            workdir / "bin" / "deliver.py",
+            "\n".join(
+                [
+                    "#!/usr/bin/env python3",
+                    "import json, sys",
+                    "from pathlib import Path",
+                    f"Path({json.dumps(str(argv_log))}).write_text(json.dumps(sys.argv[1:]))",
+                ]
+            ),
+        )
+        (workdir / "bin" / "deliver.py").chmod(0o755)
+
+        prompt = self.prompt(repo_targets=["llm-collab", "amiga"])
+        line = next(
+            raw for raw in prompt.splitlines() if raw.strip().startswith("bin/deliver.py")
+        ).strip()
+        result = subprocess.run(
+            ["/bin/zsh", "-c", line], cwd=workdir, text=True, capture_output=True, input=""
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        argv = json.loads(argv_log.read_text())
+        self.assertEqual("llm-collab,amiga", argv[argv.index("--repo-targets") + 1])
+        self.assertEqual("CHAT-REPLY", argv[argv.index("--chat") + 1])
+
+    def test_the_incomplete_command_prose_states_the_real_deliver_contract(self) -> None:
+        """Since #309 deliver.py writes durably and reports the refusal loudly.
+
+        The prose said it "will drop the reply silently", which was the pre-#309
+        behaviour. Telling a worker its packet vanished when it is sitting readable in
+        the mailbox sends it looking for the wrong failure.
+        """
+        prompt = self.prompt(repo_targets=None)
+        self.assertNotIn("silently", prompt)
+        self.assertIn("written durably", prompt)
+        self.assertIn("inbox.py", prompt)
+        self.assertIn("runtime dispatch refusal", prompt)
 
     def test_the_prompt_says_a_pr_comment_does_not_reach_the_sender(self) -> None:
         self.assertIn("does NOT reach the sender", self.prompt())
