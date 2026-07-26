@@ -700,6 +700,96 @@ class ReviewLoopCapContractTest(unittest.TestCase):
         self.assertEqual("old111", self.originating_commit_oid(threads[0]))
         self.assertEqual("head999", self.originating_commit_oid(threads[3]))
 
+    CLOSURE_LOOKING_FIELDS = {
+        "hasWrittenDisposition": True,
+        "dispositioned": True,
+        "isDispositioned": True,
+        "closed": True,
+        "isClosed": True,
+        "disposition": "superseded by the rewrite",
+        "dispositionUrl": "https://github.com/pixexid/llm-collab/pull/313#issuecomment-1",
+        "adjudicated": True,
+        "resolvedByComment": "PRRC_kwDO_whatever",
+        "outcome": "closed",
+        "state": "RESOLVED",
+    }
+
+    def test_classify_counts_only_isresolved_and_origin(self):
+        """Positive contract, because the negative one did not hold.
+
+        The earlier guard asserted the ABSENCE of closure helpers and pinned classify()'s
+        signature. Codex defeated it by adding a hasWrittenDisposition exclusion inside
+        classify() itself: no banned helper, unchanged signature, clean fixture, 62/62
+        green. Absence of a name is not absence of the behaviour.
+
+        So this asserts the behaviour. A thread wearing every closure-looking field we
+        could invent is still counted, because only GitHub resolution and the initiating
+        commit may influence the count. Automated closure cannot return anywhere --
+        helper, method body or caller -- without failing here.
+        """
+        def thread(oid, *, resolved, decorated):
+            node = {
+                "id": f"PRRT_{oid}_{resolved}_{decorated}",
+                "isResolved": resolved,
+                "isOutdated": False,
+                "comments": {"nodes": [{
+                    "commit": {"oid": oid},
+                    "originalCommit": {"oid": oid},
+                    "pullRequestReview": {"commit": {"oid": oid}},
+                }]},
+            }
+            if decorated:
+                node.update(self.CLOSURE_LOOKING_FIELDS)
+                node["comments"]["nodes"][0].update(self.CLOSURE_LOOKING_FIELDS)
+            return node
+
+        plain = [
+            thread("head999", resolved=False, decorated=False),
+            thread("old111", resolved=False, decorated=False),
+            thread("head999", resolved=True, decorated=False),
+        ]
+        decorated = [
+            thread("head999", resolved=False, decorated=True),
+            thread("old111", resolved=False, decorated=True),
+            thread("head999", resolved=True, decorated=True),
+        ]
+
+        baseline = self.classify(plain, "head999")
+        self.assertEqual(1, baseline["exact_head_findings"])
+        self.assertEqual(2, baseline["unresolved_total"])
+
+        adversarial = self.classify(decorated, "head999")
+        self.assertEqual(
+            baseline, adversarial,
+            "a closure-looking field suppressed a finding; only isResolved and the "
+            "initiating commit may affect the count",
+        )
+
+        # And each field alone must be inert, so no single one becomes a back door.
+        for field, value in self.CLOSURE_LOOKING_FIELDS.items():
+            with self.subTest(field=field):
+                one = thread("head999", resolved=False, decorated=False)
+                one[field] = value
+                counted = self.classify([one], "head999")
+                self.assertEqual(1, counted["exact_head_findings"], field)
+                self.assertEqual(1, counted["unresolved_total"], field)
+
+    def test_the_adversarial_fixture_is_not_quietly_rejected(self):
+        """The contract above is worthless if load-time validation drops the decorations.
+
+        load_threads() bans these fields in the SAVED fixture, which is correct -- raw
+        evidence only. The adversarial threads are synthetic and must reach classify()
+        wearing them, or the mutation would pass again.
+        """
+        decorated = {
+            "id": "PRRT_x", "isResolved": False, "isOutdated": False,
+            "hasWrittenDisposition": True,
+            "comments": {"nodes": [{"commit": {"oid": "h"}, "originalCommit": {"oid": "h"},
+                                    "pullRequestReview": {"commit": {"oid": "h"}}}]},
+        }
+        self.assertIn("hasWrittenDisposition", decorated)
+        self.assertEqual(1, self.classify([decorated], "h")["exact_head_findings"])
+
     def test_closure_by_written_disposition_is_not_automated(self):
         """Deleting this classifier was the fix, so the deletion needs a guard.
 
