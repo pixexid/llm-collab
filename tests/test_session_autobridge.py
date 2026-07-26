@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import base64
 import hashlib
 import socket
@@ -736,6 +737,107 @@ class SessionAutobridgeTest(unittest.TestCase):
         runtime_trigger.assert_not_called()
         mark_processed.assert_not_called()
         self.assertTrue(any(event.get("event") == "message_dispatched" for event in events))
+
+    def test_a_delivered_packet_is_recorded_even_if_the_lease_dies_mid_turn(self):
+        """Delivery happened; refusing to record it only causes a second delivery.
+
+        The activation lease has a fixed TTL and is never renewed by activity, so a turn
+        longer than the lease outlives it. Every post-delivery step was fenced, so the UI
+        refresh -- or the assert on the mark itself -- refused, the packet never entered
+        processed_messages, and the next pass sent the same packet again. The fence
+        protects against ACTING under a stale lease; the action is already done here.
+        """
+        session = {
+            "session_id": "SESSION-ACT",
+            "agent_id": "codex",
+            "project_id": "amiga",
+            "chat_id": "CHAT-ACT",
+            "mode": "auto-read",
+            "wake_strategy": "runtime_trigger",
+            "runtime": {"family": "codex_app", "session_id": "runtime-act"},
+        }
+        message = {
+            "path": "Chats/x/packet.md",
+            "frontmatter": {
+                "from": "claude", "to": "codex", "title": "Activation",
+                "project_id": "amiga", "chat_id": "CHAT-ACT",
+            },
+            "body": "Do the lane.",
+            "activation_lease": {
+                "identity": {"project": "amiga", "chat": "CHAT-ACT", "task": "TASK-97402D",
+                             "worktree": "/tmp/lane", "branch": "codex/lane",
+                             "target_agent": "codex"},
+                "lease": {"lease_key": "lease123"},
+                "owner_session_id": "SESSION-ACT",
+                "fence_token": 2,
+            },
+        }
+
+        delivered = []
+
+        def fenced(_session, _message, *, boundary, mutation):
+            if boundary == "runtime_trigger":
+                delivered.append(boundary)
+                return True, None, {"returncode": 0, "terminal_status": "completed"}
+            if delivered:
+                # The long turn outlived the lease; everything after delivery refuses.
+                return False, {"event": "activation_assert_refused", "boundary": boundary,
+                               "reason": "lease_expired"}, None
+            return True, None, mutation()
+
+        with (
+            patch.object(session_autobridge_lib, "load_session", return_value=session),
+            patch.object(session_autobridge_lib, "session_is_dispatchable", return_value=(True, "ok")),
+            patch.object(session_autobridge_lib, "matching_unread_messages", return_value=[message]),
+            patch.object(session_autobridge_lib, "processed_messages", return_value=set()),
+            patch.object(session_autobridge_lib, "message_targets_session", return_value=(True, "ok")),
+            patch.object(session_autobridge_lib, "claim_message_activation", return_value=(True, {"event": "activation_claimed"})),
+            patch.object(session_autobridge_lib, "should_skip_for_loop_protection", return_value=(False, "ok")),
+            patch.object(session_autobridge_lib, "resolve_effective_action", return_value=("runtime_trigger", "runtime_command_available")),
+            patch.object(session_autobridge_lib, "activation_fenced_mutation", side_effect=fenced),
+            patch.object(session_autobridge_lib, "append_event"),
+            patch.object(session_autobridge_lib, "mark_message_processed") as mark_processed,
+        ):
+            result = session_autobridge_lib.dispatch_session("SESSION-ACT")
+
+        mark_processed.assert_called_once_with(session, message["path"])
+        self.assertEqual("on_delivery", result["actions"][0]["processed_recorded"])
+
+    def test_an_undelivered_packet_is_still_not_recorded(self):
+        """Recording delivery early must not record a delivery that did not happen."""
+        session = {
+            "session_id": "SESSION-ACT", "agent_id": "codex", "project_id": "amiga",
+            "chat_id": "CHAT-ACT", "mode": "auto-read", "wake_strategy": "runtime_trigger",
+            "runtime": {"family": "codex_app", "session_id": "runtime-act"},
+        }
+        message = {
+            "path": "Chats/x/packet.md",
+            "frontmatter": {"from": "claude", "to": "codex", "title": "Activation",
+                            "project_id": "amiga", "chat_id": "CHAT-ACT"},
+            "body": "Do the lane.",
+        }
+
+        def fenced(_session, _message, *, boundary, mutation):
+            if boundary == "runtime_trigger":
+                return True, None, {"returncode": 1, "stderr": "spawn failed"}
+            return True, None, mutation()
+
+        with (
+            patch.object(session_autobridge_lib, "load_session", return_value=session),
+            patch.object(session_autobridge_lib, "session_is_dispatchable", return_value=(True, "ok")),
+            patch.object(session_autobridge_lib, "matching_unread_messages", return_value=[message]),
+            patch.object(session_autobridge_lib, "processed_messages", return_value=set()),
+            patch.object(session_autobridge_lib, "message_targets_session", return_value=(True, "ok")),
+            patch.object(session_autobridge_lib, "claim_message_activation", return_value=(True, {"event": "activation_claimed"})),
+            patch.object(session_autobridge_lib, "should_skip_for_loop_protection", return_value=(False, "ok")),
+            patch.object(session_autobridge_lib, "resolve_effective_action", return_value=("runtime_trigger", "runtime_command_available")),
+            patch.object(session_autobridge_lib, "activation_fenced_mutation", side_effect=fenced),
+            patch.object(session_autobridge_lib, "append_event"),
+            patch.object(session_autobridge_lib, "mark_message_processed") as mark_processed,
+        ):
+            session_autobridge_lib.dispatch_session("SESSION-ACT")
+
+        mark_processed.assert_not_called()
 
     def test_malformed_activation_dispatch_never_downgrades_or_marks_processed(self):
         session = {
@@ -6416,6 +6518,50 @@ class UnobservedTurnIsNotRedeliveredTest(unittest.TestCase):
                                 "params": {"turn": {"id": "turn-1", "status": "completed"}},
                             })
                             break
+                        if after_turn_start == "flood":
+                            for index in range(80):
+                                write_frame(conn, {
+                                    "jsonrpc": "2.0", "method": "item/agentMessage/delta",
+                                    "params": {"turnId": "turn-1", "delta": "."},
+                                })
+                            time.sleep(2.5)
+                            break
+                        if after_turn_start == "oversized_frame":
+                            # A frame declaring a 64-bit payload. Unbounded, this reaches
+                            # socket.recv(length) and raises OverflowError, which the
+                            # observation loop does not catch.
+                            conn.sendall(bytes([0x81, 127]) + (2**64 - 1).to_bytes(8, "big"))
+                            time.sleep(2.5)
+                            break
+                        if after_turn_start == "realistic_delta":
+                            # The shape the app server actually sends: text in
+                            # params.delta, no params.item at all.
+                            for index in range(3):
+                                write_frame(conn, {
+                                    "jsonrpc": "2.0", "method": "item/agentMessage/delta",
+                                    "params": {"turnId": "turn-1", "delta": f"chunk{index}"},
+                                })
+                            time.sleep(2.5)
+                            break
+                        if after_turn_start == "foreign_item":
+                            # Ours lands first, then another turn's message on the same
+                            # stream. Uncorrelated collection overwrites ours with theirs,
+                            # and our terminal then reports their text as our stdout.
+                            write_frame(conn, {
+                                "jsonrpc": "2.0", "method": "item/completed",
+                                "params": {"turnId": "turn-1",
+                                           "item": {"type": "agentMessage", "text": "OURS"}},
+                            })
+                            write_frame(conn, {
+                                "jsonrpc": "2.0", "method": "item/completed",
+                                "params": {"turnId": "someone-elses",
+                                           "item": {"type": "agentMessage", "text": "THEIRS"}},
+                            })
+                            write_frame(conn, {
+                                "jsonrpc": "2.0", "method": "turn/completed",
+                                "params": {"turn": {"id": "turn-1", "status": "completed"}},
+                            })
+                            break
                         if after_turn_start == "close":
                             break
                         if after_turn_start == "chatty":
@@ -6619,6 +6765,59 @@ class UnobservedTurnIsNotRedeliveredTest(unittest.TestCase):
         with self.assertRaises(TimeoutError):
             client._check_deadline("in test")
 
+    def test_an_absurd_frame_length_is_refused_before_it_is_read(self) -> None:
+        """An unbounded frame length crashes the loop instead of ending it.
+
+        The app server is another process's output. A frame declaring a 64-bit payload
+        reaches socket.recv(length), which raises OverflowError -- not one of the errors
+        the loop catches -- so dispatch unwinds past the point where the packet is marked
+        processed and the next poll sends the same packet again.
+        """
+        port, thread, _ = self.serve(after_turn_start="oversized_frame")
+        result = self.trigger(port)
+        thread.join(timeout=5)
+        self.assertEqual(0, result["returncode"], "a delivered packet must not be retried")
+        self.assertEqual("unobserved", result["terminal_status"])
+        self.assertIn("ConnectionError", result["unobserved_reason"])
+
+    def test_delta_text_is_read_from_the_notification_params(self) -> None:
+        """The partial reply is the whole point of preserving an unobserved turn."""
+        port, thread, _ = self.serve(after_turn_start="realistic_delta", deltas=0)
+        result = self.trigger(port)
+        thread.join(timeout=5)
+        self.assertEqual("unobserved", result["terminal_status"])
+        self.assertEqual("chunk0chunk1chunk2", result["stdout"])
+
+    def test_another_turns_agent_message_is_not_our_output(self) -> None:
+        """Attribution has to happen before collection, not after.
+
+        Skipping only a foreign TERMINAL event still let a foreign item overwrite
+        assistant_text, so this turn reported the other turn's reply as its own.
+        """
+        port, thread, _ = self.serve(after_turn_start="foreign_item", deltas=0)
+        result = self.trigger(port)
+        thread.join(timeout=5)
+        self.assertEqual("completed", result["terminal_status"])
+        self.assertEqual("OURS", result["stdout"])
+        self.assertNotIn("THEIRS", result["stdout"])
+
+    def test_a_kept_notification_tail_says_that_it_is_a_tail(self) -> None:
+        """A truncated history must not read like a complete one."""
+        port, thread, _ = self.serve(after_turn_start="flood", deltas=0)
+        result = self.trigger(port)
+        thread.join(timeout=5)
+        limit = session_autobridge_lib.CODEX_APP_SERVER_NOTIFICATION_LIMIT
+        self.assertLessEqual(len(result["notifications"]), limit)
+        self.assertGreater(result["notifications_total"], limit)
+        self.assertTrue(result["notifications_truncated"])
+
+    def test_a_short_notification_history_is_not_reported_as_truncated(self) -> None:
+        port, thread, _ = self.serve(after_turn_start="realistic_delta", deltas=0)
+        result = self.trigger(port)
+        thread.join(timeout=5)
+        self.assertFalse(result["notifications_truncated"])
+        self.assertEqual(len(result["notifications"]), result["notifications_total"])
+
     def test_a_completed_turn_reports_an_observed_delivery(self) -> None:
         """The flag must DISTINGUISH the two cases, or it certifies nothing.
 
@@ -6708,7 +6907,8 @@ class AnnouncementIsCommittedBeforeDispatchTest(unittest.TestCase):
                    {"agent": "cdx2", "unread": [message_rel], "read": []})
         return root, message_rel
 
-    def run_watcher(self, root: Path, polls: int) -> list[dict]:
+    def run_watcher(self, root: Path, polls: int, *, json_output: bool = True,
+                    dispatch: str | None = None) -> list[dict] | str:
         driver = root / "drive_watcher.py"
         write(
             driver,
@@ -6716,11 +6916,15 @@ class AnnouncementIsCommittedBeforeDispatchTest(unittest.TestCase):
                 "import sys",
                 f"sys.path.insert(0, {str(REPO_ROOT / 'bin')!r})",
                 "import watch_inbox",
-                "def boom(*args, **kwargs):",
-                "    raise TimeoutError('Codex app-server turn did not complete before timeout')",
-                "watch_inbox.dispatch_autobridge = boom",
+                dispatch or "\n".join([
+                    "def boom(*args, **kwargs):",
+                    "    raise TimeoutError('Codex app-server turn did not complete before timeout')",
+                    "watch_inbox.dispatch_autobridge = boom",
+                ]),
                 "watch_inbox.send_notification = lambda *a, **k: None",
-                f"sys.argv = ['watch_inbox.py', '--me', 'cdx2', '--json', '--poll-seconds', '1', '--max-polls', '{polls}']",
+                f"sys.argv = ['watch_inbox.py', '--me', 'cdx2'"
+                + (", '--json'" if json_output else "")
+                + f", '--poll-seconds', '1', '--max-polls', '{polls}']",
                 "watch_inbox.main()",
             ]),
         )
@@ -6732,6 +6936,8 @@ class AnnouncementIsCommittedBeforeDispatchTest(unittest.TestCase):
             env={**os.environ, "PYTHONPATH": os.pathsep.join([str(REPO_ROOT), str(REPO_ROOT / "bin"), os.environ.get("PYTHONPATH", "")])},
         )
         self.assertEqual(0, result.returncode, result.stderr)
+        if not json_output:
+            return result.stdout
         return [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
 
     def test_one_message_is_announced_once_even_when_every_dispatch_fails(self) -> None:
@@ -6747,3 +6953,41 @@ class AnnouncementIsCommittedBeforeDispatchTest(unittest.TestCase):
         events = self.run_watcher(root, polls=3)
         errors = [e for e in events if e.get("event") == "error"]
         self.assertEqual(3, len(errors), events)
+
+    UNOBSERVED_DISPATCH = "\n".join([
+        "def unobserved(*args, **kwargs):",
+        "    return {'matched_messages': 1, 'actions': [{",
+        "        'effective_action': 'runtime_trigger',",
+        "        'message_path': 'Chats/2026-04-22_watch__CHAT-WATCH/2026-04-22T00-00-00_to-cdx2_packet.md',",
+        "        'runtime_result': {'returncode': 0, 'terminal_status': 'unobserved',",
+        "                           'delivery_observed': False, 'turn_succeeded': None},",
+        "    }]}",
+        "watch_inbox.autobridge_session_ids = lambda *a, **k: ['SESSION-UNOBS']",
+        "watch_inbox.dispatch_session = unobserved",
+    ])
+
+    def test_an_unobserved_turn_does_not_print_the_same_line_as_a_completed_one(self) -> None:
+        """PM2 launches the watcher WITHOUT --json.
+
+        Non-JSON emit printed only event and detail, so an unobserved accepted turn
+        produced exactly the same `autobridge_consumed: <path>` line as a completed one
+        -- and the packet is marked processed either way, so it is never retried. The
+        operator had no way to see the reply had been lost short of changing how the
+        watcher is launched.
+        """
+        root, _ = self.workspace()
+        output = self.run_watcher(root, polls=1, json_output=False,
+                                  dispatch=self.UNOBSERVED_DISPATCH)
+        consumed = [line for line in output.splitlines() if "autobridge_consumed" in line]
+        self.assertTrue(consumed, output)
+        self.assertIn("terminal_status=unobserved", consumed[0])
+        self.assertIn("delivery_observed=False", consumed[0])
+
+    def test_the_plain_line_still_leads_with_the_event_and_path(self) -> None:
+        """The outcome is appended, not substituted -- existing log readers still work."""
+        root, message_rel = self.workspace()
+        output = self.run_watcher(root, polls=1, json_output=False,
+                                  dispatch=self.UNOBSERVED_DISPATCH)
+        consumed = next(line for line in output.splitlines() if "autobridge_consumed" in line)
+        self.assertRegex(consumed, r"autobridge_consumed: " + re.escape(message_rel) + r" \[")
+

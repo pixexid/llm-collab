@@ -79,6 +79,20 @@ def send_notification(title: str, body: str) -> None:
         pass
 
 
+# Fields the human-readable line must carry. PM2 runs watch_inbox.py WITHOUT --json, so
+# anything only present in the JSON body is absent from the operational logs -- and an
+# unobserved accepted turn printed the same autobridge_consumed line as a completed one,
+# after which the packet is marked processed and never retried. The operator could not
+# see that the reply had been lost without changing how the watcher is launched.
+OUTCOME_FIELDS = (
+    "terminal_status",
+    "delivery_observed",
+    "turn_succeeded",
+    "error_truncated",
+    "retried",
+)
+
+
 def emit(msg: dict, json_output: bool) -> None:
     if json_output:
         print(json.dumps(msg), flush=True)
@@ -86,6 +100,11 @@ def emit(msg: dict, json_output: bool) -> None:
         ts = msg.get("ts", "")
         event = msg.get("event", "")
         detail = msg.get("detail", "")
+        outcome = " ".join(
+            f"{field}={msg[field]}" for field in OUTCOME_FIELDS if field in msg
+        )
+        if outcome:
+            detail = f"{detail} [{outcome}]"
         print(f"[{ts}] {event}: {detail}", flush=True)
 
 
@@ -234,6 +253,7 @@ def dispatch_autobridge(
                         "message_path": action["message_path"],
                         "terminal_status": runtime_result.get("terminal_status"),
                         "turn_succeeded": runtime_result.get("turn_succeeded"),
+                        "delivery_observed": runtime_result.get("delivery_observed"),
                     },
                     json_output,
                 )

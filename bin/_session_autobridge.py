@@ -1980,6 +1980,57 @@ def _extract_default_codex_model(models_payload: Any) -> str | None:
     return None
 
 
+# The app server is another process's output, so its declared frame lengths are input we
+# do not control. Left unbounded, a frame claiming a 64-bit length reaches socket.recv(),
+# which raises OverflowError -- not one of the errors the observation loop catches -- so
+# dispatch unwinds past the point where the packet is marked processed and the next poll
+# sends it again. A ceiling turns an absurd claim into the ConnectionError the loop
+# already treats as a lost view, before a byte of it is read or allocated.
+CODEX_APP_SERVER_MAX_FRAME_BYTES = 16 * 1024 * 1024
+# The last 50 notification methods are kept for diagnosis; the count says whether that is
+# the whole history or the tail of one.
+CODEX_APP_SERVER_NOTIFICATION_LIMIT = 50
+
+
+def _notification_turn_id(params: Any) -> str | None:
+    """Which turn a notification belongs to, or None when it does not say."""
+    if not isinstance(params, dict):
+        return None
+    turn = params.get("turn")
+    if isinstance(turn, dict) and turn.get("id"):
+        return str(turn["id"])
+    for key in ("turnId", "turn_id"):
+        if params.get(key):
+            return str(params[key])
+    return None
+
+
+def _notification_report(notifications: list[str]) -> dict[str, Any]:
+    """The kept tail, and whether it is a tail.
+
+    Returning only the last 50 made a complete history indistinguishable from a
+    truncated one, so a consumer could not tell that the interesting frames had
+    already scrolled off.
+    """
+    limit = CODEX_APP_SERVER_NOTIFICATION_LIMIT
+    return {
+        "notifications": notifications[-limit:],
+        "notifications_total": len(notifications),
+        "notifications_truncated": len(notifications) > limit,
+    }
+
+
+def _delta_text(params: Any, item: Any) -> str:
+    if isinstance(params, dict):
+        for key in ("delta", "text"):
+            value = params.get(key)
+            if isinstance(value, str) and value:
+                return value
+    if isinstance(item, dict):
+        return str(item.get("text", ""))
+    return ""
+
+
 def execute_codex_app_server_trigger(session: dict, message: dict, runtime_home: str | None) -> dict[str, Any] | None:
     runtime = runtime_metadata(session)
     endpoint = discover_codex_app_server(runtime_home)
@@ -1994,7 +2045,12 @@ def execute_codex_app_server_trigger(session: dict, message: dict, runtime_home:
     assistant_text = ""
     terminal: dict[str, Any] | None = None
 
-    with JsonRpcWebSocketClient(str(endpoint["url"]), token=token, timeout_seconds=timeout_seconds) as client:
+    with JsonRpcWebSocketClient(
+        str(endpoint["url"]),
+        token=token,
+        timeout_seconds=timeout_seconds,
+        max_frame_bytes=CODEX_APP_SERVER_MAX_FRAME_BYTES,
+    ) as client:
         client.request(
             "initialize",
             {
@@ -2064,7 +2120,7 @@ def execute_codex_app_server_trigger(session: dict, message: dict, runtime_home:
                 "terminal_status": "unobserved",
                 "delivery_observed": False,
                 "unobserved_reason": detail,
-                "notifications": notifications[-50:],
+                **_notification_report(notifications),
             }
 
         deadline = time.monotonic() + timeout_seconds
@@ -2087,22 +2143,27 @@ def execute_codex_app_server_trigger(session: dict, message: dict, runtime_home:
                 continue
             notifications.append(method)
             params = message_payload.get("params")
-            item = params.get("item") if isinstance(params, dict) else None
-            if isinstance(item, dict) and item.get("type") == "agentMessage":
-                text = str(item.get("text", ""))
+            # Output is attributed BEFORE it is collected, not after. A second turn on the
+            # same stream has its own item notifications, and skipping only its terminal
+            # event let its agent message overwrite assistant_text -- this turn then
+            # reported the other turn's reply as its own. An item that cannot be shown to
+            # belong to this turn is not this turn's output.
+            if _notification_turn_id(params) in (started_turn_id, None):
+                item = params.get("item") if isinstance(params, dict) else None
                 if method == "item/agentMessage/delta":
-                    assistant_text += text
-                elif text:
-                    assistant_text = text
+                    # The delta text lives in params.delta; params.item is absent on a
+                    # delta frame, so reading item.text collected nothing and an
+                    # unobserved turn lost the partial reply it exists to preserve.
+                    assistant_text += _delta_text(params, item)
+                elif isinstance(item, dict) and item.get("type") == "agentMessage":
+                    text = str(item.get("text", ""))
+                    if text:
+                        assistant_text = text
             if method.lower() in {"turn/completed", "turn/failed", "turn/cancelled"}:
                 # Another turn may be live on the same event stream. Its terminal event
                 # would otherwise supply this packet's status and stdout and mark it
                 # observed, though the turn we started was never seen to end.
-                event_turn = params.get("turn") if isinstance(params, dict) else None
-                event_turn_id = (
-                    str(event_turn.get("id")) if isinstance(event_turn, dict) and event_turn.get("id")
-                    else None
-                )
+                event_turn_id = _notification_turn_id(params)
                 # Positive match required. Skipping only a DIFFERENT id let an
                 # identity-less terminal through, and the app-server schema requires
                 # TurnCompletedNotification.turn and Turn.id -- so a terminal with no id
@@ -2143,7 +2204,7 @@ def execute_codex_app_server_trigger(session: dict, message: dict, runtime_home:
         "turn_started": started,
         "terminal_status": status,
         "delivery_observed": True,
-        "notifications": notifications[-50:],
+        **_notification_report(notifications),
     }
 
 
@@ -2879,6 +2940,7 @@ def dispatch_session(
             "target_session_id": message["frontmatter"].get("target_session_id"),
         }
         should_mark_processed = True
+        already_marked = False
 
         if action == "runtime_trigger":
             runtime = runtime_metadata(session)
@@ -2992,6 +3054,16 @@ def dispatch_session(
             event["runtime_result"] = runtime_result
             should_mark_processed = runtime_result.get("returncode") == 0
             if should_mark_processed:
+                # The turn is accepted and running on the server. Every step after this
+                # point -- the UI refresh, the lease re-assert on the mark itself -- can
+                # fail without undoing that, and an activation lease can expire during a
+                # long turn. Refusing to record the delivery does not recall the message;
+                # it only guarantees the next poll sends the same packet again. So the
+                # acceptance is recorded here and unfenced: the fence protects against
+                # ACTING under a stale lease, and the action has already happened.
+                mark_message_processed(session, message["path"])
+                already_marked = True
+                event["processed_recorded"] = "on_delivery"
                 try:
                     asserted, assertion_event, ui_refresh_result = activation_fenced_mutation(
                         session,
@@ -3035,7 +3107,7 @@ def dispatch_session(
             event["relay_result"] = relay_result
 
         mark_after_event = False
-        if should_mark_processed:
+        if should_mark_processed and not already_marked:
             if message.get("activation_lease"):
                 asserted, assertion_event, _ = activation_fenced_mutation(
                     session,
