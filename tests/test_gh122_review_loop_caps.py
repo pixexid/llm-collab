@@ -700,95 +700,114 @@ class ReviewLoopCapContractTest(unittest.TestCase):
         self.assertEqual("old111", self.originating_commit_oid(threads[0]))
         self.assertEqual("head999", self.originating_commit_oid(threads[3]))
 
+    # Field names that LOOK like closure. Retained only as a readability aid for the
+    # access guard below; the guard does not depend on this list being complete, and an
+    # earlier version that did was defeated by a name absent from it.
     CLOSURE_LOOKING_FIELDS = {
         "hasWrittenDisposition": True,
+        "manualDisposition": True,
         "dispositioned": True,
-        "isDispositioned": True,
         "closed": True,
-        "isClosed": True,
         "disposition": "superseded by the rewrite",
-        "dispositionUrl": "https://github.com/pixexid/llm-collab/pull/313#issuecomment-1",
         "adjudicated": True,
         "resolvedByComment": "PRRC_kwDO_whatever",
-        "outcome": "closed",
         "state": "RESOLVED",
     }
 
-    def test_classify_counts_only_isresolved_and_origin(self):
-        """Positive contract, because the negative one did not hold.
+    CLASSIFY_MAY_READ = frozenset({"isResolved", "comments"})
 
-        The earlier guard asserted the ABSENCE of closure helpers and pinned classify()'s
-        signature. Codex defeated it by adding a hasWrittenDisposition exclusion inside
-        classify() itself: no banned helper, unchanged signature, clean fixture, 62/62
-        green. Absence of a name is not absence of the behaviour.
+    class StrictThread(dict):
+        """A thread that refuses every top-level key classify() has no business reading.
 
-        So this asserts the behaviour. A thread wearing every closure-looking field we
-        could invent is still counted, because only GitHub resolution and the initiating
-        commit may influence the count. Automated closure cannot return anywhere --
-        helper, method body or caller -- without failing here.
+        This is the guard, and it is deliberately not a list of forbidden names. Two
+        earlier versions were name-based and both were defeated: first by adding the
+        exclusion inside classify() where no banned identifier appeared, then by
+        choosing a closure field I had not thought to enumerate. Enumerating more names
+        repeats the defect, because the attacker picks the name last.
+
+        Inverting it removes the guessing. Only isResolved and comments may be read at
+        all, so ANY new closure lookup fails on access regardless of spelling.
         """
-        def thread(oid, *, resolved, decorated):
-            node = {
-                "id": f"PRRT_{oid}_{resolved}_{decorated}",
-                "isResolved": resolved,
-                "isOutdated": False,
-                "comments": {"nodes": [{
-                    "commit": {"oid": oid},
-                    "originalCommit": {"oid": oid},
-                    "pullRequestReview": {"commit": {"oid": oid}},
-                }]},
-            }
-            if decorated:
-                node.update(self.CLOSURE_LOOKING_FIELDS)
-                node["comments"]["nodes"][0].update(self.CLOSURE_LOOKING_FIELDS)
-            return node
 
+        allowed = frozenset({"isResolved", "comments"})
+
+        def __getitem__(self, key):
+            if key not in self.allowed:
+                raise AssertionError(
+                    f"classify() read {key!r}; it may consult only {sorted(self.allowed)}"
+                )
+            return super().__getitem__(key)
+
+        def get(self, key, default=None):
+            if key not in self.allowed:
+                raise AssertionError(
+                    f"classify() read {key!r} via get(); it may consult only "
+                    f"{sorted(self.allowed)}"
+                )
+            return super().get(key, default)
+
+    def strict_thread(self, oid, *, resolved, decorated):
+        node = self.StrictThread({
+            "isResolved": resolved,
+            "comments": {"nodes": [{
+                "commit": {"oid": oid},
+                "originalCommit": {"oid": oid},
+                "pullRequestReview": {"commit": {"oid": oid}},
+            }]},
+        })
+        if decorated:
+            # Stored through dict.__setitem__ so they are PRESENT but unreadable:
+            # a lookup raises rather than silently returning a falsy default.
+            for field, value in self.CLOSURE_LOOKING_FIELDS.items():
+                dict.__setitem__(node, field, value)
+            dict.__setitem__(node, "someFieldNobodyHasThoughtOfYet", True)
+        return node
+
+    def test_classify_consults_only_isresolved_and_origin(self):
+        """Proved by access, not by enumeration.
+
+        classify() may read exactly two top-level keys. Anything else raises on the
+        first lookup, so a closure exclusion cannot be smuggled in under a name the
+        test did not anticipate -- which is precisely how the previous two versions of
+        this guard were defeated.
+        """
         plain = [
-            thread("head999", resolved=False, decorated=False),
-            thread("old111", resolved=False, decorated=False),
-            thread("head999", resolved=True, decorated=False),
+            self.strict_thread("head999", resolved=False, decorated=False),
+            self.strict_thread("old111", resolved=False, decorated=False),
+            self.strict_thread("head999", resolved=True, decorated=False),
         ]
-        decorated = [
-            thread("head999", resolved=False, decorated=True),
-            thread("old111", resolved=False, decorated=True),
-            thread("head999", resolved=True, decorated=True),
-        ]
-
         baseline = self.classify(plain, "head999")
         self.assertEqual(1, baseline["exact_head_findings"])
         self.assertEqual(2, baseline["unresolved_total"])
 
-        adversarial = self.classify(decorated, "head999")
+        decorated = [
+            self.strict_thread("head999", resolved=False, decorated=True),
+            self.strict_thread("old111", resolved=False, decorated=True),
+            self.strict_thread("head999", resolved=True, decorated=True),
+        ]
         self.assertEqual(
-            baseline, adversarial,
-            "a closure-looking field suppressed a finding; only isResolved and the "
-            "initiating commit may affect the count",
+            baseline, self.classify(decorated, "head999"),
+            "closure-looking fields changed the counts",
         )
 
-        # And each field alone must be inert, so no single one becomes a back door.
-        for field, value in self.CLOSURE_LOOKING_FIELDS.items():
-            with self.subTest(field=field):
-                one = thread("head999", resolved=False, decorated=False)
-                one[field] = value
-                counted = self.classify([one], "head999")
-                self.assertEqual(1, counted["exact_head_findings"], field)
-                self.assertEqual(1, counted["unresolved_total"], field)
+    def test_the_access_guard_actually_refuses(self):
+        """A guard that never fires is decoration.
 
-    def test_the_adversarial_fixture_is_not_quietly_rejected(self):
-        """The contract above is worthless if load-time validation drops the decorations.
-
-        load_threads() bans these fields in the SAVED fixture, which is correct -- raw
-        evidence only. The adversarial threads are synthetic and must reach classify()
-        wearing them, or the mutation would pass again.
+        If StrictThread silently permitted unknown keys, the contract above would pass
+        against any implementation at all.
         """
-        decorated = {
-            "id": "PRRT_x", "isResolved": False, "isOutdated": False,
-            "hasWrittenDisposition": True,
-            "comments": {"nodes": [{"commit": {"oid": "h"}, "originalCommit": {"oid": "h"},
-                                    "pullRequestReview": {"commit": {"oid": "h"}}}]},
-        }
-        self.assertIn("hasWrittenDisposition", decorated)
-        self.assertEqual(1, self.classify([decorated], "h")["exact_head_findings"])
+        node = self.strict_thread("head999", resolved=False, decorated=True)
+        for key in ("hasWrittenDisposition", "manualDisposition",
+                    "someFieldNobodyHasThoughtOfYet"):
+            with self.subTest(key=key):
+                self.assertIn(key, dict(node), "the field must be present but unreadable")
+                with self.assertRaises(AssertionError):
+                    node[key]
+                with self.assertRaises(AssertionError):
+                    node.get(key)
+        # And the two permitted keys must still work, or classify() could not run.
+        self.assertIs(False, node["isResolved"])
+        self.assertIn("nodes", node["comments"])
 
     def test_closure_by_written_disposition_is_not_automated(self):
         """Deleting this classifier was the fix, so the deletion needs a guard.
