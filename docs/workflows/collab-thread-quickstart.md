@@ -8,6 +8,65 @@ really happened.
 
 `session-startup.md` covers the *environment*. This covers the *collaboration*.
 
+## 0. Cold start — the operator asks two workers to collaborate
+
+Collaboration does not start by itself. A worker asked to "work with zcode on the
+checkout refactor" is, until these steps run, working alone: it has no chat to write
+to and no way for anyone to reach it.
+
+The sequence below was run end to end against a scratch workspace; the commands are
+copied from that run, not composed from the help text.
+
+**Operator does (once per project):** make sure the project exists in `projects.json`
+and both agents exist in `agents.json`. An unregistered project is refused, not guessed.
+
+**Then, once per collaboration:**
+
+```bash
+# 1. create the chat — this is the work stream both workers will share
+python bin/new_chat.py --project demo-app --title "Checkout refactor"
+#    -> chat_id: CHAT-2F8529C5
+```
+
+```bash
+# 2. EACH worker publishes its own runtime session against that chat.
+#    First it reads its own thread id. This is read-only:
+python bin/session_autobridge.py discover-runtime --runtime-family codex_app --json
+#    -> {"session_id": "019f9452-...", "home": "/Users/you/.codex", ...}
+
+#    Then it registers that EXACT id:
+python bin/session_autobridge.py register   --session SESSION-CODEX-DEMO --agent codex   --project demo-app --chat CHAT-2F8529C5 --repo-target app   --mode auto-read --status active --wake-strategy runtime_trigger   --runtime-family codex_app   --runtime-session-id 019f9452-...   --runtime-home /Users/you/.codex   --runtime-session-source first_read
+```
+
+`publish-current` looks like the shortcut for this and **will refuse**
+(`heuristic_runtime_discovery_refused`). Guessing which thread belongs to which worker
+was retired deliberately: a wrong guess binds someone else's thread. Read the id, then
+register it explicitly.
+
+Repeat step 2 for the other worker, with its own `--runtime-family`
+(`codex_app`, `claude_app`, `gemini_cli`) and its own session id.
+
+**That is the whole "sharing a session id" question.** Nobody pastes an id to anybody.
+Registration publishes it to the shared registry; `deliver.py` resolves the recipient's
+binding automatically, and every packet carries both `Sender Session` and
+`Target Session` so the record shows exactly which threads spoke. `codex_stream.py`
+reads the same binding to attach to a peer's App Server.
+
+```bash
+# 3. now they can talk
+python bin/deliver.py --project demo-app --chat CHAT-2F8529C5   --from codex --to zcode --repo-targets app   --title "Splitting the checkout work" --body-file /tmp/msg.md
+#    -> "resolved_target_session_id": "zcode-thread-001", "autobridge_ready": true
+```
+
+### Two things that bite here
+
+- **`discover-runtime` returns the most recently indexed session for that family**, not
+  provably the caller's own. Check the `session_id` it prints against the thread you are
+  actually in before registering it; registering the wrong one binds someone else's
+  thread and every later refusal will point at the wrong cause.
+- **Registration is per chat.** A worker registered on one chat is unreachable on
+  another. Adding a second work stream means a second chat and a second registration.
+
 ## 1. Bootstrap
 
 ```bash
