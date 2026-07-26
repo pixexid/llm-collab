@@ -261,8 +261,14 @@ policy:
     **Never `comments.nodes[0].commit.oid`** — that field is mutable and GitHub
     advances it to the current head for a thread that is still non-outdated, so it
     reports every live stale thread as a current-head finding.
-  - *is this finding still open?* Only resolution or an explicit written
-    disposition closes it. **A push is not an adjudication.**
+  - *is this finding still open?* Only GitHub resolution, or a written disposition
+    **that identifies the thread**, closes it. Identifying means the disposition
+    contains the thread's node ID or its `#discussion_r...` comment URL. Grouped
+    prose that names findings by title reads like an adjudication and closes
+    nothing — there is no way to check which thread it answered, so it cannot be
+    audited later by anyone, including its author. **A push is not an
+    adjudication**, and neither is a summary that does not say which thread it
+    disposes.
   `isOutdated` answers neither. It is diff-position metadata — whether the thread
   still maps onto the current diff — and using it as the exclusion criterion is
   wrong in both directions. llm-collab#313 disproves it directly: at `9822524`,

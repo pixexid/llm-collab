@@ -573,7 +573,7 @@ class ReviewLoopCapContractTest(unittest.TestCase):
         self.assert_scenario_cases("canonical_wait_gate", check)
 
     THREAD_FIXTURE = (
-        REPO_ROOT / "tests" / "fixtures" / "review_thread_binding" / "pr313_at_aab95d9.json"
+        REPO_ROOT / "tests" / "fixtures" / "review_thread_binding" / "pr313_at_5b28b0a.json"
     )
 
     @staticmethod
@@ -599,7 +599,7 @@ class ReviewLoopCapContractTest(unittest.TestCase):
         return (comment.get("commit") or {}).get("oid")
 
     @staticmethod
-    def dispositioned_thread_ids(artifacts, authorized_actors):
+    def dispositioned_thread_ids(artifacts, authorized_actors, threads):
         """Thread IDs closed by an AUTHORIZED disposition artifact that names them.
 
         Derived, never asserted. A synthetic hasWrittenDisposition boolean -- the
@@ -615,8 +615,14 @@ class ReviewLoopCapContractTest(unittest.TestCase):
         for artifact in artifacts:
             if artifact.get("actor") not in authorized_actors:
                 continue
-            for thread_id in artifact.get("disposes_thread_ids") or []:
-                closed.add(thread_id)
+            body = artifact.get("body") or ""
+            for thread in threads:
+                identifiers = [
+                    thread["id"],
+                    thread["comments"]["nodes"][0].get("url") or "\x00never",
+                ]
+                if any(ident in body for ident in identifiers):
+                    closed.add(thread["id"])
         return closed
 
     def is_open(self, thread, closed_ids=frozenset()):
@@ -639,7 +645,9 @@ class ReviewLoopCapContractTest(unittest.TestCase):
 
     def closed_ids(self, fixture):
         return self.dispositioned_thread_ids(
-            fixture["disposition_artifacts"], fixture["authorized_actors"]
+            fixture["disposition_artifacts"],
+            fixture["authorized_actors"],
+            fixture["threads"],
         )
 
     def load_threads(self):
@@ -649,6 +657,7 @@ class ReviewLoopCapContractTest(unittest.TestCase):
             # the raw nested shapes and never a pre-resolved origin field.
             self.assertNotIn("originating_commit_oid", thread)
             self.assertNotIn("hasWrittenDisposition", thread)
+            self.assertNotIn("disposes_thread_ids", thread)
             self.assertIn("id", thread)
             self.assertIn("comments", thread)
         return fixture
@@ -732,37 +741,54 @@ class ReviewLoopCapContractTest(unittest.TestCase):
             "reading isResolved alone must give a different, larger answer",
         )
 
-    def test_a_grouped_disposition_closes_only_the_threads_it_names(self):
+    def test_a_grouped_disposition_closes_only_the_threads_its_body_identifies(self):
         fixture = self.load_threads()
         closed = self.closed_ids(fixture)
-        named = {
-            tid
-            for artifact in fixture["disposition_artifacts"]
-            if artifact["actor"] in fixture["authorized_actors"]
-            for tid in artifact["disposes_thread_ids"]
-        }
-        self.assertEqual(named, closed)
-        unnamed = [t for t in fixture["threads"] if t["id"] not in named]
+        self.assertEqual(set(fixture["expected"]["closed_thread_ids"]), closed)
+        unnamed = [t for t in fixture["threads"] if t["id"] not in closed]
         self.assertTrue(unnamed, "fixture must contain threads the disposition omits")
         for thread in unnamed:
             if not thread["isResolved"]:
                 self.assertTrue(self.is_open(thread, closed))
 
+    def test_a_prose_adjudication_naming_no_thread_closes_nothing(self):
+        """The real artifact, and the reason the invented mapping was wrong.
+
+        llm-collab#317's adjudication is prose plus a findings table. It contains no
+        thread node IDs and no discussion_r URLs, so there is nothing to map it to a
+        thread. A fixture that stored disposes_thread_ids for it was asserting a
+        mapping the artifact does not carry -- my own adjudication did not, in fact,
+        mechanically close anything.
+        """
+        fixture = self.load_threads()
+        real = next(
+            a for a in fixture["disposition_artifacts"]
+            if a["id"] == "IC_real_grouped_no_ids"
+        )
+        self.assertIn(real["actor"], fixture["authorized_actors"])
+        closed_by_real = self.dispositioned_thread_ids(
+            [real], fixture["authorized_actors"], fixture["threads"]
+        )
+        self.assertEqual(
+            fixture["expected"]["real_grouped_artifact_closes"], len(closed_by_real)
+        )
+        self.assertEqual(set(), closed_by_real)
+
     def test_an_unauthorized_disposition_does_not_close_anything(self):
-        """A drive-by comment naming a thread is not an adjudication."""
+        """A drive-by comment naming a thread URL is not an adjudication."""
         fixture = self.load_threads()
         closed = self.closed_ids(fixture)
-        for thread_id in fixture["expected"]["unauthorized_artifact_thread_ids"]:
-            self.assertNotIn(thread_id, closed)
-            thread = next(t for t in fixture["threads"] if t["id"] == thread_id)
-            self.assertTrue(self.is_open(thread, closed))
-        # And it would close them if the actor check were dropped.
-        without_actor_check = {
-            tid
-            for artifact in fixture["disposition_artifacts"]
-            for tid in artifact["disposes_thread_ids"]
-        }
-        self.assertNotEqual(without_actor_check, closed)
+        victim = fixture["expected"]["unauthorized_named_thread_id"]
+        self.assertNotIn(victim, closed)
+        thread = next(t for t in fixture["threads"] if t["id"] == victim)
+        self.assertTrue(self.is_open(thread, closed))
+        # It names a real thread, so only the actor check keeps it out.
+        without_actor_check = self.dispositioned_thread_ids(
+            fixture["disposition_artifacts"],
+            fixture["authorized_actors"] + ["some-drive-by-account"],
+            fixture["threads"],
+        )
+        self.assertIn(victim, without_actor_check)
 
     def test_an_arbitrary_flag_on_a_thread_cannot_close_it(self):
         """The defect this replaced: a synthetic boolean with nothing behind it."""
@@ -876,7 +902,10 @@ class ReviewLoopCapContractTest(unittest.TestCase):
             "`comments.nodes[0].originalCommit.oid`",
             "**Never `comments.nodes[0].commit.oid`**",
             "that field is mutable",
-            "A push is not an adjudication.",
+            "A push is not an adjudication**",
+            "that identifies the thread",
+            "node ID or its `#discussion_r...` comment URL",
+            "closes nothing",
             "diff-position metadata",
             "wrong in both directions",
         ):

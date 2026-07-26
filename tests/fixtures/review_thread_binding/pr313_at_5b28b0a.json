@@ -1,7 +1,7 @@
 {
-  "source": "llm-collab#313 reviewThreads, captured 2026-07-26 at head aab95d933c",
-  "why": "Two pre-resolved answers were removed from this fixture in turn. First a computed originating_commit_oid, which hid the field-authority decision. Then a synthetic hasWrittenDisposition boolean, which let any thread be declared closed without proving an artifact, an authorized actor, or a mapping to that thread. Closure is now DERIVED from disposition artifacts shaped like the real one: llm-collab#317's adjudication is a single top-level issue comment that groups findings and names the threads it disposes -- it is not attached to each thread node.",
-  "head_oid": "aab95d933c64487338f87775ade9e9b35adca30f",
+  "source": "llm-collab#313 reviewThreads, captured 2026-07-26 at head 5b28b0a594",
+  "why": "Three pre-resolved answers were removed from this fixture in succession: a computed originating_commit_oid, a synthetic hasWrittenDisposition boolean, and an invented disposes_thread_ids mapping. The last one was disproved by the real artifact it claimed to model -- llm-collab#317's adjudication comment contains NO thread identifiers, so under any content-derived rule it closes nothing. Closure is now read out of the artifact body.",
+  "head_oid": "5b28b0a59496b1ad0de5be5e07e20c27c8a124cd",
   "authorized_actors": [
     "pixexid",
     "codex"
@@ -15,8 +15,9 @@
         "nodes": [
           {
             "id": "PRRC_kwDOR8xQ287Zo7jJ",
+            "url": "https://github.com/pixexid/llm-collab/pull/313#discussion_r3651385545",
             "commit": {
-              "oid": "aab95d933c64487338f87775ade9e9b35adca30f"
+              "oid": "5b28b0a59496b1ad0de5be5e07e20c27c8a124cd"
             },
             "originalCommit": {
               "oid": "a54e33fcd94bce301040ded2a6b70ecb401cd41e"
@@ -38,8 +39,9 @@
         "nodes": [
           {
             "id": "PRRC_kwDOR8xQ287Zo7jO",
+            "url": "https://github.com/pixexid/llm-collab/pull/313#discussion_r3651385550",
             "commit": {
-              "oid": "aab95d933c64487338f87775ade9e9b35adca30f"
+              "oid": "5b28b0a59496b1ad0de5be5e07e20c27c8a124cd"
             },
             "originalCommit": {
               "oid": "a54e33fcd94bce301040ded2a6b70ecb401cd41e"
@@ -61,6 +63,7 @@
         "nodes": [
           {
             "id": "PRRC_kwDOR8xQ287Zo7jR",
+            "url": "https://github.com/pixexid/llm-collab/pull/313#discussion_r3651385553",
             "commit": {
               "oid": "a54e33fcd94bce301040ded2a6b70ecb401cd41e"
             },
@@ -84,8 +87,9 @@
         "nodes": [
           {
             "id": "PRRC_kwDOR8xQ287Zo7jS",
+            "url": "https://github.com/pixexid/llm-collab/pull/313#discussion_r3651385554",
             "commit": {
-              "oid": "aab95d933c64487338f87775ade9e9b35adca30f"
+              "oid": "5b28b0a59496b1ad0de5be5e07e20c27c8a124cd"
             },
             "originalCommit": {
               "oid": "a54e33fcd94bce301040ded2a6b70ecb401cd41e"
@@ -107,8 +111,9 @@
         "nodes": [
           {
             "id": "PRRC_kwDOR8xQ287Zo-Bn",
+            "url": "https://github.com/pixexid/llm-collab/pull/313#discussion_r3651395687",
             "commit": {
-              "oid": "aab95d933c64487338f87775ade9e9b35adca30f"
+              "oid": "5b28b0a59496b1ad0de5be5e07e20c27c8a124cd"
             },
             "originalCommit": {
               "oid": "a54e33fcd94bce301040ded2a6b70ecb401cd41e"
@@ -130,8 +135,9 @@
         "nodes": [
           {
             "id": "PRRC_kwDOR8xQ287Zo-Bq",
+            "url": "https://github.com/pixexid/llm-collab/pull/313#discussion_r3651395690",
             "commit": {
-              "oid": "aab95d933c64487338f87775ade9e9b35adca30f"
+              "oid": "5b28b0a59496b1ad0de5be5e07e20c27c8a124cd"
             },
             "originalCommit": {
               "oid": "a54e33fcd94bce301040ded2a6b70ecb401cd41e"
@@ -153,8 +159,9 @@
         "nodes": [
           {
             "id": "PRRC_kwDOR8xQ287Zo-Br",
+            "url": "https://github.com/pixexid/llm-collab/pull/313#discussion_r3651395691",
             "commit": {
-              "oid": "aab95d933c64487338f87775ade9e9b35adca30f"
+              "oid": "5b28b0a59496b1ad0de5be5e07e20c27c8a124cd"
             },
             "originalCommit": {
               "oid": "a54e33fcd94bce301040ded2a6b70ecb401cd41e"
@@ -176,6 +183,7 @@
         "nodes": [
           {
             "id": "PRRC_kwDOR8xQ287Zo-Bt",
+            "url": "https://github.com/pixexid/llm-collab/pull/313#discussion_r3651395693",
             "commit": {
               "oid": "a54e33fcd94bce301040ded2a6b70ecb401cd41e"
             },
@@ -199,8 +207,9 @@
         "nodes": [
           {
             "id": "PRRC_kwDOR8xQ287Zo-Bw",
+            "url": "https://github.com/pixexid/llm-collab/pull/313#discussion_r3651395696",
             "commit": {
-              "oid": "aab95d933c64487338f87775ade9e9b35adca30f"
+              "oid": "5b28b0a59496b1ad0de5be5e07e20c27c8a124cd"
             },
             "originalCommit": {
               "oid": "a54e33fcd94bce301040ded2a6b70ecb401cd41e"
@@ -222,6 +231,7 @@
         "nodes": [
           {
             "id": "PRRC_kwDOR8xQ287Zo-Bx",
+            "url": "https://github.com/pixexid/llm-collab/pull/313#discussion_r3651395697",
             "commit": {
               "oid": "a54e33fcd94bce301040ded2a6b70ecb401cd41e"
             },
@@ -245,8 +255,9 @@
         "nodes": [
           {
             "id": "PRRC_kwDOR8xQ287Zo-Bz",
+            "url": "https://github.com/pixexid/llm-collab/pull/313#discussion_r3651395699",
             "commit": {
-              "oid": "aab95d933c64487338f87775ade9e9b35adca30f"
+              "oid": "5b28b0a59496b1ad0de5be5e07e20c27c8a124cd"
             },
             "originalCommit": {
               "oid": "a54e33fcd94bce301040ded2a6b70ecb401cd41e"
@@ -268,6 +279,7 @@
         "nodes": [
           {
             "id": "PRRC_kwDOR8xQ287ZpJfV",
+            "url": "https://github.com/pixexid/llm-collab/pull/313#discussion_r3651442645",
             "commit": {
               "oid": "82ae7e92ded3591e55cfc8762ddc0ce537c6f7a1"
             },
@@ -291,8 +303,9 @@
         "nodes": [
           {
             "id": "PRRC_kwDOR8xQ287ZpJfY",
+            "url": "https://github.com/pixexid/llm-collab/pull/313#discussion_r3651442648",
             "commit": {
-              "oid": "aab95d933c64487338f87775ade9e9b35adca30f"
+              "oid": "5b28b0a59496b1ad0de5be5e07e20c27c8a124cd"
             },
             "originalCommit": {
               "oid": "82ae7e92ded3591e55cfc8762ddc0ce537c6f7a1"
@@ -314,8 +327,9 @@
         "nodes": [
           {
             "id": "PRRC_kwDOR8xQ287ZpJfZ",
+            "url": "https://github.com/pixexid/llm-collab/pull/313#discussion_r3651442649",
             "commit": {
-              "oid": "aab95d933c64487338f87775ade9e9b35adca30f"
+              "oid": "5b28b0a59496b1ad0de5be5e07e20c27c8a124cd"
             },
             "originalCommit": {
               "oid": "82ae7e92ded3591e55cfc8762ddc0ce537c6f7a1"
@@ -337,8 +351,9 @@
         "nodes": [
           {
             "id": "PRRC_kwDOR8xQ287ZpJfb",
+            "url": "https://github.com/pixexid/llm-collab/pull/313#discussion_r3651442651",
             "commit": {
-              "oid": "aab95d933c64487338f87775ade9e9b35adca30f"
+              "oid": "5b28b0a59496b1ad0de5be5e07e20c27c8a124cd"
             },
             "originalCommit": {
               "oid": "82ae7e92ded3591e55cfc8762ddc0ce537c6f7a1"
@@ -360,8 +375,9 @@
         "nodes": [
           {
             "id": "PRRC_kwDOR8xQ287ZpJfd",
+            "url": "https://github.com/pixexid/llm-collab/pull/313#discussion_r3651442653",
             "commit": {
-              "oid": "aab95d933c64487338f87775ade9e9b35adca30f"
+              "oid": "5b28b0a59496b1ad0de5be5e07e20c27c8a124cd"
             },
             "originalCommit": {
               "oid": "82ae7e92ded3591e55cfc8762ddc0ce537c6f7a1"
@@ -383,6 +399,7 @@
         "nodes": [
           {
             "id": "PRRC_kwDOR8xQ287ZqhHV",
+            "url": "https://github.com/pixexid/llm-collab/pull/313#discussion_r3651801557",
             "commit": {
               "oid": "07db4787e0bef743a8384ca869bd5b8a5cac4373"
             },
@@ -406,8 +423,9 @@
         "nodes": [
           {
             "id": "PRRC_kwDOR8xQ287Zquv2",
+            "url": "https://github.com/pixexid/llm-collab/pull/313#discussion_r3651857398",
             "commit": {
-              "oid": "aab95d933c64487338f87775ade9e9b35adca30f"
+              "oid": "5b28b0a59496b1ad0de5be5e07e20c27c8a124cd"
             },
             "originalCommit": {
               "oid": "7a402cc916e09392bc67597a090b24b140073d1f"
@@ -429,8 +447,9 @@
         "nodes": [
           {
             "id": "PRRC_kwDOR8xQ287Zquv3",
+            "url": "https://github.com/pixexid/llm-collab/pull/313#discussion_r3651857399",
             "commit": {
-              "oid": "aab95d933c64487338f87775ade9e9b35adca30f"
+              "oid": "5b28b0a59496b1ad0de5be5e07e20c27c8a124cd"
             },
             "originalCommit": {
               "oid": "7a402cc916e09392bc67597a090b24b140073d1f"
@@ -452,8 +471,9 @@
         "nodes": [
           {
             "id": "PRRC_kwDOR8xQ287Zquv4",
+            "url": "https://github.com/pixexid/llm-collab/pull/313#discussion_r3651857400",
             "commit": {
-              "oid": "aab95d933c64487338f87775ade9e9b35adca30f"
+              "oid": "5b28b0a59496b1ad0de5be5e07e20c27c8a124cd"
             },
             "originalCommit": {
               "oid": "7a402cc916e09392bc67597a090b24b140073d1f"
@@ -475,8 +495,9 @@
         "nodes": [
           {
             "id": "PRRC_kwDOR8xQ287Zquv5",
+            "url": "https://github.com/pixexid/llm-collab/pull/313#discussion_r3651857401",
             "commit": {
-              "oid": "aab95d933c64487338f87775ade9e9b35adca30f"
+              "oid": "5b28b0a59496b1ad0de5be5e07e20c27c8a124cd"
             },
             "originalCommit": {
               "oid": "7a402cc916e09392bc67597a090b24b140073d1f"
@@ -493,41 +514,36 @@
   ],
   "disposition_artifacts": [
     {
-      "id": "IC_kwDO_adjudication_1",
+      "id": "IC_real_grouped_no_ids",
       "url": "https://github.com/pixexid/llm-collab/pull/317#issuecomment-5082195564",
       "actor": "pixexid",
-      "kind": "grouped_issue_comment",
-      "disposes_thread_ids": [
-        "PRRT_kwDOR8xQ286Tzfuk",
-        "PRRT_kwDOR8xQ286TzhnH"
-      ]
+      "body": "## Thread adjudication at head b20c146\n\nTwelve unresolved review threads exist on this PR... | Origin | Finding | Disposition |\n| a44dbd0 | Substitute the actual repository scope | Fixed at b52c130 |\n(prose and finding titles only -- no thread identifiers)"
     },
     {
-      "id": "IC_kwDO_unauthorized",
+      "id": "IC_grouped_with_ids",
+      "url": "https://github.com/pixexid/llm-collab/pull/313#issuecomment-enumerated",
+      "actor": "pixexid",
+      "body": "Adjudication. These threads are dispositioned:\n- https://github.com/pixexid/llm-collab/pull/313#discussion_r3651385553 \u2014 superseded by the rewrite\n- https://github.com/pixexid/llm-collab/pull/313#discussion_r3651395693 \u2014 superseded by the rewrite"
+    },
+    {
+      "id": "IC_unauthorized_with_ids",
       "url": "https://example.invalid/drive-by",
       "actor": "some-drive-by-account",
-      "kind": "grouped_issue_comment",
-      "disposes_thread_ids": [
-        "PRRT_kwDOR8xQ286TzhnL"
-      ]
-    },
-    {
-      "id": "IC_kwDO_unmapped",
-      "url": "https://github.com/pixexid/llm-collab/pull/313#issuecomment-unmapped",
-      "actor": "pixexid",
-      "kind": "grouped_issue_comment",
-      "disposes_thread_ids": []
+      "body": "Looks fine to me: https://github.com/pixexid/llm-collab/pull/313#discussion_r3651395697"
     }
   ],
   "expected": {
-    "exact_head_findings": 0,
     "closed_by_disposition": 2,
+    "closed_thread_ids": [
+      "PRRT_kwDOR8xQ286Tzfuk",
+      "PRRT_kwDOR8xQ286TzhnH"
+    ],
+    "real_grouped_artifact_closes": 0,
+    "unauthorized_named_thread_id": "PRRT_kwDOR8xQ286TzhnL",
     "unresolved_needing_adjudication": 19,
-    "resolved_count": 0,
+    "exact_head_findings": 0,
     "naive_comment_commit_count": 16,
     "unresolved_outdated": 3,
-    "unauthorized_artifact_thread_ids": [
-      "PRRT_kwDOR8xQ286TzhnL"
-    ]
+    "resolved_count": 0
   }
 }
