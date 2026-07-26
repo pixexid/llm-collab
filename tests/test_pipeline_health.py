@@ -855,6 +855,11 @@ class ActivityAndWatchTest(unittest.TestCase):
             "null": {"id": "thread-x", "updatedAt": None},
             "text": {"id": "thread-x", "updatedAt": "yesterday"},
             "container": {"id": "thread-x", "updatedAt": {"seconds": 5}},
+            # `int()` coerced all three of these instead of rejecting them. `True` was the
+            # worst: it became 1 and read as a healthy observation dated to 1970.
+            "boolean": {"id": "thread-x", "updatedAt": True},
+            "float": {"id": "thread-x", "updatedAt": 1.5},
+            "numeric_string": {"id": "thread-x", "updatedAt": "123"},
         }
         for name, row in cases.items():
             with self.subTest(row=name):

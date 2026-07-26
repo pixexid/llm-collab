@@ -377,13 +377,16 @@ def _activity_check(session: dict) -> dict:
     # a non-numeric value raised outside the handler and aborted the whole preflight; and
     # a future timestamp produced a negative age that `activity_shape` called "active".
     # A malformed row is a probe that did not answer, not a healthy one.
-    try:
-        updated = int(raw_updated)
-    except (TypeError, ValueError):
-        # Covers missing, null, text and container values alike -- an earlier separate
-        # None branch was unreachable, since int(None) lands here anyway.
+    # The protocol says integer, and `int()` is a coercion rather than a check: `True`
+    # became 1 and read as a healthy observation dated to 1970, and `1.5` and `"123"` were
+    # silently accepted too. `bool` is excluded explicitly because it is an int subclass.
+    if not isinstance(raw_updated, int) or isinstance(raw_updated, bool):
         return {"check": "activity", "status": WARN,
-                "detail": f"thread {thread_id[:8]} reported updatedAt={raw_updated!r}"}
+                "detail": (
+                    f"thread {thread_id[:8]} reported updatedAt="
+                    f"{raw_updated!r} ({type(raw_updated).__name__}), not an integer"
+                )}
+    updated = raw_updated
     age = int(now_utc().timestamp()) - updated
     if age < 0:
         return {"check": "activity", "status": WARN, "idle_seconds": age,
