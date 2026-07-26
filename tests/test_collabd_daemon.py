@@ -88,7 +88,48 @@ class DaemonTest(unittest.TestCase):
         server = DaemonServer(self.paths, **kwargs)
         thread = threading.Thread(target=server.run)
         thread.start()
-        self.wait_until_accepting()
+        try:
+            # `start()` cannot be exempt from the cleanup rule: it calls readiness BEFORE
+            # returning, so a readiness exception leaves no caller holding the thread to
+            # clean up -- the non-daemon accept loop then keeps the whole run alive. Owning
+            # the failure here is the only place it can be owned.
+            self.wait_until_accepting()
+        except BaseException:
+            server._stopping = True
+            thread.join(2)
+            raise
+        return server, thread
+
+    def start_without_readiness(self) -> tuple[DaemonServer, threading.Thread]:
+        """For the one test that must own the daemon's FIRST operation itself.
+
+        `start()` exchanges a status request, which is the right readiness signal and the
+        wrong thing for a test timing the first status.
+        """
+        server = DaemonServer(
+            self.paths,
+            workspace_root=self.root,
+            declaration_path=self.declaration,
+            environment=ENABLED_ENV,
+        )
+        thread = threading.Thread(target=server.run)
+        thread.start()
+        # A connect, not a request and not the socket file. The file-existence loop this
+        # branch deletes returns during the bind-to-listen window; a connect cannot. It is
+        # weaker than `start()`'s exchange -- it can return while the accept loop is still
+        # in setup -- and that is exactly what this caller wants, since the setup it is
+        # timing must not have been consumed by the probe.
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            probe.settimeout(0.5)
+            try:
+                probe.connect(os.fspath(self.paths.socket))
+                break
+            except OSError:
+                time.sleep(0.01)
+            finally:
+                probe.close()
         return server, thread
 
     def wait_until_accepting(self, timeout: float = 5.0) -> None:
@@ -189,9 +230,13 @@ class DaemonTest(unittest.TestCase):
 
         tree = ast.parse(Path(__file__).resolve().read_text(encoding="utf-8"))
         unprotected: list[str] = []
+        examined: list[str] = []
         for function in ast.walk(tree):
-            if not isinstance(function, ast.FunctionDef) or function.name == "start":
-                # `start()` hands the thread to its caller, so protection belongs there.
+            if not isinstance(function, ast.FunctionDef):
+                continue
+            if function.name == "start_without_readiness":
+                # Deliberately hands the thread back before any request, for the one test
+                # that must own the daemon's first operation; its caller protects it.
                 continue
             launches = [
                 node.lineno
@@ -207,10 +252,21 @@ class DaemonTest(unittest.TestCase):
             ]
             if not launches:
                 continue
+            examined.append(function.name)
+            # A `finally`, or an `except` that re-raises after cleaning up. `start()` needs
+            # the second shape: it must clean up only when readiness fails, because on
+            # success the thread belongs to its caller.
             protections = [
                 node.lineno
                 for node in ast.walk(function)
-                if isinstance(node, ast.Try) and node.finalbody
+                if isinstance(node, ast.Try)
+                and (
+                    node.finalbody
+                    or any(
+                        any(isinstance(inner, ast.Raise) for inner in ast.walk(handler))
+                        for handler in node.handlers
+                    )
+                )
             ]
             for line in launches:
                 if not any(protection > line for protection in protections):
@@ -218,6 +274,13 @@ class DaemonTest(unittest.TestCase):
         self.assertEqual(
             [], unprotected,
             "a daemon server thread is launched with no try/finally after it",
+        )
+        # The exemption list is part of the rule, so what the rule actually looked at is
+        # asserted too: widening the skip set is how this check was made to pass while
+        # `start()` still leaked a thread on a readiness failure.
+        self.assertIn(
+            "start", examined,
+            "start() was skipped, so this check cannot see whether it leaks a thread",
         )
 
     def test_the_harness_has_exactly_one_readiness_mechanism(self) -> None:
@@ -302,6 +365,51 @@ class DaemonTest(unittest.TestCase):
             self.addCleanup(accepted.close)
             accepted.connect(os.fspath(path))
 
+    def test_a_readiness_failure_in_start_leaves_no_live_thread(self) -> None:
+        """`start()` calls readiness before returning, so only it can own that failure.
+
+        Exempting it from the cleanup rule on the assumption that the caller holds the
+        thread is wrong: on a readiness failure there is no caller yet, and the non-daemon
+        accept loop keeps the whole run alive.
+        """
+        import llm_collab.daemon.server as server_module
+
+        def bind_but_never_listen(inner_self):
+            inner_self._recover_stale_socket()
+            listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            listener.bind(os.fspath(inner_self.paths.socket))
+            inner_self._socket_identity = server_module._identity(inner_self.paths.socket)
+            listener.settimeout(0.1)
+            self.addCleanup(listener.close)
+            return listener
+
+        with patch.object(
+            server_module.DaemonServer, "_open_listener", bind_but_never_listen
+        ):
+            with self.assertRaises(AssertionError):
+                self.start()
+        for thread in threading.enumerate():
+            self.assertFalse(
+                thread.name.startswith("Thread-") and thread.is_alive()
+                and getattr(thread, "_target", None) is not None
+                and getattr(thread._target, "__name__", "") == "run",
+                "a daemon thread survived a readiness failure in start()",
+            )
+
+    def test_an_unexpected_server_thread_exit_is_reported(self) -> None:
+        """`if thread.is_alive()` reads as a double-shutdown guard and hides a death.
+
+        In a body that never shuts the server down, a dead thread means the accept loop
+        exited on its own -- and after the status response every assertion can pass while
+        the guard silently swallows it.
+        """
+        finished = threading.Thread(target=lambda: None)
+        finished.start()
+        finished.join(1)
+        with self.assertRaises(AssertionError) as caught:
+            self.stop_or_report(finished)
+        self.assertIn("exited before cleanup", str(caught.exception))
+
     def test_the_readiness_probe_reports_failure_rather_than_hanging(self) -> None:
         """A readiness helper that waits forever turns a fast failure into a stall."""
         from types import SimpleNamespace
@@ -332,6 +440,19 @@ class DaemonTest(unittest.TestCase):
             return json.loads(client.recv(70_000).decode())
         finally:
             client.close()
+
+    def stop_or_report(self, thread: threading.Thread) -> None:
+        """Shut down, or say why there was nothing to shut down.
+
+        `if thread.is_alive(): stop(...)` reads as a benign double-shutdown guard, but in a
+        body that never shuts the server down a dead thread means the accept loop exited on
+        its own -- and if that happened after the status response, every assertion could
+        pass while this guard silently swallowed it.
+        """
+        if thread.is_alive():
+            self.stop(thread)
+            return
+        self.fail("the server thread exited before cleanup; the accept loop died")
 
     def stop(self, thread: threading.Thread) -> None:
         self.assertEqual(self.request(b'{"version":1,"op":"shutdown"}')["stopping"], True)
@@ -403,8 +524,7 @@ class DaemonTest(unittest.TestCase):
                 self.assertFalse(self.paths.ledger.exists())
                 self.assertEqual(list(self.paths.backups.iterdir()), [])
             finally:
-                if thread.is_alive():
-                    self.stop(thread)
+                self.stop_or_report(thread)
         self.assertFalse(self.paths.ledger.exists())
 
     def test_each_false_gate_and_all_false_perform_no_observation_reads_or_ledger_open(self) -> None:
@@ -886,6 +1006,13 @@ class DaemonTest(unittest.TestCase):
             os.chdir(old_cwd)
 
     def test_first_status_is_ready_before_slow_initial_reconciliation(self) -> None:
+        """Readiness must not consume the operation this test is timing.
+
+        `start()` now exchanges a status request, so the "first" status here was really the
+        second -- a regression that served the blocked reconciliation before the first
+        status would have been hidden. This one starts the daemon without the readiness
+        exchange so the request it times really is the first.
+        """
         entered = threading.Event()
         release = threading.Event()
 
@@ -899,7 +1026,7 @@ class DaemonTest(unittest.TestCase):
             autospec=True,
             side_effect=slow_reconcile,
         ):
-            _server, thread = self.start()
+            _server, thread = self.start_without_readiness()
             try:
                 time.sleep(0.2)
                 started = time.monotonic()
