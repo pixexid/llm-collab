@@ -6081,6 +6081,16 @@ class UnobservedTurnIsNotRedeliveredTest(unittest.TestCase):
                                 "jsonrpc": "2.0", "method": "item/agentMessage/delta",
                                 "params": {"item": {"type": "agentMessage", "text": f"part{index}"}},
                             })
+                        if after_turn_start == "complete":
+                            write_frame(conn, {
+                                "jsonrpc": "2.0", "method": "item/completed",
+                                "params": {"item": {"type": "agentMessage", "text": "DONE"}},
+                            })
+                            write_frame(conn, {
+                                "jsonrpc": "2.0", "method": "turn/completed",
+                                "params": {"turn": {"id": "turn-1", "status": "completed"}},
+                            })
+                            break
                         if after_turn_start == "close":
                             break
                         if after_turn_start == "chatty":
@@ -6177,14 +6187,44 @@ class UnobservedTurnIsNotRedeliveredTest(unittest.TestCase):
         thread.join(timeout=5)
         self.assertEqual("part0part1", result["stdout"])
 
-    def test_a_completed_turn_still_reports_an_observed_delivery(self) -> None:
-        """The new flag must distinguish the two, or it certifies nothing."""
-        source = Path(session_autobridge_lib.__file__).read_text(encoding="utf-8")
-        body = source[source.index("def execute_codex_app_server_trigger"):]
-        body = body[: body.index("\ndef ", 1)]
-        self.assertIn('"delivery_observed": True', body)
-        self.assertIn('"delivery_observed": False', body)
-        self.assertNotIn("raise TimeoutError", body)
+    def test_a_completed_turn_reports_an_observed_delivery(self) -> None:
+        """The flag must DISTINGUISH the two cases, or it certifies nothing.
+
+        The first version of this test read the module source and asserted that the
+        strings '"delivery_observed": True' and '"delivery_observed": False' both
+        appeared in the function. That is a grep, not a test: it passes with the True
+        branch unreachable, which is exactly the state that would make every delivery
+        look unobserved. Run the completed turn instead and read the result.
+        """
+        port, thread, _ = self.serve(after_turn_start="complete")
+        result = self.trigger(port)
+        thread.join(timeout=5)
+        self.assertIs(True, result["delivery_observed"])
+        self.assertEqual("completed", result["terminal_status"])
+        self.assertEqual(0, result["returncode"])
+        # item/completed carries the whole message, so it REPLACES the accumulated
+        # deltas rather than appending to them.
+        self.assertEqual("DONE", result["stdout"])
+        self.assertNotIn("unobserved_reason", result)
+
+    def test_the_two_outcomes_do_not_report_the_same_thing(self) -> None:
+        """Paired on purpose: identical results either way would satisfy both tests above."""
+        completed_port, completed_thread, _ = self.serve(after_turn_start="complete")
+        completed = self.trigger(completed_port)
+        completed_thread.join(timeout=5)
+
+        lost_port, lost_thread, _ = self.serve(after_turn_start="chatty")
+        lost = self.trigger(lost_port)
+        lost_thread.join(timeout=5)
+
+        self.assertNotEqual(
+            completed["terminal_status"], lost["terminal_status"],
+            "a lost view and a completed turn must not be indistinguishable",
+        )
+        self.assertNotEqual(completed["delivery_observed"], lost["delivery_observed"])
+        # Both are still DELIVERED: neither may be retried.
+        self.assertEqual(0, completed["returncode"])
+        self.assertEqual(0, lost["returncode"])
 
 
 class AnnouncementIsCommittedBeforeDispatchTest(unittest.TestCase):
