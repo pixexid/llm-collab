@@ -203,7 +203,7 @@ loop is the orchestrator's manual branch-diff review before commit/PR and after
 any review-fix patch. When the operator has authorized the merge path, merge
 from the current thread only after the exact current head has green required
 checks, the PR is mergeable with clean merge state, the independent exact-head
-review is clean, and the full current comment/review/thread payload has no
+review is clean, and [the reviewed artifact set](commit-push-prs.md#reviewed-artifact-set) has no
 actionable finding. Reviews are MANUAL ONLY as of 2026-07-25; nothing arrives unrequested, and whether a change must be reviewed is decided by the Tier A/B/C rule in
 [`AGENTS.md` → Requesting Code Review](../../AGENTS.md#requesting-code-review-all-workers-every-repository),
 which is the only place that defines it.
@@ -218,10 +218,10 @@ artifacts only; it does not waive the handling below:
 
 - A head-named clean connector verdict is not merge-immediate. Hold an
   approximately five-minute mandatory post-clean settle, then perform a full
-  re-read of **top-level PR comments,** reviews, review threads, and reactions because
-  the connector can emit multiple reviews for one head — and because a same-head
-  re-review request posted during the settle lives in a comment, supersedes the verdict
-  or reaction being settled, and is invisible to a re-read that skips comments. When a re-review was explicitly
+  re-read of [the reviewed artifact set](commit-push-prs.md#reviewed-artifact-set) because the connector can emit multiple reviews for one head --
+  and because a same-head re-review request posted during the settle lives in a comment,
+  supersedes the verdict or reaction being settled, and is invisible to a re-read that
+  skips comments. When a re-review was explicitly
   requested, that re-review supersedes older same-head clean artifacts **and older
   same-head reactions**, not the verdict path alone; only its verdict can satisfy
   that path, and it receives the same settle and full re-read. A reaction counts
@@ -235,7 +235,7 @@ artifacts only; it does not waive the handling below:
   rationale for accepting a reaction-only CLEAN at Tier A rests on that settle
   plus adjudication, so exempting it from the settle would remove the evidence
   the rule depends on. Required CI, mergeability, independent review, and full
-  comment/review/thread inspection still apply.
+  inspection of [the reviewed artifact set](commit-push-prs.md#reviewed-artifact-set) still apply.
 
 Whether a review must be requested at all is the Tier A/B/C rule in
 [`AGENTS.md` → Requesting Code Review](../../AGENTS.md#requesting-code-review-all-workers-every-repository),

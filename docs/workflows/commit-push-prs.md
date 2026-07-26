@@ -194,8 +194,7 @@ orchestrator has inspected:
 
 - GitHub Actions checks on the latest head SHA
 - `mergeStateStatus`
-- top-level PR reviews and review bodies
-- nested review threads and inline comments
+- all of [the reviewed artifact set](#reviewed-artifact-set)
 - any requested changes or review replies after follow-up commits
 
 Do not idle on review while `mergeStateStatus` is dirty. A dirty merge state is
@@ -297,11 +296,30 @@ policy:
   them; and **zero** threads actually initiated at the current head. Those same
   twelve report `comments.nodes[0].commit.oid` as `9822524`, which is why the
   field matters as much as the rule
+### The reviewed artifact set
+
+<a id="reviewed-artifact-set"></a>
+
+**Every instruction in this repository that says to read, re-read or inspect review state
+means exactly these five, and this is the only place the list is written:**
+
+1. top-level PR comments
+2. review bodies
+3. review threads
+4. inline review comments
+5. reactions
+
+Referenced, never restated. Nine sites used to enumerate this and they had drifted into at
+least five different versions -- some omitting comments, which is where a re-review request
+lives, and some omitting reactions, which is where a terminal `+1` lives. Each omission was
+a working path to merging on a superseded signal, and each was fixed one site at a time
+until it became clear the list itself was the defect. A paraphrase of this list anywhere
+else is a second source that goes stale the moment this one moves.
+
 - a head-named clean connector verdict is not merge-immediate. Hold an
-  approximately five-minute post-clean settle, then perform a full re-read of
-  **top-level PR comments,** reviews, review threads, and reactions before merge
-  because the connector can emit multiple reviews for the same head — and because a
-  same-head re-review request posted during the settle lives in a comment and
+  approximately five-minute post-clean settle, then re-read [the reviewed artifact set](#reviewed-artifact-set) in full before
+  merge, because the connector can emit multiple reviews for the same head — and because
+  a same-head re-review request posted during the settle lives in a comment and
   supersedes the artifact being settled
 - **a reaction counts only on the latest, unedited request artifact.** GitHub keeps
   reactions across an edit, so a request comment edited to swap an old SHA for the
@@ -347,7 +365,7 @@ policy:
   waits exactly as a Tier A head does. Heartbeat inspections observe the wait and
   merge nothing
 - neither a bot verdict nor a reaction waives required CI, mergeability, the
-  independent exact-head review, or full comment/review/thread inspection
+  independent exact-head review, or full inspection of [the reviewed artifact set](#reviewed-artifact-set)
 
 **All three former no-terminal-artifact fallback variants are deleted, not
 shortened.** Each one measured how long to wait for a review that manual-only
@@ -398,8 +416,8 @@ An exact-current-head merge authorization lifts only the missing
 connector-signal subgate caused by the silently dropped requested review. It is
 not a connector terminal signal, is not a third automated terminal-signal
 model, and creates no fallback path. It does not waive independent exact-head
-review, green required checks, mergeability, the full
-comment/review/thread/reaction reread, unresolved-feedback handling, or
+review, green required checks, mergeability, a full re-read of
+[the reviewed artifact set](#reviewed-artifact-set), unresolved-feedback handling, or
 project/operator auto-merge authority. If a connector clean signal later
 arrives, its signal-specific settle and reread still apply normally; the
 operator authorization does not masquerade as that signal or inherit its
@@ -460,7 +478,7 @@ merge on a reaction that no longer passes the latest-request check.
 
 For the clean-verdict path, do not merge immediately after the first
 head-named clean artifact. Observe the approximately five-minute post-clean
-settle and then re-read all reviews, review threads, and reactions. When an
+settle and then re-read [the reviewed artifact set](#reviewed-artifact-set) in full. When an
 explicit re-review was requested for the same head, ignore older same-head
 clean artifacts for this path and apply the same settle and re-read to the
 explicit re-review verdict.
@@ -487,9 +505,8 @@ Proceed only when all of these are true:
   on without recording anything is no longer *unresolved* — so a checklist phrased
   over unresolved threads never looks at it again. Enumerate every thread, resolved
   or not, and require the written outcome for each
-- full PR comments, review bodies, review threads, and inline comments contain
-  no unresolved actionable feedback, whatever head it was raised on — prose
-  feedback is dropped by a "current head" reading exactly as a thread is
+- [the reviewed artifact set](#reviewed-artifact-set) contains no unresolved actionable feedback, whatever head it was raised
+  on — prose feedback is dropped by a "current head" reading exactly as a thread is
 - **an actionable finding that arrived with no thread carries a written outcome too.**
   A review body or a top-level comment has no node ID to link, so the
   thread-identification rule cannot reach it — and "no longer unresolved" is not a
@@ -499,7 +516,7 @@ Proceed only when all of these are true:
   rejecting
 - the project/operator has authorized auto-merge for this PR or queue class
 
-Read current review bodies and reactions directly. Do not infer the current
+Read [the reviewed artifact set](#reviewed-artifact-set) directly. Do not infer the current
 result from stale inline review-thread objects alone. The watcher must report the
 exact current-head verdict, or the connector-authored `+1` on the manual-review
 request comment together with the SHA that request named, with timestamps, and
@@ -511,7 +528,7 @@ otherwise the one path the precedence section authorises for a silently dropped
 review cannot be completed, because a connector artifact is precisely what does not
 exist there. A signal that arrives late still wins, and that is an action rather than
 a principle: **after selecting the disposition path and before reporting it or
-merging, re-read reviews, review threads and reactions once more.** Choosing the
+merging, re-read [the reviewed artifact set](#reviewed-artifact-set) once more.** Choosing the
 branch is not the same as checking it, and without that read a verdict landing in
 between is completed straight past — skipping the settle and full re-read it is owed.
 If the read finds one, abandon the disposition branch and report the signal instead. An operator disposition is
@@ -519,8 +536,8 @@ not a connector terminal signal and never substitutes for one where a signal did
 arrive. Either terminal signal
 stops the heartbeat from waiting for further artifacts;
 it does not waive post-signal handling. For a head-named clean verdict **and for a
-request-comment `+1` alike**, the approximately five-minute post-clean settle and full
-review/thread/reaction re-read remain mandatory before merge. If review feedback lands, fix or respond
+request-comment `+1` alike**, the approximately five-minute post-clean settle and a full
+re-read of [the reviewed artifact set](#reviewed-artifact-set) remain mandatory before merge. If review feedback lands, fix or respond
 to it, push the update, rerun the manual branch-diff review and required
 local/CI checks, then evaluate the new exact head from scratch before
 continuing toward merge.

@@ -260,9 +260,9 @@ class ReviewLoopCapContractTest(unittest.TestCase):
                     "lifts only the missing connector-signal subgate",
                     "is not a third automated terminal-signal model",
                     "It does not waive independent exact-head review, green "
-                    "required checks, mergeability, the full comment/review/"
-                    "thread/reaction reread, unresolved-feedback handling, or "
-                    "project/operator auto-merge authority",
+                    "required checks, mergeability, a full re-read of "
+                    "[the reviewed artifact set](#reviewed-artifact-set), unresolved-feedback "
+                    "handling, or project/operator auto-merge authority",
                     "the operator authorization does not masquerade as that "
                     "signal or inherit its handling",
                     "a dropped request is indistinguishable from a review that "
@@ -285,8 +285,9 @@ class ReviewLoopCapContractTest(unittest.TestCase):
                     "no elapsed time is ever a terminal signal",
                     "There is no resettable settle that ripens a head for merge",
                     "it does not waive post-signal handling",
-                    "the approximately five-minute post-clean settle and full "
-                    "review/thread/reaction re-read remain mandatory before merge",
+                    "the approximately five-minute post-clean settle and a full "
+                    "re-read of [the reviewed artifact set](#reviewed-artifact-set) "
+                    "remain mandatory before merge",
                     "these are the only two exact-head terminal signal models",
                 ),
             ),
@@ -559,7 +560,7 @@ class ReviewLoopCapContractTest(unittest.TestCase):
                 sources["canonical_clean_verdict"],
             )
             self.assertIn(
-                "full re-read of **top-level PR comments,** reviews, review threads, and reactions",
+                "re-read [the reviewed artifact set](#reviewed-artifact-set) in full",
                 sources["canonical_clean_verdict"],
             )
             self.assertIn(
@@ -1041,6 +1042,43 @@ class ReviewLoopCapContractTest(unittest.TestCase):
                 self.assertIn("latest, unedited request artifact", text)
                 self.assertIn("older same-head reactions", text)
 
+    def test_the_reviewed_artifact_set_is_written_exactly_once(self):
+        """Nine sites had drifted into five spellings; four omitted reactions and three
+        omitted comments.
+
+        A re-review request lives in a comment and a terminal `+1` lives in a reaction, so
+        each omission was a live path to merging on a superseded signal. Fixing them one at
+        a time is what produced five spellings, so this pins the shape rather than the
+        wording: the list exists in exactly one place and every other site references it.
+        Without this the sixth spelling appears the next time anyone writes a re-read
+        instruction, which is precisely how the five happened.
+        """
+        block = "<a id=\"reviewed-artifact-set\"></a>"
+        workflow = WORKFLOW_DOC.read_text(encoding="utf-8")
+        handoff = HANDOFF_DOC.read_text(encoding="utf-8")
+        self.assertEqual(1, workflow.count(block), "the normative block must exist once")
+        self.assertNotIn(block, handoff, "the list must not be duplicated across documents")
+
+        # Any site naming two or more of the five artifacts is a restatement. The normative
+        # block itself is excluded by construction: it is the one place allowed to list them.
+        start = workflow.index(block)
+        end = workflow.index("- a head-named clean connector verdict", start)
+        artifacts = ("review threads", "review bodies", "inline review comments",
+                     "inline comments", "reactions")
+        offenders = []
+        for document, text, name in (
+            ("workflow", workflow[:start] + workflow[end:], "commit-push-prs.md"),
+            ("handoff", handoff, "review-and-handoff.md"),
+        ):
+            for number, line in enumerate(text.splitlines(), start=1):
+                named = [a for a in artifacts if a in line]
+                if len(named) >= 2:
+                    offenders.append(f"{name}: {line.strip()[:80]}")
+        self.assertEqual(
+            [], offenders,
+            "these sites restate the artifact list instead of referencing it",
+        )
+
     def test_the_rule_heading_covers_resolved_threads(self):
         """A worker who reads only the bold heading is the one who loses a finding.
 
@@ -1145,7 +1183,7 @@ class ReviewLoopCapContractTest(unittest.TestCase):
         section = contract_section(
             WORKFLOW_DOC.read_text(encoding="utf-8"),
             "Proceed only when all of these are true:",
-            "Read current review bodies and reactions directly.",
+            "Read [the reviewed artifact set](#reviewed-artifact-set) directly.",
         )
         for phrase in (
             "**every arriving finding has a thread-linked written outcome, whatever "
@@ -1401,7 +1439,7 @@ class ReviewLoopCapContractTest(unittest.TestCase):
                 "approximately five-minute mandatory post-clean settle", handoff
             )
             self.assertIn(
-                "full re-read of **top-level PR comments,** reviews, review threads, and reactions", handoff
+                "re-read of [the reviewed artifact set](commit-push-prs.md#reviewed-artifact-set)", handoff
             )
             self.assertIn(
                 "that re-review supersedes older same-head clean artifacts "
@@ -1491,8 +1529,10 @@ class ReviewLoopCapContractTest(unittest.TestCase):
             (
                 "post-clean settle made waivable",
                 "workflow",
-                "re-read remain mandatory before merge",
-                "re-read may be skipped after a terminal signal",
+                # The enumeration between "re-read" and "remain" is now a reference, so
+                # the mutation targets the clause that carries the obligation.
+                "remain mandatory before merge",
+                "may be skipped after a terminal signal",
             ),
             (
                 "terminal signal source altered",
@@ -1562,9 +1602,9 @@ class ReviewLoopCapContractTest(unittest.TestCase):
                 "authorization waives independent gates",
                 "workflow",
                 "It does not waive independent exact-head\nreview, green "
-                "required checks, mergeability, the full\ncomment/review/thread/"
-                "reaction reread, unresolved-feedback handling, or\nproject/"
-                "operator auto-merge authority",
+                "required checks, mergeability, a full re-read of\n"
+                "[the reviewed artifact set](#reviewed-artifact-set), unresolved-feedback "
+                "handling, or\nproject/operator auto-merge authority",
                 "It waives independent review, checks, and reread",
             ),
             (
