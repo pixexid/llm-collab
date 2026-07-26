@@ -6,6 +6,7 @@ import os
 import stat
 import tempfile
 import re
+import shlex
 import signal
 import base64
 import hashlib
@@ -1187,6 +1188,34 @@ def build_runtime_payload(session: dict, message: dict) -> dict[str, Any]:
     }
 
 
+def _reply_channel_lines(session: dict, fm: dict) -> list[str]:
+    """Name the channel. Do NOT emit a runnable reply command yet.
+
+    A copyable command was tried and withdrawn (connector + codex review of #317). Two
+    defects made it premature, and both need contracts that do not exist:
+
+    - It carried no --target-session-id or --sender-session-id, because the incoming
+      sender_session_id is not authoritative. A delayed reply therefore resolved
+      whichever binding was current when it ran, and could wake a rebound runtime that
+      never saw the request. The validated return address (`reply_to_*`) fixes this.
+    - The generated packet carried no autobridge_session_id or autobridge_hops marker,
+      so `should_skip_for_loop_protection` returned (False, "ok") for it and two
+      runtime-triggered workers following the instruction could wake each other
+      indefinitely.
+
+    What survives is the part that fixed the observed failure: a worker was answering
+    review handoffs on the pull request, where the sender never sees them. Telling it
+    which channel to use needs no new contract. Telling it the exact invocation does.
+    """
+    return [
+        "Reply through the mailbox -- `deliver.py` -- addressed to the sender above.",
+        "It is the only channel the sender reads.",
+        "A PR comment, a code-review body or a desktop nudge does NOT reach the sender.",
+        "Post to a PR only when the PR itself is the artifact -- a connector review",
+        "request, or evidence a human will read there -- and deliver the packet as well.",
+    ]
+
+
 def build_resume_prompt(session: dict, message: dict) -> str:
     fm = message["frontmatter"]
     body = message.get("body", "").strip()
@@ -1203,6 +1232,7 @@ def build_resume_prompt(session: dict, message: dict) -> str:
         f"chat_id: {fm.get('chat_id', '')}",
         f"project_id: {fm.get('project_id', '')}",
         f"title: {fm.get('title', '')}",
+        f"message_path: {message.get('path', '')}",
     ]
     if activation_lease:
         identity = activation_lease.get("identity") or {}
@@ -1226,6 +1256,8 @@ def build_resume_prompt(session: dict, message: dict) -> str:
             "",
             "Message body:",
             body or "(no body)",
+            "",
+            *_reply_channel_lines(session, fm),
             "",
             "If the request is trivial, answer tersely. Do not start unrelated work.",
         ]

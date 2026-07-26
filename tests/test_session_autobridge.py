@@ -4,6 +4,7 @@ import json
 import os
 import base64
 import hashlib
+import shlex
 import socket
 import subprocess
 import sys
@@ -13,6 +14,7 @@ import unittest
 from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, Mock, patch
 
 
@@ -5973,3 +5975,123 @@ class RenamedCodexBinaryDiscoveryTest(unittest.TestCase):
             "/Applications/ChatGPT.app/Contents/Resources/codex "
             "-c features.code_mode_host=true app-server --analytics-default-enabled",
         ]))
+
+
+# /bin/sh is the only shell the repository can assume: the reviewer's Linux checkout has
+# no zsh, and every real-shell test raised FileNotFoundError there before asserting
+# anything. POSIX sh is also the stricter target for the quoting these tests prove.
+POSIX_SHELL = "/bin/sh"
+
+
+class ResumePromptNamesTheReplyChannelTest(unittest.TestCase):
+    """A woken worker must be told where its answer goes, and which packet it answers.
+
+    Observed live on 2026-07-26: codex, woken through the app-server adapter, answered a
+    review handoff by posting a PR comment and delivering nothing. The prompt carried the
+    body but neither the packet's path nor any statement that the mailbox is the channel.
+
+    This class once also proved a copyable `deliver.py` invocation. That template is
+    withdrawn -- it could not carry a validated return address or a loop-protection
+    marker, so a delayed reply could wake a rebound runtime and two workers following it
+    could wake each other indefinitely. Roughly a dozen tests covering its quoting, scope
+    rendering and shell execution went with it, because they proved properties of text
+    that is no longer emitted. They are not replaced by weaker versions; they are
+    replaced by a guard that no runnable command may reappear before the contracts it
+    needs exist.
+    """
+
+    PROJECTS = ("amiga", "nuvyr")
+
+    def prompt(
+        self,
+        *,
+        repo_targets: Any = ["llm-collab"],
+        project_id: str = "amiga",
+        **overrides: str,
+    ) -> str:
+        session = {
+            "session_id": "SESSION-REPLY",
+            "agent_id": "codex",
+            "project_id": project_id,
+            "chat_id": "CHAT-REPLY",
+            "runtime": {"family": "codex_app", "session_id": "runtime-reply"},
+        }
+        frontmatter = {
+            "from": "claude",
+            "sender_agent_id": "claude",
+            "to": "codex",
+            "title": "Review handoff",
+            "project_id": project_id,
+            "chat_id": "CHAT-REPLY",
+        }
+        if repo_targets is not None:
+            frontmatter["repo_targets"] = repo_targets
+        frontmatter.update(overrides)
+        message = {
+            "path": "Chats/2026-07-26_x__CHAT-REPLY/2026-07-26T00-00-00_to-codex_packet.md",
+            "frontmatter": frontmatter,
+            "body": "Do the lane.",
+        }
+        return session_autobridge_lib.build_resume_prompt(session, message)
+
+    def test_the_prompt_carries_the_packet_path(self) -> None:
+        for project_id in self.PROJECTS:
+            with self.subTest(project_id=project_id):
+                self.assertIn(
+                    "message_path: Chats/2026-07-26_x__CHAT-REPLY/"
+                    "2026-07-26T00-00-00_to-codex_packet.md",
+                    self.prompt(project_id=project_id),
+                )
+
+    def test_the_prompt_names_the_mailbox_as_the_only_channel(self) -> None:
+        for project_id in self.PROJECTS:
+            with self.subTest(project_id=project_id):
+                prompt = self.prompt(project_id=project_id)
+                self.assertIn("Reply through the mailbox", prompt)
+                self.assertIn("only channel the sender reads", prompt)
+                self.assertIn("deliver.py", prompt)
+
+    def test_the_prompt_says_a_pr_comment_does_not_reach_the_sender(self) -> None:
+        self.assertIn("does NOT reach the sender", self.prompt())
+
+    def test_the_prompt_still_permits_a_pr_post_alongside_the_packet(self) -> None:
+        """Connector review requests live on the PR; the rule is 'as well as', not 'never'."""
+        prompt = self.prompt()
+        self.assertIn("connector review", prompt)
+        self.assertIn("deliver the packet as well", prompt)
+
+    def test_no_runnable_reply_command_is_emitted(self) -> None:
+        """The withdrawal, pinned.
+
+        A copyable invocation cannot be correct until two contracts exist: a validated
+        return address, so a delayed reply cannot wake a rebound runtime that never saw
+        the request; and a loop-protection marker, without which
+        should_skip_for_loop_protection returns (False, "ok") and two runtime-triggered
+        workers following the instruction wake each other indefinitely. Naming the
+        channel needs neither. Reinstating a command here before those land re-opens
+        both.
+        """
+        for project_id in self.PROJECTS:
+            for repo_targets in (["llm-collab"], ["pixexid/amiga", "app"], None, []):
+                with self.subTest(project_id=project_id, repo_targets=repo_targets):
+                    prompt = self.prompt(project_id=project_id, repo_targets=repo_targets)
+                    for flag in ("--chat", "--from", "--to", "--project",
+                                 "--repo-targets", "--body-file", "--title"):
+                        self.assertNotIn(flag, prompt, f"{flag} is part of a runnable command")
+                    for line in prompt.splitlines():
+                        self.assertFalse(
+                            line.startswith("  /") or line.strip().startswith("bin/"),
+                            f"looks like a copyable command: {line!r}",
+                        )
+
+    def test_the_prompt_never_interpolates_packet_text_into_a_command(self) -> None:
+        """Hostile frontmatter has nothing executable to reach any more.
+
+        The withdrawn template rendered chat_id, project_id and the agent ids into a
+        shell line; unquoted, `chat_id: "CHAT-X;echo"` injected a second command. With no
+        command emitted, those values appear only as prompt metadata.
+        """
+        prompt = self.prompt(chat_id="CHAT-X;echo", project_id="amiga&&echo")
+        self.assertIn("chat_id: CHAT-X;echo", prompt)
+        for line in prompt.splitlines():
+            self.assertFalse(line.startswith("  /"), f"executable-looking line: {line!r}")
