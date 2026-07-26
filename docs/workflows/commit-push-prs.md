@@ -142,8 +142,8 @@ Hard cycle cap, independent of family counting:
   review cycle past the cap is a process violation.
 - A cap disposition never waives the PR Review Wait Gate. The cap bars another
   fix cycle, not waiting: the capped exact head must still pass the complete
-  gate below, including its exact-head signal model, post-clean guard, and
-  resettable fallback, before merge.
+  gate below, including its exact-head signal model and post-clean guard,
+  before merge.
 - Reaching the applicable cap requires an operator-visible escalation message
   recorded independently, whether or not open findings require a terminal
   disposition. When open findings do require a terminal disposition, record
@@ -264,54 +264,51 @@ policy:
   and never merge on silence. A Tier B/C head with no request does not wait at all.
   The requested-review clock and single re-trigger below still govern a review that
   WAS requested
-- GitHub Codex silence must not become an infinite wait: the resettable
-  15-minute settle is the fallback only for the three named
-  no-terminal-artifact variants enumerated below, when no bot review is
-  actually pending. An explicitly requested review does not enter this ageing
-  rule; follow the canonical requested-review precedence below
+- **no elapsed time is ever a terminal signal.** There is no resettable settle
+  that ripens a head for merge. Waiting is what a Tier A head does while a
+  requested review is outstanding; it is not a way to acquire the signal
 - after every review-fix push, evaluate the new exact head under the same rule:
-  a clean exact-head verdict or head-attributable connector `+1` is terminal; if
-  neither terminal signal exists and no bot review is actually pending under
-  the ageing rule above,
-  heartbeat inspections may observe the wait but must not merge before the
-  resettable 15-minute settle measured from the later of the final push and that
-  head becoming reviewable
+  a clean exact-head verdict or head-attributable connector `+1` is terminal.
+  If neither exists, the head is not merge-eligible at Tier A no matter how
+  long it has been quiet; heartbeat inspections observe the wait and merge
+  nothing
 - neither a bot verdict nor a reaction waives required CI, mergeability, the
   independent exact-head review, or full comment/review/thread inspection
 
-The resettable fallback above handles two named no-terminal-artifact variants
-explicitly, so neither silently extends the wait.
+**All three former no-terminal-artifact fallback variants are deleted, not
+shortened.** Each one measured how long to wait for a review that manual-only
+review never sends unrequested, so each clock always expired -- and its expiry
+handed a Tier A worker a path to merge on nothing. What remains is a
+classification of non-signals, with no clock attached to any of them:
 
-**The former third variant, "no explicit review request", is deleted rather than
-shortened.** Under manual-only review nothing arrives unrequested, so a clock
-measuring how long to wait for it always expires -- and that expiry used to hand a
-Tier A worker a path to merge fifteen minutes after failing to request a review. An
-absent request at Tier A is a **gate violation to fix, not a delay to wait out**; at
-Tier B/C there is nothing to wait for.
-
-- **Eyes-only current-head artifact.** This fallback variant applies only when
-  no explicit review request is outstanding. A current-head non-terminal
-  `eyes` reaction is not blocking once no review is actually pending; it does
-  not restart or suppress the resettable fallback, and it is not itself a
-  terminal signal.
+- **No explicit review request.** At Tier A this is a **gate violation to fix,
+  not a delay to wait out**: request the review. At Tier B/C there is nothing to
+  wait for and nothing to merge on.
+- **Eyes-only current-head artifact.** A current-head `eyes` reaction is not a
+  terminal signal and never becomes one. It neither blocks nor ripens anything.
 - **Prior-head artifacts only.** Any push creates a new head and invalidates every
   prior verdict and reaction lifecycle; a prior-head `Codex Review:` body or
   `eyes`/`+1` reaction is not head-attributable for the current head and is
-  ignored for terminal-signal purposes. The resettable fallback runs its clock on
-  the current head, never on a stale-head artifact.
+  ignored for terminal-signal purposes.
 
 #### Explicit requested-review precedence
 
 An explicitly requested review remains pending until its roughly 30–35-minute
 clock expires unless one of the two exact-head terminal signals arrives; it
-never ages into the 15-minute fallback. Anchor each clock to the corresponding
-explicit request artifact's GitHub `created_at`, never to the latest push or
-the time the head became reviewable. A current-head `eyes` reaction alone is
-non-terminal: it does not exit requested-review precedence, reset that request's
-clock, or move the PR into the eyes-only fallback.
+never ages into a merge-eligible state, because no silence fallback exists to
+age into. Anchor each clock to the corresponding explicit request artifact's
+GitHub `created_at`, never to the latest push or the time the head became
+reviewable. That clock decides only when to re-trigger once and when to
+escalate -- never when to merge. A current-head `eyes` reaction alone is
+non-terminal: it does not exit requested-review precedence or reset that
+request's clock.
 
 When the initial request's clock expires without a terminal signal, treat that
-request as silently dropped and issue exactly one `@codex review` re-trigger.
+request as silently dropped and issue exactly one re-trigger. **The re-trigger
+repeats the full request shape — focus and the exact head SHA — never a bare
+`@codex review`:** a reaction is terminal only when it sits on a comment that
+named the current head, so a SHA-less retry cannot produce a usable signal even
+when the connector answers it.
 The re-trigger is the sole automatic retry and starts its own 30–35-minute clock
 at its GitHub `created_at`. If that clock also expires without a terminal
 signal, do not re-trigger again. The PR remains unmergeable until a
@@ -385,15 +382,11 @@ clean artifacts for this path and apply the same settle and re-read to the
 explicit re-review verdict.
 
 If neither a terminal GitHub Codex verdict nor a head-attributable connector
-`+1` exists for the exact current head, use the fallback only for the three
-named no-terminal-artifact variants above and only after at least 15 minutes
-have elapsed since the later of the final push to that head and the
-reviewability timestamp for that head (PR open, marked ready when applicable,
-and visible for review). Eyes or another non-terminal reaction does not
-restart or suppress that fallback after review is no longer pending. Any push
-resets this clock. Explicit requested-review silence follows
+`+1` exists for the exact current head, a Tier A head does not merge — there is
+no elapsed-time substitute. Fix the missing request, or follow
 [Explicit requested-review precedence](#explicit-requested-review-precedence)
-instead of this fallback. Proceed only when all of these are true:
+to the operator disposition. A Tier B/C head needs no connector signal at all.
+Proceed only when all of these are true:
 
 - the independent exact-head review found no actionable issues
 - required checks are green on the latest head
@@ -407,7 +400,7 @@ result from stale inline review-thread objects alone. The watcher must report th
 exact current-head verdict, or the connector-authored `+1` on the manual-review
 request comment together with the SHA that request named, with timestamps, and
 confirm that no later push occurred. Either terminal signal
-stops the heartbeat from waiting for further artifacts or a fallback timeout;
+stops the heartbeat from waiting for further artifacts;
 it does not waive post-signal handling. For a head-named clean verdict **and for a
 request-comment `+1` alike**, the approximately five-minute post-clean settle and full
 review/thread/reaction re-read remain mandatory before merge. If review feedback lands, fix or respond

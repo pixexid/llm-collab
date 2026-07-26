@@ -214,7 +214,7 @@ manual-review request comment while the head still equals the SHA that request
 named. A bare `eyes` reaction is accepted-and-in-progress, never a verdict. Either signal is terminal for the bot wait on that
 head, and these remain the only two exact-head terminal signal sources. Their
 post-signal handling differs. A terminal signal stops waiting for further
-artifacts or the fallback timeout only; it does not waive the handling below:
+artifacts only; it does not waive the handling below:
 
 - A head-named clean connector verdict is not merge-immediate. Hold an
   approximately five-minute mandatory post-clean settle, then perform a full
@@ -238,28 +238,23 @@ which is the only place that defines it. The section linked below governs clocks
 and dispositions **after** a review has been requested, and answers a different
 question.
 
-For requested-review silence versus the fallback, follow the canonical
+For requested-review silence, follow the canonical
 [Explicit requested-review precedence](commit-push-prs.md#explicit-requested-review-precedence).
-Do not apply the 15-minute fallback to an explicitly requested review.
-Automation may issue exactly one re-trigger, and no further automatic retry is
-allowed. The canonical section is the sole authority for both request-anchored
-clocks, current-head invalidation, the post-timeout disposition choices, and
-every effect of an exact-head operator authorization; this compact guidance
-defines no separate disposition effect. Under manual-only review the fallback is
-limited to exactly two named no-terminal-artifact variants: eyes-only current-head
-artifact (which applies only when no explicit review request is outstanding and is
-non-blocking once no review is pending), and prior-head artifacts only (a stale-head
-`Codex Review:` body or reaction is not head-attributable and is ignored for
-terminal-signal purposes).
+Automation may issue exactly one re-trigger, repeating the focus and exact head
+SHA of the original request, and no further automatic retry is allowed. The
+canonical section is the sole authority for the request-anchored clocks,
+current-head invalidation, the post-timeout disposition choices, and every
+effect of an exact-head operator authorization; this compact guidance defines no
+separate disposition effect.
 
-The former third variant, **no explicit review request**, is deleted rather than
-shortened. Nothing arrives unrequested now, so a clock measuring how long to wait for
-it always expires: at Tier A the absence of a request is a **gate violation to fix, not
-a delay to wait out**, and at Tier B/C there is nothing to wait for at all. For those
-fallback variants, any push invalidates the prior signal and restarts the
-fallback clock for the new head; it does not reset an explicit request's
-request-anchored clock. This compact handoff rule must not define a competing
-timer or disposition rule.
+**No silence fallback exists.** All three former no-terminal-artifact variants —
+no explicit review request, eyes-only current-head artifact, prior-head artifacts
+only — are deleted, not shortened. Each measured how long to wait for a review
+manual-only review never sends unrequested, so each always expired into a merge
+on nothing. They remain a classification of non-signals with no clock: at Tier A
+an absent request is a **gate violation to fix, not a delay to wait out**; at
+Tier B/C there is nothing to wait for. This compact handoff rule must not define
+a competing timer or disposition rule.
 
 If GitHub Codex comments on the PR, fix the pointed issue, rerun the manual
 branch-diff review and required checks, then evaluate the new exact head and its

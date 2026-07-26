@@ -34,6 +34,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW_DOC = REPO_ROOT / "docs" / "workflows" / "commit-push-prs.md"
 PLAN_DOC = REPO_ROOT / "docs" / "standalone-agent-session-bus-plan.md"
 HANDOFF_DOC = REPO_ROOT / "docs" / "workflows" / "review-and-handoff.md"
+AGENTS_DOC = REPO_ROOT / "AGENTS.md"
 REQUIRED_PROJECTS = ("amiga", "nuvyr")
 PROJECT_CASES = (
     {
@@ -204,8 +205,8 @@ class ReviewLoopCapContractTest(unittest.TestCase):
         )
         fallback = contract_section(
             workflow_text,
-            "The resettable fallback above handles two named "
-            "no-terminal-artifact variants",
+            "**All three former no-terminal-artifact fallback variants are "
+            "deleted, not",
             "#### Explicit requested-review precedence",
         )
         precedence = contract_section(
@@ -220,7 +221,7 @@ class ReviewLoopCapContractTest(unittest.TestCase):
         )
         compact_precedence = contract_section(
             handoff_text,
-            "For requested-review silence versus the fallback",
+            "For requested-review silence, follow the canonical",
             "If GitHub Codex comments on the PR",
         ).strip()
 
@@ -229,13 +230,17 @@ class ReviewLoopCapContractTest(unittest.TestCase):
                 precedence,
                 (
                     "remains pending until its roughly 30–35-minute clock expires",
-                    "never ages into the 15-minute fallback",
+                    "never ages into a merge-eligible state, because no silence "
+                    "fallback exists to age into",
+                    "That clock decides only when to re-trigger once and when to "
+                    "escalate -- never when to merge",
                     "Anchor each clock to the corresponding explicit request "
                     "artifact's GitHub `created_at`, never to the latest push or "
                     "the time the head became reviewable",
                     "A current-head `eyes` reaction alone is non-terminal: it "
                     "does not exit requested-review precedence",
-                    "issue exactly one `@codex review` re-trigger",
+                    "issue exactly one re-trigger",
+                    "The re-trigger repeats the full request shape",
                     "The re-trigger is the sole automatic retry",
                     "do not re-trigger again",
                     "explicit disposition bound to the exact current head",
@@ -267,15 +272,15 @@ class ReviewLoopCapContractTest(unittest.TestCase):
                 fallback,
                 (
                     "Eyes-only current-head artifact",
-                    "This fallback variant applies only when no explicit review "
-                    "request is outstanding",
+                    "with no clock attached to any of them",
+                    "gate violation to fix, not a delay to wait out",
                 ),
             ),
             (
                 review_policy,
                 (
-                    "An explicitly requested review does not enter this ageing "
-                    "rule",
+                    "no elapsed time is ever a terminal signal",
+                    "There is no resettable settle that ripens a head for merge",
                     "it does not waive post-signal handling",
                     "the approximately five-minute post-clean settle and full "
                     "review/thread/reaction re-read remain mandatory before merge",
@@ -287,22 +292,15 @@ class ReviewLoopCapContractTest(unittest.TestCase):
                 (
                     "[Explicit requested-review precedence]"
                     "(commit-push-prs.md#explicit-requested-review-precedence)",
-                    "Do not apply the 15-minute fallback to an explicitly "
-                    "requested review",
-                    "Automation may issue exactly one re-trigger, and no further "
-                    "automatic retry is allowed",
-                    "The canonical section is the sole authority for both "
-                    "request-anchored clocks, current-head invalidation, the "
-                    "post-timeout disposition choices, and every effect of an "
-                    "exact-head operator authorization; this compact guidance "
-                    "defines no separate disposition effect",
-                    "eyes-only current-head artifact (which applies only when no "
-                    "explicit review request is outstanding",
-                    "it does not reset an explicit request's request-anchored "
-                    "clock",
-                    "A terminal signal stops waiting for further artifacts or "
-                    "the fallback timeout only; it does not waive the handling "
-                    "below",
+                    "**No silence fallback exists.**",
+                    "repeating the focus and exact head SHA of the original request",
+                    "no further automatic retry is allowed",
+                    "The canonical section is the sole authority for the request-anchored "
+                    "clocks, current-head invalidation, the post-timeout disposition "
+                    "choices, and every effect of an exact-head operator authorization; "
+                    "this compact guidance defines no separate disposition effect",
+                    "A terminal signal stops waiting for further artifacts only; it does "
+                    "not waive the handling below",
                     "approximately five-minute mandatory post-clean settle",
                     "these remain the only two exact-head terminal signal sources",
                 ),
@@ -319,36 +317,31 @@ class ReviewLoopCapContractTest(unittest.TestCase):
         self.assertEqual(
             compact_precedence,
             normalized(
-                'For requested-review silence versus the fallback, follow the canonical [Explicit '
-                'requested-review precedence](commit-push-prs.md#explicit-requested-review-precedence). '
-                'Do not apply the 15-minute fallback to an explicitly requested review. Automation may '
-                'issue exactly one re-trigger, and no further automatic retry is allowed. The canonical '
-                'section is the sole authority for both request-anchored clocks, current-head '
-                'invalidation, the post-timeout disposition choices, and every effect of an exact-head '
-                'operator authorization; this compact guidance defines no separate disposition effect. '
-                'Under manual-only review the fallback is limited to exactly two named '
-                'no-terminal-artifact variants: eyes-only current-head artifact (which applies only '
-                'when no explicit review request is outstanding and is non-blocking once no review is '
-                'pending), and prior-head artifacts only (a stale-head `Codex Review:` body or reaction '
-                'is not head-attributable and is ignored for terminal-signal purposes). The former '
-                'third variant, **no explicit review request**, is deleted rather than shortened. '
-                'Nothing arrives unrequested now, so a clock measuring how long to wait for it always '
-                'expires: at Tier A the absence of a request is a **gate violation to fix, not a delay '
-                'to wait out**, and at Tier B/C there is nothing to wait for at all. For those fallback '
-                'variants, any push invalidates the prior signal and restarts the fallback clock for '
-                "the new head; it does not reset an explicit request's request-anchored clock. This "
-                'compact handoff rule must not define a competing timer or disposition rule.'
+                'For requested-review silence, follow the canonical [Explicit requested-review '
+                'precedence](commit-push-prs.md#explicit-requested-review-precedence). Automation may '
+                'issue exactly one re-trigger, repeating the focus and exact head SHA of the original '
+                'request, and no further automatic retry is allowed. The canonical section is the sole '
+                'authority for the request-anchored clocks, current-head invalidation, the post-timeout '
+                'disposition choices, and every effect of an exact-head operator authorization; this '
+                'compact guidance defines no separate disposition effect. **No silence fallback exists.** '
+                'All three former no-terminal-artifact variants — no explicit review request, eyes-only '
+                'current-head artifact, prior-head artifacts only — are deleted, not shortened. Each '
+                'measured how long to wait for a review manual-only review never sends unrequested, so '
+                'each always expired into a merge on nothing. They remain a classification of non-signals '
+                'with no clock: at Tier A an absent request is a **gate violation to fix, not a delay to '
+                'wait out**; at Tier B/C there is nothing to wait for. This compact handoff rule must not '
+                'define a competing timer or disposition rule.'
             ),
         )
 
         fallback_variants = re.findall(r"- \*\*([^*]+)\.\*\*", fallback)
-        # TWO since 2026-07-26. "No explicit review request" is deleted, not renamed:
-        # with automatic review off, a clock counting how long to wait for an unrequested
-        # review always expires, and that expiry handed a Tier A worker a path to merge
-        # fifteen minutes after failing to request one.
+        # All three survive as a CLASSIFICATION with no clock. Deleting the timer for only
+        # the unrequested-review variant left the other two ripening a head on silence,
+        # which is the same defect under a narrower name.
         self.assertEqual(
             fallback_variants,
             [
+                "No explicit review request",
                 "Eyes-only current-head artifact",
                 "Prior-head artifacts only",
             ],
@@ -578,6 +571,29 @@ class ReviewLoopCapContractTest(unittest.TestCase):
 
         self.assert_scenario_cases("canonical_wait_gate", check)
 
+    def test_the_request_shape_itself_names_focus_and_the_exact_head_sha(self):
+        """The source-of-truth request template, pinned.
+
+        A reaction is terminal only on a comment that named the current head, so a
+        template without a SHA makes the reaction path unsatisfiable -- the rule and the
+        syntax that is supposed to satisfy it have to be pinned together or they drift
+        apart again.
+        """
+        section = contract_section(
+            AGENTS_DOC.read_text(encoding="utf-8"),
+            "Request with `@codex review for <focus>`",
+            '**"Untrusted" means input we do not control.**',
+        )
+        for phrase in (
+            "naming **every** Tier A family the diff touches",
+            "**stating the exact head SHA the request is for**",
+            "a connector `+1` is terminal only while the head still equals the SHA "
+            "that request named",
+            "a request without one leaves the reaction path unsatisfiable",
+            "Request **once per candidate final head**",
+        ):
+            self.assertIn(phrase, section)
+
     def test_silently_dropped_review_gets_one_request_anchored_retrigger(self):
         def check(case, sources):
             self.assertIn(
@@ -585,8 +601,15 @@ class ReviewLoopCapContractTest(unittest.TestCase):
                 sources["review_policy"],
             )
             self.assertIn(
-                "request as silently dropped and issue exactly one `@codex "
-                "review` re-trigger",
+                "request as silently dropped and issue exactly one re-trigger",
+                sources["review_policy"],
+            )
+            # GH-313 finding 3: the retry shape is the contract, not prose. A bare
+            # `@codex review` names no SHA, and a reaction on a comment that named no
+            # SHA can never satisfy the terminal-signal rule.
+            self.assertIn(
+                "The re-trigger repeats the full request shape — focus and the exact "
+                "head SHA — never a bare `@codex review`",
                 sources["review_policy"],
             )
             self.assertIn(
@@ -775,10 +798,11 @@ class ReviewLoopCapContractTest(unittest.TestCase):
                 handoff,
             )
             self.assertIn(
-                "Do not apply the 15-minute fallback to an explicitly requested "
-                "review",
+                "repeating the focus and exact head SHA of the original request",
                 handoff,
+                "a SHA-less retry cannot produce a usable reaction signal",
             )
+            self.assertIn("**No silence fallback exists.**", handoff)
 
         self.assert_scenario_cases("compact_wait_gate", check)
 
@@ -802,13 +826,13 @@ class ReviewLoopCapContractTest(unittest.TestCase):
         )
         mutations = (
             (
-                "requested-review silence re-aged to 15 minutes",
+                "requested-review silence re-aged into a merge path",
                 "workflow",
-                "never ages into the 15-minute fallback",
-                "ages into the 15-minute fallback",
+                "never ages into a merge-eligible state",
+                "ages into a merge-eligible state",
             ),
             (
-                "fallback broadened beyond the two named variants",
+                "a deleted fallback variant reintroduced",
                 "workflow",
                 "- **Prior-head artifacts only.**",
                 "- **Explicit requested-review silence.** Broadened case.\n"
@@ -834,10 +858,10 @@ class ReviewLoopCapContractTest(unittest.TestCase):
                 "Explicit requested-review precedence",
             ),
             (
-                "explicit request also enters 15-minute ageing",
+                "elapsed time reinstated as a terminal signal",
                 "workflow",
-                "does not enter this ageing",
-                "also enters this ageing",
+                "no elapsed time is ever a terminal signal",
+                "elapsed time is a terminal signal",
             ),
             (
                 "generic terminal signal waives post-signal handling",
@@ -848,8 +872,8 @@ class ReviewLoopCapContractTest(unittest.TestCase):
             (
                 "automatic re-trigger repeats indefinitely",
                 "workflow",
-                "issue exactly one `@codex review` re-trigger",
-                "repeatedly issue an `@codex review` re-trigger",
+                "issue exactly one re-trigger",
+                "repeatedly issue a re-trigger",
             ),
             (
                 "request clock re-anchored to latest push",
@@ -896,7 +920,7 @@ class ReviewLoopCapContractTest(unittest.TestCase):
             (
                 "compact guidance defines a divergent disposition effect",
                 "handoff",
-                "this compact guidance\ndefines no separate disposition effect",
+                "this compact guidance defines no\nseparate disposition effect",
                 "this compact guidance says any disposition ends the wait",
             ),
             (

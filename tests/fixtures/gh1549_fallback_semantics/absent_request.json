@@ -1,6 +1,6 @@
 {
   "variant": "absent_request",
-  "description": "No explicit review request on the PR. The reviewability clock still starts at the later of the final push and the head becoming reviewable (PR open, draft ready when applicable, review visibility exists). Absence of an explicit request neither pre-expires nor indefinitely extends the resettable fallback. Each project_cases entry is a concrete per-project scenario with its own pr_state and expected outcome.",
+  "description": "The silence fallback is deleted (2026-07-26). This variant is a classification of a NON-signal: it says what an artifact is not. No clock starts, nothing ages, and no elapsed time makes the head merge-eligible. The reviewability clock still starts at the later of the final push and the head becoming reviewable (PR open, draft ready when applicable, review visibility exists). Absence of an explicit request neither pre-expires nor indefinitely extends the resettable fallback. Each project_cases entry is a concrete per-project scenario with its own pr_state and expected outcome.",
   "project_cases": [
     {
       "project_id": "amiga",
@@ -9,18 +9,14 @@
         "pr_open": true,
         "draft_ready": true,
         "explicit_review_request": false,
-        "review_visibility_exists": true,
-        "final_push_utc": "2026-07-18T12:00:00Z",
-        "head_reviewable_utc": "2026-07-18T12:00:00Z"
+        "review_visibility_exists": true
       },
       "expected": {
-        "clock_anchor": "later_of(final_push, head_reviewable)",
-        "clock_start_utc": "2026-07-18T12:00:00Z",
-        "fallback_eligible_after_utc": "2026-07-18T12:15:00Z",
         "fallback_blocked_by_absent_request": false,
         "absent_request_extends_fallback_indefinitely": false,
         "commit_age_pre_expires_fallback": false,
-        "stuck_state_remains_reported_and_escalated": true
+        "stuck_state_remains_reported_and_escalated": true,
+        "merge_eligible_on_silence": false
       }
     },
     {
@@ -30,18 +26,14 @@
         "pr_open": true,
         "draft_ready": true,
         "explicit_review_request": false,
-        "review_visibility_exists": true,
-        "final_push_utc": "2026-07-18T13:00:00Z",
-        "head_reviewable_utc": "2026-07-18T13:02:00Z"
+        "review_visibility_exists": true
       },
       "expected": {
-        "clock_anchor": "later_of(final_push, head_reviewable)",
-        "clock_start_utc": "2026-07-18T13:02:00Z",
-        "fallback_eligible_after_utc": "2026-07-18T13:17:00Z",
         "fallback_blocked_by_absent_request": false,
         "absent_request_extends_fallback_indefinitely": false,
         "commit_age_pre_expires_fallback": false,
-        "stuck_state_remains_reported_and_escalated": true
+        "stuck_state_remains_reported_and_escalated": true,
+        "merge_eligible_on_silence": false
       }
     }
   ]

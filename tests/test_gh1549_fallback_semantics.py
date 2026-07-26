@@ -19,11 +19,9 @@ the docs or a runtime implementation that consumes these scenarios is caught.
 
 from __future__ import annotations
 
-import inspect
 import json
 import re
 import unittest
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -66,16 +64,6 @@ _RUNNABLE_AX_RE = re.compile(
     r"(?:--[\w-]+|<[^>]+>|\w)"  # a shell argument: flag, placeholder, or value
 )
 
-
-def _parse_explicit_timezone_iso8601(value: str) -> datetime:
-    """Parse an explicit-timezone ISO 8601 value and normalize it to UTC."""
-    if not isinstance(value, str) or not value:
-        raise ValueError("timestamp must be a non-empty string")
-    normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
-    parsed = datetime.fromisoformat(normalized)
-    if parsed.tzinfo is None or parsed.utcoffset() is None:
-        raise ValueError("timestamp must include an explicit timezone")
-    return parsed.astimezone(timezone.utc)
 
 
 def _bare_runnable_ax_lines(text: str) -> list[str]:
@@ -235,13 +223,13 @@ class Gh1549ClassARunnableExamplesTest(unittest.TestCase):
 
 
 class Gh1549ClassDFallbackSemanticsTest(unittest.TestCase):
-    """Class D: silent-fallback ageing handles the named variants.
+    """Class D: the three named states, and the timer that no longer exists.
 
-    There were THREE until 2026-07-26. "No explicit review request" is deleted, not
-    renamed: with automatic review off, a clock measuring how long to wait for an
-    unrequested review always expires, and that expiry handed a Tier A worker a path to
-    merge fifteen minutes after failing to request one. Absence of a request is now a
-    gate violation to fix, not a delay to wait out.
+    Silent-fallback AGEING is gone as of 2026-07-26. Deleting the clock for only the
+    unrequested-review variant left eyes-only and prior-head still ripening a head on
+    silence -- the same defect under a narrower name -- so all three clocks are deleted.
+    The three variants survive purely as a classification of non-signals: they say what
+    an artifact is NOT, and none of them can make a head merge-eligible.
     """
 
     def test_commit_push_prs_doc_names_the_surviving_variants(self) -> None:
@@ -252,14 +240,30 @@ class Gh1549ClassDFallbackSemanticsTest(unittest.TestCase):
         self.assertIn("Eyes-only current-head artifact", text)
         self.assertIn("Prior-head artifacts only", text)
 
-    def test_the_unrequested_review_variant_is_gone_and_stays_gone(self) -> None:
-        """The deletion is the point, so it is pinned as hard as the survivors."""
+    def test_no_variant_carries_a_timer(self) -> None:
+        """What was deleted is the CLOCK, not the classification.
+
+        Revised 2026-07-26 (GH-313 finding 1). The earlier version asserted the
+        unrequested-review variant had disappeared from the document entirely, which
+        both misstated the ruling and left the other two variants' clocks unexamined --
+        so the suite certified a document that still aged a head into a merge.
+        """
         text = (
             REPO_ROOT / "docs" / "workflows" / "commit-push-prs.md"
         ).read_text(encoding="utf-8")
-        self.assertNotIn("No explicit review request", text,
-                         "the unrequested-review fallback variant must not return")
-        self.assertIn("gate violation to fix, not a delay to wait out", text)
+        self.assertIn("No explicit review request", text)
+        self.assertRegex(text, r"gate violation to fix,\s+not a delay to wait out")
+        self.assertRegex(text, r"with no clock attached to any\s+of them")
+        for revived in (
+            "15-minute",
+            "15 minutes",
+            "resettable fallback",
+            "fallback clock",
+            "fallback timeout",
+        ):
+            self.assertNotIn(
+                revived, text, f"the deleted silence timer came back as {revived!r}"
+            )
 
     def test_review_and_handoff_doc_references_the_surviving_variants(self) -> None:
         text = (
@@ -270,18 +274,17 @@ class Gh1549ClassDFallbackSemanticsTest(unittest.TestCase):
         self.assertIn("commit-push-prs.md", text)
         self.assertNotIn("no explicit review request (the reviewability clock", text)
 
-    def test_later_of_clock_anchor_is_preserved(self) -> None:
+    def test_the_clock_anchor_is_gone_with_the_clock(self) -> None:
+        """GH-1539's "later of final push and head-reviewable" anchor is retired.
+
+        It described where the silence fallback started counting. With nothing counting,
+        an anchor is not a weaker invariant -- it is a claim that a clock exists.
+        """
         text = (
             REPO_ROOT / "docs" / "workflows" / "commit-push-prs.md"
         ).read_text(encoding="utf-8")
-        # The GH-1539 invariant: the fallback clock anchors at the later of
-        # the final push and the head becoming reviewable. This must not be
-        # weakened to commit age alone.
-        self.assertRegex(
-            text,
-            r"later of the\s+final push",
-        )
-        self.assertRegex(text, r"head becoming reviewable")
+        self.assertNotRegex(text, r"later of the\s+final push")
+        self.assertRegex(text, r"no elapsed time is ever a terminal\s+signal")
 
     def test_report_and_escalate_behavior_is_preserved(self) -> None:
         text = (
@@ -423,186 +426,43 @@ class Gh1549FallbackFixturesTest(unittest.TestCase):
                 f"{sorted(missing)} (must include both amiga and nuvyr)",
             )
 
-    def test_fallback_fixture_coherence_for_every_case(self) -> None:
+    # The 15-minute coherence machine that lived here -- the timestamp parser, its four
+    # validation tests, the later-of-both-anchors computation, and the meta-guards that
+    # checked the guard -- is deleted with the clock it validated (2026-07-26, GH-313
+    # finding 1). It computed when a silent head became merge-eligible. Nothing becomes
+    # merge-eligible by elapsing now, so the computation has no referent; keeping it
+    # green would certify the retired policy. What replaces it is the guard against
+    # bringing the clock back.
+
+    TIMING_FIELDS = (
+        "clock_anchor",
+        "clock_start_utc",
+        "fallback_eligible_after_utc",
+        "final_push_utc",
+        "head_reviewable_utc",
+    )
+
+    def test_no_fixture_carries_a_timing_field(self) -> None:
         for variant in self.VARIANT_FILES:
             for case in self._project_cases(variant):
-                fallback_utc = case["expected"].get(
-                    "fallback_eligible_after_utc"
-                )
-                if fallback_utc is None:
-                    continue
-                with self.subTest(
-                    project_id=case["project_id"],
-                    variant=variant,
-                ):
-                    self._assert_fallback_case_coherent(case)
+                with self.subTest(project_id=case["project_id"], variant=variant):
+                    present = sorted(
+                        field
+                        for field in self.TIMING_FIELDS
+                        if field in case["expected"] or field in case["pr_state"]
+                    )
+                    self.assertEqual(
+                        [], present,
+                        f"{variant} reintroduced silence-fallback timing: {present}",
+                    )
 
-    def test_fallback_timestamp_parser_normalizes_explicit_instants_to_utc(
-        self,
-    ) -> None:
-        trailing_z = _parse_explicit_timezone_iso8601(
-            "2026-07-18T12:00:00Z"
-        )
-        explicit_offset = _parse_explicit_timezone_iso8601(
-            "2026-07-18T14:00:00+02:00"
-        )
-        self.assertEqual(trailing_z, explicit_offset)
-        self.assertIs(trailing_z.tzinfo, timezone.utc)
-        self.assertIs(explicit_offset.tzinfo, timezone.utc)
-
-    def test_fallback_timestamp_parser_rejects_naive_timestamp(self) -> None:
-        with self.assertRaisesRegex(ValueError, "explicit timezone"):
-            _parse_explicit_timezone_iso8601("2026-07-18T12:00:00")
-
-    def test_fallback_timestamp_parser_rejects_lowercase_z_and_malformed(
-        self,
-    ) -> None:
-        for value in (
-            "2026-07-18T12:00:00z",
-            "not-a-timestamp",
-        ):
-            with self.subTest(value=value):
-                with self.assertRaises(ValueError):
-                    _parse_explicit_timezone_iso8601(value)
-
-    def test_fallback_timestamp_parser_requires_non_empty_string(self) -> None:
-        for value in (
-            "",
-            None,
-            0,
-            1,
-            False,
-            True,
-            [],
-            [1],
-            {},
-            {"x": 1},
-            b"x",
-        ):
-            with self.subTest(value=value):
-                with self.assertRaisesRegex(ValueError, "non-empty string"):
-                    _parse_explicit_timezone_iso8601(value)  # type: ignore[arg-type]
-
-    def test_fallback_clock_uses_later_of_both_anchors(self) -> None:
-        cases = (
-            (
-                "final_push_later",
-                "2026-07-18T12:05:00Z",
-                "2026-07-18T12:00:00Z",
-                "2026-07-18T12:20:00Z",
-            ),
-            (
-                "head_reviewable_later",
-                "2026-07-18T12:00:00Z",
-                "2026-07-18T12:07:00Z",
-                "2026-07-18T12:22:00Z",
-            ),
-        )
-        for name, final_push, head_reviewable, fallback in cases:
-            case = {
-                "pr_state": {
-                    "explicit_review_request": False,
-                    "final_push_utc": final_push,
-                    "head_reviewable_utc": head_reviewable,
-                },
-                "expected": {
-                    "fallback_eligible_after_utc": fallback,
-                },
-            }
-            with self.subTest(name=name):
-                self._assert_fallback_case_coherent(case)
-
-    def test_fallback_coherence_routes_all_timestamps_through_parser(
-        self,
-    ) -> None:
-        source = inspect.getsource(type(self)._assert_fallback_case_coherent)
-        helper_call = "_parse_explicit_timezone_iso8601("
-        self.assertEqual(
-            source.count(helper_call),
-            3,
-            "coherence must route exactly three timestamp fields through "
-            "the Python-3.10-compatible parser",
-        )
-        routed_values = re.findall(
-            r"_parse_explicit_timezone_iso8601\(\s*"
-            r"(pr\[[\"'](?:final_push_utc|head_reviewable_utc)[\"']\]"
-            r"|fallback_utc)\s*\)",
-            source,
-        )
-        self.assertEqual(
-            routed_values,
-            [
-                'pr["final_push_utc"]',
-                'pr["head_reviewable_utc"]',
-                "fallback_utc",
-            ],
-            "coherence timestamp routing must remain final push, head "
-            "reviewable, then fallback eligibility",
-        )
-
-    def test_fixture_coherence_timestamps_retain_trailing_z(self) -> None:
+    def test_every_case_states_that_silence_does_not_ripen_a_head(self) -> None:
         for variant in self.VARIANT_FILES:
             for case in self._project_cases(variant):
-                timestamps = [
-                    case["pr_state"]["final_push_utc"],
-                    case["pr_state"]["head_reviewable_utc"],
-                    case["expected"].get("fallback_eligible_after_utc"),
-                ]
-                for value in timestamps:
-                    if value is not None:
-                        self.assertTrue(
-                            value.endswith("Z"),
-                            f"{variant} coherence timestamp must retain "
-                            f"trailing Z: {value!r}",
-                        )
-
-    def _assert_fallback_case_coherent(self, case: dict) -> None:
-        pr = case["pr_state"]
-        fallback_utc = case["expected"]["fallback_eligible_after_utc"]
-        self.assertFalse(
-            pr["explicit_review_request"],
-            "fallback eligibility and an explicit current-head review request "
-            "are mutually exclusive",
-        )
-        clock_start = max(
-            _parse_explicit_timezone_iso8601(pr["final_push_utc"]),
-            _parse_explicit_timezone_iso8601(pr["head_reviewable_utc"]),
-        )
-        self.assertEqual(
-            _parse_explicit_timezone_iso8601(fallback_utc),
-            clock_start + timedelta(minutes=15),
-            "fallback eligibility must be exactly 15 minutes after "
-            "later_of(final_push, head_reviewable)",
-        )
-
-    def test_generic_fixture_coherence_guard_is_registered(self) -> None:
-        self.assertTrue(
-            callable(
-                getattr(
-                    type(self),
-                    "test_fallback_fixture_coherence_for_every_case",
-                    None,
-                )
-            )
-        )
-        source = inspect.getsource(
-            type(self).test_fallback_fixture_coherence_for_every_case
-        )
-        self.assertIn("self._assert_fallback_case_coherent(case)", source)
-
-    def test_fixture_coherence_guard_rejects_named_mutations(self) -> None:
-        case = self._project_cases("eyes_only_current_head")[0]
-        explicit_request = json.loads(json.dumps(case))
-        explicit_request["pr_state"]["explicit_review_request"] = True
-        with self.assertRaises(AssertionError):
-            self._assert_fallback_case_coherent(explicit_request)
-
-        shifted_timestamp = json.loads(json.dumps(case))
-        shifted_timestamp["expected"]["fallback_eligible_after_utc"] = (
-            "2026-07-18T12:16:00Z"
-        )
-        with self.assertRaises(AssertionError):
-            self._assert_fallback_case_coherent(shifted_timestamp)
+                with self.subTest(project_id=case["project_id"], variant=variant):
+                    self.assertIs(
+                        False, case["expected"]["merge_eligible_on_silence"]
+                    )
 
     def test_absent_request_variant_per_project(self) -> None:
         # Absent explicit review request: the reviewability clock still starts
@@ -614,21 +474,12 @@ class Gh1549FallbackFixturesTest(unittest.TestCase):
             pr = case["pr_state"]
             expected = case["expected"]
             with self.subTest(project_id=pid, variant="absent_request"):
-                self.assertEqual(
-                    expected["clock_anchor"],
-                    "later_of(final_push, head_reviewable)",
-                )
                 self.assertFalse(expected["fallback_blocked_by_absent_request"])
                 self.assertFalse(
                     expected["absent_request_extends_fallback_indefinitely"]
                 )
                 self.assertFalse(expected["commit_age_pre_expires_fallback"])
                 self.assertTrue(expected["stuck_state_remains_reported_and_escalated"])
-                # The clock starts at the later of final push and head-reviewable.
-                self.assertEqual(
-                    expected["clock_start_utc"],
-                    max(pr["final_push_utc"], pr["head_reviewable_utc"]),
-                )
 
     def test_eyes_only_variant_per_project(self) -> None:
         # Eyes-only current-head artifact: non-terminal, non-blocking once no
@@ -663,15 +514,11 @@ class Gh1549FallbackFixturesTest(unittest.TestCase):
                         "prior_head_reaction_is_head_attributable_for_current_head"
                     ]
                 )
-                self.assertEqual(
-                    expected["clock_anchor"],
-                    "later_of(final_push, head_reviewable)",
-                )
                 self.assertTrue(expected["stuck_state_remains_reported_and_escalated"])
-                # The clock must anchor to the current head, not to any
-                # prior-head artifact timestamp.
+                # A stale artifact cannot become attributable by being recent; there is
+                # no longer a clock to compare it against, only head identity.
                 for artifact in stale:
-                    self.assertGreater(expected["clock_start_utc"], artifact["utc"])
+                    self.assertNotEqual(artifact["oid"], pr["head_oid"])
 
 
 if __name__ == "__main__":
