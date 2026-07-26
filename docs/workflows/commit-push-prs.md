@@ -266,8 +266,14 @@ policy:
     advances it to the current head for a thread that is still non-outdated, so it
     reports every live stale thread as a current-head finding.
   - *is this finding still open?* Only GitHub resolution, or a written disposition
-    **that identifies the thread**, closes it. Identifying means the disposition
-    contains the thread's node ID or its `#discussion_r...` comment URL.
+    **that identifies the thread**, closes it. **Resolution is not adjudication.**
+    `AGENTS.md` requires every arriving finding to be adjudicated in writing at every
+    tier, and the merge checklist only inspects *unresolved* threads — so clicking
+    Resolve with nothing recorded removes the thread from the checklist while leaving
+    the finding unanswered, which is the one way to lose a finding silently. A
+    resolved thread still owes a thread-linked written outcome; resolution closes it
+    for the checklist, the writing is what discharges it. Identifying means the
+    disposition contains the thread's node ID or its `#discussion_r...` comment URL.
     Identification is **necessary and not sufficient**: a human must also validate
     that the disposition came from someone authorised on *this* pull request, that it
     concerns this PR rather than merely mentioning the thread from elsewhere, and that
@@ -309,11 +315,14 @@ policy:
   lifecycle
 - **there is no silence fallback for an unrequested review.** Under manual-only,
   waiting out a clock for a review nobody asked for is a path that always ends in
-  silence. A Tier A head waits, without a fallback, for a terminal connector
-  outcome; if none ever completes, retry explicitly or obtain an operator waiver,
-  and never merge on silence. A Tier B/C head with no request does not wait at all.
-  The requested-review clock and single re-trigger below still govern a review that
-  WAS requested
+  silence. A Tier A head with no request has exactly one remedy: **issue the
+  request.** Failing to request is itself a gate violation, so an unrequested head
+  is not a head awaiting a waiver — it is a head whose worker has not yet done the
+  mandatory step, and no waiver is available for skipping it. Only once the request
+  exists does the precedence flow below apply: the initial request, its single
+  request-anchored re-trigger, and the two request-anchored expiries, at the end of
+  which an operator waiver is the defined outcome. A Tier B/C head with no request
+  does not wait at all. At no tier is quiet a signal: never merge on silence
 - **no elapsed time is ever a terminal signal.** There is no resettable settle
   that ripens a head for merge. Waiting is what a Tier A head does while a
   requested review is outstanding; it is not a way to acquire the signal

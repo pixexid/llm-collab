@@ -168,7 +168,7 @@ contract changes, concurrency and partial state, migrations, and anything that c
 weaken proof of those — **must** be requested. Formatting, comments and additive
 tests must not.
 
-Request once, on the head you believe is final:
+Issue one *initial* request, on the head you believe is final:
 
 ```
 @codex review for <every Tier A family the diff touches> at <exact head SHA>
@@ -178,7 +178,14 @@ State the SHA. A connector `+1` counts as CLEAN only while the head still equals
 SHA the request named, so a request without one cannot be satisfied by a reaction.
 
 An amendment stales the review; request again on the new final head. Any finding
-that arrives is adjudicated in writing whatever the tier.
+that arrives is adjudicated in writing whatever the tier — including a finding whose
+thread you resolve, since the merge checklist only reads unresolved threads.
+
+The one-initial-request limit is not a ban on ever asking twice. If the connector
+silently drops your request and neither a verdict nor a reaction ever arrives, the
+**single request-anchored re-trigger** in
+[`commit-push-prs.md`](commit-push-prs.md) is the explicit exemption and the only
+recovery — without it a Tier A head would sit pending forever.
 
 ## 8. When something looks wrong
 

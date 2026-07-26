@@ -661,6 +661,43 @@ class ReviewLoopCapContractTest(unittest.TestCase):
         for thread in naive:
             self.assertNotEqual(head, self.originating_commit_oid(thread))
 
+    def test_the_review_commit_wins_when_the_two_stable_fields_disagree(self):
+        """Primary and fallback must be distinguishable, or the order is unproven.
+
+        Every other case supplies the same OID in `pullRequestReview.commit` and
+        `originalCommit`, so swapping the documented primary and fallback leaves
+        them all green while binding findings to the wrong head on the one shape
+        where it matters: a thread carried forward into a later review.
+        """
+        def node(review_oid, original_oid):
+            comment = {
+                "commit": {"oid": "MUTABLE-MUST-NOT-BE-READ"},
+                "originalCommit": {"oid": original_oid},
+                "pullRequestReview": (
+                    {"commit": {"oid": review_oid}} if review_oid else None
+                ),
+            }
+            return {"isResolved": False, "isOutdated": False,
+                    "comments": {"nodes": [comment]}}
+
+        self.assertEqual(
+            "head999", self.originating_commit_oid(node("head999", "old111")),
+            "the backing review's commit is authoritative over originalCommit",
+        )
+        self.assertEqual(
+            "old111", self.originating_commit_oid(node("old111", "head999")),
+            "originalCommit must not override the backing review's commit",
+        )
+        self.assertEqual(
+            "head999", self.originating_commit_oid(node(None, "head999")),
+            "originalCommit is the fallback only when no review backs the thread",
+        )
+
+        crossed = [node("head999", "old111"), node("old111", "head999")]
+        actual = self.classify(crossed, "head999")
+        self.assertEqual(1, actual["exact_head_findings"])
+        self.assertEqual(2, actual["unresolved_total"])
+
     def test_outdated_is_not_the_exclusion_criterion_on_real_graphql_shapes(self):
         fixture = self.load_threads()
         threads, expected = fixture["threads"], fixture["expected"]
@@ -761,20 +798,39 @@ class ReviewLoopCapContractTest(unittest.TestCase):
         def hidden(self):
             return {k: v for k, v in self._data.items() if k not in self._allowed}
 
-    def strict_thread(self, oid, *, resolved, decorated):
+    def strict_thread(self, oid, *, resolved, decorated, backed=True):
         """A thread guarded at EVERY level the origin helper walks.
 
         `commit` is deliberately forbidden on the comment node: it is the mutable field
         the origin rule must never consult, so reading it fails loudly here rather than
         silently returning the current head.
+
+        `backed=False` drops the backing review so the fallback branch runs. With a
+        review always present the helper returns before it ever touches
+        `originalCommit`, which left that mapping guarded but never exercised.
         """
+        def strict_commit(commit_oid, label):
+            """The commit mappings are walked too, so they are guarded too.
+
+            Left as plain dicts these were the last undecorated level: a closure
+            read added inside the origin helper could probe a new field on either
+            one and pass, because nothing here would object.
+            """
+            data = {"oid": commit_oid}
+            if decorated:
+                data.update(self.CLOSURE_LOOKING_FIELDS)
+                data["someFieldNobodyHasThoughtOfYet"] = True
+            return self.StrictMapping(data, {"oid"}, label)
+
         review = dict(self.CLOSURE_LOOKING_FIELDS) if decorated else {}
-        review["commit"] = {"oid": oid}
+        review["commit"] = strict_commit(oid, "pullRequestReview.commit")
         comment = {
-            "commit": {"oid": "MUTABLE-MUST-NOT-BE-READ"},
-            "originalCommit": {"oid": oid},
-            "pullRequestReview": self.StrictMapping(
-                review, {"commit"}, "pullRequestReview"
+            "commit": strict_commit("MUTABLE-MUST-NOT-BE-READ", "comment.commit"),
+            "originalCommit": strict_commit(oid, "originalCommit"),
+            "pullRequestReview": (
+                self.StrictMapping(review, {"commit"}, "pullRequestReview")
+                if backed
+                else None
             ),
         }
         if decorated:
@@ -804,15 +860,17 @@ class ReviewLoopCapContractTest(unittest.TestCase):
             self.strict_thread("head999", resolved=False, decorated=False),
             self.strict_thread("old111", resolved=False, decorated=False),
             self.strict_thread("head999", resolved=True, decorated=False),
+            self.strict_thread("head999", resolved=False, decorated=False, backed=False),
         ]
         baseline = self.classify(plain, "head999")
-        self.assertEqual(1, baseline["exact_head_findings"])
-        self.assertEqual(2, baseline["unresolved_total"])
+        self.assertEqual(2, baseline["exact_head_findings"])
+        self.assertEqual(3, baseline["unresolved_total"])
 
         decorated = [
             self.strict_thread("head999", resolved=False, decorated=True),
             self.strict_thread("old111", resolved=False, decorated=True),
             self.strict_thread("head999", resolved=True, decorated=True),
+            self.strict_thread("head999", resolved=False, decorated=True, backed=False),
         ]
         self.assertEqual(
             baseline, self.classify(decorated, "head999"),
