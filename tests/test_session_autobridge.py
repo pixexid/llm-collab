@@ -1203,12 +1203,16 @@ class SessionAutobridgeTest(unittest.TestCase):
         self.assertEqual("gpt-test", turn_start["params"]["model"])
 
     def test_zcode_exact_registration_reaches_the_worker_end_to_end(self):
-        """The replacement acceptance path for GH-314, proved end to end.
+        """The replacement acceptance path for GH-314, through the real watcher.
 
         publish-current refuses zcode_cli, so `register --runtime-session-id` IS the
-        acceptance criterion. The focused ZCode tests stop at derived_runtime_command,
-        which proves the argv and nothing about whether a registered binding actually
-        reaches a process -- including ZCODE_HOME, which only the trigger sets.
+        acceptance criterion, and it must be proved along the path a worker actually
+        travels: canonical binding -> watch_inbox.py -> subprocess.
+
+        The first version of this test used `show --session` and `dispatch --session`.
+        Codex suppressed `save_binding()` in `update_binding_from_session()` and it
+        still passed -- it read the session file, which register writes either way, and
+        never touched the binding or the watcher. Both are asserted directly now.
         """
         root = self.make_workspace()
         self.add_agent(
@@ -1216,7 +1220,7 @@ class SessionAutobridgeTest(unittest.TestCase):
             {
                 "id": "zcode",
                 "display_name": "ZCode",
-                "activation": {"type": "human_relay", "watcher_enabled": False},
+                "activation": {"type": "cli_session", "watcher_enabled": True},
             },
         )
         message_rel = self.add_message(
@@ -1249,7 +1253,6 @@ class SessionAutobridgeTest(unittest.TestCase):
                     "        'zcode_home': os.environ.get('ZCODE_HOME'),",
                     "        'runtime_family': os.environ.get('LLM_COLLAB_RUNTIME_FAMILY'),",
                     "        'runtime_session_id': os.environ.get('LLM_COLLAB_RUNTIME_SESSION_ID'),",
-                    "        'runtime_home': os.environ.get('LLM_COLLAB_RUNTIME_HOME'),",
                     "    },",
                     "}",
                     f"Path({json.dumps(str(output_file))}).write_text(json.dumps(payload, indent=2))",
@@ -1281,29 +1284,59 @@ class SessionAutobridgeTest(unittest.TestCase):
             str(zcode_home / "cli" / "artifacts" / "sess_11111111-2222-3333-4444-555555555555"),
         )
 
-        # The canonical binding the worker self-reported, read back from storage.
-        session_payload = self.run_cli(root, "show", "--session", "SESSION-ZCODE-E2E")
-        self.assertEqual("zcode_cli", session_payload["runtime"]["family"])
+        # The CANONICAL BINDING, not the session file: this is what register must publish
+        # for the watcher to have anything to resolve.
+        binding = self.run_cli(
+            root,
+            "show-binding",
+            "--project",
+            "amiga",
+            "--chat",
+            "CHAT-ZCODE-E2E",
+            "--agent",
+            "zcode",
+        )
         self.assertEqual(
             "sess_11111111-2222-3333-4444-555555555555",
-            session_payload["runtime"]["session_id"],
+            binding["runtime_session_id"],
         )
-        self.assertEqual(str(zcode_home), session_payload["runtime"]["home"])
+        self.assertEqual("zcode_cli", binding["runtime_family"])
+        self.assertEqual(str(zcode_home), binding["runtime_home"])
 
-        dispatch_result = self.run_cli_with_env(
-            root,
-            {"LLM_COLLAB_ZCODE_BIN": f"{sys.executable} {runtime_script}"},
-            "dispatch",
-            "--session",
-            "SESSION-ZCODE-E2E",
+        # The real watcher, not `dispatch --session`.
+        watcher_result = subprocess.run(
+            [
+                sys.executable,
+                str(WATCH_INBOX_SCRIPT),
+                "--me",
+                "zcode",
+                "--max-polls",
+                "1",
+                "--json",
+            ],
+            cwd=root,
+            text=True,
+            capture_output=True,
+            check=True,
+            env={
+                **self.subprocess_env(root),
+                "LLM_COLLAB_ZCODE_BIN": f"{sys.executable} {runtime_script}",
+            },
+        )
+        events = [json.loads(line) for line in watcher_result.stdout.splitlines() if line.strip()]
+        self.assertTrue(
+            any(e["event"] == "autobridge_dispatch" for e in events), watcher_result.stdout
+        )
+        self.assertTrue(
+            any(
+                e["event"] == "autobridge_consumed" and e.get("message_path") == message_rel
+                for e in events
+            ),
+            watcher_result.stdout,
         )
 
-        self.assertEqual(1, len(dispatch_result["actions"]))
-        action = dispatch_result["actions"][0]
-        self.assertEqual(message_rel, action["message_path"])
-        self.assertEqual("runtime_trigger", action["effective_action"])
-        self.assertTrue(action["runtime_result"]["derived_command"])
-        self.assertEqual(0, action["runtime_result"]["returncode"])
+        inbox = json.loads((root / "agents" / "zcode" / "inbox.json").read_text())
+        self.assertEqual([], inbox["unread"])
 
         self.assertTrue(output_file.exists(), "the registered binding never reached a process")
         runtime_payload = json.loads(output_file.read_text())
@@ -1318,19 +1351,17 @@ class SessionAutobridgeTest(unittest.TestCase):
         self.assertIn("ZCode exact wake", argv[argv.index("--prompt") + 1])
         self.assertIn("claude-session-9", argv[argv.index("--prompt") + 1])
 
-        # ZCODE_HOME is set by the trigger alone; derived_runtime_command cannot show it.
+        # ZCODE_HOME is set by the trigger alone; no derived-command test can see it.
         self.assertEqual(str(zcode_home), runtime_payload["env"]["zcode_home"])
         self.assertEqual("zcode_cli", runtime_payload["env"]["runtime_family"])
-        self.assertEqual(
-            "sess_11111111-2222-3333-4444-555555555555",
-            runtime_payload["env"]["runtime_session_id"],
-        )
 
-    def test_zcode_publish_current_refuses_so_registration_is_the_only_path(self):
-        """The accepted deviation, asserted where the acceptance criterion is claimed.
+    def test_zcode_publish_current_refuses_with_the_structured_reason(self):
+        """The accepted deviation, pinned on the returned reason.
 
-        If publish-current ever starts succeeding for zcode_cli, the end-to-end test
-        above still passes -- it would just no longer be the only way in.
+        The first version omitted the required --session, so argparse exited 2 before
+        publish_current_session ran, and the assertions passed on the USAGE TEXT --
+        which contains "zcode_cli" because it is a choice. publish-current exits 0 and
+        reports the refusal in its payload, so the exit code proves nothing either way.
         """
         root = self.make_workspace()
         self.add_agent(
@@ -1338,32 +1369,43 @@ class SessionAutobridgeTest(unittest.TestCase):
             {
                 "id": "zcode",
                 "display_name": "ZCode",
-                "activation": {"type": "human_relay", "watcher_enabled": False},
+                "activation": {"type": "cli_session", "watcher_enabled": True},
             },
         )
-        result = subprocess.run(
-            [
-                sys.executable,
-                str(SCRIPT_PATH),
-                "publish-current",
-                "--agent",
-                "zcode",
-                "--project",
-                "amiga",
-                "--chat",
-                "CHAT-ZCODE-E2E",
-                "--runtime-family",
-                "zcode_cli",
-                "--json",
-            ],
-            cwd=root,
-            text=True,
-            capture_output=True,
-            env=self.subprocess_env(root),
+        result = self.run_cli(
+            root,
+            "publish-current",
+            "--session",
+            "SESSION-ZCODE-PUBLISH",
+            "--agent",
+            "zcode",
+            "--project",
+            "amiga",
+            "--chat",
+            "CHAT-ZCODE-E2E",
+            "--runtime-family",
+            "zcode_cli",
         )
-        self.assertNotEqual(0, result.returncode, result.stdout)
-        combined = (result.stdout + result.stderr).lower()
-        self.assertIn("zcode_cli", combined)
+        self.assertIn("published", result, result)
+        self.assertIs(False, result["published"])
+        # The LITERAL, not session_autobridge_lib.HEURISTIC_RUNTIME_DISCOVERY_REFUSED_REASON:
+        # comparing a value against the constant it came from is a tautology that moves
+        # with any rename. A renamed reason is a contract change for every consumer
+        # matching on it, so it has to break this test.
+        self.assertEqual("heuristic_runtime_discovery_refused", result["reason"])
+        self.assertEqual(
+            session_autobridge_lib.HEURISTIC_RUNTIME_DISCOVERY_REFUSED_REASON,
+            "heuristic_runtime_discovery_refused",
+        )
+        self.assertEqual("zcode_cli", result["runtime_family"])
+        self.assertIn("register --runtime-session-id", result["hint"])
+        # No binding may be created by a refused publish.
+        self.assertFalse(
+            (
+                root / "State" / "session_autobridge" / "bindings" / "amiga"
+                / "CHAT-ZCODE-E2E" / "zcode.json"
+            ).exists()
+        )
 
     def test_codex_app_server_discovery_matches_exact_codex_home(self):
         rows = [
