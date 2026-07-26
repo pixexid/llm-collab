@@ -1188,74 +1188,31 @@ def build_runtime_payload(session: dict, message: dict) -> dict[str, Any]:
     }
 
 
-def _reply_command_lines(session: dict, fm: dict) -> list[str]:
-    """The mailbox reply instruction, as a command a shell can safely run.
+def _reply_channel_lines(session: dict, fm: dict) -> list[str]:
+    """Name the channel. Do NOT emit a runnable reply command yet.
 
-    This line is generated from an UNTRUSTED packet and handed to a worker as
-    something to execute, so every dynamic value is quoted by shlex.join rather than
-    interpolated. A packet declaring repo_targets ["llm-collab", "safe;echo"] used to
-    emit `--repo-targets llm-collab,safe;echo`, and the `;` is a control operator: the
-    shell ran `echo` as a second command. shlex.split cannot see that -- it is a
-    tokenizer, not a shell -- so an earlier metacharacter check passed while the
-    injection was live.
+    A copyable command was tried and withdrawn (connector + codex review of #317). Two
+    defects made it premature, and both need contracts that do not exist:
 
-    Shell safety is shlex.join's job alone. Structural validity is `_repo_target_set`'s,
-    the same predicate the router applies -- NOT a grammar re-derived here. A local
-    regex forbidding `/` rejected `pixexid/amiga`, a scope the router accepts and
-    durable packets already carry, so a perfectly routable reply was declared unusable
-    and lost its scope. Any narrower repo-id grammar belongs in that one shared
-    contract, not at this call site.
+    - It carried no --target-session-id or --sender-session-id, because the incoming
+      sender_session_id is not authoritative. A delayed reply therefore resolved
+      whichever binding was current when it ran, and could wake a rebound runtime that
+      never saw the request. The validated return address (`reply_to_*`) fixes this.
+    - The generated packet carried no autobridge_session_id or autobridge_hops marker,
+      so `should_skip_for_loop_protection` returned (False, "ok") for it and two
+      runtime-triggered workers following the instruction could wake each other
+      indefinitely.
+
+    What survives is the part that fixed the observed failure: a worker was answering
+    review handoffs on the pull request, where the sender never sees them. Telling it
+    which channel to use needs no new contract. Telling it the exact invocation does.
     """
-    raw = fm.get("repo_targets")
-    declared = list(raw) if isinstance(raw, list) else []
-    # _repo_target_set is the routing authority: it rejects non-lists, empties, blank or
-    # untrimmed entries, non-strings and duplicates. Order is not its concern, so the
-    # rendering below uses `declared`, not the set it returns.
-    # Short-circuits deliberately: the comma check below assumes strings, and only the
-    # router's verdict establishes that. The one constraint this call site owns is about
-    # the CLI ENCODING, not repo ids -- deliver.py splits --repo-targets on commas, so a
-    # token containing one cannot round-trip and would silently widen the scope.
-    usable = _repo_target_set(raw) is not None and all(
-        "," not in token for token in declared
-    )
-    argv = [
-        # The `llm-collab` LAUNCHER, absolute, not deliver.py directly. Absolute because
-        # #315 resumes a worker with --cwd in the packet's product checkout, where a
-        # relative path exits 127. Through the launcher because deliver.py's shebang
-        # resolves to whatever `python3` is first on PATH: on a stock macOS that is 3.9,
-        # and require_python() then exits before the send. The launcher picks a 3.10+
-        # interpreter.
-        str(ROOT / "bin" / "llm-collab"),
-        "deliver.py",
-        "--chat", str(fm.get("chat_id", "")),
-        "--from", str(session["agent_id"]),
-        "--to", str(fm.get("sender_agent_id", fm.get("from", ""))),
-        "--project", str(fm.get("project_id", "")),
-    ]
-    if usable:
-        argv += ["--repo-targets", ",".join(declared)]
-    # A TEMPLATE, deliberately not a command that succeeds unmodified. `--body-file -`
-    # reads EOF in a noninteractive shell, so a worker pasting the line verbatim used to
-    # send an empty body under the literal title "...", and the mailbox reported a
-    # successful reply that carried no answer. These placeholders make deliver.py fail
-    # until real content is supplied; shlex.join quotes them, so they are inert either way.
-    argv += ["--title", "REPLACE-WITH-YOUR-SUBJECT",
-             "--body-file", "REPLACE-WITH-YOUR-REPLY.md"]
-    command = f"  {shlex.join(argv)}"
-    if usable:
-        return [
-            "Reply through the mailbox. It is the only channel the sender reads.",
-            "Replace the title and body-file placeholders before running it:",
-            command,
-        ]
     return [
-        "Reply through the mailbox. It is the only channel the sender reads.",
-        "This packet declares no usable repo scope, so the command below is NOT",
-        "complete: add --repo-targets with your own comma-separated repo ids. If the",
-        "recipient declares a repo scope, omitting it still writes the packet durably --",
-        "readable with inbox.py -- but deliver.py reports a runtime dispatch refusal and",
-        "no worker is woken. An unscoped recipient accepts it either way.",
-        command,
+        "Reply through the mailbox -- `deliver.py` -- addressed to the sender above.",
+        "It is the only channel the sender reads.",
+        "A PR comment, a code-review body or a desktop nudge does NOT reach the sender.",
+        "Post to a PR only when the PR itself is the artifact -- a connector review",
+        "request, or evidence a human will read there -- and deliver the packet as well.",
     ]
 
 
@@ -1300,10 +1257,7 @@ def build_resume_prompt(session: dict, message: dict) -> str:
             "Message body:",
             body or "(no body)",
             "",
-            *_reply_command_lines(session, fm),
-            "A PR comment, a code-review body or a desktop nudge does NOT reach the sender.",
-            "Post to a PR only when the PR itself is the artifact -- a connector review",
-            "request, or evidence a human will read there -- and deliver the packet as well.",
+            *_reply_channel_lines(session, fm),
             "",
             "If the request is trivial, answer tersely. Do not start unrelated work.",
         ]

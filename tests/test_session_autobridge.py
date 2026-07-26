@@ -5988,70 +5988,18 @@ class ResumePromptNamesTheReplyChannelTest(unittest.TestCase):
 
     Observed live on 2026-07-26: codex, woken through the app-server adapter, answered a
     review handoff by posting a PR comment and delivering nothing. The prompt carried the
-    body but neither the packet's path nor any statement that the mailbox is the channel,
-    so the reply never reached the sender and the operator had to relay it by hand.
+    body but neither the packet's path nor any statement that the mailbox is the channel.
+
+    This class once also proved a copyable `deliver.py` invocation. That template is
+    withdrawn -- it could not carry a validated return address or a loop-protection
+    marker, so a delayed reply could wake a rebound runtime and two workers following it
+    could wake each other indefinitely. Roughly a dozen tests covering its quoting, scope
+    rendering and shell execution went with it, because they proved properties of text
+    that is no longer emitted. They are not replaced by weaker versions; they are
+    replaced by a guard that no runnable command may reappear before the contracts it
+    needs exist.
     """
 
-    def stub_collab_root(self) -> tuple[Path, Path, Path]:
-        """A fake llm-collab checkout holding a stub launcher, plus a tripwire echo.
-
-        The generated command must name the launcher by ABSOLUTE path, so the stub has
-        to live where ROOT points -- not in the cwd the command runs from. Planting it
-        in the working directory is what let the relative-path defect pass: the test
-        manufactured the very file whose absence is the bug.
-        """
-        collab_root = Path(tempfile.mkdtemp(prefix="collab-root-", dir="/tmp"))
-        (collab_root / "bin").mkdir()
-        argv_log = collab_root / "argv.json"
-        breach = collab_root / "BREACH"
-        write(
-            collab_root / "bin" / "llm-collab",
-            "\n".join(
-                [
-                    "#!/usr/bin/env python3",
-                    "import json, sys",
-                    "from pathlib import Path",
-                    f"log = Path({json.dumps(str(argv_log))})",
-                    "runs = json.loads(log.read_text()) if log.exists() else []",
-                    "argv = sys.argv[1:]",
-                    "assert argv and argv[0] == 'deliver.py', argv",
-                    "runs.append(argv[1:])",
-                    "log.write_text(json.dumps(runs))",
-                ]
-            ),
-        )
-        (collab_root / "bin" / "llm-collab").chmod(0o755)
-        write(
-            collab_root / "echo",
-            "\n".join(["#!/bin/sh", f"touch {shlex.quote(str(breach))}"]),
-        )
-        (collab_root / "echo").chmod(0o755)
-        return collab_root, argv_log, breach
-
-    def run_line(self, prompt: str, collab_root: Path, cwd: Path) -> subprocess.CompletedProcess:
-        line = self.command_line(prompt)
-        return subprocess.run(
-            [POSIX_SHELL, "-c", line],
-            cwd=cwd,
-            text=True,
-            capture_output=True,
-            input="",
-            env={**os.environ, "PATH": f"{collab_root}:{os.environ['PATH']}"},
-        )
-
-    def product_cwd(self) -> Path:
-        """A checkout that is NOT llm-collab and has no bin/ of its own.
-
-        #315 resumes a worker with --cwd set to the packet's product checkout, so this
-        is the directory the instruction is actually read from.
-        """
-        product = Path(tempfile.mkdtemp(prefix="product-cwd-", dir="/tmp"))
-        self.assertFalse((product / "bin").exists())
-        return product
-
-    # AGENTS.md:75 -- a shared contract needs focused coverage for Amiga AND at least one
-    # non-Amiga project. This prompt is shared across every runtime family and project, so
-    # a fixture hardcoded to amiga would let project-specific assumptions in unnoticed.
     PROJECTS = ("amiga", "nuvyr")
 
     def prompt(
@@ -6086,291 +6034,22 @@ class ResumePromptNamesTheReplyChannelTest(unittest.TestCase):
         }
         return session_autobridge_lib.build_resume_prompt(session, message)
 
-    def command_line(self, prompt: str) -> str:
-        """The one emitted COMMAND line.
-
-        Selected by "an absolute launcher path followed by deliver.py", not by "mentions
-        deliver.py": the incomplete-scope prose names deliver.py too, and matching that
-        first made a passing test run a nonexistent `deliver.py` from the prose.
-        """
-        candidates = [
-            raw.strip()
-            for raw in prompt.splitlines()
-            if raw.startswith("  /") and "/bin/llm-collab deliver.py " in raw
-        ]
-        self.assertEqual(1, len(candidates), f"expected one command line, got {candidates}")
-        return candidates[0]
-
-    def command_argv(self, prompt: str) -> list[str]:
-        """The emitted line as a shell would actually split it.
-
-        shlex.split is the point of this helper: the defect it guards was a literal
-        `<repo>` placeholder, which is a redirection to a nonexistent file, not an
-        argument. Asserting that a flag appears in the text cannot see that.
-        """
-        return shlex.split(self.command_line(prompt))
-
-    def flag_value(self, argv: list[str], flag: str) -> str:
-        self.assertIn(flag, argv)
-        return argv[argv.index(flag) + 1]
-
     def test_the_prompt_carries_the_packet_path(self) -> None:
-        self.assertIn(
-            "message_path: Chats/2026-07-26_x__CHAT-REPLY/"
-            "2026-07-26T00-00-00_to-codex_packet.md",
-            self.prompt(),
-        )
-
-    def test_the_prompt_names_the_mailbox_as_the_only_channel(self) -> None:
-        prompt = self.prompt()
-        self.assertIn("Reply through the mailbox", prompt)
-        self.assertIn("only channel the sender reads", prompt)
-
-    def test_the_emitted_command_is_shell_safe_and_carries_the_real_scope(self) -> None:
         for project_id in self.PROJECTS:
             with self.subTest(project_id=project_id):
-                argv = self.command_argv(self.prompt(project_id=project_id))
-                self.assertEqual(
-                    str(session_autobridge_lib.ROOT / "bin" / "llm-collab"), argv[0]
+                self.assertIn(
+                    "message_path: Chats/2026-07-26_x__CHAT-REPLY/"
+                    "2026-07-26T00-00-00_to-codex_packet.md",
+                    self.prompt(project_id=project_id),
                 )
-                self.assertTrue(Path(argv[0]).is_absolute())
-                self.assertEqual("deliver.py", argv[1])
-                self.assertEqual("CHAT-REPLY", self.flag_value(argv, "--chat"))
-                self.assertEqual("codex", self.flag_value(argv, "--from"))
-                self.assertEqual("claude", self.flag_value(argv, "--to"))
-                self.assertEqual(project_id, self.flag_value(argv, "--project"))
-                self.assertEqual("llm-collab", self.flag_value(argv, "--repo-targets"))
 
-    def test_the_command_is_a_template_that_cannot_silently_send_an_empty_reply(self) -> None:
-        """`--body-file -` reads EOF in a noninteractive shell.
-
-        A worker pasting the line verbatim sent an empty body under the literal title
-        "...", and the mailbox reported a successful reply carrying no answer. The
-        placeholders make deliver.py fail instead.
-        """
+    def test_the_prompt_names_the_mailbox_as_the_only_channel(self) -> None:
         for project_id in self.PROJECTS:
             with self.subTest(project_id=project_id):
                 prompt = self.prompt(project_id=project_id)
-                argv = self.command_argv(prompt)
-                self.assertNotIn("-", [self.flag_value(argv, "--body-file")])
-                self.assertIn("REPLACE", self.flag_value(argv, "--body-file"))
-                self.assertIn("REPLACE", self.flag_value(argv, "--title"))
-                self.assertIn("Replace the title and body-file placeholders", prompt)
-
-    def test_a_non_amiga_project_gets_the_same_shared_contract(self) -> None:
-        """The prompt is shared across every project; nothing in it may be amiga-shaped."""
-        amiga = self.command_argv(self.prompt(project_id="amiga"))
-        nuvyr = self.command_argv(self.prompt(project_id="nuvyr"))
-        self.assertEqual("amiga", self.flag_value(amiga, "--project"))
-        self.assertEqual("nuvyr", self.flag_value(nuvyr, "--project"))
-        # Identical apart from the project value itself.
-        self.assertEqual(
-            [t for t in amiga if t != "amiga"], [t for t in nuvyr if t != "nuvyr"]
-        )
-
-    def test_a_non_amiga_packet_scope_is_carried_and_refused_the_same_way(self) -> None:
-        for project_id in self.PROJECTS:
-            with self.subTest(project_id=project_id):
-                argv = self.command_argv(
-                    self.prompt(project_id=project_id, repo_targets=["app", "shared"])
-                )
-                self.assertEqual("app,shared", self.flag_value(argv, "--repo-targets"))
-                bad = self.prompt(project_id=project_id, repo_targets=["app", ""])
-                self.assertIn("declares no usable repo scope", bad)
-
-    def test_the_router_is_the_authority_on_what_scope_is_valid(self) -> None:
-        """No repo-id grammar is re-derived here.
-
-        A local regex forbidding `/` rejected `pixexid/amiga` -- a scope
-        `_repo_target_set` accepts and durable packets already carry -- so a routable
-        reply was declared unusable and silently lost its scope. Every scope the router
-        accepts must stay runnable; shell safety is shlex.join's job, not the grammar's.
-        """
-        canonical = [
-            ["pixexid/amiga"],
-            ["pixexid/amiga", "llm-collab"],
-            ["app"],
-            ["a.b_c-d"],
-            ["UPPER", "lower"],
-            ["llm collab"],
-        ]
-        for scope in canonical:
-            with self.subTest(scope=scope):
-                self.assertIsNotNone(
-                    session_autobridge_lib._repo_target_set(scope),
-                    "fixture must be a scope the canonical validator accepts",
-                )
-                argv = self.command_argv(self.prompt(repo_targets=scope))
-                self.assertEqual(",".join(scope), self.flag_value(argv, "--repo-targets"))
-
-    def test_declared_order_is_preserved_rather_than_set_ordered(self) -> None:
-        """_repo_target_set returns a set; rendering from it would scramble the scope."""
-        scope = ["zzz-last", "aaa-first", "mmm-mid"]
-        argv = self.command_argv(self.prompt(repo_targets=scope))
-        self.assertEqual("zzz-last,aaa-first,mmm-mid", self.flag_value(argv, "--repo-targets"))
-
-    def test_several_repo_targets_render_comma_separated_as_deliver_parses_them(self) -> None:
-        argv = self.command_argv(self.prompt(repo_targets=["llm-collab", "amiga"]))
-        rendered = self.flag_value(argv, "--repo-targets")
-        self.assertEqual("llm-collab,amiga", rendered)
-        # The value must survive deliver.py's own parser, not merely look plausible.
-        self.assertEqual(
-            ["llm-collab", "amiga"],
-            [token.strip() for token in rendered.split(",") if token.strip()],
-        )
-
-    def test_a_packet_with_no_scope_does_not_pretend_the_command_is_runnable(self) -> None:
-        for empty in (None, [], ""):
-            with self.subTest(repo_targets=empty):
-                prompt = self.prompt(repo_targets=empty)
-                self.assertIn("declares no usable repo scope", prompt)
-                self.assertIn("NOT", prompt)
-                self.assertNotIn("--repo-targets", self.command_argv(prompt))
-
-    def test_a_scope_the_router_rejects_yields_no_runnable_command(self) -> None:
-        """Rejection is delegated, not duplicated: whatever the router refuses, so does this."""
-        for scope in ([""], ["llm-collab", ""], ["dup", "dup"], [" pad "], ["llm-collab", 7]):
-            with self.subTest(scope=scope):
-                self.assertIsNone(
-                    session_autobridge_lib._repo_target_set(scope),
-                    "fixture must be a scope the canonical validator rejects",
-                )
-                prompt = self.prompt(repo_targets=scope)
-                self.assertIn("declares no usable repo scope", prompt)
-                self.assertNotIn("--repo-targets", self.command_argv(prompt))
-
-    def test_a_comma_in_a_token_cannot_round_trip_so_no_command_is_offered(self) -> None:
-        """The one constraint this call site owns, and it is about the CLI encoding.
-
-        deliver.py splits --repo-targets on commas, so `a,b` would come back as two
-        scopes and silently WIDEN what the reply claims. The router accepts it because
-        commas are fine in a repo id; only this encoding cannot carry it.
-        """
-        scope = ["llm-collab", "a,b"]
-        self.assertIsNotNone(session_autobridge_lib._repo_target_set(scope))
-        prompt = self.prompt(repo_targets=scope)
-        self.assertIn("declares no usable repo scope", prompt)
-        self.assertNotIn("--repo-targets", self.command_argv(prompt))
-
-    def test_a_hostile_token_the_router_accepts_is_carried_quoted_not_dropped(self) -> None:
-        """Shell safety comes from quoting, so a routable scope is never discarded.
-
-        `safe;echo` is structurally valid to `_repo_target_set`. Dropping it would make
-        the reply unroutable to defend against a shell problem that quoting already
-        solves -- the mistake the local regex made with `pixexid/amiga`.
-        """
-        for token in ("safe;echo", "safe&&echo", "safe|echo", "$(echo)", "`echo`"):
-            with self.subTest(token=token):
-                scope = ["llm-collab", token]
-                self.assertIsNotNone(session_autobridge_lib._repo_target_set(scope))
-                argv = self.command_argv(self.prompt(repo_targets=scope))
-                self.assertEqual(
-                    f"llm-collab,{token}", self.flag_value(argv, "--repo-targets")
-                )
-
-    def test_a_hostile_generated_line_runs_as_exactly_one_command_in_a_real_shell(self) -> None:
-        """The proof shlex.split cannot give: run it, in a shell, and count the commands.
-
-        shlex.split is a tokenizer with no model of `;`, `&&` or `$(...)`, so the earlier
-        metacharacter assertion passed while a hostile scope emitted a line whose second
-        command the shell would execute.
-        """
-        collab_root, argv_log, breach = self.stub_collab_root()
-        product = self.product_cwd()
-        for token in ("safe;echo", "safe&&echo", "safe|echo", "$(echo)", "`echo`"):
-            with self.subTest(token=token):
-                argv_log.unlink(missing_ok=True)
-                breach.unlink(missing_ok=True)
-                with patch.object(session_autobridge_lib, "ROOT", collab_root):
-                    prompt = self.prompt(repo_targets=["llm-collab", token])
-                result = self.run_line(prompt, collab_root, product)
-                self.assertEqual(0, result.returncode, result.stderr)
-                self.assertFalse(breach.exists(), f"injected command executed for {token!r}")
-                runs = json.loads(argv_log.read_text())
-                self.assertEqual(1, len(runs), f"{len(runs)} commands ran for {token!r}")
-                # Carried, quoted, and intact -- not sacrificed to buy shell safety.
-                self.assertEqual(
-                    f"llm-collab,{token}", runs[0][runs[0].index("--repo-targets") + 1]
-                )
-
-    def test_every_dynamic_value_is_quoted_not_just_the_validated_scope(self) -> None:
-        """repo_targets is validated; chat_id, project_id and the agent ids are not.
-
-        They come from the same untrusted frontmatter and are interpolated into the same
-        executable line, so quoting -- not validation -- is what protects them. Proving
-        this also proves the quoting layer itself: with only the hostile-scope tests,
-        replacing shlex.join with a plain join still passed, because validation stopped
-        every hostile token before it could reach the renderer.
-        """
-        collab_root, argv_log, breach = self.stub_collab_root()
-        product = self.product_cwd()
-        cases = [
-            ("chat_id", "CHAT-X;echo", "--chat"),
-            ("chat_id", "CHAT-X$(echo)", "--chat"),
-            ("project_id", "amiga&&echo", "--project"),
-            ("sender_agent_id", "claude|echo", "--to"),
-            ("chat_id", "CHAT-X `echo`", "--chat"),
-        ]
-        for field, hostile, flag in cases:
-            with self.subTest(field=field, value=hostile):
-                argv_log.unlink(missing_ok=True)
-                breach.unlink(missing_ok=True)
-                with patch.object(session_autobridge_lib, "ROOT", collab_root):
-                    prompt = self.prompt(**{field: hostile})
-                result = self.run_line(prompt, collab_root, product)
-                self.assertEqual(0, result.returncode, result.stderr)
-                self.assertFalse(breach.exists(), f"injection via {field}={hostile!r}")
-                runs = json.loads(argv_log.read_text())
-                self.assertEqual(1, len(runs), f"{len(runs)} commands ran for {field}")
-                # The hostile text must arrive as ONE argument, intact.
-                self.assertEqual(hostile, runs[0][runs[0].index(flag) + 1])
-
-    def test_the_command_runs_from_a_product_checkout_not_only_from_llm_collab(self) -> None:
-        """#315 resumes a worker with --cwd set to the PACKET's product checkout.
-
-        A relative `bin/deliver.py` exits 127 there -- `zsh: no such file or directory`
-        -- so the first worker this PR is sequenced to support could never have run the
-        instruction. The earlier shell tests hid it by planting bin/deliver.py inside the
-        working directory they ran from.
-        """
-        collab_root, argv_log, _ = self.stub_collab_root()
-        product = self.product_cwd()
-        with patch.object(session_autobridge_lib, "ROOT", collab_root):
-            prompt = self.prompt(repo_targets=["llm-collab", "amiga"])
-        line = self.command_line(prompt)
-        self.assertIn(str(collab_root / "bin" / "llm-collab"), line)
-
-        result = self.run_line(prompt, collab_root, product)
-        self.assertEqual(0, result.returncode, result.stderr)
-        argv = json.loads(argv_log.read_text())[0]
-        self.assertEqual("llm-collab,amiga", argv[argv.index("--repo-targets") + 1])
-        self.assertEqual("CHAT-REPLY", argv[argv.index("--chat") + 1])
-
-    def test_the_emitted_executable_path_is_absolute(self) -> None:
-        argv = self.command_argv(self.prompt())
-        self.assertTrue(Path(argv[0]).is_absolute(), argv[0])
-        self.assertEqual(
-            str(session_autobridge_lib.ROOT / "bin" / "llm-collab"), argv[0]
-        )
-
-    def test_the_incomplete_command_prose_states_the_real_deliver_contract(self) -> None:
-        """Since #309 deliver.py writes durably and reports the refusal loudly.
-
-        The prose said it "will drop the reply silently", which was the pre-#309
-        behaviour. Telling a worker its packet vanished when it is sitting readable in
-        the mailbox sends it looking for the wrong failure.
-        """
-        prompt = self.prompt(repo_targets=None)
-        self.assertNotIn("silently", prompt)
-        self.assertIn("writes the packet durably", prompt)
-        self.assertIn("inbox.py", prompt)
-        self.assertIn("runtime dispatch refusal", prompt)
-        # Connector P2: the refusal is conditional on the RECIPIENT declaring a scope.
-        # repo_scope_matches returns (True, "unscoped") for an unscoped subscriber, so an
-        # unconditional warning told workers a dispatch would fail when it would succeed.
-        self.assertIn("If the", prompt)
-        self.assertIn("recipient declares a repo scope", prompt)
-        self.assertIn("An unscoped recipient accepts it either way", prompt)
+                self.assertIn("Reply through the mailbox", prompt)
+                self.assertIn("only channel the sender reads", prompt)
+                self.assertIn("deliver.py", prompt)
 
     def test_the_prompt_says_a_pr_comment_does_not_reach_the_sender(self) -> None:
         self.assertIn("does NOT reach the sender", self.prompt())
@@ -6380,3 +6059,39 @@ class ResumePromptNamesTheReplyChannelTest(unittest.TestCase):
         prompt = self.prompt()
         self.assertIn("connector review", prompt)
         self.assertIn("deliver the packet as well", prompt)
+
+    def test_no_runnable_reply_command_is_emitted(self) -> None:
+        """The withdrawal, pinned.
+
+        A copyable invocation cannot be correct until two contracts exist: a validated
+        return address, so a delayed reply cannot wake a rebound runtime that never saw
+        the request; and a loop-protection marker, without which
+        should_skip_for_loop_protection returns (False, "ok") and two runtime-triggered
+        workers following the instruction wake each other indefinitely. Naming the
+        channel needs neither. Reinstating a command here before those land re-opens
+        both.
+        """
+        for project_id in self.PROJECTS:
+            for repo_targets in (["llm-collab"], ["pixexid/amiga", "app"], None, []):
+                with self.subTest(project_id=project_id, repo_targets=repo_targets):
+                    prompt = self.prompt(project_id=project_id, repo_targets=repo_targets)
+                    for flag in ("--chat", "--from", "--to", "--project",
+                                 "--repo-targets", "--body-file", "--title"):
+                        self.assertNotIn(flag, prompt, f"{flag} is part of a runnable command")
+                    for line in prompt.splitlines():
+                        self.assertFalse(
+                            line.startswith("  /") or line.strip().startswith("bin/"),
+                            f"looks like a copyable command: {line!r}",
+                        )
+
+    def test_the_prompt_never_interpolates_packet_text_into_a_command(self) -> None:
+        """Hostile frontmatter has nothing executable to reach any more.
+
+        The withdrawn template rendered chat_id, project_id and the agent ids into a
+        shell line; unquoted, `chat_id: "CHAT-X;echo"` injected a second command. With no
+        command emitted, those values appear only as prompt metadata.
+        """
+        prompt = self.prompt(chat_id="CHAT-X;echo", project_id="amiga&&echo")
+        self.assertIn("chat_id: CHAT-X;echo", prompt)
+        for line in prompt.splitlines():
+            self.assertFalse(line.startswith("  /"), f"executable-looking line: {line!r}")
