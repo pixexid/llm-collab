@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Mapping
 import unittest
 from pathlib import Path
 
@@ -716,51 +717,74 @@ class ReviewLoopCapContractTest(unittest.TestCase):
 
     CLASSIFY_MAY_READ = frozenset({"isResolved", "comments"})
 
-    class StrictThread(dict):
-        """A thread that refuses every top-level key classify() has no business reading.
+    class StrictThread(Mapping):
+        """A read-only Mapping that refuses every key classify() has no business reading.
 
-        This is the guard, and it is deliberately not a list of forbidden names. Two
-        earlier versions were name-based and both were defeated: first by adding the
-        exclusion inside classify() where no banned identifier appeared, then by
-        choosing a closure field I had not thought to enumerate. Enumerating more names
-        repeats the defect, because the attacker picks the name last.
+        Four versions of this guard have now been defeated, each by the same move at a
+        different depth:
 
-        Inverting it removes the guessing. Only isResolved and comments may be read at
-        all, so ANY new closure lookup fails on access regardless of spelling.
+        1. introspection for banned helper names -- beaten by putting the exclusion
+           inside classify(), where no banned identifier appears;
+        2. a positive contract over enumerated closure field names -- beaten by
+           `manualDisposition`, a name not on the list;
+        3. a dict subclass overriding __getitem__ and get -- beaten by
+           `t.setdefault("reviewDisposition", False)`, because every OTHER mapping
+           method was inherited straight from dict and never saw the guard.
+
+        Subclassing dict was the mistake: it hands the caller setdefault, pop,
+        __contains__, iteration and mutation for free, so guarding two methods guards
+        two methods. collections.abc.Mapping supplies no storage and no back doors --
+        get, __contains__, keys, items and values are all mixin methods routed through
+        __getitem__, and setdefault/pop/__setitem__ do not exist at all, so reaching for
+        one raises rather than quietly succeeding.
         """
 
-        allowed = frozenset({"isResolved", "comments"})
+        ALLOWED = frozenset({"isResolved", "comments"})
+
+        def __init__(self, data):
+            self._data = dict(data)
 
         def __getitem__(self, key):
-            if key not in self.allowed:
+            if key not in self.ALLOWED:
                 raise AssertionError(
-                    f"classify() read {key!r}; it may consult only {sorted(self.allowed)}"
+                    f"classify() read {key!r}; it may consult only {sorted(self.ALLOWED)}"
                 )
-            return super().__getitem__(key)
+            return self._data[key]
 
-        def get(self, key, default=None):
-            if key not in self.allowed:
-                raise AssertionError(
-                    f"classify() read {key!r} via get(); it may consult only "
-                    f"{sorted(self.allowed)}"
-                )
-            return super().get(key, default)
+        def __iter__(self):
+            # Iteration raises rather than yielding the permitted keys. Yielding them
+            # made a scan -- `any(k.startswith("review") for k in t)` -- inert in the
+            # test while it would still suppress findings against a real GraphQL dict
+            # in production: a mutation that cannot fail here but bites there is worse
+            # than one that is simply uncaught. classify() has no legitimate reason to
+            # enumerate a thread's keys, so enumerating is itself the violation.
+            raise AssertionError(
+                "classify() iterated a thread's keys; it may consult only "
+                f"{sorted(self.ALLOWED)} by direct access"
+            )
+
+        def __len__(self):
+            raise AssertionError("classify() measured a thread; it may only read keys")
+
+        def hidden(self):
+            """Test-only view of what is stored but unreadable."""
+            return {k: v for k, v in self._data.items() if k not in self.ALLOWED}
 
     def strict_thread(self, oid, *, resolved, decorated):
-        node = self.StrictThread({
+        data = {
             "isResolved": resolved,
             "comments": {"nodes": [{
                 "commit": {"oid": oid},
                 "originalCommit": {"oid": oid},
                 "pullRequestReview": {"commit": {"oid": oid}},
             }]},
-        })
+        }
         if decorated:
-            # Stored through dict.__setitem__ so they are PRESENT but unreadable:
-            # a lookup raises rather than silently returning a falsy default.
-            for field, value in self.CLOSURE_LOOKING_FIELDS.items():
-                dict.__setitem__(node, field, value)
-            dict.__setitem__(node, "someFieldNobodyHasThoughtOfYet", True)
+            # Present in the underlying store but unreadable through any access path,
+            # so a lookup raises rather than quietly returning a falsy default.
+            data.update(self.CLOSURE_LOOKING_FIELDS)
+            data["someFieldNobodyHasThoughtOfYet"] = True
+        node = self.StrictThread(data)
         return node
 
     def test_classify_consults_only_isresolved_and_origin(self):
@@ -797,14 +821,30 @@ class ReviewLoopCapContractTest(unittest.TestCase):
         against any implementation at all.
         """
         node = self.strict_thread("head999", resolved=False, decorated=True)
-        for key in ("hasWrittenDisposition", "manualDisposition",
+        for key in ("hasWrittenDisposition", "manualDisposition", "reviewDisposition",
                     "someFieldNobodyHasThoughtOfYet"):
             with self.subTest(key=key):
-                self.assertIn(key, dict(node), "the field must be present but unreadable")
+                if key != "reviewDisposition":
+                    self.assertIn(key, node.hidden(), "must be present but unreadable")
                 with self.assertRaises(AssertionError):
                     node[key]
                 with self.assertRaises(AssertionError):
                     node.get(key)
+                with self.assertRaises(AssertionError):
+                    key in node
+                # Mutating access paths must not exist at all, so reaching for one is
+                # an error rather than a silent bypass.
+                for method in ("setdefault", "pop", "update", "__setitem__"):
+                    self.assertFalse(
+                        hasattr(node, method),
+                        f"{method} would bypass the allowed-key contract",
+                    )
+        # Enumeration is refused outright, so a scan cannot find a hidden key here and
+        # then behave differently against a real dict in production.
+        with self.assertRaises(AssertionError):
+            set(node)
+        with self.assertRaises(AssertionError):
+            len(node)
         # And the two permitted keys must still work, or classify() could not run.
         self.assertIs(False, node["isResolved"])
         self.assertIn("nodes", node["comments"])
