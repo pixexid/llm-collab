@@ -1201,6 +1201,44 @@ class ReviewLoopCapContractTest(unittest.TestCase):
             "the set must be selected by lane rather than stated unconditionally",
         )
 
+    def test_an_unrequested_tier_a_head_offers_no_waiver_alternative(self):
+        """"Fix the missing request, OR go to the operator disposition" was a choice.
+
+        Requested-review precedence is reachable only after a request and its single
+        re-trigger have both existed and run out. Offering it beside the missing request
+        reopened the closed path where a worker never requests review at all and asks for
+        authorization on an unreviewed head instead -- the waiver is the end of the
+        requested flow, not a substitute for entering it.
+        """
+        import re
+
+        text = re.sub(r"\s+", " ", WORKFLOW_DOC.read_text(encoding="utf-8"))
+        self.assertNotIn("Fix the missing request, or follow", text)
+        self.assertIn("the two cases are **not** alternatives", text)
+        self.assertIn("issue it. That is the only move", text)
+        self.assertRegex(
+            text,
+            r"reachable only after a request and its single re-trigger have both existed",
+        )
+
+    def test_a_finding_may_be_rejected_in_writing_without_a_fix(self):
+        """Requiring a fix for every finding left an invalid one with no legal move.
+
+        The amended-head sequence began by requiring the pointed issue to be fixed, so a
+        wrong or out-of-scope finding forced an unwarranted change or a stall -- and there
+        is no amended head in that case for the rest of the sequence to apply to. The
+        contract asks for written adjudication, which includes rejecting.
+        """
+        import re
+
+        text = re.sub(r"\s+", " ", HANDOFF_DOC.read_text(encoding="utf-8"))
+        self.assertIn("adjudicated in writing — which is not the same as accepted", text)
+        self.assertIn("**Reject it.**", text)
+        self.assertIn("no code changes, so there is no amended head".lower(),
+                      text.lower())
+        # The distinction the fix path depends on: rejecting does not stale the request.
+        self.assertIn("the existing exact-head request stands", text)
+
     def test_the_rule_heading_covers_resolved_threads(self):
         """A worker who reads only the bold heading is the one who loses a finding.
 

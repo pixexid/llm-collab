@@ -263,12 +263,26 @@ an absent request is a **gate violation to fix, not a delay to wait out**; at
 Tier B/C there is nothing to wait for. This compact handoff rule must not define
 a competing timer or disposition rule.
 
-If GitHub Codex comments on the PR, fix the pointed issue, rerun the manual
-branch-diff review and required checks, then **issue a new exact-head request for
-the amended head**. Automatic review is off, so nothing arrives unrequested: the
-fix push invalidates every prior-head signal and produces no replacement on its
-own. Waiting on the amended head's "automatic artifacts" waits forever. Evaluate
-that head from scratch once the requested signal arrives. Do not substitute a resolved older thread or
+If GitHub Codex comments on the PR, every finding is adjudicated in writing —
+which is not the same as accepted. Two paths, and which one applies depends on
+whether the code changes:
+
+- **Fix it.** Repair the pointed issue, rerun the manual branch-diff review and
+  required checks, then **issue a new exact-head request for the amended head**.
+- **Reject it.** A finding that is wrong, out of scope, or already handled is
+  answered with a written disposition posted on that thread, naming the head it
+  was judged at. No code changes, so there is no amended head and no new request:
+  the existing exact-head request stands, and a re-review is requested on the
+  **same** head only if the rejection itself needs one.
+
+Requiring a fix for every finding left an invalid one with no legal move — a
+worker had to either make an unwarranted change or stall — and the governing
+contract asks for adjudication, not compliance.
+
+Automatic review is off, so nothing arrives unrequested: a fix push invalidates
+every prior-head signal and produces no replacement on its own. Waiting on the
+amended head's "automatic artifacts" waits forever. Evaluate that head from
+scratch once the requested signal arrives. Do not substitute a resolved older thread or
 stale inline review-thread object for current-head evidence. Delete the
 heartbeat before post-merge cleanup.
 

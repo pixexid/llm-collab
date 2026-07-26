@@ -526,9 +526,18 @@ explicit re-review verdict.
 
 If neither a terminal GitHub Codex verdict nor a head-attributable connector
 `+1` exists for the exact current head, a Tier A head does not merge — there is
-no elapsed-time substitute. Fix the missing request, or follow
-[Explicit requested-review precedence](#explicit-requested-review-precedence)
-to the operator disposition. A Tier B/C head **for which no review was requested**
+no elapsed-time substitute. What to do next depends on whether a request exists
+for this head, and the two cases are **not** alternatives:
+
+- **No request for this head** (never made, or staled by an amendment): issue it.
+  That is the only move. The operator-disposition route is not available here —
+  it is reachable only after a request and its single re-trigger have both existed
+  and run out, and offering it as a choice on an unrequested head recreates the
+  closed path where a worker skips review entirely and asks for authorization
+  instead.
+- **A request for this head exists and has gone unanswered**: follow
+  [Explicit requested-review precedence](#explicit-requested-review-precedence)
+  through the single re-trigger to the operator disposition. A Tier B/C head **for which no review was requested**
 needs no connector signal at all. A requested review is pending whatever its tier:
 once a request exists, precedence is tier-agnostic, so a voluntarily or
 operator-requested Tier B/C review is outstanding until a terminal signal or an
