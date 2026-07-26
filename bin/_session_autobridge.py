@@ -1996,9 +1996,50 @@ def execute_codex_app_server_trigger(session: dict, message: dict, runtime_home:
         if model:
             turn_payload["model"] = model
         started = client.request("turn/start", turn_payload)
+
+        def unobserved(detail: str) -> dict[str, Any]:
+            """The turn was ACCEPTED and we stopped watching it.
+
+            turn/start returned before the wait began, so the server-side turn is running whatever
+            happens to this socket afterwards. Reporting a failure here would leave the packet
+            unprocessed, and the next poll would issue a SECOND turn/start carrying the same
+            packet -- the recipient reads it twice and the operator is notified twice. Delivery is
+            what this call is responsible for; observing the reply is best-effort.
+            """
+            return {
+                "command": [
+                    "codex-app-server",
+                    str(endpoint["url"]),
+                    "turn/start",
+                    runtime_session_id,
+                ],
+                "derived_command": True,
+                "adapter": "codex_app_server",
+                "app_server": {
+                    "url": endpoint["url"],
+                    "pid": endpoint.get("pid"),
+                    "source": endpoint.get("source"),
+                },
+                "timeout_seconds": timeout_seconds,
+                "returncode": 0,
+                "stdout": assistant_text.strip(),
+                "stderr": "",
+                "turn_started": started,
+                "terminal_status": "unobserved",
+                "delivery_observed": False,
+                "unobserved_reason": detail,
+                "notifications": notifications[-50:],
+            }
+
         deadline = time.monotonic() + timeout_seconds
         while time.monotonic() < deadline:
-            message_payload = client.recv_json()
+            try:
+                message_payload = client.recv_json()
+            except (TimeoutError, OSError, ValueError) as exc:
+                # Every way this read can fail -- socket timeout, peer reset, a truncated or
+                # unparseable frame -- is a lost VIEW of a turn that is already running. They all
+                # land here so no single one of them can resurrect the packet for redelivery.
+                return unobserved(f"{type(exc).__name__}: {exc}")
             method = str(message_payload.get("method", ""))
             if not method:
                 continue
@@ -2015,7 +2056,7 @@ def execute_codex_app_server_trigger(session: dict, message: dict, runtime_home:
                 terminal = params if isinstance(params, dict) else {"raw": params}
                 break
         if terminal is None:
-            raise TimeoutError("Codex app-server turn did not complete before timeout")
+            return unobserved("turn did not reach a terminal event before the timeout")
 
     turn = terminal.get("turn") if isinstance(terminal, dict) else None
     status = turn.get("status") if isinstance(turn, dict) else None
@@ -2035,6 +2076,7 @@ def execute_codex_app_server_trigger(session: dict, message: dict, runtime_home:
         "stderr": "" if status == "completed" else json.dumps(error or terminal, sort_keys=True),
         "turn_started": started,
         "terminal_status": status,
+        "delivery_observed": True,
         "notifications": notifications[-50:],
     }
 

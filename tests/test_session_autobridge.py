@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from contextlib import redirect_stdout
 from io import StringIO
@@ -5973,3 +5974,304 @@ class RenamedCodexBinaryDiscoveryTest(unittest.TestCase):
             "/Applications/ChatGPT.app/Contents/Resources/codex "
             "-c features.code_mode_host=true app-server --analytics-default-enabled",
         ]))
+
+
+class UnobservedTurnIsNotRedeliveredTest(unittest.TestCase):
+    """A turn we stop watching has still been delivered.
+
+    turn/start returns before the reply stream is read, so the recipient already has the packet.
+    Reporting the lost view as a dispatch failure left the packet unprocessed and the next poll
+    sent it a second time -- observed live on 2026-07-26, where one review packet produced two
+    turn/start calls and two operator notifications 3m16s apart.
+    """
+
+    def serve(
+        self,
+        *,
+        after_turn_start: str,
+        deltas: int = 1,
+    ) -> tuple[int, threading.Thread, threading.Event]:
+        """A fake app-server that accepts a turn and then `after_turn_start`.
+
+        "silence" holds the socket open sending nothing; "close" drops it. Both are ways to lose
+        sight of a turn that the server is still running.
+        """
+        ready = threading.Event()
+        server = socket.socket()
+        server.bind(("127.0.0.1", 0))
+        server.listen(1)
+        port = server.getsockname()[1]
+
+        def read_exact(conn: socket.socket, count: int) -> bytes:
+            chunks: list[bytes] = []
+            remaining = count
+            while remaining:
+                chunk = conn.recv(remaining)
+                if not chunk:
+                    raise ConnectionError("closed")
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            return b"".join(chunks)
+
+        def read_frame(conn: socket.socket) -> dict:
+            _, second = read_exact(conn, 2)
+            length = second & 0x7F
+            if length == 126:
+                length = int.from_bytes(read_exact(conn, 2), "big")
+            elif length == 127:
+                length = int.from_bytes(read_exact(conn, 8), "big")
+            mask = read_exact(conn, 4) if second & 0x80 else b""
+            payload = read_exact(conn, length) if length else b""
+            if mask:
+                payload = bytes(byte ^ mask[index % 4] for index, byte in enumerate(payload))
+            return json.loads(payload.decode("utf-8"))
+
+        def write_frame(conn: socket.socket, payload: dict) -> None:
+            body = json.dumps(payload).encode("utf-8")
+            header = bytearray([0x81])
+            if len(body) < 126:
+                header.append(len(body))
+            else:
+                header.extend([126, (len(body) >> 8) & 0xFF, len(body) & 0xFF])
+            conn.sendall(bytes(header) + body)
+
+        def run() -> None:
+            ready.set()
+            conn, _ = server.accept()
+            try:
+                request = b""
+                while b"\r\n\r\n" not in request:
+                    request += conn.recv(4096)
+                headers = request.decode("iso-8859-1")
+                key_line = next(
+                    line for line in headers.splitlines()
+                    if line.lower().startswith("sec-websocket-key:")
+                )
+                key = key_line.split(":", 1)[1].strip()
+                accept = base64.b64encode(
+                    hashlib.sha1(
+                        (key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode("ascii")
+                    ).digest()
+                ).decode("ascii")
+                conn.sendall(
+                    (
+                        "HTTP/1.1 101 Switching Protocols\r\n"
+                        "Upgrade: websocket\r\n"
+                        "Connection: Upgrade\r\n"
+                        f"Sec-WebSocket-Accept: {accept}\r\n\r\n"
+                    ).encode("ascii")
+                )
+                while True:
+                    frame = read_frame(conn)
+                    method = frame.get("method")
+                    if not frame.get("id"):
+                        continue
+                    if method == "model/list":
+                        write_frame(conn, {
+                            "jsonrpc": "2.0", "id": frame["id"],
+                            "result": {"data": [{"id": "gpt-test", "isDefault": True}]},
+                        })
+                    elif method == "turn/start":
+                        write_frame(conn, {
+                            "jsonrpc": "2.0", "id": frame["id"],
+                            "result": {"turn": {"id": "turn-1", "status": "inProgress"}},
+                        })
+                        for index in range(deltas):
+                            write_frame(conn, {
+                                "jsonrpc": "2.0", "method": "item/agentMessage/delta",
+                                "params": {"item": {"type": "agentMessage", "text": f"part{index}"}},
+                            })
+                        if after_turn_start == "close":
+                            break
+                        if after_turn_start == "chatty":
+                            # Keep the stream alive past the deadline without ever reaching a
+                            # terminal event: the live failure, where a long review turn was
+                            # still emitting deltas when the caller gave up.
+                            chatty_until = time.monotonic() + 2.5
+                            while time.monotonic() < chatty_until:
+                                write_frame(conn, {
+                                    "jsonrpc": "2.0", "method": "item/agentMessage/delta",
+                                    "params": {"item": {"type": "agentMessage", "text": "."}},
+                                })
+                                time.sleep(0.05)
+                            break
+                        # "silence": hold the connection open past the caller's timeout.
+                        time.sleep(3)
+                        break
+                    else:
+                        write_frame(conn, {"jsonrpc": "2.0", "id": frame["id"], "result": {}})
+            except (OSError, ConnectionError, StopIteration):
+                pass
+            finally:
+                conn.close()
+                server.close()
+
+        thread = threading.Thread(target=run, daemon=True)
+        thread.start()
+        ready.wait(timeout=2)
+        return port, thread, ready
+
+    def trigger(self, port: int) -> dict:
+        session = {
+            "session_id": "SESSION-UNOBSERVED",
+            "agent_id": "cdx2",
+            "project_id": "amiga",
+            "chat_id": "CHAT-UNOBSERVED",
+            "runtime": {
+                "family": "codex_app",
+                "session_id": "codex-thread-unobserved",
+                "timeout_seconds": 1,
+                "model": "gpt-test",
+            },
+        }
+        message = {
+            "path": "Chats/x/2026-04-22T00-00-00_to-cdx2_packet.md",
+            "body": "Body.",
+            "frontmatter": {
+                "chat_id": "CHAT-UNOBSERVED",
+                "from": "claude",
+                "to": "cdx2",
+                "title": "One packet",
+                "project_id": "amiga",
+                "target_session_id": "codex-thread-unobserved",
+            },
+        }
+        with patch.dict(
+            os.environ,
+            {"LLM_COLLAB_CODEX_APP_SERVER_URL": f"ws://127.0.0.1:{port}"},
+            clear=False,
+        ):
+            return session_autobridge_lib.execute_codex_app_server_trigger(session, message, None)
+
+    def test_a_turn_that_outlives_the_timeout_reports_delivered_not_failed(self) -> None:
+        port, thread, _ = self.serve(after_turn_start="silence")
+        result = self.trigger(port)
+        thread.join(timeout=5)
+        self.assertEqual(0, result["returncode"], "a delivered packet must not be retried")
+        self.assertEqual("unobserved", result["terminal_status"])
+        self.assertFalse(result["delivery_observed"])
+        self.assertIn("turn_started", result)
+
+    def test_a_dropped_connection_after_turn_start_is_also_delivered(self) -> None:
+        """The read can fail as well as expire; both lose the same view of a running turn."""
+        port, thread, _ = self.serve(after_turn_start="close")
+        result = self.trigger(port)
+        thread.join(timeout=5)
+        self.assertEqual(0, result["returncode"])
+        self.assertEqual("unobserved", result["terminal_status"])
+        self.assertFalse(result["delivery_observed"])
+
+    def test_a_turn_still_streaming_at_the_deadline_reports_delivered_not_failed(self) -> None:
+        """The live shape: deltas were still arriving when the 180s budget ran out."""
+        port, thread, _ = self.serve(after_turn_start="chatty")
+        result = self.trigger(port)
+        thread.join(timeout=5)
+        self.assertEqual(0, result["returncode"], "a delivered packet must not be retried")
+        self.assertEqual("unobserved", result["terminal_status"])
+        self.assertIn("terminal event", result["unobserved_reason"])
+        self.assertIn("item/agentMessage/delta", result["notifications"])
+
+    def test_partial_reply_text_collected_before_the_view_was_lost_is_kept(self) -> None:
+        port, thread, _ = self.serve(after_turn_start="silence", deltas=2)
+        result = self.trigger(port)
+        thread.join(timeout=5)
+        self.assertEqual("part0part1", result["stdout"])
+
+    def test_a_completed_turn_still_reports_an_observed_delivery(self) -> None:
+        """The new flag must distinguish the two, or it certifies nothing."""
+        source = Path(session_autobridge_lib.__file__).read_text(encoding="utf-8")
+        body = source[source.index("def execute_codex_app_server_trigger"):]
+        body = body[: body.index("\ndef ", 1)]
+        self.assertIn('"delivery_observed": True', body)
+        self.assertIn('"delivery_observed": False', body)
+        self.assertNotIn("raise TimeoutError", body)
+
+
+class AnnouncementIsCommittedBeforeDispatchTest(unittest.TestCase):
+    """A failed dispatch must not replay the announcement.
+
+    `seen_paths` was committed after dispatch, so any exception out of the autobridge -- including
+    the timed-out turn above -- skipped it for EVERY message in that poll, and the next poll
+    re-emitted new_message and re-sent the desktop notification for all of them, forever.
+    """
+
+    def workspace(self) -> Path:
+        root = Path(tempfile.mkdtemp(prefix="lca-watch-", dir="/tmp"))
+        write_json(
+            root / "collab.config.json",
+            {
+                "workspace_name": "test-collab",
+                "schema_version": 2,
+                "workspace_id": "ws_alpha",
+                "projects_root": str(root),
+                "project_state_root": str(root / "project-state"),
+                "poll_interval_seconds": 15,
+                "notifications_enabled": False,
+            },
+        )
+        write_json(root / "projects.json", {"projects": [{"id": "amiga", "display_name": "Amiga", "repos": {"app": "."}}]})
+        write_json(root / "agents.json", {"agents": [{"id": "cdx2", "display_name": "CDX2"}]})
+        write(root / "agents" / "cdx2" / "identity.md", "# Identity: cdx2\n")
+
+        message_rel = "Chats/2026-04-22_watch__CHAT-WATCH/2026-04-22T00-00-00_to-cdx2_packet.md"
+        write_json(root / "Chats" / "2026-04-22_watch__CHAT-WATCH" / "meta.json",
+                   {"chat_id": "CHAT-WATCH", "project_id": "amiga"})
+        write(
+            root / message_rel,
+            "\n".join([
+                "---",
+                "chat_id: CHAT-WATCH",
+                "from: claude",
+                "to: cdx2",
+                "title: One packet",
+                "priority: normal",
+                "project_id: amiga",
+                "sent_utc: 2026-04-22T00:00:00+00:00",
+                "---",
+                "",
+                "Body.",
+            ]),
+        )
+        write_json(root / "agents" / "cdx2" / "inbox.json",
+                   {"agent": "cdx2", "unread": [message_rel], "read": []})
+        return root, message_rel
+
+    def run_watcher(self, root: Path, polls: int) -> list[dict]:
+        driver = root / "drive_watcher.py"
+        write(
+            driver,
+            "\n".join([
+                "import sys",
+                f"sys.path.insert(0, {str(REPO_ROOT / 'bin')!r})",
+                "import watch_inbox",
+                "def boom(*args, **kwargs):",
+                "    raise TimeoutError('Codex app-server turn did not complete before timeout')",
+                "watch_inbox.dispatch_autobridge = boom",
+                "watch_inbox.send_notification = lambda *a, **k: None",
+                f"sys.argv = ['watch_inbox.py', '--me', 'cdx2', '--json', '--poll-seconds', '1', '--max-polls', '{polls}']",
+                "watch_inbox.main()",
+            ]),
+        )
+        result = subprocess.run(
+            [sys.executable, str(driver)],
+            cwd=root,
+            text=True,
+            capture_output=True,
+            env={**os.environ, "PYTHONPATH": os.pathsep.join([str(REPO_ROOT), str(REPO_ROOT / "bin"), os.environ.get("PYTHONPATH", "")])},
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        return [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
+
+    def test_one_message_is_announced_once_even_when_every_dispatch_fails(self) -> None:
+        root, message_rel = self.workspace()
+        events = self.run_watcher(root, polls=4)
+        announcements = [e for e in events if e.get("event") == "new_message" and e.get("detail") == message_rel]
+        self.assertEqual(1, len(announcements),
+                         f"announced {len(announcements)}x across 4 failing polls: {events}")
+
+    def test_the_dispatch_failure_is_still_reported_every_poll(self) -> None:
+        """Suppressing the replay must not suppress the error itself."""
+        root, _ = self.workspace()
+        events = self.run_watcher(root, polls=3)
+        errors = [e for e in events if e.get("event") == "error"]
+        self.assertEqual(3, len(errors), events)
