@@ -1217,7 +1217,11 @@ def _reply_command_lines(session: dict, fm: dict) -> list[str]:
         isinstance(token, str) and REPO_TARGET_TOKEN_RE.match(token) for token in declared
     )
     argv = [
-        "bin/deliver.py",
+        # ABSOLUTE, resolved from the llm-collab workspace root. A relative bin/deliver.py
+        # is only runnable from this checkout, and the first worker this instruction is
+        # written for is resumed by #315 with --cwd set to the packet's PRODUCT checkout,
+        # where that path does not exist -- exit 127 before deliver.py is reached.
+        str(ROOT / "bin" / "deliver.py"),
         "--chat", str(fm.get("chat_id", "")),
         "--from", str(session["agent_id"]),
         "--to", str(fm.get("sender_agent_id", fm.get("from", ""))),

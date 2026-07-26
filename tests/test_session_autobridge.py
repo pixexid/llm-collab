@@ -5986,6 +5986,61 @@ class ResumePromptNamesTheReplyChannelTest(unittest.TestCase):
     so the reply never reached the sender and the operator had to relay it by hand.
     """
 
+    def stub_collab_root(self) -> tuple[Path, Path, Path]:
+        """A fake llm-collab checkout holding a stub deliver.py, plus a tripwire echo.
+
+        The generated command must name deliver.py by ABSOLUTE path, so the stub has to
+        live where ROOT points -- not in the cwd the command runs from. Planting
+        `bin/deliver.py` in the working directory is what let the relative-path defect
+        pass: the test manufactured the very file whose absence is the bug.
+        """
+        collab_root = Path(tempfile.mkdtemp(prefix="collab-root-", dir="/tmp"))
+        (collab_root / "bin").mkdir()
+        argv_log = collab_root / "argv.json"
+        breach = collab_root / "BREACH"
+        write(
+            collab_root / "bin" / "deliver.py",
+            "\n".join(
+                [
+                    "#!/usr/bin/env python3",
+                    "import json, sys",
+                    "from pathlib import Path",
+                    f"log = Path({json.dumps(str(argv_log))})",
+                    "runs = json.loads(log.read_text()) if log.exists() else []",
+                    "runs.append(sys.argv[1:])",
+                    "log.write_text(json.dumps(runs))",
+                ]
+            ),
+        )
+        (collab_root / "bin" / "deliver.py").chmod(0o755)
+        write(
+            collab_root / "echo",
+            "\n".join(["#!/bin/sh", f"touch {shlex.quote(str(breach))}"]),
+        )
+        (collab_root / "echo").chmod(0o755)
+        return collab_root, argv_log, breach
+
+    def run_line(self, prompt: str, collab_root: Path, cwd: Path) -> subprocess.CompletedProcess:
+        line = self.command_line(prompt)
+        return subprocess.run(
+            ["/bin/zsh", "-c", line],
+            cwd=cwd,
+            text=True,
+            capture_output=True,
+            input="",
+            env={**os.environ, "PATH": f"{collab_root}:{os.environ['PATH']}"},
+        )
+
+    def product_cwd(self) -> Path:
+        """A checkout that is NOT llm-collab and has no bin/ of its own.
+
+        #315 resumes a worker with --cwd set to the packet's product checkout, so this
+        is the directory the instruction is actually read from.
+        """
+        product = Path(tempfile.mkdtemp(prefix="product-cwd-", dir="/tmp"))
+        self.assertFalse((product / "bin").exists())
+        return product
+
     def prompt(self, *, repo_targets: Any = ["llm-collab"], **overrides: str) -> str:
         session = {
             "session_id": "SESSION-REPLY",
@@ -6012,6 +6067,21 @@ class ResumePromptNamesTheReplyChannelTest(unittest.TestCase):
         }
         return session_autobridge_lib.build_resume_prompt(session, message)
 
+    def command_line(self, prompt: str) -> str:
+        """The one emitted COMMAND line.
+
+        Selected by "an absolute path ending in deliver.py", not by "mentions
+        deliver.py": the incomplete-scope prose names deliver.py too, and matching that
+        first made a passing test run a nonexistent `deliver.py` from the prose.
+        """
+        candidates = [
+            raw.strip()
+            for raw in prompt.splitlines()
+            if raw.startswith("  /") and "/bin/deliver.py " in raw
+        ]
+        self.assertEqual(1, len(candidates), f"expected one command line, got {candidates}")
+        return candidates[0]
+
     def command_argv(self, prompt: str) -> list[str]:
         """The emitted line as a shell would actually split it.
 
@@ -6019,10 +6089,7 @@ class ResumePromptNamesTheReplyChannelTest(unittest.TestCase):
         `<repo>` placeholder, which is a redirection to a nonexistent file, not an
         argument. Asserting that a flag appears in the text cannot see that.
         """
-        line = next(
-            raw for raw in prompt.splitlines() if raw.strip().startswith("bin/deliver.py")
-        )
-        return shlex.split(line)
+        return shlex.split(self.command_line(prompt))
 
     def flag_value(self, argv: list[str], flag: str) -> str:
         self.assertIn(flag, argv)
@@ -6042,7 +6109,10 @@ class ResumePromptNamesTheReplyChannelTest(unittest.TestCase):
 
     def test_the_emitted_command_is_shell_safe_and_carries_the_real_scope(self) -> None:
         argv = self.command_argv(self.prompt())
-        self.assertEqual("bin/deliver.py", argv[0])
+        self.assertEqual(
+            str(session_autobridge_lib.ROOT / "bin" / "deliver.py"), argv[0]
+        )
+        self.assertTrue(Path(argv[0]).is_absolute())
         self.assertEqual("CHAT-REPLY", self.flag_value(argv, "--chat"))
         self.assertEqual("codex", self.flag_value(argv, "--from"))
         self.assertEqual("claude", self.flag_value(argv, "--to"))
@@ -6051,10 +6121,7 @@ class ResumePromptNamesTheReplyChannelTest(unittest.TestCase):
 
     def test_no_argument_is_a_shell_metacharacter(self) -> None:
         """`<repo>` split to a redirection, not an argument. Nothing may do that again."""
-        line = next(
-            raw for raw in self.prompt().splitlines()
-            if raw.strip().startswith("bin/deliver.py")
-        )
+        line = self.command_line(self.prompt())
         for bad in ("<", ">", "|", "&", "$(", "`"):
             self.assertNotIn(bad, line.replace("--body-file -", ""))
 
@@ -6106,54 +6173,18 @@ class ResumePromptNamesTheReplyChannelTest(unittest.TestCase):
         """The proof shlex.split cannot give: run it, in a shell, and count the commands.
 
         shlex.split is a tokenizer with no model of `;`, `&&` or `$(...)`, so the earlier
-        metacharacter assertion passed while `repo_targets: [llm-collab, "safe;echo"]`
-        emitted a line whose second command the shell would execute. This runs the
-        generated line against a stub deliver.py and asserts both that the stub is
-        invoked exactly once and that nothing else executed.
+        metacharacter assertion passed while a hostile scope emitted a line whose second
+        command the shell would execute.
         """
-        workdir = Path(tempfile.mkdtemp(prefix="reply-cmd-", dir="/tmp"))
-        (workdir / "bin").mkdir()
-        argv_log = workdir / "argv.json"
-        breach = workdir / "BREACH"
-        write(
-            workdir / "bin" / "deliver.py",
-            "\n".join(
-                [
-                    "#!/usr/bin/env python3",
-                    "import json, sys",
-                    "from pathlib import Path",
-                    f"log = Path({json.dumps(str(argv_log))})",
-                    "runs = json.loads(log.read_text()) if log.exists() else []",
-                    "runs.append(sys.argv[1:])",
-                    "log.write_text(json.dumps(runs))",
-                ]
-            ),
-        )
-        (workdir / "bin" / "deliver.py").chmod(0o755)
-        # Any injected command would be `echo`; make `echo` in this PATH a tripwire.
-        write(
-            workdir / "bin" / "echo",
-            "\n".join(["#!/bin/sh", f"touch {shlex.quote(str(breach))}"]),
-        )
-        (workdir / "bin" / "echo").chmod(0o755)
-
+        collab_root, argv_log, breach = self.stub_collab_root()
+        product = self.product_cwd()
         for token in ("safe;echo", "safe&&echo", "safe|echo", "$(echo)", "`echo`"):
             with self.subTest(token=token):
                 argv_log.unlink(missing_ok=True)
                 breach.unlink(missing_ok=True)
-                prompt = self.prompt(repo_targets=["llm-collab", token])
-                line = next(
-                    raw for raw in prompt.splitlines()
-                    if raw.strip().startswith("bin/deliver.py")
-                ).strip()
-                result = subprocess.run(
-                    ["/bin/zsh", "-c", line],
-                    cwd=workdir,
-                    text=True,
-                    capture_output=True,
-                    input="",
-                    env={**os.environ, "PATH": f"{workdir / 'bin'}:{os.environ['PATH']}"},
-                )
+                with patch.object(session_autobridge_lib, "ROOT", collab_root):
+                    prompt = self.prompt(repo_targets=["llm-collab", token])
+                result = self.run_line(prompt, collab_root, product)
                 self.assertEqual(0, result.returncode, result.stderr)
                 self.assertFalse(breach.exists(), f"injected command executed for {token!r}")
                 runs = json.loads(argv_log.read_text())
@@ -6169,31 +6200,8 @@ class ResumePromptNamesTheReplyChannelTest(unittest.TestCase):
         replacing shlex.join with a plain join still passed, because validation stopped
         every hostile token before it could reach the renderer.
         """
-        workdir = Path(tempfile.mkdtemp(prefix="reply-quote-", dir="/tmp"))
-        (workdir / "bin").mkdir()
-        argv_log = workdir / "argv.json"
-        breach = workdir / "BREACH"
-        write(
-            workdir / "bin" / "deliver.py",
-            "\n".join(
-                [
-                    "#!/usr/bin/env python3",
-                    "import json, sys",
-                    "from pathlib import Path",
-                    f"log = Path({json.dumps(str(argv_log))})",
-                    "runs = json.loads(log.read_text()) if log.exists() else []",
-                    "runs.append(sys.argv[1:])",
-                    "log.write_text(json.dumps(runs))",
-                ]
-            ),
-        )
-        (workdir / "bin" / "deliver.py").chmod(0o755)
-        write(
-            workdir / "bin" / "echo",
-            "\n".join(["#!/bin/sh", f"touch {shlex.quote(str(breach))}"]),
-        )
-        (workdir / "bin" / "echo").chmod(0o755)
-
+        collab_root, argv_log, breach = self.stub_collab_root()
+        product = self.product_cwd()
         cases = [
             ("chat_id", "CHAT-X;echo", "--chat"),
             ("chat_id", "CHAT-X$(echo)", "--chat"),
@@ -6205,19 +6213,9 @@ class ResumePromptNamesTheReplyChannelTest(unittest.TestCase):
             with self.subTest(field=field, value=hostile):
                 argv_log.unlink(missing_ok=True)
                 breach.unlink(missing_ok=True)
-                prompt = self.prompt(**{field: hostile})
-                line = next(
-                    raw for raw in prompt.splitlines()
-                    if raw.strip().startswith("bin/deliver.py")
-                ).strip()
-                result = subprocess.run(
-                    ["/bin/zsh", "-c", line],
-                    cwd=workdir,
-                    text=True,
-                    capture_output=True,
-                    input="",
-                    env={**os.environ, "PATH": f"{workdir / 'bin'}:{os.environ['PATH']}"},
-                )
+                with patch.object(session_autobridge_lib, "ROOT", collab_root):
+                    prompt = self.prompt(**{field: hostile})
+                result = self.run_line(prompt, collab_root, product)
                 self.assertEqual(0, result.returncode, result.stderr)
                 self.assertFalse(breach.exists(), f"injection via {field}={hostile!r}")
                 runs = json.loads(argv_log.read_text())
@@ -6225,35 +6223,33 @@ class ResumePromptNamesTheReplyChannelTest(unittest.TestCase):
                 # The hostile text must arrive as ONE argument, intact.
                 self.assertEqual(hostile, runs[0][runs[0].index(flag) + 1])
 
-    def test_a_well_formed_scope_survives_the_same_shell_round_trip(self) -> None:
-        """The hostile test would also pass if the command never carried scope at all."""
-        workdir = Path(tempfile.mkdtemp(prefix="reply-ok-", dir="/tmp"))
-        (workdir / "bin").mkdir()
-        argv_log = workdir / "argv.json"
-        write(
-            workdir / "bin" / "deliver.py",
-            "\n".join(
-                [
-                    "#!/usr/bin/env python3",
-                    "import json, sys",
-                    "from pathlib import Path",
-                    f"Path({json.dumps(str(argv_log))}).write_text(json.dumps(sys.argv[1:]))",
-                ]
-            ),
-        )
-        (workdir / "bin" / "deliver.py").chmod(0o755)
+    def test_the_command_runs_from_a_product_checkout_not_only_from_llm_collab(self) -> None:
+        """#315 resumes a worker with --cwd set to the PACKET's product checkout.
 
-        prompt = self.prompt(repo_targets=["llm-collab", "amiga"])
-        line = next(
-            raw for raw in prompt.splitlines() if raw.strip().startswith("bin/deliver.py")
-        ).strip()
-        result = subprocess.run(
-            ["/bin/zsh", "-c", line], cwd=workdir, text=True, capture_output=True, input=""
-        )
+        A relative `bin/deliver.py` exits 127 there -- `zsh: no such file or directory`
+        -- so the first worker this PR is sequenced to support could never have run the
+        instruction. The earlier shell tests hid it by planting bin/deliver.py inside the
+        working directory they ran from.
+        """
+        collab_root, argv_log, _ = self.stub_collab_root()
+        product = self.product_cwd()
+        with patch.object(session_autobridge_lib, "ROOT", collab_root):
+            prompt = self.prompt(repo_targets=["llm-collab", "amiga"])
+        line = self.command_line(prompt)
+        self.assertIn(str(collab_root / "bin" / "deliver.py"), line)
+
+        result = self.run_line(prompt, collab_root, product)
         self.assertEqual(0, result.returncode, result.stderr)
-        argv = json.loads(argv_log.read_text())
+        argv = json.loads(argv_log.read_text())[0]
         self.assertEqual("llm-collab,amiga", argv[argv.index("--repo-targets") + 1])
         self.assertEqual("CHAT-REPLY", argv[argv.index("--chat") + 1])
+
+    def test_the_emitted_executable_path_is_absolute(self) -> None:
+        argv = self.command_argv(self.prompt())
+        self.assertTrue(Path(argv[0]).is_absolute(), argv[0])
+        self.assertEqual(
+            str(session_autobridge_lib.ROOT / "bin" / "deliver.py"), argv[0]
+        )
 
     def test_the_incomplete_command_prose_states_the_real_deliver_contract(self) -> None:
         """Since #309 deliver.py writes durably and reports the refusal loudly.
