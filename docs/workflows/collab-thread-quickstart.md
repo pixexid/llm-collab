@@ -165,8 +165,14 @@ Whether you must request one is decided by the Tier A/B/C rule in
 [`AGENTS.md` → Requesting Code Review](../../AGENTS.md#requesting-code-review-all-workers-every-repository).
 Short version: credentials, authority, money, input we do not control, shared
 contract changes, concurrency and partial state, migrations, and anything that can
-weaken proof of those — **must** be requested. Formatting, comments and additive
-tests must not.
+weaken proof of those — **must** be requested.
+
+There is deliberately no short version of the *exclusions*. "Comments and additive
+tests must not" dropped the qualifiers the canonical rule carries: normative
+authority prose is not a comment, and a test that changes a gate, fixture or
+baseline is not additive. Both are Tier A there and were Tier C here, so a worker
+following this summary could skip a mandatory request. Read the Tier C list in
+`AGENTS.md` itself rather than a paraphrase of it.
 
 Issue one *initial* request, on the head you believe is final:
 

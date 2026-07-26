@@ -303,12 +303,14 @@ policy:
   current one still carries the `+1` the connector left for the *old* head, and all
   four checks then pass on a review that never happened. If the request artifact has
   been edited since the reaction was left, or is not the most recent request for this
-  head, the reaction is not terminal. What to do next depends on which artifact is
-  at fault. If there is **no valid latest request** for this head, issue one. If a
-  valid latest request already exists — typically the allowed re-trigger — the stale
-  reaction changes nothing: let that request's clock run to its exact-head operator
-  disposition. Posting another request there would be a *third* same-head request,
-  and the single request-anchored re-trigger is the only exempted recovery
+  head, the reaction is not terminal. What to do next turns on the **re-trigger
+  budget**, not on whether a valid artifact happens to exist right now. If the single
+  request-anchored re-trigger for this head has not been used, use it. If it has been
+  used — whether it is still valid, or was since edited, deleted or otherwise made
+  invalid — the budget is spent and there is no further request to issue: continue to
+  the exact-head operator disposition. Reading this as "issue one whenever no valid
+  latest request exists" produces a third same-head request every time an artifact is
+  tampered with, and the single re-trigger is the only exempted recovery
 - when a re-review was explicitly requested, that re-review supersedes older
   same-head clean artifacts **and older same-head reactions**, not the verdict path
   alone. Only the explicit
@@ -466,11 +468,14 @@ Proceed only when all of these are true:
 - the independent exact-head review found no actionable issues
 - required checks are green on the latest head
 - the PR is mergeable and `mergeStateStatus` is clean
-- **every** unresolved actionable thread is resolved or explicitly dispositioned
-  in writing, whatever head it was initiated on. The origin rule above decides
-  which findings are *about* this head; it does not narrow this checklist. A
-  prior-head thread nobody answered is unadjudicated, not closed — reading
-  "for the current head" here is the silent drop this section already forbids
+- **every arriving finding has a thread-linked written outcome, whatever head it was
+  initiated on and whatever its current resolution state.** The origin rule above
+  decides which findings are *about* this head; it does not narrow this checklist.
+  Two ways to lose one, and this bullet closes both: a prior-head thread nobody
+  answered is unadjudicated rather than closed, and a thread someone clicked Resolve
+  on without recording anything is no longer *unresolved* — so a checklist phrased
+  over unresolved threads never looks at it again. Enumerate every thread, resolved
+  or not, and require the written outcome for each
 - full PR comments, review bodies, review threads, and inline comments contain
   no unresolved actionable feedback, whatever head it was raised on — prose
   feedback is dropped by a "current head" reading exactly as a thread is
@@ -486,9 +491,12 @@ terminal connector signal has arrived since**, the watcher reports **that
 disposition** instead, naming the head it was given for --
 otherwise the one path the precedence section authorises for a silently dropped
 review cannot be completed, because a connector artifact is precisely what does not
-exist there. A signal that arrives late still wins: the disposition covered its
-absence, so once a verdict or `+1` exists for this head the watcher reports that and
-it takes the mandatory post-clean settle and full re-read. An operator disposition is
+exist there. A signal that arrives late still wins, and that is an action rather than
+a principle: **after selecting the disposition path and before reporting it or
+merging, re-read reviews, review threads and reactions once more.** Choosing the
+branch is not the same as checking it, and without that read a verdict landing in
+between is completed straight past — skipping the settle and full re-read it is owed.
+If the read finds one, abandon the disposition branch and report the signal instead. An operator disposition is
 not a connector terminal signal and never substitutes for one where a signal did
 arrive. Either terminal signal
 stops the heartbeat from waiting for further artifacts;

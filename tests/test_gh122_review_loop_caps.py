@@ -1068,6 +1068,11 @@ class ReviewLoopCapContractTest(unittest.TestCase):
         head", so once the origin rule narrowed that phrase, a worker could satisfy the
         checklist with prior-head threads nobody had answered -- recreating the silent
         drop the same section forbids.
+
+        Phrasing the bullet over *unresolved* threads left the second way to lose a
+        finding: clicking Resolve without recording anything takes the thread out of
+        that set for good. The checklist is phrased over every arriving finding now,
+        whatever its resolution state.
         """
         section = contract_section(
             WORKFLOW_DOC.read_text(encoding="utf-8"),
@@ -1075,10 +1080,12 @@ class ReviewLoopCapContractTest(unittest.TestCase):
             "Read current review bodies and reactions directly.",
         )
         for phrase in (
-            "**every** unresolved actionable thread is resolved or explicitly "
-            "dispositioned in writing, whatever head it was initiated on",
+            "**every arriving finding has a thread-linked written outcome, whatever "
+            "head it was initiated on and whatever its current resolution state.**",
             "it does not narrow this checklist",
-            "A prior-head thread nobody answered is unadjudicated, not closed",
+            "a prior-head thread nobody answered is unadjudicated rather than closed",
+            "is no longer *unresolved*",
+            "Enumerate every thread, resolved or not",
         ):
             self.assertIn(phrase, section)
 
