@@ -1278,6 +1278,8 @@ class SessionAutobridgeTest(unittest.TestCase):
             "runtime_trigger",
             "--runtime-family",
             "zcode_cli",
+            "--repo-target",
+            "app",
             "--runtime-session-id",
             "sess_11111111-2222-3333-4444-555555555555",
             "--runtime-session-source",
@@ -1302,6 +1304,12 @@ class SessionAutobridgeTest(unittest.TestCase):
         )
         self.assertEqual("zcode_cli", binding["runtime_family"])
         self.assertEqual(str(zcode_home), binding["runtime_home"])
+
+        # The SESSION must carry the scope; the packet may only confirm it. Registering
+        # without --repo-target previously left the packet free to choose the checkout,
+        # and this test asserted that unsafe shape as if it were the contract.
+        session_payload = self.run_cli(root, "show", "--session", "SESSION-ZCODE-E2E")
+        self.assertEqual(["app"], session_payload["repo_targets"])
 
         # The real watcher, not `dispatch --session`.
         watcher_result = subprocess.run(
@@ -1354,6 +1362,77 @@ class SessionAutobridgeTest(unittest.TestCase):
         # ZCODE_HOME is set by the trigger alone; no derived-command test can see it.
         self.assertEqual(str(zcode_home), runtime_payload["env"]["zcode_home"])
         self.assertEqual("zcode_cli", runtime_payload["env"]["runtime_family"])
+
+    def test_an_unscoped_session_cannot_be_given_a_checkout_by_the_packet(self):
+        """Authority is the session's; a packet may narrow it, never create it.
+
+        activation_workdir() read the packet's scope FIRST and fell back to the session
+        only when the packet had none, so an unscoped session plus a scoped packet
+        produced a runnable `--cwd` chosen by the sender. That is the sender deciding
+        where the recipient runs, against this function's own contract and against
+        "--repo-target is required" in docs/adapters/pm2.md.
+        """
+        root = self.make_workspace()
+        self.add_agent(
+            root,
+            {"id": "zcode", "display_name": "ZCode",
+             "activation": {"type": "cli_session", "watcher_enabled": True}},
+        )
+        message_rel = self.add_message(
+            root, agent_id="zcode", chat_id="CHAT-ZCODE-UNSCOPED", project_id="amiga",
+            title="Packet-chosen cwd", target_session_id="sess_unscoped",
+            sender_agent_id="claude", repo_targets=["app"],
+        )
+        zcode_home = root / "zcode-home"
+        (zcode_home / "cli" / "artifacts").mkdir(parents=True, exist_ok=True)
+
+        # Registered with NO repo target: the session has no scope to lend.
+        self.run_cli(
+            root, "register", "--session", "SESSION-ZCODE-UNSCOPED", "--agent", "zcode",
+            "--project", "amiga", "--chat", "CHAT-ZCODE-UNSCOPED", "--mode", "auto-read",
+            "--wake-strategy", "runtime_trigger", "--runtime-family", "zcode_cli",
+            "--runtime-session-id", "sess_unscoped",
+            "--runtime-session-source",
+            str(zcode_home / "cli" / "artifacts" / "sess_unscoped"),
+        )
+
+        session = self.run_cli(root, "show", "--session", "SESSION-ZCODE-UNSCOPED")
+        self.assertIsNone(session.get("repo_targets"), "fixture must be genuinely unscoped")
+
+        result = subprocess.run(
+            [sys.executable, str(WATCH_INBOX_SCRIPT), "--me", "zcode",
+             "--max-polls", "1", "--json"],
+            cwd=root, text=True, capture_output=True, check=True,
+            env={**self.subprocess_env(root),
+                 "LLM_COLLAB_ZCODE_BIN": f"{sys.executable} /nonexistent-must-not-run"},
+        )
+        events = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
+        consumed = [
+            e for e in events
+            if e.get("event") == "autobridge_consumed" and e.get("message_path") == message_rel
+        ]
+        self.assertEqual([], consumed, f"unscoped session must refuse: {events}")
+
+        # And the packet must still be unread, not silently dropped.
+        inbox = json.loads((root / "agents" / "zcode" / "inbox.json").read_text())
+        self.assertIn(message_rel, inbox["unread"])
+
+    def test_a_packet_naming_a_repo_outside_the_session_scope_refuses(self):
+        """Narrowing is allowed; widening or replacing is not."""
+        session = {
+            "session_id": "S", "agent_id": "zcode", "project_id": "amiga",
+            "chat_id": "C", "repo_targets": ["app"],
+        }
+        widening = {"frontmatter": {"repo_targets": ["other"]}}
+        confirming = {"frontmatter": {"repo_targets": ["app"]}}
+        silent = {"frontmatter": {}}
+        with patch.object(session_autobridge_lib, "resolve_project_repo_path",
+                          return_value=Path("/tmp")):
+            self.assertIsNone(session_autobridge_lib.activation_workdir(session, widening))
+            self.assertEqual(
+                Path("/tmp"), session_autobridge_lib.activation_workdir(session, confirming))
+            self.assertEqual(
+                Path("/tmp"), session_autobridge_lib.activation_workdir(session, silent))
 
     def test_zcode_publish_current_refuses_with_the_structured_reason(self):
         """The accepted deviation, pinned on the returned reason.
@@ -6186,6 +6265,33 @@ class ZCodeRuntimeTest(unittest.TestCase):
     def setUp(self) -> None:
         self.home = Path(tempfile.mkdtemp(prefix="zcode-", dir="/tmp"))
         self.artifacts = self.home / "cli" / "artifacts"
+
+    def test_a_pathological_artifacts_directory_fails_closed(self) -> None:
+        """Charged before name filtering, so foreign names cannot buy unbounded work.
+
+        The scan filtered on `sess_` first, so a directory of foreign entries cost a stat
+        per entry with no budget -- and no existing test created one, so every guard
+        passed. AGENTS.md requires the charge at the enumeration boundary.
+        """
+        self.artifacts.mkdir(parents=True, exist_ok=True)
+        limit = session_autobridge_lib.ZCODE_ARTIFACT_SCAN_LIMIT
+        for index in range(limit + 5):
+            (self.artifacts / f"not-a-session-{index}").mkdir()
+        with patch.dict(os.environ, {"ZCODE_HOME": str(self.home)}, clear=False):
+            with self.assertRaises(RuntimeError) as caught:
+                session_autobridge_lib.discover_zcode_runtime_session()
+        self.assertIn("refusing to scan further", str(caught.exception))
+        self.assertIn(str(limit), str(caught.exception))
+
+    def test_a_normal_directory_is_well_under_the_budget(self) -> None:
+        """A bound that fires in ordinary use is a bug, not a guard."""
+        self.artifacts.mkdir(parents=True, exist_ok=True)
+        (self.artifacts / "sess_aaaa").mkdir()
+        (self.artifacts / "sess_subagent_bbbb").mkdir()
+        with patch.dict(os.environ, {"ZCODE_HOME": str(self.home)}, clear=False):
+            found = session_autobridge_lib.discover_zcode_runtime_session()
+        self.assertEqual("sess_aaaa", found["session_id"])
+        self.assertGreater(session_autobridge_lib.ZCODE_ARTIFACT_SCAN_LIMIT, 100)
 
     def make_session_dir(self, name: str, mtime: float) -> Path:
         path = self.artifacts / name

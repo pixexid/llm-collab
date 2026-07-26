@@ -610,6 +610,9 @@ def discover_gemini_runtime_session(project_path: str | None = None) -> dict[str
 
 
 ZCODE_SUBAGENT_PREFIX = "sess_subagent_"
+# Entries examined during one artifacts scan, counted before name filtering. A real home
+# holds tens; this bounds a hostile or pathological directory without truncating silently.
+ZCODE_ARTIFACT_SCAN_LIMIT = 5000
 
 
 def discover_zcode_runtime_session() -> dict[str, Any]:
@@ -625,9 +628,22 @@ def discover_zcode_runtime_session() -> dict[str, Any]:
     """
     artifacts_root = zcode_home() / "cli" / "artifacts"
     newest: tuple[float, Path] | None = None
+    examined = 0
     try:
         with os.scandir(artifacts_root) as scan:
             for entry in scan:
+                # Charged at the enumeration boundary, BEFORE any name filtering, per the
+                # bounded-work rule in AGENTS.md: filtering first means a directory full
+                # of foreign names costs unbounded work while every existing test passes,
+                # because none of them creates one. Fails closed -- a truncated "newest"
+                # is a wrong answer that looks like a right one.
+                examined += 1
+                if examined > ZCODE_ARTIFACT_SCAN_LIMIT:
+                    raise RuntimeError(
+                        f"ZCode artifacts directory {artifacts_root} exceeds "
+                        f"{ZCODE_ARTIFACT_SCAN_LIMIT} entries; refusing to scan further "
+                        "rather than report a partial newest-session result"
+                    )
                 if not entry.name.startswith("sess_"):
                     continue
                 if entry.name.startswith(ZCODE_SUBAGENT_PREFIX):
@@ -1320,24 +1336,31 @@ def build_resume_prompt(session: dict, message: dict) -> str:
 def activation_workdir(session: dict, message: dict) -> Path | None:
     """The one checkout this activation is scoped to, or None.
 
-    Derived from the repo target the packet activates -- the packet's if it names one, else
-    the session's subscription -- and resolved through the project registry, the same
-    authority every other repo path in this tool comes from.
+    Authority comes from the REGISTERED SESSION, which must name exactly one repo target.
+    A packet may narrow or confirm that authority; it can never create it. Reading the
+    packet first let an unscoped session be handed a checkout by whatever the packet
+    asked for -- the sender choosing where the recipient runs, which is the opposite of
+    the fail-closed contract this docstring already claimed and of the "--repo-target is
+    required" rule in docs/adapters/pm2.md.
 
-    None whenever that is not exactly one existing checkout: an unscoped session, a packet
-    spanning two repos, or a target the registry does not resolve. A caller that needs a
-    working directory must refuse, not fall back to a guess -- resuming a worker in the wrong
-    tree is worse than not resuming it.
+    None whenever that is not exactly one existing checkout: an unscoped session, a
+    session spanning two repos, a packet naming a repo the session is not subscribed to,
+    or a target the registry does not resolve. A caller that needs a working directory
+    must refuse, not fall back to a guess -- resuming a worker in the wrong tree is worse
+    than not resuming it.
     """
     project_id = session.get("project_id")
     if not isinstance(project_id, str) or not project_id:
         return None
-    frontmatter = message.get("frontmatter", {}) if isinstance(message, dict) else {}
-    targets = _repo_target_set(frontmatter.get("repo_targets"))
-    if targets is None:
-        targets = _repo_target_set(session.get("repo_targets"))
-    if targets is None or len(targets) != 1:
+    session_targets = _repo_target_set(session.get("repo_targets"))
+    if session_targets is None or len(session_targets) != 1:
         return None
+    frontmatter = message.get("frontmatter", {}) if isinstance(message, dict) else {}
+    packet_targets = _repo_target_set(frontmatter.get("repo_targets"))
+    if packet_targets is not None and not packet_targets <= session_targets:
+        # The packet may narrow the session's scope, never widen or replace it.
+        return None
+    targets = session_targets
     path = resolve_project_repo_path(project_id, next(iter(targets)))
     if path is None or not path.is_dir():
         return None
