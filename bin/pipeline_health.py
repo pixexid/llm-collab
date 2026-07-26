@@ -1,9 +1,16 @@
 #!/usr/bin/env python3
 """
-pipeline_health.py — Can a packet to this agent actually wake it, right now?
+pipeline_health.py — What is observably true about this agent's delivery lane?
 
-Run this BEFORE sending, not after wondering why there was no reply. Every check
-here corresponds to a way the lane has silently stopped in practice:
+**Observations, not a verdict.** Nothing here is permission to send and nothing here
+withholds it. The mailbox is durable-first: `deliver.py` writes the packet whether or
+not activation is available, and its own result plus the watcher events that follow are
+the authority on what happened. An aggregate green here could only ever be a second
+implementation of delivery and dispatch — three review rounds each found another
+predicate it was missing, which is the argument against having it at all. Exit status
+reports whether the observation could be made, never what it found.
+
+Every check corresponds to a way the lane has silently stopped in practice:
 
   lease        A lease is stamped at register time with a fixed TTL and is NEVER
                renewed by activity. A session dispatched to continuously still dies
@@ -13,7 +20,7 @@ here corresponds to a way the lane has silently stopped in practice:
                written with `target_session_id: null`. Exact-receive sessions refuse
                a null target as `route_ambiguous`, so that packet is permanently
                unroutable -- fixing the lease afterwards does not rescue it.
-  endpoint     A codex_app binding is only wakeable while its app-server is running
+  endpoint     A codex_app binding can only be woken while its app-server is running
                under the same home; the binding looks perfect either way.
   watcher      No watcher process means nothing polls the inbox at all.
   backlog      Unread packets that are already unroutable, which is the visible
@@ -35,11 +42,13 @@ require_python()
 
 import argparse
 import json
+import os
 import subprocess
 
 sys.path.insert(0, str(Path(__file__).parent))
-from _helpers import ROOT, agent_ids, get_agent, get_unread_messages, is_agent_disabled
+from _helpers import ROOT, agent_ids, get_agent, is_agent_disabled, load_agent_inbox, parse_frontmatter
 from _session_autobridge import (
+    BindingUnreadable,
     SERVER_REQUEST_IGNORE,
     SESSIONS_DIR,
     JsonRpcWebSocketClient,
@@ -73,21 +82,48 @@ SESSION_SCAN_LIMIT = 5000
 UNREAD_SCAN_LIMIT = 5000
 
 
-def _sessions_for(agent_id: str) -> list[dict]:
-    sessions = []
+def _bounded_session_paths() -> list[Path]:
+    """Every directory entry charged as it is seen, before any filtering or sorting.
+
+    `sorted(glob("*.json"))` materialises the whole matching list before a loop can
+    charge anything, and the suffix filter drops entries before they are counted -- so
+    millions of non-JSON names escaped the budget entirely and millions of JSON ones
+    exhausted memory before the check was reached. `scandir` yields incrementally, the
+    charge happens per entry, and the sort runs on an already-bounded list.
+    """
+    if not SESSIONS_DIR.exists():
+        return []
+    paths: list[Path] = []
     examined = 0
-    for path in sorted(SESSIONS_DIR.glob("*.json")):
-        examined += 1
-        if examined > SESSION_SCAN_LIMIT:
-            raise RuntimeError(
-                f"session directory holds more than {SESSION_SCAN_LIMIT} entries; "
-                "refusing to scan further rather than report a partial inventory as "
-                "complete. Prune it or raise SESSION_SCAN_LIMIT deliberately."
-            )
-        session = load_session(path.stem)
-        if session and session.get("agent_id") == agent_id:
+    with os.scandir(SESSIONS_DIR) as entries:
+        for entry in entries:
+            examined += 1
+            if examined > SESSION_SCAN_LIMIT:
+                raise RuntimeError(
+                    f"session directory holds more than {SESSION_SCAN_LIMIT} entries; "
+                    "refusing to scan further rather than report a partial inventory as "
+                    "complete. Prune it or raise SESSION_SCAN_LIMIT deliberately."
+                )
+            if entry.name.endswith(".json"):
+                paths.append(Path(entry.path))
+    return sorted(paths)
+
+
+def _bounded_sessions() -> list[dict]:
+    """One bounded snapshot, shared by the inventory and the exact resolver."""
+    sessions: list[dict] = []
+    for path in _bounded_session_paths():
+        try:
+            session = load_session(path.stem)
+        except (FileNotFoundError, ValueError, OSError):
+            continue
+        if session:
             sessions.append(session)
     return sessions
+
+
+def _sessions_for(agent_id: str) -> list[dict]:
+    return [s for s in _bounded_sessions() if s.get("agent_id") == agent_id]
 
 
 def _lease_check(session: dict, min_seconds: int) -> dict:
@@ -137,8 +173,8 @@ def _wake_action_check(session: dict) -> dict:
     `resolve_effective_action`, which turns `mode: manual` into `manual_noop` and
     `mode: notify` into `notify_only` -- and a manual session records the packet in
     `processed_messages` without waking anything, so fixing the mode afterwards does not
-    make that session pick the packet up. Reporting can_wake for those is the false green
-    this tool exists to prevent.
+    make that session pick the packet up, so the resolved action is worth reporting as its
+    own observation rather than being implied by status and lease.
     """
     try:
         action, reason = resolve_effective_action(session, {})
@@ -186,6 +222,14 @@ def _endpoint_check(session: dict) -> dict:
             "detail": f"app-server {endpoint.get('url')} (pid {endpoint.get('pid')}){scope}"}
 
 
+# Mirrors execute_codex_app_server_trigger exactly. A probe that negotiates differently
+# from the dispatcher is observing a different connection than the one that matters.
+CODEX_APP_SERVER_INITIALIZE_PARAMS = {
+    "protocolVersion": "2024-11-05",
+    "clientInfo": {"name": "llm-collab-session-autobridge", "version": "0.0.0"},
+    "capabilities": {"experimentalApi": True},
+}
+
 ACTIVE_WITHIN_SECONDS = 90
 
 
@@ -229,9 +273,11 @@ def _activity_check(session: dict) -> dict:
             server_request_policy=SERVER_REQUEST_IGNORE,
         ) as client:
             stage = "initialize"
-            client.request("initialize", {"clientInfo": {"name": "pipeline-health",
-                                                         "title": "llm-collab",
-                                                         "version": "0.1"}})
+            # The dispatcher's payload, not a second protocol shape. A weaker probe can be
+            # accepted by a server that rejects the real handshake, or rejected by one that
+            # would have served it -- and the test that claimed these matched only varied
+            # the method's return value and never asserted its parameters.
+            client.request("initialize", CODEX_APP_SERVER_INITIALIZE_PARAMS)
             client.notify("initialized")
             stage = "thread/list"
             listed = client.request("thread/list", {})
@@ -298,25 +344,58 @@ def _watcher_check(agent_id: str) -> dict:
         return {"check": "watcher", "status": WARN,
                 "detail": f"could not inspect processes: {exc}"}
     needle = f"watch_inbox.py --me {agent_id}"
-    # Matching the basename alone counted a watcher polling a DIFFERENT checkout's
-    # mailbox as this workspace's watcher, so the check passed while nothing read these
-    # packets. The script path is what ties the process to this ROOT.
-    this_workspace = str((ROOT / "bin" / "watch_inbox.py").resolve())
-    mine = [
-        line for line in listing.splitlines()
-        if needle in line and this_workspace in line
-    ]
+    # Two ways to get this wrong, and the previous two versions each picked one. Matching
+    # the basename alone counted a watcher polling a DIFFERENT checkout's mailbox as ours.
+    # Requiring the resolved absolute path rejected the DOCUMENTED invocation, `python
+    # bin/watch_inbox.py --me <agent>`, because ps keeps the relative argument. So a line
+    # is ours if its script argument resolves into this ROOT -- absolute or relative --
+    # and foreign only if it names some other absolute path.
+    this_script = (ROOT / "bin" / "watch_inbox.py").resolve()
+    # Three answers, not two, because `ps axo args=` does not carry the process cwd. An
+    # absolute argument attributes the process exactly. A relative one -- which the
+    # DOCUMENTED `python bin/watch_inbox.py --me <agent>` form produces -- cannot be
+    # attributed at all: resolving it against this ROOT assumes it was launched from here,
+    # which invents the fact. Reporting that honestly beats guessing either way; the
+    # earlier versions of this check made both mistakes in turn, first counting another
+    # checkout's watcher as ours and then rejecting our own.
+    mine: list[str] = []
+    foreign: list[str] = []
+    unattributable: list[str] = []
+    for line in listing.splitlines():
+        if needle not in line:
+            continue
+        argument = next(
+            (part for part in line.split() if part.endswith("watch_inbox.py")), ""
+        )
+        if not argument:
+            continue
+        if not Path(argument).is_absolute():
+            unattributable.append(argument)
+        elif Path(argument) == this_script:
+            mine.append(line)
+        else:
+            foreign.append(argument)
     if mine:
         return {"check": "watcher", "status": OK,
-                "detail": f"watcher running from {this_workspace}"}
-    elsewhere = [line for line in listing.splitlines() if needle in line]
-    if elsewhere:
+                "detail": f"watcher running for {this_script}"}
+    if unattributable:
+        return {
+            "check": "watcher",
+            "status": WARN,
+            "detail": (
+                f"a `{needle}` process names its script relatively ({unattributable[0]}), "
+                "so which checkout it polls cannot be determined from the process list. "
+                "Launch it with an absolute path to make this observable."
+            ),
+        }
+    if foreign:
         return {
             "check": "watcher",
             "status": FAIL,
             "detail": (
-                f"a `{needle}` process exists but not from {this_workspace}; it polls "
-                "another checkout's mailbox, so nothing reads a packet written here."
+                f"a `{needle}` process exists but its script is {foreign[0]}, not "
+                f"{this_script}; it polls another checkout's mailbox, so nothing reads a "
+                "packet written here."
             ),
         }
     return {
@@ -329,7 +408,9 @@ def _watcher_check(agent_id: str) -> dict:
     }
 
 
-def _backlog_check(agent_id: str, sessions: list[dict]) -> dict:
+def _backlog_check(
+    agent_id: str, sessions: list[dict], *, all_sessions: list[dict] | None = None
+) -> dict:
     """Classify the backlog with the ROUTER's predicate, and report its reasons.
 
     An earlier version asked whether `target_session_id` was null and whether the id
@@ -339,15 +420,35 @@ def _backlog_check(agent_id: str, sessions: list[dict]) -> dict:
     `message_targets_session` is the predicate dispatch actually applies, so it is the
     only one that can answer "will this packet ever be delivered".
     """
-    unread = get_unread_messages(agent_id)
-    if len(unread) > UNREAD_SCAN_LIMIT:
-        raise RuntimeError(
-            f"unread queue holds {len(unread)} messages, above the {UNREAD_SCAN_LIMIT} "
-            "limit; refusing to classify a partial backlog as the whole one."
-        )
-    if not sessions:
+    unread = _bounded_unread(agent_id)
+    known = all_sessions if all_sessions is not None else sessions
+    if not known:
         return {"check": "backlog", "status": OK,
-                "detail": f"{len(unread)} unread; no session to route them to"}
+                "detail": f"{len(unread)} unread; no session registered to route them to"}
+    if not sessions:
+        # Nothing dispatchable, so nothing can absolve a packet -- but the packets that
+        # could never route to ANY registered session are permanent, and reporting them
+        # only once a session recovers hides them exactly while the lane is down.
+        stranded = [
+            message["path"]
+            for message in unread
+            if not any(
+                message_targets_session(candidate, message)[0] for candidate in known
+            )
+        ]
+        detail = f"{len(unread)} unread; no dispatchable session to route them to"
+        if not stranded:
+            return {"check": "backlog", "status": OK, "detail": detail}
+        return {
+            "check": "backlog",
+            "status": WARN,
+            "undeliverable": len(stranded),
+            "sample": [Path(path).name for path in stranded[-3:]],
+            "detail": (
+                f"{detail}; {len(stranded)} of them no REGISTERED session would accept "
+                "either, so those stay unroutable after the lane recovers"
+            ),
+        }
 
     reasons: dict[str, int] = {}
     undeliverable: list[str] = []
@@ -398,7 +499,7 @@ def _agent_enabled_check(agent_id: str) -> dict:
     """`deliver.py` refuses a disabled recipient before it resolves the chat at all.
 
     A disabled agent can keep an active binding and an unexpired lease, so every session
-    check passed and the preflight disagreed with the very command it predicts.
+    check passed while the very command whose refusals this describes would refuse.
     """
     try:
         agent = get_agent(agent_id)
@@ -422,21 +523,16 @@ def _repo_scope_check(session: dict, packet_repo_targets: list[str] | None) -> d
 
     `resolve_exact_dispatch_pair` validates binding identity only. `deliver.py` and the
     watcher additionally run `repo_scope_matches`, so a session scoped to one repo was
-    reported wakeable for a packet naming another -- and both of those refuse it as
+    reported clean for a packet naming another -- and both of those refuse it as
     `route_ambiguous`. Predicting delivery means applying delivery's whole predicate.
     """
-    if packet_repo_targets is None:
-        return {
-            "check": "repo-scope",
-            "status": OK,
-            "detail": (
-                "no --repo-targets given; pass the packet's scope to have it checked, "
-                "since an unscoped check cannot see a route_ambiguous refusal"
-            ),
-        }
+    # deliver.py represents an omitted scope as `repo_targets: []` and still runs the
+    # predicate, so reporting OK for a check that was not run was the false-green shape --
+    # a malformed stored subscriber scope is refused there and passed here. The omission
+    # is treated as the empty list delivery would use.
     matched, reason = repo_scope_matches(
         session.get("repo_targets"),
-        packet_repo_targets,
+        packet_repo_targets if packet_repo_targets is not None else [],
         subscriber_project=session.get("project_id"),
         packet_project=session.get("project_id"),
     )
@@ -453,6 +549,30 @@ def _repo_scope_check(session: dict, packet_repo_targets: list[str] | None) -> d
     }
 
 
+def _bounded_unread(agent_id: str) -> list[dict]:
+    """Charge inbox pointers before reading or parsing a single packet.
+
+    `get_unread_messages` reads and parses every existing packet before it returns, so a
+    length check on its result detected the excess only after all the work was done --
+    and the test that "proved" the bound handed it an already-materialised list, which
+    asserted that a check exists rather than that the work is bounded.
+    """
+    pointers = load_agent_inbox(agent_id).get("unread", [])
+    if len(pointers) > UNREAD_SCAN_LIMIT:
+        raise RuntimeError(
+            f"unread queue holds {len(pointers)} pointers, above the {UNREAD_SCAN_LIMIT} "
+            "limit; refusing to classify a partial backlog as the whole one."
+        )
+    messages: list[dict] = []
+    for rel_path in pointers:
+        path = ROOT / rel_path
+        if not path.exists():
+            continue
+        frontmatter, body = parse_frontmatter(path.read_text())
+        messages.append({"path": rel_path, "frontmatter": frontmatter, "body": body})
+    return messages
+
+
 def target_report(
     project_id: str,
     chat_id: str,
@@ -463,17 +583,29 @@ def target_report(
 ) -> dict:
     """Can a packet for THIS project/chat/agent wake its exact binding right now?
 
-    The agent-wide report answers a different and weaker question. It says can_wake as
-    soon as ANY session for the agent is live, and a packet addressed to a different,
-    expired or rebound session cannot be retargeted to that live one -- so the tool
-    could return exit 0 while its own backlog line said the packet was undeliverable.
-    That is precisely the false green it exists to prevent.
+    The agent-wide report describes an agent's whole inventory, which cannot answer this:
+    a packet addressed to a different, expired or rebound session is not retargeted to a
+    live one. This report observes the exact binding the router would use, resolved
+    through the router's own resolver rather than re-derived.
 
-    Send-time questions are answered through the same exact dispatch-pair resolver the
-    router uses, never by inventory.
+    It reports observations and no verdict. Nothing here is a permission to send: the
+    mailbox is durable-first, so `deliver.py` writes the packet either way and its result,
+    with the watcher events that follow, is the authority on the outcome.
     """
-    pair, reason = resolve_exact_dispatch_pair(project_id, chat_id, agent_id)
     checks: list[dict] = [_agent_enabled_check(agent_id)]
+    try:
+        # The resolver falls back to an UNBOUNDED iter_sessions() when given no snapshot,
+        # so the budget was absent from the one mode workers are told to trust.
+        pair, reason = resolve_exact_dispatch_pair(
+            project_id, chat_id, agent_id, _bounded_sessions()
+        )
+    except BindingUnreadable as exc:
+        # deliver.py treats this as a specific runtime-dispatch blocker. Letting it escape
+        # meant automation got a traceback and no JSON at all -- worse than a false green,
+        # because the promised diagnostic shape simply is not there.
+        pair, reason = None, f"binding unreadable: {exc}"
+    except RuntimeError as exc:
+        pair, reason = None, str(exc)
     if pair is None:
         checks.append({
             "check": "exact-pair",
@@ -503,21 +635,12 @@ def target_report(
             checks.append({**check, "session_id": session["session_id"]})
 
     checks.append(_watcher_check(agent_id))
-    # Every FAIL blocks here, endpoint and watcher included. The agent-wide report keeps
-    # them advisory because it answers "is this lane configured", and a process
-    # observation there is stale the instant it is taken. This report answers "may I send
-    # THIS packet now", and both of those checks say in their own words that nothing will
-    # read the packet or wake from it. That an observation can go stale after inspection
-    # is true of every preflight check and is not a reason to call a known-unreachable
-    # lane sendable.
-    blocking = [c for c in checks if c["status"] == FAIL]
     status = max((c["status"] for c in checks), key=lambda s: _RANK[s])
     return {
         "agent_id": agent_id,
         "project_id": project_id,
         "chat_id": chat_id,
         "status": status,
-        "can_wake": not blocking,
         "session_id": session["session_id"] if session else None,
         "checks": checks,
     }
@@ -529,7 +652,8 @@ def agent_report(agent_id: str, *, min_lease_seconds: int) -> dict:
     A workspace accumulates dead sessions (probes, superseded activations, months-old
     disposables). Scoring them all together reported FAIL for a lane that was working
     perfectly, which is the kind of always-red signal people learn to ignore. One
-    wakeable session is sufficient; the rest are reported as clutter to prune.
+    dispatchable session is enough to describe the lane as usable; the rest are reported
+    as clutter to prune.
     """
     sessions = _sessions_for(agent_id)
     live: list[dict] = []
@@ -544,15 +668,14 @@ def agent_report(agent_id: str, *, min_lease_seconds: int) -> dict:
             _wake_action_check(session),
             _endpoint_check(session),
         ]
-        # Endpoint reachability is ADVISORY, as the can_wake comment below states: it is
-        # a live observation that is stale the instant it is taken. Letting it decide
-        # `live` made the advertised rule false and untested -- an active, leased session
-        # with a momentarily unreachable app-server reported can_wake=False.
-        wakeable = all(
+        # Endpoint reachability is a live observation that is stale the instant it is
+        # taken, so it does not decide whether a session counts as dispatchable -- status,
+        # lease and resolved wake action do. It is reported alongside them.
+        dispatchable = all(
             c["status"] != FAIL for c in session_checks if c["check"] != "endpoint"
         )
-        (live if wakeable else dead).append(session)
-        if wakeable:
+        (live if dispatchable else dead).append(session)
+        if dispatchable:
             checks.extend({**c, "session_id": session["session_id"]} for c in session_checks)
         else:
             failures.extend(
@@ -574,7 +697,7 @@ def agent_report(agent_id: str, *, min_lease_seconds: int) -> dict:
                 "status": FAIL,
                 "failing_checks": [f["check"] for f in failures],
                 "detail": (
-                    f"{len(dead)} registered session(s), none wakeable. Nearest problem: "
+                    f"{len(dead)} registered session(s), none dispatchable. Nearest problem: "
                     f"{nearest}"
                 ),
             })
@@ -582,7 +705,10 @@ def agent_report(agent_id: str, *, min_lease_seconds: int) -> dict:
             checks.append({
                 "check": "session",
                 "status": FAIL,
-                "detail": "no registered autobridge session; packets are durable only",
+                "detail": (
+                "no registered autobridge session; a packet here is durable and will not "
+                "wake anything until one is registered"
+            ),
             })
     elif dead:
         checks.append({
@@ -591,16 +717,21 @@ def agent_report(agent_id: str, *, min_lease_seconds: int) -> dict:
             "count": len(dead),
             "sample": [s["session_id"] for s in dead[:3]],
             "detail": (
-                f"{len(live)} wakeable, {len(dead)} expired or unreachable. The expired "
+                f"{len(live)} dispatchable, {len(dead)} expired or unreachable. The expired "
                 "ones cannot receive but do clutter every diagnosis; deactivate them."
             ),
         })
 
-    # Only sessions that can actually receive may absolve a packet. Falling back to every
-    # session let a dead one "match" a packet -- message_targets_session answers
-    # addressing, not wakeability -- so a fully broken lane reported an empty backlog,
-    # the one line that would have shown the packets were stuck.
-    advisory = [_watcher_check(agent_id), _backlog_check(agent_id, live)]
+    # Only sessions that can receive may absolve a packet -- message_targets_session
+    # answers addressing, not dispatchability, so a dead one could "match" a packet and a
+    # broken lane reported an empty backlog. But passing an EMPTY list made the stranded
+    # residue invisible precisely while the lane was down, which is when it matters most.
+    # So the classification runs against every registered session and the absolution runs
+    # only against the dispatchable ones.
+    advisory = [
+        _watcher_check(agent_id),
+        _backlog_check(agent_id, live, all_sessions=sessions),
+    ]
     for session in live:
         advisory.insert(0, {**_activity_check(session), "session_id": session["session_id"]})
     checks.extend(advisory)
@@ -609,22 +740,15 @@ def agent_report(agent_id: str, *, min_lease_seconds: int) -> dict:
     return {
         "agent_id": agent_id,
         "status": status,
-        # Keyed to the session state ALONE, deliberately. A watcher or endpoint
-        # observation is stale the instant it is taken -- the process can exit a
-        # millisecond later -- so gating on it would make the verdict a coin flip under
-        # exactly the conditions it is consulted. Those two are reported as advisory
-        # instead. (Codex's contract ruling, 2026-07-26; an earlier version of this file
-        # folded the watcher into can_wake.)
-        "can_wake": bool(live),
-        "wakeable_sessions": [s["session_id"] for s in live],
-        "unwakeable_sessions": [s["session_id"] for s in dead],
+        "dispatchable_sessions": [s["session_id"] for s in live],
+        "undispatchable_sessions": [s["session_id"] for s in dead],
         "checks": checks,
     }
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Check whether a packet can actually wake an agent right now."
+        description="Report what is observably true about an agent's delivery lane."
     )
     parser.add_argument("--agent", action="append", dest="agents", default=None)
     parser.add_argument("--all", action="store_true", help="Every known agent")
@@ -636,19 +760,19 @@ def main() -> int:
     parser.add_argument(
         "--project",
         default=_UNSET,
-        help="Pre-send mode: the packet's project. Requires --chat and one --agent.",
+        help="Exact-binding mode: the packet's project. Requires --chat and one --agent.",
     )
     parser.add_argument(
         "--chat",
         default=_UNSET,
-        help="Pre-send mode: the packet's chat. Requires --project and one --agent.",
+        help="Exact-binding mode: the packet's chat. Requires --project and one --agent.",
     )
     parser.add_argument(
         "--repo-targets",
         default=None,
         help=(
-            "Pre-send mode: the packet's repo_targets, comma-separated. Without it the "
-            "repo-scope refusal that real delivery applies cannot be predicted."
+            "Exact-binding mode: the packet's repo_targets, comma-separated. Omitted is "
+            "observed as the empty list delivery would use."
         ),
     )
     parser.add_argument(
@@ -671,7 +795,7 @@ def main() -> int:
         parser.error("--project and --chat are the pre-send pair; pass both or neither")
     if all(given):
         if args.all or not args.agents or len(args.agents) != 1:
-            parser.error("pre-send mode needs exactly one --agent, and not --all")
+            parser.error("exact-binding mode needs exactly one --agent, and not --all")
         packet_repo_targets = (
             [part.strip() for part in args.repo_targets.split(",") if part.strip()]
             if args.repo_targets is not None
@@ -689,12 +813,18 @@ def main() -> int:
         else:
             marks = {OK: "ok  ", WARN: "WARN", FAIL: "FAIL"}
             print(f"\n{marks[report['status']]} {args.project}/{args.chat}"
-                  f" -> {report['agent_id']}  (can_wake={report['can_wake']})")
+                  f" -> {report['agent_id']}")
             for check in report["checks"]:
                 where = f" [{check['session_id']}]" if check.get("session_id") else ""
                 print(f"  {marks[check['status']]} {check['check']}{where}: {check['detail']}")
             print()
-        return 0 if report["can_wake"] else 2
+        # Observations only. A lane that looks unhealthy is a fact reported, not a
+        # failure of this command: the mailbox contract is durable-first, so deliver.py
+        # writes the packet regardless and its own result plus the watcher events are the
+        # authority on what happened. An aggregate green here could only ever be a second
+        # implementation of delivery, and every round of review found another predicate it
+        # was missing. (Codex's scope ruling, 2026-07-26.)
+        return 0
 
     if args.all:
         targets = list(agent_ids())
@@ -714,17 +844,15 @@ def main() -> int:
     else:
         marks = {OK: "ok  ", WARN: "WARN", FAIL: "FAIL"}
         for report in reports:
-            print(f"\n{marks[report['status']]} {report['agent_id']}"
-                  f"  (can_wake={report['can_wake']})")
+            print(f"\n{marks[report['status']]} {report['agent_id']}")
             for check in report["checks"]:
                 where = f" [{check['session_id']}]" if "session_id" in check else ""
                 print(f"  {marks[check['status']]} {check['check']}{where}: {check['detail']}")
         print()
 
-    # Exit status answers the preflight question only: can every requested agent be
-    # woken? Warnings are printed but never block, because a gate that fails on
-    # advisory noise is a gate people wrap in `|| true` and stop reading.
-    return 0 if all(report["can_wake"] for report in reports) else 2
+    # Same rule for inventory mode: nonzero is for an invocation this command could not
+    # carry out, never for what it observed.
+    return 0
 
 
 if __name__ == "__main__":

@@ -187,24 +187,23 @@ class PipelineHealthTest(unittest.TestCase):
         agents["agents"].append({"id": agent_id, "display_name": agent_id.upper(), **fields})
         write_json(agents_path, agents)
 
-    def test_a_pre_send_check_blocks_when_nothing_polls_the_inbox(self) -> None:
-        """The watcher check says in its own words that nobody will read the packet.
+    def test_an_observation_never_gates_the_exit_status(self) -> None:
+        """Observations report; they do not gate.
 
-        The agent-wide report keeps this advisory because it answers "is the lane
-        configured". This report answers "may I send THIS packet now", and returning exit
-        0 with can_wake=true while no watcher is polling is the false green the tool
-        exists to prevent. That the process could exit a moment after inspection is true
-        of every preflight check.
+        The mailbox is durable-first, so `deliver.py` writes the packet regardless and its
+        own result plus the watcher events are the authority. An aggregate green here could
+        only ever be a second implementation of delivery, and every review round found
+        another predicate it was missing. Exit nonzero is for an invocation this command
+        could not carry out. (Codex's scope ruling, 2026-07-26.)
         """
         root = self.workspace()
         self.add_session(root, "SESSION-LIVE", lease_delta=3600)
         self.add_binding(root, "SESSION-LIVE")
         code, payload = self.run_presend(
             root, "--project", "amiga", "--chat", "CHAT-HEALTH", "--agent", "cdx2")
-        checks = self.presend_checks(payload)
-        self.assertEqual(FAIL, checks["watcher"]["status"])
-        self.assertFalse(payload["agents"][0]["can_wake"])
-        self.assertEqual(2, code)
+        self.assertEqual(0, code)
+        self.assertIn("watcher", self.presend_checks(payload))
+        self.assertNotIn("can_wake", payload["agents"][0])
 
     def test_a_packet_outside_the_session_repo_scope_is_refused(self) -> None:
         """The pair resolver validates identity; delivery also applies repo scope."""
@@ -215,25 +214,27 @@ class PipelineHealthTest(unittest.TestCase):
             root, "--project", "amiga", "--chat", "CHAT-HEALTH", "--agent", "cdx2",
             "--repo-targets", "web")
         self.assertEqual(FAIL, self.presend_checks(mismatched)["repo-scope"]["status"])
-        self.assertFalse(mismatched["agents"][0]["can_wake"])
 
         _, matched = self.run_presend(
             root, "--project", "amiga", "--chat", "CHAT-HEALTH", "--agent", "cdx2",
             "--repo-targets", "app")
         self.assertEqual(OK, self.presend_checks(matched)["repo-scope"]["status"])
 
-    def test_an_unscoped_pre_send_check_says_it_did_not_check_the_scope(self) -> None:
-        """Silence about a check that was not run is how a false green reads as a pass."""
+    def test_an_omitted_scope_is_checked_as_the_empty_list_delivery_would_use(self) -> None:
+        """`deliver.py` represents an omitted scope as `repo_targets: []` and still runs
+        the predicate, so reporting OK for a check that was not run was a false green.
+
+        A session scoped to `app` refuses an unscoped packet there, so it must refuse here.
+        """
         root = self.workspace()
         self.add_session(root, "SESSION-LIVE", lease_delta=3600)
         self.add_binding(root, "SESSION-LIVE")
         _, payload = self.run_presend(
             root, "--project", "amiga", "--chat", "CHAT-HEALTH", "--agent", "cdx2")
         scope = self.presend_checks(payload)["repo-scope"]
-        self.assertEqual(OK, scope["status"])
-        self.assertIn("--repo-targets", scope["detail"])
+        self.assertEqual(FAIL, scope["status"])
 
-    def test_a_session_that_would_not_wake_the_runtime_is_not_wakeable(self) -> None:
+    def test_a_session_that_would_not_wake_the_runtime_is_reported_as_such(self) -> None:
         """`session_is_dispatchable` checks status and lease, not the wake action.
 
         A `mode: manual` session records the packet in processed_messages without waking
@@ -251,7 +252,6 @@ class PipelineHealthTest(unittest.TestCase):
         action = self.presend_checks(payload)["wake-action"]
         self.assertEqual(FAIL, action["status"])
         self.assertIn("manual_noop", action["detail"])
-        self.assertFalse(payload["agents"][0]["can_wake"])
 
     def test_a_disabled_recipient_is_refused_before_anything_else(self) -> None:
         """deliver.py refuses a disabled recipient before it resolves the chat."""
@@ -266,7 +266,6 @@ class PipelineHealthTest(unittest.TestCase):
             root, "--project", "amiga", "--chat", "CHAT-HEALTH", "--agent", "cdx2")
         agent_check = self.presend_checks(payload)["agent"]
         self.assertEqual(FAIL, agent_check["status"])
-        self.assertFalse(payload["agents"][0]["can_wake"])
 
     def test_an_empty_scope_is_a_mistake_not_a_wildcard(self) -> None:
         """`--project "$PROJECT"` with the variable unset used to mean "every project".
@@ -339,27 +338,145 @@ class PipelineHealthTest(unittest.TestCase):
         self.add_unread(root, "stuck", target="SESSION-DEAD-runtime")
         _, payload = self.run_health(root)
         backlog = self.check(payload, "backlog")
-        self.assertIn("no session to route them to", backlog["detail"])
-        self.assertFalse(payload["agents"][0]["can_wake"])
+        self.assertIn("no dispatchable session to route them to", backlog["detail"])
 
-    def test_agent_wide_mode_is_an_inventory_not_a_send_verdict(self) -> None:
+    def test_a_stranded_packet_is_reported_while_the_lane_is_down(self) -> None:
+        """The permanent residue must not disappear exactly when it matters.
+
+        Classifying the backlog only against dispatchable sessions made packets that no
+        REGISTERED session would accept invisible while nothing was live -- they surfaced
+        as warnings only after a session recovered, which is the opposite of useful.
+        """
+        root = self.workspace()
+        self.add_session(root, "SESSION-DEAD", lease_delta=-600)
+        self.add_unread(root, "stranded", target="SOMEONE-ELSES-RUNTIME")
+        _, payload = self.run_health(root)
+        backlog = self.check(payload, "backlog")
+        self.assertEqual(WARN, backlog["status"])
+        self.assertEqual(1, backlog["undeliverable"])
+        self.assertIn("stay unroutable after the lane recovers", backlog["detail"])
+
+    def test_the_exact_resolver_gets_the_bounded_snapshot(self) -> None:
+        """The resolver falls back to an UNBOUNDED scan when given no snapshot.
+
+        The budget lived in `_sessions_for`, which the exact path never calls, so it was
+        absent from the one mode a worker consults about a specific packet.
+        """
+        root = self.workspace()
+        self.add_session(root, "SESSION-LIVE", lease_delta=3600)
+        self.add_binding(root, "SESSION-LIVE")
+        driver = root / "drive.py"
+        driver.write_text(
+            "\n".join([
+                "import sys, json",
+                f"sys.path.insert(0, {str(REPO_ROOT / 'bin')!r})",
+                "import _session_autobridge as ab",
+                "def boom(*a, **k):",
+                "    raise AssertionError('unbounded iter_sessions must not be used')",
+                "ab.iter_sessions = boom",
+                "import pipeline_health",
+                "pipeline_health.iter_sessions = boom",
+                "report = pipeline_health.target_report(",
+                "    'amiga', 'CHAT-HEALTH', 'cdx2', min_lease_seconds=1800)",
+                "print(json.dumps({c['check']: c['status'] for c in report['checks']}))",
+            ]),
+            encoding="utf-8",
+        )
+        result = subprocess.run(
+            [sys.executable, str(driver)], cwd=root, text=True, capture_output=True,
+            env={**os.environ, "PYTHONPATH": os.pathsep.join(
+                [str(root), str(REPO_ROOT), str(REPO_ROOT / "bin"),
+                 os.environ.get("PYTHONPATH", "")])},
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual(OK, json.loads(result.stdout)["exact-pair"])
+
+    def test_an_unreadable_binding_is_a_finding_not_a_traceback(self) -> None:
+        """`deliver.py` treats this as a specific blocker; escaping it emits no JSON.
+
+        Automation asking for the diagnostic shape got a stack trace instead, which is
+        worse than a wrong answer because there is no answer at all.
+        """
+        root = self.workspace()
+        self.add_session(root, "SESSION-LIVE", lease_delta=3600)
+        binding = (root / "State" / "session_autobridge" / "bindings" / "amiga"
+                   / "CHAT-HEALTH" / "cdx2.json")
+        binding.parent.mkdir(parents=True, exist_ok=True)
+        binding.write_bytes(b'{"project_id": "amiga", "pad": "' + b"x" * 400_000 + b'"}')
+        code, payload = self.run_presend(
+            root, "--project", "amiga", "--chat", "CHAT-HEALTH", "--agent", "cdx2")
+        pair = self.presend_checks(payload)["exact-pair"]
+        self.assertEqual(FAIL, pair["status"])
+        self.assertIn(
+            "binding unreadable", pair["detail"],
+            "the oversized binding must be reported as unreadable, not as a mismatch",
+        )
+        self.assertEqual(0, code)
+
+    def test_a_second_project_is_observed_independently(self) -> None:
+        """Every other case in this file is built on `amiga` alone.
+
+        A shared, project-aware contract proven against one project ID is not proven to be
+        project-aware at all: an Amiga-shaped assumption would pass every case above.
+        """
+        root = self.workspace()
+        write_json(root / "projects.json", {"projects": [
+            {"id": "amiga", "display_name": "Amiga", "repos": {"app": "."}},
+            {"id": "nuvyr", "display_name": "Nuvyr", "repos": {"api": "."}}]})
+        write_json(
+            root / "State" / "session_autobridge" / "sessions" / "SESSION-NUVYR.json",
+            {
+                "session_id": "SESSION-NUVYR", "agent_id": "cdx2", "project_id": "nuvyr",
+                "chat_id": "CHAT-NUVYR", "status": "active", "mode": "auto-read",
+                "wake_strategy": "runtime_trigger", "repo_targets": ["api"],
+                "lease_expires_utc": iso(3600),
+                "runtime": {"family": "gemini_cli", "session_id": "SESSION-NUVYR-runtime"},
+                "processed_messages": [],
+            },
+        )
+        write_json(
+            root / "State" / "session_autobridge" / "bindings" / "nuvyr"
+            / "CHAT-NUVYR" / "cdx2.json",
+            {
+                "project_id": "nuvyr", "chat_id": "CHAT-NUVYR", "agent_id": "cdx2",
+                "session_id": "SESSION-NUVYR",
+                "runtime_session_id": "SESSION-NUVYR-runtime",
+                "runtime_family": "gemini_cli",
+            },
+        )
+
+        _, nuvyr = self.run_presend(
+            root, "--project", "nuvyr", "--chat", "CHAT-NUVYR", "--agent", "cdx2",
+            "--repo-targets", "api")
+        checks = self.presend_checks(nuvyr)
+        self.assertEqual(OK, checks["exact-pair"]["status"])
+        self.assertEqual("SESSION-NUVYR", nuvyr["agents"][0]["session_id"])
+        self.assertEqual(OK, checks["repo-scope"]["status"])
+
+        # The amiga chat has no session here, so the same agent's nuvyr binding must not
+        # be offered for it -- that is the cross-project leak this case exists to exclude.
+        _, amiga = self.run_presend(
+            root, "--project", "amiga", "--chat", "CHAT-HEALTH", "--agent", "cdx2")
+        self.assertEqual(FAIL, self.presend_checks(amiga)["exact-pair"]["status"])
+        self.assertIsNone(amiga["agents"][0]["session_id"])
+
+    def test_agent_wide_mode_reports_the_whole_inventory(self) -> None:
         """Kept, but it must not be the thing consulted before a send."""
         root = self.workspace_with_two_sessions()
         code, payload = self.run_presend(root, "--agent", "cdx2")
         self.assertEqual(0, code)
-        self.assertTrue(payload["agents"][0]["can_wake"])
         # It reports BOTH, which is the honest inventory answer.
-        self.assertEqual(["SESSION-LIVE"], payload["agents"][0]["wakeable_sessions"])
-        self.assertEqual(["SESSION-DEAD"], payload["agents"][0]["unwakeable_sessions"])
+        self.assertEqual(["SESSION-LIVE"], payload["agents"][0]["dispatchable_sessions"])
+        self.assertEqual(["SESSION-DEAD"], payload["agents"][0]["undispatchable_sessions"])
 
-    def test_pre_send_mode_refuses_when_the_exact_pair_is_not_wakeable(self) -> None:
+    def test_exact_binding_mode_reports_when_there_is_no_pair(self) -> None:
         """Codex's reproduction: a live sibling session is not evidence for this packet."""
         root = self.workspace_with_two_sessions()
         code, payload = self.run_presend(
             root, "--agent", "cdx2", "--project", "amiga", "--chat", "CHAT-NOT-BOUND")
         report = payload["agents"][0]
-        self.assertEqual(2, code, report)
-        self.assertFalse(report["can_wake"])
+        self.assertEqual(0, code, report)
+        self.assertEqual(FAIL, report["status"])
         pair = next(c for c in report["checks"] if c["check"] == "exact-pair")
         self.assertEqual("fail", pair["status"])
         self.assertIn("not evidence", pair["detail"])
@@ -382,15 +499,15 @@ class PipelineHealthTest(unittest.TestCase):
                 self.assertNotEqual(0, result.returncode)
                 self.assertIn("exactly one --agent", result.stderr)
 
-    def test_an_expired_lease_is_reported_as_cannot_wake(self) -> None:
+    def test_an_expired_lease_is_reported_as_a_failing_observation(self) -> None:
         root = self.workspace()
         self.add_session(root, "SESSION-DEAD", lease_delta=-60)
         code, payload = self.run_health(root)
-        self.assertEqual(2, code)
-        self.assertFalse(self.agent(payload)["can_wake"])
+        self.assertEqual(0, code)
+        self.assertEqual(FAIL, self.agent(payload)["status"])
         self.assertIn("lease_expired", json.dumps(payload))
 
-    def test_one_live_session_makes_the_agent_wakeable_despite_dead_ones(self) -> None:
+    def test_one_live_session_is_reported_dispatchable_despite_dead_ones(self) -> None:
         """The verdict that matters is 'can a packet land', not 'is every session well'.
 
         Scoring all sessions together reported FAIL for a lane that was working, because
@@ -402,18 +519,19 @@ class PipelineHealthTest(unittest.TestCase):
         self.add_session(root, "SESSION-OLD-PROBE", lease_delta=-7_000_000)
         code, payload = self.run_health(root)
         self.assertEqual(0, code)
-        self.assertTrue(self.agent(payload)["can_wake"])
-        self.assertEqual(["SESSION-LIVE"], self.agent(payload)["wakeable_sessions"])
-        self.assertEqual(["SESSION-OLD-PROBE"], self.agent(payload)["unwakeable_sessions"])
+        self.assertEqual(["SESSION-LIVE"], self.agent(payload)["dispatchable_sessions"])
+        self.assertEqual(
+            ["SESSION-OLD-PROBE"], self.agent(payload)["undispatchable_sessions"]
+        )
         self.assertEqual("warn", self.check(payload, "stale-sessions")["status"])
 
-    def test_an_unreachable_endpoint_does_not_make_a_session_unwakeable(self) -> None:
+    def test_an_unreachable_endpoint_does_not_make_a_session_undispatchable(self) -> None:
         """The advertised rule, now actually tested.
 
-        The return comment says can_wake is keyed to session state alone, because a live
+        Dispatchability is keyed to session state alone, because a live
         observation is stale the instant it is taken -- but endpoint FAIL was
         participating in the `live` classification, so an active leased session with an
-        unreachable app-server reported can_wake=False. Code and comment disagreed and
+        unreachable app-server was reported undispatchable. Code and comment disagreed and
         the advertised rule was untested.
 
         No mock: a codex_app session whose home has no app-server fails the endpoint
@@ -425,9 +543,8 @@ class PipelineHealthTest(unittest.TestCase):
         report = self.agent(payload)
         endpoint = self.check(payload, "endpoint")
         self.assertEqual("fail", endpoint["status"], "still reported")
-        self.assertTrue(report["can_wake"], "but advisory, exactly as documented")
-        self.assertEqual(["SESSION-LIVE"], report["wakeable_sessions"])
-        self.assertEqual(0, code, "an advisory failure must not block a send")
+        self.assertEqual(["SESSION-LIVE"], report["dispatchable_sessions"])
+        self.assertEqual(0, code, "an observation reports; it does not gate")
 
     def test_a_warning_never_blocks_the_send(self) -> None:
         """A gate that fails on advisory noise gets wrapped in `|| true` and ignored."""
@@ -438,7 +555,7 @@ class PipelineHealthTest(unittest.TestCase):
         # The aggregate status also absorbs the ambient watcher check, so this asserts
         # the warning it is about, not the roll-up.
         self.assertEqual("warn", self.check(payload, "stale-sessions")["status"])
-        self.assertEqual(0, code, "a warning must not fail the preflight")
+        self.assertEqual(0, code, "an observation reports; it does not gate")
 
     def test_a_lease_below_the_margin_warns_but_still_wakes(self) -> None:
         root = self.workspace()
@@ -462,7 +579,7 @@ class PipelineHealthTest(unittest.TestCase):
         self.add_unread(root, "orphan_one", target=None)
         self.add_unread(root, "orphan_two", target=None)
         code, payload = self.run_health(root)
-        self.assertEqual(0, code, "unroutable backlog is a warning, not a block")
+        self.assertEqual(0, code, "an observation reports; it does not gate")
         backlog = self.check(payload, "backlog")
         self.assertEqual("warn", backlog["status"])
         self.assertEqual(2, backlog["undeliverable"])
@@ -477,18 +594,18 @@ class PipelineHealthTest(unittest.TestCase):
         self.assertEqual(0, code)
         self.assertEqual("ok", self.check(payload, "backlog")["status"])
 
-    def test_no_registered_session_cannot_wake(self) -> None:
+    def test_no_registered_session_is_reported_as_a_failing_observation(self) -> None:
         root = self.workspace()
         code, payload = self.run_health(root)
-        self.assertEqual(2, code)
-        self.assertFalse(self.agent(payload)["can_wake"])
-        self.assertIn("durable only", self.check(payload, "session")["detail"])
+        self.assertEqual(0, code)
+        self.assertEqual(FAIL, self.agent(payload)["status"])
+        self.assertIn("will not wake anything", self.check(payload, "session")["detail"])
 
-    def test_the_watcher_is_advisory_and_never_gates_the_verdict(self) -> None:
+    def test_the_watcher_observation_does_not_decide_dispatchability(self) -> None:
         """Contract ruling (codex, 2026-07-26): process and endpoint checks are stale the
         instant they are taken, so gating on them makes the verdict a coin flip under
         exactly the conditions it is consulted. An earlier version folded the watcher
-        into can_wake; this pins the reversal so it cannot drift back silently.
+        into dispatchability; this pins the reversal so it cannot drift back silently.
         """
         root = self.workspace()
         self.add_session(root, "SESSION-LIVE", lease_delta=3600)
@@ -499,8 +616,11 @@ class PipelineHealthTest(unittest.TestCase):
         # state is a test that fails for reasons unrelated to the contract. The contract
         # is that its value does not influence the verdict.
         self.assertIn(watcher["status"], (OK, WARN, FAIL))
-        self.assertTrue(self.agent(payload)["can_wake"], "session state alone decides")
-        self.assertEqual(0, code, "an advisory check must not block a send")
+        self.assertEqual(
+            ["SESSION-LIVE"], self.agent(payload)["dispatchable_sessions"],
+            "status, lease and resolved action decide dispatchability, not the watcher",
+        )
+        self.assertEqual(0, code, "an observation reports; it does not gate")
         if watcher["status"] == FAIL:
             self.assertEqual("fail", payload["status"], "still visible in the report")
 
@@ -682,38 +802,59 @@ class ActivityAndWatchTest(unittest.TestCase):
         self.assertNotIn("allow_unscoped_env", seen["kwargs"],
                          "the probe must not opt out of the override dispatch honours")
 
-    def test_the_session_scan_fails_closed_rather_than_reporting_a_partial_inventory(self) -> None:
-        """A partial inventory looks exactly like a complete one.
+    def test_the_session_scan_charges_entries_the_filter_would_have_hidden(self) -> None:
+        """A real directory, because mocking `glob` proves nothing about the bound.
 
-        The directory is untrusted input and was enumerated without any budget, so a
-        pathological one could stall the preflight or exhaust memory. The charge is at the
-        enumeration boundary, before the agent filter, because filtering first hides the
-        cost of the entries that were rejected.
+        `sorted(glob("*.json"))` materialises the whole matching list before a loop can
+        charge anything, and the suffix filter drops entries before they are counted -- so
+        non-JSON names escaped the budget entirely. The previous version of this test
+        handed the function a fake `glob`, which asserted that a check exists rather than
+        that the work is bounded.
         """
         from unittest import mock
 
-        class ManyPaths:
-            def glob(self_inner, pattern):
-                return [Path(f"/tmp/nonexistent/sess_{i}.json") for i in range(20)]
-
-        with mock.patch.object(self.mod, "SESSIONS_DIR", ManyPaths()), \
-                mock.patch.object(self.mod, "SESSION_SCAN_LIMIT", 5), \
-                mock.patch.object(self.mod, "load_session", return_value=None):
-            with self.assertRaises(RuntimeError) as caught:
-                self.mod._sessions_for("cdx2")
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            for index in range(12):
+                (directory / f"noise_{index}.txt").write_text("x", encoding="utf-8")
+            (directory / "sess_real.json").write_text("{}", encoding="utf-8")
+            with mock.patch.object(self.mod, "SESSIONS_DIR", directory), \
+                    mock.patch.object(self.mod, "SESSION_SCAN_LIMIT", 5):
+                with self.assertRaises(RuntimeError) as caught:
+                    self.mod._sessions_for("cdx2")
         self.assertIn("refusing to scan further", str(caught.exception))
 
     def test_a_normal_session_directory_is_well_under_the_budget(self) -> None:
         """The budget must not be so tight that ordinary use trips it."""
         from unittest import mock
 
-        class FewPaths:
-            def glob(self_inner, pattern):
-                return [Path(f"/tmp/nonexistent/sess_{i}.json") for i in range(50)]
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            for index in range(50):
+                (directory / f"sess_{index}.json").write_text("{}", encoding="utf-8")
+            with mock.patch.object(self.mod, "SESSIONS_DIR", directory):
+                self.assertEqual([], self.mod._sessions_for("cdx2"))
 
-        with mock.patch.object(self.mod, "SESSIONS_DIR", FewPaths()), \
-                mock.patch.object(self.mod, "load_session", return_value=None):
-            self.assertEqual([], self.mod._sessions_for("cdx2"))
+    def test_the_unread_queue_is_refused_before_any_packet_is_parsed(self) -> None:
+        """The charge is on the pointers, not on the parsed result.
+
+        `get_unread_messages` reads and parses every existing packet before returning, so
+        a length check on its result detected the excess only after all the work was done.
+        Parsing is made to explode here, so the refusal can only pass if nothing was
+        parsed.
+        """
+        from unittest import mock
+
+        inbox = {"agent": "cdx2", "unread": [f"Chats/x/{i}.md" for i in range(20)], "read": []}
+        with mock.patch.object(self.mod, "load_agent_inbox", return_value=inbox), \
+                mock.patch.object(self.mod, "UNREAD_SCAN_LIMIT", 5), \
+                mock.patch.object(
+                    self.mod, "parse_frontmatter",
+                    side_effect=AssertionError("must refuse before parsing"),
+                ):
+            with self.assertRaises(RuntimeError) as caught:
+                self.mod._bounded_unread("cdx2")
+        self.assertIn("partial backlog", str(caught.exception))
 
     def watcher_with_listing(self, listing: str) -> dict:
         from unittest import mock
@@ -724,32 +865,84 @@ class ActivityAndWatchTest(unittest.TestCase):
         with mock.patch.object(self.mod.subprocess, "run", return_value=Result()):
             return self.mod._watcher_check("cdx2")
 
-    def test_a_watcher_polling_another_checkout_is_not_this_workspaces_watcher(self) -> None:
-        """Matching the basename counted someone else's mailbox poller as ours.
+    def test_no_watcher_at_all_is_a_failing_observation(self) -> None:
+        """Injected rather than read from the host.
 
-        The check passed while nothing read packets written here, which is the exact
-        false green this tool exists to prevent.
+        A real watcher for this agent on the machine running the suite would otherwise
+        decide the result -- which it did, and the earlier version of this case passed or
+        failed depending on what was running.
         """
-        foreign = "/Users/x/other-collab/bin/watch_inbox.py --me cdx2 --json"
-        check = self.watcher_with_listing(f"/bin/zsh\n{foreign}\n")
+        check = self.watcher_with_listing("/bin/zsh\n/usr/bin/ssh\n")
         self.assertEqual(self.mod.FAIL, check["status"])
-        self.assertIn("another checkout", check["detail"])
+        self.assertIn("Nothing polls this inbox", check["detail"])
 
     def test_a_watcher_from_this_workspace_counts(self) -> None:
         mine = f"python3 {self.mod.ROOT / 'bin' / 'watch_inbox.py'} --me cdx2 --json"
         check = self.watcher_with_listing(f"/bin/zsh\n{mine}\n")
         self.assertEqual(self.mod.OK, check["status"])
 
-    def test_the_unread_queue_is_bounded_like_the_session_directory(self) -> None:
-        """The other untrusted enumeration, read and parsed in full."""
+    def test_an_absolute_foreign_watcher_is_reported_as_foreign(self) -> None:
+        """Matching the basename alone counted another checkout's mailbox poller as ours."""
+        foreign = "/Users/x/other-collab/bin/watch_inbox.py --me cdx2 --json"
+        check = self.watcher_with_listing(f"/bin/zsh\n{foreign}\n")
+        self.assertEqual(self.mod.FAIL, check["status"])
+        self.assertIn("another checkout", check["detail"])
+
+    def test_a_relatively_named_watcher_is_reported_as_unattributable(self) -> None:
+        """`ps` does not carry the process cwd, so a relative argument names nothing.
+
+        The documented `python bin/watch_inbox.py --me <agent>` form produces one. Calling
+        it foreign rejects a real watcher; resolving it against this ROOT invents the fact
+        that it was launched from here. Both were shipped in turn, so neither guess is an
+        observation -- this reports the uncertainty and says how to remove it.
+        """
+        relative = "python3 bin/watch_inbox.py --me cdx2 --json"
+        check = self.watcher_with_listing(f"/bin/zsh\n{relative}\n")
+        self.assertEqual(self.mod.WARN, check["status"])
+        self.assertIn("cannot be determined", check["detail"])
+
+    def test_the_probe_negotiates_exactly_as_the_dispatcher_does(self) -> None:
+        """A weaker handshake observes a different connection than the one that matters.
+
+        A server can accept `clientInfo` alone and reject the real negotiation, or reject a
+        malformed probe that dispatch would have completed. The earlier test only varied
+        the method's return value and never looked at the parameters.
+        """
         from unittest import mock
 
-        many = [{"path": f"Chats/x/{i}.md", "frontmatter": {}, "body": ""} for i in range(20)]
-        with mock.patch.object(self.mod, "get_unread_messages", return_value=many), \
-                mock.patch.object(self.mod, "UNREAD_SCAN_LIMIT", 5):
-            with self.assertRaises(RuntimeError) as caught:
-                self.mod._backlog_check("cdx2", [])
-        self.assertIn("partial backlog", str(caught.exception))
+        seen: dict[str, object] = {}
+
+        class FakeClient:
+            def __enter__(self_inner):
+                return self_inner
+
+            def __exit__(self_inner, *exc):
+                return False
+
+            def notify(self_inner, *a, **k):
+                return None
+
+            def request(self_inner, method, params=None):
+                seen[method] = params
+                if method == "thread/list":
+                    return {"data": [{"id": "thread-x", "updatedAt": 0}]}
+                return {}
+
+        with mock.patch.object(
+            self.mod, "discover_codex_app_server",
+            return_value={"url": "ws://127.0.0.1:1", "token_file": None},
+        ), mock.patch.object(
+            self.mod, "_codex_app_server_token", return_value=None
+        ), mock.patch.object(
+            self.mod, "JsonRpcWebSocketClient", lambda *a, **k: FakeClient()
+        ):
+            self.mod._activity_check(
+                {"runtime": {"family": "codex_app", "session_id": "thread-x",
+                             "home": "/home"}}
+            )
+        self.assertEqual(self.mod.CODEX_APP_SERVER_INITIALIZE_PARAMS, seen["initialize"])
+        self.assertEqual("2024-11-05", seen["initialize"]["protocolVersion"])
+        self.assertTrue(seen["initialize"]["capabilities"]["experimentalApi"])
 
     def test_a_long_idle_worker_is_reported_but_never_failed(self) -> None:
         """Quiet is not broken. Failing on it would make the view cry wolf hourly.
