@@ -12,6 +12,7 @@ Usage:
 """
 
 import sys
+import re
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -106,6 +107,45 @@ def queue_summaries() -> list[dict]:
     return summaries
 
 
+def announce_contract(agent_id: str) -> None:
+    """Print the contract version and this agent's own drifted instruction copies.
+
+    Bootstrap is the one command every worker runs, so it is where drift has to surface.
+    A canonical document does not help on its own: nobody re-reads a document they
+    believe they already know, which is how eight agent memory files ended up teaching a
+    deliver.py invocation that silently dropped packets.
+    """
+    contract = ROOT / "AGENTS.md"
+    version = "unknown"
+    try:
+        head = contract.read_text(encoding="utf-8")[:200]
+        marker = re.search(r"CONTRACT_VERSION:\s*(\S+)", head)
+        if marker:
+            version = marker.group(1)
+    except OSError:
+        return
+
+    print(f"[contract] AGENTS.md version {version} — canonical worker contract")
+    print(f"[contract] if your last session predates it, read "
+          f"'Recent contract changes' in {contract}")
+
+    checker = ROOT / "bin" / "contract_drift.py"
+    if not checker.exists():
+        return
+    try:
+        done = subprocess.run(
+            [sys.executable, str(checker), "--agent", agent_id],
+            capture_output=True, text=True, timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return
+    if done.returncode != 0 and done.stdout:
+        first = done.stdout.splitlines()[0]
+        print(f"[contract] {first}")
+        print(f"[contract] run: python bin/contract_drift.py --agent {agent_id}")
+    print()
+
+
 def main():
     args = parse_args()
 
@@ -116,6 +156,9 @@ def main():
         sys.exit(1)
 
     agent = get_agent(args.agent)
+
+    if not args.json_output:
+        announce_contract(args.agent)
 
     # ── 1. Identity (FIRST — the LLM must read this before anything else) ──
     identity_file = agent_identity_path(args.agent)
