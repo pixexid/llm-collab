@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections import deque
 import importlib
 import os
 import stat
@@ -1569,7 +1570,9 @@ class JsonRpcWebSocketClient:
         # recv(1099511627776) here, and any budget applied to the DECODED message is charged too
         # late to matter. A length is a claim, and this is where the claim is first believed.
         self.max_frame_bytes = max_frame_bytes
-        self.pending_notifications: list[dict[str, Any]] = []
+        # A deque, so the replay is linear rather than quadratic in popleft.
+        self.pending_notifications: deque[dict[str, Any]] = deque()
+        self.pending_notifications_dropped = 0
         # Bytes already pulled off the socket but not yet consumed. The handshake is read with
         # recv(4096), so when the peer's upgrade response and its first frame land in one segment,
         # those frame bytes arrive in the SAME read -- and everything after the \r\n\r\n used to be
@@ -1800,6 +1803,15 @@ class JsonRpcWebSocketClient:
             # turn that finished that fast lost its answer and its terminal event and was
             # committed as unobserved. They are held for the caller to replay instead.
             if message.get("method") and message.get("id") is None:
+                # Bounded here too, and for the same reason the turn loop is: the absolute
+                # deadline is not installed until turn/start returns, so a peer that emits
+                # notifications continuously while a response is outstanding could grow
+                # this without limit -- an OOM before delivery state is even known, which
+                # redelivers the packet. The newest are kept, since those are the ones
+                # nearest whatever went wrong.
+                if len(self.pending_notifications) >= PENDING_NOTIFICATION_LIMIT:
+                    self.pending_notifications.popleft()
+                    self.pending_notifications_dropped += 1
                 self.pending_notifications.append(message)
 
 
@@ -2002,6 +2014,11 @@ CODEX_APP_SERVER_NOTIFICATION_LIMIT = 50
 # the accepted packet is marked processed, which redelivers it.
 CODEX_APP_SERVER_ASSISTANT_TEXT_LIMIT = 4 * 1024 * 1024
 CODEX_APP_SERVER_NOTIFICATION_RETENTION = 4096
+# Counting entries alone bounded nothing: a frame may declare up to 16 MiB, so 4096
+# oversized `method` strings is ~64 GiB. Each retained method is truncated to a length no
+# real method approaches, which bounds the product rather than one factor of it.
+CODEX_APP_SERVER_METHOD_CHARS = 200
+PENDING_NOTIFICATION_LIMIT = 512
 
 
 def _notification_turn_id(params: Any) -> str | None:
@@ -2018,7 +2035,7 @@ def _notification_turn_id(params: Any) -> str | None:
 
 
 def _notification_report(
-    notifications: list[str],
+    notifications,
     *,
     dropped: int = 0,
     text_truncated: bool = False,
@@ -2030,10 +2047,11 @@ def _notification_report(
     already scrolled off.
     """
     limit = CODEX_APP_SERVER_NOTIFICATION_LIMIT
+    retained = list(notifications)
     return {
-        "notifications": notifications[-limit:],
-        "notifications_total": len(notifications) + dropped,
-        "notifications_truncated": len(notifications) > limit or bool(dropped),
+        "notifications": retained[-limit:],
+        "notifications_total": len(retained) + dropped,
+        "notifications_truncated": len(retained) > limit or bool(dropped),
         "notifications_dropped": dropped,
         "stdout_truncated": text_truncated,
     }
@@ -2050,7 +2068,13 @@ def _delta_text(params: Any, item: Any) -> str:
     return ""
 
 
-def execute_codex_app_server_trigger(session: dict, message: dict, runtime_home: str | None) -> dict[str, Any] | None:
+def execute_codex_app_server_trigger(
+    session: dict,
+    message: dict,
+    runtime_home: str | None,
+    *,
+    on_accepted=None,
+) -> dict[str, Any] | None:
     runtime = runtime_metadata(session)
     endpoint = discover_codex_app_server(runtime_home)
     if endpoint is None:
@@ -2060,7 +2084,10 @@ def execute_codex_app_server_trigger(session: dict, message: dict, runtime_home:
     prompt = build_resume_prompt(session, message)
     runtime_session_id = str(runtime["session_id"])
     token = _codex_app_server_token(endpoint.get("token_file"))
-    notifications: list[str] = []
+    # Ring buffer, so truncation discards the OLDEST. Dropping the newest kept methods
+    # 4047-4096 and reported them as "the last 50 events", which throws away precisely the
+    # frames nearest a terminal condition -- the ones a diagnostic tail exists for.
+    notifications: deque[str] = deque(maxlen=CODEX_APP_SERVER_NOTIFICATION_RETENTION)
     notifications_dropped = 0
     assistant_text = ""
     assistant_text_truncated = False
@@ -2114,6 +2141,10 @@ def execute_codex_app_server_trigger(session: dict, message: dict, runtime_home:
                 f"{json.dumps(started, sort_keys=True)[:200]}"
             )
         started_turn_id = turn_identifier
+        if on_accepted is not None:
+            # Delivery is proven here, and everything below is observation. A crash during
+            # the wait would otherwise lose the record and redeliver the packet.
+            on_accepted()
 
         def unobserved(detail: str) -> dict[str, Any]:
             """The turn was ACCEPTED and we stopped watching it.
@@ -2156,6 +2187,10 @@ def execute_codex_app_server_trigger(session: dict, message: dict, runtime_home:
         # Notifications the turn/start correlation loop saw before its reply. Replayed
         # first, in arrival order, so a turn that answered that fast is still observed.
         replay = list(client.pending_notifications)
+        # Frames discarded at the correlation boundary are notifications that were seen and
+        # dropped, so they belong in the same count -- a bound nobody can observe reads
+        # exactly like no bound at all.
+        notifications_dropped += client.pending_notifications_dropped
         client.pending_notifications.clear()
 
         deadline = time.monotonic() + timeout_seconds
@@ -2180,10 +2215,9 @@ def execute_codex_app_server_trigger(session: dict, message: dict, runtime_home:
             method = str(message_payload.get("method", ""))
             if not method:
                 continue
-            if len(notifications) < CODEX_APP_SERVER_NOTIFICATION_RETENTION:
-                notifications.append(method)
-            else:
+            if len(notifications) == CODEX_APP_SERVER_NOTIFICATION_RETENTION:
                 notifications_dropped += 1
+            notifications.append(method[:CODEX_APP_SERVER_METHOD_CHARS])
             params = message_payload.get("params")
             # Output is attributed BEFORE it is collected, not after. A second turn on the
             # same stream has its own item notifications, and skipping only its terminal
@@ -2265,7 +2299,17 @@ def execute_codex_app_server_trigger(session: dict, message: dict, runtime_home:
     }
 
 
-def execute_runtime_trigger(session: dict, message: dict) -> dict[str, Any]:
+def execute_runtime_trigger(
+    session: dict, message: dict, *, on_accepted=None
+) -> dict[str, Any]:
+    """`on_accepted` is called the moment delivery is proven, before observation.
+
+    The fence only serialises LIVE processes. If the watcher dies after turn/start has
+    been accepted but before the trigger returns -- an interval that contains the whole
+    terminal-observation wait, up to the full timeout -- the OS releases the lock, the
+    mark never runs, and a successor sends the same packet again. Recording acceptance at
+    the correlated response boundary closes that window without a protocol change.
+    """
     runtime = runtime_metadata(session)
     command = runtime.get("command") if isinstance(runtime, dict) else None
     derived = False
@@ -2276,6 +2320,7 @@ def execute_runtime_trigger(session: dict, message: dict) -> dict[str, Any]:
             session,
             message,
             str(runtime_home) if runtime_home else None,
+            on_accepted=on_accepted,
         )
         if app_server_result is not None:
             return app_server_result
@@ -3100,11 +3145,23 @@ def dispatch_session(
             # holder descheduled between the two could let another watcher take over, pass
             # its own trigger fence and send the packet again -- and then record the path,
             # so processed state concealed the duplicate instead of preventing it.
+            recorded: list[str] = []
+
+            def record_acceptance() -> None:
+                mark_message_processed(session, message["path"])
+                recorded.append("on_acceptance")
+
             def trigger_and_record() -> dict[str, Any]:
-                result = execute_runtime_trigger(session, message)
-                if isinstance(result, dict) and result.get("returncode") == 0:
+                result = execute_runtime_trigger(
+                    session, message, on_accepted=record_acceptance
+                )
+                if isinstance(result, dict) and result.get("returncode") == 0 and not recorded:
+                    # Adapters with no acceptance boundary to hook still record here,
+                    # under the same fence that authorised the send.
                     mark_message_processed(session, message["path"])
-                    result = {**result, "processed_recorded": "inside_trigger_fence"}
+                    recorded.append("inside_trigger_fence")
+                if isinstance(result, dict) and recorded:
+                    result = {**result, "processed_recorded": recorded[0]}
                 return result
 
             asserted, assertion_event, runtime_result = activation_fenced_mutation(

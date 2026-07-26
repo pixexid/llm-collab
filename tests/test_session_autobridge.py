@@ -6475,6 +6475,15 @@ class UnobservedTurnIsNotRedeliveredTest(unittest.TestCase):
                             "jsonrpc": "2.0", "id": frame["id"],
                             "result": {"data": [{"id": "gpt-test", "isDefault": True}]},
                         })
+                    elif method == "thread/resume" and after_turn_start == "chatty_before_reply":
+                        # Notifications while a correlated response is outstanding, which
+                        # is before any deadline is installed.
+                        for index in range(200):
+                            write_frame(conn, {
+                                "jsonrpc": "2.0", "method": f"item/noise/{index}",
+                                "params": {"turnId": "turn-1"},
+                            })
+                        write_frame(conn, {"jsonrpc": "2.0", "id": frame["id"], "result": {}})
                     elif method == "turn/start" and after_turn_start == "early_notifications":
                         # The whole turn arrives BEFORE the correlated turn/start reply.
                         write_frame(conn, {
@@ -6513,10 +6522,20 @@ class UnobservedTurnIsNotRedeliveredTest(unittest.TestCase):
                                            "item": {"type": "agentMessage", "text": f"part{index}"}},
                             })
                         if after_turn_start == "failed":
+                            # The schema exposes a failed outcome through turn/completed
+                            # with turn.status, carries threadId, and nests the error in
+                            # turn.error. `turn/failed` is not a notification the app
+                            # server emits, so the old fixture could not occur.
                             write_frame(conn, {
-                                "jsonrpc": "2.0", "method": "turn/failed",
-                                "params": {"turn": {"id": "turn-1", "status": "failed"},
-                                           "error": {"message": "model refused"}},
+                                "jsonrpc": "2.0", "method": "turn/completed",
+                                "params": {
+                                    "threadId": "codex-thread-unobserved",
+                                    "turn": {
+                                        "id": "turn-1",
+                                        "status": "failed",
+                                        "error": {"message": "model refused"},
+                                    },
+                                },
                             })
                             break
                         if after_turn_start == "anonymous_terminal":
@@ -6554,6 +6573,15 @@ class UnobservedTurnIsNotRedeliveredTest(unittest.TestCase):
                                 "params": {"turn": {"id": "turn-1", "status": "completed"}},
                             })
                             break
+                        if after_turn_start == "giant_methods":
+                            for index in range(40):
+                                write_frame(conn, {
+                                    "jsonrpc": "2.0",
+                                    "method": "x" * 5000 + str(index),
+                                    "params": {"turnId": "turn-1"},
+                                })
+                            time.sleep(2.5)
+                            break
                         if after_turn_start == "unidentified_item":
                             # No turnId anywhere: unattributable, so not ours.
                             write_frame(conn, {
@@ -6567,8 +6595,10 @@ class UnobservedTurnIsNotRedeliveredTest(unittest.TestCase):
                             break
                         if after_turn_start == "flood":
                             for index in range(80):
+                                # Numbered, so a test can say WHICH ones survived
+                                # truncation rather than only how many.
                                 write_frame(conn, {
-                                    "jsonrpc": "2.0", "method": "item/agentMessage/delta",
+                                    "jsonrpc": "2.0", "method": f"item/event/{index:03d}",
                                     "params": {"turnId": "turn-1", "delta": "."},
                                 })
                             time.sleep(2.5)
@@ -6849,6 +6879,58 @@ class UnobservedTurnIsNotRedeliveredTest(unittest.TestCase):
         self.assertEqual("OURS", result["stdout"])
         self.assertNotIn("THEIRS", result["stdout"])
 
+    def test_the_kept_tail_is_the_newest_events_not_the_oldest(self) -> None:
+        """A diagnostic tail exists for the frames nearest whatever went wrong.
+
+        Refusing to append past the retention cap kept methods 4047-4096 and reported them
+        as "the last 50", discarding precisely the events closest to the terminal
+        condition.
+        """
+        with patch.object(session_autobridge_lib, "CODEX_APP_SERVER_NOTIFICATION_RETENTION", 4), \
+                patch.object(session_autobridge_lib, "CODEX_APP_SERVER_NOTIFICATION_LIMIT", 4):
+            port, thread, _ = self.serve(after_turn_start="flood", deltas=0)
+            result = self.trigger(port)
+            thread.join(timeout=5)
+        self.assertEqual(4, len(result["notifications"]))
+        self.assertTrue(result["notifications_truncated"])
+        self.assertGreater(result["notifications_dropped"], 0)
+        # The point of the tail: the highest-numbered events, not the first four.
+        kept = [int(method.rsplit("/", 1)[1]) for method in result["notifications"]]
+        self.assertEqual(sorted(kept), kept)
+        self.assertGreater(min(kept), 4, f"kept the oldest events instead: {kept}")
+
+    def test_a_giant_method_name_is_truncated_before_it_is_retained(self) -> None:
+        """Counting entries bounded one factor of the product, not the product.
+
+        A frame may declare up to 16 MiB, so 4096 oversized method strings is tens of
+        gigabytes -- and a MemoryError there kills the watcher after the turn was accepted
+        but before it is recorded, which redelivers the packet.
+        """
+        port, thread, _ = self.serve(after_turn_start="giant_methods", deltas=0)
+        result = self.trigger(port)
+        thread.join(timeout=5)
+        limit = session_autobridge_lib.CODEX_APP_SERVER_METHOD_CHARS
+        self.assertTrue(result["notifications"])
+        for method in result["notifications"]:
+            self.assertLessEqual(len(method), limit)
+
+    def test_notifications_before_a_correlated_reply_are_bounded(self) -> None:
+        """No deadline is installed until turn/start returns.
+
+        A peer emitting notifications continuously while a response is outstanding could
+        grow the replay buffer without limit -- an OOM before delivery state is even known.
+        """
+        with patch.object(session_autobridge_lib, "PENDING_NOTIFICATION_LIMIT", 8):
+            port, thread, _ = self.serve(after_turn_start="chatty_before_reply", deltas=0)
+            result = self.trigger(port)
+            thread.join(timeout=5)
+        self.assertEqual(0, result["returncode"], "a delivered packet must not be retried")
+        self.assertGreater(
+            result["notifications_dropped"], 0,
+            "the correlation buffer discarded nothing, so it was not bounded",
+        )
+        self.assertTrue(result["notifications_truncated"])
+
     def test_a_kept_notification_tail_says_that_it_is_a_tail(self) -> None:
         """A truncated history must not read like a complete one."""
         port, thread, _ = self.serve(after_turn_start="flood", deltas=0)
@@ -6865,6 +6947,69 @@ class UnobservedTurnIsNotRedeliveredTest(unittest.TestCase):
         thread.join(timeout=5)
         self.assertFalse(result["notifications_truncated"])
         self.assertEqual(len(result["notifications"]), result["notifications_total"])
+
+    def test_acceptance_is_recorded_before_the_observation_wait(self) -> None:
+        """The fence only serialises LIVE processes.
+
+        A watcher that dies after turn/start is accepted but before the trigger returns --
+        an interval containing the entire terminal wait -- releases its lock with no record
+        written, and a successor sends the same packet again. The callback fires at the
+        correlated response boundary, so the record survives a crash during observation.
+        """
+        port, thread, _ = self.serve(after_turn_start="silence")
+        marks: list[str] = []
+        session = {
+            "session_id": "SESSION-UNOBSERVED", "agent_id": "cdx2", "project_id": "amiga",
+            "chat_id": "CHAT-UNOBSERVED",
+            "runtime": {"family": "codex_app", "session_id": "codex-thread-unobserved",
+                        "timeout_seconds": 1, "model": "gpt-test"},
+        }
+        message = {
+            "path": "Chats/x/2026-04-22T00-00-00_to-cdx2_packet.md",
+            "body": "Body.",
+            "frontmatter": {"chat_id": "CHAT-UNOBSERVED", "from": "claude", "to": "cdx2",
+                            "title": "One packet", "project_id": "amiga",
+                            "target_session_id": "codex-thread-unobserved"},
+        }
+        with patch.dict(
+            os.environ, {"LLM_COLLAB_CODEX_APP_SERVER_URL": f"ws://127.0.0.1:{port}"},
+            clear=False,
+        ):
+            result = session_autobridge_lib.execute_codex_app_server_trigger(
+                session, message, None, on_accepted=lambda: marks.append("accepted")
+            )
+        thread.join(timeout=5)
+        # "silence" never reaches a terminal event, so the callback can only have fired
+        # from the acceptance boundary rather than from anything after the wait.
+        self.assertEqual(["accepted"], marks)
+        self.assertEqual("unobserved", result["terminal_status"])
+
+    def test_an_unaccepted_turn_records_nothing(self) -> None:
+        """Recording early must not record a delivery that never happened."""
+        port, thread, _ = self.serve(after_turn_start="unaccepted")
+        marks: list[str] = []
+        session = {
+            "session_id": "SESSION-UNOBSERVED", "agent_id": "cdx2", "project_id": "amiga",
+            "chat_id": "CHAT-UNOBSERVED",
+            "runtime": {"family": "codex_app", "session_id": "codex-thread-unobserved",
+                        "timeout_seconds": 1, "model": "gpt-test"},
+        }
+        message = {
+            "path": "Chats/x/2026-04-22T00-00-00_to-cdx2_packet.md", "body": "Body.",
+            "frontmatter": {"chat_id": "CHAT-UNOBSERVED", "from": "claude", "to": "cdx2",
+                            "title": "One packet", "project_id": "amiga",
+                            "target_session_id": "codex-thread-unobserved"},
+        }
+        with patch.dict(
+            os.environ, {"LLM_COLLAB_CODEX_APP_SERVER_URL": f"ws://127.0.0.1:{port}"},
+            clear=False,
+        ):
+            with self.assertRaises(ValueError):
+                session_autobridge_lib.execute_codex_app_server_trigger(
+                    session, message, None, on_accepted=lambda: marks.append("accepted")
+                )
+        thread.join(timeout=5)
+        self.assertEqual([], marks)
 
     def test_an_unattributable_item_is_not_our_output(self) -> None:
         """A positive match, exactly as the terminal path requires.
@@ -6913,15 +7058,21 @@ class UnobservedTurnIsNotRedeliveredTest(unittest.TestCase):
         50-entry slice ran only after everything had been kept -- and a MemoryError there
         escapes before the accepted packet is marked processed, which redelivers it.
         """
-        with patch.object(session_autobridge_lib, "CODEX_APP_SERVER_NOTIFICATION_RETENTION", 10), \
-                patch.object(session_autobridge_lib, "CODEX_APP_SERVER_ASSISTANT_TEXT_LIMIT", 8):
+        with patch.object(session_autobridge_lib, "CODEX_APP_SERVER_NOTIFICATION_RETENTION", 10):
             port, thread, _ = self.serve(after_turn_start="flood", deltas=0)
+            result = self.trigger(port)
+            thread.join(timeout=5)
+        self.assertGreater(result["notifications_dropped"], 0)
+        self.assertTrue(result["notifications_truncated"])
+
+    def test_retained_delta_text_is_cumulatively_bounded(self) -> None:
+        """The other half: concatenated deltas, bounded and reported as truncated."""
+        with patch.object(session_autobridge_lib, "CODEX_APP_SERVER_ASSISTANT_TEXT_LIMIT", 8):
+            port, thread, _ = self.serve(after_turn_start="realistic_delta", deltas=0)
             result = self.trigger(port)
             thread.join(timeout=5)
         self.assertLessEqual(len(result["stdout"]), 8)
         self.assertTrue(result["stdout_truncated"])
-        self.assertGreater(result["notifications_dropped"], 0)
-        self.assertTrue(result["notifications_truncated"])
 
     def test_a_completed_turn_reports_an_observed_delivery(self) -> None:
         """The flag must DISTINGUISH the two cases, or it certifies nothing.
