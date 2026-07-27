@@ -317,6 +317,34 @@ The `type` command exposes key-typing directly and is ATTENDED-ONLY (GH-1547):
 `axsend type --app <name> --text "..." --attended [--submit] [--verify]` —
 without `--attended` it refuses with exit 11 before touching anything.
 
+## Diagnosing a resolver failure (2026-07-27)
+
+`no proven chat window/composer` is a resolver verdict, not a verdict on AX. Two
+ways to misread it, both observed in one session:
+
+**It can be transient.** Three consecutive `state` and `ring --submit --dry-run`
+calls against Codex returned it, and `check` reported `AX trusted: YES` the whole
+time. The same commands resolved the composer immediately once the app window was
+brought into view. What changed was visibility of the window, not trust, not the
+binary, and not the app (same pid throughout). So: before concluding the doorbell
+is unavailable, make the target window visible and retry. Declaring AX down on the
+strength of the message alone was wrong, and it cost a working delivery path.
+
+**`tree` cannot tell you whether the target composer holds a draft.** It lists
+`AXTextArea` nodes from every thread the app has open, including background
+threads whose composers legitimately hold drafts, and it truncates `AXValue` at
+about 40 characters. A stale-looking fragment from some other thread's composer
+reads exactly like a stuck draft in the one you are about to ring. Use
+`ring --submit --dry-run` instead: it resolves the real target, prints
+`composer set (role=...)`, presses nothing, and clears the draft. If you need the
+full text of a draft, `tree` will not give it to you.
+
+**A failed mailbox wake says nothing about AX.** `deliver.py` refusing with
+`autobridge_refusal_reason: exact_binding_not_dispatchable` means the recipient's
+session binding lapsed (check `lease_expires_utc` — expiry does not change
+`status`). The AX doorbell is an independent path and may be fine; test it rather
+than assuming both are down.
+
 ## Limits / next
 
 - Validated on Codex. ZCode and Claude Desktop expose composers too; per-app send
