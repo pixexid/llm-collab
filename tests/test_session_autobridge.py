@@ -2997,7 +2997,7 @@ class SessionAutobridgeTest(unittest.TestCase):
         ):
             with self.subTest(project=project):
                 root = self.make_workspace()
-                for agent in ("codex", "claude"):
+                for agent in ("codex", "relay"):
                     self.add_agent(
                         root,
                         {
@@ -3015,8 +3015,8 @@ class SessionAutobridgeTest(unittest.TestCase):
                     chat_id=chat_id,
                     project_id=project,
                 )
-                runtime_id = f"claude-runtime-expired-{project}"
-                session_id = f"SESSION-CLAUDE-EXP-{project.upper()}"
+                runtime_id = f"relay-runtime-expired-{project}"
+                session_id = f"SESSION-RELAY-EXP-{project.upper()}"
                 worker_script = root / "record_dispatch.py"
                 dispatch_output = root / "dispatch.json"
                 write(
@@ -3033,12 +3033,12 @@ class SessionAutobridgeTest(unittest.TestCase):
                     root,
                     "register",
                     "--session", session_id,
-                    "--agent", "claude",
+                    "--agent", "relay",
                     "--project", project,
                     "--chat", chat_id,
                     "--mode", "auto-read",
                     "--wake-strategy", "runtime_trigger",
-                    "--runtime-family", "claude_app",
+                    "--runtime-family", "codex_app",
                     "--runtime-session-id", runtime_id,
                     "--runtime-session-source", "first_read",
                     "--runtime-command",
@@ -3057,7 +3057,7 @@ class SessionAutobridgeTest(unittest.TestCase):
                         sys.executable, str(DELIVER_SCRIPT),
                         "--chat", chat_id,
                         "--from", "codex",
-                        "--to", "claude",
+                        "--to", "relay",
                         "--project", project,
                         "--title", "Strand guard",
                         "--sender-session-id", "codex-session-1",
@@ -3078,7 +3078,7 @@ class SessionAutobridgeTest(unittest.TestCase):
                 )
                 self.assertEqual(runtime_id, payload["resolved_target_session_id"])
 
-                packet = sorted(chat_dir.glob("*_to-claude_*.md"))[-1]
+                packet = sorted(chat_dir.glob("*_to-relay_*.md"))[-1]
                 frontmatter, _ = parse_frontmatter(packet.read_text())
                 self.assertEqual(runtime_id, frontmatter["target_session_id"])
 
@@ -3103,7 +3103,7 @@ class SessionAutobridgeTest(unittest.TestCase):
                         sys.executable, str(DELIVER_SCRIPT),
                         "--chat", chat_id,
                         "--from", "codex",
-                        "--to", "claude",
+                        "--to", "relay",
                         "--project", project,
                         "--title", "Expired scope refusal",
                         "--sender-session-id", "codex-session-1",
@@ -3136,7 +3136,7 @@ class SessionAutobridgeTest(unittest.TestCase):
                 self.assertFalse(refused_payload["activation_unavailable"])
                 refused_frontmatter = next(
                     frontmatter
-                    for candidate in chat_dir.glob("*_to-claude_*.md")
+                    for candidate in chat_dir.glob("*_to-relay_*.md")
                     for frontmatter, _ in [parse_frontmatter(candidate.read_text())]
                     if frontmatter.get("title") == "Expired scope refusal"
                 )
