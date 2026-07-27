@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import sys
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -22,7 +23,9 @@ sys.path.insert(0, str(REPO_ROOT / "bin"))
 
 from _pi_fingerprint import (  # noqa: E402
     FINGERPRINT_FIELDS,
+    MAX_SESSIONS_SCANNED,
     REFUSE_DUPLICATE_NATIVE_SESSION,
+    REFUSE_SESSION_REGISTRY_UNPROVABLE,
     REFUSE_FINGERPRINT_INCOMPLETE,
     REFUSE_FINGERPRINT_MISMATCH,
     REFUSE_FINGERPRINT_UNPROVEN,
@@ -291,6 +294,149 @@ class PiNativeSessionExclusivityTest(unittest.TestCase):
         }
         self.assertEqual(5, len(codes))
         self.assertEqual(3, len(FINGERPRINT_FIELDS))
+
+
+def pi_session(session_id, native="THREAD-1", *, status="active", expires=None,
+               project_id=None):
+    record = {
+        "session_id": session_id,
+        "status": status,
+        "runtime": {"family": "pi", "session_id": native},
+    }
+    if expires is not None:
+        record["lease_expires_utc"] = expires
+    if project_id is not None:
+        record["project_id"] = project_id
+    return record
+
+
+class PiExclusivityEvidenceTest(unittest.TestCase):
+    """Findings from the GH-323 review: silence is not proof of an unclaimed thread."""
+
+    def test_an_unreadable_registry_refuses_rather_than_reading_as_empty(self):
+        """Approving exactly when a claimant cannot be inspected is the worst case.
+
+        `None`, a mapping, or a malformed record all used to mean "found no claimant",
+        so exclusivity was granted precisely when the evidence was missing.
+        """
+        for registry in (None, {"a": 1}, "sessions", 7):
+            with self.subTest(registry=registry):
+                with self.assertRaises(PiFingerprintRefused) as caught:
+                    assert_native_session_is_exclusive("THREAD-1", registry)
+                self.assertEqual(
+                    REFUSE_SESSION_REGISTRY_UNPROVABLE, caught.exception.reason
+                )
+
+    def test_a_malformed_record_refuses_rather_than_being_skipped(self):
+        with self.assertRaises(PiFingerprintRefused) as caught:
+            assert_native_session_is_exclusive("THREAD-1", [pi_session("S1", "OTHER"), 42])
+        self.assertEqual(REFUSE_SESSION_REGISTRY_UNPROVABLE, caught.exception.reason)
+
+    def test_enumeration_is_bounded(self):
+        """An untrusted registry must not decide how long registration takes."""
+        registry = [pi_session(f"S{i}", "OTHER") for i in range(MAX_SESSIONS_SCANNED + 1)]
+        with self.assertRaises(PiFingerprintRefused) as caught:
+            assert_native_session_is_exclusive("THREAD-1", registry)
+        self.assertEqual(REFUSE_SESSION_REGISTRY_UNPROVABLE, caught.exception.reason)
+
+    def test_an_expired_lease_stops_blocking_a_replacement(self):
+        """Expiry lives in `lease_expires_utc`; the status stays active.
+
+        There is no `expired` status, so reading status alone kept a lapsed session
+        claiming its native thread forever and no replacement could ever be registered --
+        the same lease-expiry trap that stranded two packets in llm-collab#324.
+        """
+        now = datetime(2026, 7, 27, 12, 0, tzinfo=timezone.utc)
+        lapsed = pi_session("S1", "THREAD-1", expires="2026-07-27T11:00:00Z")
+        assert_native_session_is_exclusive("THREAD-1", [lapsed], now_utc=now)
+
+        live = pi_session("S2", "THREAD-1", expires="2026-07-27T13:00:00Z")
+        with self.assertRaises(PiFingerprintRefused) as caught:
+            assert_native_session_is_exclusive("THREAD-1", [live], now_utc=now)
+        self.assertEqual(REFUSE_DUPLICATE_NATIVE_SESSION, caught.exception.reason)
+
+    def test_an_undatable_lease_still_blocks(self):
+        """A claimant we cannot date is one we cannot prove is gone."""
+        now = datetime(2026, 7, 27, 12, 0, tzinfo=timezone.utc)
+        for expires in (None, "", "not-a-date"):
+            with self.subTest(expires=expires):
+                record = pi_session("S1", "THREAD-1")
+                if expires is not None:
+                    record["lease_expires_utc"] = expires
+                with self.assertRaises(PiFingerprintRefused):
+                    assert_native_session_is_exclusive("THREAD-1", [record], now_utc=now)
+
+
+class PiReasoningLevelVocabularyTest(unittest.TestCase):
+    def test_an_unknown_level_is_refused_rather_than_passed_through(self):
+        """A typo was absent from the sparse map for the same reason a real level is.
+
+        Treating absence as pass-through pinned a value Pi can only reject or substitute,
+        so the binding stayed mismatched at every wake with nothing to point at.
+        """
+        runtime = {"fingerprint": {"provider": "openai", "model": "gpt-5.6-sol",
+                                   "reasoning_level": "medum"}}
+        with self.assertRaises(PiFingerprintRefused) as caught:
+            assert_reasoning_level_supported(runtime, {"high": "high"})
+        self.assertEqual(
+            REFUSE_REASONING_LEVEL_UNSUPPORTED, caught.exception.reason
+        )
+
+    def test_a_known_level_absent_from_the_map_still_passes_through(self):
+        runtime = {"fingerprint": {"provider": "openai", "model": "gpt-5.6-sol",
+                                   "reasoning_level": "medium"}}
+        assert_reasoning_level_supported(runtime, {"high": "high"})
+
+
+class PiSharedContractProjectCoverageTest(unittest.TestCase):
+    """Shared `bin/` contracts on Amiga and on a non-Amiga project.
+
+    These were exercised only with project-less records, so neither required class was
+    covered and a project-specific consumer could diverge with the suite green.
+    """
+
+    def test_exclusivity_holds_for_both_project_classes(self):
+        now = datetime(2026, 7, 27, 12, 0, tzinfo=timezone.utc)
+        for project_id in ("amiga", "nuvyr"):
+            with self.subTest(project_id=project_id):
+                native = f"THREAD-{project_id}"
+                holder = pi_session("S1", native, project_id=project_id)
+                with self.assertRaises(PiFingerprintRefused) as caught:
+                    assert_native_session_is_exclusive(native, [holder], now_utc=now)
+                self.assertEqual(
+                    REFUSE_DUPLICATE_NATIVE_SESSION, caught.exception.reason
+                )
+                # The owner may re-register its own binding.
+                assert_native_session_is_exclusive(
+                    native, [holder], owner_session_id="S1", now_utc=now
+                )
+
+    def test_the_fingerprint_pin_holds_for_both_project_classes(self):
+        for project_id in ("amiga", "nuvyr"):
+            with self.subTest(project_id=project_id):
+                runtime = {
+                    "project_id": project_id,
+                    "fingerprint": {
+                        "provider": "openai",
+                        "model": "gpt-5.6-sol",
+                        "reasoning_level": "medium",
+                    },
+                }
+                observed = assert_fingerprint_matches(
+                    runtime,
+                    {"provider": "openai", "model": "gpt-5.6-sol",
+                     "reasoningLevel": "medium"},
+                )
+                self.assertEqual("gpt-5.6-sol", observed["model"])
+                with self.assertRaises(PiFingerprintRefused) as caught:
+                    assert_fingerprint_matches(
+                        runtime,
+                        {"provider": "openai", "model": "k3",
+                         "reasoningLevel": "medium"},
+                    )
+                self.assertEqual(
+                    REFUSE_FINGERPRINT_MISMATCH, caught.exception.reason
+                )
 
 
 if __name__ == "__main__":

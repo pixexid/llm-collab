@@ -21,6 +21,7 @@ for it.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any
 
 
@@ -34,6 +35,16 @@ REFUSE_FINGERPRINT_UNPROVEN = "pi_fingerprint_unproven"
 REFUSE_DUPLICATE_NATIVE_SESSION = "pi_duplicate_native_session"
 REFUSE_FINGERPRINT_INCOMPLETE = "pi_fingerprint_incomplete"
 REFUSE_REASONING_LEVEL_UNSUPPORTED = "pi_reasoning_level_unsupported"
+REFUSE_SESSION_REGISTRY_UNPROVABLE = "pi_session_registry_unprovable"
+
+# Records we will read before giving up on proving exclusivity. An untrusted registry
+# that never contains a claimant would otherwise be scanned in full at every
+# registration, so its size decides how long a verdict takes.
+MAX_SESSIONS_SCANNED = 10_000
+
+# The levels Pi itself defines. A pinned value outside this set is a typo, not a
+# pass-through, and is caught at registration rather than at every wake.
+KNOWN_REASONING_LEVELS = ("minimal", "low", "medium", "high")
 
 
 class PiFingerprintRefused(RuntimeError):
@@ -117,7 +128,19 @@ def assert_reasoning_level_supported(runtime: Any, thinking_level_map: Any) -> N
         return
     level = pinned["reasoning_level"]
     if level not in thinking_level_map:
-        # Absent means no override: the level passes through unchanged.
+        # Absent means no override -- but only for a level Pi actually has. A typo like
+        # "medum" is absent for the same reason, and treating it as pass-through pinned a
+        # value the model can only reject or substitute, leaving the binding mismatched at
+        # every wake with nothing to point at.
+        known = {name for name in thinking_level_map} | set(KNOWN_REASONING_LEVELS)
+        if level not in known:
+            raise PiFingerprintRefused(
+                REFUSE_REASONING_LEVEL_UNSUPPORTED,
+                f"reasoning level {level!r} is not one this model declares "
+                f"({sorted(thinking_level_map)}) nor a level Pi defines "
+                f"({sorted(KNOWN_REASONING_LEVELS)}); an unknown level cannot pass through "
+                "because nothing would ever match it",
+            )
         return
     mapped = thinking_level_map[level]
     if mapped is None:
@@ -184,8 +207,34 @@ def assert_fingerprint_matches(runtime: Any, effective: Any) -> dict[str, str]:
     return observed
 
 
+def _lease_is_live(session: dict, now: datetime) -> bool:
+    """Is this claimant's autobridge lease still valid?
+
+    Expiry is carried by `lease_expires_utc`; the status stays `active`/`parked` -- there
+    is no `expired` status, so reading status alone kept a lapsed session claiming its
+    native thread forever and no replacement binding could ever be registered.
+
+    An unparseable or absent expiry counts as LIVE: a claimant we cannot date is one we
+    cannot prove is gone, and the safe direction here is refusing a second binding.
+    """
+    raw = session.get("lease_expires_utc")
+    if not isinstance(raw, str) or not raw.strip():
+        return True
+    try:
+        expires = datetime.fromisoformat(raw.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    if expires.tzinfo is None:
+        expires = expires.replace(tzinfo=timezone.utc)
+    return expires > now
+
+
 def assert_native_session_is_exclusive(
-    native_session_id: Any, sessions: Any, *, owner_session_id: Any = None
+    native_session_id: Any,
+    sessions: Any,
+    *,
+    owner_session_id: Any = None,
+    now_utc: datetime | None = None,
 ) -> None:
     """One native Pi thread, one worker binding.
 
@@ -200,12 +249,35 @@ def assert_native_session_is_exclusive(
             "a Pi binding needs a native session id; window identity is not routing "
             "authority",
         )
+    # An unreadable registry is not an empty one. `None`, a mapping, or a record we
+    # cannot parse used to mean "no claimant found", so exclusivity was APPROVED exactly
+    # when an existing claimant could not be inspected -- the one case where approving is
+    # least defensible.
+    if not isinstance(sessions, (list, tuple)):
+        raise PiFingerprintRefused(
+            REFUSE_SESSION_REGISTRY_UNPROVABLE,
+            "the session registry could not be enumerated as a sequence "
+            f"(got {type(sessions).__name__}), so exclusivity is unproven rather than "
+            "satisfied",
+        )
     native = native_session_id.strip()
     owner = str(owner_session_id) if owner_session_id is not None else None
+    now = now_utc or datetime.now(timezone.utc)
     claimants = []
-    for session in sessions or []:
+    for index, session in enumerate(sessions):
+        if index >= MAX_SESSIONS_SCANNED:
+            raise PiFingerprintRefused(
+                REFUSE_SESSION_REGISTRY_UNPROVABLE,
+                f"stopped after {MAX_SESSIONS_SCANNED} session records without reaching a "
+                "verdict; an unbounded registry decides how long registration takes and "
+                "is refused rather than scanned to exhaustion",
+            )
         if not isinstance(session, dict):
-            continue
+            raise PiFingerprintRefused(
+                REFUSE_SESSION_REGISTRY_UNPROVABLE,
+                f"session record {index} is a {type(session).__name__}, not a record; a "
+                "registry we cannot read cannot show the native thread is unclaimed",
+            )
         runtime = session.get("runtime")
         if not isinstance(runtime, dict) or str(runtime.get("family", "")) != "pi":
             continue
@@ -215,7 +287,7 @@ def assert_native_session_is_exclusive(
         if owner is not None and holder == owner:
             continue
         dispatchable = session.get("status") in {"active", "parked"}
-        if dispatchable:
+        if dispatchable and _lease_is_live(session, now):
             claimants.append(holder)
     if claimants:
         raise PiFingerprintRefused(

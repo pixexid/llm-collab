@@ -46,6 +46,7 @@ REFUSE_DUPLICATE_WAKE_OWNER = "pi_duplicate_wake_owner"
 REFUSE_MONITOR_STALE = "pi_monitor_stale"
 REFUSE_MONITOR_ABSENT = "pi_monitor_absent"
 REFUSE_UNKNOWN_WAKE_OWNER = "pi_unknown_wake_owner"
+REFUSE_MONITOR_NOT_OWNED = "pi_monitor_not_owned"
 
 
 class PiMonitorRefused(RuntimeError):
@@ -85,6 +86,24 @@ def assert_single_wake_owner(session: Any) -> str:
             f"unrecognised wake owner(s) {sorted(unknown)}; expected one of "
             f"{list(WAKE_OWNERS)}",
         )
+    # A declaration naming only PM2 does not retire a monitor that is still current.
+    # Switching `wake_owners` without clearing `pi_monitor` left both automatic paths
+    # live while this reported PM2 as the sole owner -- the duplicate-wake case the
+    # function exists to refuse, reached by editing one field.
+    if set(owners) == {WAKE_OWNER_PM2}:
+        monitor = session.get("pi_monitor") if isinstance(session, dict) else None
+        if isinstance(monitor, dict):
+            try:
+                assert_monitor_is_current(session)
+            except PiMonitorRefused:
+                pass
+            else:
+                raise PiMonitorRefused(
+                    REFUSE_DUPLICATE_WAKE_OWNER,
+                    "the declaration names only the PM2 watcher, but a CURRENT Pi monitor "
+                    "is still recorded for this binding, so both paths would wake it. "
+                    "Invalidate the monitor before handing wake ownership to PM2.",
+                )
     if len(set(owners)) > 1:
         raise PiMonitorRefused(
             REFUSE_DUPLICATE_WAKE_OWNER,
@@ -113,12 +132,37 @@ def assert_monitor_is_current(session: Any) -> dict[str, Any]:
             "no Pi monitor is recorded for this binding, so nothing is watching the "
             "doorbell path; the packet is durable and must be pulled",
         )
+    # The monitor must say which session installed it. Generations are per-session
+    # counters, so two sessions sit at generation 3 as a matter of course -- a match
+    # proves recency, never ownership, and a record carried into a replacement session
+    # read as current while watching a doorbell nobody is listening to.
+    owner = session.get("session_id")
+    recorded_owner = monitor.get("session_id")
+    if not isinstance(recorded_owner, str) or not recorded_owner:
+        raise PiMonitorRefused(
+            REFUSE_MONITOR_NOT_OWNED,
+            "this monitor record names no owning session, so a matching generation "
+            "cannot show it belongs to this binding rather than to a replaced one",
+        )
+    if recorded_owner != owner:
+        raise PiMonitorRefused(
+            REFUSE_MONITOR_NOT_OWNED,
+            f"the monitor was installed by session {recorded_owner!r} and this binding is "
+            f"{owner!r}; generations are per-session counters, so the numbers matching "
+            "proves nothing about which session it is watching for",
+        )
     session_generation = session.get("runtime_generation")
     # `.get` on a possibly-non-dict via a local, so that a bypassed guard above degrades to
     # a refusal instead of raising AttributeError INTO the dispatch path -- the same hazard
     # as the uncaught OverflowError that produced a redelivery in llm-collab#316.
     monitor_generation = monitor.get("runtime_generation") if isinstance(monitor, dict) else None
-    if not isinstance(session_generation, int) or not isinstance(monitor_generation, int):
+    def provable(value: Any) -> bool:
+        # `isinstance(True, int)` is True and `True == 1`, so a persisted `true` was read
+        # as generation 1 and a malformed record declared current. A negative counter is
+        # equally impossible and equally a sign the record is not what it claims.
+        return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+    if not provable(session_generation) or not provable(monitor_generation):
         raise PiMonitorRefused(
             REFUSE_MONITOR_STALE,
             "cannot prove which session generation this monitor was installed under, so it "
@@ -151,8 +195,9 @@ def invalidate_monitor(session: Any, event: str) -> dict[str, Any]:
             f"{list(LIFECYCLE_INVALIDATING_EVENTS)}",
         )
     current = 0
-    if isinstance(session, dict) and isinstance(session.get("runtime_generation"), int):
-        current = session["runtime_generation"]
+    generation = session.get("runtime_generation") if isinstance(session, dict) else None
+    if isinstance(generation, int) and not isinstance(generation, bool) and generation >= 0:
+        current = generation
     return {
         "runtime_generation": current + 1,
         "pi_monitor": None,
