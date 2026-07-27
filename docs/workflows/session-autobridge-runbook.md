@@ -12,9 +12,9 @@ Current `deliver.py` gives a matching dispatchable session autobridge precedence
 and suppresses `ax_doorbell_required` for that packet. The primary wake for an
 AX-capable `cli_session` only when no such autobridge resolves is the busy-safe
 **bidirectional AX doorbell**. This applies only to a worker with no background
-event pickup of its own — Codex today. A worker whose runtime carries its own
-inbox watcher (`claude_app`) is woken by its durable packet and that watcher
-alone; see the Claude bullets below, which override this paragraph for it.
+event pickup of its own — Codex today. The canonical `claude` agent is woken by
+its durable packet and its own inbox watcher alone; see the Claude bullets
+below, which override this paragraph for that identity.
 The doorbell is `bin/axsend-ensure ring --submit --verify`, run from the
 llm-collab checkout root; see
 `claude-code-desktop-computer-use-bridge.md`. First prove through readable
@@ -69,9 +69,9 @@ remove it and rely on the doorbell + mailbox-drain self-heal.
   the durable collab packet, picked up by the app's own background inbox
   watcher.** The poller leaves the activation unclaimed for that watcher. Do not
   claim a PM2 watcher, CLI resume, or filesystem write reached the app.
-- A Claude desktop binding used only to scope its durable mailbox must use
-  `notify` mode. `claude_app` never derives `claude -p` or `claude --resume`;
-  the app's background inbox watcher owns pickup.
+- A binding whose canonical `agent_id` is `claude` must use `notify` mode.
+  Only that identity suppresses `claude -p` / `claude --resume`; its background
+  inbox watcher owns pickup.
 - Workers must not synthesize a second wake path for Claude: no AX ring, no
   `claude --resume` or `claude -p`, no app reload or restart, no Computer Use
   typing, and no replacement thread or task. These are not attended-recovery

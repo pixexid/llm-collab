@@ -134,7 +134,6 @@ refresh as a fallback:
   invalidate an already-open thread cache.
 - Account relaunch is kept as an explicit fallback with
   `LLM_COLLAB_CODEX_UI_REFRESH_METHOD=relaunch_account` only.
-- Claude app: activate Claude and invoke `View > Reload This Page`
 - Gemini CLI: no UI refresh hook
 
 Set `LLM_COLLAB_UI_REFRESH=0` to disable this behavior. The refresh hook is

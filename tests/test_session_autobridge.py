@@ -1296,6 +1296,27 @@ class SessionAutobridgeTest(unittest.TestCase):
         self.assertEqual("ws://127.0.0.1:8767", result["url"])
         self.assertEqual("/tmp/main-token", result["token_file"])
 
+    def test_claude_ui_refresh_stays_disabled_even_when_requested(self):
+        session = {
+            "session_id": "SESSION-NONCLAUDE-CLAUDE-RUNTIME",
+            "agent_id": "other-agent",
+            "runtime": {
+                "family": "claude_app",
+                "session_id": "claude-thread",
+            },
+        }
+        with (
+            patch.dict(os.environ, {"LLM_COLLAB_UI_REFRESH": "1"}, clear=False),
+            patch.object(session_autobridge_lib, "run_osascript") as run_osascript,
+        ):
+            result = session_autobridge_lib.refresh_runtime_ui(session)
+
+        self.assertEqual(
+            {"skipped": True, "reason": "unsupported_runtime_family=claude_app"},
+            result,
+        )
+        run_osascript.assert_not_called()
+
     def test_codex_shortcut_refresh_is_reported_unsupported(self):
         root = self.make_workspace()
         self.add_agent(

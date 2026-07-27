@@ -2197,7 +2197,7 @@ def ui_refresh_enabled(runtime: dict[str, Any]) -> bool:
     configured = runtime.get("ui_refresh")
     if configured is not None:
         return bool(configured)
-    return runtime.get("family") in {"codex_app", "claude_app"}
+    return runtime.get("family") == "codex_app"
 
 
 def osascript_binary() -> str:
@@ -2636,19 +2636,6 @@ def refresh_runtime_ui(session: dict) -> dict[str, Any]:
     runtime_family = runtime.get("family")
     if not ui_refresh_enabled(runtime):
         return {"skipped": True, "reason": "ui_refresh_disabled"}
-
-    if runtime_family == "claude_app":
-        result = run_osascript(
-            """
-tell application "Claude" to activate
-tell application "System Events"
-  tell process "Claude"
-    click menu item "Reload This Page" of menu 1 of menu bar item "View" of menu bar 1
-  end tell
-end tell
-""".strip()
-        )
-        return {"skipped": False, "method": "claude_reload_page", **result}
 
     if runtime_family == "codex_app":
         method = str(

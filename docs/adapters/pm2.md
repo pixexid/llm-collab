@@ -157,6 +157,10 @@ adapters, but it cannot perform Codex Computer Use recovery.
 
 Current safe ordering:
 
+These target-side AX and Computer Use steps apply only to non-Claude workers.
+Canonical `agent_id == "claude"` uses its durable packet and background inbox
+watcher alone.
+
 - if AX must be the primary wake, first ensure no matching dispatchable session
   autobridge is active; current `deliver.py` gives `autobridge_ready` precedence
   and suppresses `ax_doorbell_required`
@@ -188,7 +192,8 @@ Why:
 Watcher policy for desktop-app agents:
 
 PM2/heartbeat is only the bounded, provisional safety-fuse described in
-`session-autobridge-runbook.md`.
+`session-autobridge-runbook.md`. The target-side AX and Computer Use policy
+below excludes canonical `claude`; inbound Claude-to-Codex AX is unchanged.
 
 - primary: after readable `AXValue` proves the native composer is empty, ring
   the registered AX app once, even while it is busy, with one short pointer to

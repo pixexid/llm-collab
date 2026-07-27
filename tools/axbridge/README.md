@@ -245,12 +245,14 @@ temporarily populated, identified by `composer set (role=...)`, and restored
 without submitting; an existing draft is preserved and causes exit 11. If you
 need the full text of a draft, `tree` will not give it to you.
 
-**A failed mailbox wake says nothing about AX.** `deliver.py` refusing with
+**For a non-Claude target, a failed mailbox wake says nothing about AX.**
+`deliver.py` refusing with
 `autobridge_refusal_reason: exact_binding_not_dispatchable` means the bound
 session is not dispatchable. Check both `status` and `lease_expires_utc`; expiry
 does not change `status`, and a stopped session can produce the same refusal
 without an expired lease. The AX doorbell is an independent path and may be fine;
-test it rather than assuming both are down.
+test it rather than assuming both are down. Canonical Claude is the exception:
+its durable packet and background inbox watcher remain the only target-side path.
 
 ## Limits / next
 
@@ -274,7 +276,9 @@ handling, unsafe-composer recovery, or an unblock that the mailbox plus
 `axsend state` cannot safely resolve. Do not use Computer Use to select or route
 work to a Codex task. Other collaborators continue to use durable packets plus
 AX and send Codex a durable intervention request instead of independently
-driving another agent's desktop UI.
+driving another agent's desktop UI. These target-side Computer Use and AX
+recovery clauses exclude canonical Claude; its mailbox watcher is the only wake
+path. Inbound Claude-to-Codex AX remains permitted.
 
 Computer Use is a serialized control and recovery plane, not a replacement
 doorbell. Once Codex has restored a safe target/thread, normal delivery returns
