@@ -133,8 +133,7 @@ Initialization creates local `collab.config.json`, `agents.json`,
 
 After initialization, add optional project contracts such as
 `ui_ux.required_design_docs`, `db.shared_supabase_project_ref`,
-`db.required_surfaces`, and `claude_desktop_bridge` directly to that project's
-`projects.json` entry.
+and `db.required_surfaces` directly to that project's `projects.json` entry.
 
 `scripts/init.py` reinitializes the workspace. To add a project to an existing
 workspace, edit `projects.json` instead of rerunning initialization.
@@ -232,8 +231,8 @@ overwrite another project's report.
 
 1. Add a unique project entry to `projects.json` with `id`, `display_name`,
    `repos`, `default_branch_base`, `preflight_command`, and `github`.
-2. Add project-specific `ui_ux`, `db`, and `claude_desktop_bridge` values only
-   when applicable. Never copy another project's paths, refs, or tool names.
+2. Add project-specific `ui_ux` and `db` values only when applicable. Never
+   copy another project's paths, refs, or tool names.
 3. Create `{project_state_root}/{project_id}/` and add local routing/runbook
    overrides there. Do not commit real project state under `projects/`.
 4. Add product-repository worker instructions that use the exact checkout and
@@ -295,7 +294,7 @@ For GitHub-backed projects:
 | Activation | Behavior |
 |---|---|
 | Dispatchable runtime session | Message can be routed to the bound runtime session |
-| `cli_session` with `activation.ax_app` (and `ax_attended_only` not `true`) | `deliver.py` prints an AX doorbell command |
+| Non-Claude `cli_session` with `activation.ax_app` (and `ax_attended_only` not `true`) | `deliver.py` prints an AX doorbell command |
 | `ax_attended_only: true` (opaque composer, e.g. ZCode/Antigravity) | Reports `ax_attended_recovery_required`; Codex-attended recovery, no routine ring |
 | Terminal-only `cli_session` | Requires a dispatchable runtime session |
 | `human_relay` | Prints a human handoff prompt |

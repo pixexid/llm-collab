@@ -34,7 +34,8 @@ def has_ax_doorbell_capability(agent: dict) -> bool:
     activation = agent.get("activation", {})
     ax_app = activation.get("ax_app")
     return (
-        activation.get("type") == "cli_session"
+        agent.get("id") != "claude"
+        and activation.get("type") == "cli_session"
         and isinstance(ax_app, str)
         and bool(ax_app.strip())
         and not activation.get("ax_attended_only")

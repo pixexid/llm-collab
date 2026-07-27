@@ -260,6 +260,32 @@ class AxTrustProbeTest(unittest.TestCase):
                     self.assertEqual(calls, [])
             self.assertEqual(serialized["amiga"], serialized["nuvyr"])
 
+    def test_canonical_claude_is_not_an_ax_target_even_with_stale_config(self) -> None:
+        runner = mock.Mock()
+        result = _ax_trust.probe_ax_trust(
+            {
+                "id": "claude",
+                "activation": {
+                    "type": "cli_session",
+                    "ax_app": "Claude",
+                    "watcher_enabled": True,
+                },
+            },
+            platform_name="Darwin",
+            binary_path=self.binary,
+            runner=runner,
+        )
+
+        self.assertEqual(
+            result.as_dict(),
+            {
+                "status": "n/a",
+                "reason": "agent has no routine AX doorbell capability",
+                "remediation": None,
+            },
+        )
+        runner.assert_not_called()
+
     def test_down_human_line_is_honest_and_portable(self) -> None:
         case = self.paired_cases(
             scenario="down", probe_outcome=2, expected=DOWN
@@ -387,6 +413,84 @@ class AxTrustCallerTest(unittest.TestCase):
                 session_bootstrap.main()
         ax_lines = [line for line in output.getvalue().splitlines() if line.startswith("[ax]")]
         self.assertEqual(ax_lines, ["[ax] trusted"])
+
+    def test_bootstrap_and_pm2_publish_claude_as_not_ax_capable(self) -> None:
+        claude = {
+            "id": "claude",
+            "activation": {
+                "type": "cli_session",
+                "watcher_enabled": True,
+                "ax_app": "Claude",
+            },
+        }
+
+        def real_probe(agent: dict) -> _ax_trust.AxTrustStatus:
+            return _ax_trust.probe_ax_trust(
+                agent,
+                platform_name="Darwin",
+                binary_path=Path("/definitely/missing/axsend"),
+            )
+
+        bootstrap_output = io.StringIO()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            identity_path = Path(temp_dir) / "identity.md"
+            with contextlib.ExitStack() as stack:
+                for patcher in (
+                    mock.patch.object(
+                        session_bootstrap,
+                        "parse_args",
+                        return_value=argparse.Namespace(
+                            agent="claude",
+                            limit=5,
+                            no_watcher=True,
+                            json_output=False,
+                        ),
+                    ),
+                    mock.patch.object(session_bootstrap, "agent_ids", return_value=["claude"]),
+                    mock.patch.object(session_bootstrap, "get_agent", return_value=claude),
+                    mock.patch.object(
+                        session_bootstrap, "agent_identity_path", return_value=identity_path
+                    ),
+                    mock.patch.object(
+                        session_bootstrap, "get_unread_messages", return_value=[]
+                    ),
+                    mock.patch.object(session_bootstrap, "queue_summaries", return_value=[]),
+                    mock.patch.object(
+                        session_bootstrap, "probe_ax_trust", side_effect=real_probe
+                    ),
+                    mock.patch.object(
+                        session_bootstrap,
+                        "start_watcher",
+                        return_value={"status": "skipped"},
+                    ),
+                    mock.patch.object(
+                        session_bootstrap, "utc_iso", return_value="2026-07-20T00:00:00Z"
+                    ),
+                ):
+                    stack.enter_context(patcher)
+                with contextlib.redirect_stdout(bootstrap_output):
+                    session_bootstrap.main()
+
+        self.assertIn("[ax] n/a", bootstrap_output.getvalue())
+
+        pm2_output = io.StringIO()
+        with contextlib.ExitStack() as stack:
+            for patcher in (
+                mock.patch.object(
+                    sys, "argv", ["pm2_watchers.py", "status", "--agent", "claude"]
+                ),
+                mock.patch.object(pm2_watchers, "agent_ids", return_value=["claude"]),
+                mock.patch.object(pm2_watchers, "get_agent", return_value=claude),
+                mock.patch.object(pm2_watchers, "probe_ax_trust", side_effect=real_probe),
+                mock.patch.object(pm2_watchers, "config_get", return_value="llm-collab"),
+                mock.patch.object(pm2_watchers, "pm2_run", side_effect=SystemExit(1)),
+            ):
+                stack.enter_context(patcher)
+            with self.assertRaises(SystemExit):
+                with contextlib.redirect_stdout(pm2_output):
+                    pm2_watchers.main()
+
+        self.assertIn("[ax] n/a agent=claude", pm2_output.getvalue())
 
     def test_down_does_not_block_bootstrap_even_when_watcher_errors(self) -> None:
         output = io.StringIO()

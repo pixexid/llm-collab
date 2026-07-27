@@ -284,7 +284,7 @@ class AxRegistryBinaryAgreementTest(unittest.TestCase):
                 f"binary says readable={readable}, registry ax_attended_only={attended_only}",
             )
             checked += 1
-        self.assertGreaterEqual(checked, 3)  # codex, claude, zcode at minimum
+        self.assertGreaterEqual(checked, 2)  # codex plus one attended-only app
 
 
 class AxRecoveryWordingPinTest(unittest.TestCase):
