@@ -373,12 +373,19 @@ def append_event(
 ) -> None:
     path = autobridge_event_log_path(session_id)
     path.parent.mkdir(parents=True, exist_ok=True)
+    creating = not path.exists()
     event_payload = {"ts": utc_iso(), **event}
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(event_payload, sort_keys=True) + "\n")
         if sync:
             handle.flush()
             os.fsync(handle.fileno())
+    if sync and creating:
+        directory_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
 
 
 def write_operator_turn_summary(

@@ -361,7 +361,7 @@ class InboxMarkAllReadTest(unittest.TestCase):
         }
         stdout = StringIO()
         with patch.object(inbox_lib, "agent_ids", return_value=["codex"]), patch.object(
-            inbox_lib, "load_session", side_effect=[session, rebound_session]
+            inbox_lib, "load_session", return_value=rebound_session
         ), patch.object(
             inbox_lib,
             "matching_unread_messages",
@@ -410,7 +410,7 @@ class InboxMarkAllReadTest(unittest.TestCase):
         }
         stdout = StringIO()
         with patch.object(inbox_lib, "agent_ids", return_value=["codex"]), patch.object(
-            inbox_lib, "load_session", side_effect=[session, session]
+            inbox_lib, "load_session", return_value=session
         ), patch.object(
             inbox_lib, "matching_unread_messages", return_value=[]
         ) as matching, redirect_stdout(stdout), patch.object(
@@ -463,7 +463,7 @@ class InboxMarkAllReadTest(unittest.TestCase):
 
         stdout = StringIO()
         with patch.object(inbox_lib, "agent_ids", return_value=["codex"]), patch.object(
-            inbox_lib, "load_session", side_effect=[session, session]
+            inbox_lib, "load_session", return_value=session
         ), patch.object(
             inbox_lib, "matching_unread_messages", side_effect=refuse
         ), patch.object(
@@ -493,6 +493,50 @@ class InboxMarkAllReadTest(unittest.TestCase):
         payload = json.loads(stdout.getvalue())
         self.assertEqual([], payload["messages"])
         self.assertEqual("route_ambiguous", payload["repo_scope_refused"][0]["reason"])
+
+    def test_exact_session_bound_failure_is_an_explicit_refusal(self) -> None:
+        session = {
+            "session_id": "SESSION-EXACT",
+            "agent_id": "codex",
+            "project_id": "amiga",
+            "chat_id": "CHAT-EXACT",
+            "runtime": {"family": "pi", "session_id": "pi-exact"},
+        }
+        stdout = StringIO()
+        with patch.object(inbox_lib, "agent_ids", return_value=["codex"]), patch.object(
+            inbox_lib, "load_session", return_value=session
+        ), patch.object(
+            inbox_lib,
+            "matching_unread_messages",
+            side_effect=ValueError("exact-session unread entries exceed the limit"),
+        ), patch.object(
+            inbox_lib, "gate_activation_message"
+        ) as gate, redirect_stdout(stdout), patch.object(
+            sys,
+            "argv",
+            [
+                "inbox.py",
+                "--me",
+                "codex",
+                "--project",
+                "amiga",
+                "--chat",
+                "CHAT-EXACT",
+                "--session",
+                "SESSION-EXACT",
+                "--repo-target",
+                "llm-collab",
+                "--json",
+            ],
+        ):
+            with self.assertRaisesRegex(SystemExit, "75"):
+                inbox_lib.main()
+
+        gate.assert_not_called()
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual([], payload["messages"])
+        self.assertIn("exceed the limit", payload["exact_session_refused"])
+        self.assertGreaterEqual(inbox_lib.MAX_EXACT_SESSION_UNREAD_ENTRIES, 2_000)
 
     def test_exact_session_repo_refusal_fails_before_output_or_consumption(self) -> None:
         session = {

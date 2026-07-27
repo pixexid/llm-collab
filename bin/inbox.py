@@ -47,6 +47,7 @@ from _helpers import (
 from _session_autobridge import (
     HEURISTIC_RUNTIME_DISCOVERY_FAMILIES,
     HEURISTIC_RUNTIME_DISCOVERY_REFUSED_REASON,
+    UnreadableFile,
     discover_runtime_session,
     load_session,
     matching_unread_messages,
@@ -56,7 +57,7 @@ from _session_autobridge import (
 )
 from session_autobridge import register_session
 
-MAX_EXACT_SESSION_UNREAD_ENTRIES = 1_000
+MAX_EXACT_SESSION_UNREAD_ENTRIES = 5_000
 MAX_EXACT_SESSION_UNREAD_BYTES = 16 * 1024 * 1024
 
 
@@ -570,17 +571,9 @@ def main():
     published_runtime = publish_runtime_identity(args)
 
     exact_session = None
+    exact_session_requested = bool(args.session and not args.publish_session)
     repo_scope_refused: list[dict] = []
-    if args.session and not args.publish_session:
-        exact_session = load_session(args.session)
-        if exact_session.get("agent_id") != args.me:
-            raise ValueError("--session does not belong to --me")
-        if not exact_session.get("project_id") or not exact_session.get("chat_id"):
-            raise ValueError("--session exact read requires project and chat scope")
-        if args.project and exact_session.get("project_id") != args.project:
-            raise ValueError("--session does not belong to --project")
-        if args.chat and exact_session.get("chat_id") != args.chat:
-            raise ValueError("--session does not belong to --chat")
+    if exact_session_requested:
         messages = []
     elif args.packet:
         messages = load_all_messages(args.me)
@@ -599,34 +592,39 @@ def main():
     if not args.packet and exact_session is None:
         messages = messages[: args.limit]
 
-    if exact_session is not None and repo_scope_refused:
-        if args.json_output:
-            print(
-                json.dumps(
-                    {
-                        "messages": [],
-                        "repo_scope_refused": repo_scope_refused,
-                    },
-                    indent=2,
-                )
-            )
-        else:
-            for refused in repo_scope_refused:
-                print(
-                    f"[inbox] Repo-scope refused {refused['path']}: {refused['reason']}",
-                    file=sys.stderr,
-                )
-        sys.exit(75)
-
-    if exact_session is not None:
+    if exact_session_requested:
+        exact_session = load_session(args.session)
+        if exact_session.get("agent_id") != args.me:
+            raise ValueError("--session does not belong to --me")
+        if not exact_session.get("project_id") or not exact_session.get("chat_id"):
+            raise ValueError("--session exact read requires project and chat scope")
+        if args.project and exact_session.get("project_id") != args.project:
+            raise ValueError("--session does not belong to --project")
+        if args.chat and exact_session.get("chat_id") != args.chat:
+            raise ValueError("--session does not belong to --chat")
         current_refusals: list[dict] = []
-        messages = matching_unread_messages(
-            load_session(args.session),
-            invocation_repo_targets=args.repo_target,
-            repo_scope_refusals=current_refusals,
-            max_entries=MAX_EXACT_SESSION_UNREAD_ENTRIES,
-            max_bytes=MAX_EXACT_SESSION_UNREAD_BYTES,
-        )
+        try:
+            messages = matching_unread_messages(
+                exact_session,
+                invocation_repo_targets=args.repo_target,
+                repo_scope_refusals=current_refusals,
+                max_entries=MAX_EXACT_SESSION_UNREAD_ENTRIES,
+                max_bytes=MAX_EXACT_SESSION_UNREAD_BYTES,
+            )
+        except (UnreadableFile, ValueError) as exc:
+            if args.json_output:
+                print(
+                    json.dumps(
+                        {
+                            "messages": [],
+                            "exact_session_refused": str(exc),
+                        },
+                        indent=2,
+                    )
+                )
+            else:
+                print(f"[inbox] Exact-session read refused: {exc}", file=sys.stderr)
+            sys.exit(75)
         messages = filter_messages(messages, args.project, args.chat, args.packet)
         messages, late_refusals = filter_repo_scope(
             messages, args.repo_target, args.project

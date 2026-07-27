@@ -5246,7 +5246,7 @@ class SessionAutobridgeTest(unittest.TestCase):
                     self.assertFalse(result["delivery_accepted"])
                     self.assertEqual("pi_inbox_wake", event["event"])
                     self.assertEqual(project, event["project_id"])
-            self.assertEqual(2, fsync.call_count)
+            self.assertEqual(4, fsync.call_count)
 
     def test_exact_session_unread_budget_starts_before_filtering(self):
         inbox_raw = b'{"unread":["first","second"],"read":[]}'
