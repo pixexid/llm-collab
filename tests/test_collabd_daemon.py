@@ -86,7 +86,7 @@ class DaemonTest(unittest.TestCase):
         if peer is not None:
             kwargs["peer_uid_getter"] = peer
         server = DaemonServer(self.paths, **kwargs)
-        thread = threading.Thread(target=server.run)
+        thread = threading.Thread(target=server.run, daemon=True)
         thread.start()
         try:
             # `start()` cannot be exempt from the cleanup rule: it calls readiness BEFORE
@@ -95,6 +95,12 @@ class DaemonTest(unittest.TestCase):
             # the failure here is the only place it can be owned.
             self.wait_until_accepting()
         except BaseException:
+            # `_stopping` is only read between accepts, so it cannot reach a handler that
+            # is already stalled inside `_handle` -- and the accept loop never gets back
+            # to check it. The join is therefore best-effort, and the daemon flag above is
+            # what guarantees the process can still exit: a stalled server must never be
+            # able to outlive the test that started it, or a run that should report a
+            # failure hangs forever instead.
             server._stopping = True
             thread.join(2)
             raise
@@ -112,7 +118,7 @@ class DaemonTest(unittest.TestCase):
             declaration_path=self.declaration,
             environment=ENABLED_ENV,
         )
-        thread = threading.Thread(target=server.run)
+        thread = threading.Thread(target=server.run, daemon=True)
         thread.start()
         # NO probe at all. A connect-and-close is handled as an empty request, so on a
         # loaded run where the accept loop is delayed past the startup grace it could be
@@ -367,6 +373,34 @@ class DaemonTest(unittest.TestCase):
         with self.assertRaises(AssertionError) as caught:
             self.stop_or_report(finished)
         self.assertIn("exited before cleanup", str(caught.exception))
+
+    def test_a_stalled_server_cannot_outlive_the_test_process(self) -> None:
+        """Cleanup cannot reach a handler that is already stuck.
+
+        `_serve` reads `_stopping` only between accepts, so a server stalled inside
+        `_handle` never gets back to check it -- `force_stop` and every join are
+        best-effort against that case. Reproduced by patching `_handle` to wait on an
+        Event that is never set: readiness times out, cleanup cannot stop the thread, and
+        with a non-daemon thread the process hung indefinitely instead of reporting the
+        failure.
+
+        The daemon flag is the guarantee, so it is asserted on every path that starts a
+        server here rather than trusted to stay put.
+        """
+        server, thread = self.start()
+        try:
+            self.assertTrue(
+                thread.daemon,
+                "a stalled server thread must not be able to hang the run",
+            )
+        finally:
+            self.stop(thread)
+
+        server, thread = self.start_without_readiness()
+        try:
+            self.assertTrue(thread.daemon)
+        finally:
+            self.force_stop(server, thread)
 
     def test_force_stop_ends_the_server_without_using_the_protocol(self) -> None:
         """Cleanup after a protocol failure cannot itself require the protocol.
@@ -645,7 +679,7 @@ class DaemonTest(unittest.TestCase):
             environment=ENABLED_ENV,
         )
         with patch.object(LedgerStore, "open_writer", side_effect=AssertionError("must not open")):
-            thread = threading.Thread(target=server.run)
+            thread = threading.Thread(target=server.run, daemon=True)
             thread.start()
             # From immediately after start(), not after the assertions: a readiness
             # failure raises before any of them and would otherwise leave this non-daemon
@@ -708,7 +742,7 @@ class DaemonTest(unittest.TestCase):
                         side_effect=AssertionError("gate-off must not load watchdog"),
                     ) as watchdog_load,
                 ):
-                    thread = threading.Thread(target=server.run)
+                    thread = threading.Thread(target=server.run, daemon=True)
                     thread.start()
                     try:
                         self.wait_until_accepting()
@@ -740,7 +774,7 @@ class DaemonTest(unittest.TestCase):
             declaration_path=self.declaration,
             environment=ENABLED_ENV,
         )
-        thread = threading.Thread(target=server.run)
+        thread = threading.Thread(target=server.run, daemon=True)
         thread.start()
         # Readiness INSIDE the guard: if status requests never produce a valid dictionary --
         # a response-shape or dispatch regression -- it raises, and outside the guard that
