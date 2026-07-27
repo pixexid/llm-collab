@@ -4615,7 +4615,8 @@ class SessionAutobridgeTest(unittest.TestCase):
             endpoint_id="endpoint_pi_glim",
             native_session_id="pi-glim-1",
         )
-        doorbell = root / "State" / "pi" / "glmpi.pointer"
+        doorbell = root / "State" / "pi" / "glmpi" / "message.pointer"
+        doorbell.parent.mkdir(parents=True, mode=0o700)
         self.run_cli(
             root,
             "register",
@@ -4818,6 +4819,7 @@ class SessionAutobridgeTest(unittest.TestCase):
     def test_pi_doorbell_publishes_complete_mode_600_content_atomically(self):
         root = self.make_workspace()
         doorbell = root / "State" / "pi" / "glmpi" / "message.pointer"
+        doorbell.parent.mkdir(parents=True, mode=0o700)
         original_replace = os.replace
         observed: dict[str, object] = {}
 
@@ -4847,6 +4849,7 @@ class SessionAutobridgeTest(unittest.TestCase):
         self.assertEqual(0o600, observed["mode"])
         self.assertFalse(observed["destination_existed"])
         self.assertEqual(observed["content"], doorbell.read_text())
+        first_pointer_inode = doorbell.stat().st_ino
         watch_directory_inode = doorbell.parent.stat().st_ino
 
         with patch.dict(
@@ -4860,7 +4863,24 @@ class SessionAutobridgeTest(unittest.TestCase):
             self.assertEqual(0, pi_doorbell_lib.main())
 
         self.assertEqual("Chats/2026-07-27/next-packet.md\n", doorbell.read_text())
+        self.assertNotEqual(first_pointer_inode, doorbell.stat().st_ino)
         self.assertEqual(watch_directory_inode, doorbell.parent.stat().st_ino)
+
+    def test_pi_doorbell_refuses_missing_watched_directory(self):
+        root = self.make_workspace()
+        doorbell = root / "State" / "pi" / "typo" / "message.pointer"
+
+        with patch.dict(
+            os.environ,
+            {"LLM_COLLAB_MESSAGE_PATH": "Chats/2026-07-27/packet.md"},
+        ), patch.object(
+            pi_doorbell_lib.sys,
+            "argv",
+            ["pi_doorbell.py", str(doorbell)],
+        ):
+            self.assertEqual(2, pi_doorbell_lib.main())
+
+        self.assertFalse(doorbell.parent.exists())
 
     def test_watch_inbox_default_off_empty_ledger_preserves_legacy_runtime_trigger(self):
         root = self.make_workspace()

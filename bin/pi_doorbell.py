@@ -16,7 +16,8 @@ def main() -> int:
     if not pointer or "\n" in pointer or len(pointer.encode()) > 4096:
         return 2
     doorbell = Path(sys.argv[1]).expanduser()
-    doorbell.parent.mkdir(parents=True, exist_ok=True)
+    if not doorbell.parent.is_dir():
+        return 2
     fd, temporary = tempfile.mkstemp(
         dir=doorbell.parent,
         prefix=f".{doorbell.name}.",
