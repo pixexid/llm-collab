@@ -2100,6 +2100,24 @@ def execute_runtime_trigger(session: dict, message: dict) -> dict[str, Any]:
     derived = False
     runtime_family = str(runtime.get("family", ""))
     runtime_home = runtime.get("home") or runtime_home_from_source(runtime_family, runtime.get("session_source"))
+    if runtime_family == "pi":
+        event_path = autobridge_event_log_path(str(session["session_id"]))
+        append_event(
+            str(session["session_id"]),
+            {
+                "event": "pi_inbox_wake",
+                "project_id": session.get("project_id"),
+                "chat_id": session.get("chat_id"),
+            },
+        )
+        return {
+            "adapter": "session_event_log",
+            "event_path": str(event_path),
+            "returncode": 0,
+            "stdout": "",
+            "stderr": "",
+            "delivery_accepted": False,
+        }
     if not command and runtime_family == "codex_app":
         app_server_result = execute_codex_app_server_trigger(
             session,
@@ -2159,9 +2177,6 @@ def execute_runtime_trigger(session: dict, message: dict) -> dict[str, Any]:
         "stdout": result.stdout.strip(),
         "stderr": result.stderr.strip(),
     }
-    if runtime_family == "pi":
-        # The pointer wakes Pi; only the recipient can acknowledge the packet.
-        trigger_result["delivery_accepted"] = False
     return trigger_result
 
 

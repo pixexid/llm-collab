@@ -69,6 +69,22 @@ Dispatcher artifacts live under:
 - `State/session_autobridge/events/<session-id>.jsonl`
 - `State/session_autobridge/prompts/<session-id>/...`
 
+For a Pi runtime, the exact session event log is the doorbell. The runtime
+trigger appends `pi_inbox_wake`; a session-owned `pi-event-monitor` tails that
+one file and wakes the same native session. The event is not a message pointer
+or queue. On wake, read every matching durable unread packet through:
+
+```bash
+/monitor collab inbox :: tail -n 0 -F /absolute/State/session_autobridge/events/<session-id>.jsonl | grep --line-buffered '"event": "pi_inbox_wake"'
+
+python3 bin/inbox.py --me <agent> --project <project> --chat <chat> \
+  --session <session-id> --repo-target <repo>
+```
+
+`--session` uses the dispatcher's existing exact project/chat/session matcher,
+so coalesced events still drain all accepted unread work and another session's
+packet remains unread.
+
 Canonical runtime bindings live under:
 
 - `State/session_autobridge/bindings/<project-id>/<chat-id>/<agent-id>.json`

@@ -23,14 +23,12 @@ SCRIPT_PATH = REPO_ROOT / "bin" / "session_autobridge.py"
 DELIVER_SCRIPT = REPO_ROOT / "bin" / "deliver.py"
 INBOX_SCRIPT = REPO_ROOT / "bin" / "inbox.py"
 WATCH_INBOX_SCRIPT = REPO_ROOT / "bin" / "watch_inbox.py"
-PI_DOORBELL_SCRIPT = REPO_ROOT / "bin" / "pi_doorbell.py"
 sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(REPO_ROOT / "bin"))
 
 import _session_autobridge as session_autobridge_lib
 import _activation_cleanup as activation_cleanup_lib
 import _activation_lease as activation_lease_lib
-import pi_doorbell as pi_doorbell_lib
 import watch_inbox as watch_inbox_lib
 from _helpers import parse_frontmatter
 from llm_collab.ledger import LedgerPaths, LedgerStore
@@ -4985,7 +4983,7 @@ class SessionAutobridgeTest(unittest.TestCase):
         session_payload = self.run_cli(root, "show", "--session", "SESSION-WATCHER")
         self.assertIn(message_rel, session_payload["processed_messages"])
 
-    def test_pi_doorbell_wakes_once_without_claiming_acceptance(self):
+    def test_pi_event_wakes_once_and_exact_session_drains_every_matching_unread(self):
         root = self.make_workspace()
         self.add_agent(
             root,
@@ -5000,13 +4998,60 @@ class SessionAutobridgeTest(unittest.TestCase):
             agent_id="glmpi",
             chat_id="CHAT-PI-WAKE",
             project_id="amiga",
-            title="Pi pointer wake",
+            title="Pi event wake",
             sender_session_id="codex-pi-wake",
             target_session_id="pi-glim-1",
             sender_agent_id="codex",
             repo_targets=["llm-collab"],
             target_binding_id="binding-pi-glim",
             target_binding_generation=1,
+            packet_slug="first",
+        )
+        second_rel = self.add_message(
+            root,
+            agent_id="glmpi",
+            chat_id="CHAT-PI-WAKE",
+            project_id="amiga",
+            title="Pi second unread",
+            sender_session_id="codex-pi-wake",
+            target_session_id="pi-glim-1",
+            sender_agent_id="codex",
+            repo_targets=["llm-collab"],
+            target_binding_id="binding-pi-glim",
+            target_binding_generation=1,
+            packet_slug="second",
+        )
+        exact_rels = [message_rel, second_rel]
+        for index in range(10):
+            exact_rels.append(
+                self.add_message(
+                    root,
+                    agent_id="glmpi",
+                    chat_id="CHAT-PI-WAKE",
+                    project_id="amiga",
+                    title=f"Pi queued unread {index}",
+                    sender_session_id="codex-pi-wake",
+                    target_session_id="pi-glim-1",
+                    sender_agent_id="codex",
+                    repo_targets=["llm-collab"],
+                    target_binding_id="binding-pi-glim",
+                    target_binding_generation=1,
+                    packet_slug=f"queued-{index}",
+                )
+            )
+        wrong_rel = self.add_message(
+            root,
+            agent_id="glmpi",
+            chat_id="CHAT-PI-WAKE",
+            project_id="amiga",
+            title="Other Pi session",
+            sender_session_id="codex-pi-wake",
+            target_session_id="pi-other",
+            sender_agent_id="codex",
+            repo_targets=["llm-collab"],
+            target_binding_id="binding-pi-glim",
+            target_binding_generation=1,
+            packet_slug="wrong-session",
         )
         self.seed_binding_ledger(
             root,
@@ -5017,7 +5062,6 @@ class SessionAutobridgeTest(unittest.TestCase):
             endpoint_id="endpoint_pi_glim",
             native_session_id="pi-glim-1",
         )
-        doorbell = root / "State" / "pi" / "glmpi.pointer"
         self.run_cli(
             root,
             "register",
@@ -5037,8 +5081,6 @@ class SessionAutobridgeTest(unittest.TestCase):
             "pi",
             "--runtime-session-id",
             "pi-glim-1",
-            "--runtime-command",
-            json.dumps([sys.executable, str(PI_DOORBELL_SCRIPT), str(doorbell)]),
         )
         session_path = (
             root
@@ -5083,15 +5125,6 @@ class SessionAutobridgeTest(unittest.TestCase):
             / "SESSION-PI-GLIM.jsonl"
         )
         events_after_wake = event_path.read_text()
-        settled = subprocess.run(
-            command,
-            cwd=root,
-            text=True,
-            capture_output=True,
-            env=self.subprocess_env(root),
-            check=True,
-        )
-        self.assertEqual(events_after_wake, event_path.read_text())
         session_payload = json.loads(session_path.read_text())
         self.assertIn(
             message_rel,
@@ -5100,25 +5133,13 @@ class SessionAutobridgeTest(unittest.TestCase):
             + first.stderr
             + event_path.read_text(),
         )
-        session_payload["processed_messages"].remove(message_rel)
-        write_json(session_path, session_payload)
-        recovered = subprocess.run(
-            command,
-            cwd=root,
-            text=True,
-            capture_output=True,
-            env=self.subprocess_env(root),
-            check=True,
-        )
         first_events = [json.loads(line) for line in first.stdout.splitlines() if line.strip()]
-        settled_events = [
-            json.loads(line) for line in settled.stdout.splitlines() if line.strip()
-        ]
-        recovered_events = [
-            json.loads(line) for line in recovered.stdout.splitlines() if line.strip()
-        ]
+        durable_events = [json.loads(line) for line in event_path.read_text().splitlines()]
 
-        self.assertEqual(message_rel + "\n", doorbell.read_text())
+        self.assertEqual(
+            1,
+            sum(event["event"] == "pi_inbox_wake" for event in durable_events),
+        )
         self.assertTrue(
             any(
                 event["event"] == "autobridge_wake_signaled"
@@ -5127,15 +5148,56 @@ class SessionAutobridgeTest(unittest.TestCase):
             )
         )
         self.assertFalse(any(event["event"] == "autobridge_consumed" for event in first_events))
+
+        inbox_before_read = json.loads(
+            (root / "agents" / "glmpi" / "inbox.json").read_text()
+        )
+        self.assertEqual(
+            {*exact_rels, wrong_rel},
+            set(inbox_before_read["unread"]),
+        )
+        exact_read = subprocess.run(
+            [
+                sys.executable,
+                str(INBOX_SCRIPT),
+                "--me",
+                "glmpi",
+                "--project",
+                "amiga",
+                "--chat",
+                "CHAT-PI-WAKE",
+                "--session",
+                "SESSION-PI-GLIM",
+                "--repo-target",
+                "llm-collab",
+                "--json",
+            ],
+            cwd=root,
+            text=True,
+            capture_output=True,
+            env=self.subprocess_env(root),
+            check=True,
+        )
+        exact_messages = json.loads(exact_read.stdout)["messages"]
+        self.assertEqual(set(exact_rels), {item["path"] for item in exact_messages})
+        inbox = json.loads((root / "agents" / "glmpi" / "inbox.json").read_text())
+        self.assertEqual([wrong_rel], inbox["unread"])
+        self.assertEqual(set(exact_rels), set(inbox["read"]))
+        settled = subprocess.run(
+            command,
+            cwd=root,
+            text=True,
+            capture_output=True,
+            env=self.subprocess_env(root),
+            check=True,
+        )
+        settled_events = [
+            json.loads(line) for line in settled.stdout.splitlines() if line.strip()
+        ]
+        self.assertEqual(events_after_wake, event_path.read_text())
         self.assertFalse(
             any(event["event"] == "autobridge_wake_signaled" for event in settled_events)
         )
-        self.assertFalse(
-            any(event["event"] == "autobridge_wake_signaled" for event in recovered_events)
-        )
-        inbox = json.loads((root / "agents" / "glmpi" / "inbox.json").read_text())
-        self.assertIn(message_rel, inbox["unread"])
-        self.assertNotIn(message_rel, inbox["read"])
         paths = LedgerPaths.derive(root / "project-state", "ws_alpha")
         with patch.object(store_module, "_linked_sqlite_version_info", return_value=SAFE_VERSION):
             with LedgerStore.open_reader(paths) as store:
@@ -5152,6 +5214,36 @@ class SessionAutobridgeTest(unittest.TestCase):
                     ).fetchone(),
                 )
 
+    def test_pi_session_event_wake_is_project_independent(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.object(
+            session_autobridge_lib,
+            "EVENTS_DIR",
+            Path(temp_dir),
+        ):
+            for project in ("amiga", "nuvyr"):
+                with self.subTest(project=project):
+                    session_id = f"SESSION-PI-{project.upper()}"
+                    result = session_autobridge_lib.execute_runtime_trigger(
+                        {
+                            "session_id": session_id,
+                            "agent_id": "glmpi",
+                            "project_id": project,
+                            "chat_id": f"CHAT-{project.upper()}",
+                            "runtime": {
+                                "family": "pi",
+                                "session_id": f"pi-{project}",
+                            },
+                        },
+                        {"path": f"Chats/{project}/packet.md", "frontmatter": {}},
+                    )
+                    event = json.loads(
+                        (Path(temp_dir) / f"{session_id}.jsonl").read_text()
+                    )
+                    self.assertEqual("session_event_log", result["adapter"])
+                    self.assertFalse(result["delivery_accepted"])
+                    self.assertEqual("pi_inbox_wake", event["event"])
+                    self.assertEqual(project, event["project_id"])
+
     def test_pi_runtime_refuses_without_an_exact_bound_attempt(self):
         session = {
             "session_id": "SESSION-PI-UNBOUND",
@@ -5160,11 +5252,10 @@ class SessionAutobridgeTest(unittest.TestCase):
             "chat_id": "CHAT-PI-UNBOUND",
             "mode": "auto-read",
             "wake_strategy": "runtime_trigger",
-            "runtime": {
-                "family": "pi",
-                "session_id": "pi-unbound",
-                "command": [sys.executable, str(PI_DOORBELL_SCRIPT), "/tmp/unused"],
-            },
+                "runtime": {
+                    "family": "pi",
+                    "session_id": "pi-unbound",
+                },
         }
         message = {
             "path": "Chats/2026-07-27/packet.md",
@@ -5216,39 +5307,6 @@ class SessionAutobridgeTest(unittest.TestCase):
 
         runtime_trigger.assert_not_called()
         self.assertEqual("pull_pending", result["actions"][0]["reason"])
-
-    def test_pi_doorbell_publishes_complete_mode_600_content_atomically(self):
-        root = self.make_workspace()
-        doorbell = root / "State" / "pi" / "glmpi.pointer"
-        original_replace = os.replace
-        observed: dict[str, object] = {}
-
-        def observe_replace(source: str, destination: str) -> None:
-            source_path = Path(source)
-            destination_path = Path(destination)
-            observed["content"] = source_path.read_text()
-            observed["mode"] = source_path.stat().st_mode & 0o777
-            observed["destination_existed"] = destination_path.exists()
-            original_replace(source, destination)
-
-        with patch.dict(
-            os.environ,
-            {"LLM_COLLAB_MESSAGE_PATH": "Chats/2026-07-27/packet.md"},
-        ), patch.object(
-            pi_doorbell_lib.sys,
-            "argv",
-            ["pi_doorbell.py", str(doorbell)],
-        ), patch.object(
-            pi_doorbell_lib.os,
-            "replace",
-            side_effect=observe_replace,
-        ):
-            self.assertEqual(0, pi_doorbell_lib.main())
-
-        self.assertEqual("Chats/2026-07-27/packet.md\n", observed["content"])
-        self.assertEqual(0o600, observed["mode"])
-        self.assertFalse(observed["destination_existed"])
-        self.assertEqual(observed["content"], doorbell.read_text())
 
     def test_watch_inbox_default_off_empty_ledger_preserves_legacy_runtime_trigger(self):
         root = self.make_workspace()

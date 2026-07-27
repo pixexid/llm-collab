@@ -49,6 +49,7 @@ from _session_autobridge import (
     HEURISTIC_RUNTIME_DISCOVERY_REFUSED_REASON,
     discover_runtime_session,
     load_session,
+    matching_unread_messages,
     repo_scope_matches,
     save_session,
 )
@@ -86,7 +87,7 @@ def parse_args():
         help="Mark unread messages in the selected project scope as read and exit",
     )
     p.add_argument("--publish-session", action="store_true", help="Publish current runtime session identity before showing inbox")
-    p.add_argument("--session", default=None, help="Stable llm-collab session id to update when publishing runtime identity")
+    p.add_argument("--session", default=None, help="Exact llm-collab session to read or update when publishing runtime identity")
     p.add_argument("--runtime-family", default=None, choices=("codex_app", "claude_app", "gemini_cli"), help="Runtime family for session discovery")
     p.add_argument("--project-path", default=None, help="Optional runtime project path hint for session discovery")
     p.add_argument("--json", dest="json_output", action="store_true", help="Emit JSON output")
@@ -99,6 +100,8 @@ def parse_args():
 
     if args.all_projects and not args.mark_all_read:
         p.error("--all-projects is only valid with --mark-all-read")
+    if args.session is not None and not args.publish_session and args.show_all:
+        p.error("--session reads exact unread work and does not support --all")
 
     if args.mark_all_read:
         if args.project is None and not args.all_projects:
@@ -543,7 +546,23 @@ def main():
 
     published_runtime = publish_runtime_identity(args)
 
-    if args.packet:
+    exact_session = None
+    if args.session and not args.publish_session:
+        exact_session = load_session(args.session)
+        if exact_session.get("agent_id") != args.me:
+            raise ValueError("--session does not belong to --me")
+        if not exact_session.get("project_id") or not exact_session.get("chat_id"):
+            raise ValueError("--session exact read requires project and chat scope")
+        if args.project and exact_session.get("project_id") != args.project:
+            raise ValueError("--session does not belong to --project")
+        if args.chat and exact_session.get("chat_id") != args.chat:
+            raise ValueError("--session does not belong to --chat")
+        messages = matching_unread_messages(
+            exact_session,
+            invocation_repo_targets=args.repo_target,
+        )
+        messages = filter_messages(messages, args.project, args.chat, args.packet)
+    elif args.packet:
         messages = load_all_messages(args.me)
     elif args.show_all:
         messages = load_all_messages(args.me)
@@ -556,7 +575,7 @@ def main():
     messages, repo_scope_refused = filter_repo_scope(
         messages, args.repo_target, args.project
     )
-    if not args.packet:
+    if not args.packet and exact_session is None:
         messages = messages[: args.limit]
 
     if not messages:
@@ -625,6 +644,15 @@ def main():
             args.me, shown_paths, args.repo_target, args.project
         )
         repo_scope_refused.extend(late_refused)
+        if exact_session is not None:
+            exact_paths = {
+                message["path"]
+                for message in matching_unread_messages(
+                    load_session(args.session),
+                    invocation_repo_targets=args.repo_target,
+                )
+            }
+            shown_paths = [path for path in shown_paths if path in exact_paths]
 
     if args.json_output:
         payload: dict[str, object] = {"messages": messages}
