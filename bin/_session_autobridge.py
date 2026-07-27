@@ -1208,8 +1208,10 @@ def _reply_channel_lines(session: dict, fm: dict) -> list[str]:
     which channel to use needs no new contract. Telling it the exact invocation does.
     """
     return [
-        "Reply through the mailbox -- `deliver.py` -- addressed to the sender above.",
-        "It is the only channel the sender reads.",
+        "When the packet explicitly requests a substantive response, send it through",
+        "the mailbox -- `deliver.py` -- addressed to the sender above.",
+        "Do not send another mailbox message for a packet that is itself only a reply",
+        "or delivery receipt. The runtime thread gets the terse delivery receipt.",
         "A PR comment, a code-review body or a desktop nudge does NOT reach the sender.",
         "Post to a PR only when the PR itself is the artifact -- a connector review",
         "request, or evidence a human will read there -- and deliver the packet as well.",
@@ -1231,7 +1233,7 @@ def build_resume_prompt(session: dict, message: dict) -> str:
         f"chat_id: {fm.get('chat_id', '')}",
         f"project_id: {fm.get('project_id', '')}",
         f"title: {fm.get('title', '')}",
-        f"message_path: {message.get('path', '')}",
+        f"message_path: {ROOT / str(message.get('path', ''))}",
     ]
     if activation_lease:
         identity = activation_lease.get("identity") or {}
@@ -1262,7 +1264,8 @@ def build_resume_prompt(session: dict, message: dict) -> str:
         lines.extend(
             [
                 "",
-                "The packet body is not copied here; open it through your llm-collab inbox.",
+                "The packet body is not copied here. Open `message_path` directly, read-only.",
+                "If you use `inbox.py` instead, use `--peek` so reading does not acknowledge it.",
             ]
         )
     lines.extend(
@@ -1270,8 +1273,8 @@ def build_resume_prompt(session: dict, message: dict) -> str:
             "",
             *_reply_channel_lines(session, fm),
             "",
-            "Even a trivial answer is a mailbox packet. This runtime thread gets only a",
-            "terse delivery receipt. Do not start unrelated work.",
+            "Do not put substantive work results in this runtime thread.",
+            "Do not start unrelated work.",
         ]
     )
     return "\n".join(lines)

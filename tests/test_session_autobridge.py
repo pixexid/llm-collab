@@ -6363,21 +6363,24 @@ class ResumePromptNamesTheReplyChannelTest(unittest.TestCase):
             with self.subTest(project_id=project_id):
                 prompt = self.prompt(project_id=project_id)
                 self.assertIn(
-                    "message_path: Chats/2026-07-26_x__CHAT-REPLY/"
+                    "message_path: "
+                    f"{session_autobridge_lib.ROOT}/Chats/2026-07-26_x__CHAT-REPLY/"
                     "2026-07-26T00-00-00_to-codex_packet.md",
                     prompt,
                 )
                 self.assertNotIn("Do the lane.", prompt)
                 self.assertNotIn("Message body:", prompt)
                 self.assertIn("Do not answer it in this runtime thread", prompt)
-                self.assertIn("only a\nterse delivery receipt", prompt)
+                self.assertIn("Open `message_path` directly, read-only", prompt)
+                self.assertIn("use `--peek` so reading does not acknowledge it", prompt)
 
     def test_the_prompt_names_the_mailbox_as_the_only_channel(self) -> None:
         for project_id in self.PROJECTS:
             with self.subTest(project_id=project_id):
                 prompt = self.prompt(project_id=project_id)
-                self.assertIn("Reply through the mailbox", prompt)
-                self.assertIn("only channel the sender reads", prompt)
+                self.assertIn("explicitly requests a substantive response", prompt)
+                self.assertIn("itself only a reply\nor delivery receipt", prompt)
+                self.assertNotIn("Even a trivial answer is a mailbox packet", prompt)
                 self.assertIn("deliver.py", prompt)
 
     def test_the_prompt_says_a_pr_comment_does_not_reach_the_sender(self) -> None:
