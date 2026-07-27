@@ -317,6 +317,39 @@ The `type` command exposes key-typing directly and is ATTENDED-ONLY (GH-1547):
 `axsend type --app <name> --text "..." --attended [--submit] [--verify]` —
 without `--attended` it refuses with exit 11 before touching anything.
 
+## Diagnosing a resolver failure (2026-07-27)
+
+Resolver failures are not verdicts on AX. `state` reports
+`no proven chat window/composer`; `ring` reports
+`no native chat composer found for <app> (auto mode requires a proven chat window)`.
+Two ways to misread them were observed in one session:
+
+**It can be transient.** Three consecutive `state` and
+`ring --submit --dry-run --text "probe"` calls against Codex returned their
+respective resolver failures, and `check`
+reported `AX trusted: YES` the whole time. The same commands resolved the composer
+immediately once the app window was brought into view. What changed was visibility
+of the window, not trust, not the binary, and not the app (same pid throughout).
+Before concluding the doorbell is unavailable, make the target window visible and
+retry.
+
+**`tree` cannot tell you whether the target composer holds a draft.** It lists
+`AXTextArea` nodes from every thread the app has open, including background
+threads whose composers legitimately hold drafts, and it truncates `AXValue` at
+about 40 characters. A stale-looking fragment from some other thread's composer
+reads exactly like a stuck draft in the one you are about to ring. Use
+`ring --submit --dry-run --text "probe"` instead. An empty target composer is
+temporarily populated, identified by `composer set (role=...)`, and restored
+without submitting; an existing draft is preserved and causes exit 11. If you
+need the full text of a draft, `tree` will not give it to you.
+
+**A failed mailbox wake says nothing about AX.** `deliver.py` refusing with
+`autobridge_refusal_reason: exact_binding_not_dispatchable` means the bound
+session is not dispatchable. Check both `status` and `lease_expires_utc`; expiry
+does not change `status`, and a stopped session can produce the same refusal
+without an expired lease. The AX doorbell is an independent path and may be fine;
+test it rather than assuming both are down.
+
 ## Limits / next
 
 - Validated on Codex. ZCode and Claude Desktop expose composers too; per-app send
