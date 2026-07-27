@@ -135,7 +135,12 @@ class DaemonTest(unittest.TestCase):
             if remaining <= 0:
                 break
             try:
-                return self.request(payload, timeout=min(1.0, remaining))
+                # The caller's whole budget, not a one-second slice of it. A daemon that
+                # accepts and is then descheduled for between one and two seconds --
+                # which the sole caller explicitly accepts -- raised here instead, and a
+                # timeout is not a refusal so the retry loop could not recover it. The
+                # helper was rejecting behaviour the test contract calls a pass.
+                return self.request(payload, timeout=remaining)
             except (ConnectionRefusedError, FileNotFoundError) as exc:
                 last = exc
                 time.sleep(0.01)
@@ -166,12 +171,17 @@ class DaemonTest(unittest.TestCase):
             if remaining <= 0:
                 break
             try:
-                # Bounded by what is LEFT, not by request()'s fixed two seconds: a socket
-                # that accepts and never answers made `wait_until_accepting(timeout=0.3)`
-                # block for two seconds per attempt, so the helper's own deadline meant
-                # nothing.
+                # Bounded by what is LEFT, and by nothing else. request()'s fixed two
+                # seconds made `wait_until_accepting(timeout=0.3)` block for two seconds
+                # per attempt, so the helper's own deadline meant nothing -- but capping
+                # each attempt at half a second traded that for backlog churn: attempts
+                # time out and close while their requests sit queued, so a startup near
+                # the far end of the budget (say 4.8s of a 5s window) fills the listener's
+                # backlog and later attempts get EAGAIN or run out of time, even though
+                # the accept loop began before the deadline. One request allowed to wait
+                # out the remaining budget just gets answered.
                 answer = self.request(
-                    b'{"version":1,"op":"status"}', timeout=min(0.5, remaining)
+                    b'{"version":1,"op":"status"}', timeout=remaining
                 )
             except (OSError, ValueError) as exc:
                 last = exc
@@ -387,6 +397,85 @@ class DaemonTest(unittest.TestCase):
             f"the 0.3s deadline took {elapsed:.2f}s; each attempt ignored what was left",
         )
 
+    @contextlib.contextmanager
+    def slow_listener(self, delay: float):
+        """A listener that accepts immediately and answers `delay` seconds later.
+
+        The shape both timing findings are about: the connection succeeds, so nothing
+        retries, and the only question is whether the helper waits long enough to be
+        answered.
+        """
+        from types import SimpleNamespace
+
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            path = Path(tmp) / "slow.sock"
+            listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            listener.bind(os.fspath(path))
+            listener.listen(8)
+            stop = threading.Event()
+
+            def serve():
+                listener.settimeout(0.2)
+                while not stop.is_set():
+                    try:
+                        conn, _ = listener.accept()
+                    except (OSError, socket.timeout):
+                        continue
+                    with conn:
+                        conn.recv(4096)
+                        if stop.wait(delay):
+                            return
+                        try:
+                            conn.sendall(b'{"running": true}')
+                        except OSError:
+                            return
+
+            server = threading.Thread(target=serve, daemon=True)
+            server.start()
+            original = self.paths
+            self.paths = SimpleNamespace(socket=path)
+            try:
+                yield
+            finally:
+                self.paths = original
+                stop.set()
+                server.join(2)
+                listener.close()
+
+    def test_the_first_request_gets_the_callers_whole_window(self) -> None:
+        """A first response after 1.2s is a pass by the caller's contract, not a failure.
+
+        `request_when_available` capped each attempt at one second while its sole caller
+        accepts anything answered within two. A daemon that accepted and was then
+        descheduled for between one and two seconds raised here -- and a timeout is not a
+        connection refusal, so the retry loop could not recover it. The helper rejected
+        behaviour the test contract calls a pass, which is how a load-dependent failure
+        gets reintroduced as a "flake".
+        """
+        with self.slow_listener(1.2):
+            started = time.monotonic()
+            answer = self.request_when_available(b'{"version":1,"op":"status"}')
+            elapsed = time.monotonic() - started
+        self.assertTrue(answer["running"])
+        self.assertGreater(elapsed, 1.0, "the listener was supposed to answer slowly")
+        self.assertLess(elapsed, 2.0)
+
+    def test_readiness_lets_one_attempt_use_the_remaining_budget(self) -> None:
+        """Half-second attempts churned the backlog instead of waiting to be answered.
+
+        Each attempt timed out and closed while its request sat queued, so a startup near
+        the far end of the budget filled the listener's backlog and later attempts hit
+        EAGAIN or ran out of time -- failing even though the accept loop had begun well
+        before the deadline. One request allowed to wait out what is left is simply
+        answered.
+        """
+        with self.slow_listener(1.0):
+            started = time.monotonic()
+            self.wait_until_accepting(timeout=3.0)
+            elapsed = time.monotonic() - started
+        self.assertGreater(elapsed, 0.8)
+        self.assertLess(elapsed, 2.5)
+
     def test_the_readiness_probe_reports_failure_rather_than_hanging(self) -> None:
         """A readiness helper that waits forever turns a fast failure into a stall."""
         from types import SimpleNamespace
@@ -581,8 +670,11 @@ class DaemonTest(unittest.TestCase):
                             status["observation"]["source_reachability"], "not_checked"
                         )
                     finally:
-                        if thread.is_alive():
-                            self.stop(thread)
+                        # stop_or_report, not a liveness guard: this body never shuts the
+                        # server down, so a dead thread means the accept loop exited on
+                        # its own. If that happened after the status response every
+                        # assertion above still passed, and the guard swallowed it.
+                        self.stop_or_report(thread)
                     open_writer.assert_not_called()
                     registry_read.assert_not_called()
                     watchdog_load.assert_not_called()
