@@ -70,6 +70,15 @@
       }
     },
     {
+      "id": "glmpi",
+      "display_name": "Glim",
+      "role": "implementation",
+      "activation": {
+        "type": "cli_session",
+        "watcher_enabled": true
+      }
+    },
+    {
       "id": "kimi",
       "display_name": "Kimi",
       "role": "implementation",
