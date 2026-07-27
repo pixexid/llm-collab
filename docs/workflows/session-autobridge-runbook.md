@@ -69,6 +69,9 @@ remove it and rely on the doorbell + mailbox-drain self-heal.
   `[BRIDGE <8-char-uuid-prefix>] <short title>`, then verify the sidebar title
   and `local_*` URL. Do not claim a PM2 watcher, CLI resume, or filesystem write
   created a desktop-visible thread.
+- A Claude desktop binding used only to scope its durable mailbox must use
+  `notify` mode. `claude_app` never derives `claude -p` or `claude --resume`;
+  the app's background inbox watcher owns pickup.
 - If AX resolves an embedded preview/web field or cannot verify the native
   prompt or its empty state, stop sending but preserve the durable packet. Use
   attended Computer Use plus

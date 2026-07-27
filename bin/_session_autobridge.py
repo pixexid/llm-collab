@@ -1145,6 +1145,8 @@ def resolve_effective_action(session: dict, message: dict) -> tuple[str, str]:
         return "manual_noop", "manual_mode"
     if mode == "notify" or wake_strategy == "notify":
         return "notify_only", "notify_mode"
+    if runtime_family == "claude_app":
+        return "notify_only", "claude_desktop_mailbox_watcher"
     if wake_strategy == "runtime_trigger" and runtime_command:
         return "runtime_trigger", "runtime_command_available"
     if wake_strategy == "runtime_trigger" and runtime_family and runtime_session_id:
@@ -1294,7 +1296,8 @@ def derived_runtime_command(session: dict, message: dict) -> list[str] | None:
     runtime_session_id = runtime.get("session_id")
     if not runtime_family or not runtime_session_id:
         return None
-
+    if runtime_family == "claude_app":
+        return None
     prompt = build_resume_prompt(session, message)
     binary = runtime_binary(str(runtime_family))
 
@@ -1307,16 +1310,6 @@ def derived_runtime_command(session: dict, message: dict) -> list[str] | None:
             prompt,
             "--json",
             "--skip-git-repo-check",
-        ]
-    if runtime_family == "claude_app":
-        return [
-            binary,
-            "-p",
-            "--output-format",
-            "json",
-            "--resume",
-            str(runtime_session_id),
-            prompt,
         ]
     if runtime_family == "gemini_cli":
         return [

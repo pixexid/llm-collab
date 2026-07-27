@@ -959,7 +959,6 @@ class SessionAutobridgeTest(unittest.TestCase):
     def test_runtime_trigger_derives_resume_command_from_registered_session(self):
         fixtures = [
             ("codex_app", "LLM_COLLAB_CODEX_BIN", ["exec", "resume"], ["--json", "--skip-git-repo-check"]),
-            ("claude_app", "LLM_COLLAB_CLAUDE_BIN", ["-p", "--output-format", "json", "--resume"], []),
             ("gemini_cli", "LLM_COLLAB_GEMINI_BIN", ["--prompt"], []),
         ]
 
@@ -1087,6 +1086,35 @@ class SessionAutobridgeTest(unittest.TestCase):
                     self.assertEqual(str(runtime_home), runtime_payload["env"]["gemini_home"])
                 self.assertEqual(f"{runtime_family}-session-1", runtime_payload["env"]["target_session_id"])
                 self.assertEqual("claude-session-2", runtime_payload["env"]["sender_session_id"])
+
+    def test_claude_app_uses_its_mailbox_watcher_not_cli_resume(self):
+        session = {
+            "session_id": "SESSION-CLAUDE",
+            "agent_id": "claude",
+            "mode": "auto-read",
+            "wake_strategy": "runtime_trigger",
+            "runtime": {
+                "family": "claude_app",
+                "session_id": "claude-thread",
+            },
+        }
+        message = {
+            "path": "Chats/packet.md",
+            "frontmatter": {},
+        }
+
+        with patch.object(
+            session_autobridge_lib,
+            "get_agent",
+            return_value={"activation": {"type": "cli_session"}},
+        ):
+            self.assertEqual(
+                ("notify_only", "claude_desktop_mailbox_watcher"),
+                session_autobridge_lib.resolve_effective_action(session, message),
+            )
+        self.assertIsNone(
+            session_autobridge_lib.derived_runtime_command(session, message)
+        )
 
     def test_codex_runtime_trigger_prefers_app_server_when_available(self):
         root = self.make_workspace()
@@ -1593,7 +1621,7 @@ class SessionAutobridgeTest(unittest.TestCase):
         self.assertTrue(fake_app_log.exists())
         self.assertEqual(str(runtime_home), fake_app_log.read_text())
 
-    def test_successful_claude_runtime_trigger_refreshes_app_ui(self):
+    def test_claude_app_dispatch_leaves_pickup_to_background_watcher(self):
         root = self.make_workspace()
         self.add_agent(
             root,
@@ -1612,8 +1640,14 @@ class SessionAutobridgeTest(unittest.TestCase):
             target_session_id="claude-thread-1",
         )
 
+        worker_log = root / "claude_runtime.log"
         worker_script = root / "claude_runtime.py"
-        write(worker_script, "#!/usr/bin/env python3\nimport json, sys\njson.load(sys.stdin)\nprint('ok')\n")
+        write(
+            worker_script,
+            "#!/usr/bin/env python3\n"
+            "from pathlib import Path\n"
+            f"Path({json.dumps(str(worker_log))}).write_text('called')\n",
+        )
         worker_script.chmod(0o755)
 
         osascript_log = root / "claude_osascript.log"
@@ -1668,12 +1702,12 @@ class SessionAutobridgeTest(unittest.TestCase):
         )
 
         action = dispatch_result["actions"][0]
-        self.assertEqual(0, action["runtime_result"]["returncode"])
-        self.assertEqual("claude_reload_page", action["ui_refresh_result"]["method"])
-        self.assertEqual(0, action["ui_refresh_result"]["returncode"])
-        osascript_text = osascript_log.read_text()
-        self.assertIn('tell application "Claude" to activate', osascript_text)
-        self.assertIn('Reload This Page', osascript_text)
+        self.assertEqual("notify_only", action["effective_action"])
+        self.assertEqual("claude_desktop_mailbox_watcher", action["reason"])
+        self.assertNotIn("runtime_result", action)
+        self.assertNotIn("ui_refresh_result", action)
+        self.assertFalse(worker_log.exists())
+        self.assertFalse(osascript_log.exists())
 
     def test_human_relay_downgrades_to_prompt_without_runtime_hook(self):
         root = self.make_workspace()
