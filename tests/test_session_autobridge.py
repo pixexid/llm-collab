@@ -2423,6 +2423,40 @@ class SessionAutobridgeTest(unittest.TestCase):
             self.assertIsNone(inactive_binding)
             self.assertEqual(session_autobridge_lib.EXACT_BINDING_AMBIGUOUS_REASON, reason)
 
+        superseded_runtime = {
+            **reused_runtime,
+            "status": "superseded",
+        }
+        with patch.object(
+            session_autobridge_lib,
+            "load_binding",
+            return_value={
+                "project_id": "amiga",
+                "chat_id": "CHAT-EXACT-DUP",
+                "agent_id": "claude",
+                "session_id": "SESSION-DUP",
+                "runtime_family": "claude_app",
+                "runtime_session_id": "runtime-dup",
+            },
+        ), patch.object(
+            session_autobridge_lib,
+            "iter_sessions",
+            return_value=[expired_a, superseded_runtime],
+        ):
+            pair, reason, inactive_pair = (
+                session_autobridge_lib.resolve_exact_dispatch_pair(
+                    "amiga",
+                    "CHAT-EXACT-DUP",
+                    "claude",
+                )
+            )
+            self.assertIsNone(pair)
+            self.assertEqual(
+                session_autobridge_lib.EXACT_BINDING_NOT_DISPATCHABLE_REASON,
+                reason,
+            )
+            self.assertEqual(expired_a, inactive_pair[0])
+
         cross_scope_runtime = {
             **reused_runtime,
             "project_id": "nuvyr",
