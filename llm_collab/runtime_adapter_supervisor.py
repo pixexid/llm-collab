@@ -45,6 +45,7 @@ class StdioSupervisor:
         self._stderr_lock = threading.Lock()
         self._stderr_barriers: queue.Queue[threading.Event] = queue.Queue()
         self._stderr_done = threading.Event()
+        self._tearing_down = threading.Event()
         self._stderr_failed = threading.Event()
         self._stderr_wakeup: tuple[int, int] | None = None
         self._lifecycle_lock = threading.RLock()
@@ -88,10 +89,14 @@ class StdioSupervisor:
         self.close()
 
     def request(self, frame: str, *, timeout_seconds: float = 5.0) -> SupervisorOutcome:
-        process = self._require_process()
+        # BEFORE _require_process. A recorded drain failure is a structured outcome we
+        # promised the caller; letting the liveness check run first meant an adapter that
+        # exited after the failure raised RuntimeError instead, so which error the caller
+        # saw depended on whether the child happened to still be alive.
         if self._stderr_failed.is_set():
             self.close()
             return self._outcome(fault="STDERR_DRAIN_FAILED", should_close=True)
+        process = self._require_process()
         stdin = process.stdin
         if stdin is None:
             return self._outcome(fault="PROCESS_CLOSED", should_close=True)
@@ -127,6 +132,7 @@ class StdioSupervisor:
             self._close()
 
     def _close(self) -> None:
+        self._tearing_down.set()
         process = self._process
         if process is None:
             return
@@ -188,7 +194,11 @@ class StdioSupervisor:
                 self._stdout.put(None)
                 return
             if line == b"":
-                self._stdout.put(None)
+                # Through the barrier, like a frame. Publishing the sentinel directly let
+                # an adapter that wrote stderr and exited return PROCESS_CLOSED carrying a
+                # partial prefix with stderr_truncated=False -- indistinguishable from a
+                # complete diagnostic.
+                self._publish(None)
                 return
             self._publish(line)
 
@@ -208,9 +218,15 @@ class StdioSupervisor:
                 selector.register(wake_read, selectors.EVENT_READ)
                 while True:
                     events = selector.select()
-                    barriers = self._take_stderr_barriers()
+                    # Drain the wake FIRST, then snapshot. Snapshotting first meant a
+                    # barrier queued between the snapshot and the drain had its wake byte
+                    # consumed on its behalf: it was never signalled and no byte remained
+                    # to trigger another pass, so the publisher waited forever. Draining
+                    # first guarantees any byte written afterwards survives and forces a
+                    # further iteration.
                     if any(key.fd == wake_read for key, _ in events):
                         self._drain_fd(wake_read)
+                    barriers = self._take_stderr_barriers()
                     stderr_closed = self._drain_stderr_fd(stderr_fd)
                     for barrier in barriers:
                         barrier.set()
@@ -230,7 +246,13 @@ class StdioSupervisor:
             except BlockingIOError:
                 return False
             except OSError:
-                return True
+                # A zero-length read is the ONLY EOF signal. Treating every OSError as
+                # EOF let an active-connection failure such as EIO end the drain
+                # normally, releasing a waiting response as clean while diagnostics were
+                # never read. Errors caused by our own teardown are the sole exception.
+                if self._tearing_down.is_set():
+                    return True
+                raise
             if not chunk:
                 return True
             with self._stderr_lock:
@@ -249,7 +271,7 @@ class StdioSupervisor:
             except (BlockingIOError, OSError):
                 return
 
-    def _publish(self, frame: bytes) -> None:
+    def _publish(self, frame: bytes | None) -> None:
         barrier = threading.Event()
         self._stderr_barriers.put(barrier)
         if self._stderr_done.is_set():
