@@ -598,6 +598,17 @@ def session_is_dispatchable(session: dict) -> tuple[bool, str]:
     return True, "ok"
 
 
+def session_is_watcher_only(session: dict) -> bool:
+    """Claude's pickup is its durable packet plus the app's own background inbox watcher.
+
+    Keyed on the canonical agent identity, not on `runtime.family`: `register` accepts any
+    caller-selected `--runtime-family` and `--runtime-command`, so a `claude` session declared
+    as another family would otherwise select runtime_trigger, run a CLI command, and take the
+    activation lease ahead of the watcher. Non-Claude families are unaffected.
+    """
+    return str(session.get("agent_id") or "") == "claude"
+
+
 def session_target_ids(session: dict) -> set[str]:
     runtime = runtime_metadata(session)
     target_ids = {str(session["session_id"])}
@@ -1026,8 +1037,7 @@ def claim_message_activation(session: dict, message: dict) -> tuple[bool, dict[s
             "detail": detail,
         }
 
-    runtime = runtime_metadata(session)
-    if runtime.get("family") == "claude_app":
+    if session_is_watcher_only(session):
         # The app's background inbox watcher is the pickup path, and it claims the
         # activation under its own reader identity. A lease taken here under the
         # poller's PID is still live when that pickup runs, so the watcher is refused
@@ -1042,7 +1052,7 @@ def claim_message_activation(session: dict, message: dict) -> tuple[bool, dict[s
     from _activation_cleanup import claim_activation_lease
     from _activation_lease import LeaseRefused
 
-    runtime_id = runtime.get("session_id")
+    runtime_id = runtime_metadata(session).get("session_id")
     owner_pid = os.getpid()
     try:
         claim = claim_activation_lease(
@@ -1157,7 +1167,7 @@ def resolve_effective_action(session: dict, message: dict) -> tuple[str, str]:
         return "manual_noop", "manual_mode"
     if mode == "notify" or wake_strategy == "notify":
         return "notify_only", "notify_mode"
-    if runtime_family == "claude_app":
+    if session_is_watcher_only(session):
         return "notify_only", "claude_desktop_mailbox_watcher"
     if wake_strategy == "runtime_trigger" and runtime_command:
         return "runtime_trigger", "runtime_command_available"
@@ -1308,7 +1318,7 @@ def derived_runtime_command(session: dict, message: dict) -> list[str] | None:
     runtime_session_id = runtime.get("session_id")
     if not runtime_family or not runtime_session_id:
         return None
-    if runtime_family == "claude_app":
+    if session_is_watcher_only(session):
         return None
     prompt = build_resume_prompt(session, message)
     binary = runtime_binary(str(runtime_family))

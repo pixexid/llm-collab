@@ -97,8 +97,6 @@ next action:
 - `inbox.py --me codex --project <project_id> --limit 5 --peek` or the
   project-approved unread check
 - canonical issue/design queue validation
-- `project_design_queue.py bridge-status --project <project_id> --json` when a
-  design/Claude Desktop lane may be active
 - active task mirrors and worker checkpoint status
 - active PR checks, merge state, branch freshness, and the full reviewed artifact
   set (`commit-push-prs.md#reviewed-artifact-set`)

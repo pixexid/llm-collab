@@ -7,10 +7,11 @@ the operator is working and misroutes keystrokes across overlapping windows.
 
 AX is a doorbell between distinct collaborator app identities. External
 workers such as Claude and ZCode may ring root Codex, and root Codex may ring an
-external worker. Never use AX for `codex -> codex`, a root self-handoff, or a
-managed Codex worker: use Codex Thread Coordination (`read_thread` /
-`send_message_to_thread`) instead. Native subagents use native subagent
-coordination, not an app doorbell. `deliver.py` persists a sender-aware
+external worker except Claude. Claude-targeted delivery is its durable packet
+plus its own background inbox watcher. Never use AX for `codex -> codex`, a root
+self-handoff, or a managed Codex worker: use Codex Thread Coordination
+(`read_thread` / `send_message_to_thread`) instead. Native subagents use native
+subagent coordination, not an app doorbell. `deliver.py` persists a sender-aware
 `autobridge_skip` guard on a `codex -> codex` packet so PM2 or manual inbox
 watchers cannot later turn that durable history into a runtime wake.
 

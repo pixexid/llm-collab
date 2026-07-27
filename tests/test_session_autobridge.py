@@ -1709,7 +1709,7 @@ class SessionAutobridgeTest(unittest.TestCase):
         self.assertFalse(worker_log.exists())
         self.assertFalse(osascript_log.exists())
 
-    def test_claude_app_dispatch_is_mailbox_only_on_a_non_amiga_project(self):
+    def test_claude_dispatch_is_mailbox_only_despite_a_mismatched_runtime_family(self):
         # amiga carries claude_desktop_bridge in the fixture and nuvyr does not, so a
         # project-specific bridge setting cannot be what produces the mailbox-only route.
         root = self.make_workspace()
@@ -1771,7 +1771,7 @@ class SessionAutobridgeTest(unittest.TestCase):
             "--wake-strategy",
             "runtime_trigger",
             "--runtime-family",
-            "claude_app",
+            "codex_app",
             "--runtime-session-id",
             "claude-thread-nuvyr",
             "--runtime-session-source",
@@ -1799,7 +1799,7 @@ class SessionAutobridgeTest(unittest.TestCase):
         self.assertFalse(worker_log.exists())
         self.assertFalse(osascript_log.exists())
 
-    def test_claude_app_activation_stays_claimable_by_the_app_watcher(self):
+    def test_claude_activation_stays_claimable_despite_a_mismatched_runtime_family(self):
         root = self.make_workspace()
         leases_dir = root / "State" / "session_autobridge" / "activation_leases"
         worktree = root / "claude-lane"
@@ -1811,7 +1811,7 @@ class SessionAutobridgeTest(unittest.TestCase):
             "chat_id": "CHAT-CLAUDE-ACTIVATION",
             "mode": "auto-read",
             "wake_strategy": "runtime_trigger",
-            "runtime": {"family": "claude_app", "session_id": "claude-thread-1"},
+            "runtime": {"family": "codex_app", "session_id": "claude-thread-1"},
         }
         message = {
             "path": "Chats/claude/activation.md",

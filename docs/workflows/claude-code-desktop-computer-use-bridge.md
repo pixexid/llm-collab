@@ -207,7 +207,7 @@ this runbook intentionally specifies no code, signing, or IPC design.
   blocker, clarification, decision, and piece of evidence is a file written with
   `deliver.py`. Nothing load-bearing lives only in an app's visible thread.
 - **Doorbell = AX (immediate, event-driven nudge).** The moment one participant
-  in a distinct-app route finishes
+  in a distinct-app route other than Claude finishes
   a task, hits a blocker, needs a clarification, or completes a handoff, it uses
   `bin/axsend-ensure ring --submit --verify` (run from the llm-collab checkout
   root, or use the exact absolute command `deliver.py` prints)
@@ -245,7 +245,8 @@ For task-grade work, in order:
 
 1. Write the durable instruction/handoff with `deliver.py` to `Chats/` and the
    recipient's `agents/<agent>/inbox.json`.
-2. If sender and recipient are both `codex`, stop app routing and use Thread
+2. If the recipient is Claude, stop: its background inbox watcher owns pickup.
+   If sender and recipient are both `codex`, stop app routing and use Thread
    Coordination (`read_thread` / `send_message_to_thread`). Otherwise ring the
    distinct external-app recipient with
    `bin/axsend-ensure ring --submit --verify --text "<pointer>"`
@@ -269,7 +270,7 @@ For task-grade work, in order:
    Never re-ring queued/unconfirmed or identity-loss/ambiguous results; route
    other non-zero results into recovery.
 4. Use screenshot/keyboard Computer Use only as attended fallback or recovery
-   for an external collaborator app when `axsend` is unavailable or unsafe. In
+   for an external collaborator app other than Claude when `axsend` is unavailable or unsafe. In
    that fallback path, pass the idle input gate before typing.
 5. Record the ring result in your own thread and, when relevant, in the mailbox.
 
@@ -331,92 +332,6 @@ Completion/handoff still requires durable evidence:
 
 `status: in_progress` alone is not durable progress; it only proves activation.
 
-## Provisional safety-fuse (heartbeat) — experimental
-
-Routine/continuous polling is **deprecated** as the primary wake mechanism
-(token cost + stale-context risk). A bounded heartbeat survives only as a
-provisional **safety-fuse**, on trial, with hard constraints:
-
-- **Only** when a doorbell attempt is blocked, or a worker is visibly running and
-  a handoff is expected.
-- **Task-scoped**: tied to one specific task/worktree/branch and its chat.
-- **Auto-deletes** on handoff/ack/blocker; must not outlive its task/chat.
-- **Never the primary path**, never a standing always-on watcher.
-- Must be fixed or removed if it misbehaves on real tasks.
-
-When a safety-fuse heartbeat is active, the Codex-side tooling below is the
-reference implementation; the same discipline applies symmetrically to any agent
-running one.
-
-### Health diagnostics (safety-fuse)
-
-If Computer Use cannot inspect the other app, do not switch to CLI/session-file
-bridging. Record the blocker and gather only coarse shell diagnostics, e.g.:
-
-```bash
-python3 bin/claude_desktop_bridge_health.py --json
-```
-
-This reports whether the app appears running, frontmost, visible, holding power
-assertions, and whether its main process appears busy by CPU. It deliberately
-does not read message content, prompt state, thread titles, URLs, or local
-session stores. A healthy shell report is not proof the doorbell is usable; that
-is proven by the AX ring exit result and, when needed, `axsend confirm`. A
-healthy shell report is also not proof an attended Computer Use fallback is
-safe; that requires visible target inspection and the idle input gate. CPU-busy
-is not proof of lane progress — pair it with durable lane evidence before
-describing progress.
-
-### Cadence (safety-fuse only)
-
-Set heartbeat cadence per relay, scoped to the expectation, and delete it the
-moment the expected response is recorded, blocked, or no longer needed:
-
-- short response expected: tight minute-level
-- long implementation/verification: slower, with what state counts as a useful
-  update
-- waiting only for final handoff: moderate, notify only on awaiting-input/new
-  response/blocked/errored
-- no longer needed: delete immediately
-
-A heartbeat sends only when an explicit outbound directive exists; it must never
-start the next queue lane or interrupt a running turn on its own. For ordered
-Amiga queues, recompute the ready lane each wakeup rather than hardcoding an
-issue:
-
-```bash
-python3 bin/project_design_queue.py bridge-status --project <project-id> --json
-```
-
-Use its `classification` (e.g. `durable-progress-visible`,
-`cpu-busy-no-durable-progress`, `idle-no-durable-progress`,
-`computer-use-cooldown-no-durable-progress`, `missing-bridge-metadata`,
-`queue-empty`/`no-ready-lane`) to decide whether to inspect the app, wait, or
-stop. After an idle-timeout, record the cooldown:
-
-```bash
-python3 bin/project_design_queue.py record-computer-use-timeout --project <project-id> --reason "Computer Use get_app_state timed out"
-```
-
-## New thread naming
-
-Every new desktop thread must start with a unique bridge id and a short title so
-the sidebar does not fill with indistinguishable rows. Before clicking
-`New session`, generate a `bridge_thread_uuid` (full UUID, durable binding/audit)
-and a `short_thread_title` (compact sidebar label, e.g. `GH-361 review
-workflow`). Send the first visible prompt only after the idle gate passes, in the
-compact one-line form:
-
-```text
-[BRIDGE <8-char-uuid-prefix>] Read <collab_message_path or latest CHAT-id packet> and execute it.
-```
-
-Keep the visible prompt under ~240 characters. The full UUID, chat id, message
-path, task body, acceptance criteria, and gates live in the durable mailbox
-packet, not in visible prompt text. Never paste task bodies or multi-paragraph
-briefs into the app for task-grade work, and never split one bridge across
-multiple visible messages.
-
 ## Completion detection
 
 A turn is settled only when ALL are true:
@@ -454,9 +369,8 @@ the settled UI, then records the meaningful content into the mailbox.
   not claim exact-thread delivery. Do not use screenshot/keyboard Computer Use
   until the idle input gate passes.
 - Computer Use cannot see the prompt/transcript: the Computer Use fallback is
-  paused; record the blocker (for the safety-fuse path,
-  `record-computer-use-timeout` applies a cooldown) and retry that fallback
-  after repair. AX may still ring once only when it can verify the native
+  paused; record the blocker and retry that fallback after repair. AX may still
+  ring once only when it can verify the native
   composer identity and prove its empty state through readable `AXValue`. Do
   not fall back to CLI.
 - App-visible thread changed: re-read app state and confirm project/title before
