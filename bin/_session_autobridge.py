@@ -1217,12 +1217,30 @@ def _reply_channel_lines(session: dict, fm: dict) -> list[str]:
 
 
 def build_resume_prompt(session: dict, message: dict) -> str:
+    """A POINTER to the packet, never a copy of it.
+
+    This pasted the whole body into the worker's runtime thread. Two costs, both paid:
+    the thread accumulates long duplicates of durable content, and -- worse -- a worker
+    holding the full text in front of it answers where it is standing. Codex replied in
+    its thread to three decisions; the answers sat there for twenty minutes while the
+    sender, watching the mailbox, reported them outstanding.
+
+    `_reply_channel_lines` already says to reply by packet, and that instruction was
+    present and ignored. Handing over the body invites the thing it forbids, so the body
+    stops travelling: the thread keeps the routing facts and `message_path`, and the
+    content stays in the packet.
+
+    No read command is emitted either. `test_no_runnable_reply_command_is_emitted`
+    withdrew copyable invocations from this prompt, and an `inbox.py --packet ...` line
+    evades that guard only because `--packet` is not in its flag list -- which is a hole
+    in the guard, not permission.
+    """
     fm = message["frontmatter"]
-    body = message.get("body", "").strip()
     activation_lease = message.get("activation_lease")
     lines = [
         "You are resuming a registered llm-collab worker session for one bounded action.",
-        "Read the routed message context below and produce exactly one bounded reply or action.",
+        "This is a POINTER, not the message. The message is a packet in your llm-collab",
+        "inbox; open it there and act on what it says.",
         "",
         f"llm_collab_session_id: {session['session_id']}",
         f"agent_id: {session['agent_id']}",
@@ -1254,8 +1272,7 @@ def build_resume_prompt(session: dict, message: dict) -> str:
     lines.extend(
         [
             "",
-            "Message body:",
-            body or "(no body)",
+            "The packet is at `message_path` above. Open it there.",
             "",
             *_reply_channel_lines(session, fm),
             "",

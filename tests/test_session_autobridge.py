@@ -6043,6 +6043,54 @@ class ResumePromptNamesTheReplyChannelTest(unittest.TestCase):
                     self.prompt(project_id=project_id),
                 )
 
+    def test_the_prompt_does_not_carry_the_packet_body(self) -> None:
+        """The thread gets a pointer; the content stays in the packet.
+
+        Pasting the body into the worker's runtime thread duplicated durable content into
+        a channel the sender cannot read, and put the full text in front of a worker that
+        then answered where it was standing. Codex replied in its thread to three
+        decisions and the answers sat there for twenty minutes while the sender, watching
+        the mailbox, reported them outstanding.
+
+        The instruction to reply by packet was already present and was ignored, so this
+        removes the invitation rather than repeating the instruction louder.
+        """
+        for project_id in self.PROJECTS:
+            with self.subTest(project_id=project_id):
+                prompt = self.prompt(project_id=project_id)
+                self.assertNotIn("Do the lane.", prompt, "the packet body is in the thread")
+                self.assertNotIn("Message body:", prompt)
+                # The pointer must still be there, or the worker cannot find the packet.
+                self.assertIn("message_path: Chats/", prompt)
+                self.assertIn("Open it there", prompt)
+
+    def test_no_runnable_command_of_any_kind_is_emitted(self) -> None:
+        """The withdrawal covers reads too, and the flag list was not enough.
+
+        `test_no_runnable_reply_command_is_emitted` enumerates reply flags, so an
+        `inbox.py --me X --packet Y` line passed it -- `--packet` and `--me` are simply
+        not on the list. I added exactly that line and it slipped through, which is a hole
+        in the guard rather than permission. Matched by SHAPE here: an interpreter or a
+        repo script being invoked, whatever its arguments.
+        """
+        import re
+
+        runnable = re.compile(r"(?:^|\s)(?:python3?|bin/[\w_]+\.py|\./)", re.M)
+        for project_id in self.PROJECTS:
+            with self.subTest(project_id=project_id):
+                prompt = self.prompt(project_id=project_id)
+                found = [
+                    line for line in prompt.splitlines() if runnable.search(line)
+                ]
+                self.assertEqual(
+                    [], found,
+                    "a copyable command is emitted; the withdrawal in "
+                    "test_no_runnable_reply_command_is_emitted covers these",
+                )
+                # `deliver.py` is NAMED as the channel and must stay named -- naming is
+                # what survived the withdrawal, invoking is what did not.
+                self.assertIn("`deliver.py`", prompt)
+
     def test_the_prompt_names_the_mailbox_as_the_only_channel(self) -> None:
         for project_id in self.PROJECTS:
             with self.subTest(project_id=project_id):
