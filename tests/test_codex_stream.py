@@ -745,6 +745,25 @@ class ResolveThreadTest(unittest.TestCase):
         self.bind(chat="CHAT-A")
         self.assertTrue(codex_stream.bounded_sessions("codex"))
 
+    def test_bounded_snapshot_keeps_other_agents_for_runtime_ownership(self) -> None:
+        self.bind(chat="CHAT-A")
+        (self.sessions / "relay.json").write_text(
+            json.dumps(
+                {
+                    "session_id": "SESSION-RELAY",
+                    "agent_id": "relay",
+                    "status": "parked",
+                    "runtime": {"family": "pi", "session_id": "shared-runtime"},
+                }
+            ),
+            encoding="utf-8",
+        )
+        sessions = codex_stream.bounded_sessions("codex")
+        self.assertEqual(
+            {"codex", "relay"},
+            {session["agent_id"] for session in sessions},
+        )
+
     def test_a_session_record_swapped_for_a_FIFO_cannot_hang_the_scan(self) -> None:
         """The P1: entry.is_file() is a stat on a PATHNAME; the reopen can hit another object.
 
