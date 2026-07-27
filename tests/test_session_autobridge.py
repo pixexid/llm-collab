@@ -5219,7 +5219,10 @@ class SessionAutobridgeTest(unittest.TestCase):
             session_autobridge_lib,
             "EVENTS_DIR",
             Path(temp_dir),
-        ):
+        ), patch.object(
+            session_autobridge_lib.os,
+            "fsync",
+        ) as fsync:
             for project in ("amiga", "nuvyr"):
                 with self.subTest(project=project):
                     session_id = f"SESSION-PI-{project.upper()}"
@@ -5243,6 +5246,63 @@ class SessionAutobridgeTest(unittest.TestCase):
                     self.assertFalse(result["delivery_accepted"])
                     self.assertEqual("pi_inbox_wake", event["event"])
                     self.assertEqual(project, event["project_id"])
+            self.assertEqual(2, fsync.call_count)
+
+    def test_exact_session_unread_budget_starts_before_filtering(self):
+        with patch.object(
+            session_autobridge_lib,
+            "load_agent_inbox",
+            return_value={"unread": ["first", "second"], "read": []},
+        ), patch.object(
+            session_autobridge_lib,
+            "read_regular_file_bounded",
+        ) as bounded_read:
+            with self.assertRaisesRegex(ValueError, "1 entry limit"):
+                session_autobridge_lib.matching_unread_messages(
+                    {"agent_id": "glmpi"},
+                    max_entries=1,
+                    max_bytes=100,
+                )
+        bounded_read.assert_not_called()
+
+    def test_exact_session_unread_budget_is_cumulative(self):
+        raw = b"---\n---\n\nx"
+        with patch.object(
+            session_autobridge_lib,
+            "load_agent_inbox",
+            return_value={"unread": ["first", "second"], "read": []},
+        ), patch.object(
+            session_autobridge_lib,
+            "read_regular_file_bounded",
+            side_effect=[raw, session_autobridge_lib.UnreadableFile("over budget")],
+        ) as bounded_read:
+            with self.assertRaisesRegex(
+                session_autobridge_lib.UnreadableFile,
+                "over budget",
+            ):
+                session_autobridge_lib.matching_unread_messages(
+                    {"agent_id": "glmpi"},
+                    max_entries=2,
+                    max_bytes=len(raw) + 1,
+                )
+        self.assertEqual(
+            [
+                unittest.mock.call(session_autobridge_lib.ROOT / "first", len(raw) + 1),
+                unittest.mock.call(session_autobridge_lib.ROOT / "second", 1),
+            ],
+            bounded_read.call_args_list,
+        )
+
+    def test_pi_monitor_replays_durable_unread_before_following_new_wakes(self):
+        contract = (
+            REPO_ROOT / "docs" / "workflows" / "session-autobridge-rfc.md"
+        ).read_text()
+        replay = contract.index("--peek --json")
+        self.assertIn("pi_inbox_replay", contract[replay:])
+        replay_event = contract.index("pi_inbox_replay", replay)
+        follow = contract.index("tail -n 0 -F", replay_event)
+        self.assertLess(replay, replay_event)
+        self.assertLess(replay_event, follow)
 
     def test_pi_runtime_refuses_without_an_exact_bound_attempt(self):
         session = {

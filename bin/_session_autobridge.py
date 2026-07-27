@@ -37,7 +37,9 @@ from _helpers import (
     config_get,
     get_agent,
     get_unread_messages,
+    load_agent_inbox,
     now_utc,
+    parse_frontmatter,
     project_state_root,
     utc_iso,
     write_file,
@@ -362,12 +364,20 @@ def update_binding_from_session(
     return payload
 
 
-def append_event(session_id: str, event: dict[str, Any]) -> None:
+def append_event(
+    session_id: str,
+    event: dict[str, Any],
+    *,
+    sync: bool = False,
+) -> None:
     path = autobridge_event_log_path(session_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     event_payload = {"ts": utc_iso(), **event}
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(event_payload, sort_keys=True) + "\n")
+        if sync:
+            handle.flush()
+            os.fsync(handle.fileno())
 
 
 def write_operator_turn_summary(
@@ -894,8 +904,31 @@ def matching_unread_messages(
     *,
     invocation_repo_targets: Any = None,
     repo_scope_refusals: list[dict] | None = None,
+    max_entries: int | None = None,
+    max_bytes: int | None = None,
 ) -> list[dict]:
-    messages = get_unread_messages(str(session["agent_id"]))
+    if (max_entries is None) != (max_bytes is None):
+        raise ValueError("max_entries and max_bytes must be supplied together")
+    if max_entries is None:
+        messages = get_unread_messages(str(session["agent_id"]))
+    else:
+        unread = load_agent_inbox(str(session["agent_id"])).get("unread", [])
+        if len(unread) > max_entries:
+            raise ValueError(
+                f"exact-session unread entries exceed the {max_entries} entry limit"
+            )
+        messages = []
+        remaining = int(max_bytes)
+        for rel_path in unread:
+            try:
+                raw = read_regular_file_bounded(ROOT / rel_path, remaining)
+            except FileNotFoundError:
+                continue
+            remaining -= len(raw)
+            frontmatter, body = parse_frontmatter(raw.decode("utf-8"))
+            messages.append(
+                {"path": rel_path, "frontmatter": frontmatter, "body": body}
+            )
     project_id = session.get("project_id")
     chat_id = session.get("chat_id")
     if project_id:
@@ -2109,6 +2142,7 @@ def execute_runtime_trigger(session: dict, message: dict) -> dict[str, Any]:
                 "project_id": session.get("project_id"),
                 "chat_id": session.get("chat_id"),
             },
+            sync=True,
         )
         return {
             "adapter": "session_event_log",

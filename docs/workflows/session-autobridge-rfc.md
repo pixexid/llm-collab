@@ -75,7 +75,11 @@ one file and wakes the same native session. The event is not a message pointer
 or queue. On wake, read every matching durable unread packet through:
 
 ```bash
-/monitor collab inbox :: tail -n 0 -F /absolute/State/session_autobridge/events/<session-id>.jsonl | grep --line-buffered '"event": "pi_inbox_wake"'
+/monitor collab inbox :: if python3 bin/inbox.py --me <agent> --project <project> \
+  --chat <chat> --session <session-id> --repo-target <repo> --peek --json \
+  | grep -q '"path"'; then printf '%s\n' '{"event":"pi_inbox_replay"}'; fi; \
+  tail -n 0 -F /absolute/State/session_autobridge/events/<session-id>.jsonl \
+  | grep --line-buffered '"event": "pi_inbox_wake"'
 
 python3 bin/inbox.py --me <agent> --project <project> --chat <chat> \
   --session <session-id> --repo-target <repo>

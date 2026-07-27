@@ -51,9 +51,13 @@ from _session_autobridge import (
     load_session,
     matching_unread_messages,
     repo_scope_matches,
+    runtime_metadata,
     save_session,
 )
 from session_autobridge import register_session
+
+MAX_EXACT_SESSION_UNREAD_ENTRIES = 1_000
+MAX_EXACT_SESSION_UNREAD_BYTES = 16 * 1024 * 1024
 
 
 def parse_args():
@@ -380,6 +384,8 @@ def gate_activation_message(args, msg: dict, *, consume: bool) -> dict | None:
         }
 
     runtime_id = activation_reader_runtime_id()
+    if runtime_id is None and args.session:
+        runtime_id = runtime_metadata(load_session(args.session)).get("session_id")
     owner_pid = None if runtime_id else activation_reader_pid()
     session_id = activation_reader_session_id(args, identity)
     ensure_reader_session(session_id, args.me, identity, runtime_id=runtime_id)
@@ -547,6 +553,7 @@ def main():
     published_runtime = publish_runtime_identity(args)
 
     exact_session = None
+    repo_scope_refused: list[dict] = []
     if args.session and not args.publish_session:
         exact_session = load_session(args.session)
         if exact_session.get("agent_id") != args.me:
@@ -560,6 +567,9 @@ def main():
         messages = matching_unread_messages(
             exact_session,
             invocation_repo_targets=args.repo_target,
+            repo_scope_refusals=repo_scope_refused,
+            max_entries=MAX_EXACT_SESSION_UNREAD_ENTRIES,
+            max_bytes=MAX_EXACT_SESSION_UNREAD_BYTES,
         )
         messages = filter_messages(messages, args.project, args.chat, args.packet)
     elif args.packet:
@@ -572,24 +582,42 @@ def main():
         messages = filter_messages(messages, args.project, args.chat, args.packet)
     if args.packet and len(messages) != 1:
         packet_selection_error(args, messages)
-    messages, repo_scope_refused = filter_repo_scope(
+    messages, filtered_repo_scope = filter_repo_scope(
         messages, args.repo_target, args.project
     )
+    repo_scope_refused.extend(filtered_repo_scope)
     if not args.packet and exact_session is None:
         messages = messages[: args.limit]
+
+    if exact_session is not None and repo_scope_refused:
+        if args.json_output:
+            print(
+                json.dumps(
+                    {
+                        "messages": [],
+                        "repo_scope_refused": repo_scope_refused,
+                    },
+                    indent=2,
+                )
+            )
+        else:
+            for refused in repo_scope_refused:
+                print(
+                    f"[inbox] Repo-scope refused {refused['path']}: {refused['reason']}",
+                    file=sys.stderr,
+                )
+        sys.exit(75)
 
     if not messages:
         if args.json_output:
             if not repo_scope_refused and published_runtime is None:
                 print("[]")
-                return
-            payload = {"messages": []}
-            if repo_scope_refused:
-                payload["repo_scope_refused"] = repo_scope_refused
-            if published_runtime is None:
-                print(json.dumps(payload, indent=2))
             else:
-                payload["published_runtime"] = published_runtime
+                payload = {"messages": []}
+                if repo_scope_refused:
+                    payload["repo_scope_refused"] = repo_scope_refused
+                if published_runtime is not None:
+                    payload["published_runtime"] = published_runtime
                 print(json.dumps(payload, indent=2))
         else:
             if published_runtime is not None:
@@ -650,8 +678,13 @@ def main():
                 for message in matching_unread_messages(
                     load_session(args.session),
                     invocation_repo_targets=args.repo_target,
+                    max_entries=MAX_EXACT_SESSION_UNREAD_ENTRIES,
+                    max_bytes=MAX_EXACT_SESSION_UNREAD_BYTES,
                 )
             }
+            messages = [
+                message for message in messages if message["path"] in exact_paths
+            ]
             shown_paths = [path for path in shown_paths if path in exact_paths]
 
     if args.json_output:

@@ -337,6 +337,165 @@ class InboxMarkAllReadTest(unittest.TestCase):
             payload["repo_scope_refused"],
         )
 
+    def test_exact_session_recheck_removes_stale_output(self) -> None:
+        message = {
+            "path": "Chats/late/CHAT-EXACT-packet.md",
+            "read": False,
+            "frontmatter": {
+                "project_id": "amiga",
+                "chat_id": "CHAT-EXACT",
+                "repo_targets": ["llm-collab"],
+            },
+            "body": "must not be exposed",
+        }
+        session = {
+            "session_id": "SESSION-EXACT",
+            "agent_id": "codex",
+            "project_id": "amiga",
+            "chat_id": "CHAT-EXACT",
+            "runtime": {"family": "pi", "session_id": "pi-exact"},
+        }
+        stdout = StringIO()
+        with patch.object(inbox_lib, "agent_ids", return_value=["codex"]), patch.object(
+            inbox_lib, "load_session", return_value=session
+        ), patch.object(
+            inbox_lib,
+            "matching_unread_messages",
+            side_effect=[[message], []],
+        ), patch.object(
+            inbox_lib, "mark_messages_read"
+        ) as mark_read, redirect_stdout(stdout), patch.object(
+            sys,
+            "argv",
+            [
+                "inbox.py",
+                "--me",
+                "codex",
+                "--project",
+                "amiga",
+                "--chat",
+                "CHAT-EXACT",
+                "--session",
+                "SESSION-EXACT",
+                "--repo-target",
+                "llm-collab",
+                "--json",
+            ],
+        ):
+            inbox_lib.main()
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual([], payload["messages"])
+        self.assertNotIn("must not be exposed", stdout.getvalue())
+        mark_read.assert_called_once_with("codex", [])
+
+    def test_exact_session_repo_refusal_fails_before_output_or_consumption(self) -> None:
+        session = {
+            "session_id": "SESSION-EXACT",
+            "agent_id": "codex",
+            "project_id": "amiga",
+            "chat_id": "CHAT-EXACT",
+            "runtime": {"family": "pi", "session_id": "pi-exact"},
+        }
+
+        def refuse(_session, *, repo_scope_refusals=None, **_kwargs):
+            if repo_scope_refusals is not None:
+                repo_scope_refusals.append(
+                    {"path": "Chats/refused.md", "reason": "route_ambiguous"}
+                )
+            return []
+
+        stdout = StringIO()
+        with patch.object(inbox_lib, "agent_ids", return_value=["codex"]), patch.object(
+            inbox_lib, "load_session", return_value=session
+        ), patch.object(
+            inbox_lib,
+            "matching_unread_messages",
+            side_effect=refuse,
+        ), patch.object(
+            inbox_lib, "mark_messages_read"
+        ) as mark_read, redirect_stdout(stdout), patch.object(
+            sys,
+            "argv",
+            [
+                "inbox.py",
+                "--me",
+                "codex",
+                "--project",
+                "amiga",
+                "--chat",
+                "CHAT-EXACT",
+                "--session",
+                "SESSION-EXACT",
+                "--repo-target",
+                "llm-collab",
+                "--json",
+            ],
+        ):
+            with self.assertRaisesRegex(SystemExit, "75"):
+                inbox_lib.main()
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual([], payload["messages"])
+        self.assertEqual("route_ambiguous", payload["repo_scope_refused"][0]["reason"])
+        mark_read.assert_not_called()
+
+    def test_exact_session_activation_reuses_registered_runtime_claimant(self) -> None:
+        args = SimpleNamespace(me="codex", session="SESSION-PI")
+        identity = {
+            "project": "amiga",
+            "chat": "CHAT-PI",
+            "task": "TASK-PI",
+            "worktree": "/tmp/pi",
+            "branch": "codex/pi",
+            "target_agent": "codex",
+        }
+        claim = {
+            "lease": {"owner_runtime_session_id": "pi-native"},
+            "fence_token": 1,
+            "identity": identity,
+            "poller_audit": {},
+        }
+        with patch.object(
+            inbox_lib,
+            "classify_activation",
+            return_value=("activation", identity),
+        ), patch.object(
+            inbox_lib,
+            "load_lease",
+            return_value=None,
+        ), patch.object(
+            inbox_lib,
+            "activation_reader_runtime_id",
+            return_value=None,
+        ), patch.object(
+            inbox_lib,
+            "load_session",
+            return_value={
+                "runtime": {"family": "pi", "session_id": "pi-native"},
+            },
+        ), patch.object(
+            inbox_lib,
+            "ensure_reader_session",
+        ), patch.object(
+            inbox_lib,
+            "claim_activation_lease",
+            return_value=claim,
+        ) as claim_lease:
+            result = inbox_lib.gate_activation_message(
+                args,
+                {"frontmatter": {}, "path": "Chats/activation.md"},
+                consume=True,
+            )
+
+        self.assertTrue(result["authorized"])
+        claim_lease.assert_called_once()
+        self.assertEqual(
+            "pi-native",
+            claim_lease.call_args.kwargs["claimant_runtime_id"],
+        )
+        self.assertIsNone(claim_lease.call_args.kwargs["owner_pid"])
+
     def test_repo_target_requires_project_scope(self) -> None:
         result = self.run_inbox("--repo-target", "llm-collab", "--json")
 
