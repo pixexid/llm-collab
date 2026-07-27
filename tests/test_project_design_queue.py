@@ -18,6 +18,22 @@ import task_contract
 
 
 class ProjectDesignQueueTest(unittest.TestCase):
+    def setUp(self) -> None:
+        # Every path helper in project_design_queue resolves through this one name, and
+        # unpatched it reaches _helpers.project_state_root() -> load_config(), which
+        # sys.exit(1)s when collab.config.json is absent. That file is untracked, so the
+        # verdict depended on whether the checkout running the test had one: green in the
+        # main checkout, SystemExit in every worktree. (#338)
+        state_root = tempfile.TemporaryDirectory(prefix="llm-collab-design-queue-")
+        self.addCleanup(state_root.cleanup)
+        patcher = patch.object(
+            project_design_queue,
+            "project_state_dir",
+            side_effect=lambda project_id: Path(state_root.name) / project_id,
+        )
+        self.addCleanup(patcher.stop)
+        patcher.start()
+
     def test_direct_app_policy_rejects_active_legacy_design_lane_but_keeps_done_history(self) -> None:
         project = {"id": "amiga", "ui_ux": {"direct_app_only": True}}
 
