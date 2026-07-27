@@ -4983,7 +4983,7 @@ class SessionAutobridgeTest(unittest.TestCase):
         session_payload = self.run_cli(root, "show", "--session", "SESSION-WATCHER")
         self.assertIn(message_rel, session_payload["processed_messages"])
 
-    def test_pi_event_wakes_once_and_exact_session_drains_every_matching_unread(self):
+    def test_pi_event_wakes_once_and_exact_session_drains_only_settled_unread(self):
         root = self.make_workspace()
         self.add_agent(
             root,
@@ -5176,13 +5176,14 @@ class SessionAutobridgeTest(unittest.TestCase):
             text=True,
             capture_output=True,
             env=self.subprocess_env(root),
-            check=True,
+            check=False,
         )
+        self.assertEqual(0, exact_read.returncode, exact_read.stdout + exact_read.stderr)
         exact_messages = json.loads(exact_read.stdout)["messages"]
-        self.assertEqual(set(exact_rels), {item["path"] for item in exact_messages})
+        self.assertEqual({message_rel}, {item["path"] for item in exact_messages})
         inbox = json.loads((root / "agents" / "glmpi" / "inbox.json").read_text())
-        self.assertEqual([wrong_rel], inbox["unread"])
-        self.assertEqual(set(exact_rels), set(inbox["read"]))
+        self.assertEqual(set([*exact_rels[1:], wrong_rel]), set(inbox["unread"]))
+        self.assertEqual([message_rel], inbox["read"])
         settled = subprocess.run(
             command,
             cwd=root,
@@ -5194,15 +5195,19 @@ class SessionAutobridgeTest(unittest.TestCase):
         settled_events = [
             json.loads(line) for line in settled.stdout.splitlines() if line.strip()
         ]
-        self.assertEqual(events_after_wake, event_path.read_text())
-        self.assertFalse(
-            any(event["event"] == "autobridge_wake_signaled" for event in settled_events)
+        self.assertNotEqual(events_after_wake, event_path.read_text())
+        self.assertTrue(
+            any(
+                event["event"] == "autobridge_wake_signaled"
+                and event["message_path"] == second_rel
+                for event in settled_events
+            )
         )
         paths = LedgerPaths.derive(root / "project-state", "ws_alpha")
         with patch.object(store_module, "_linked_sqlite_version_info", return_value=SAFE_VERSION):
             with LedgerStore.open_reader(paths) as store:
                 self.assertEqual(
-                    (1, 1, 1, 1),
+                    (2, 2, 2, 2),
                     store._connection.execute(
                         """
                         SELECT
@@ -5329,16 +5334,79 @@ class SessionAutobridgeTest(unittest.TestCase):
                 )
         bounded_read.assert_called_once_with(inbox_path, 100)
 
+    def test_exact_session_unread_rejects_malformed_index_paths(self):
+        invalid_indexes = [
+            b'{"unread":"Chats/one.md"}',
+            b'{"unread":{"path":"Chats/one.md"}}',
+            b'{"unread":[null]}',
+            b'{"unread":["../outside.md"]}',
+            b'{"unread":["/absolute.md"]}',
+        ]
+        for inbox_raw in invalid_indexes:
+            with self.subTest(inbox_raw=inbox_raw), patch.object(
+                session_autobridge_lib,
+                "agent_inbox_path",
+                return_value=session_autobridge_lib.ROOT / "agents/glmpi/inbox.json",
+            ), patch.object(
+                session_autobridge_lib,
+                "read_regular_file_bounded",
+                return_value=inbox_raw,
+            ):
+                with self.assertRaisesRegex(ValueError, "relative path strings"):
+                    session_autobridge_lib.matching_unread_messages(
+                        {"agent_id": "glmpi"},
+                        max_entries=5,
+                        max_bytes=1_000,
+                    )
+
+    def test_other_exact_session_repo_mismatch_is_not_a_local_refusal(self):
+        session = {
+            "session_id": "SESSION-PI-ONE",
+            "agent_id": "glmpi",
+            "project_id": "amiga",
+            "chat_id": "CHAT-PI",
+            "repo_targets": ["llm-collab"],
+            "runtime": {"family": "pi", "session_id": "pi-one"},
+        }
+        message = {
+            "path": "Chats/other.md",
+            "frontmatter": {
+                "project_id": "amiga",
+                "chat_id": "CHAT-PI",
+                "target_session_id": "pi-two",
+                "repo_targets": ["other-repo"],
+            },
+        }
+        refusals = []
+        with patch.object(
+            session_autobridge_lib,
+            "get_unread_messages",
+            return_value=[message],
+        ):
+            matched = session_autobridge_lib.matching_unread_messages(
+                session,
+                invocation_repo_targets=["llm-collab"],
+                repo_scope_refusals=refusals,
+            )
+
+        self.assertEqual([], matched)
+        self.assertEqual([], refusals)
+
     def test_pi_monitor_replays_durable_unread_before_following_new_wakes(self):
         contract = (
             REPO_ROOT / "docs" / "workflows" / "session-autobridge-rfc.md"
         ).read_text()
         cursor = contract.index("cursor=$(wc -l")
         replay = contract.index("--peek --json", cursor)
+        replay_status = contract.index("replay_status=$?", replay)
+        propagate = contract.index('exit "$replay_status"', replay_status)
         self.assertIn("pi_inbox_replay", contract[replay:])
         replay_event = contract.index("pi_inbox_replay", replay)
         follow = contract.index('tail -n "+$((cursor + 1))" -F', replay_event)
         self.assertLess(cursor, replay)
+        self.assertLess(replay, replay_status)
+        self.assertLess(replay_status, propagate)
+        self.assertLess(propagate, replay_event)
         self.assertLess(replay, replay_event)
         self.assertLess(replay_event, follow)
 

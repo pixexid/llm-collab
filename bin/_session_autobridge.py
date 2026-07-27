@@ -914,31 +914,48 @@ def matching_unread_messages(
     repo_scope_refusals: list[dict] | None = None,
     max_entries: int | None = None,
     max_bytes: int | None = None,
+    read_budget: ExactSessionReadBudget | None = None,
 ) -> list[dict]:
     if (max_entries is None) != (max_bytes is None):
         raise ValueError("max_entries and max_bytes must be supplied together")
     if max_entries is None:
         messages = get_unread_messages(str(session["agent_id"]))
     else:
+        budget = read_budget or ExactSessionReadBudget(int(max_bytes))
         inbox_path = agent_inbox_path(str(session["agent_id"]))
         try:
-            inbox_raw = read_regular_file_bounded(inbox_path, int(max_bytes))
+            inbox_raw = read_regular_file_bounded(inbox_path, budget.remaining)
+            budget.charge(len(inbox_raw), inbox_path)
         except FileNotFoundError:
             inbox_raw = b'{"unread":[]}'
         inbox = json.loads(inbox_raw)
+        if not isinstance(inbox, dict):
+            raise ValueError("exact-session inbox index must be an object")
         unread = inbox.get("unread", [])
+        if not isinstance(unread, list) or any(
+            not isinstance(rel_path, str)
+            or not rel_path
+            or rel_path != rel_path.strip()
+            or "\x00" in rel_path
+            or Path(rel_path).is_absolute()
+            or ".." in Path(rel_path).parts
+            for rel_path in unread
+        ):
+            raise ValueError(
+                "exact-session inbox unread entries must be relative path strings"
+            )
         if len(unread) > max_entries:
             raise ValueError(
                 f"exact-session unread entries exceed the {max_entries} entry limit"
             )
         messages = []
-        remaining = int(max_bytes) - len(inbox_raw)
         for rel_path in unread:
             try:
-                raw = read_regular_file_bounded(ROOT / rel_path, remaining)
+                message_path = ROOT / rel_path
+                raw = read_regular_file_bounded(message_path, budget.remaining)
+                budget.charge(len(raw), message_path)
             except FileNotFoundError:
                 continue
-            remaining -= len(raw)
             frontmatter, body = parse_frontmatter(raw.decode("utf-8"))
             messages.append(
                 {"path": rel_path, "frontmatter": frontmatter, "body": body}
@@ -951,6 +968,12 @@ def matching_unread_messages(
         messages = [m for m in messages if m["frontmatter"].get("chat_id") == chat_id]
     matched_messages: list[dict] = []
     for message in messages:
+        target_session_id = message["frontmatter"].get("target_session_id")
+        if (
+            target_session_id
+            and str(target_session_id) not in session_target_ids(session)
+        ):
+            continue
         repo_match, repo_reason = _session_repo_scope_matches(
             session, message, invocation_repo_targets
         )
@@ -1942,6 +1965,25 @@ class active_read_budget:
     def __exit__(self, *exc) -> bool:
         _ACTIVE_READ_BUDGET.pop()
         return False
+
+
+class ExactSessionReadBudget:
+    """One cumulative byte budget for an exact-session inbox read."""
+
+    def __init__(self, limit: int) -> None:
+        self.limit = limit
+        self.spent = 0
+
+    @property
+    def remaining(self) -> int:
+        return self.limit - self.spent
+
+    def charge(self, count: int, path: Path) -> None:
+        self.spent += count
+        if self.spent > self.limit:
+            raise UnreadableFile(
+                f"exact-session read exceeds the {self.limit} byte limit at {path}"
+            )
 
 
 def read_regular_file_bounded(path: Path, limit: int) -> bytes:

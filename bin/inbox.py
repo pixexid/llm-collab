@@ -41,17 +41,23 @@ from _helpers import (
     load_agent_inbox,
     mark_messages_read,
     parse_frontmatter,
+    save_agent_inbox,
     now_utc,
     utc_iso,
 )
 from _session_autobridge import (
+    ExactSessionReadBudget,
     HEURISTIC_RUNTIME_DISCOVERY_FAMILIES,
     HEURISTIC_RUNTIME_DISCOVERY_REFUSED_REASON,
     UnreadableFile,
+    agent_inbox_path,
+    canonical_settled_message_paths,
     discover_runtime_session,
     load_session,
     matching_unread_messages,
+    read_regular_file_bounded,
     repo_scope_matches,
+    resolve_exact_dispatch_pair,
     runtime_metadata,
     save_session,
 )
@@ -359,7 +365,13 @@ def ensure_reader_session(
         return payload
 
 
-def gate_activation_message(args, msg: dict, *, consume: bool) -> dict | None:
+def gate_activation_message(
+    args,
+    msg: dict,
+    *,
+    consume: bool,
+    exact_session: dict | None = None,
+) -> dict | None:
     kind, detail = classify_activation(msg["frontmatter"], target_agent=args.me)
     if kind == "none":
         return None
@@ -386,9 +398,8 @@ def gate_activation_message(args, msg: dict, *, consume: bool) -> dict | None:
 
     runtime_id = activation_reader_runtime_id()
     if args.session:
-        registered_runtime_id = runtime_metadata(load_session(args.session)).get(
-            "session_id"
-        )
+        session = exact_session if exact_session is not None else load_session(args.session)
+        registered_runtime_id = runtime_metadata(session).get("session_id")
         if not registered_runtime_id:
             return {
                 "authorized": False,
@@ -430,6 +441,30 @@ def gate_activation_message(args, msg: dict, *, consume: bool) -> dict | None:
         "fence_token": claim["fence_token"],
         "poller_audit": claim["poller_audit"],
     }
+
+
+def mark_exact_messages_read(
+    agent_id: str,
+    paths: list[str],
+    *,
+    budget: ExactSessionReadBudget,
+) -> None:
+    inbox_path = agent_inbox_path(agent_id)
+    raw = read_regular_file_bounded(inbox_path, budget.remaining)
+    budget.charge(len(raw), inbox_path)
+    inbox = json.loads(raw)
+    if not isinstance(inbox, dict):
+        raise ValueError("exact-session inbox index must be an object")
+    unread = inbox.get("unread")
+    read = inbox.get("read")
+    if not isinstance(unread, list) or not isinstance(read, list):
+        raise ValueError("exact-session inbox index must contain unread and read lists")
+    for path in paths:
+        if path in unread:
+            unread.remove(path)
+        if path not in read:
+            read.append(path)
+    save_agent_inbox(agent_id, inbox)
 
 
 UNSCOPED_PROJECT_BUCKET = "<unscoped-or-missing-project>"
@@ -571,6 +606,7 @@ def main():
     published_runtime = publish_runtime_identity(args)
 
     exact_session = None
+    exact_read_budget = None
     exact_session_requested = bool(args.session and not args.publish_session)
     repo_scope_refused: list[dict] = []
     if exact_session_requested:
@@ -593,16 +629,35 @@ def main():
         messages = messages[: args.limit]
 
     if exact_session_requested:
-        exact_session = load_session(args.session)
-        if exact_session.get("agent_id") != args.me:
+        requested_session = load_session(args.session)
+        if requested_session.get("agent_id") != args.me:
             raise ValueError("--session does not belong to --me")
-        if not exact_session.get("project_id") or not exact_session.get("chat_id"):
+        if not requested_session.get("project_id") or not requested_session.get("chat_id"):
             raise ValueError("--session exact read requires project and chat scope")
-        if args.project and exact_session.get("project_id") != args.project:
+        if args.project and requested_session.get("project_id") != args.project:
             raise ValueError("--session does not belong to --project")
-        if args.chat and exact_session.get("chat_id") != args.chat:
+        if args.chat and requested_session.get("chat_id") != args.chat:
             raise ValueError("--session does not belong to --chat")
+        pair, refusal, _ = resolve_exact_dispatch_pair(
+            str(requested_session["project_id"]),
+            str(requested_session["chat_id"]),
+            args.me,
+        )
+        if pair is None or str(pair[0].get("session_id")) != str(args.session):
+            detail = refusal or "exact_binding_mismatch"
+            if args.json_output:
+                print(
+                    json.dumps(
+                        {"messages": [], "exact_session_refused": detail},
+                        indent=2,
+                    )
+                )
+            else:
+                print(f"[inbox] Exact-session read refused: {detail}", file=sys.stderr)
+            sys.exit(75)
+        exact_session = pair[0]
         current_refusals: list[dict] = []
+        exact_read_budget = ExactSessionReadBudget(MAX_EXACT_SESSION_UNREAD_BYTES)
         try:
             messages = matching_unread_messages(
                 exact_session,
@@ -610,6 +665,7 @@ def main():
                 repo_scope_refusals=current_refusals,
                 max_entries=MAX_EXACT_SESSION_UNREAD_ENTRIES,
                 max_bytes=MAX_EXACT_SESSION_UNREAD_BYTES,
+                read_budget=exact_read_budget,
             )
         except (UnreadableFile, ValueError) as exc:
             if args.json_output:
@@ -625,6 +681,13 @@ def main():
             else:
                 print(f"[inbox] Exact-session read refused: {exc}", file=sys.stderr)
             sys.exit(75)
+        if runtime_metadata(exact_session).get("family") == "pi":
+            settled_paths = canonical_settled_message_paths(exact_session)
+            messages = [
+                message
+                for message in messages
+                if message["path"] in settled_paths
+            ]
         messages = filter_messages(messages, args.project, args.chat, args.packet)
         messages, late_refusals = filter_repo_scope(
             messages, args.repo_target, args.project
@@ -687,7 +750,12 @@ def main():
     consume = not args.peek and not args.show_all
     refused_gates: list[dict] = []
     for message in messages:
-        gate = gate_activation_message(args, message, consume=consume)
+        gate = gate_activation_message(
+            args,
+            message,
+            consume=consume,
+            exact_session=exact_session,
+        )
         if gate is not None:
             message["activation_gate"] = gate
             if consume and not gate.get("authorized"):
@@ -747,7 +815,21 @@ def main():
             )
 
     if consume:
-        mark_messages_read(args.me, shown_paths)
+        if exact_session is None:
+            mark_messages_read(args.me, shown_paths)
+        else:
+            try:
+                mark_exact_messages_read(
+                    args.me,
+                    shown_paths,
+                    budget=exact_read_budget,
+                )
+            except (UnreadableFile, ValueError) as exc:
+                print(
+                    f"[inbox] Exact-session read refused after output: {exc}",
+                    file=sys.stderr,
+                )
+                sys.exit(75)
 
 
 if __name__ == "__main__":

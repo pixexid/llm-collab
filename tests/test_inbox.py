@@ -364,6 +364,10 @@ class InboxMarkAllReadTest(unittest.TestCase):
             inbox_lib, "load_session", return_value=rebound_session
         ), patch.object(
             inbox_lib,
+            "resolve_exact_dispatch_pair",
+            return_value=((rebound_session, {}), None, None),
+        ), patch.object(
+            inbox_lib,
             "matching_unread_messages",
             return_value=[],
         ) as matching, patch.object(
@@ -398,6 +402,7 @@ class InboxMarkAllReadTest(unittest.TestCase):
             repo_scope_refusals=[],
             max_entries=inbox_lib.MAX_EXACT_SESSION_UNREAD_ENTRIES,
             max_bytes=inbox_lib.MAX_EXACT_SESSION_UNREAD_BYTES,
+            read_budget=unittest.mock.ANY,
         )
 
     def test_exact_session_peek_uses_the_final_authority_snapshot(self) -> None:
@@ -411,6 +416,10 @@ class InboxMarkAllReadTest(unittest.TestCase):
         stdout = StringIO()
         with patch.object(inbox_lib, "agent_ids", return_value=["codex"]), patch.object(
             inbox_lib, "load_session", return_value=session
+        ), patch.object(
+            inbox_lib,
+            "resolve_exact_dispatch_pair",
+            return_value=((session, {}), None, None),
         ), patch.object(
             inbox_lib, "matching_unread_messages", return_value=[]
         ) as matching, redirect_stdout(stdout), patch.object(
@@ -465,6 +474,10 @@ class InboxMarkAllReadTest(unittest.TestCase):
         with patch.object(inbox_lib, "agent_ids", return_value=["codex"]), patch.object(
             inbox_lib, "load_session", return_value=session
         ), patch.object(
+            inbox_lib,
+            "resolve_exact_dispatch_pair",
+            return_value=((session, {}), None, None),
+        ), patch.object(
             inbox_lib, "matching_unread_messages", side_effect=refuse
         ), patch.object(
             inbox_lib, "gate_activation_message"
@@ -505,6 +518,10 @@ class InboxMarkAllReadTest(unittest.TestCase):
         stdout = StringIO()
         with patch.object(inbox_lib, "agent_ids", return_value=["codex"]), patch.object(
             inbox_lib, "load_session", return_value=session
+        ), patch.object(
+            inbox_lib,
+            "resolve_exact_dispatch_pair",
+            return_value=((session, {}), None, None),
         ), patch.object(
             inbox_lib,
             "matching_unread_messages",
@@ -557,6 +574,10 @@ class InboxMarkAllReadTest(unittest.TestCase):
         stdout = StringIO()
         with patch.object(inbox_lib, "agent_ids", return_value=["codex"]), patch.object(
             inbox_lib, "load_session", return_value=session
+        ), patch.object(
+            inbox_lib,
+            "resolve_exact_dispatch_pair",
+            return_value=((session, {}), None, None),
         ), patch.object(
             inbox_lib,
             "matching_unread_messages",
@@ -620,10 +641,8 @@ class InboxMarkAllReadTest(unittest.TestCase):
         ), patch.object(
             inbox_lib,
             "load_session",
-            return_value={
-                "runtime": {"family": "pi", "session_id": "pi-native"},
-            },
-        ), patch.object(
+            side_effect=AssertionError("must use the validated session snapshot"),
+        ) as load_session, patch.object(
             inbox_lib,
             "ensure_reader_session",
         ), patch.object(
@@ -635,8 +654,12 @@ class InboxMarkAllReadTest(unittest.TestCase):
                 args,
                 {"frontmatter": {}, "path": "Chats/activation.md"},
                 consume=True,
+                exact_session={
+                    "runtime": {"family": "pi", "session_id": "pi-native"},
+                },
             )
 
+        load_session.assert_not_called()
         self.assertTrue(result["authorized"])
         claim_lease.assert_called_once()
         self.assertEqual(
@@ -644,6 +667,121 @@ class InboxMarkAllReadTest(unittest.TestCase):
             claim_lease.call_args.kwargs["claimant_runtime_id"],
         )
         self.assertIsNone(claim_lease.call_args.kwargs["owner_pid"])
+
+    def test_exact_session_refuses_a_non_dispatchable_current_binding(self) -> None:
+        session = {
+            "session_id": "SESSION-EXACT",
+            "agent_id": "codex",
+            "project_id": "amiga",
+            "chat_id": "CHAT-EXACT",
+            "runtime": {"family": "pi", "session_id": "pi-exact"},
+        }
+        stdout = StringIO()
+        with patch.object(inbox_lib, "agent_ids", return_value=["codex"]), patch.object(
+            inbox_lib, "load_session", return_value=session
+        ), patch.object(
+            inbox_lib,
+            "resolve_exact_dispatch_pair",
+            return_value=(None, "exact_binding_not_dispatchable", (session, {})),
+        ), patch.object(
+            inbox_lib,
+            "matching_unread_messages",
+        ) as matching, redirect_stdout(stdout), patch.object(
+            sys,
+            "argv",
+            [
+                "inbox.py",
+                "--me",
+                "codex",
+                "--project",
+                "amiga",
+                "--chat",
+                "CHAT-EXACT",
+                "--session",
+                "SESSION-EXACT",
+                "--repo-target",
+                "llm-collab",
+                "--json",
+            ],
+        ):
+            with self.assertRaisesRegex(SystemExit, "75"):
+                inbox_lib.main()
+
+        matching.assert_not_called()
+        self.assertEqual(
+            "exact_binding_not_dispatchable",
+            json.loads(stdout.getvalue())["exact_session_refused"],
+        )
+
+    def test_exact_session_consumption_reuses_the_selection_byte_budget(self) -> None:
+        path = "Chats/CHAT-EXACT/exact.md"
+        message = {
+            "path": path,
+            "frontmatter": {
+                "project_id": "amiga",
+                "chat_id": "CHAT-EXACT",
+                "target_session_id": "pi-exact",
+                "repo_targets": ["llm-collab"],
+            },
+            "body": "packet",
+        }
+        session = {
+            "session_id": "SESSION-EXACT",
+            "agent_id": "codex",
+            "project_id": "amiga",
+            "chat_id": "CHAT-EXACT",
+            "canonical_settled_messages": {path: {"reason": "materialized"}},
+            "runtime": {"family": "pi", "session_id": "pi-exact"},
+        }
+        selected_budget = []
+
+        def select(_session, *, read_budget=None, **_kwargs):
+            selected_budget.append(read_budget)
+            return [message]
+
+        stdout = StringIO()
+        with patch.object(inbox_lib, "agent_ids", return_value=["codex"]), patch.object(
+            inbox_lib, "load_session", return_value=session
+        ), patch.object(
+            inbox_lib,
+            "resolve_exact_dispatch_pair",
+            return_value=((session, {}), None, None),
+        ), patch.object(
+            inbox_lib,
+            "matching_unread_messages",
+            side_effect=select,
+        ), patch.object(
+            inbox_lib,
+            "gate_activation_message",
+            return_value=None,
+        ), patch.object(
+            inbox_lib,
+            "mark_exact_messages_read",
+        ) as mark_exact, redirect_stdout(stdout), patch.object(
+            sys,
+            "argv",
+            [
+                "inbox.py",
+                "--me",
+                "codex",
+                "--project",
+                "amiga",
+                "--chat",
+                "CHAT-EXACT",
+                "--session",
+                "SESSION-EXACT",
+                "--repo-target",
+                "llm-collab",
+                "--json",
+            ],
+        ):
+            inbox_lib.main()
+
+        self.assertEqual([path], [item["path"] for item in json.loads(stdout.getvalue())["messages"]])
+        self.assertIs(
+            selected_budget[0],
+            mark_exact.call_args.kwargs["budget"],
+        )
 
     def test_exact_session_activation_refuses_conflicting_ambient_runtime(self) -> None:
         args = SimpleNamespace(me="codex", session="SESSION-PI")

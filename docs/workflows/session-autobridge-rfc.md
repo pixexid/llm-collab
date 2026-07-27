@@ -77,9 +77,12 @@ or queue. On wake, read every matching durable unread packet through:
 ```bash
 /monitor collab inbox :: event_log=/absolute/State/session_autobridge/events/<session-id>.jsonl; \
   cursor=$(wc -l < "$event_log" 2>/dev/null || printf 0); \
-  if python3 bin/inbox.py --me <agent> --project <project> \
+  replay=$(python3 bin/inbox.py --me <agent> --project <project> \
   --chat <chat> --session <session-id> --repo-target <repo> --peek --json \
-  | grep -q '"path"'; then printf '%s\n' '{"event":"pi_inbox_replay"}'; fi; \
+  ); replay_status=$?; \
+  if [ "$replay_status" -ne 0 ]; then printf '%s\n' "$replay"; exit "$replay_status"; fi; \
+  if printf '%s\n' "$replay" | grep -q '"path"'; then \
+  printf '%s\n' '{"event":"pi_inbox_replay"}'; fi; \
   tail -n "+$((cursor + 1))" -F "$event_log" \
   | grep --line-buffered '"event": "pi_inbox_wake"'
 
