@@ -16,8 +16,9 @@ def main() -> int:
         return 2
     doorbell = Path(sys.argv[1]).expanduser()
     doorbell.parent.mkdir(parents=True, exist_ok=True)
-    doorbell.write_text(pointer + "\n")
+    doorbell.touch(mode=0o600, exist_ok=True)
     doorbell.chmod(0o600)
+    doorbell.write_text(pointer + "\n")
     return 0
 
 

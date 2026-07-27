@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import importlib
+import fcntl
 import os
 import stat
 import tempfile
@@ -2679,6 +2680,35 @@ def dispatch_session(
     project_id: str | None = None,
     repo_targets: list[str] | None = None,
 ) -> dict[str, Any]:
+    lock_path = autobridge_session_path(session_id).with_suffix(".dispatch.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return {
+                "session_id": session_id,
+                "dispatchable": False,
+                "reason": "session_dispatch_busy",
+                "matched_messages": 0,
+                "actions": [],
+            }
+        return _dispatch_session_locked(
+            session_id,
+            project_id=project_id,
+            repo_targets=repo_targets,
+        )
+    finally:
+        os.close(lock_fd)
+
+
+def _dispatch_session_locked(
+    session_id: str,
+    *,
+    project_id: str | None = None,
+    repo_targets: list[str] | None = None,
+) -> dict[str, Any]:
     session = load_session(session_id)
     if project_id is not None and session.get("project_id") != project_id:
         append_event(
@@ -2782,6 +2812,7 @@ def dispatch_session(
 
     actions: list[dict[str, Any]] = []
     for message in completed_settlements:
+        delivery_accepted = runtime_metadata(session).get("family") != "pi"
         event = {
             "event": "message_already_consumed",
             "message_path": message["path"],
@@ -2789,7 +2820,11 @@ def dispatch_session(
             "requested_wake_strategy": session.get("wake_strategy"),
             "effective_action": "runtime_trigger",
             "reason": "already_processed",
-            "runtime_result": {"returncode": 0, "skipped": True},
+            "runtime_result": {
+                "returncode": 0,
+                "skipped": True,
+                "delivery_accepted": delivery_accepted,
+            },
         }
         append_event(session_id, event)
         actions.append(event)

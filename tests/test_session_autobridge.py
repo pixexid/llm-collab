@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import base64
+import fcntl
 import hashlib
 import shlex
 import socket
@@ -4608,6 +4609,21 @@ class SessionAutobridgeTest(unittest.TestCase):
             "1",
             "--json",
         ]
+        lock_path = (
+            root
+            / "State"
+            / "session_autobridge"
+            / "sessions"
+            / "SESSION-PI-GLIM.dispatch.lock"
+        )
+        lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        busy = self.run_cli(root, "dispatch", "--session", "SESSION-PI-GLIM")
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
+        self.assertEqual("session_dispatch_busy", busy["reason"])
+        self.assertFalse(doorbell.exists())
+
         first = subprocess.run(command, cwd=root, text=True, capture_output=True, check=True)
         second = subprocess.run(command, cwd=root, text=True, capture_output=True, check=True)
         first_events = [json.loads(line) for line in first.stdout.splitlines() if line.strip()]
@@ -4626,6 +4642,35 @@ class SessionAutobridgeTest(unittest.TestCase):
         inbox = json.loads((root / "agents" / "glmpi" / "inbox.json").read_text())
         self.assertIn(message_rel, inbox["unread"])
         self.assertNotIn(message_rel, inbox["read"])
+
+        settled = {
+            "matched_messages": 0,
+            "actions": [
+                {
+                    "effective_action": "runtime_trigger",
+                    "message_path": message_rel,
+                    "runtime_result": {
+                        "returncode": 0,
+                        "skipped": True,
+                        "delivery_accepted": False,
+                    },
+                }
+            ],
+        }
+        with patch.object(
+            watch_inbox_lib,
+            "autobridge_session_ids",
+            return_value=["SESSION-PI-GLIM"],
+        ), patch.object(
+            watch_inbox_lib,
+            "dispatch_session",
+            return_value=settled,
+        ), patch.object(
+            watch_inbox_lib,
+            "mark_messages_read",
+        ) as mark_read, redirect_stdout(StringIO()):
+            self.assertEqual([], watch_inbox_lib.dispatch_autobridge("glmpi", True))
+        mark_read.assert_not_called()
 
     def test_watch_inbox_default_off_empty_ledger_preserves_legacy_runtime_trigger(self):
         root = self.make_workspace()
