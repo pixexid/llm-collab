@@ -594,8 +594,9 @@ def resolve_one(project: str, chat: str, agent: str, *, fatal: bool,
     nothing left to reopen and nothing to reconcile.
     """
     try:
-        pair, reason = autobridge.resolve_exact_dispatch_pair(project, chat, agent,
-                                                             sessions=sessions)
+        pair, reason, _ = autobridge.resolve_exact_dispatch_pair(
+            project, chat, agent, sessions=sessions
+        )
     except autobridge.BindingUnreadable as error:
         # Reported, never collapsed: an oversized or unreadable binding is a present record we
         # refused to parse, not an absent one. Turning it into "no live session" would name the

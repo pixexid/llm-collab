@@ -767,7 +767,7 @@ def resolve_exact_dispatch_target(
     path afterwards is a TOCTOU, and fields the binding owns and the session does not mirror --
     runtime_home above all -- cannot be recovered by any later cross-check.
     """
-    pair, reason = resolve_exact_dispatch_pair(project_id, chat_id, agent_id)
+    pair, reason, _ = resolve_exact_dispatch_pair(project_id, chat_id, agent_id)
     return (pair[0] if pair else None), reason
 
 
@@ -776,8 +776,12 @@ def resolve_exact_dispatch_pair(
     chat_id: str,
     agent_id: str,
     sessions: list[dict[str, Any]] | None = None,
-) -> tuple[tuple[dict[str, Any], dict[str, Any]] | None, str | None]:
-    """Return ((session, binding), None) or (None, reason).
+) -> tuple[
+    tuple[dict[str, Any], dict[str, Any]] | None,
+    str | None,
+    dict[str, Any] | None,
+]:
+    """Return the dispatchable pair, refusal reason, and validated inactive binding.
 
     Hands back the exact binding snapshot this validation was performed against, so a caller
     never has to reopen the path to read a field the session does not carry. Introduced because
@@ -788,20 +792,20 @@ def resolve_exact_dispatch_pair(
     try:
         binding = load_binding(project_id, chat_id, agent_id)
     except FileNotFoundError:
-        return None, EXACT_BINDING_REQUIRED_REASON
+        return None, EXACT_BINDING_REQUIRED_REASON, None
 
     if (
         binding.get("project_id") != project_id
         or binding.get("chat_id") != chat_id
         or binding.get("agent_id") != agent_id
     ):
-        return None, EXACT_BINDING_MISMATCH_REASON
+        return None, EXACT_BINDING_MISMATCH_REASON, None
 
     bound_session_id = binding.get("session_id")
     bound_runtime_id = binding.get("runtime_session_id")
     bound_runtime_family = binding.get("runtime_family")
     if not bound_session_id or not bound_runtime_id:
-        return None, EXACT_BINDING_REQUIRED_REASON
+        return None, EXACT_BINDING_REQUIRED_REASON, None
 
     # A caller resolving SEVERAL chats would otherwise rescan the whole session directory once
     # per chat; passing a pre-scanned list makes that one scan for the whole lookup. Defaults to
@@ -823,7 +827,7 @@ def resolve_exact_dispatch_pair(
         exact_matches.append(session)
 
     if not exact_matches:
-        return None, EXACT_BINDING_MISMATCH_REASON
+        return None, EXACT_BINDING_MISMATCH_REASON, None
 
     dispatchable = [
         session
@@ -831,10 +835,10 @@ def resolve_exact_dispatch_pair(
         if session_is_dispatchable(session)[0]
     ]
     if not dispatchable:
-        return None, EXACT_BINDING_NOT_DISPATCHABLE_REASON
+        return None, EXACT_BINDING_NOT_DISPATCHABLE_REASON, binding
     if len(dispatchable) > 1:
-        return None, EXACT_BINDING_AMBIGUOUS_REASON
-    return (dispatchable[0], binding), None
+        return None, EXACT_BINDING_AMBIGUOUS_REASON, None
+    return (dispatchable[0], binding), None, None
 
 
 def message_targets_session(
