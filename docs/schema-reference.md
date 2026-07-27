@@ -162,7 +162,7 @@ Project registry. Created by `scripts/init.py`. Gitignored.
 | `repos` | object | Map of repo ID → path (relative to `projects_root` or absolute) |
 | `default_branch_base` | string | Default git ref for worktree creation |
 | `preflight_command` | string[] or null | Command to validate before task integration |
-| `claude_desktop_bridge` | bool | Optional Claude Desktop fallback for a non-CLI Claude target. CLI-session workers use AX first. |
+| `claude_desktop_bridge` | bool | Retained for compatibility; selects nothing. Claude is woken by its durable packet and the app's own background inbox watcher, never AX or Computer Use. |
 | `ui_ux.direct_app_only` | bool | Optional, default-off direct-app gate. When `true`, every non-`done` task must avoid design/sandbox/spec/handoff/parity, bare-template, and template-design-only lane types, repository-root `design/**` targets, and dependency materialization of newly authored `design/**` artifacts. Explicit implementation lanes such as `template-implementation`, `src/design/**`, and read-only `required_design_docs` remain valid. Absolute related/dependency paths require a complete resolvable project `repos` mapping so repository-root scope can be evaluated. A present non-boolean value is a configuration error. |
 | `ui_ux.required_design_docs` | string[] | Optional project-specific design sources prepended to every UI/UX task contract. Non-Amiga projects must configure these or provide explicit task-level design docs. |
 | `db.production_schema_guard` | bool | Optional strict boolean, default `false`. When `true` for the task's exact project, assignment/review/PR/done validation rejects schema-changing tasks classified as `none`, restricts `local-schema-only` to the exact operator-approved dev-only exception, and treats concrete `db/migrations/**` or `db/schema.sql` paths as schema changes even after `manual_false`. A present non-boolean fails closed; projects never inherit another project's value. |
@@ -1779,6 +1779,7 @@ Notes:
 - A terminal-only `cli_session` needs a dispatchable runtime session. Without
   either transport, `deliver.py` reports `activation_unavailable` instead of
   silently requesting operator relay.
-- A project may enable `claude_desktop_bridge` for a non-CLI Claude target. Only
-  that fallback reports `desktop_bridge_required` and uses Computer Use; it does
-  not override AX routing for a Claude agent registered as `cli_session`.
+- `claude_desktop_bridge` no longer selects anything. Claude is woken by its
+  durable packet and the app's own background inbox watcher, so `deliver.py`
+  emits neither `ax_doorbell_required` nor `desktop_bridge_required` for it;
+  `desktop_bridge_required` is retained in the result shape and is always false.

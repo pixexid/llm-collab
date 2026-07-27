@@ -130,11 +130,11 @@ served.
 
 ## Claude Desktop Rule
 
-Route Claude according to its registered activation type, explicit doorbell
-capability, and active project configuration. A Claude agent registered as
-`cli_session` uses AX only when `activation.ax_app` is configured. A project may
-set `claude_desktop_bridge: true` as a fallback only when its Claude target is
-not a CLI session.
+Claude has one wake path in every registration and project shape: the durable
+`Chats/` packet, picked up by the Claude app's own background inbox watcher.
+Neither `activation.ax_app` nor `claude_desktop_bridge` changes that — `deliver.py`
+excludes Claude from the AX doorbell selector, and the Computer Use fallback that
+`claude_desktop_bridge` used to select is removed.
 
 Important distinction:
 
@@ -164,8 +164,9 @@ Operational rule:
   the defect — preserve the packet and report it, rather than ringing. See
   `session-autobridge-runbook.md` for the full rule
 - attended Computer Use is fallback/recovery when AX cannot safely target or
-  verify the native composer, and for a project-configured non-CLI Claude
-  Desktop bridge; it is never the universal first path
+  verify the native composer; it is never the universal first path, and it is
+  never a path to Claude — the project-configured non-CLI Claude Desktop bridge
+  is removed, and `deliver.py` no longer reports `desktop_bridge_required`
 
 Current Phase 1 routing gives a matching dispatchable session autobridge
 precedence. When `deliver.py` reports `autobridge_ready: true`, it intentionally
@@ -189,7 +190,8 @@ Safest task-grade workflow for desktop-app agents:
      printed form is the absolute executable under the llm-collab checkout's
      `bin/` directory); it is
      not a manual operator relay request
-   - `desktop_bridge_required` is the project-configured non-CLI Claude fallback
+   - `desktop_bridge_required` is always false: the Claude Computer Use fallback
+     it selected is removed, and Claude is woken by its own background watcher
    - `activation_unavailable` means the durable packet exists but neither a
      dispatchable runtime nor an explicit wake transport is configured
 2. when `ax_doorbell_required` is true, the sender rings once with the printed AX
@@ -221,14 +223,11 @@ Safest task-grade workflow for desktop-app agents:
    Computer Use send as the bounded fallback. Never turn one targeting incident
    into a standing AX-disabled rule.
 
-After `desktop_bridge_required` or an AX targeting/delivery failure enters the
-attended recovery path, Codex owns the visible Claude Desktop recovery/wake
-through Computer Use. If Computer Use is unavailable, blocked by a non-idle
-Claude state, cannot inspect the app, or fails to send, Codex must keep
-ownership of the Claude app path: bring Claude to front by bundle id, use
-Computer Use app inspection/click/type, run coarse Claude bridge health checks,
-wait/retry via heartbeat when Claude is busy, and record any
-accessibility/capture blocker. Keep or create the heartbeat and record
+A Claude packet that is not picked up is a watcher or binding defect: preserve
+the durable packet, record the observed blocker, and report it for repair or
+operator attention. Codex does not wake Claude through Computer Use, AX, or an
+app restart — coarse Claude bridge health checks and recording an
+accessibility/capture blocker are diagnosis, not a wake. Keep or create the heartbeat and record
 `observed_state`, `expected_outcome`, `why_not_done`, and
 `next_unlock_action`. Do not ask the operator to relay, paste, click, or
 manually wake Claude; repair Computer Use/app access or continue monitoring the

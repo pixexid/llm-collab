@@ -3207,11 +3207,12 @@ class SessionAutobridgeTest(unittest.TestCase):
         frontmatter, _ = parse_frontmatter(packet.read_text())
         self.assertIsNone(frontmatter["target_session_id"])
 
-    def deliver_with_scope(self, root, chat_id, *, repo_targets=None, project="amiga"):
+    def deliver_with_scope(self, root, chat_id, *, repo_targets=None, project="amiga",
+                           recipient="claude"):
         """Run deliver.py and return its JSON payload plus stderr."""
         argv = [
             sys.executable, str(DELIVER_SCRIPT),
-            "--chat", chat_id, "--from", "codex", "--to", "claude",
+            "--chat", chat_id, "--from", "codex", "--to", recipient,
             "--project", project, "--title", "Scope preflight probe",
             "--sender-session-id", "codex-session-9", "--body-file", "-",
         ]
@@ -3317,16 +3318,18 @@ class SessionAutobridgeTest(unittest.TestCase):
         This is the control that proves the gate is narrow. If this ever goes false, the fix has
         broken the doorbell rather than confined it to non-refusal cases.
         """
+        # The subject is relay, not claude: Claude is excluded from the doorbell
+        # selector outright, so it can no longer serve as this lane's control.
         root = self.make_workspace()
         for agent, activation in (
             ("codex", {"type": "cli_session", "watcher_enabled": True}),
-            ("claude", {"type": "cli_session", "watcher_enabled": True, "ax_app": "Claude"}),
+            ("relay", {"type": "cli_session", "watcher_enabled": True, "ax_app": "Relay"}),
         ):
             self.add_agent(root, {"id": agent, "display_name": agent.title(),
                                   "activation": activation})
         self.create_chat(root, chat_dir_name="2026-07-25_no-session__CHAT-NOSESS",
                          chat_id="CHAT-NOSESS", project_id="amiga")
-        payload, _stderr = self.deliver_with_scope(root, "CHAT-NOSESS")
+        payload, _stderr = self.deliver_with_scope(root, "CHAT-NOSESS", recipient="relay")
         self.assertFalse(payload["autobridge_ready"])
         self.assertTrue(payload["ax_doorbell_required"],
                         "with no bound session there is nothing to refuse, so the doorbell stands")
@@ -3341,7 +3344,8 @@ class SessionAutobridgeTest(unittest.TestCase):
         source = (REPO_ROOT / "bin" / "deliver.py").read_text(encoding="utf-8")
         self.assertNotIn("        and not autobridge_ready\n", source,
                          "a wake lane is gating on autobridge_ready directly again")
-        self.assertGreaterEqual(source.count("and wake_fallback_allowed"), 5)
+        # Four lanes since the Claude desktop/Computer Use lane was deleted.
+        self.assertGreaterEqual(source.count("and wake_fallback_allowed"), 4)
 
     # --- registration is all-or-nothing across BOTH writes ----------------------------------
     #
@@ -3851,6 +3855,9 @@ class SessionAutobridgeTest(unittest.TestCase):
         self.assertEqual(7, frontmatter["target_binding_generation"])
 
     def test_deliver_false_readiness_engages_fallback_and_writes_packet(self):
+        # The subject is relay, not claude: this lane asserts the doorbell fallback
+        # engages when a session claims readiness it cannot back, and Claude is
+        # excluded from that fallback entirely.
         root = self.make_workspace()
         self.add_agent(
             root,
@@ -3863,12 +3870,12 @@ class SessionAutobridgeTest(unittest.TestCase):
         self.add_agent(
             root,
             {
-                "id": "claude",
-                "display_name": "Claude",
+                "id": "relay",
+                "display_name": "Relay",
                 "activation": {
                     "type": "cli_session",
                     "watcher_enabled": True,
-                    "ax_app": "Claude",
+                    "ax_app": "Relay",
                 },
             },
         )
@@ -3898,18 +3905,18 @@ class SessionAutobridgeTest(unittest.TestCase):
                     "import deliver",
                     "target = {",
                     "    'session_id': 'SESSION-READY-DRIFT',",
-                    "    'agent_id': 'claude',",
+                    "    'agent_id': 'relay',",
                     "    'project_id': 'amiga',",
                     "    'chat_id': 'CHAT-READY-DRIFT',",
                     "    'status': 'parked',",
                     "    'wake_strategy': 'runtime_trigger',",
-                    "    'runtime': {'family': 'claude_app', 'session_id': 'claude-runtime-drift'},",
+                    "    'runtime': {'family': 'zcode_cli', 'session_id': 'relay-runtime-drift'},",
                     "}",
                     "deliver.resolve_exact_dispatch_target = lambda *_args: (target, None)",
                     "deliver.resolve_bound_runtime_session_id = lambda *_args: None",
                     "sys.argv = [",
                     "    sys.argv[0], '--chat', 'CHAT-READY-DRIFT', '--from', 'codex',",
-                    "    '--to', 'claude', '--project', 'amiga', '--title', 'Readiness drift',",
+                    "    '--to', 'relay', '--project', 'amiga', '--title', 'Readiness drift',",
                     "    '--body-file', 'readiness-drift-body.txt', '--skip-awareness-instruction',",
                     "]",
                     "deliver.main()",
@@ -3930,7 +3937,7 @@ class SessionAutobridgeTest(unittest.TestCase):
         self.assertTrue(payload["ax_doorbell_required"])
         self.assertIsNone(payload["resolved_target_session_id"])
 
-        delivered_candidates = sorted(chat_dir.glob("*_to-claude_readiness-drift.md"))
+        delivered_candidates = sorted(chat_dir.glob("*_to-relay_readiness-drift.md"))
         self.assertTrue(delivered_candidates)
         frontmatter, _ = parse_frontmatter(delivered_candidates[-1].read_text())
         self.assertEqual("Readiness drift", frontmatter["title"])
@@ -4160,7 +4167,9 @@ class SessionAutobridgeTest(unittest.TestCase):
                 self.assertIn("AX DOORBELL REQUIRED", deliver_result.stdout)
                 self.assertIn('axsend-ensure ring --app "Codex"', deliver_result.stdout)
 
-    def test_deliver_prefers_ax_doorbell_for_claude_cli_session_target(self):
+    def test_deliver_never_rings_a_claude_cli_session_without_a_binding(self):
+        # The case the AX doorbell exists for -- no dispatchable autobridge -- is exactly
+        # where a worker used to be handed a runnable ring for Claude.
         root = self.make_workspace()
         self.add_agent(
             root,
@@ -4175,13 +4184,17 @@ class SessionAutobridgeTest(unittest.TestCase):
             {
                 "id": "claude",
                 "display_name": "Claude",
-                "activation": {"type": "cli_session", "watcher_enabled": True, "ax_app": "Claude"},
+                "activation": {
+                    "type": "cli_session",
+                    "watcher_enabled": True,
+                    "ax_app": "Claude",
+                },
             },
         )
         self.create_chat(
             root,
-            chat_dir_name="2026-04-23_claude-desktop-bridge__CHAT-BRIDGE1",
-            chat_id="CHAT-BRIDGE1",
+            chat_dir_name="2026-04-23_claude-no-binding__CHAT-NOBIND",
+            chat_id="CHAT-NOBIND",
             project_id="amiga",
         )
 
@@ -4190,7 +4203,7 @@ class SessionAutobridgeTest(unittest.TestCase):
                 sys.executable,
                 str(DELIVER_SCRIPT),
                 "--chat",
-                "CHAT-BRIDGE1",
+                "CHAT-NOBIND",
                 "--from",
                 "codex",
                 "--to",
@@ -4198,29 +4211,35 @@ class SessionAutobridgeTest(unittest.TestCase):
                 "--project",
                 "amiga",
                 "--title",
-                "Claude desktop bridge",
+                "Claude packet with no dispatchable binding",
                 "--body-file",
                 "-",
             ],
             cwd=root,
             text=True,
-            input="Use the durable packet, then ring Claude with axsend.",
+            input="Durable packet only.",
             capture_output=True,
             check=True,
         )
 
         result_payload = json.loads(deliver_result.stdout.split("\n\n", 1)[0])
-        self.assertFalse(result_payload["relay_required"])
-        self.assertFalse(result_payload["operator_relay_required"])
+        self.assertFalse(result_payload["ax_doorbell_required"])
+        self.assertIsNone(result_payload["ax_doorbell_prompt"])
         self.assertFalse(result_payload["desktop_bridge_required"])
-        self.assertTrue(result_payload["ax_doorbell_required"])
-        self.assertIn("AX DOORBELL REQUIRED", deliver_result.stdout)
-        self.assertIn("axsend-ensure ring --app", deliver_result.stdout)
-        self.assertNotIn("CLAUDE DESKTOP BRIDGE REQUIRED", deliver_result.stdout)
-        self.assertNotIn("RELAY REQUIRED FOR OPERATOR", deliver_result.stdout)
+        self.assertFalse(result_payload["operator_relay_required"])
+        self.assertNotIn("AX DOORBELL REQUIRED", deliver_result.stdout)
+        self.assertNotIn("axsend", deliver_result.stdout)
+        self.assertNotIn("Computer Use", deliver_result.stdout)
 
-    def test_deliver_uses_project_configured_desktop_bridge_for_non_cli_claude_target(self):
-        # #given
+        # The packet is durable and the output names the repair, not a second wake path.
+        self.assertTrue((root / result_payload["to_file"]).exists())
+        self.assertTrue(result_payload["activation_unavailable"])
+        self.assertIsNotNone(result_payload["activation_unavailable_reason"])
+
+    def test_deliver_never_uses_computer_use_for_a_desktop_bridge_project(self):
+        # amiga carries claude_desktop_bridge: true in the fixture, and this Claude is
+        # registered non-cli_session -- the exact shape that used to select the
+        # Computer Use fallback.
         root = self.make_workspace()
         self.add_agent(
             root,
@@ -4245,7 +4264,6 @@ class SessionAutobridgeTest(unittest.TestCase):
             project_id="amiga",
         )
 
-        # #when
         deliver_result = subprocess.run(
             [
                 sys.executable,
@@ -4265,17 +4283,20 @@ class SessionAutobridgeTest(unittest.TestCase):
             ],
             cwd=root,
             text=True,
-            input="Use the configured desktop bridge fallback.",
+            input="Durable packet only.",
             capture_output=True,
             check=True,
         )
 
-        # #then
         result_payload = json.loads(deliver_result.stdout.split("\n\n", 1)[0])
-        self.assertTrue(result_payload["desktop_bridge_required"])
+        self.assertFalse(result_payload["desktop_bridge_required"])
+        self.assertIsNone(result_payload["desktop_bridge_prompt"])
         self.assertFalse(result_payload["ax_doorbell_required"])
-        self.assertFalse(result_payload["operator_relay_required"])
-        self.assertIn("CLAUDE DESKTOP BRIDGE REQUIRED", deliver_result.stdout)
+        self.assertNotIn("CLAUDE DESKTOP BRIDGE REQUIRED", deliver_result.stdout)
+        self.assertNotIn("Computer Use", deliver_result.stdout)
+        self.assertNotIn("Claude.app", deliver_result.stdout)
+
+        self.assertTrue((root / result_payload["to_file"]).exists())
 
     def test_deliver_prints_ax_doorbell_for_cli_session_worker_without_operator_relay(self):
         root = self.make_workspace()

@@ -236,20 +236,6 @@ def resolve_bound_runtime_session_id(project_id: str, chat_id: str, agent_id: st
     return str(runtime_session_id)
 
 
-def is_claude_desktop_bridge_target(
-    project_id: str,
-    recipient_agent: dict,
-    recipient_id: str,
-) -> bool:
-    project = get_project(project_id) or {}
-    activation_type = recipient_agent.get("activation", {}).get("type")
-    return (
-        bool(project.get("claude_desktop_bridge"))
-        and recipient_id == "claude"
-        and activation_type != "cli_session"
-    )
-
-
 def ax_doorbell_app(recipient_agent: dict) -> str | None:
     ax_app = recipient_agent.get("activation", {}).get("ax_app")
     if not isinstance(ax_app, str) or not ax_app.strip():
@@ -279,6 +265,11 @@ def is_ax_doorbell_target(
     return (
         not is_codex_self_target(sender_id, recipient_id)
         and recipient_id != "operator"
+        # Claude is woken by its durable packet and the app's own background inbox
+        # watcher. Its agents.json entry is a cli_session with ax_app "Claude", so
+        # without this it falls into the doorbell and deliver.py prints a runnable
+        # ring -- the exact wake the canonical docs forbid.
+        and recipient_id != "claude"
         and activation_type == "cli_session"
         and ax_doorbell_app(recipient_agent) is not None
         # GH-1547: an AXValue-opaque target never gets a routine doorbell —
@@ -305,15 +296,6 @@ def is_ax_attended_recovery_target(
         and recipient_id != "operator"
         and ax_attended_only(recipient_agent)
     )
-
-
-def build_desktop_bridge_prompt(chat_id: str, recipient_id: str, message_path: Path) -> str:
-    bridge_id = shortid(8)
-    filename = message_path.name
-    prompt = f"[BRIDGE {bridge_id}] Read latest {recipient_id} packet in {chat_id}: {filename}"
-    if len(prompt) <= 240:
-        return prompt
-    return f"[BRIDGE {bridge_id}] Read latest {recipient_id} inbox packet for {chat_id} and respond here."
 
 
 def main():
@@ -651,19 +633,11 @@ def main():
         if ax_attended_recovery_required
         else None
     )
-    desktop_bridge_required = (
-        args.recipient != "operator"
-        and not thread_coordination_required
-        and wake_fallback_allowed
-        and not ax_doorbell_required
-        and not ax_attended_recovery_required
-        and is_claude_desktop_bridge_target(args.project, recipient_agent, args.recipient)
-    )
-    desktop_bridge_prompt = (
-        build_desktop_bridge_prompt(chat_id, args.recipient, to_path)
-        if desktop_bridge_required
-        else None
-    )
+    # The project-configured Computer Use fallback was Claude-only, and Claude is
+    # never woken by typing into its app. Its only producer is deleted; the keys stay
+    # in the result so the scope-refusal wake-flag guard keeps covering them.
+    desktop_bridge_required = False
+    desktop_bridge_prompt = None
     operator_relay_required = (
         args.recipient != "operator"
         and not thread_coordination_required
@@ -778,25 +752,6 @@ def main():
         print("unblocks with send_message_to_thread. Use native subagent coordination")
         print("for bounded local support. Do not use AX or Computer Use to route this")
         print("packet to a Codex task.")
-        print(border)
-    elif desktop_bridge_required:
-        recipient_display = recipient_agent.get("display_name", args.recipient)
-        border = "━" * 60
-        print(f"\n{border}")
-        print("🖥️  CLAUDE DESKTOP BRIDGE REQUIRED")
-        print(border)
-        print()
-        print(
-            f"Use Computer Use against /Applications/Claude.app to wake "
-            f"{recipient_display} ({args.recipient}) for chat {chat_id}."
-        )
-        print("Do not ask the operator to relay, paste, click, or manually wake Claude.")
-        print()
-        print("Visible one-line prompt:")
-        print(desktop_bridge_prompt)
-        print()
-        print("If Computer Use is blocked or Claude is not idle, keep the heartbeat active,")
-        print("retry through Codex/Computer Use when appropriate, and record exact failed attempts.")
         print(border)
     # GH-1547 (#110 P2 3609336511): the relay print must mirror the computed
     # operator_relay_required (which excludes attended-recovery targets) — the

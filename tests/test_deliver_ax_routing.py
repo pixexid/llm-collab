@@ -100,6 +100,26 @@ class AxAttendedRecoveryRoutingTest(unittest.TestCase):
         },
     }
 
+    def test_claude_is_never_a_routine_doorbell_target(self) -> None:
+        # agents.json registers Claude as a cli_session with ax_app "Claude", which is
+        # exactly the shape the selector accepts. The exclusion is what keeps
+        # deliver.py from printing a runnable ring for it.
+        claude = {
+            "id": "claude",
+            "activation": {
+                "type": "cli_session",
+                "watcher_enabled": True,
+                "ax_app": "Claude",
+            },
+        }
+        self.assertFalse(deliver.ax_attended_only(claude))
+        self.assertFalse(
+            deliver.is_ax_doorbell_target(claude, "claude", sender_id="codex")
+        )
+        self.assertFalse(
+            deliver.is_ax_attended_recovery_target(claude, "claude", sender_id="codex")
+        )
+
     def test_attended_only_target_is_not_routine_doorbell(self) -> None:
         self.assertTrue(deliver.ax_attended_only(self.ZCODE))
         self.assertFalse(
@@ -114,7 +134,10 @@ class AxAttendedRecoveryRoutingTest(unittest.TestCase):
         )
 
     def test_readable_targets_keep_routine_doorbell(self) -> None:
-        for agent_id, app in (("codex", "Codex"), ("claude", "Claude")):
+        # Claude is deliberately absent: it is excluded from the doorbell selector
+        # entirely (its own background inbox watcher owns pickup), and
+        # test_claude_is_never_a_routine_doorbell_target below covers that.
+        for agent_id, app in (("codex", "Codex"), ("relay", "Relay")):
             agent = {
                 "id": agent_id,
                 "activation": {
