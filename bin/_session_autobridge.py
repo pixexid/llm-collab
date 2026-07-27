@@ -2127,7 +2127,7 @@ def execute_runtime_trigger(session: dict, message: dict) -> dict[str, Any]:
         timeout=timeout_seconds,
         check=False,
     )
-    return {
+    trigger_result = {
         "command": command,
         "derived_command": derived,
         "timeout_seconds": timeout_seconds,
@@ -2135,6 +2135,10 @@ def execute_runtime_trigger(session: dict, message: dict) -> dict[str, Any]:
         "stdout": result.stdout.strip(),
         "stderr": result.stderr.strip(),
     }
+    if runtime_family == "pi":
+        # The pointer wakes Pi; only the recipient can acknowledge the packet.
+        trigger_result["delivery_accepted"] = False
+    return trigger_result
 
 
 def ui_refresh_enabled(runtime: dict[str, Any]) -> bool:
