@@ -33,6 +33,7 @@ HEURISTIC_RUNTIME_DISCOVERY_FAMILIES = frozenset(
 
 from _helpers import (
     ROOT,
+    agent_inbox_path,
     build_handoff_prompt,
     config_get,
     get_agent,
@@ -912,13 +913,19 @@ def matching_unread_messages(
     if max_entries is None:
         messages = get_unread_messages(str(session["agent_id"]))
     else:
-        unread = load_agent_inbox(str(session["agent_id"])).get("unread", [])
+        inbox_path = agent_inbox_path(str(session["agent_id"]))
+        try:
+            inbox_raw = read_regular_file_bounded(inbox_path, int(max_bytes))
+        except FileNotFoundError:
+            inbox_raw = b'{"unread":[]}'
+        inbox = json.loads(inbox_raw)
+        unread = inbox.get("unread", [])
         if len(unread) > max_entries:
             raise ValueError(
                 f"exact-session unread entries exceed the {max_entries} entry limit"
             )
         messages = []
-        remaining = int(max_bytes)
+        remaining = int(max_bytes) - len(inbox_raw)
         for rel_path in unread:
             try:
                 raw = read_regular_file_bounded(ROOT / rel_path, remaining)

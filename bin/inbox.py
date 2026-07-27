@@ -384,8 +384,25 @@ def gate_activation_message(args, msg: dict, *, consume: bool) -> dict | None:
         }
 
     runtime_id = activation_reader_runtime_id()
-    if runtime_id is None and args.session:
-        runtime_id = runtime_metadata(load_session(args.session)).get("session_id")
+    if args.session:
+        registered_runtime_id = runtime_metadata(load_session(args.session)).get(
+            "session_id"
+        )
+        if not registered_runtime_id:
+            return {
+                "authorized": False,
+                "reason": "exact_session_runtime_unavailable",
+                "identity": identity,
+                "owner": existing,
+            }
+        if runtime_id and runtime_id != registered_runtime_id:
+            return {
+                "authorized": False,
+                "reason": "exact_session_runtime_mismatch",
+                "identity": identity,
+                "owner": existing,
+            }
+        runtime_id = registered_runtime_id
     owner_pid = None if runtime_id else activation_reader_pid()
     session_id = activation_reader_session_id(args, identity)
     ensure_reader_session(session_id, args.me, identity, runtime_id=runtime_id)
@@ -564,14 +581,7 @@ def main():
             raise ValueError("--session does not belong to --project")
         if args.chat and exact_session.get("chat_id") != args.chat:
             raise ValueError("--session does not belong to --chat")
-        messages = matching_unread_messages(
-            exact_session,
-            invocation_repo_targets=args.repo_target,
-            repo_scope_refusals=repo_scope_refused,
-            max_entries=MAX_EXACT_SESSION_UNREAD_ENTRIES,
-            max_bytes=MAX_EXACT_SESSION_UNREAD_BYTES,
-        )
-        messages = filter_messages(messages, args.project, args.chat, args.packet)
+        messages = []
     elif args.packet:
         messages = load_all_messages(args.me)
     elif args.show_all:
@@ -607,6 +617,40 @@ def main():
                     file=sys.stderr,
                 )
         sys.exit(75)
+
+    if exact_session is not None:
+        current_refusals: list[dict] = []
+        messages = matching_unread_messages(
+            load_session(args.session),
+            invocation_repo_targets=args.repo_target,
+            repo_scope_refusals=current_refusals,
+            max_entries=MAX_EXACT_SESSION_UNREAD_ENTRIES,
+            max_bytes=MAX_EXACT_SESSION_UNREAD_BYTES,
+        )
+        messages = filter_messages(messages, args.project, args.chat, args.packet)
+        messages, late_refusals = filter_repo_scope(
+            messages, args.repo_target, args.project
+        )
+        current_refusals.extend(late_refusals)
+        if current_refusals:
+            if args.json_output:
+                print(
+                    json.dumps(
+                        {
+                            "messages": [],
+                            "repo_scope_refused": current_refusals,
+                        },
+                        indent=2,
+                    )
+                )
+            else:
+                for refused in current_refusals:
+                    print(
+                        f"[inbox] Repo-scope refused {refused['path']}: "
+                        f"{refused['reason']}",
+                        file=sys.stderr,
+                    )
+            sys.exit(75)
 
     if not messages:
         if args.json_output:
@@ -667,25 +711,11 @@ def main():
         sys.exit(75)
 
     shown_paths = [m["path"] for m in messages if not m.get("read")]
-    if consume:
+    if consume and exact_session is None:
         shown_paths, late_refused = recheck_repo_scope_before_read(
             args.me, shown_paths, args.repo_target, args.project
         )
         repo_scope_refused.extend(late_refused)
-        if exact_session is not None:
-            exact_paths = {
-                message["path"]
-                for message in matching_unread_messages(
-                    load_session(args.session),
-                    invocation_repo_targets=args.repo_target,
-                    max_entries=MAX_EXACT_SESSION_UNREAD_ENTRIES,
-                    max_bytes=MAX_EXACT_SESSION_UNREAD_BYTES,
-                )
-            }
-            messages = [
-                message for message in messages if message["path"] in exact_paths
-            ]
-            shown_paths = [path for path in shown_paths if path in exact_paths]
 
     if args.json_output:
         payload: dict[str, object] = {"messages": messages}

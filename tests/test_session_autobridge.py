@@ -5249,13 +5249,15 @@ class SessionAutobridgeTest(unittest.TestCase):
             self.assertEqual(2, fsync.call_count)
 
     def test_exact_session_unread_budget_starts_before_filtering(self):
+        inbox_raw = b'{"unread":["first","second"],"read":[]}'
         with patch.object(
             session_autobridge_lib,
-            "load_agent_inbox",
-            return_value={"unread": ["first", "second"], "read": []},
+            "agent_inbox_path",
+            return_value=session_autobridge_lib.ROOT / "agents/glmpi/inbox.json",
         ), patch.object(
             session_autobridge_lib,
             "read_regular_file_bounded",
+            return_value=inbox_raw,
         ) as bounded_read:
             with self.assertRaisesRegex(ValueError, "1 entry limit"):
                 session_autobridge_lib.matching_unread_messages(
@@ -5263,18 +5265,26 @@ class SessionAutobridgeTest(unittest.TestCase):
                     max_entries=1,
                     max_bytes=100,
                 )
-        bounded_read.assert_not_called()
+        bounded_read.assert_called_once_with(
+            session_autobridge_lib.ROOT / "agents/glmpi/inbox.json",
+            100,
+        )
 
     def test_exact_session_unread_budget_is_cumulative(self):
+        inbox_raw = b'{"unread":["first","second"],"read":[]}'
         raw = b"---\n---\n\nx"
         with patch.object(
             session_autobridge_lib,
-            "load_agent_inbox",
-            return_value={"unread": ["first", "second"], "read": []},
+            "agent_inbox_path",
+            return_value=session_autobridge_lib.ROOT / "agents/glmpi/inbox.json",
         ), patch.object(
             session_autobridge_lib,
             "read_regular_file_bounded",
-            side_effect=[raw, session_autobridge_lib.UnreadableFile("over budget")],
+            side_effect=[
+                inbox_raw,
+                raw,
+                session_autobridge_lib.UnreadableFile("over budget"),
+            ],
         ) as bounded_read:
             with self.assertRaisesRegex(
                 session_autobridge_lib.UnreadableFile,
@@ -5283,24 +5293,52 @@ class SessionAutobridgeTest(unittest.TestCase):
                 session_autobridge_lib.matching_unread_messages(
                     {"agent_id": "glmpi"},
                     max_entries=2,
-                    max_bytes=len(raw) + 1,
+                    max_bytes=len(inbox_raw) + len(raw) + 1,
                 )
         self.assertEqual(
             [
+                unittest.mock.call(
+                    session_autobridge_lib.ROOT / "agents/glmpi/inbox.json",
+                    len(inbox_raw) + len(raw) + 1,
+                ),
                 unittest.mock.call(session_autobridge_lib.ROOT / "first", len(raw) + 1),
                 unittest.mock.call(session_autobridge_lib.ROOT / "second", 1),
             ],
             bounded_read.call_args_list,
         )
 
+    def test_exact_session_unread_budget_bounds_the_inbox_index(self):
+        inbox_path = session_autobridge_lib.ROOT / "agents/glmpi/inbox.json"
+        with patch.object(
+            session_autobridge_lib,
+            "agent_inbox_path",
+            return_value=inbox_path,
+        ), patch.object(
+            session_autobridge_lib,
+            "read_regular_file_bounded",
+            side_effect=session_autobridge_lib.UnreadableFile("over budget"),
+        ) as bounded_read:
+            with self.assertRaisesRegex(
+                session_autobridge_lib.UnreadableFile,
+                "over budget",
+            ):
+                session_autobridge_lib.matching_unread_messages(
+                    {"agent_id": "glmpi"},
+                    max_entries=2,
+                    max_bytes=100,
+                )
+        bounded_read.assert_called_once_with(inbox_path, 100)
+
     def test_pi_monitor_replays_durable_unread_before_following_new_wakes(self):
         contract = (
             REPO_ROOT / "docs" / "workflows" / "session-autobridge-rfc.md"
         ).read_text()
-        replay = contract.index("--peek --json")
+        cursor = contract.index("cursor=$(wc -l")
+        replay = contract.index("--peek --json", cursor)
         self.assertIn("pi_inbox_replay", contract[replay:])
         replay_event = contract.index("pi_inbox_replay", replay)
-        follow = contract.index("tail -n 0 -F", replay_event)
+        follow = contract.index('tail -n "+$((cursor + 1))" -F', replay_event)
+        self.assertLess(cursor, replay)
         self.assertLess(replay, replay_event)
         self.assertLess(replay_event, follow)
 
