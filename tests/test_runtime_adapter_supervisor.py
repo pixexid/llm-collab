@@ -8,6 +8,8 @@ import os
 import sys
 import tempfile
 import textwrap
+import threading
+import time
 import unittest
 from dataclasses import replace
 from pathlib import Path
@@ -162,6 +164,72 @@ class RuntimeAdapterSupervisorTests(unittest.TestCase):
                 self.assertTrue(outcome.stderr_truncated)
                 self.assertLessEqual(len(outcome.stderr), MAX_STDERR_BYTES_PER_CONNECTION)
 
+    def test_response_waits_for_preceding_stderr_to_be_drained(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            script = write_script(
+                root,
+                """
+                import sys
+                sys.stderr.buffer.write(b"x")
+                sys.stderr.buffer.flush()
+                sys.stdin.buffer.readline()
+                sys.stderr.buffer.write(b"xxxxx")
+                sys.stderr.buffer.flush()
+                sys.stdout.buffer.write(b'{"jsonrpc":"2.0","id":"r1","result":{}}\\n')
+                sys.stdout.buffer.flush()
+                """,
+            )
+            read_started = threading.Event()
+            second_drain_started = threading.Event()
+            release_read = threading.Event()
+            release_second_drain = threading.Event()
+            request_done = threading.Event()
+            result = {}
+            drain_calls = 0
+            real_drain = StdioSupervisor._drain_stderr_fd
+
+            def paused_drain(supervisor, fd):
+                nonlocal drain_calls
+                drain_calls += 1
+                if drain_calls == 1:
+                    result = real_drain(supervisor, fd)
+                    read_started.set()
+                    release_read.wait(5)
+                    return result
+                if drain_calls == 2:
+                    second_drain_started.set()
+                    release_second_drain.wait(5)
+                return real_drain(supervisor, fd)
+
+            with patch(
+                "llm_collab.runtime_adapter_supervisor.MAX_STDERR_BYTES_PER_CONNECTION", 4
+            ), patch.object(StdioSupervisor, "_drain_stderr_fd", paused_drain):
+                with StdioSupervisor(resolved_adapter(script, root)) as supervisor:
+                    def request():
+                        result["outcome"] = supervisor.request(
+                            '{"jsonrpc":"2.0","id":"r1","method":"runtime.health","params":{}}'
+                        )
+                        request_done.set()
+
+                    thread = threading.Thread(target=request)
+                    try:
+                        self.assertTrue(read_started.wait(5))
+                        thread.start()
+                        deadline = time.monotonic() + 5
+                        while supervisor._stderr_barriers.empty() and time.monotonic() < deadline:
+                            time.sleep(0.001)
+                        self.assertFalse(supervisor._stderr_barriers.empty())
+                        release_read.set()
+                        self.assertTrue(second_drain_started.wait(5))
+                        self.assertFalse(request_done.wait(0.25))
+                    finally:
+                        release_read.set()
+                        release_second_drain.set()
+                    thread.join(5)
+                    self.assertFalse(thread.is_alive())
+                    self.assertEqual(result["outcome"].fault, "STDERR_LIMIT_EXCEEDED")
+
     def test_oversized_stdout_frame_is_bounded_and_closes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -201,6 +269,52 @@ class RuntimeAdapterSupervisorTests(unittest.TestCase):
                 pass
             self.assertIsInstance(pid, int)
             self.assertFalse(process_alive(pid))
+
+    def test_thread_start_failure_is_not_masked_and_reaps_child(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            script = write_script(root, "import time\ntime.sleep(30)\n")
+            supervisor = StdioSupervisor(resolved_adapter(script, root))
+            real_start = threading.Thread.start
+            starts = 0
+
+            def fail_second_start(thread):
+                nonlocal starts
+                starts += 1
+                if starts == 2:
+                    raise RuntimeError("thread start failed")
+                real_start(thread)
+
+            with patch.object(threading.Thread, "start", new=fail_second_start):
+                with self.assertRaisesRegex(RuntimeError, "thread start failed"):
+                    supervisor.__enter__()
+            self.assertFalse(process_alive(supervisor.pid))
+
+    def test_stderr_drain_failure_faults_and_closes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            script = write_script(
+                root,
+                """
+                import sys
+                sys.stdin.buffer.readline()
+                sys.stdout.buffer.write(b'{"jsonrpc":"2.0","id":"r1","result":{}}\\n')
+                sys.stdout.buffer.flush()
+                """,
+            )
+            with patch.object(
+                StdioSupervisor,
+                "_drain_stderr_fd",
+                side_effect=RuntimeError("drain failed"),
+            ):
+                with StdioSupervisor(resolved_adapter(script, root)) as supervisor:
+                    pid = supervisor.pid
+                    outcome = supervisor.request(
+                        '{"jsonrpc":"2.0","id":"r1","method":"runtime.health","params":{}}'
+                    )
+                    self.assertEqual(outcome.fault, "STDERR_DRAIN_FAILED")
+                    self.assertTrue(outcome.should_close)
+                    self.assertFalse(process_alive(pid))
 
     def test_no_forbidden_process_or_state_imports(self) -> None:
         forbidden_llm_collab = {
@@ -260,6 +374,177 @@ class RuntimeAdapterSupervisorTests(unittest.TestCase):
                 if node.func.id == "StdioSupervisor":
                     self.assertFalse(any(keyword.arg in params for keyword in node.keywords))
 
+
+
+    def test_a_wake_queued_during_the_drain_is_not_swallowed(self) -> None:
+        """A barrier queued between the snapshot and the wake drain must still be served.
+
+        The loop used to snapshot barriers and then drain the wake pipe, so a publish
+        landing in that window had its wake byte consumed on its behalf: the barrier was
+        never signalled and no byte remained to force another pass, leaving the publisher
+        blocked in `barrier.wait()` forever. Draining first guarantees any byte written
+        afterwards survives into the next `select()`.
+
+        Made deterministic by injecting exactly that interleaving at the start of the
+        wake drain rather than racing for it.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            script = write_script(
+                root,
+                """
+                import sys, time
+                sys.stdin.readline()
+                sys.stdout.buffer.write(b'{"jsonrpc":"2.0","id":"r1","result":{}}\\n')
+                sys.stdout.buffer.flush()
+                time.sleep(5)
+                """,
+            )
+            injected = threading.Event()
+            late_barrier = threading.Event()
+            real_drain_fd = StdioSupervisor._drain_fd
+
+            with StdioSupervisor(resolved_adapter(script, root)) as supervisor:
+                def injecting_drain_fd(fd: int) -> None:
+                    if not injected.is_set():
+                        injected.set()
+                        # A publish landing after select() and before the wake drain.
+                        supervisor._stderr_barriers.put(late_barrier)
+                        supervisor._wake_stderr()
+                    real_drain_fd(fd)
+
+                with patch.object(StdioSupervisor, "_drain_fd",
+                                  staticmethod(injecting_drain_fd)):
+                    outcome = supervisor.request(
+                        '{"jsonrpc":"2.0","id":"r1","method":"x","params":{}}',
+                        timeout_seconds=5,
+                    )
+                    self.assertIsNotNone(outcome.response, f"fault={outcome.fault} stderr={outcome.stderr[:200]!r}")
+                    self.assertTrue(
+                        late_barrier.wait(5),
+                        "a barrier queued during the wake drain was never signalled",
+                    )
+
+    def test_stdout_eof_waits_for_the_stderr_drain(self) -> None:
+        """PROCESS_CLOSED must not carry a half-drained diagnostic.
+
+        Only non-empty lines went through the barrier, so an adapter that wrote stderr
+        and exited could publish the EOF sentinel while the drain was still running,
+        returning diagnostics that were merely whatever had been read so far.
+
+        The child writes well UNDER the pipe buffer on purpose. An earlier version of
+        this test wrote past the stderr limit, which meant the child blocked on a full
+        pipe until the drain ran -- so pausing the drain also prevented the exit, no
+        early sentinel was possible, and the test passed with or without the barrier.
+        """
+        payload = 8192
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            script = write_script(
+                root,
+                """
+                import sys
+                sys.stdin.readline()
+                sys.stderr.buffer.write(b"e" * 8192)
+                sys.stderr.buffer.flush()
+                """,
+            )
+            real_drain = StdioSupervisor._drain_stderr_fd
+            first = threading.Event()
+
+            def paused_drain(self_inner, fd):
+                if not first.is_set():
+                    first.set()
+                    time.sleep(0.4)
+                return real_drain(self_inner, fd)
+
+            with patch.object(StdioSupervisor, "_drain_stderr_fd", paused_drain):
+                with StdioSupervisor(resolved_adapter(script, root)) as supervisor:
+                    outcome = supervisor.request(
+                        '{"jsonrpc":"2.0","id":"r1","method":"x","params":{}}',
+                        timeout_seconds=5,
+                    )
+        self.assertEqual("PROCESS_CLOSED", outcome.fault)
+        self.assertEqual(
+            payload, len(outcome.stderr),
+            "the EOF sentinel published before the drain had read the diagnostics",
+        )
+        self.assertFalse(outcome.stderr_truncated)
+
+    def test_an_unexpected_stderr_read_error_is_a_drain_failure(self) -> None:
+        """Only a zero-length read is EOF.
+
+        Treating every `OSError` as EOF let an active-connection failure end the drain
+        normally, so a waiting response was released as clean while diagnostics were
+        never read. Teardown-caused errors remain suppressed -- that path is exercised by
+        every other test in this file, which all close normally.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            script = write_script(
+                root,
+                """
+                import sys, time
+                sys.stdin.readline()
+                sys.stdout.buffer.write(b'{"jsonrpc":"2.0","id":"r1","result":{}}\\n')
+                sys.stdout.buffer.flush()
+                time.sleep(5)
+                """,
+            )
+            real_read = os.read
+
+            def failing_read(fd, size):
+                if fd == self._stderr_fd_under_test:
+                    raise OSError(5, "Input/output error")
+                return real_read(fd, size)
+
+            with StdioSupervisor(resolved_adapter(script, root)) as supervisor:
+                self._stderr_fd_under_test = supervisor._process.stderr.fileno()
+                with patch.object(
+                    __import__("llm_collab.runtime_adapter_supervisor", fromlist=["os"]).os,
+                    "read",
+                    failing_read,
+                ):
+                    deadline = time.monotonic() + 5
+                    while not supervisor._stderr_failed.is_set() and time.monotonic() < deadline:
+                        supervisor._wake_stderr()
+                        time.sleep(0.05)
+                    self.assertTrue(
+                        supervisor._stderr_failed.is_set(),
+                        "an active-connection read error did not fail the drain closed",
+                    )
+                outcome = supervisor.request(
+                    '{"jsonrpc":"2.0","id":"r1","method":"x","params":{}}',
+                    timeout_seconds=5,
+                )
+        self.assertEqual("STDERR_DRAIN_FAILED", outcome.fault)
+        self.assertTrue(outcome.should_close)
+
+    def test_a_recorded_drain_failure_survives_a_dead_child(self) -> None:
+        """The structured fault must not depend on whether the child is still alive.
+
+        `_require_process()` ran first, so an adapter that exited after the drain failure
+        produced a `RuntimeError` instead of the promised `STDERR_DRAIN_FAILED` outcome.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            script = write_script(root, "import sys\nsys.stdin.readline()\n")
+            with StdioSupervisor(resolved_adapter(script, root)) as supervisor:
+                supervisor._stderr_failed.set()
+                # Detach the child only for the duration of the call, then put it back so
+                # __exit__ can still reap it. Leaving `_process` as None made `close()`
+                # return early, orphaning the child and its threads into later tests.
+                live = supervisor._process
+                supervisor._process = None
+                try:
+                    outcome = supervisor.request(
+                        '{"jsonrpc":"2.0","id":"r1","method":"x","params":{}}',
+                        timeout_seconds=5,
+                    )
+                finally:
+                    supervisor._process = live
+        self.assertEqual("STDERR_DRAIN_FAILED", outcome.fault)
+        self.assertTrue(outcome.should_close)
 
 if __name__ == "__main__":
     unittest.main()

@@ -9,7 +9,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import os
 import queue
+import selectors
 import subprocess
 import threading
 
@@ -41,6 +43,12 @@ class StdioSupervisor:
         self._stderr = bytearray()
         self._stderr_truncated = False
         self._stderr_lock = threading.Lock()
+        self._stderr_barriers: queue.Queue[threading.Event] = queue.Queue()
+        self._stderr_done = threading.Event()
+        self._tearing_down = threading.Event()
+        self._stderr_failed = threading.Event()
+        self._stderr_wakeup: tuple[int, int] | None = None
+        self._lifecycle_lock = threading.RLock()
         self._stdout_thread: threading.Thread | None = None
         self._stderr_thread: threading.Thread | None = None
 
@@ -62,16 +70,32 @@ class StdioSupervisor:
             shell=False,
         )
         self._process = process
-        self._stdout_thread = threading.Thread(target=self._read_stdout, daemon=True)
-        self._stderr_thread = threading.Thread(target=self._drain_stderr, daemon=True)
-        self._stdout_thread.start()
-        self._stderr_thread.start()
+        try:
+            if process.stderr is not None:
+                os.set_blocking(process.stderr.fileno(), False)
+            self._stderr_wakeup = os.pipe()
+            for fd in self._stderr_wakeup:
+                os.set_blocking(fd, False)
+            self._stdout_thread = threading.Thread(target=self._read_stdout, daemon=True)
+            self._stderr_thread = threading.Thread(target=self._drain_stderr, daemon=True)
+            self._stdout_thread.start()
+            self._stderr_thread.start()
+        except BaseException:
+            self.close()
+            raise
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
         self.close()
 
     def request(self, frame: str, *, timeout_seconds: float = 5.0) -> SupervisorOutcome:
+        # BEFORE _require_process. A recorded drain failure is a structured outcome we
+        # promised the caller; letting the liveness check run first meant an adapter that
+        # exited after the failure raised RuntimeError instead, so which error the caller
+        # saw depended on whether the child happened to still be alive.
+        if self._stderr_failed.is_set():
+            self.close()
+            return self._outcome(fault="STDERR_DRAIN_FAILED", should_close=True)
         process = self._require_process()
         stdin = process.stdin
         if stdin is None:
@@ -87,6 +111,9 @@ class StdioSupervisor:
         except queue.Empty:
             self.close()
             return self._outcome(fault="REQUEST_TIMEOUT", should_close=True)
+        if self._stderr_failed.is_set():
+            self.close()
+            return self._outcome(fault="STDERR_DRAIN_FAILED", should_close=True)
         if raw is None:
             return self._outcome(fault="PROCESS_CLOSED", should_close=True)
         if len(raw) > MAX_MESSAGE_BYTES + 1 or not raw.endswith(b"\n"):
@@ -101,6 +128,11 @@ class StdioSupervisor:
             return self._outcome(fault="INVALID_FRAMING", should_close=True)
 
     def close(self) -> None:
+        with self._lifecycle_lock:
+            self._close()
+
+    def _close(self) -> None:
+        self._tearing_down.set()
         process = self._process
         if process is None:
             return
@@ -116,15 +148,26 @@ class StdioSupervisor:
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait(timeout=2)
+        self._wake_stderr()
         for stream in (process.stdout, process.stderr):
             if stream is not None:
                 try:
                     stream.close()
                 except OSError:
                     pass
+        self._stderr_done.set()
+        self._release_stderr_barriers()
         for thread in (self._stdout_thread, self._stderr_thread):
-            if thread is not None:
+            if thread is not None and thread.ident is not None:
                 thread.join(timeout=1)
+        wakeup = self._stderr_wakeup
+        self._stderr_wakeup = None
+        if wakeup is not None:
+            for fd in wakeup:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
 
     def _validate_spawn_paths(self) -> None:
         if not Path(self._resolved.executable).is_absolute():
@@ -151,28 +194,113 @@ class StdioSupervisor:
                 self._stdout.put(None)
                 return
             if line == b"":
-                self._stdout.put(None)
+                # Through the barrier, like a frame. Publishing the sentinel directly let
+                # an adapter that wrote stderr and exited return PROCESS_CLOSED carrying a
+                # partial prefix with stderr_truncated=False -- indistinguishable from a
+                # complete diagnostic.
+                self._publish(None)
                 return
-            self._stdout.put(line)
+            self._publish(line)
 
     def _drain_stderr(self) -> None:
         process = self._process
         stderr = process.stderr if process is not None else None
-        if stderr is None:
+        wakeup = self._stderr_wakeup
+        if stderr is None or wakeup is None:
+            self._stderr_done.set()
+            self._release_stderr_barriers()
             return
+        stderr_fd = stderr.fileno()
+        wake_read, _ = wakeup
+        try:
+            with selectors.DefaultSelector() as selector:
+                selector.register(stderr_fd, selectors.EVENT_READ)
+                selector.register(wake_read, selectors.EVENT_READ)
+                while True:
+                    events = selector.select()
+                    # Drain the wake FIRST, then snapshot. Snapshotting first meant a
+                    # barrier queued between the snapshot and the drain had its wake byte
+                    # consumed on its behalf: it was never signalled and no byte remained
+                    # to trigger another pass, so the publisher waited forever. Draining
+                    # first guarantees any byte written afterwards survives and forces a
+                    # further iteration.
+                    if any(key.fd == wake_read for key, _ in events):
+                        self._drain_fd(wake_read)
+                    barriers = self._take_stderr_barriers()
+                    stderr_closed = self._drain_stderr_fd(stderr_fd)
+                    for barrier in barriers:
+                        barrier.set()
+                    if stderr_closed:
+                        return
+        except Exception:
+            self._stderr_failed.set()
+            self._stdout.put(None)
+        finally:
+            self._stderr_done.set()
+            self._release_stderr_barriers()
+
+    def _drain_stderr_fd(self, fd: int) -> bool:
         while True:
             try:
-                chunk = stderr.read(4096)
+                chunk = os.read(fd, 4096)
+            except BlockingIOError:
+                return False
             except OSError:
-                return
+                # A zero-length read is the ONLY EOF signal. Treating every OSError as
+                # EOF let an active-connection failure such as EIO end the drain
+                # normally, releasing a waiting response as clean while diagnostics were
+                # never read. Errors caused by our own teardown are the sole exception.
+                if self._tearing_down.is_set():
+                    return True
+                raise
             if not chunk:
-                return
+                return True
             with self._stderr_lock:
                 remaining = MAX_STDERR_BYTES_PER_CONNECTION - len(self._stderr)
                 if remaining > 0:
                     self._stderr.extend(chunk[:remaining])
                 if len(chunk) > remaining:
                     self._stderr_truncated = True
+
+    @staticmethod
+    def _drain_fd(fd: int) -> None:
+        while True:
+            try:
+                if not os.read(fd, 4096):
+                    return
+            except (BlockingIOError, OSError):
+                return
+
+    def _publish(self, frame: bytes | None) -> None:
+        barrier = threading.Event()
+        self._stderr_barriers.put(barrier)
+        if self._stderr_done.is_set():
+            self._release_stderr_barriers()
+        else:
+            self._wake_stderr()
+        barrier.wait()
+        self._stdout.put(frame)
+
+    def _wake_stderr(self) -> None:
+        with self._lifecycle_lock:
+            if self._stderr_wakeup is None:
+                return
+            try:
+                os.write(self._stderr_wakeup[1], b"\0")
+            except (BlockingIOError, OSError):
+                pass
+
+    def _take_stderr_barriers(self) -> list[threading.Event]:
+        barriers = []
+        while True:
+            try:
+                barriers.append(self._stderr_barriers.get_nowait())
+            except queue.Empty:
+                return barriers
+
+    def _release_stderr_barriers(self) -> None:
+        for barrier in self._take_stderr_barriers():
+            barrier.set()
 
     def _outcome(
         self,
