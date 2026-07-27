@@ -271,9 +271,12 @@ whether the code changes:
   required checks, then **issue a new exact-head request for the amended head**.
 - **Reject it.** A finding that is wrong, out of scope, or already handled is
   answered with a written disposition posted on that thread, naming the head it
-  was judged at. No code changes, so there is no amended head and no new request:
-  the existing exact-head request stands, and a re-review is requested on the
-  **same** head only if the rejection itself needs one.
+  was judged at. No code changes, so there is no amended head — but the request is
+  **not** satisfied by the disposition: adjudicating a finding produces neither
+  exact-head terminal signal, and automatic review is off, so nothing further
+  arrives unasked. **Request a re-review on the same head.** Leaving it optional
+  left the request pending forever, or pushed it down the silently-dropped-request
+  escalation path for a review that was answered rather than dropped.
 
 Requiring a fix for every finding left an invalid one with no legal move — a
 worker had to either make an unwarranted change or stall — and the governing

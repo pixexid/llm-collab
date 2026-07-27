@@ -393,7 +393,12 @@ else is a second source that goes stale the moment this one moves.
 - **the worker who pushed the change owns re-requesting the amended head, at every
   tier.** Tier decides whether a review must be *initiated*; once an operator has
   explicitly requested one, every amended candidate head needs a new exact-head request
-  from the change owner, unless the operator explicitly withdraws the review requirement.
+  from the change owner, unless the operator withdraws the review requirement **for that
+  exact head**. A withdrawal is a durable operator-authored artifact naming the commit OID
+  it applies to, and **a later push invalidates it**: the next head owes a new request
+  like any other. "Explicit" alone was not enough — a withdrawal recorded on an earlier
+  head could be read as retiring the obligation for every head after it, which turns one
+  operator decision into a standing exemption nobody granted.
   Tier C does not make an old-head artifact valid, and a requested Tier C review with no
   named owner is how an amended head sits waiting for a re-request nobody believes is
   theirs

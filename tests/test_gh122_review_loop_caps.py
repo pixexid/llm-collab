@@ -1132,7 +1132,7 @@ class ReviewLoopCapContractTest(unittest.TestCase):
         # `review` is discounted where it modifies another head.
         HEAD = r"(?:comments?|bodies|body|threads?|reactions?|reviews?)"
         ITEM = rf"(?:(?:top-level|PR|inline|connector|full|review|the)[ -])*{HEAD}"
-        SEP = r"(?:\s*/\s*|,\s+(?:and\s+|or\s+)?|\s+(?:and|or|as well as)\s+)"
+        SEP = r"(?:\s*/\s*|[,;]\s+(?:and\s+|or\s+)?|\s+(?:and|or|as well as)\s+)"
         RUN = re.compile(rf"{ITEM}(?:{SEP}{ITEM}){{2,}}", re.I)
 
         def kinds(sentence):
@@ -1160,11 +1160,16 @@ class ReviewLoopCapContractTest(unittest.TestCase):
         for tree in INSTRUCTION_TREES:
             documents.extend(sorted((REPO_ROOT / tree).rglob("*.md")))
         self.assertIn(WORKFLOW_DOC, documents, "the scan must cover the canonical document")
-        for required in ("projects", "agents"):
-            self.assertTrue(
-                any(d.is_relative_to(REPO_ROOT / required) for d in documents),
-                f"the scan must reach the {required}/ instruction tree",
-            )
+        # The SCOPE is asserted, not the contents. Requiring a markdown file under each
+        # tree passed only because of an untracked local file: `agents/` holds nothing but
+        # `.gitkeep` in a clean checkout, so that assertion failed unconditionally for
+        # anyone else -- a test that depended on one machine's stray file.
+        self.assertIn("agents", INSTRUCTION_TREES)
+        self.assertIn("projects", INSTRUCTION_TREES)
+        self.assertTrue(
+            any(d.is_relative_to(REPO_ROOT / "projects") for d in documents),
+            "projects/ has tracked markdown, so the scan must be reaching it",
+        )
 
         # A link to the canonical set is stripped, not treated as absolution. Exempting
         # the whole sentence let a complete restatement pass by appending the link to it:
@@ -1223,7 +1228,11 @@ class ReviewLoopCapContractTest(unittest.TestCase):
                 end = text.index("Referenced, never restated.", start)
                 text = text[:start] + text[end:]
             for unit in units(text):
-                for sentence in re.split(r"(?<=[.;]) ", LINK.sub(" ", unit)):
+                # Split on sentence ends only. A semicolon LINKS clauses -- "inspect
+                # comments; review bodies; threads; reactions" is one list -- so splitting
+                # there first cut a genuine enumeration into one-kind fragments that could
+                # never reach the threshold.
+                for sentence in re.split(r"(?<=[.]) ", LINK.sub(" ", unit)):
                     named = kinds(sentence)
                     if len(named) >= 3:
                         offenders.append(f"{document.name}: {sentence.strip()[:110]}")
@@ -1314,7 +1323,27 @@ class ReviewLoopCapContractTest(unittest.TestCase):
         self.assertIn("no code changes, so there is no amended head".lower(),
                       text.lower())
         # The distinction the fix path depends on: rejecting does not stale the request.
-        self.assertIn("the existing exact-head request stands", text)
+        # Rejecting adjudicates the finding but produces no terminal signal, so the
+        # request stays open unless a same-head re-review is REQUIRED. Optional left it
+        # pending forever, or sent it down the dropped-request escalation path for a
+        # review that was answered rather than dropped.
+        self.assertIn("**Request a re-review on the same head.**", text)
+        self.assertIn("not** satisfied by the disposition", text)
+
+    def test_a_withdrawal_is_bound_to_the_head_it_was_granted_on(self):
+        """An operator decision about one head was readable as a standing exemption.
+
+        The fixture helper already required withdrawal evidence naming the current head,
+        but that requirement lived only in the tests: the worker-facing rule said
+        "explicit" and nothing more, so a withdrawal recorded before an amendment could
+        be read as retiring the new head's obligation too.
+        """
+        import re
+
+        text = re.sub(r"\s+", " ", WORKFLOW_DOC.read_text(encoding="utf-8"))
+        self.assertIn("withdraws the review requirement **for that exact head**", text)
+        self.assertIn("naming the commit OID it applies to", text)
+        self.assertIn("a later push invalidates it", text)
 
     def test_the_rule_heading_covers_resolved_threads(self):
         """A worker who reads only the bold heading is the one who loses a finding.
