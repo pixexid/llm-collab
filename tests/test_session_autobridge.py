@@ -2588,6 +2588,96 @@ class SessionAutobridgeTest(unittest.TestCase):
         frontmatter, _ = parse_frontmatter(delivered_candidates[-1].read_text())
         self.assertIsNone(frontmatter["target_session_id"])
 
+    def test_expired_lease_does_not_write_permanently_unroutable_packet(self):
+        # GH-324: a recipient binding whose session lease expired while in use
+        # must still address the written packet to the binding's durable
+        # runtime_session_id. The old code derived target_session_id from the
+        # DISPATCHABLE pair, which is None once the lease lapses, so it baked
+        # target_session_id: null into a durable packet that no later
+        # re-registration could heal -- the binding still named a real target.
+        # The durable address and the transient dispatch decision are separate
+        # facts: the packet must carry the real target so a re-registration
+        # routes it, while autobridge stays honestly refused (lease_expired).
+        root = self.make_workspace()
+        self.add_agent(
+            root,
+            {"id": "codex", "display_name": "Codex",
+             "activation": {"type": "cli_session", "watcher_enabled": True}},
+        )
+        self.add_agent(
+            root,
+            {"id": "claude", "display_name": "Claude",
+             "activation": {"type": "cli_session", "watcher_enabled": True}},
+        )
+        chat_dir = self.create_chat(
+            root,
+            chat_dir_name="2026-07-27_expired-lease__CHAT-EXP1",
+            chat_id="CHAT-EXP1",
+            project_id="amiga",
+        )
+        self.run_cli(
+            root,
+            "register",
+            "--session", "SESSION-CLAUDE-EXP",
+            "--agent", "claude",
+            "--project", "amiga",
+            "--chat", "CHAT-EXP1",
+            "--mode", "auto-read",
+            "--runtime-family", "claude_app",
+            "--runtime-session-id", "claude-runtime-expired",
+            "--runtime-session-source", "first_read",
+        )
+        # Expire the lease after registration: the exact "expired while in
+        # continuous use" shape from GH-324, made deterministic.
+        session_path = (
+            root / "State" / "session_autobridge" / "sessions"
+            / "SESSION-CLAUDE-EXP.json"
+        )
+        session = json.loads(session_path.read_text())
+        session["lease_expires_utc"] = "2000-01-01T00:00:00+00:00"
+        session_path.write_text(json.dumps(session))
+
+        deliver_result = subprocess.run(
+            [sys.executable, str(DELIVER_SCRIPT),
+             "--chat", "CHAT-EXP1", "--from", "codex", "--to", "claude",
+             "--project", "amiga", "--title", "Strand guard",
+             "--sender-session-id", "codex-session-1", "--body-file", "-"],
+            cwd=root, text=True, input="Body for the expired-lease packet.",
+            capture_output=True, check=False,
+        )
+        self.assertEqual(0, deliver_result.returncode, deliver_result.stderr)
+        payload = json.loads(deliver_result.stdout.split("\n\n", 1)[0])
+
+        # Dispatch is honestly refused: the lease is expired, so no autobridge wake.
+        self.assertFalse(payload["autobridge_ready"])
+        self.assertEqual(
+            session_autobridge_lib.EXACT_BINDING_NOT_DISPATCHABLE_REASON,
+            payload["autobridge_refusal_reason"],
+        )
+        # GH-324 fix: the durable address is the binding's runtime_session_id,
+        # not null. A null here is the permanently-unroutable regression.
+        self.assertEqual(
+            "claude-runtime-expired", payload["resolved_target_session_id"]
+        )
+
+        delivered_candidates = sorted(chat_dir.glob("*_to-claude_*.md"))
+        self.assertTrue(delivered_candidates)
+        frontmatter, _ = parse_frontmatter(delivered_candidates[-1].read_text())
+        self.assertEqual(
+            "claude-runtime-expired", frontmatter["target_session_id"]
+        )
+
+        # Self-heal proof: a re-registered session with the same durable
+        # runtime_session_id routes this packet, because the recorded target is
+        # the binding's runtime id rather than a transient null.
+        re_registered = dict(session)
+        re_registered["lease_expires_utc"] = "2999-01-01T00:00:00+00:00"
+        re_registered["status"] = "active"
+        self.assertIn(
+            frontmatter["target_session_id"],
+            session_autobridge_lib.session_target_ids(re_registered),
+        )
+
     def deliver_with_scope(self, root, chat_id, *, repo_targets=None, project="amiga"):
         """Run deliver.py and return its JSON payload plus stderr."""
         argv = [

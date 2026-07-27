@@ -437,18 +437,43 @@ def main():
             autobridge_target = None
             autobridge_refusal_reason = f"{BINDING_UNREADABLE_REASON}: {error}"
             binding_unreadable = True
+        # DURABLE ADDRESS vs TRANSIENT DISPATCH are two different facts. The binding's
+        # runtime_session_id is the durable "which thread this packet is for" address; whether
+        # that session is dispatchable RIGHT NOW (lease alive, status ok) is the transient wake
+        # decision. resolve_exact_dispatch_pair hands back the binding only when the matched
+        # session is dispatchable, so when it is merely not dispatchable right now --
+        # lease_expired is the case that bit GH-324 -- autobridge_binding is None and the old
+        # code nulled the address. That baked a permanently unroutable target_session_id into
+        # the packet which no later re-registration could heal, because the binding still named
+        # a real target but the packet no longer carried it. Fall back to the binding's durable
+        # runtime_session_id so the packet is addressed correctly and self-heals the moment the
+        # session is re-registered; autobridge stays refused for this send, which is the honest
+        # transient state. The watcher re-validates the recorded address at dispatch time, so a
+        # swap between this read and dispatch is still caught downstream, exactly as it is for
+        # the dispatchable path.
         resolved_binding_target = (
             autobridge_binding.get("runtime_session_id")
             if autobridge_binding is not None
-            else None
+            else resolve_bound_runtime_session_id(args.project, chat_id, args.recipient)
         )
-        if autobridge_target is not None and resolved_binding_target is not None:
-            if explicit_target_session_id and str(explicit_target_session_id) != resolved_binding_target:
-                autobridge_target = None
-                autobridge_refusal_reason = EXACT_BINDING_MISMATCH_REASON
-                args.target_session_id = None
-            else:
-                args.target_session_id = resolved_binding_target
+        explicit_mismatches_binding = (
+            explicit_target_session_id is not None
+            and resolved_binding_target is not None
+            and str(explicit_target_session_id) != str(resolved_binding_target)
+        )
+        if explicit_mismatches_binding:
+            # The sender named a specific target thread the recipient's binding contradicts.
+            # Do not re-address the packet to the binding's target; that would silently redirect
+            # an explicit intent. Refuse so the sender sees the mismatch.
+            autobridge_target = None
+            autobridge_refusal_reason = EXACT_BINDING_MISMATCH_REASON
+            args.target_session_id = None
+        elif resolved_binding_target is not None:
+            # Address the packet to the binding's durable runtime_session_id whether or not the
+            # session is dispatchable right now. This branch is also the one that fires for a
+            # not-dispatchable-but-bound session, which is the GH-324 fix.
+            args.target_session_id = str(resolved_binding_target)
+            if autobridge_binding is not None:
                 args.target_binding_id = autobridge_binding.get("binding_id")
                 args.target_binding_generation = autobridge_binding.get("binding_generation")
         else:
