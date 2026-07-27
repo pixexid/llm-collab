@@ -23,6 +23,7 @@ SCRIPT_PATH = REPO_ROOT / "bin" / "session_autobridge.py"
 DELIVER_SCRIPT = REPO_ROOT / "bin" / "deliver.py"
 INBOX_SCRIPT = REPO_ROOT / "bin" / "inbox.py"
 WATCH_INBOX_SCRIPT = REPO_ROOT / "bin" / "watch_inbox.py"
+PI_DOORBELL_SCRIPT = REPO_ROOT / "bin" / "pi_doorbell.py"
 sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(REPO_ROOT / "bin"))
 
@@ -4555,6 +4556,76 @@ class SessionAutobridgeTest(unittest.TestCase):
         self.assertEqual("Watcher autobridge", runtime_payload["message"]["title"])
         session_payload = self.run_cli(root, "show", "--session", "SESSION-WATCHER")
         self.assertIn(message_rel, session_payload["processed_messages"])
+
+    def test_pi_doorbell_wakes_once_without_claiming_acceptance(self):
+        root = self.make_workspace()
+        self.add_agent(
+            root,
+            {
+                "id": "glmpi",
+                "display_name": "Glim",
+                "activation": {"type": "cli_session", "watcher_enabled": True},
+            },
+        )
+        message_rel = self.add_message(
+            root,
+            agent_id="glmpi",
+            chat_id="CHAT-PI-WAKE",
+            project_id="amiga",
+            title="Pi pointer wake",
+            target_session_id="pi-glim-1",
+        )
+        doorbell = root / "State" / "pi" / "glmpi.pointer"
+        self.run_cli(
+            root,
+            "register",
+            "--session",
+            "SESSION-PI-GLIM",
+            "--agent",
+            "glmpi",
+            "--project",
+            "amiga",
+            "--chat",
+            "CHAT-PI-WAKE",
+            "--mode",
+            "auto-read",
+            "--wake-strategy",
+            "runtime_trigger",
+            "--runtime-family",
+            "pi",
+            "--runtime-session-id",
+            "pi-glim-1",
+            "--runtime-command",
+            json.dumps([sys.executable, str(PI_DOORBELL_SCRIPT), str(doorbell)]),
+        )
+
+        command = [
+            sys.executable,
+            str(WATCH_INBOX_SCRIPT),
+            "--me",
+            "glmpi",
+            "--max-polls",
+            "1",
+            "--json",
+        ]
+        first = subprocess.run(command, cwd=root, text=True, capture_output=True, check=True)
+        second = subprocess.run(command, cwd=root, text=True, capture_output=True, check=True)
+        first_events = [json.loads(line) for line in first.stdout.splitlines() if line.strip()]
+        second_events = [json.loads(line) for line in second.stdout.splitlines() if line.strip()]
+
+        self.assertEqual(message_rel + "\n", doorbell.read_text())
+        self.assertTrue(
+            any(
+                event["event"] == "autobridge_wake_signaled"
+                and event["message_path"] == message_rel
+                for event in first_events
+            )
+        )
+        self.assertFalse(any(event["event"] == "autobridge_consumed" for event in first_events))
+        self.assertFalse(any(event["event"] == "autobridge_wake_signaled" for event in second_events))
+        inbox = json.loads((root / "agents" / "glmpi" / "inbox.json").read_text())
+        self.assertIn(message_rel, inbox["unread"])
+        self.assertNotIn(message_rel, inbox["read"])
 
     def test_watch_inbox_default_off_empty_ledger_preserves_legacy_runtime_trigger(self):
         root = self.make_workspace()
