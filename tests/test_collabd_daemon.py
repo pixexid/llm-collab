@@ -239,11 +239,12 @@ class DaemonTest(unittest.TestCase):
                 # The first request must land on a listening socket, not a bound one.
                 self.assertTrue(self.request(b'{"version":1,"op":"status"}')["running"])
             finally:
-                # If the regression recurs, the assertion above raises. `thread` is
-                # non-daemon and the server stays in its accept loop, so a test meant to
-                # report a failure would instead hang the whole run -- shutdown belongs
-                # here, not after the assertion.
-                self.stop(thread)
+                # Out-of-band, deliberately. If the regression recurs the assertion above
+                # raises because the socket is bound but not listening -- and an in-band
+                # shutdown request would raise for the identical reason, leaving the
+                # non-daemon thread in its accept loop forever. A test meant to report a
+                # failure would hang the run instead.
+                self.force_stop(server, thread)
         self.assertIs(real_open, server_module.DaemonServer._open_listener)
 
     def test_readiness_waits_for_a_served_request_not_for_a_connect(self) -> None:
@@ -367,6 +368,24 @@ class DaemonTest(unittest.TestCase):
             self.stop_or_report(finished)
         self.assertIn("exited before cleanup", str(caught.exception))
 
+    def test_force_stop_ends_the_server_without_using_the_protocol(self) -> None:
+        """Cleanup after a protocol failure cannot itself require the protocol.
+
+        The in-band `stop()` sends a shutdown REQUEST. When the thing that regressed is
+        the socket or the dispatch path, that request fails exactly like the assertion
+        did, and the non-daemon accept thread outlives the test -- a run that should
+        report a failure hangs instead.
+
+        Proven by breaking the protocol first: the socket file is removed, so no request
+        can reach the daemon at all, and the server must still be stoppable.
+        """
+        server, thread = self.start()
+        self.paths.socket.unlink()
+        with self.assertRaises((OSError, ValueError)):
+            self.request(b'{"version":1,"op":"status"}')
+        self.force_stop(server, thread)
+        self.assertFalse(thread.is_alive())
+
     def test_readiness_respects_its_own_deadline_against_a_silent_socket(self) -> None:
         """A socket that accepts and never answers must not outlast the helper's deadline.
 
@@ -456,9 +475,13 @@ class DaemonTest(unittest.TestCase):
             started = time.monotonic()
             answer = self.request_when_available(b'{"version":1,"op":"status"}')
             elapsed = time.monotonic() - started
+        # Receipt plus the lower bound is the whole claim: the capped implementation
+        # cannot get here at all, it raises TimeoutError at one second. An upper bound
+        # would add back exactly the scheduling-dependent failure this PR removes --
+        # a loaded worker can deliver a valid response and not reschedule this thread
+        # until after any wall-clock threshold I could pick.
         self.assertTrue(answer["running"])
         self.assertGreater(elapsed, 1.0, "the listener was supposed to answer slowly")
-        self.assertLess(elapsed, 2.0)
 
     def test_readiness_lets_one_attempt_use_the_remaining_budget(self) -> None:
         """Half-second attempts churned the backlog instead of waiting to be answered.
@@ -474,7 +497,6 @@ class DaemonTest(unittest.TestCase):
             self.wait_until_accepting(timeout=3.0)
             elapsed = time.monotonic() - started
         self.assertGreater(elapsed, 0.8)
-        self.assertLess(elapsed, 2.5)
 
     def test_the_readiness_probe_reports_failure_rather_than_hanging(self) -> None:
         """A readiness helper that waits forever turns a fast failure into a stall."""
@@ -523,7 +545,24 @@ class DaemonTest(unittest.TestCase):
         finally:
             self.stop_or_report(thread)
 
-    def stop_or_report(self, thread: threading.Thread) -> None:
+    def force_stop(self, server, thread: threading.Thread, *, timeout: float = 5.0) -> None:
+        """Stop the server WITHOUT using the protocol.
+
+        Failure-path cleanup cannot ask a broken daemon to shut itself down. When the
+        readiness regression recurs the socket is bound but not listening, so the
+        shutdown request raises exactly like the assertion did -- and the accept loop is
+        entered afterwards on a non-daemon thread that then never exits, turning a test
+        that should report a failure into one that hangs the whole run.
+
+        `_stopping` is checked every 0.1s because the listener polls, so setting it
+        directly is sufficient and needs nothing from the socket.
+        """
+        server._stopping = True
+        thread.join(timeout)
+        if thread.is_alive():
+            self.fail("the server thread did not exit after an out-of-band stop")
+
+    def stop_or_report(self, thread: threading.Thread, server=None) -> None:
         """Shut down and join, or say why there was nothing to shut down.
 
         `if thread.is_alive(): stop(...)` reads as a benign double-shutdown guard, but in a
@@ -532,7 +571,17 @@ class DaemonTest(unittest.TestCase):
         pass while this guard silently swallowed it.
         """
         if thread.is_alive():
-            self.stop(thread)
+            if server is None:
+                self.stop(thread)
+            else:
+                # In-band first, because a clean shutdown is worth exercising -- but
+                # never at the cost of hanging: if dispatch is the thing that regressed,
+                # the shutdown request fails the same way and the thread outlives the run.
+                try:
+                    self.stop(thread)
+                except (OSError, ValueError, AssertionError):
+                    self.force_stop(server, thread)
+                    raise
         else:
             self.fail("the server thread exited before cleanup; the accept loop died")
         thread.join(2)
@@ -674,7 +723,9 @@ class DaemonTest(unittest.TestCase):
                         # server down, so a dead thread means the accept loop exited on
                         # its own. If that happened after the status response every
                         # assertion above still passed, and the guard swallowed it.
-                        self.stop_or_report(thread)
+                        # The server is passed so cleanup can fall back out-of-band
+                        # rather than hang when dispatch is what broke.
+                        self.stop_or_report(thread, server)
                     open_writer.assert_not_called()
                     registry_read.assert_not_called()
                     watchdog_load.assert_not_called()
