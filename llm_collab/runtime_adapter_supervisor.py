@@ -45,6 +45,7 @@ class StdioSupervisor:
         self._stderr_lock = threading.Lock()
         self._stderr_barriers: queue.Queue[threading.Event] = queue.Queue()
         self._stderr_done = threading.Event()
+        self._stderr_failed = threading.Event()
         self._stderr_wakeup: tuple[int, int] | None = None
         self._lifecycle_lock = threading.RLock()
         self._stdout_thread: threading.Thread | None = None
@@ -88,6 +89,9 @@ class StdioSupervisor:
 
     def request(self, frame: str, *, timeout_seconds: float = 5.0) -> SupervisorOutcome:
         process = self._require_process()
+        if self._stderr_failed.is_set():
+            self.close()
+            return self._outcome(fault="STDERR_DRAIN_FAILED", should_close=True)
         stdin = process.stdin
         if stdin is None:
             return self._outcome(fault="PROCESS_CLOSED", should_close=True)
@@ -102,6 +106,9 @@ class StdioSupervisor:
         except queue.Empty:
             self.close()
             return self._outcome(fault="REQUEST_TIMEOUT", should_close=True)
+        if self._stderr_failed.is_set():
+            self.close()
+            return self._outcome(fault="STDERR_DRAIN_FAILED", should_close=True)
         if raw is None:
             return self._outcome(fault="PROCESS_CLOSED", should_close=True)
         if len(raw) > MAX_MESSAGE_BYTES + 1 or not raw.endswith(b"\n"):
@@ -145,7 +152,7 @@ class StdioSupervisor:
         self._stderr_done.set()
         self._release_stderr_barriers()
         for thread in (self._stdout_thread, self._stderr_thread):
-            if thread is not None:
+            if thread is not None and thread.ident is not None:
                 thread.join(timeout=1)
         wakeup = self._stderr_wakeup
         self._stderr_wakeup = None
@@ -209,6 +216,9 @@ class StdioSupervisor:
                         barrier.set()
                     if stderr_closed:
                         return
+        except Exception:
+            self._stderr_failed.set()
+            self._stdout.put(None)
         finally:
             self._stderr_done.set()
             self._release_stderr_barriers()

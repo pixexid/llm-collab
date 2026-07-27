@@ -270,6 +270,52 @@ class RuntimeAdapterSupervisorTests(unittest.TestCase):
             self.assertIsInstance(pid, int)
             self.assertFalse(process_alive(pid))
 
+    def test_thread_start_failure_is_not_masked_and_reaps_child(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            script = write_script(root, "import time\ntime.sleep(30)\n")
+            supervisor = StdioSupervisor(resolved_adapter(script, root))
+            real_start = threading.Thread.start
+            starts = 0
+
+            def fail_second_start(thread):
+                nonlocal starts
+                starts += 1
+                if starts == 2:
+                    raise RuntimeError("thread start failed")
+                real_start(thread)
+
+            with patch.object(threading.Thread, "start", new=fail_second_start):
+                with self.assertRaisesRegex(RuntimeError, "thread start failed"):
+                    supervisor.__enter__()
+            self.assertFalse(process_alive(supervisor.pid))
+
+    def test_stderr_drain_failure_faults_and_closes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            script = write_script(
+                root,
+                """
+                import sys
+                sys.stdin.buffer.readline()
+                sys.stdout.buffer.write(b'{"jsonrpc":"2.0","id":"r1","result":{}}\\n')
+                sys.stdout.buffer.flush()
+                """,
+            )
+            with patch.object(
+                StdioSupervisor,
+                "_drain_stderr_fd",
+                side_effect=RuntimeError("drain failed"),
+            ):
+                with StdioSupervisor(resolved_adapter(script, root)) as supervisor:
+                    pid = supervisor.pid
+                    outcome = supervisor.request(
+                        '{"jsonrpc":"2.0","id":"r1","method":"runtime.health","params":{}}'
+                    )
+                    self.assertEqual(outcome.fault, "STDERR_DRAIN_FAILED")
+                    self.assertTrue(outcome.should_close)
+                    self.assertFalse(process_alive(pid))
+
     def test_no_forbidden_process_or_state_imports(self) -> None:
         forbidden_llm_collab = {
             "canonical",
