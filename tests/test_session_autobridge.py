@@ -6091,6 +6091,21 @@ class ResumePromptNamesTheReplyChannelTest(unittest.TestCase):
                 # what survived the withdrawal, invoking is what did not.
                 self.assertIn("`deliver.py`", prompt)
 
+    def test_the_thread_is_for_a_delivery_receipt_not_the_answer(self) -> None:
+        """The old closing line invited the failure it was meant to bound.
+
+        "produce exactly one bounded reply or action" was read by a woken worker as a
+        promise that its thread answer would be routed back to the sender. It is not
+        routed anywhere -- the worker said so itself once it noticed. Telling it to
+        "answer tersely" without saying WHERE left the same gap open.
+        """
+        for project_id in self.PROJECTS:
+            with self.subTest(project_id=project_id):
+                prompt = self.prompt(project_id=project_id)
+                self.assertNotIn("produce exactly one bounded reply or action", prompt)
+                self.assertIn("Even a trivial answer is a packet", prompt)
+                self.assertIn("terse delivery", prompt)
+
     def test_the_prompt_names_the_mailbox_as_the_only_channel(self) -> None:
         for project_id in self.PROJECTS:
             with self.subTest(project_id=project_id):

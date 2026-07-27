@@ -1230,6 +1230,11 @@ def build_resume_prompt(session: dict, message: dict) -> str:
     stops travelling: the thread keeps the routing facts and `message_path`, and the
     content stays in the packet.
 
+    The closing instruction was also part of the failure. It read "produce exactly one
+    bounded reply or action", and the worker took that to mean its thread answer would be
+    routed back automatically -- its own words, after the fact. Nothing routes it. So the
+    prompt now says what the thread is FOR: a delivery receipt, not the answer.
+
     No read command is emitted either. `test_no_runnable_reply_command_is_emitted`
     withdrew copyable invocations from this prompt, and an `inbox.py --packet ...` line
     evades that guard only because `--packet` is not in its flag list -- which is a hole
@@ -1276,7 +1281,8 @@ def build_resume_prompt(session: dict, message: dict) -> str:
             "",
             *_reply_channel_lines(session, fm),
             "",
-            "If the request is trivial, answer tersely. Do not start unrelated work.",
+            "Even a trivial answer is a packet. This thread gets only a terse delivery",
+            "receipt -- what you sent and to whom. Do not start unrelated work.",
         ]
     )
     return "\n".join(lines)
