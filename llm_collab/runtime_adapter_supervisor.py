@@ -9,7 +9,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import os
 import queue
+import signal
 import subprocess
 import threading
 
@@ -19,6 +21,11 @@ from llm_collab.runtime_adapter_manifest import ManifestResolutionError, Resolve
 MAX_MESSAGE_BYTES = 1_048_576
 MAX_STDERR_BYTES_PER_CONNECTION = 65_536
 STDERR_READ_BYTES = 4096
+# Frames the child may have outstanding before we stop reading it. Nothing requires a
+# child to wait to be asked, so without a cap an adapter that emits unsolicited output
+# grows this queue for as long as it likes -- the memory is the host's, and the child
+# decides how much of it to take.
+MAX_PENDING_FRAMES = 64
 
 
 @dataclass(frozen=True)
@@ -38,9 +45,15 @@ class StdioSupervisor:
             raise TypeError("resolved must be a ResolvedAdapter")
         self._resolved = resolved
         self._process: subprocess.Popen[bytes] | None = None
-        self._stdout: queue.Queue[tuple[bytes, bool, bytes] | None] = queue.Queue()
+        self._stdout: queue.Queue[tuple[bytes, tuple[bytes, bool]] | None] = queue.Queue()
         self._stderr = bytearray()
         self._stderr_truncated = False
+        # The published snapshot, rebuilt only when stderr actually changes and then
+        # SHARED by reference. Copying the retained prefix per frame let a child that
+        # first filled the 64 KiB budget and then emitted many tiny frames multiply one
+        # bounded buffer into an unbounded one -- ~16k frames is about a gigabyte of
+        # duplicated diagnostics, every byte of it the same bytes.
+        self._diagnostics: tuple[bytes, bool] = (b"", False)
         self._stderr_lock = threading.Lock()
         self._stdout_thread: threading.Thread | None = None
         self._stderr_thread: threading.Thread | None = None
@@ -61,6 +74,11 @@ class StdioSupervisor:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             shell=False,
+            # Its own process group, so teardown can reach descendants. Terminating only
+            # the direct child leaves an inherited stdout/stderr handle open in a
+            # grandchild, the pump stays blocked in read, and closing the stream then
+            # waits on the same BufferedReader lock -- a timeout that never returns.
+            start_new_session=True,
         )
         self._process = process
         # Two threads, because the protocol requires stderr to be drained
@@ -96,25 +114,40 @@ class StdioSupervisor:
             return self._outcome(fault="REQUEST_TIMEOUT", should_close=True)
         if published is None:
             return self._outcome(fault="PROCESS_CLOSED", should_close=True)
-        raw, truncated_when_published, stderr_when_published = published
+        raw, (stderr_when_published, truncated_when_published) = published
         published_diagnostics = {
             "stderr": stderr_when_published,
             "stderr_truncated": truncated_when_published,
         }
         if len(raw) > MAX_MESSAGE_BYTES + 1 or not raw.endswith(b"\n"):
+            # close() can drain more stderr through process exit, so the diagnostics are
+            # read AFTER it. Reporting the publication snapshot here returned stderr=b""
+            # and truncated=False while the supervisor's own live state held the retained
+            # prefix and a true flag -- the outcome contradicted the object that built it.
             self.close()
-            return self._outcome(fault="MESSAGE_TOO_LARGE", should_close=True,
-                                 diagnostics=published_diagnostics)
-        if truncated_when_published:
-            return self._outcome(fault="STDERR_LIMIT_EXCEEDED", should_close=True,
-                                 diagnostics=published_diagnostics)
+            return self._outcome(fault="MESSAGE_TOO_LARGE", should_close=True)
+        # The two pumps are independent, so the stdout thread can snapshot before the
+        # stderr thread has consumed overflow bytes ALREADY sitting in the pipe. Trusting
+        # the published verdict alone therefore returned success, with no close and no
+        # quarantine, on a connection that had already breached its stderr budget --
+        # decided by which thread happened to run first. Truncation only ever goes from
+        # false to true, so consulting the live flag here is strictly conservative.
+        with self._stderr_lock:
+            truncated_now = self._stderr_truncated
+        if truncated_when_published or truncated_now:
+            # should_close is the quarantine signal and it belongs to the caller to act
+            # on; the supervisor does not tear itself down here, because a breached
+            # stderr budget still leaves a readable connection the caller may want to
+            # drain. Live diagnostics, since no frame's consistency is at stake once the
+            # outcome is a fault -- and the publication snapshot understates exactly the
+            # overflow being reported.
+            return self._outcome(fault="STDERR_LIMIT_EXCEEDED", should_close=True)
         try:
             return self._outcome(response=raw[:-1].decode("utf-8"),
                                  diagnostics=published_diagnostics)
         except UnicodeDecodeError:
             self.close()
-            return self._outcome(fault="INVALID_FRAMING", should_close=True,
-                                 diagnostics=published_diagnostics)
+            return self._outcome(fault="INVALID_FRAMING", should_close=True)
 
     def close(self) -> None:
         process = self._process
@@ -126,12 +159,7 @@ class StdioSupervisor:
             except OSError:
                 pass
         if process.poll() is None:
-            process.terminate()
-            try:
-                process.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=2)
+            self._terminate_group(process)
         for stream in (process.stdout, process.stderr):
             if stream is not None:
                 try:
@@ -141,6 +169,33 @@ class StdioSupervisor:
         for thread in (self._stdout_thread, self._stderr_thread):
             if thread is not None:
                 thread.join(timeout=1)
+
+    def _terminate_group(self, process: subprocess.Popen) -> None:
+        """Signal the child's whole process group, not just the child.
+
+        A descendant that inherited stdout/stderr keeps the pipe open after its parent
+        dies, so the pump stays blocked in read and the later stream close waits on the
+        same BufferedReader lock. Killing the group is what actually closes the
+        descriptors; without it a request timeout could never return.
+        """
+        def signal_group(sig, fallback) -> None:
+            try:
+                os.killpg(os.getpgid(process.pid), sig)
+            except (AttributeError, OSError, ProcessLookupError):
+                try:
+                    fallback()
+                except (OSError, ProcessLookupError):
+                    pass
+
+        signal_group(signal.SIGTERM, process.terminate)
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            signal_group(signal.SIGKILL, process.kill)
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                pass
 
     def _validate_spawn_paths(self) -> None:
         if not Path(self._resolved.executable).is_absolute():
@@ -177,6 +232,12 @@ class StdioSupervisor:
             if line == b"":
                 self._stdout.put(None)
                 return
+            if self._stdout.qsize() >= MAX_PENDING_FRAMES:
+                # The child is talking without being asked and faster than anyone is
+                # listening. Stop reading rather than let it size the host's memory;
+                # the connection is finished either way.
+                self._stdout.put(None)
+                return
             self._publish(line)
 
     def _drain_stderr(self) -> None:
@@ -204,6 +265,7 @@ class StdioSupervisor:
                     self._stderr.extend(chunk[:remaining])
                 if len(chunk) > remaining:
                     self._stderr_truncated = True
+                self._diagnostics = (bytes(self._stderr), self._stderr_truncated)
 
     def _publish(self, frame: bytes) -> None:
         """Enqueue a frame with the diagnostics as they stood when it was published.
@@ -215,7 +277,8 @@ class StdioSupervisor:
         retained diagnostic per frame is bounded too.
         """
         with self._stderr_lock:
-            self._stdout.put((frame, self._stderr_truncated, bytes(self._stderr)))
+            snapshot = self._diagnostics
+        self._stdout.put((frame, snapshot))
 
     def _outcome(
         self,

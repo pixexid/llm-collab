@@ -19,6 +19,7 @@ from llm_collab.runtime_adapter_manifest import (
     TrustedManifestRegistry,
 )
 from llm_collab.runtime_adapter_supervisor import (
+    MAX_PENDING_FRAMES,
     MAX_STDERR_BYTES_PER_CONNECTION,
     StdioSupervisor,
 )
@@ -333,13 +334,172 @@ class RuntimeAdapterSupervisorTests(unittest.TestCase):
                     "the response was ready; stderr noise must not delay it",
                 )
 
-    def test_the_stderr_verdict_is_not_read_from_shared_state_by_the_caller(self) -> None:
-        """`request` must use the verdict published with the frame.
+    def test_a_timeout_returns_even_when_a_descendant_holds_the_pipe(self) -> None:
+        """Terminating the child is not enough when a grandchild inherited the pipe.
 
-        Reading `self._stderr_truncated` in the requesting thread is the original defect:
-        it races the drain and has no ordering against it.
+        The descendant keeps stdout/stderr open after its parent dies, so the pump stays
+        blocked in read and the later `stream.close()` waits on the same BufferedReader
+        lock -- the timeout never returns and the caller hangs forever. Killing the whole
+        process group is what actually closes the descriptors.
+
+        The adapter forks a child that outlives it and then answers nothing.
         """
-        tree = ast.parse(MODULE_PATH.read_text(encoding="utf-8"))
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            script = write_script(
+                root,
+                """
+                import os, sys, time
+                if os.fork() == 0:
+                    # Inherits stdout/stderr and outlives its parent.
+                    time.sleep(60)
+                    os._exit(0)
+                sys.stdin.readline()
+                time.sleep(60)
+                """,
+            )
+            with StdioSupervisor(resolved_adapter(script, root)) as supervisor:
+                started = time.monotonic()
+                outcome = supervisor.request(
+                    '{"jsonrpc":"2.0","id":"r1","method":"runtime.health","params":{}}',
+                    timeout_seconds=1,
+                )
+                elapsed = time.monotonic() - started
+        self.assertEqual("REQUEST_TIMEOUT", outcome.fault)
+        self.assertTrue(outcome.should_close)
+        self.assertLess(
+            elapsed, 20,
+            "teardown blocked behind a descendant's inherited pipe handle",
+        )
+
+    def test_an_oversized_frame_reports_what_close_drained(self) -> None:
+        """close() can drain more stderr through process exit, so read it after.
+
+        A child that publishes an oversized frame and then writes an overflowing
+        diagnostic used to return stderr=b'' with truncated=False, while the supervisor's
+        own live state held the retained prefix and a true flag -- the outcome
+        contradicted the object that produced it.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            script = write_script(
+                root,
+                """
+                import sys
+                sys.stdin.readline()
+                sys.stdout.buffer.write(b"x" * (1_048_576 + 8) + b"\\n")
+                sys.stdout.buffer.flush()
+                sys.stderr.buffer.write(b"e" * (65_536 * 2))
+                sys.stderr.buffer.flush()
+                """,
+            )
+            with StdioSupervisor(resolved_adapter(script, root)) as supervisor:
+                outcome = supervisor.request(
+                    '{"jsonrpc":"2.0","id":"r1","method":"runtime.health","params":{}}',
+                    timeout_seconds=5,
+                )
+        self.assertEqual("MESSAGE_TOO_LARGE", outcome.fault)
+        # NOT asserted here: that the diagnostics are non-empty. Whether the drain has
+        # consumed the child's stderr by this point is a race, so asserting it would pass
+        # or fail on scheduling -- I wrote that assertion first and it passed against the
+        # unfixed code, which is how I know it discriminates nothing. The ordering
+        # property is pinned structurally below instead.
+        self.assertTrue(outcome.should_close)
+
+    def test_a_close_first_fault_reads_diagnostics_after_the_close(self) -> None:
+        """The ordering is the fix, and only the ordering can be asserted.
+
+        `close()` can drain more stderr through process exit, so a fault that closes must
+        build its outcome afterwards. Whether any bytes have arrived by then is a race
+        and unassertable; that the read happens after the close is not.
+
+        Structural because behavioural is impossible here: the branch must not pass a
+        pre-close snapshot at all.
+        """
+        source = MODULE_PATH.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        request = next(
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "request"
+        )
+        closing_faults = {"MESSAGE_TOO_LARGE", "INVALID_FRAMING"}
+        seen = set()
+        for call in ast.walk(request):
+            if not isinstance(call, ast.Call):
+                continue
+            faults = [
+                kw.value.value for kw in call.keywords
+                if kw.arg == "fault" and isinstance(kw.value, ast.Constant)
+            ]
+            if not faults or faults[0] not in closing_faults:
+                continue
+            seen.add(faults[0])
+            self.assertNotIn(
+                "diagnostics", [kw.arg for kw in call.keywords],
+                f"{faults[0]} closes first, so it must read the live state after close() "
+                "rather than carry the publication snapshot past it",
+            )
+        self.assertEqual(closing_faults, seen, "a close-first fault went unchecked")
+
+    def test_unsolicited_frames_cannot_size_the_hosts_memory(self) -> None:
+        """Every frame used to copy the retained 64 KiB prefix into an unbounded queue.
+
+        A child that fills the stderr budget and then emits many tiny frames multiplied
+        one bounded buffer into an unbounded one -- about 16k frames is a gigabyte of the
+        same duplicated bytes. Two defences, both asserted: the snapshot is SHARED by
+        reference rather than copied, and the queue itself stops accepting frames.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            script = write_script(
+                root,
+                """
+                import sys
+                sys.stderr.buffer.write(b"e" * (65_536 * 2))
+                sys.stderr.buffer.flush()
+                for _ in range(4000):
+                    sys.stdout.buffer.write(b'{"jsonrpc":"2.0","id":"x","result":{}}\\n')
+                sys.stdout.buffer.flush()
+                sys.stdin.readline()
+                """,
+            )
+            with StdioSupervisor(resolved_adapter(script, root)) as supervisor:
+                deadline = time.monotonic() + 5
+                while supervisor._stdout.qsize() < MAX_PENDING_FRAMES and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                time.sleep(0.2)
+                depth = supervisor._stdout.qsize()
+                snapshots = [
+                    item[1] for item in list(supervisor._stdout.queue) if item is not None
+                ]
+        self.assertLessEqual(
+            depth, MAX_PENDING_FRAMES + 1,
+            f"the child queued {depth} frames; the cap must stop it",
+        )
+        distinct = {id(snapshot) for snapshot in snapshots}
+        self.assertLessEqual(
+            len(distinct), 2,
+            "each frame carried its own copy of the diagnostic instead of sharing one",
+        )
+
+    def test_the_stderr_verdict_can_only_be_escalated_by_live_state(self) -> None:
+        """Inverted 2026-07-27: this asserted the defect as contract.
+
+        It used to require that `request` never read `_stderr_truncated`, on the argument
+        that reading it races the drain. But the two pumps are independent, so the stdout
+        thread can snapshot BEFORE the stderr thread has consumed overflow bytes already
+        sitting in the pipe -- and trusting the published verdict alone then returned a
+        plain success on a connection that had already breached its budget, decided by
+        whichever thread ran first.
+
+        Truncation is monotonic, so the live flag can only ever turn a success into a
+        fault, never a fault into a success. That is the property worth pinning: the read
+        must exist, and it must be used to ESCALATE. A read that could downgrade -- a
+        published `True` overridden by a live `False` -- would reintroduce the race in
+        the direction that actually loses a signal.
+        """
+        source = MODULE_PATH.read_text(encoding="utf-8")
+        tree = ast.parse(source)
         request = next(
             node
             for node in ast.walk(tree)
@@ -350,7 +510,13 @@ class RuntimeAdapterSupervisorTests(unittest.TestCase):
             for node in ast.walk(request)
             if isinstance(node, ast.Attribute) and node.attr == "_stderr_truncated"
         ]
-        self.assertEqual(reads, [])
+        self.assertTrue(
+            reads, "request must consult the live flag or the publication race survives"
+        )
+        self.assertIn("truncated_when_published or truncated_now", source)
+        # The escalation must be a disjunction. `and` would require both, so a breach the
+        # drain recorded after publication would once again pass as success.
+        self.assertNotIn("truncated_when_published and truncated_now", source)
 
     def test_the_reader_stops_at_the_protocol_frame_bound(self) -> None:
         """The stop limit is exact, so the read must be limited rather than the buffer.
