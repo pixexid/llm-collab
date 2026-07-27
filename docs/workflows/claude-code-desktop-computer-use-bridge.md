@@ -215,6 +215,12 @@ this runbook intentionally specifies no code, signing, or IPC design.
 The mailbox is the record; the doorbell is the notification. A doorbell with no
 corresponding mailbox packet is not valid for task-grade work.
 
+The doorbell exists for a worker that has no background event pickup of its own —
+Codex today. **Claude is not rung.** Its runtime carries its own inbox watcher,
+so the durable packet is the whole wake path; a Claude packet that is not being
+picked up is a watcher or binding defect to report, not a reason to reach for AX.
+See `session-autobridge-runbook.md`.
+
 ## Sender identifier convention
 
 Because agents now type directly into each other's apps, every agent-to-agent

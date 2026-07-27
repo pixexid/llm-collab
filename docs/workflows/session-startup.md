@@ -158,6 +158,11 @@ Operational rule:
   `cli_session` worker is the **bidirectional AX doorbell** (see
   `claude-code-desktop-computer-use-bridge.md`); terminal-only sessions require a
   dispatchable runtime binding
+- **except Claude**, whose runtime carries its own background inbox watcher: it
+  is woken by the durable packet and that watcher alone, never by AX. If no
+  dispatchable binding matches a Claude packet, the binding or the watcher is
+  the defect — preserve the packet and report it, rather than ringing. See
+  `session-autobridge-runbook.md` for the full rule
 - attended Computer Use is fallback/recovery when AX cannot safely target or
   verify the native composer, and for a project-configured non-CLI Claude
   Desktop bridge; it is never the universal first path
@@ -177,7 +182,8 @@ Safest task-grade workflow for desktop-app agents:
 1. `llm-collab` delivers the task into `Chats/` with `deliver.py`
    - `autobridge_ready: true` takes precedence and means no AX doorbell was
      requested for this packet
-   - for an AX-capable `cli_session` worker, including Claude when configured,
+   - for an AX-capable `cli_session` worker **other than Claude** (Claude is
+     woken by its own background inbox watcher and is never rung),
      `ax_doorbell_required` means the
      sender rings the worker with the printed `axsend-ensure ring` command (the
      printed form is the absolute executable under the llm-collab checkout's
