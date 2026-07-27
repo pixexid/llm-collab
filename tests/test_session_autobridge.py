@@ -2343,6 +2343,17 @@ class SessionAutobridgeTest(unittest.TestCase):
             "iter_sessions",
             return_value=[duplicate_a, duplicate_b],
         ):
+            pair, reason, inactive_binding = (
+                session_autobridge_lib.resolve_exact_dispatch_pair(
+                    "amiga",
+                    "CHAT-EXACT-DUP",
+                    "claude",
+                )
+            )
+            self.assertIsNone(pair)
+            self.assertIsNone(inactive_binding)
+            self.assertEqual(session_autobridge_lib.EXACT_BINDING_AMBIGUOUS_REASON, reason)
+
             session, reason = session_autobridge_lib.resolve_exact_dispatch_target(
                 "amiga",
                 "CHAT-EXACT-DUP",
@@ -2664,12 +2675,31 @@ class SessionAutobridgeTest(unittest.TestCase):
                 packet = sorted(chat_dir.glob("*_to-claude_*.md"))[-1]
                 frontmatter, _ = parse_frontmatter(packet.read_text())
                 self.assertEqual(runtime_id, frontmatter["target_session_id"])
+
                 session["lease_expires_utc"] = "2999-01-01T00:00:00+00:00"
                 session["status"] = "active"
-                self.assertIn(
-                    frontmatter["target_session_id"],
-                    session_autobridge_lib.session_target_ids(session),
+                write_json(session_path, session)
+                renewed = subprocess.run(
+                    [
+                        sys.executable, str(DELIVER_SCRIPT),
+                        "--chat", chat_id,
+                        "--from", "codex",
+                        "--to", "claude",
+                        "--project", project,
+                        "--title", "Renewed lease route",
+                        "--sender-session-id", "codex-session-1",
+                        "--body-file", "-",
+                    ],
+                    cwd=root,
+                    text=True,
+                    input="The renewed exact session should be dispatchable.",
+                    capture_output=True,
+                    check=False,
                 )
+                self.assertEqual(0, renewed.returncode, renewed.stderr)
+                renewed_payload = json.loads(renewed.stdout.split("\n\n", 1)[0])
+                self.assertTrue(renewed_payload["autobridge_ready"])
+                self.assertEqual(runtime_id, renewed_payload["resolved_target_session_id"])
 
     def test_mismatched_binding_never_supplies_a_durable_target(self):
         root = self.make_workspace()
