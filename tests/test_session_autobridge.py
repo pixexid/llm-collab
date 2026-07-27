@@ -699,6 +699,7 @@ class SessionAutobridgeTest(unittest.TestCase):
         self.assertEqual(message["activation_lease"], payload["activation_lease"])
         self.assertIn("activation_fence_token: 2", prompt)
         self.assertIn("Before mutating protected lane state", prompt)
+        self.assertIn("Activation packet body:\nDo the lane.", prompt)
 
     def test_activation_assert_refusal_stops_before_protected_runtime_mutations(self):
         session = {
@@ -997,7 +998,7 @@ class SessionAutobridgeTest(unittest.TestCase):
                             "from pathlib import Path",
                             "payload = {",
                             "    'argv': sys.argv[1:],",
-                            "    'stdin': json.load(sys.stdin),",
+                            "    'stdin': sys.stdin.read(),",
                             "    'env': {",
                             "        'session_id': os.environ.get('LLM_COLLAB_SESSION_ID'),",
                             "        'runtime_family': os.environ.get('LLM_COLLAB_RUNTIME_FAMILY'),",
@@ -1073,8 +1074,7 @@ class SessionAutobridgeTest(unittest.TestCase):
                     self.assertEqual(f"{runtime_family}-session-1", argv[resume_index + 1])
                     output_index = argv.index("--output-format")
                     self.assertEqual("json", argv[output_index + 1])
-                self.assertIn("Derived runtime wake", json.dumps(runtime_payload["stdin"]))
-                self.assertIn("claude-session-2", json.dumps(runtime_payload["stdin"]))
+                self.assertEqual("", runtime_payload["stdin"])
                 self.assertEqual("SESSION-DERIVED", runtime_payload["env"]["session_id"])
                 self.assertEqual(runtime_family, runtime_payload["env"]["runtime_family"])
                 self.assertEqual(f"{runtime_family}-session-1", runtime_payload["env"]["runtime_session_id"])
@@ -6358,21 +6358,29 @@ class ResumePromptNamesTheReplyChannelTest(unittest.TestCase):
         }
         return session_autobridge_lib.build_resume_prompt(session, message)
 
-    def test_the_prompt_carries_the_packet_path(self) -> None:
+    def test_the_prompt_is_a_packet_pointer_and_the_thread_is_receipt_only(self) -> None:
         for project_id in self.PROJECTS:
             with self.subTest(project_id=project_id):
+                prompt = self.prompt(project_id=project_id)
                 self.assertIn(
-                    "message_path: Chats/2026-07-26_x__CHAT-REPLY/"
+                    "message_path: "
+                    f"{session_autobridge_lib.ROOT}/Chats/2026-07-26_x__CHAT-REPLY/"
                     "2026-07-26T00-00-00_to-codex_packet.md",
-                    self.prompt(project_id=project_id),
+                    prompt,
                 )
+                self.assertNotIn("Do the lane.", prompt)
+                self.assertNotIn("Message body:", prompt)
+                self.assertIn("Do not answer it in this runtime thread", prompt)
+                self.assertIn("Open `message_path` directly, read-only", prompt)
+                self.assertIn("use `--peek` so reading does not acknowledge it", prompt)
 
     def test_the_prompt_names_the_mailbox_as_the_only_channel(self) -> None:
         for project_id in self.PROJECTS:
             with self.subTest(project_id=project_id):
                 prompt = self.prompt(project_id=project_id)
-                self.assertIn("Reply through the mailbox", prompt)
-                self.assertIn("only channel the sender reads", prompt)
+                self.assertIn("explicitly requests a substantive response", prompt)
+                self.assertIn("itself only a reply\nor delivery receipt", prompt)
+                self.assertNotIn("Even a trivial answer is a mailbox packet", prompt)
                 self.assertIn("deliver.py", prompt)
 
     def test_the_prompt_says_a_pr_comment_does_not_reach_the_sender(self) -> None:
