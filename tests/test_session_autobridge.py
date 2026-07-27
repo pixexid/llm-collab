@@ -6358,14 +6358,19 @@ class ResumePromptNamesTheReplyChannelTest(unittest.TestCase):
         }
         return session_autobridge_lib.build_resume_prompt(session, message)
 
-    def test_the_prompt_carries_the_packet_path(self) -> None:
+    def test_the_prompt_is_a_packet_pointer_and_the_thread_is_receipt_only(self) -> None:
         for project_id in self.PROJECTS:
             with self.subTest(project_id=project_id):
+                prompt = self.prompt(project_id=project_id)
                 self.assertIn(
                     "message_path: Chats/2026-07-26_x__CHAT-REPLY/"
                     "2026-07-26T00-00-00_to-codex_packet.md",
-                    self.prompt(project_id=project_id),
+                    prompt,
                 )
+                self.assertNotIn("Do the lane.", prompt)
+                self.assertNotIn("Message body:", prompt)
+                self.assertIn("Do not answer it in this runtime thread", prompt)
+                self.assertIn("only a\nterse delivery receipt", prompt)
 
     def test_the_prompt_names_the_mailbox_as_the_only_channel(self) -> None:
         for project_id in self.PROJECTS:

@@ -1218,11 +1218,10 @@ def _reply_channel_lines(session: dict, fm: dict) -> list[str]:
 
 def build_resume_prompt(session: dict, message: dict) -> str:
     fm = message["frontmatter"]
-    body = message.get("body", "").strip()
     activation_lease = message.get("activation_lease")
     lines = [
         "You are resuming a registered llm-collab worker session for one bounded action.",
-        "Read the routed message context below and produce exactly one bounded reply or action.",
+        "Read the packet at `message_path` below. Do not answer it in this runtime thread.",
         "",
         f"llm_collab_session_id: {session['session_id']}",
         f"agent_id: {session['agent_id']}",
@@ -1254,12 +1253,12 @@ def build_resume_prompt(session: dict, message: dict) -> str:
     lines.extend(
         [
             "",
-            "Message body:",
-            body or "(no body)",
+            "The packet body is not copied here; open it through your llm-collab inbox.",
             "",
             *_reply_channel_lines(session, fm),
             "",
-            "If the request is trivial, answer tersely. Do not start unrelated work.",
+            "Even a trivial answer is a mailbox packet. This runtime thread gets only a",
+            "terse delivery receipt. Do not start unrelated work.",
         ]
     )
     return "\n".join(lines)
