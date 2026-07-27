@@ -1026,10 +1026,22 @@ def claim_message_activation(session: dict, message: dict) -> tuple[bool, dict[s
             "detail": detail,
         }
 
+    runtime = runtime_metadata(session)
+    if runtime.get("family") == "claude_app":
+        # The app's background inbox watcher is the pickup path, and it claims the
+        # activation under its own reader identity. A lease taken here under the
+        # poller's PID is still live when that pickup runs, so the watcher is refused
+        # (same_session_different_claimant) and the packet is stranded.
+        return True, {
+            "event": "activation_left_to_watcher",
+            "message_path": message["path"],
+            "reason": "claude_desktop_mailbox_watcher",
+            "identity": detail,
+        }
+
     from _activation_cleanup import claim_activation_lease
     from _activation_lease import LeaseRefused
 
-    runtime = runtime_metadata(session)
     runtime_id = runtime.get("session_id")
     owner_pid = os.getpid()
     try:

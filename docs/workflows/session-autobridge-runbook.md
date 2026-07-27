@@ -60,8 +60,13 @@ remove it and rely on the doorbell + mailbox-drain self-heal.
   visible in `Chats/`.
 - Do not target an active operator thread for retry tests.
 - Treat Claude desktop as a human-visible UI, not as a
-  `session_autobridge.py` runtime target. Ring an existing native composer
-  through AX first only after readable `AXValue` proves it is empty. A
+  `session_autobridge.py` runtime target. **AX is never the routine wake for
+  Claude.** Routine delivery is the durable packet alone: the app's background
+  inbox watcher owns pickup, and the poller leaves the activation unclaimed for
+  it. Everything below about AX applies only to attended recovery, once that
+  watcher is demonstrably not picking up. On that attended path, ring an
+  existing native composer through AX only after readable `AXValue` proves it is
+  empty. A
   non-empty, unreadable, unprovable, or `AXValue`-opaque composer means hold and
   attended recovery. Computer Use owns attended AX recovery/fallback and fresh
   thread creation: generate a UUID plus short title, click `New session`, send
@@ -85,8 +90,10 @@ remove it and rely on the doorbell + mailbox-drain self-heal.
   question, waiting for direction, or reporting Read/Agent/tool errors, Codex
   must answer or unblock it in that same visible thread when safe; do not wait
   for a final inbox handoff while Claude is blocked in the app.
-- If Claude is stale, idle with no durable progress, or repeatedly erroring,
-  first try to wake or repair the same thread with a durable unblock packet plus
+- If Claude is stale, idle with no durable progress, or repeatedly erroring —
+  that is, the background watcher is not picking up, which is the only condition
+  that puts this lane on the attended path at all — first try to wake or repair
+  the same thread with a durable unblock packet plus
   one short AX bridge only after the native composer is provably empty; it may
   queue behind an active turn, and busy alone is not a hold. A non-empty,
   unreadable, unprovable, or `AXValue`-opaque composer means hold and recovery.

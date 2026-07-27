@@ -1709,6 +1709,189 @@ class SessionAutobridgeTest(unittest.TestCase):
         self.assertFalse(worker_log.exists())
         self.assertFalse(osascript_log.exists())
 
+    def test_claude_app_dispatch_is_mailbox_only_on_a_non_amiga_project(self):
+        # amiga carries claude_desktop_bridge in the fixture and nuvyr does not, so a
+        # project-specific bridge setting cannot be what produces the mailbox-only route.
+        root = self.make_workspace()
+        self.add_agent(
+            root,
+            {
+                "id": "claude",
+                "display_name": "Claude",
+                "activation": {"type": "cli_session", "watcher_enabled": True},
+            },
+        )
+        self.add_message(
+            root,
+            agent_id="claude",
+            chat_id="CHAT-CLAUDE-NUVYR",
+            project_id="nuvyr",
+            title="Nuvyr lane packet",
+            target_session_id="claude-thread-nuvyr",
+        )
+
+        worker_log = root / "claude_runtime_nuvyr.log"
+        worker_script = root / "claude_runtime_nuvyr.py"
+        write(
+            worker_script,
+            "#!/usr/bin/env python3\n"
+            "from pathlib import Path\n"
+            f"Path({json.dumps(str(worker_log))}).write_text('called')\n",
+        )
+        worker_script.chmod(0o755)
+
+        osascript_log = root / "claude_osascript_nuvyr.log"
+        osascript_script = root / "fake_claude_osascript_nuvyr.py"
+        write(
+            osascript_script,
+            "\n".join(
+                [
+                    "#!/usr/bin/env python3",
+                    "import sys",
+                    "from pathlib import Path",
+                    f"Path({json.dumps(str(osascript_log))}).write_text(sys.stdin.read())",
+                ]
+            ),
+        )
+        osascript_script.chmod(0o755)
+
+        self.run_cli(
+            root,
+            "register",
+            "--session",
+            "SESSION-CLAUDE-NUVYR",
+            "--agent",
+            "claude",
+            "--project",
+            "nuvyr",
+            "--chat",
+            "CHAT-CLAUDE-NUVYR",
+            "--mode",
+            "auto-read",
+            "--wake-strategy",
+            "runtime_trigger",
+            "--runtime-family",
+            "claude_app",
+            "--runtime-session-id",
+            "claude-thread-nuvyr",
+            "--runtime-session-source",
+            "first_read",
+            "--runtime-command",
+            json.dumps([sys.executable, str(worker_script)]),
+        )
+
+        dispatch_result = self.run_cli_with_env(
+            root,
+            {
+                "LLM_COLLAB_UI_REFRESH": "1",
+                "LLM_COLLAB_OSASCRIPT_BIN": str(osascript_script),
+            },
+            "dispatch",
+            "--session",
+            "SESSION-CLAUDE-NUVYR",
+        )
+
+        action = dispatch_result["actions"][0]
+        self.assertEqual("notify_only", action["effective_action"])
+        self.assertEqual("claude_desktop_mailbox_watcher", action["reason"])
+        self.assertNotIn("runtime_result", action)
+        self.assertNotIn("ui_refresh_result", action)
+        self.assertFalse(worker_log.exists())
+        self.assertFalse(osascript_log.exists())
+
+    def test_claude_app_activation_stays_claimable_by_the_app_watcher(self):
+        root = self.make_workspace()
+        leases_dir = root / "State" / "session_autobridge" / "activation_leases"
+        worktree = root / "claude-lane"
+        worktree.mkdir()
+        session = {
+            "session_id": "SESSION-CLAUDE-ACTIVATION",
+            "agent_id": "claude",
+            "project_id": "amiga",
+            "chat_id": "CHAT-CLAUDE-ACTIVATION",
+            "mode": "auto-read",
+            "wake_strategy": "runtime_trigger",
+            "runtime": {"family": "claude_app", "session_id": "claude-thread-1"},
+        }
+        message = {
+            "path": "Chats/claude/activation.md",
+            "frontmatter": {
+                "from": "codex",
+                "to": "claude",
+                "project_id": "amiga",
+                "chat_id": "CHAT-CLAUDE-ACTIVATION",
+                "activation": True,
+                "related_task": "TASK-CLAUDE",
+                "worktree": str(worktree),
+                "branch": "claude/lane",
+            },
+        }
+
+        sessions_dir = root / "State" / "session_autobridge" / "sessions"
+        # Registered live and bound, so the poller's claim would succeed if it tried:
+        # the contract under test is that it does not try, not that it would fail.
+        write_json(
+            sessions_dir / "SESSION-CLAUDE-ACTIVATION.json",
+            {**session, "status": "active", "lease_expires_utc": "2999-01-01T00:00:00+00:00"},
+        )
+        write_json(
+            sessions_dir / "SESSION-activation-reader.json",
+            {
+                "session_id": "SESSION-activation-reader",
+                "agent_id": "claude",
+                "project_id": "amiga",
+                "chat_id": "CHAT-CLAUDE-ACTIVATION",
+                "mode": "manual",
+                "status": "parked",
+                "wake_strategy": "none",
+                "lease_expires_utc": "2999-01-01T00:00:00+00:00",
+                "runtime": {"family": "reader", "session_id": "claude-thread-1"},
+                "ephemeral_reader": True,
+            },
+        )
+
+        with (
+            patch.object(session_autobridge_lib, "SESSIONS_DIR", sessions_dir),
+            patch.object(activation_lease_lib, "ACTIVATION_LEASES_DIR", leases_dir),
+            patch.object(
+                activation_lease_lib,
+                "ACTIVATION_GRANT_LOCK",
+                leases_dir / ".claim-grant.lock",
+            ),
+            patch.object(activation_cleanup_lib, "audit_activation_pollers", return_value=[]),
+        ):
+            allowed, event = session_autobridge_lib.claim_message_activation(session, message)
+            self.assertTrue(allowed)
+
+            # The binding assertion: the app watcher picks the packet up under its own
+            # reader identity, and a lease the poller took first refuses it
+            # (same_session_different_claimant), stranding the packet.
+            identity = activation_lease_lib.lease_identity(
+                {
+                    "project": "amiga",
+                    "chat": "CHAT-CLAUDE-ACTIVATION",
+                    "task": "TASK-CLAUDE",
+                    "worktree": str(worktree),
+                    "branch": "claude/lane",
+                    "target_agent": "claude",
+                }
+            )
+            try:
+                watcher_claim = activation_cleanup_lib.claim_activation_lease(
+                    identity,
+                    owner_session_id="SESSION-activation-reader",
+                    owner_pid=os.getpid(),
+                    claimant_runtime_id="claude-thread-1",
+                )
+            except activation_lease_lib.LeaseRefused as exc:
+                self.fail(f"app watcher refused after poller pickup: {exc.reason}")
+
+            self.assertEqual("activation_left_to_watcher", event["event"])
+            self.assertEqual("claude_desktop_mailbox_watcher", event["reason"])
+            self.assertNotIn("activation_lease", message)
+
+        self.assertEqual("SESSION-activation-reader", watcher_claim["lease"]["owner_session_id"])
+
     def test_human_relay_downgrades_to_prompt_without_runtime_hook(self):
         root = self.make_workspace()
         self.add_agent(
