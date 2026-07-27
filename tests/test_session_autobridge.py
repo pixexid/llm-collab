@@ -219,6 +219,7 @@ class SessionAutobridgeTest(unittest.TestCase):
         generation: int,
         endpoint_id: str,
         native_session_id: str,
+        project_id: str = "amiga",
     ) -> None:
         paths = LedgerPaths.derive(root / "project-state", "ws_alpha")
         with patch.object(store_module, "_linked_sqlite_version_info", return_value=SAFE_VERSION):
@@ -237,7 +238,12 @@ class SessionAutobridgeTest(unittest.TestCase):
                     "amiga": json.dumps(
                         {"project_id": "amiga", write_gate_key: True}
                     ),
-                    "nuvyr": json.dumps({"project_id": "nuvyr"}),
+                    "nuvyr": json.dumps(
+                        {
+                            "project_id": "nuvyr",
+                            **({write_gate_key: True} if project_id == "nuvyr" else {}),
+                        }
+                    ),
                 },
                 source_snapshots={"amiga": {}, "nuvyr": {}},
             )
@@ -274,7 +280,7 @@ class SessionAutobridgeTest(unittest.TestCase):
                 (
                     "ws_alpha",
                     "project",
-                    "amiga",
+                    project_id,
                     chat_id,
                     "participant_" + agent_id,
                     "agent_" + agent_id,
@@ -295,7 +301,7 @@ class SessionAutobridgeTest(unittest.TestCase):
                 (
                     "ws_alpha",
                     "project",
-                    "amiga",
+                    project_id,
                     chat_id,
                     "participant_" + agent_id,
                     binding_id,
@@ -4584,6 +4590,15 @@ class SessionAutobridgeTest(unittest.TestCase):
         self.assertIn(message_rel, session_payload["processed_messages"])
 
     def test_pi_doorbell_wakes_once_without_claiming_acceptance(self):
+        for project_id in ("amiga", "nuvyr"):
+            with self.subTest(project_id=project_id):
+                self._assert_pi_doorbell_wakes_once_without_claiming_acceptance(
+                    project_id
+                )
+
+    def _assert_pi_doorbell_wakes_once_without_claiming_acceptance(
+        self, project_id: str
+    ):
         root = self.make_workspace()
         self.add_agent(
             root,
@@ -4597,7 +4612,7 @@ class SessionAutobridgeTest(unittest.TestCase):
             root,
             agent_id="glmpi",
             chat_id="CHAT-PI-WAKE",
-            project_id="amiga",
+            project_id=project_id,
             title="Pi pointer wake",
             sender_session_id="codex-pi-wake",
             target_session_id="pi-glim-1",
@@ -4614,6 +4629,7 @@ class SessionAutobridgeTest(unittest.TestCase):
             generation=1,
             endpoint_id="endpoint_pi_glim",
             native_session_id="pi-glim-1",
+            project_id=project_id,
         )
         doorbell = (
             root
@@ -4631,7 +4647,7 @@ class SessionAutobridgeTest(unittest.TestCase):
             "--agent",
             "glmpi",
             "--project",
-            "amiga",
+            project_id,
             "--chat",
             "CHAT-PI-WAKE",
             "--mode",
@@ -4687,6 +4703,7 @@ class SessionAutobridgeTest(unittest.TestCase):
             / "events"
             / "SESSION-PI-GLIM.jsonl"
         )
+        self.assertTrue(event_path.exists(), first.stdout + first.stderr)
         events_after_wake = event_path.read_text()
         settled = subprocess.run(
             command,
