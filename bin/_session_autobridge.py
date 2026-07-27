@@ -779,9 +779,9 @@ def resolve_exact_dispatch_pair(
 ) -> tuple[
     tuple[dict[str, Any], dict[str, Any]] | None,
     str | None,
-    dict[str, Any] | None,
+    tuple[dict[str, Any], dict[str, Any]] | None,
 ]:
-    """Return the dispatchable pair, refusal reason, and validated expired binding.
+    """Return the dispatchable pair, refusal reason, and validated expired pair.
 
     Hands back the exact binding snapshot this validation was performed against, so a caller
     never has to reopen the path to read a field the session does not carry. Introduced because
@@ -816,8 +816,6 @@ def resolve_exact_dispatch_pair(
     exact_matches: list[dict[str, Any]] = []
     live_target_matches: list[dict[str, Any]] = []
     for session in candidates:
-        if session.get("project_id") != project_id or session.get("chat_id") != chat_id:
-            continue
         runtime = runtime_metadata(session)
         if not bound_runtime_family or str(bound_runtime_family) != str(runtime.get("family")):
             continue
@@ -825,6 +823,8 @@ def resolve_exact_dispatch_pair(
             continue
         if session.get("status") in {"active", "parked"}:
             live_target_matches.append(session)
+        if session.get("project_id") != project_id or session.get("chat_id") != chat_id:
+            continue
         if str(session.get("session_id")) != str(bound_session_id):
             continue
         exact_matches.append(session)
@@ -839,7 +839,7 @@ def resolve_exact_dispatch_pair(
     if not dispatchable and refusal_reason == "lease_expired":
         if len(live_target_matches) > 1:
             return None, EXACT_BINDING_AMBIGUOUS_REASON, None
-        return None, EXACT_BINDING_NOT_DISPATCHABLE_REASON, binding
+        return None, EXACT_BINDING_NOT_DISPATCHABLE_REASON, (session, binding)
     if not dispatchable:
         return None, EXACT_BINDING_NOT_DISPATCHABLE_REASON, None
     return (session, binding), None, None

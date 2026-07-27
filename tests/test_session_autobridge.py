@@ -2423,6 +2423,38 @@ class SessionAutobridgeTest(unittest.TestCase):
             self.assertIsNone(inactive_binding)
             self.assertEqual(session_autobridge_lib.EXACT_BINDING_AMBIGUOUS_REASON, reason)
 
+        cross_scope_runtime = {
+            **reused_runtime,
+            "project_id": "nuvyr",
+            "chat_id": "CHAT-OTHER",
+        }
+        with patch.object(
+            session_autobridge_lib,
+            "load_binding",
+            return_value={
+                "project_id": "amiga",
+                "chat_id": "CHAT-EXACT-DUP",
+                "agent_id": "claude",
+                "session_id": "SESSION-DUP",
+                "runtime_family": "claude_app",
+                "runtime_session_id": "runtime-dup",
+            },
+        ), patch.object(
+            session_autobridge_lib,
+            "iter_sessions",
+            return_value=[expired_a, cross_scope_runtime],
+        ):
+            pair, reason, inactive_pair = (
+                session_autobridge_lib.resolve_exact_dispatch_pair(
+                    "amiga",
+                    "CHAT-EXACT-DUP",
+                    "claude",
+                )
+            )
+            self.assertIsNone(pair)
+            self.assertIsNone(inactive_pair)
+            self.assertEqual(session_autobridge_lib.EXACT_BINDING_AMBIGUOUS_REASON, reason)
+
         stopped = dict(duplicate_a)
         stopped["status"] = "stopped"
         with patch.object(
@@ -2777,6 +2809,45 @@ class SessionAutobridgeTest(unittest.TestCase):
                 self.assertEqual(packet_rel, json.loads(dispatch_output.read_text())["message"]["path"])
                 renewed_session = json.loads(session_path.read_text())
                 self.assertIn(packet_rel, renewed_session["processed_messages"])
+
+                session["lease_expires_utc"] = "2000-01-01T00:00:00+00:00"
+                session["repo_targets"] = ["app"]
+                write_json(session_path, session)
+                refused = subprocess.run(
+                    [
+                        sys.executable, str(DELIVER_SCRIPT),
+                        "--chat", chat_id,
+                        "--from", "codex",
+                        "--to", "claude",
+                        "--project", project,
+                        "--title", "Expired scope refusal",
+                        "--sender-session-id", "codex-session-1",
+                        "--body-file", "-",
+                    ],
+                    cwd=root,
+                    text=True,
+                    input="This packet cannot satisfy the registered repo scope.",
+                    capture_output=True,
+                    check=True,
+                )
+                refused_payload = json.loads(refused.stdout.split("\n\n", 1)[0])
+                self.assertFalse(refused_payload["autobridge_ready"])
+                self.assertEqual(
+                    session_autobridge_lib.ROUTE_AMBIGUOUS_REASON,
+                    refused_payload["autobridge_refusal_reason"],
+                )
+                self.assertIsNone(refused_payload["resolved_target_session_id"])
+                self.assertFalse(refused_payload["ax_doorbell_required"])
+                self.assertFalse(refused_payload["ax_attended_recovery_required"])
+                self.assertFalse(refused_payload["operator_relay_required"])
+                self.assertFalse(refused_payload["activation_unavailable"])
+                refused_frontmatter = next(
+                    frontmatter
+                    for candidate in chat_dir.glob("*_to-claude_*.md")
+                    for frontmatter, _ in [parse_frontmatter(candidate.read_text())]
+                    if frontmatter.get("title") == "Expired scope refusal"
+                )
+                self.assertIsNone(refused_frontmatter["target_session_id"])
 
     def test_mismatched_binding_never_supplies_a_durable_target(self):
         root = self.make_workspace()

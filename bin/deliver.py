@@ -421,11 +421,12 @@ def main():
 
     autobridge_target = None
     autobridge_binding = None
-    inactive_binding = None
+    inactive_pair = None
     binding_unreadable = False
+    dispatch_scope_refused = False
     if not thread_coordination_required:
         try:
-            pair, autobridge_refusal_reason, inactive_binding = resolve_exact_dispatch_pair(
+            pair, autobridge_refusal_reason, inactive_pair = resolve_exact_dispatch_pair(
                 args.project,
                 chat_id,
                 args.recipient,
@@ -438,7 +439,12 @@ def main():
             autobridge_target = None
             autobridge_refusal_reason = f"{BINDING_UNREADABLE_REASON}: {error}"
             binding_unreadable = True
-        durable_binding = autobridge_binding or inactive_binding
+        durable_session = autobridge_target or (
+            inactive_pair[0] if inactive_pair is not None else None
+        )
+        durable_binding = autobridge_binding or (
+            inactive_pair[1] if inactive_pair is not None else None
+        )
         resolved_binding_target = (
             durable_binding.get("runtime_session_id") if durable_binding is not None else None
         )
@@ -455,9 +461,21 @@ def main():
             autobridge_refusal_reason = EXACT_BINDING_MISMATCH_REASON
             args.target_session_id = None
         elif resolved_binding_target is not None:
-            args.target_session_id = str(resolved_binding_target)
-            args.target_binding_id = durable_binding.get("binding_id")
-            args.target_binding_generation = durable_binding.get("binding_generation")
+            routable, scope_reason = repo_scope_matches(
+                durable_session.get("repo_targets"),
+                packet_repo_targets(args),
+                subscriber_project=durable_session.get("project_id"),
+                packet_project=args.project,
+            )
+            if not routable:
+                autobridge_target = None
+                autobridge_refusal_reason = scope_reason
+                args.target_session_id = None
+                dispatch_scope_refused = True
+            else:
+                args.target_session_id = str(resolved_binding_target)
+                args.target_binding_id = durable_binding.get("binding_id")
+                args.target_binding_generation = durable_binding.get("binding_generation")
         else:
             args.target_session_id = None
     autobridge_ready = bool(
@@ -473,24 +491,7 @@ def main():
     # Terminal for the same reason a scope refusal is: no lane may wake a recipient whose
     # authoritative record could not be read. Waking them to "go read it" would be the wrong-wake
     # bug again, one cause over.
-    dispatch_scope_refused = binding_unreadable
-    if autobridge_ready:
-        routable, scope_reason = repo_scope_matches(
-            autobridge_target.get("repo_targets"),
-            packet_repo_targets(args),
-            subscriber_project=autobridge_target.get("project_id"),
-            packet_project=args.project,
-        )
-        if not routable:
-            autobridge_ready = False
-            autobridge_refusal_reason = scope_reason
-            # TERMINAL, not merely "autobridge cannot take it". Every wake lane below is gated on
-            # `not autobridge_ready`, which means "fall back to another way of waking them" -- so
-            # reusing that flag for a scope refusal turned a silent drop into a WRONG WAKE: a
-            # refused packet raised ax_doorbell_required with a prompt telling the recipient to go
-            # read it. The scope contract says this packet does not reach this subscriber at all,
-            # by any lane, so the refusal has to be its own state.
-            dispatch_scope_refused = True
+    dispatch_scope_refused = dispatch_scope_refused or binding_unreadable
 
     # One predicate for every wake lane, so a refusal cannot reach any of them and a lane added
     # later cannot silently miss the gate by re-deriving `not autobridge_ready` on its own.
@@ -723,8 +724,12 @@ def main():
     # the target to None -- so the one refusal a sender can do nothing about printed no banner at
     # all, while every wake flag and activation_unavailable were also false. A sender following the
     # documented flags saw no required action for a packet that will wake nobody.
-    if binding_unreadable or (autobridge_target is not None and not autobridge_ready
-                              and autobridge_refusal_reason):
+    refusal_banner_required = (
+        not autobridge_ready
+        and autobridge_target is not None
+        and bool(autobridge_refusal_reason)
+    )
+    if binding_unreadable or dispatch_scope_refused or refusal_banner_required:
         border = "━" * 60
         print(f"\n{border}", file=sys.stderr)
         print("⚠️  DURABLE WRITE OK — RUNTIME DISPATCH REFUSED", file=sys.stderr)
