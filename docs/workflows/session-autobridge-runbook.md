@@ -101,17 +101,22 @@ Give each `pi` runtime session its own doorbell directory and watch that
 directory non-recursively, never the atomically replaced packet pointer:
 
 ```bash
-mkdir -m 700 /absolute/path/to/<worker>-<chat>
+mkdir -m 700 /absolute/path/to/<worker>-<chat>-<runtime-session-id>
 ```
 
-Register `bin/pi_doorbell.py /absolute/path/to/<worker>-<chat>/message.pointer`
+Register
+`bin/pi_doorbell.py /absolute/path/to/<worker>-<chat>-<runtime-session-id>/message.pointer`
 as the runtime command. Bind `pi-event-monitor` in the existing native worker
-thread to `/absolute/path/to/<worker>-<chat>/`. Atomic pointer replacement
-changes the stable directory on every send without detaching the watch. The
-event is only a wake signal: after every event, read `message.pointer`, validate
-the exact project/chat/session binding, then read and answer the durable collab
-packet. Do not share a watched directory between workers, use AX, or create a
-new native thread for routine Pi packet delivery.
+thread to `/absolute/path/to/<worker>-<chat>-<runtime-session-id>/`. The
+doorbell stages its temporary file in the parent directory, then atomically
+renames only the final `message.pointer` into the watched directory. The pointer
+contains the packet's absolute path beneath the collaboration root.
+
+The event is only a wake signal and notifications may be coalesced or repeated:
+on wake, read `message.pointer` once, validate the exact project/chat/session
+binding, and answer only if that exact durable packet is still unread. Do not
+share a watched directory between sessions, use AX, or create a new native
+thread for routine Pi packet delivery.
 
 ## Activate A Session
 

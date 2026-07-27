@@ -15,12 +15,26 @@ def main() -> int:
     pointer = os.environ.get("LLM_COLLAB_MESSAGE_PATH", "")
     if not pointer or "\n" in pointer or len(pointer.encode()) > 4096:
         return 2
+    collab_root = Path.cwd().resolve()
+    pointer_path = Path(pointer)
+    pointer_path = (
+        pointer_path.resolve()
+        if pointer_path.is_absolute()
+        else (collab_root / pointer_path).resolve()
+    )
+    try:
+        pointer_path.relative_to(collab_root)
+    except ValueError:
+        return 2
+    pointer = str(pointer_path)
+    if len(pointer.encode()) > 4096:
+        return 2
     doorbell = Path(sys.argv[1]).expanduser()
     if not doorbell.parent.is_dir():
         return 2
     fd, temporary = tempfile.mkstemp(
-        dir=doorbell.parent,
-        prefix=f".{doorbell.name}.",
+        dir=doorbell.parent.parent,
+        prefix=f".{doorbell.parent.name}.{doorbell.name}.",
     )
     published = False
     try:

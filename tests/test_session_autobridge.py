@@ -4615,7 +4615,13 @@ class SessionAutobridgeTest(unittest.TestCase):
             endpoint_id="endpoint_pi_glim",
             native_session_id="pi-glim-1",
         )
-        doorbell = root / "State" / "pi" / "glmpi" / "message.pointer"
+        doorbell = (
+            root
+            / "State"
+            / "pi"
+            / "glmpi-CHAT-PI-WAKE-pi-glim-1"
+            / "message.pointer"
+        )
         doorbell.parent.mkdir(parents=True, mode=0o700)
         self.run_cli(
             root,
@@ -4717,7 +4723,7 @@ class SessionAutobridgeTest(unittest.TestCase):
             json.loads(line) for line in recovered.stdout.splitlines() if line.strip()
         ]
 
-        self.assertEqual(message_rel + "\n", doorbell.read_text())
+        self.assertEqual(str((root / message_rel).resolve()) + "\n", doorbell.read_text())
         self.assertTrue(
             any(
                 event["event"] == "autobridge_wake_signaled"
@@ -4818,7 +4824,16 @@ class SessionAutobridgeTest(unittest.TestCase):
 
     def test_pi_doorbell_publishes_complete_mode_600_content_atomically(self):
         root = self.make_workspace()
-        doorbell = root / "State" / "pi" / "glmpi" / "message.pointer"
+        old_cwd = Path.cwd()
+        os.chdir(root)
+        self.addCleanup(os.chdir, old_cwd)
+        doorbell = (
+            root
+            / "State"
+            / "pi"
+            / "glmpi-CHAT-PI-ATOMIC-pi-glim-1"
+            / "message.pointer"
+        )
         doorbell.parent.mkdir(parents=True, mode=0o700)
         original_replace = os.replace
         observed: dict[str, object] = {}
@@ -4828,6 +4843,7 @@ class SessionAutobridgeTest(unittest.TestCase):
             destination_path = Path(destination)
             observed["content"] = source_path.read_text()
             observed["mode"] = source_path.stat().st_mode & 0o777
+            observed["source_parent"] = source_path.parent
             observed["destination_existed"] = destination_path.exists()
             original_replace(source, destination)
 
@@ -4845,8 +4861,12 @@ class SessionAutobridgeTest(unittest.TestCase):
         ):
             self.assertEqual(0, pi_doorbell_lib.main())
 
-        self.assertEqual("Chats/2026-07-27/packet.md\n", observed["content"])
+        self.assertEqual(
+            str((root / "Chats/2026-07-27/packet.md").resolve()) + "\n",
+            observed["content"],
+        )
         self.assertEqual(0o600, observed["mode"])
+        self.assertEqual(doorbell.parent.parent, observed["source_parent"])
         self.assertFalse(observed["destination_existed"])
         self.assertEqual(observed["content"], doorbell.read_text())
         first_pointer_inode = doorbell.stat().st_ino
@@ -4862,7 +4882,10 @@ class SessionAutobridgeTest(unittest.TestCase):
         ):
             self.assertEqual(0, pi_doorbell_lib.main())
 
-        self.assertEqual("Chats/2026-07-27/next-packet.md\n", doorbell.read_text())
+        self.assertEqual(
+            str((root / "Chats/2026-07-27/next-packet.md").resolve()) + "\n",
+            doorbell.read_text(),
+        )
         self.assertNotEqual(first_pointer_inode, doorbell.stat().st_ino)
         self.assertEqual(watch_directory_inode, doorbell.parent.stat().st_ino)
 
@@ -4881,6 +4904,20 @@ class SessionAutobridgeTest(unittest.TestCase):
             self.assertEqual(2, pi_doorbell_lib.main())
 
         self.assertFalse(doorbell.parent.exists())
+
+    def test_pi_event_runbook_uses_one_exact_session_watch_directory(self):
+        runbook = (
+            REPO_ROOT / "docs" / "workflows" / "session-autobridge-runbook.md"
+        ).read_text()
+        section = runbook.split("## Pi Native Event Wake", 1)[1].split("\n## ", 1)[0]
+
+        self.assertIn("<worker>-<chat>-<runtime-session-id>", section)
+        for line in section.splitlines():
+            if "/absolute/path/to/<worker>-<chat>" in line:
+                self.assertIn("<worker>-<chat>-<runtime-session-id>", line)
+        self.assertIn("stages its temporary file in the parent directory", section)
+        self.assertIn("absolute path beneath the collaboration root", section)
+        self.assertIn("still unread", section)
 
     def test_watch_inbox_default_off_empty_ledger_preserves_legacy_runtime_trigger(self):
         root = self.make_workspace()
