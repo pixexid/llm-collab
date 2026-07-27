@@ -2127,7 +2127,7 @@ def execute_runtime_trigger(session: dict, message: dict) -> dict[str, Any]:
         timeout=timeout_seconds,
         check=False,
     )
-    return {
+    trigger_result = {
         "command": command,
         "derived_command": derived,
         "timeout_seconds": timeout_seconds,
@@ -2135,6 +2135,10 @@ def execute_runtime_trigger(session: dict, message: dict) -> dict[str, Any]:
         "stdout": result.stdout.strip(),
         "stderr": result.stderr.strip(),
     }
+    if runtime_family == "pi":
+        # The pointer wakes Pi; only the recipient can acknowledge the packet.
+        trigger_result["delivery_accepted"] = False
+    return trigger_result
 
 
 def ui_refresh_enabled(runtime: dict[str, Any]) -> bool:
@@ -2778,6 +2782,8 @@ def dispatch_session(
 
     actions: list[dict[str, Any]] = []
     for message in completed_settlements:
+        if runtime_metadata(session).get("family") == "pi":
+            continue
         event = {
             "event": "message_already_consumed",
             "message_path": message["path"],
@@ -2806,6 +2812,15 @@ def dispatch_session(
 
         if action == "runtime_trigger":
             runtime = runtime_metadata(session)
+            if (
+                runtime.get("family") == "pi"
+                and not message_needs_canonical_materialization(session, message)
+            ):
+                event["reason"] = EXACT_BINDING_REQUIRED_REASON
+                should_mark_processed = False
+                append_event(session_id, event)
+                actions.append(event)
+                continue
             if message_needs_canonical_materialization(session, message):
                 if not materialization_slot_available:
                     event["reason"] = "pull_pending"
@@ -2851,6 +2866,14 @@ def dispatch_session(
                 if (
                     materialization_result.get("materialized")
                     and not materialization_result.get("created")
+                ):
+                    event["reason"] = "pull_pending"
+                    append_event(session_id, event)
+                    actions.append(event)
+                    continue
+                if (
+                    runtime.get("family") == "pi"
+                    and not materialization_result.get("materialized")
                 ):
                     event["reason"] = "pull_pending"
                     append_event(session_id, event)

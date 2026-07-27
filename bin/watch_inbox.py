@@ -155,7 +155,8 @@ def dispatch_autobridge(
         for action in result["actions"]:
             runtime_result = action.get("runtime_result") or {}
             runtime_ok = runtime_result.get("returncode") == 0
-            if action.get("effective_action") == "runtime_trigger" and runtime_ok:
+            delivery_accepted = runtime_ok and runtime_result.get("delivery_accepted", True)
+            if action.get("effective_action") == "runtime_trigger" and delivery_accepted:
                 # Stored session scope was already checked by dispatch_session;
                 # an explicit watcher scope is rechecked at the read boundary.
                 effective_repo_targets = repo_targets
@@ -192,6 +193,22 @@ def dispatch_autobridge(
                     {
                         "ts": utc_now_str(),
                         "event": "autobridge_consumed",
+                        "detail": action["message_path"],
+                        "agent": agent_id,
+                        "session_id": session_id,
+                        "message_path": action["message_path"],
+                    },
+                    json_output,
+                )
+            elif (
+                action.get("effective_action") == "runtime_trigger"
+                and runtime_ok
+                and not runtime_result.get("skipped")
+            ):
+                emit(
+                    {
+                        "ts": utc_now_str(),
+                        "event": "autobridge_wake_signaled",
                         "detail": action["message_path"],
                         "agent": agent_id,
                         "session_id": session_id,
