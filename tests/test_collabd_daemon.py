@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import contextlib
 import inspect
 import errno
 import io
+import contextlib
 import json
 import os
 import runpy
@@ -86,13 +86,118 @@ class DaemonTest(unittest.TestCase):
         if peer is not None:
             kwargs["peer_uid_getter"] = peer
         server = DaemonServer(self.paths, **kwargs)
-        thread = threading.Thread(target=server.run)
+        thread = threading.Thread(target=server.run, daemon=True)
         thread.start()
-        deadline = time.monotonic() + 2
-        while not self.paths.socket.exists() and time.monotonic() < deadline:
-            time.sleep(0.01)
-        self.assertTrue(self.paths.socket.exists())
+        try:
+            # `start()` cannot be exempt from the cleanup rule: it calls readiness BEFORE
+            # returning, so a readiness exception leaves no caller holding the thread to
+            # clean up -- the non-daemon accept loop then keeps the whole run alive. Owning
+            # the failure here is the only place it can be owned.
+            self.wait_until_accepting()
+        except BaseException:
+            # `_stopping` is only read between accepts, so it cannot reach a handler that
+            # is already stalled inside `_handle` -- and the accept loop never gets back
+            # to check it. The join is therefore best-effort, and the daemon flag above is
+            # what guarantees the process can still exit: a stalled server must never be
+            # able to outlive the test that started it, or a run that should report a
+            # failure hangs forever instead.
+            server._stopping = True
+            thread.join(2)
+            raise
         return server, thread
+
+    def start_without_readiness(self) -> tuple[DaemonServer, threading.Thread]:
+        """For the one test that must own the daemon's FIRST operation itself.
+
+        `start()` exchanges a status request, which is the right readiness signal and the
+        wrong thing for a test timing the first status.
+        """
+        server = DaemonServer(
+            self.paths,
+            workspace_root=self.root,
+            declaration_path=self.declaration,
+            environment=ENABLED_ENV,
+        )
+        thread = threading.Thread(target=server.run, daemon=True)
+        thread.start()
+        # NO probe at all. A connect-and-close is handled as an empty request, so on a
+        # loaded run where the accept loop is delayed past the startup grace it could be
+        # consumed first -- and `_tick_observation(force=True)` could then run before the
+        # request this caller intends to own. Consuming an accepted connection is exactly
+        # what this helper exists to avoid, so it consumes nothing: the caller's own first
+        # request retries until the socket answers.
+        return server, thread
+
+    def request_when_available(self, payload: bytes, *, timeout: float = 5.0) -> dict:
+        """The first real request, retrying only the connection refusal.
+
+        For the one caller that must own the daemon's first accepted connection. A refusal
+        means the listener is not up yet; anything else is a genuine failure and is raised.
+        """
+        deadline = time.monotonic() + timeout
+        last: Exception | None = None
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                # The caller's whole budget, not a one-second slice of it. A daemon that
+                # accepts and is then descheduled for between one and two seconds --
+                # which the sole caller explicitly accepts -- raised here instead, and a
+                # timeout is not a refusal so the retry loop could not recover it. The
+                # helper was rejecting behaviour the test contract calls a pass.
+                return self.request(payload, timeout=remaining)
+            except (ConnectionRefusedError, FileNotFoundError) as exc:
+                last = exc
+                time.sleep(0.01)
+        self.fail(f"socket never accepted a request within {timeout}s: {last!r}")
+
+    def wait_until_accepting(self, timeout: float = 5.0) -> None:
+        """Wait until the daemon ANSWERS, not until its socket file appears.
+
+        `_open_listener` binds -- which creates the file -- then restores the umask,
+        chmods, stats for its identity, and only then calls listen(). Connecting inside
+        that window raises ECONNREFUSED, because a bound-but-unlistening AF_UNIX socket
+        refuses. Polling `socket.exists()` therefore returned true while the daemon was
+        still unreachable, and under full-suite load the test won the race often enough
+        to fail roughly one run in three (llm-collab#320).
+
+        A successful connect is not enough either: with observation enabled, `_serve`
+        listens and then runs the integrity probe, builds and starts the observation
+        engine, and writes the startup log before it ever reaches `accept()`. The kernel
+        completes a connect into the backlog throughout that interval, so a connect-only
+        probe can return while the daemon still cannot dispatch -- and a following request
+        times out, or is reset if setup aborts. A completed request/response exchange is
+        the only evidence that the accept loop is actually serving.
+        """
+        deadline = time.monotonic() + timeout
+        last: Exception | None = None
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                # Bounded by what is LEFT, and by nothing else. request()'s fixed two
+                # seconds made `wait_until_accepting(timeout=0.3)` block for two seconds
+                # per attempt, so the helper's own deadline meant nothing -- but capping
+                # each attempt at half a second traded that for backlog churn: attempts
+                # time out and close while their requests sit queued, so a startup near
+                # the far end of the budget (say 4.8s of a 5s window) fills the listener's
+                # backlog and later attempts get EAGAIN or run out of time, even though
+                # the accept loop began before the deadline. One request allowed to wait
+                # out the remaining budget just gets answered.
+                answer = self.request(
+                    b'{"version":1,"op":"status"}', timeout=remaining
+                )
+            except (OSError, ValueError) as exc:
+                last = exc
+                time.sleep(0.01)
+                continue
+            if isinstance(answer, dict):
+                return
+            last = ValueError(f"status answered with {type(answer).__name__}")
+            time.sleep(0.01)
+        self.fail(f"daemon never answered a request within {timeout}s: {last!r}")
 
     def wait_for_log(self) -> Path:
         deadline = time.monotonic() + 2
@@ -101,10 +206,350 @@ class DaemonTest(unittest.TestCase):
         self.assertTrue(self.paths.log.exists(), "daemon started log was not written")
         return self.paths.log
 
-    def request(self, value: bytes) -> dict:
+    def test_start_survives_a_widened_bind_to_listen_window(self) -> None:
+        """The race, made deterministic instead of waited for.
+
+        Rather than run the suite until load happens to open the real bind->listen
+        window, this widens it on purpose. A readiness probe that waits for the socket
+        FILE returns during the window and the first request hits ECONNREFUSED; a probe
+        that waits for a successful connect does not.
+
+        Without this the fix was only supported by 8 consecutive green full-suite runs,
+        which under the measured 1-in-3 failure rate could happen by chance about 4% of
+        the time. This fails outright on the old probe.
+        """
+        import llm_collab.daemon.server as server_module
+
+        real_open = server_module.DaemonServer._open_listener
+
+        def slow_open(inner_self):
+            inner_self._recover_stale_socket()
+            old_mask = os.umask(0o077)
+            try:
+                listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                listener.bind(os.fspath(inner_self.paths.socket))
+            finally:
+                os.umask(old_mask)
+            # The window that exists for real -- umask restore, chmod, stat -- widened
+            # so the test does not depend on scheduling luck.
+            time.sleep(0.3)
+            os.chmod(inner_self.paths.socket, 0o600)
+            inner_self._socket_identity = server_module._identity(inner_self.paths.socket)
+            listener.listen(8)
+            listener.settimeout(0.1)
+            return listener
+
+        with patch.object(server_module.DaemonServer, "_open_listener", slow_open):
+            server, thread = self.start()
+            try:
+                # The first request must land on a listening socket, not a bound one.
+                self.assertTrue(self.request(b'{"version":1,"op":"status"}')["running"])
+            finally:
+                # Out-of-band, deliberately. If the regression recurs the assertion above
+                # raises because the socket is bound but not listening -- and an in-band
+                # shutdown request would raise for the identical reason, leaving the
+                # non-daemon thread in its accept loop forever. A test meant to report a
+                # failure would hang the run instead.
+                self.force_stop(server, thread)
+        self.assertIs(real_open, server_module.DaemonServer._open_listener)
+
+    def test_readiness_waits_for_a_served_request_not_for_a_connect(self) -> None:
+        """A connect can complete into the backlog while the daemon cannot dispatch.
+
+        With observation enabled, `_serve` listens and then runs the integrity probe,
+        builds and starts the observation engine, and writes the startup log before it
+        reaches `accept()`. The kernel accepts connections into the backlog throughout
+        that interval, so a connect-only probe returns while nothing is serving -- and a
+        following request times out, or is reset if setup aborts. Widened here, on the
+        startup log.
+
+        Proved by ORDER, not by a short timeout. The previous version gave the follow-up
+        request 150 ms, which on a loaded worker is a scheduling race: the server can be
+        descheduled that long after answering readiness and the test fails although
+        readiness behaved correctly. Comparing two observed instants has no such race --
+        readiness cannot return before the startup work unless it never waited for it.
+        """
+        real_write_log = DaemonServer._write_log
+        startup_finished: list[float] = []
+
+        def slow_started_log(inner_self, event: dict[str, object]) -> None:
+            if event.get("event") == "started":
+                time.sleep(0.4)
+                real_write_log(inner_self, event)
+                startup_finished.append(time.monotonic())
+                return
+            real_write_log(inner_self, event)
+
+        with patch.object(DaemonServer, "_write_log", slow_started_log):
+            _server, thread = self.start()
+            ready_at = time.monotonic()
+            try:
+                self.assertEqual(
+                    1, len(startup_finished),
+                    "the widened startup work never ran; the fixture proves nothing",
+                )
+                self.assertGreater(
+                    ready_at, startup_finished[0],
+                    "readiness returned before startup finished, so it did not wait for a "
+                    "served request -- a connect-only probe returns exactly here",
+                )
+                served = self.request(b'{"version":1,"op":"status"}')
+                # Readiness has returned, so the accept loop is serving: a request with
+                # far less patience than the widened window must still be answered. A
+                # connect-only probe would have returned mid-window and this would time
+                # out in the backlog.
+                self.assertTrue(served["running"])
+            finally:
+                self.stop_or_report(thread)
+
+    def test_readiness_waits_for_accept_not_for_the_socket_file(self) -> None:
+        """The race this harness had, pinned deterministically.
+
+        _open_listener() binds -- creating the socket file -- then restores the umask,
+        chmods and stats before calling listen(). A bound-but-unlistening AF_UNIX socket
+        refuses connections, so a probe that waits for the FILE returns while the daemon
+        is still unreachable. Under full-suite load that window was won often enough to
+        fail about one run in three (llm-collab#320).
+
+        Rather than time the real window, this reproduces its shape directly: a socket
+        that is bound and not yet listening must refuse, which is what makes file
+        existence the wrong readiness signal.
+        """
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            path = Path(tmp) / "probe.sock"
+            listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            self.addCleanup(listener.close)
+            listener.bind(os.fspath(path))
+
+            self.assertTrue(path.exists(), "bind() alone makes the file appear")
+            probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            probe.settimeout(1)
+            self.addCleanup(probe.close)
+            with self.assertRaises(ConnectionRefusedError):
+                probe.connect(os.fspath(path))
+
+            listener.listen(8)
+            accepted = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            accepted.settimeout(1)
+            self.addCleanup(accepted.close)
+            accepted.connect(os.fspath(path))
+
+    def test_a_readiness_failure_in_start_stops_a_live_daemon(self) -> None:
+        """The worker must still be alive when readiness gives up, or nothing is proved.
+
+        The previous fixture bound a socket without listening, so `accept()` raised EINVAL
+        and the thread exited by itself -- the assertion passed with the cleanup deleted
+        entirely, which Codex verified and I reproduced. Here the accept loop is genuinely
+        running and readiness fails because every request is refused, so a missing cleanup
+        leaves a live thread.
+        """
+        import llm_collab.daemon.server as server_module
+
+        def refuse_every_request(inner_self, connection):
+            connection.close()
+
+        with patch.object(server_module.DaemonServer, "_handle", refuse_every_request):
+            with self.assertRaises(AssertionError):
+                self.start()
+        # start() owns the failure: no thread of its making may outlive it.
+        leaked = [
+            thread for thread in threading.enumerate()
+            if thread.is_alive() and thread.name.startswith("Thread-")
+            and getattr(getattr(thread, "_target", None), "__self__", None) is not None
+            and type(getattr(thread._target, "__self__")).__name__ == "DaemonServer"
+        ]
+        self.assertEqual([], leaked, "a live daemon thread outlived its failed start()")
+
+    def test_an_unexpected_server_thread_exit_is_reported(self) -> None:
+        """`if thread.is_alive()` reads as a double-shutdown guard and hides a death.
+
+        In a body that never shuts the server down, a dead thread means the accept loop
+        exited on its own -- and after the status response every assertion can pass while
+        the guard silently swallows it.
+        """
+        finished = threading.Thread(target=lambda: None)
+        finished.start()
+        finished.join(1)
+        with self.assertRaises(AssertionError) as caught:
+            self.stop_or_report(finished)
+        self.assertIn("exited before cleanup", str(caught.exception))
+
+    def test_a_stalled_server_cannot_outlive_the_test_process(self) -> None:
+        """Cleanup cannot reach a handler that is already stuck.
+
+        `_serve` reads `_stopping` only between accepts, so a server stalled inside
+        `_handle` never gets back to check it -- `force_stop` and every join are
+        best-effort against that case. Reproduced by patching `_handle` to wait on an
+        Event that is never set: readiness times out, cleanup cannot stop the thread, and
+        with a non-daemon thread the process hung indefinitely instead of reporting the
+        failure.
+
+        The daemon flag is the guarantee, so it is asserted on every path that starts a
+        server here rather than trusted to stay put.
+        """
+        server, thread = self.start()
+        try:
+            self.assertTrue(
+                thread.daemon,
+                "a stalled server thread must not be able to hang the run",
+            )
+        finally:
+            self.stop(thread)
+
+        server, thread = self.start_without_readiness()
+        try:
+            self.assertTrue(thread.daemon)
+        finally:
+            self.force_stop(server, thread)
+
+    def test_force_stop_ends_the_server_without_using_the_protocol(self) -> None:
+        """Cleanup after a protocol failure cannot itself require the protocol.
+
+        The in-band `stop()` sends a shutdown REQUEST. When the thing that regressed is
+        the socket or the dispatch path, that request fails exactly like the assertion
+        did, and the non-daemon accept thread outlives the test -- a run that should
+        report a failure hangs instead.
+
+        Proven by breaking the protocol first: the socket file is removed, so no request
+        can reach the daemon at all, and the server must still be stoppable.
+        """
+        server, thread = self.start()
+        self.paths.socket.unlink()
+        with self.assertRaises((OSError, ValueError)):
+            self.request(b'{"version":1,"op":"status"}')
+        self.force_stop(server, thread)
+        self.assertFalse(thread.is_alive())
+
+    def test_readiness_respects_its_own_deadline_against_a_silent_socket(self) -> None:
+        """A socket that accepts and never answers must not outlast the helper's deadline.
+
+        Each attempt used `request()`'s fixed two seconds, so `wait_until_accepting(0.3)`
+        blocked for two seconds per attempt and the helper's own timeout meant nothing.
+        A listener that accepts and then goes silent is the shape that exposes it.
+        """
+        from types import SimpleNamespace
+
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            path = Path(tmp) / "silent.sock"
+            listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            listener.bind(os.fspath(path))
+            listener.listen(8)
+            self.addCleanup(listener.close)
+
+            original = self.paths
+            self.paths = SimpleNamespace(socket=path)
+            try:
+                started = time.monotonic()
+                with self.assertRaises(AssertionError):
+                    self.wait_until_accepting(timeout=0.3)
+                elapsed = time.monotonic() - started
+            finally:
+                self.paths = original
+        self.assertLess(
+            elapsed, 1.5,
+            f"the 0.3s deadline took {elapsed:.2f}s; each attempt ignored what was left",
+        )
+
+    @contextlib.contextmanager
+    def slow_listener(self, delay: float):
+        """A listener that accepts immediately and answers `delay` seconds later.
+
+        The shape both timing findings are about: the connection succeeds, so nothing
+        retries, and the only question is whether the helper waits long enough to be
+        answered.
+        """
+        from types import SimpleNamespace
+
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            path = Path(tmp) / "slow.sock"
+            listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            listener.bind(os.fspath(path))
+            listener.listen(8)
+            stop = threading.Event()
+
+            def serve():
+                listener.settimeout(0.2)
+                while not stop.is_set():
+                    try:
+                        conn, _ = listener.accept()
+                    except (OSError, socket.timeout):
+                        continue
+                    with conn:
+                        conn.recv(4096)
+                        if stop.wait(delay):
+                            return
+                        try:
+                            conn.sendall(b'{"running": true}')
+                        except OSError:
+                            return
+
+            server = threading.Thread(target=serve, daemon=True)
+            server.start()
+            original = self.paths
+            self.paths = SimpleNamespace(socket=path)
+            try:
+                yield
+            finally:
+                self.paths = original
+                stop.set()
+                server.join(2)
+                listener.close()
+
+    def test_the_first_request_gets_the_callers_whole_window(self) -> None:
+        """A first response after 1.2s is a pass by the caller's contract, not a failure.
+
+        `request_when_available` capped each attempt at one second while its sole caller
+        accepts anything answered within two. A daemon that accepted and was then
+        descheduled for between one and two seconds raised here -- and a timeout is not a
+        connection refusal, so the retry loop could not recover it. The helper rejected
+        behaviour the test contract calls a pass, which is how a load-dependent failure
+        gets reintroduced as a "flake".
+        """
+        with self.slow_listener(1.2):
+            started = time.monotonic()
+            answer = self.request_when_available(b'{"version":1,"op":"status"}')
+            elapsed = time.monotonic() - started
+        # Receipt plus the lower bound is the whole claim: the capped implementation
+        # cannot get here at all, it raises TimeoutError at one second. An upper bound
+        # would add back exactly the scheduling-dependent failure this PR removes --
+        # a loaded worker can deliver a valid response and not reschedule this thread
+        # until after any wall-clock threshold I could pick.
+        self.assertTrue(answer["running"])
+        self.assertGreater(elapsed, 1.0, "the listener was supposed to answer slowly")
+
+    def test_readiness_lets_one_attempt_use_the_remaining_budget(self) -> None:
+        """Half-second attempts churned the backlog instead of waiting to be answered.
+
+        Each attempt timed out and closed while its request sat queued, so a startup near
+        the far end of the budget filled the listener's backlog and later attempts hit
+        EAGAIN or ran out of time -- failing even though the accept loop had begun well
+        before the deadline. One request allowed to wait out what is left is simply
+        answered.
+        """
+        with self.slow_listener(1.0):
+            started = time.monotonic()
+            self.wait_until_accepting(timeout=3.0)
+            elapsed = time.monotonic() - started
+        self.assertGreater(elapsed, 0.8)
+
+    def test_the_readiness_probe_reports_failure_rather_than_hanging(self) -> None:
+        """A readiness helper that waits forever turns a fast failure into a stall."""
+        from types import SimpleNamespace
+
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            original = self.paths
+            self.paths = SimpleNamespace(socket=Path(tmp) / "never-created.sock")
+            try:
+                with self.assertRaises(AssertionError) as caught:
+                    self.wait_until_accepting(timeout=0.3)
+                self.assertIn("never answered a request", str(caught.exception))
+            finally:
+                self.paths = original
+
+    def request(self, value: bytes, *, timeout: float = 2) -> dict:
         client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
-            client.settimeout(2)
+            client.settimeout(timeout)
             client.connect(os.fspath(self.paths.socket))
             client.sendall(value)
             try:
@@ -117,6 +562,65 @@ class DaemonTest(unittest.TestCase):
             return json.loads(client.recv(70_000).decode())
         finally:
             client.close()
+
+    @contextlib.contextmanager
+    def daemon(self, *, peer=None):
+        """Start a daemon and guarantee it is gone, whatever the body does.
+
+        One mechanism, so there is nothing to keep in sync. The previous attempt asserted
+        the property structurally -- over `Thread` spellings, line numbers and source text --
+        and every one of those checks was satisfiable without the property holding. A
+        leaking non-daemon thread corrupts later tests, so this cannot be deferred; but
+        proving it needs a `finally` that always runs, not static analysis.
+        """
+        server, thread = self.start(peer=peer)
+        try:
+            yield server, thread
+        finally:
+            self.stop_or_report(thread)
+
+    def force_stop(self, server, thread: threading.Thread, *, timeout: float = 5.0) -> None:
+        """Stop the server WITHOUT using the protocol.
+
+        Failure-path cleanup cannot ask a broken daemon to shut itself down. When the
+        readiness regression recurs the socket is bound but not listening, so the
+        shutdown request raises exactly like the assertion did -- and the accept loop is
+        entered afterwards on a non-daemon thread that then never exits, turning a test
+        that should report a failure into one that hangs the whole run.
+
+        `_stopping` is checked every 0.1s because the listener polls, so setting it
+        directly is sufficient and needs nothing from the socket.
+        """
+        server._stopping = True
+        thread.join(timeout)
+        if thread.is_alive():
+            self.fail("the server thread did not exit after an out-of-band stop")
+
+    def stop_or_report(self, thread: threading.Thread, server=None) -> None:
+        """Shut down and join, or say why there was nothing to shut down.
+
+        `if thread.is_alive(): stop(...)` reads as a benign double-shutdown guard, but in a
+        body that never shuts the server down a dead thread means the accept loop exited on
+        its own -- and if that happened after the status response, every assertion could
+        pass while this guard silently swallowed it.
+        """
+        if thread.is_alive():
+            if server is None:
+                self.stop(thread)
+            else:
+                # In-band first, because a clean shutdown is worth exercising -- but
+                # never at the cost of hanging: if dispatch is the thing that regressed,
+                # the shutdown request fails the same way and the thread outlives the run.
+                try:
+                    self.stop(thread)
+                except (OSError, ValueError, AssertionError):
+                    self.force_stop(server, thread)
+                    raise
+        else:
+            self.fail("the server thread exited before cleanup; the accept loop died")
+        thread.join(2)
+        if thread.is_alive():
+            self.fail("the server thread is still alive after shutdown and join")
 
     def stop(self, thread: threading.Thread) -> None:
         self.assertEqual(self.request(b'{"version":1,"op":"shutdown"}')["stopping"], True)
@@ -175,18 +679,20 @@ class DaemonTest(unittest.TestCase):
             environment=ENABLED_ENV,
         )
         with patch.object(LedgerStore, "open_writer", side_effect=AssertionError("must not open")):
-            thread = threading.Thread(target=server.run)
+            thread = threading.Thread(target=server.run, daemon=True)
             thread.start()
-            deadline = time.monotonic() + 2
-            while not self.paths.socket.exists() and time.monotonic() < deadline:
-                time.sleep(0.01)
-            self.assertTrue(self.paths.socket.exists())
-            status = self.request(b'{"version":1,"op":"status"}')
-            self.assertFalse(status["observation_gate"]["effective"])
-            self.assertEqual(status["ledger"]["state"], "absent")
-            self.assertFalse(self.paths.ledger.exists())
-            self.assertEqual(list(self.paths.backups.iterdir()), [])
-            self.stop(thread)
+            # From immediately after start(), not after the assertions: a readiness
+            # failure raises before any of them and would otherwise leave this non-daemon
+            # thread in its accept loop, hanging the run instead of reporting.
+            try:
+                self.wait_until_accepting()
+                status = self.request(b'{"version":1,"op":"status"}')
+                self.assertFalse(status["observation_gate"]["effective"])
+                self.assertEqual(status["ledger"]["state"], "absent")
+                self.assertFalse(self.paths.ledger.exists())
+                self.assertEqual(list(self.paths.backups.iterdir()), [])
+            finally:
+                self.stop_or_report(thread)
         self.assertFalse(self.paths.ledger.exists())
 
     def test_each_false_gate_and_all_false_perform_no_observation_reads_or_ledger_open(self) -> None:
@@ -236,17 +742,24 @@ class DaemonTest(unittest.TestCase):
                         side_effect=AssertionError("gate-off must not load watchdog"),
                     ) as watchdog_load,
                 ):
-                    thread = threading.Thread(target=server.run)
+                    thread = threading.Thread(target=server.run, daemon=True)
                     thread.start()
-                    deadline = time.monotonic() + 2
-                    while not self.paths.socket.exists() and time.monotonic() < deadline:
-                        time.sleep(0.01)
-                    self.assertTrue(self.paths.socket.exists())
-                    status = self.request(b'{"version":1,"op":"status"}')
-                    self.assertFalse(status["observation_gate"]["effective"])
-                    self.assertEqual(status["observation"]["state"], "gated_off")
-                    self.assertEqual(status["observation"]["source_reachability"], "not_checked")
-                    self.stop(thread)
+                    try:
+                        self.wait_until_accepting()
+                        status = self.request(b'{"version":1,"op":"status"}')
+                        self.assertFalse(status["observation_gate"]["effective"])
+                        self.assertEqual(status["observation"]["state"], "gated_off")
+                        self.assertEqual(
+                            status["observation"]["source_reachability"], "not_checked"
+                        )
+                    finally:
+                        # stop_or_report, not a liveness guard: this body never shuts the
+                        # server down, so a dead thread means the accept loop exited on
+                        # its own. If that happened after the status response every
+                        # assertion above still passed, and the guard swallowed it.
+                        # The server is passed so cleanup can fall back out-of-band
+                        # rather than hang when dispatch is what broke.
+                        self.stop_or_report(thread, server)
                     open_writer.assert_not_called()
                     registry_read.assert_not_called()
                     watchdog_load.assert_not_called()
@@ -261,16 +774,17 @@ class DaemonTest(unittest.TestCase):
             declaration_path=self.declaration,
             environment=ENABLED_ENV,
         )
-        thread = threading.Thread(target=server.run)
+        thread = threading.Thread(target=server.run, daemon=True)
         thread.start()
-        deadline = time.monotonic() + 2
-        while not self.paths.socket.exists() and time.monotonic() < deadline:
-            time.sleep(0.01)
+        # Readiness INSIDE the guard: if status requests never produce a valid dictionary --
+        # a response-shape or dispatch regression -- it raises, and outside the guard that
+        # leaves the non-daemon accept loop running and hangs the suite.
         try:
+            self.wait_until_accepting()
             with self.assertRaises(WriterAlreadyOpenError):
                 LedgerStore.open_writer(self.paths)
         finally:
-            self.stop(thread)
+            self.stop_or_report(thread)
 
     def test_status_uses_cached_integrity_snapshot_or_gate_off_shape(self) -> None:
         def request_status(server: DaemonServer) -> dict[str, object]:
@@ -668,6 +1182,13 @@ class DaemonTest(unittest.TestCase):
             os.chdir(old_cwd)
 
     def test_first_status_is_ready_before_slow_initial_reconciliation(self) -> None:
+        """Readiness must not consume the operation this test is timing.
+
+        `start()` now exchanges a status request, so the "first" status here was really the
+        second -- a regression that served the blocked reconciliation before the first
+        status would have been hidden. This one starts the daemon without the readiness
+        exchange so the request it times really is the first.
+        """
         entered = threading.Event()
         release = threading.Event()
 
@@ -681,15 +1202,18 @@ class DaemonTest(unittest.TestCase):
             autospec=True,
             side_effect=slow_reconcile,
         ):
-            _server, thread = self.start()
-            time.sleep(0.2)
-            started = time.monotonic()
-            status = self.request(b'{"version":1,"op":"status"}')
-            self.assertTrue(status["running"])
-            self.assertLess(time.monotonic() - started, 2)
-            self.assertTrue(entered.wait(1))
-            release.set()
-            self.stop(thread)
+            _server, thread = self.start_without_readiness()
+            try:
+                started = time.monotonic()
+                # The FIRST accepted connection, retried only on refusal, so nothing this
+                # test does not control has been served before it.
+                status = self.request_when_available(b'{"version":1,"op":"status"}')
+                self.assertTrue(status["running"])
+                self.assertLess(time.monotonic() - started, 2)
+                self.assertTrue(entered.wait(1))
+            finally:
+                release.set()
+                self.stop(thread)
 
     def test_listener_and_observer_setup_share_cleanup_discipline(self) -> None:
         gate = GateStatus(
@@ -745,11 +1269,13 @@ class DaemonTest(unittest.TestCase):
             with self.subTest(payload=payload), self.assertRaises(ProtocolError):
                 parse_request(payload)
         _server, thread = self.start()
-        self.assertIn("error", self.request(b"x" * 4097))
-        self.assertIn("error", self.request(b'{"version":1,"op":"start"}'))
-        self.assertIn("error", self.request(b'{"version":1,"op":[]}'))
-        self.assertTrue(self.request(valid)["running"])
-        self.stop(thread)
+        try:
+            self.assertIn("error", self.request(b"x" * 4097))
+            self.assertIn("error", self.request(b'{"version":1,"op":"start"}'))
+            self.assertIn("error", self.request(b'{"version":1,"op":[]}'))
+            self.assertTrue(self.request(valid)["running"])
+        finally:
+            self.stop(thread)
 
     def test_peer_authentication_precedes_dispatch(self) -> None:
         server, thread = self.start(peer=lambda _connection: os.getuid() + 1)
