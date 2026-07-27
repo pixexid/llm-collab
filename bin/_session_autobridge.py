@@ -781,7 +781,7 @@ def resolve_exact_dispatch_pair(
     str | None,
     dict[str, Any] | None,
 ]:
-    """Return the dispatchable pair, refusal reason, and validated inactive binding.
+    """Return the dispatchable pair, refusal reason, and validated expired binding.
 
     Hands back the exact binding snapshot this validation was performed against, so a caller
     never has to reopen the path to read a field the session does not carry. Introduced because
@@ -828,17 +828,16 @@ def resolve_exact_dispatch_pair(
 
     if not exact_matches:
         return None, EXACT_BINDING_MISMATCH_REASON, None
-
-    dispatchable = [
-        session
-        for session in exact_matches
-        if session_is_dispatchable(session)[0]
-    ]
-    if not dispatchable:
-        return None, EXACT_BINDING_NOT_DISPATCHABLE_REASON, binding
-    if len(dispatchable) > 1:
+    if len(exact_matches) > 1:
         return None, EXACT_BINDING_AMBIGUOUS_REASON, None
-    return (dispatchable[0], binding), None, None
+
+    session = exact_matches[0]
+    dispatchable, refusal_reason = session_is_dispatchable(session)
+    if not dispatchable and refusal_reason == "lease_expired":
+        return None, EXACT_BINDING_NOT_DISPATCHABLE_REASON, binding
+    if not dispatchable:
+        return None, EXACT_BINDING_NOT_DISPATCHABLE_REASON, None
+    return (session, binding), None, None
 
 
 def message_targets_session(
