@@ -1333,6 +1333,16 @@ def derived_runtime_command(session: dict, message: dict) -> list[str] | None:
             "--json",
             "--skip-git-repo-check",
         ]
+    if runtime_family == "claude_app":
+        return [
+            binary,
+            "-p",
+            "--output-format",
+            "json",
+            "--resume",
+            str(runtime_session_id),
+            prompt,
+        ]
     if runtime_family == "gemini_cli":
         return [
             binary,

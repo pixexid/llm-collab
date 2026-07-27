@@ -298,7 +298,6 @@ For GitHub-backed projects:
 | `cli_session` with `activation.ax_app` (and `ax_attended_only` not `true`) | `deliver.py` prints an AX doorbell command |
 | `ax_attended_only: true` (opaque composer, e.g. ZCode/Antigravity) | Reports `ax_attended_recovery_required`; Codex-attended recovery, no routine ring |
 | Terminal-only `cli_session` | Requires a dispatchable runtime session |
-| Project-configured non-CLI Claude fallback | Reports `desktop_bridge_required` |
 | `human_relay` | Prints a human handoff prompt |
 | Missing transport | Reports `activation_unavailable` with a reason |
 

@@ -1074,6 +1074,15 @@ guard args.count >= 2 else {
     print("  confirm --app <app> --text <sent-text>   read-only: delivered? (exit 0 delivered / 7 not delivered)")
     exit(64)
 }
+if ["ring", "type"].contains(args[1]),
+   let app = argValue("--app"),
+   profileFor(app) == .claude {
+    FileHandle.standardError.write(
+        "REFUSED (no mutation): Claude receives durable mailbox packets through its own background watcher; AX may not mutate its composer.\n"
+            .data(using: .utf8)!
+    )
+    exit(11)
+}
 // --window-index is optional: absent = nil (auto-select the native chat window);
 // an explicit value (incl. 0) is honored. This distinguishes auto from index 0.
 // A PRESENT-but-invalid value fails closed (usage error) — a bad explicit

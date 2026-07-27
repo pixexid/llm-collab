@@ -959,6 +959,7 @@ class SessionAutobridgeTest(unittest.TestCase):
     def test_runtime_trigger_derives_resume_command_from_registered_session(self):
         fixtures = [
             ("codex_app", "LLM_COLLAB_CODEX_BIN", ["exec", "resume"], ["--json", "--skip-git-repo-check"]),
+            ("claude_app", "LLM_COLLAB_CLAUDE_BIN", ["-p", "--output-format", "json", "--resume"], []),
             ("gemini_cli", "LLM_COLLAB_GEMINI_BIN", ["--prompt"], []),
         ]
 
