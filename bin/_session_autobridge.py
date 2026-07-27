@@ -1250,10 +1250,23 @@ def build_resume_prompt(session: dict, message: dict) -> str:
                 "Before mutating protected lane state, assert this exact activation lease fence.",
             ]
         )
+    if activation_lease:
+        lines.extend(
+            [
+                "",
+                "Activation packet body:",
+                message.get("body", "").strip() or "(no body)",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                "",
+                "The packet body is not copied here; open it through your llm-collab inbox.",
+            ]
+        )
     lines.extend(
         [
-            "",
-            "The packet body is not copied here; open it through your llm-collab inbox.",
             "",
             *_reply_channel_lines(session, fm),
             "",
@@ -2118,7 +2131,8 @@ def execute_runtime_trigger(session: dict, message: dict) -> dict[str, Any]:
             env["GEMINI_HOME"] = str(runtime_home)
     result = subprocess.run(
         command,
-        input=json.dumps(payload),
+        input=None if derived else json.dumps(payload),
+        stdin=subprocess.DEVNULL if derived else None,
         text=True,
         capture_output=True,
         cwd=ROOT,

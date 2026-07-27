@@ -699,6 +699,7 @@ class SessionAutobridgeTest(unittest.TestCase):
         self.assertEqual(message["activation_lease"], payload["activation_lease"])
         self.assertIn("activation_fence_token: 2", prompt)
         self.assertIn("Before mutating protected lane state", prompt)
+        self.assertIn("Activation packet body:\nDo the lane.", prompt)
 
     def test_activation_assert_refusal_stops_before_protected_runtime_mutations(self):
         session = {
@@ -997,7 +998,7 @@ class SessionAutobridgeTest(unittest.TestCase):
                             "from pathlib import Path",
                             "payload = {",
                             "    'argv': sys.argv[1:],",
-                            "    'stdin': json.load(sys.stdin),",
+                            "    'stdin': sys.stdin.read(),",
                             "    'env': {",
                             "        'session_id': os.environ.get('LLM_COLLAB_SESSION_ID'),",
                             "        'runtime_family': os.environ.get('LLM_COLLAB_RUNTIME_FAMILY'),",
@@ -1073,8 +1074,7 @@ class SessionAutobridgeTest(unittest.TestCase):
                     self.assertEqual(f"{runtime_family}-session-1", argv[resume_index + 1])
                     output_index = argv.index("--output-format")
                     self.assertEqual("json", argv[output_index + 1])
-                self.assertIn("Derived runtime wake", json.dumps(runtime_payload["stdin"]))
-                self.assertIn("claude-session-2", json.dumps(runtime_payload["stdin"]))
+                self.assertEqual("", runtime_payload["stdin"])
                 self.assertEqual("SESSION-DERIVED", runtime_payload["env"]["session_id"])
                 self.assertEqual(runtime_family, runtime_payload["env"]["runtime_family"])
                 self.assertEqual(f"{runtime_family}-session-1", runtime_payload["env"]["runtime_session_id"])
