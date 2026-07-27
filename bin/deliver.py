@@ -111,7 +111,7 @@ from _session_autobridge import (
     EXACT_BINDING_MISMATCH_REASON,
     load_binding,
     repo_scope_matches,
-    resolve_exact_dispatch_target,
+    resolve_exact_dispatch_pair,
     resolve_thread_pair_session_id,
     session_target_ids,
     update_thread_pair,
@@ -202,6 +202,9 @@ def build_message(args, body: str, chat_id: str, packet_name: str | None = None)
         "path_targets": path_targets,
         "sent_utc": utc_iso(),
     }
+    if getattr(args, "target_binding_id", None) is not None:
+        fm["target_binding_id"] = args.target_binding_id
+        fm["target_binding_generation"] = args.target_binding_generation
     if args.activation:
         fm["activation"] = True
         fm["worktree"] = args.worktree
@@ -417,24 +420,27 @@ def main():
             )
 
     autobridge_target = None
+    autobridge_binding = None
     binding_unreadable = False
     if not thread_coordination_required:
         try:
-            autobridge_target, autobridge_refusal_reason = resolve_exact_dispatch_target(
+            pair, autobridge_refusal_reason = resolve_exact_dispatch_pair(
                 args.project,
                 chat_id,
                 args.recipient,
             )
+            if pair is not None:
+                autobridge_target, autobridge_binding = pair
         except BindingUnreadable as error:
             # Distinct from exact_binding_required, which means the binding is ABSENT. This record
             # exists and was refused, so the reason says so and carries the real cause with it.
             autobridge_target = None
             autobridge_refusal_reason = f"{BINDING_UNREADABLE_REASON}: {error}"
             binding_unreadable = True
-        resolved_binding_target = resolve_bound_runtime_session_id(
-            args.project,
-            chat_id,
-            args.recipient,
+        resolved_binding_target = (
+            autobridge_binding.get("runtime_session_id")
+            if autobridge_binding is not None
+            else None
         )
         if autobridge_target is not None and resolved_binding_target is not None:
             if explicit_target_session_id and str(explicit_target_session_id) != resolved_binding_target:
@@ -443,6 +449,8 @@ def main():
                 args.target_session_id = None
             else:
                 args.target_session_id = resolved_binding_target
+                args.target_binding_id = autobridge_binding.get("binding_id")
+                args.target_binding_generation = autobridge_binding.get("binding_generation")
         else:
             args.target_session_id = None
     autobridge_ready = bool(
