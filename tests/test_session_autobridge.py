@@ -2391,6 +2391,38 @@ class SessionAutobridgeTest(unittest.TestCase):
             self.assertIsNone(inactive_binding)
             self.assertEqual(session_autobridge_lib.EXACT_BINDING_AMBIGUOUS_REASON, reason)
 
+        reused_runtime = {
+            **expired_a,
+            "session_id": "SESSION-OTHER",
+            "lease_expires_utc": "2999-01-01T00:00:00+00:00",
+        }
+        with patch.object(
+            session_autobridge_lib,
+            "load_binding",
+            return_value={
+                "project_id": "amiga",
+                "chat_id": "CHAT-EXACT-DUP",
+                "agent_id": "claude",
+                "session_id": "SESSION-DUP",
+                "runtime_family": "claude_app",
+                "runtime_session_id": "runtime-dup",
+            },
+        ), patch.object(
+            session_autobridge_lib,
+            "iter_sessions",
+            return_value=[expired_a, reused_runtime],
+        ):
+            pair, reason, inactive_binding = (
+                session_autobridge_lib.resolve_exact_dispatch_pair(
+                    "amiga",
+                    "CHAT-EXACT-DUP",
+                    "claude",
+                )
+            )
+            self.assertIsNone(pair)
+            self.assertIsNone(inactive_binding)
+            self.assertEqual(session_autobridge_lib.EXACT_BINDING_AMBIGUOUS_REASON, reason)
+
         stopped = dict(duplicate_a)
         stopped["status"] = "stopped"
         with patch.object(

@@ -814,15 +814,18 @@ def resolve_exact_dispatch_pair(
         session for session in sessions if session.get("agent_id") == agent_id
     ]
     exact_matches: list[dict[str, Any]] = []
+    live_target_matches: list[dict[str, Any]] = []
     for session in candidates:
         if session.get("project_id") != project_id or session.get("chat_id") != chat_id:
-            continue
-        if str(session.get("session_id")) != str(bound_session_id):
             continue
         runtime = runtime_metadata(session)
         if not bound_runtime_family or str(bound_runtime_family) != str(runtime.get("family")):
             continue
         if not runtime.get("session_id") or str(bound_runtime_id) != str(runtime.get("session_id")):
+            continue
+        if session.get("status") in {"active", "parked"}:
+            live_target_matches.append(session)
+        if str(session.get("session_id")) != str(bound_session_id):
             continue
         exact_matches.append(session)
 
@@ -834,6 +837,8 @@ def resolve_exact_dispatch_pair(
     session = exact_matches[0]
     dispatchable, refusal_reason = session_is_dispatchable(session)
     if not dispatchable and refusal_reason == "lease_expired":
+        if len(live_target_matches) > 1:
+            return None, EXACT_BINDING_AMBIGUOUS_REASON, None
         return None, EXACT_BINDING_NOT_DISPATCHABLE_REASON, binding
     if not dispatchable:
         return None, EXACT_BINDING_NOT_DISPATCHABLE_REASON, None
