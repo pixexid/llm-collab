@@ -8,6 +8,8 @@ import os
 import sys
 import tempfile
 import textwrap
+import threading
+import time
 import unittest
 from dataclasses import replace
 from pathlib import Path
@@ -161,6 +163,72 @@ class RuntimeAdapterSupervisorTests(unittest.TestCase):
                 self.assertEqual(outcome.fault, "STDERR_LIMIT_EXCEEDED")
                 self.assertTrue(outcome.stderr_truncated)
                 self.assertLessEqual(len(outcome.stderr), MAX_STDERR_BYTES_PER_CONNECTION)
+
+    def test_response_waits_for_preceding_stderr_to_be_drained(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            script = write_script(
+                root,
+                """
+                import sys
+                sys.stderr.buffer.write(b"x")
+                sys.stderr.buffer.flush()
+                sys.stdin.buffer.readline()
+                sys.stderr.buffer.write(b"xxxxx")
+                sys.stderr.buffer.flush()
+                sys.stdout.buffer.write(b'{"jsonrpc":"2.0","id":"r1","result":{}}\\n')
+                sys.stdout.buffer.flush()
+                """,
+            )
+            read_started = threading.Event()
+            second_drain_started = threading.Event()
+            release_read = threading.Event()
+            release_second_drain = threading.Event()
+            request_done = threading.Event()
+            result = {}
+            drain_calls = 0
+            real_drain = StdioSupervisor._drain_stderr_fd
+
+            def paused_drain(supervisor, fd):
+                nonlocal drain_calls
+                drain_calls += 1
+                if drain_calls == 1:
+                    result = real_drain(supervisor, fd)
+                    read_started.set()
+                    release_read.wait(5)
+                    return result
+                if drain_calls == 2:
+                    second_drain_started.set()
+                    release_second_drain.wait(5)
+                return real_drain(supervisor, fd)
+
+            with patch(
+                "llm_collab.runtime_adapter_supervisor.MAX_STDERR_BYTES_PER_CONNECTION", 4
+            ), patch.object(StdioSupervisor, "_drain_stderr_fd", paused_drain):
+                with StdioSupervisor(resolved_adapter(script, root)) as supervisor:
+                    def request():
+                        result["outcome"] = supervisor.request(
+                            '{"jsonrpc":"2.0","id":"r1","method":"runtime.health","params":{}}'
+                        )
+                        request_done.set()
+
+                    thread = threading.Thread(target=request)
+                    try:
+                        self.assertTrue(read_started.wait(5))
+                        thread.start()
+                        deadline = time.monotonic() + 5
+                        while supervisor._stderr_barriers.empty() and time.monotonic() < deadline:
+                            time.sleep(0.001)
+                        self.assertFalse(supervisor._stderr_barriers.empty())
+                        release_read.set()
+                        self.assertTrue(second_drain_started.wait(5))
+                        self.assertFalse(request_done.wait(0.25))
+                    finally:
+                        release_read.set()
+                        release_second_drain.set()
+                    thread.join(5)
+                    self.assertFalse(thread.is_alive())
+                    self.assertEqual(result["outcome"].fault, "STDERR_LIMIT_EXCEEDED")
 
     def test_oversized_stdout_frame_is_bounded_and_closes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
