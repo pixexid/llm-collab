@@ -95,6 +95,24 @@ remove it and rely on the doorbell + mailbox-drain self-heal.
   corrupted, repeatedly loses tool access, or still cannot continue after
   attended recovery; include a full continuity packet for the same task.
 
+## Pi Native Event Wake
+
+Give each `pi` runtime session its own doorbell directory and watch that
+directory non-recursively, never the atomically replaced packet pointer:
+
+```bash
+mkdir -m 700 /absolute/path/to/<worker>-<chat>
+```
+
+Register `bin/pi_doorbell.py /absolute/path/to/<worker>-<chat>/message.pointer`
+as the runtime command. Bind `pi-event-monitor` in the existing native worker
+thread to `/absolute/path/to/<worker>-<chat>/`. Atomic pointer replacement
+changes the stable directory on every send without detaching the watch. The
+event is only a wake signal: after every event, read `message.pointer`, validate
+the exact project/chat/session binding, then read and answer the durable collab
+packet. Do not share a watched directory between workers, use AX, or create a
+new native thread for routine Pi packet delivery.
+
 ## Activate A Session
 
 From the collaboration repo:

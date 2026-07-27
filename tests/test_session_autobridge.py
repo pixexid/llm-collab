@@ -4817,7 +4817,7 @@ class SessionAutobridgeTest(unittest.TestCase):
 
     def test_pi_doorbell_publishes_complete_mode_600_content_atomically(self):
         root = self.make_workspace()
-        doorbell = root / "State" / "pi" / "glmpi.pointer"
+        doorbell = root / "State" / "pi" / "glmpi" / "message.pointer"
         original_replace = os.replace
         observed: dict[str, object] = {}
 
@@ -4847,6 +4847,20 @@ class SessionAutobridgeTest(unittest.TestCase):
         self.assertEqual(0o600, observed["mode"])
         self.assertFalse(observed["destination_existed"])
         self.assertEqual(observed["content"], doorbell.read_text())
+        watch_directory_inode = doorbell.parent.stat().st_ino
+
+        with patch.dict(
+            os.environ,
+            {"LLM_COLLAB_MESSAGE_PATH": "Chats/2026-07-27/next-packet.md"},
+        ), patch.object(
+            pi_doorbell_lib.sys,
+            "argv",
+            ["pi_doorbell.py", str(doorbell)],
+        ):
+            self.assertEqual(0, pi_doorbell_lib.main())
+
+        self.assertEqual("Chats/2026-07-27/next-packet.md\n", doorbell.read_text())
+        self.assertEqual(watch_directory_inode, doorbell.parent.stat().st_ino)
 
     def test_watch_inbox_default_off_empty_ledger_preserves_legacy_runtime_trigger(self):
         root = self.make_workspace()
