@@ -1,0 +1,400 @@
+{
+  "variant": "requested_review_phases",
+  "description": "A request that EXISTS, at each point of its request-anchored flow. The other variants classify non-signals; this one classifies where a live request has got to, because collapsing every requested review to 'escalate' made a just-posted request, an expired initial request, an expired re-trigger and an already-raised escalation indistinguishable -- so the fixtures could certify a consumer that escalates immediately, one that skips the mandatory re-trigger, or one that reads its own escalation as terminal. Each phase is a REACHABLE case here rather than a shape an assertion forbids.",
+  "project_cases": [
+    {
+      "project_id": "amiga",
+      "tier": "A",
+      "description": "A request naming the PRIOR head after a push. Stale, so nothing is pending for THIS head and the mandatory new-head request is owed.",
+      "pr_state": {
+        "head_oid": "amiga-abc200",
+        "pr_open": true,
+        "draft_ready": true,
+        "explicit_review_request": true,
+        "review_requests": [
+          {
+            "kind": "initial",
+            "head_oid": "amiga-abc100",
+            "phase": "expired"
+          }
+        ],
+        "request_phase": "stale_for_this_head"
+      },
+      "artifacts_for_current_head": [],
+      "expected": {
+        "terminal_signal_present": false,
+        "review_is_pending": false,
+        "disposition": "gate_violation_request_required",
+        "merge_eligible_on_silence": false
+      }
+    },
+    {
+      "project_id": "amiga",
+      "tier": "A",
+      "description": "Still inside the initial request's clock. Pending, and escalating here would skip the re-trigger the contract requires.",
+      "pr_state": {
+        "head_oid": "amiga-abc200",
+        "pr_open": true,
+        "draft_ready": true,
+        "explicit_review_request": true,
+        "review_requests": [
+          {
+            "kind": "initial",
+            "head_oid": "amiga-abc200",
+            "phase": "pending"
+          }
+        ],
+        "request_phase": "initial_pending"
+      },
+      "artifacts_for_current_head": [],
+      "expected": {
+        "terminal_signal_present": false,
+        "review_is_pending": true,
+        "disposition": "wait_out_initial_request",
+        "merge_eligible_on_silence": false
+      }
+    },
+    {
+      "project_id": "amiga",
+      "tier": "A",
+      "description": "The initial request's clock and the re-trigger's own clock are both spent, and the escalation is raised. The head stays blocked while the operator decision is pending; escalating again is not a next action.",
+      "pr_state": {
+        "head_oid": "amiga-abc200",
+        "pr_open": true,
+        "draft_ready": true,
+        "explicit_review_request": true,
+        "review_requests": [
+          {
+            "kind": "initial",
+            "head_oid": "amiga-abc200",
+            "phase": "expired"
+          },
+          {
+            "kind": "re_trigger",
+            "head_oid": "amiga-abc200",
+            "phase": "expired"
+          }
+        ],
+        "request_phase": "escalated_awaiting_disposition"
+      },
+      "artifacts_for_current_head": [],
+      "expected": {
+        "terminal_signal_present": false,
+        "review_is_pending": true,
+        "disposition": "blocked_pending_operator_disposition",
+        "merge_eligible_on_silence": false
+      }
+    },
+    {
+      "project_id": "nuvyr",
+      "tier": "A",
+      "description": "A request naming the PRIOR head after a push. Stale, so nothing is pending for THIS head and the mandatory new-head request is owed.",
+      "pr_state": {
+        "head_oid": "nuvyr-abc200",
+        "pr_open": true,
+        "draft_ready": true,
+        "explicit_review_request": true,
+        "review_requests": [
+          {
+            "kind": "initial",
+            "head_oid": "nuvyr-abc100",
+            "phase": "expired"
+          }
+        ],
+        "request_phase": "stale_for_this_head"
+      },
+      "artifacts_for_current_head": [],
+      "expected": {
+        "terminal_signal_present": false,
+        "review_is_pending": false,
+        "disposition": "gate_violation_request_required",
+        "merge_eligible_on_silence": false
+      }
+    },
+    {
+      "project_id": "nuvyr",
+      "tier": "A",
+      "description": "Still inside the initial request's clock. Pending, and escalating here would skip the re-trigger the contract requires.",
+      "pr_state": {
+        "head_oid": "nuvyr-abc200",
+        "pr_open": true,
+        "draft_ready": true,
+        "explicit_review_request": true,
+        "review_requests": [
+          {
+            "kind": "initial",
+            "head_oid": "nuvyr-abc200",
+            "phase": "pending"
+          }
+        ],
+        "request_phase": "initial_pending"
+      },
+      "artifacts_for_current_head": [],
+      "expected": {
+        "terminal_signal_present": false,
+        "review_is_pending": true,
+        "disposition": "wait_out_initial_request",
+        "merge_eligible_on_silence": false
+      }
+    },
+    {
+      "project_id": "nuvyr",
+      "tier": "A",
+      "description": "The initial request's clock and the re-trigger's own clock are both spent, and the escalation is raised. The head stays blocked while the operator decision is pending; escalating again is not a next action.",
+      "pr_state": {
+        "head_oid": "nuvyr-abc200",
+        "pr_open": true,
+        "draft_ready": true,
+        "explicit_review_request": true,
+        "review_requests": [
+          {
+            "kind": "initial",
+            "head_oid": "nuvyr-abc200",
+            "phase": "expired"
+          },
+          {
+            "kind": "re_trigger",
+            "head_oid": "nuvyr-abc200",
+            "phase": "expired"
+          }
+        ],
+        "request_phase": "escalated_awaiting_disposition"
+      },
+      "artifacts_for_current_head": [],
+      "expected": {
+        "terminal_signal_present": false,
+        "review_is_pending": true,
+        "disposition": "blocked_pending_operator_disposition",
+        "merge_eligible_on_silence": false
+      }
+    },
+    {
+      "project_id": "amiga",
+      "tier": "B",
+      "description": "A voluntarily requested Tier B review, mid-flow. Tier decides whether a review must be INITIATED; once one exists the request-anchored clocks are tier-agnostic, so this waits out its re-trigger exactly as Tier A does.",
+      "pr_state": {
+        "head_oid": "amiga-abc200",
+        "pr_open": true,
+        "draft_ready": true,
+        "explicit_review_request": true,
+        "review_requests": [
+          {
+            "kind": "initial",
+            "head_oid": "amiga-abc200",
+            "phase": "expired"
+          },
+          {
+            "kind": "re_trigger",
+            "head_oid": "amiga-abc200",
+            "phase": "pending"
+          }
+        ],
+        "request_phase": "retrigger_pending"
+      },
+      "artifacts_for_current_head": [],
+      "expected": {
+        "terminal_signal_present": false,
+        "review_is_pending": true,
+        "disposition": "wait_out_the_re_trigger",
+        "merge_eligible_on_silence": false
+      }
+    },
+    {
+      "project_id": "nuvyr",
+      "tier": "B",
+      "description": "A voluntarily requested Tier B review, mid-flow. Tier decides whether a review must be INITIATED; once one exists the request-anchored clocks are tier-agnostic, so this waits out its re-trigger exactly as Tier A does.",
+      "pr_state": {
+        "head_oid": "nuvyr-abc200",
+        "pr_open": true,
+        "draft_ready": true,
+        "explicit_review_request": true,
+        "review_requests": [
+          {
+            "kind": "initial",
+            "head_oid": "nuvyr-abc200",
+            "phase": "expired"
+          },
+          {
+            "kind": "re_trigger",
+            "head_oid": "nuvyr-abc200",
+            "phase": "pending"
+          }
+        ],
+        "request_phase": "retrigger_pending"
+      },
+      "artifacts_for_current_head": [],
+      "expected": {
+        "terminal_signal_present": false,
+        "review_is_pending": true,
+        "disposition": "wait_out_the_re_trigger",
+        "merge_eligible_on_silence": false
+      }
+    },
+    {
+      "project_id": "amiga",
+      "tier": "A",
+      "description": "The initial request's own window has run out and no re-trigger has been issued yet. The single re-trigger is owed here; escalating instead skips the recovery step the contract requires, and waiting longer waits on nothing.",
+      "pr_state": {
+        "head_oid": "amiga-abc200",
+        "pr_open": true,
+        "draft_ready": true,
+        "explicit_review_request": true,
+        "review_requests": [
+          {
+            "kind": "initial",
+            "head_oid": "amiga-abc200",
+            "phase": "expired"
+          }
+        ],
+        "request_phase": "initial_expired"
+      },
+      "artifacts_for_current_head": [],
+      "expected": {
+        "terminal_signal_present": false,
+        "review_is_pending": true,
+        "disposition": "issue_the_single_re_trigger",
+        "merge_eligible_on_silence": false
+      }
+    },
+    {
+      "project_id": "amiga",
+      "tier": "B",
+      "description": "A Tier B review was requested voluntarily, then the head was amended. The request named the prior head so nothing is pending for this one, but the requirement was never withdrawn: a new exact-head request is owed. Reading this as the tier's no-request answer retired a review someone had already been asked for.",
+      "pr_state": {
+        "head_oid": "amiga-abc200",
+        "pr_open": true,
+        "draft_ready": true,
+        "explicit_review_request": true,
+        "review_requests": [
+          {
+            "kind": "initial",
+            "head_oid": "amiga-abc100",
+            "phase": "expired"
+          }
+        ],
+        "request_phase": "stale_for_this_head"
+      },
+      "artifacts_for_current_head": [],
+      "expected": {
+        "terminal_signal_present": false,
+        "review_is_pending": false,
+        "disposition": "rerequest_required_at_new_head",
+        "merge_eligible_on_silence": false
+      }
+    },
+    {
+      "project_id": "nuvyr",
+      "tier": "A",
+      "description": "The initial request's own window has run out and no re-trigger has been issued yet. The single re-trigger is owed here; escalating instead skips the recovery step the contract requires, and waiting longer waits on nothing.",
+      "pr_state": {
+        "head_oid": "nuvyr-abc200",
+        "pr_open": true,
+        "draft_ready": true,
+        "explicit_review_request": true,
+        "review_requests": [
+          {
+            "kind": "initial",
+            "head_oid": "nuvyr-abc200",
+            "phase": "expired"
+          }
+        ],
+        "request_phase": "initial_expired"
+      },
+      "artifacts_for_current_head": [],
+      "expected": {
+        "terminal_signal_present": false,
+        "review_is_pending": true,
+        "disposition": "issue_the_single_re_trigger",
+        "merge_eligible_on_silence": false
+      }
+    },
+    {
+      "project_id": "nuvyr",
+      "tier": "B",
+      "description": "A Tier B review was requested voluntarily, then the head was amended. The request named the prior head so nothing is pending for this one, but the requirement was never withdrawn: a new exact-head request is owed. Reading this as the tier's no-request answer retired a review someone had already been asked for.",
+      "pr_state": {
+        "head_oid": "nuvyr-abc200",
+        "pr_open": true,
+        "draft_ready": true,
+        "explicit_review_request": true,
+        "review_requests": [
+          {
+            "kind": "initial",
+            "head_oid": "nuvyr-abc100",
+            "phase": "expired"
+          }
+        ],
+        "request_phase": "stale_for_this_head"
+      },
+      "artifacts_for_current_head": [],
+      "expected": {
+        "terminal_signal_present": false,
+        "review_is_pending": false,
+        "disposition": "rerequest_required_at_new_head",
+        "merge_eligible_on_silence": false
+      }
+    },
+    {
+      "project_id": "amiga",
+      "tier": "C",
+      "description": "A Tier C request the operator explicitly withdrew before the amendment. This is the one way a stale request stops being owed, and it is recorded rather than inferred -- without a case for it, 'withdrawal retires the requirement' would be an unreachable branch and any consumer could implement it as anything.",
+      "pr_state": {
+        "head_oid": "amiga-abc200",
+        "pr_open": true,
+        "draft_ready": true,
+        "explicit_review_request": true,
+        "review_requests": [
+          {
+            "kind": "initial",
+            "head_oid": "amiga-abc100",
+            "phase": "expired"
+          }
+        ],
+        "request_phase": "stale_for_this_head",
+        "review_requirement_withdrawn": {
+          "authority": "operator",
+          "recorded_at": "2026-07-26T00:00:00Z",
+          "head_oid": "amiga-abc200"
+        }
+      },
+      "artifacts_for_current_head": [],
+      "expected": {
+        "terminal_signal_present": false,
+        "review_is_pending": false,
+        "disposition": "no_review_pending",
+        "merge_eligible_on_silence": false
+      }
+    },
+    {
+      "project_id": "nuvyr",
+      "tier": "B",
+      "description": "The same operator withdrawal on a non-Amiga project, at Tier B rather than C. Withdrawal was reachable only through one Amiga case and the helper assertion carries no project identity, so a project-specific consumer could mishandle it everywhere except Amiga and every test still passed.",
+      "pr_state": {
+        "head_oid": "nuvyr-abc200",
+        "pr_open": true,
+        "draft_ready": true,
+        "explicit_review_request": true,
+        "review_requests": [
+          {
+            "kind": "initial",
+            "head_oid": "nuvyr-abc100",
+            "phase": "expired"
+          }
+        ],
+        "request_phase": "stale_for_this_head",
+        "review_requirement_withdrawn": {
+          "authority": "operator",
+          "recorded_at": "2026-07-26T00:00:00Z",
+          "head_oid": "nuvyr-abc200"
+        }
+      },
+      "artifacts_for_current_head": [],
+      "expected": {
+        "terminal_signal_present": false,
+        "review_is_pending": false,
+        "disposition": "no_review_pending",
+        "merge_eligible_on_silence": false
+      }
+    }
+  ]
+}

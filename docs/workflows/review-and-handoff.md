@@ -203,53 +203,89 @@ loop is the orchestrator's manual branch-diff review before commit/PR and after
 any review-fix patch. When the operator has authorized the merge path, merge
 from the current thread only after the exact current head has green required
 checks, the PR is mergeable with clean merge state, the independent exact-head
-review is clean, and the full current comment/review/thread payload has no
-actionable finding. The GitHub Codex signal is clean when either the latest
+review is clean, and [the reviewed artifact set](commit-push-prs.md#reviewed-artifact-set) has no
+actionable finding. Reviews are MANUAL ONLY as of 2026-07-25; nothing arrives unrequested, and whether a change must be reviewed is decided by the Tier A/B/C rule in
+[`AGENTS.md` → Requesting Code Review](../../AGENTS.md#requesting-code-review-all-workers-every-repository),
+which is the only place that defines it.
+The GitHub Codex signal is clean when either the latest
 `chatgpt-codex-connector` review/comment explicitly covers that exact OID with
-no actionable issues or the watcher observed the connector's eyes-to-`+1`
-(`thumbs-up`) transition on the latest head, the `+1` postdates that head, and no
-subsequent push occurred. Either signal is terminal for the bot wait on that
+no actionable issues, or a connector-authored `+1` (`thumbs-up`) sits on the exact
+manual-review request comment while the head still equals the SHA that request
+named. A bare `eyes` reaction is accepted-and-in-progress, never a verdict. Either signal is terminal for the bot wait on that
 head, and these remain the only two exact-head terminal signal sources. Their
 post-signal handling differs. A terminal signal stops waiting for further
-artifacts or the fallback timeout only; it does not waive the handling below:
+artifacts only; it does not waive the handling below:
 
 - A head-named clean connector verdict is not merge-immediate. Hold an
   approximately five-minute mandatory post-clean settle, then perform a full
-  re-read of reviews, review threads, and reactions because the connector can
-  emit multiple reviews for one head. When a re-review was explicitly
-  requested, that re-review supersedes older same-head clean artifacts for the
-  clean-verdict path; only its verdict can satisfy that path, and it receives
-  the same settle and full re-read.
-- A watcher-observed latest-head eyes-to-`+1` lifecycle is already
-  post-artifact evidence. Once it qualifies under the exact-head conditions
-  above, report it immediately and do not wait out the remainder of the
-  15-minute fallback itself. Required CI, mergeability, independent review,
-  and full comment/review/thread inspection still apply.
+  re-read of [the reviewed artifact set](commit-push-prs.md#reviewed-artifact-set) because the connector can emit multiple reviews for one head --
+  and because a same-head re-review request posted during the settle lives in a comment,
+  supersedes the verdict or reaction being settled, and is invisible to a re-read that
+  skips comments. When a re-review was explicitly
+  requested, that re-review supersedes artifacts attached to **older requests** -- clean verdicts and
+  reactions alike. It does **not** disable the reaction path: a connector `+1` on
+  the latest unedited request naming the current head is terminal for the re-review
+  exactly as a fresh textual verdict is, and either receives the same
+  settle and full re-read. A reaction counts
+  only on the latest, unedited request artifact -- GitHub keeps reactions across an
+  edit, so an edited request comment can still carry a `+1` left for an older head.
+- A connector-authored `+1` on the exact manual-review request comment is
+  terminal CLEAN once all six checks hold (actor, that request comment, the
+  requested SHA, the current head, that this request is the latest for this head,
+  and that it has not been edited since the reaction was left). It receives **the same approximately
+  five-minute post-clean settle and full re-read as a text verdict**. The
+  rationale for accepting a reaction-only CLEAN at Tier A rests on that settle
+  plus adjudication, so exempting it from the settle would remove the evidence
+  the rule depends on. Required CI, mergeability, independent review, and full
+  inspection of [the reviewed artifact set](commit-push-prs.md#reviewed-artifact-set) still apply.
 
-For requested-review silence versus the fallback, follow the canonical
+Whether a review must be requested at all is the Tier A/B/C rule in
+[`AGENTS.md` → Requesting Code Review](../../AGENTS.md#requesting-code-review-all-workers-every-repository),
+which is the only place that defines it. The section linked below governs clocks
+and dispositions **after** a review has been requested, and answers a different
+question.
+
+For requested-review silence, follow the canonical
 [Explicit requested-review precedence](commit-push-prs.md#explicit-requested-review-precedence).
-Do not apply the 15-minute fallback to an explicitly requested review.
-Automation may issue exactly one re-trigger, and no further automatic retry is
-allowed. The canonical section is the sole authority for both request-anchored
-clocks, current-head invalidation, the post-timeout disposition choices, and
-every effect of an exact-head operator authorization; this compact guidance
-defines no separate disposition effect. The fallback is limited to exactly
-three named
-no-terminal-artifact variants:
-no explicit review request (the reviewability clock starts at the later of the
-final push and the head becoming reviewable), eyes-only current-head artifact
-(which applies only when no explicit review request is outstanding and is
-non-blocking once no review is pending), and prior-head artifacts only (a
-stale-head `Codex Review:` body or reaction is not
-head-attributable and is ignored for terminal-signal purposes). For those
-fallback variants, any push invalidates the prior signal and restarts the
-fallback clock for the new head; it does not reset an explicit request's
-request-anchored clock. This compact handoff rule must not define a competing
-timer or disposition rule.
+Automation may issue exactly one re-trigger, repeating the focus and exact head
+SHA of the original request, and no further automatic retry is allowed. The
+canonical section is the sole authority for the request-anchored clocks,
+current-head invalidation, the post-timeout disposition choices, and every
+effect of an exact-head operator authorization; this compact guidance defines no
+separate disposition effect.
 
-If GitHub Codex comments on the PR, fix the pointed issue, rerun the manual
-branch-diff review and required checks, then evaluate the new exact head and its
-automatic artifacts from scratch. Do not substitute a resolved older thread or
+**No silence fallback exists.** All three former no-terminal-artifact variants —
+no explicit review request, eyes-only current-head artifact, prior-head artifacts
+only — are deleted, not shortened. Each measured how long to wait for a review
+manual-only review never sends unrequested, so each always expired into a merge
+on nothing. They remain a classification of non-signals with no clock: at Tier A
+an absent request is a **gate violation to fix, not a delay to wait out**; at
+Tier B/C there is nothing to wait for. This compact handoff rule must not define
+a competing timer or disposition rule.
+
+If GitHub Codex comments on the PR, every finding is adjudicated in writing —
+which is not the same as accepted. Two paths, and which one applies depends on
+whether the code changes:
+
+- **Fix it.** Repair the pointed issue, rerun the manual branch-diff review and
+  required checks, then **issue a new exact-head request for the amended head**.
+- **Reject it.** A finding that is wrong, out of scope, or already handled is
+  answered with a written disposition posted on that thread, naming the head it
+  was judged at. No code changes, so there is no amended head — but the request is
+  **not** satisfied by the disposition: adjudicating a finding produces neither
+  exact-head terminal signal, and automatic review is off, so nothing further
+  arrives unasked. **Request a re-review on the same head.** Leaving it optional
+  left the request pending forever, or pushed it down the silently-dropped-request
+  escalation path for a review that was answered rather than dropped.
+
+Requiring a fix for every finding left an invalid one with no legal move — a
+worker had to either make an unwarranted change or stall — and the governing
+contract asks for adjudication, not compliance.
+
+Automatic review is off, so nothing arrives unrequested: a fix push invalidates
+every prior-head signal and produces no replacement on its own. Waiting on the
+amended head's "automatic artifacts" waits forever. Evaluate that head from
+scratch once the requested signal arrives. Do not substitute a resolved older thread or
 stale inline review-thread object for current-head evidence. Delete the
 heartbeat before post-merge cleanup.
 

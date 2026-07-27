@@ -142,8 +142,8 @@ Hard cycle cap, independent of family counting:
   review cycle past the cap is a process violation.
 - A cap disposition never waives the PR Review Wait Gate. The cap bars another
   fix cycle, not waiting: the capped exact head must still pass the complete
-  gate below, including its exact-head signal model, post-clean guard, and
-  resettable fallback, before merge.
+  gate below, including its exact-head signal model and post-clean guard,
+  before merge.
 - Reaching the applicable cap requires an operator-visible escalation message
   recorded independently, whether or not open findings require a terminal
   disposition. When open findings do require a terminal disposition, record
@@ -161,9 +161,10 @@ amendment, stale review-attestation CI is an expected transitional state rather
 than evidence that product verification failed. Refresh the PR body only after
 the amended head passes its required review.
 
-Rely on the automatic GitHub Codex review flow for ready PRs. Consume the
-automatic PR review/comment/reaction when it appears. If no automatic artifact
-appears, use the opportunistic policy below.
+There is no automatic GitHub Codex review flow to rely on: automatic review is off
+account-wide. A review exists because someone requested it. Consume
+everything in [the reviewed artifact set](#reviewed-artifact-set) that appears, and see
+the policy below for when requesting one is mandatory.
 
 ## PR requirements
 
@@ -193,8 +194,7 @@ orchestrator has inspected:
 
 - GitHub Actions checks on the latest head SHA
 - `mergeStateStatus`
-- top-level PR reviews and review bodies
-- nested review threads and inline comments
+- all of [the reviewed artifact set](#reviewed-artifact-set)
 - any requested changes or review replies after follow-up commits
 
 Do not idle on review while `mergeStateStatus` is dirty. A dirty merge state is
@@ -203,82 +203,268 @@ rerun verification, push, and then request/inspect review again.
 
 ### GitHub Codex review policy
 
+> **Reviews are MANUAL ONLY (operator decision, 2026-07-25).** Automatic review is
+> off account-wide. Nothing arrives unless someone asks for it, so the question is
+> no longer "how long do we wait" but "must this change be reviewed at all". That
+> is decided by the Tier A/B/C rule in
+> [`AGENTS.md` → Requesting Code Review](../../AGENTS.md#requesting-code-review-all-workers-every-repository),
+> which is the **only** place that defines it. This copy previously restated the tiers
+> and went stale the moment Tier A was narrowed — the restatement still carried the
+> superseded meaning in which "untrusted" covered our own workspace. Pointing is the
+> rule this repository sets for exactly that reason.
+>
+> What matters here: **Tier A must request on the candidate final head**, failing to
+> request is itself a gate violation, **Tier B/C do not wait** when nothing was
+> requested, and any finding that does arrive is adjudicated in writing at every tier.
+>
+> "Request once" means **one initial request per candidate final head**, not once
+> per PR: any amendment stales the review and requires a new request. The limit
+> governs *initial* requests only — the single request-anchored re-trigger below is
+> an explicit exemption, and is the only recovery for a silently dropped request.
+> Read as absolute it leaves a Tier A worker choosing between violating it and
+> having no recovery at all.
+
 Use `local_required_github_codex_opportunistic` as the default queue-runner
 policy:
 
 - the orchestrator's local review and required project gates are mandatory
-- automatic GitHub Codex review/comments are consumed when they appear
+- GitHub Codex review/comments are consumed when they appear; under manual-only
+  they appear because they were requested
 - a clean `chatgpt-codex-connector` review/comment that explicitly covers the
   exact current OID is terminal for that head
-- a connector `+1` (`thumbs-up`) is terminal only when it postdates the latest
-  head, no subsequent push occurred, and the watcher observed the connector's
-  eyes-to-`+1` lifecycle on that head. Timestamp alone or a `+1` on an older or
-  unrelated artifact is not head-attributable
-- these are the only two exact-head terminal signal models; no other review,
-  comment, or reaction artifact is terminal
+- a connector-authored `+1` (`thumbs-up`) **on the exact manual-review request
+  comment** is terminal CLEAN, after pickup, while the PR head still equals the SHA
+  that request named. Verify all six: the actor is the connector, the reaction is
+  on that request comment, the requested SHA, the current head, that this request is
+  the latest for this head, and that it has not been edited since the reaction was
+  left. Any head change voids it and requires a new request. An ambiguous or removed reaction is
+  non-terminal, and a bare `eyes` reaction or the request comment itself is never a
+  verdict — `eyes` means accepted and in progress
+- the meaning of `+1` does **not** vary by tier. Tier A takes its strength from the
+  mandatory final-head request, independent exact-head P0–P2 review, mutation and
+  verification evidence, and settle plus adjudication. Requiring a posted text
+  review for Tier A would deadlock whenever the connector's clean protocol is
+  reaction-only, and the request plus a connector-authored `+1` is already a durable
+  GitHub artifact
+- these are the only two exact-head terminal signal models; nothing else in
+  [the reviewed artifact set](#reviewed-artifact-set) is terminal
+- **a connector review body that lists no findings is not a clean verdict.** The
+  connector posts its findings as inline review threads, and the review body can be
+  boilerplate — a heading, the reviewed commit, and a collapsed "About Codex"
+  section — while unresolved P1 threads sit on that head. An empty body with live
+  threads reads exactly like a pass (llm-collab#317 at `87e8e47`, 2026-07-26: body
+  listed nothing, six unresolved threads including three P1s, one of which made the
+  generated command unrunnable on macOS). `reviewThreads`, not the body, is the
+  finding list
+- **bind an exact-head finding through its initiating review commit, and adjudicate
+  every thread, resolved or not, regardless of `isOutdated`.** A worker who reads only
+  this heading is the one who clicks Resolve, records nothing, and then omits the thread
+  from the gate — so the heading states the rule rather than the narrower version of it.
+  Two distinct questions:
+  - *is this finding about the current head?* Only if the thread's **initiating
+    review commit OID** equals the current head OID. Read it from
+    `comments.nodes[0].pullRequestReview.commit.oid`, falling back to
+    `comments.nodes[0].originalCommit.oid` for a thread with no backing review.
+    **Never `comments.nodes[0].commit.oid`** — that field is mutable and GitHub
+    advances it to the current head for a thread that is still non-outdated, so it
+    reports every live stale thread as a current-head finding.
+  - *is this finding still open?* Only GitHub resolution, or a written disposition
+    **that identifies the thread**, closes it. **Resolution is not adjudication.**
+    `AGENTS.md` requires every arriving finding to be adjudicated in writing at every
+    tier. A checklist phrased over *unresolved* threads could not see a thread someone
+    clicked Resolve on with nothing recorded, which is the one way to lose a finding
+    silently — so the merge checklist enumerates **every** thread, resolved or not. A
+    resolved thread still owes a thread-linked written outcome; resolution closes it
+    for GitHub, the writing is what discharges it. Identifying means the
+    disposition contains the thread's node ID or its `#discussion_r...` comment URL.
+    Identification is **necessary and not sufficient**: a human must also validate
+    that the disposition came from someone authorised on *this* pull request, that it
+    concerns this PR rather than merely mentioning the thread from elsewhere, and that
+    it states an actual closing outcome. A comment reading "Still unresolved: `<url>`"
+    identifies the thread perfectly and closes nothing. Closure is never derived
+    mechanically from a body — the identifier exists so a human's decision can be
+    audited afterwards, not so a consumer can skip the human. Grouped prose naming
+    findings by title closes nothing either, because there is no way to check which
+    thread it answered, including for its author. **A push is not an adjudication**,
+    and neither is a summary that does not say which thread it disposes.
+  `isOutdated` answers neither. It is diff-position metadata — whether the thread
+  still maps onto the current diff — and using it as the exclusion criterion is
+  wrong in both directions. llm-collab#313 disproves it directly: at `9822524`,
+  twelve unresolved non-outdated threads initiated at `a54e33f` or `82ae7e9`, so
+  the rule counts twelve stale threads as current-head findings; five unresolved
+  outdated threads, which the rule drops silently though nobody ever answered
+  them; and **zero** threads actually initiated at the current head. Those same
+  twelve report `comments.nodes[0].commit.oid` as `9822524`, which is why the
+  field matters as much as the rule
+### Projects without GitHub
+
+<a id="review-surface-independence"></a>
+
+**Tier A does not depend on GitHub.** The gate is a property of the change, not of the
+place the review happens, so a registered project with no GitHub surface still owes the
+same review — it satisfies it with durable **mailbox request and verdict packets** naming
+the exact repository commit OID, the project, the repository scope, the requester and the
+reviewer. What GitHub exposes is that project's *implementation* of this gate, not the gate
+itself — see [the reviewed artifact set](#reviewed-artifact-set) for what each lane's
+implementation consists of.
+
+One asymmetry, and it is not an oversight: **a non-GitHub lane has no reaction-only
+terminal path.** A reaction is terminal because it sits on an identifiable request artifact
+that names a head; a mailbox lane has no equivalent, so it needs a textual verdict packet.
+Conditioning the requirement on GitHub instead would make the gate unsatisfiable for such a
+project, which reads as an exemption and is not one.
+
+### The reviewed artifact set
+
+<a id="reviewed-artifact-set"></a>
+
+**Every instruction in this repository that says to read, re-read or inspect review state
+means the set below for the lane that change is on, and this is the only place either list
+is written.**
+
+**On a GitHub-backed lane, exactly these five:**
+
+1. top-level PR comments
+2. review bodies
+3. review threads
+4. inline review comments
+5. reactions
+
+**On a lane with no GitHub surface, exactly these two:** every durable **review request
+packet** and every durable **verdict packet** in the mailbox naming the exact commit OID
+under review. The count differs because GitHub splits one conversation across five
+artifacts and a mailbox does not; what does not differ is that *all* of the lane's review
+surface is read, which is the only property any instruction here relies on.
+
+Naming five GitHub artifacts unconditionally would have made Tier A unsatisfiable on the
+mailbox lane defined directly above — the gate would demand artifacts that cannot exist
+there, which reads as an exemption and is not one.
+
+Referenced, never restated. Twelve sites used to enumerate this and they had drifted into at
+least five different versions -- some omitting comments, which is where a re-review request
+lives, and some omitting reactions, which is where a terminal `+1` lives. Each omission was
+a working path to merging on a superseded signal, and each was fixed one site at a time
+until it became clear the list itself was the defect. A paraphrase of this list anywhere
+else is a second source that goes stale the moment this one moves.
+
 - a head-named clean connector verdict is not merge-immediate. Hold an
-  approximately five-minute post-clean settle, then perform a full re-read of
-  reviews, review threads, and reactions before merge because the connector
-  can emit multiple reviews for the same head
-- when a re-review was explicitly requested, that re-review supersedes older
-  same-head clean artifacts for the clean-verdict path. Only the explicit
-  re-review verdict can satisfy that path, and it receives the same
-  approximately five-minute post-clean settle and full re-read
-- report the exact verdict or the latest-head eyes-to-`+1` transition with its
-  timestamps and confirm that no later push occurred
+  approximately five-minute post-clean settle, then re-read [the reviewed artifact set](#reviewed-artifact-set) in full before
+  merge, because the connector can emit multiple reviews for the same head — and because
+  a same-head re-review request posted during the settle lives in a comment and
+  supersedes the artifact being settled
+- **a reaction counts only on the latest, unedited request artifact.** GitHub keeps
+  reactions across an edit, so a request comment edited to swap an old SHA for the
+  current one still carries the `+1` the connector left for the *old* head, and all
+  four checks then pass on a review that never happened. If the request artifact has
+  been edited since the reaction was left, or is not the most recent request for this
+  head, the reaction is not terminal. What to do next turns on the **re-trigger
+  budget**, not on whether a valid artifact happens to exist right now. If the single
+  request-anchored re-trigger for this head has not been used, use it. If it has been
+  used — whether it is still valid, or was since edited, deleted or otherwise made
+  invalid — the budget is spent and there is no further request to issue: continue to
+  the exact-head operator disposition. Reading this as "issue one whenever no valid
+  latest request exists" produces a third same-head request every time an artifact is
+  tampered with, and the single re-trigger is the only exempted recovery
+- when a re-review was explicitly requested, that re-review supersedes artifacts attached to **older requests** -- clean verdicts and
+  reactions alike. It does **not** disable the reaction path: a connector `+1` on
+  the latest unedited request naming the current head is terminal for the re-review
+  exactly as a fresh textual verdict is.
+  Requiring text merely because this is a re-review would leave the connector's own
+  reaction-only clean protocol unable to satisfy a request it answered. Either terminal
+  form receives the same approximately five-minute post-clean settle and full re-read
+- report the exact verdict, or the connector-authored `+1` on the manual-review
+  request comment with its timestamps and the SHA that request named, and confirm
+  that no later push occurred
 - any push creates a new head and invalidates every prior verdict and reaction
-  lifecycle. Start or reset the 15-minute fallback clock at the later of the
-  final push to that head and the time that head becomes reviewable: the PR is
-  open, any draft is marked ready, and the PR is visible for review. An explicit
-  review request is NOT required for a head to be reviewable; absence of an
-  explicit request neither pre-expires the fallback nor extends it (see the
-  absent-request variant below)
-- GitHub Codex silence must not become an infinite wait: the resettable
-  15-minute settle is the fallback only for the three named
-  no-terminal-artifact variants enumerated below, when no bot review is
-  actually pending. An explicitly requested review does not enter this ageing
-  rule; follow the canonical requested-review precedence below
+  lifecycle
+- **there is no silence fallback for an unrequested review.** Under manual-only,
+  waiting out a clock for a review nobody asked for is a path that always ends in
+  silence. A Tier A head with no request has exactly one remedy: **issue the
+  request.** Failing to request is itself a gate violation, so an unrequested head
+  is not a head awaiting a waiver — it is a head whose worker has not yet done the
+  mandatory step, and no waiver is available for skipping it. Only once the request
+  exists does the precedence flow below apply: the initial request, its single
+  request-anchored re-trigger, and the two request-anchored expiries, at the end of
+  which an operator waiver is the defined outcome. A Tier B/C head with no request
+  does not wait at all. At no tier is quiet a signal: never merge on silence
+- **no elapsed time is ever a terminal signal.** There is no resettable settle
+  that ripens a head for merge. Waiting is what a Tier A head does while a
+  requested review is outstanding; it is not a way to acquire the signal
+- **the worker who pushed the change owns re-requesting the amended head, at every
+  tier.** Tier decides whether a review must be *initiated*; once an operator has
+  explicitly requested one, every amended candidate head needs a new exact-head request
+  from the change owner, unless the operator withdraws the review requirement **for that
+  exact head**. A withdrawal is a durable operator-authored artifact naming the commit OID
+  it applies to, and **a later push invalidates it**: the next head owes a new request
+  like any other. "Explicit" alone was not enough — a withdrawal recorded on an earlier
+  head could be read as retiring the obligation for every head after it, which turns one
+  operator decision into a standing exemption nobody granted.
+  Tier C does not make an old-head artifact valid, and a requested Tier C review with no
+  named owner is how an amended head sits waiting for a re-request nobody believes is
+  theirs
 - after every review-fix push, evaluate the new exact head under the same rule:
-  a clean exact-head verdict or head-attributable connector `+1` is terminal; if
-  neither terminal signal exists and no bot review is actually pending under
-  the ageing rule above,
-  heartbeat inspections may observe the wait but must not merge before the
-  resettable 15-minute settle measured from the later of the final push and that
-  head becoming reviewable
+  a clean exact-head verdict or head-attributable connector `+1` is terminal.
+  If neither exists, **any head carrying an outstanding request** is not
+  merge-eligible no matter how long it has been quiet — the request, not the tier,
+  is what makes it pending, so an amended Tier B/C head whose review was requested
+  waits exactly as a Tier A head does. Heartbeat inspections observe the wait and
+  merge nothing
 - neither a bot verdict nor a reaction waives required CI, mergeability, the
-  independent exact-head review, or full comment/review/thread inspection
+  independent exact-head review, or full inspection of [the reviewed artifact set](#reviewed-artifact-set)
 
-The resettable fallback above handles three named no-terminal-artifact variants
-explicitly, so none of them silently extends the wait:
+**All three former no-terminal-artifact fallback variants are deleted, not
+shortened.** Each one measured how long to wait for a review that manual-only
+review never sends unrequested, so each clock always expired -- and its expiry
+handed a Tier A worker a path to merge on nothing. What remains is a
+classification of non-signals, with no clock attached to any of them:
 
-- **No explicit review request.** The reviewability clock starts at the later of
-  the final push and the head becoming reviewable even when no explicit review
-  request exists on the PR (the PR is open, any draft is marked ready, and review
-  visibility exists for that head). Absence of an explicit request does not
-  pre-expire the fallback, and it does not extend it indefinitely either.
-- **Eyes-only current-head artifact.** This fallback variant applies only when
-  no explicit review request is outstanding. A current-head non-terminal
-  `eyes` reaction is not blocking once no review is actually pending; it does
-  not restart or suppress the resettable fallback, and it is not itself a
-  terminal signal.
+- **No explicit review request.** At Tier A this is a **gate violation to fix,
+  not a delay to wait out**: request the review. At Tier B/C there is nothing to
+  wait for and nothing to merge on.
+- **Eyes-only current-head artifact.** A current-head `eyes` reaction is not a
+  terminal signal and never becomes one. It neither blocks nor ripens anything.
 - **Prior-head artifacts only.** Any push creates a new head and invalidates every
   prior verdict and reaction lifecycle; a prior-head `Codex Review:` body or
   `eyes`/`+1` reaction is not head-attributable for the current head and is
-  ignored for terminal-signal purposes. The resettable fallback runs its clock on
-  the current head, never on a stale-head artifact.
+  ignored for terminal-signal purposes.
 
 #### Explicit requested-review precedence
 
 An explicitly requested review remains pending until its roughly 30–35-minute
 clock expires unless one of the two exact-head terminal signals arrives; it
-never ages into the 15-minute fallback. Anchor each clock to the corresponding
-explicit request artifact's GitHub `created_at`, never to the latest push or
-the time the head became reviewable. A current-head `eyes` reaction alone is
-non-terminal: it does not exit requested-review precedence, reset that request's
-clock, or move the PR into the eyes-only fallback.
+never ages into a merge-eligible state, because no silence fallback exists to
+age into. Anchor each clock to the corresponding explicit request artifact's
+GitHub `created_at`, never to the latest push or the time the head became
+reviewable. That clock decides only when to re-trigger once and when to
+escalate -- never when to merge. A current-head `eyes` reaction alone is
+non-terminal: it does not exit requested-review precedence or reset that
+request's clock.
+
+**On a lane with no GitHub surface, every anchor in this section has a mailbox
+equivalent, and nothing else about the flow changes.** Without them a Tier A
+non-GitHub lane could request a review and then stall forever, or invent its own
+timing — which is why they are written here rather than left to the lane:
+
+| GitHub anchor | Mailbox equivalent |
+| --- | --- |
+| request comment naming the head | request packet naming the exact commit OID |
+| the comment's `created_at` | the packet's recorded delivery timestamp |
+| `@codex review` re-trigger comment | a second request packet, same exact OID, marked as the re-trigger |
+| the two exact-head terminal signals | a verdict packet naming that exact OID |
+| PR-wait heartbeat | the same heartbeat cadence against the mailbox thread |
+
+The two clocks, the single re-trigger, the ban on a second one, and the
+exact-head operator disposition are unchanged — they are properties of the
+request, not of GitHub. The one asymmetry is the one already stated above: a
+mailbox lane has no reaction-only terminal path, so its terminal signal is
+always a textual verdict packet.
 
 When the initial request's clock expires without a terminal signal, treat that
-request as silently dropped and issue exactly one `@codex review` re-trigger.
+request as silently dropped and issue exactly one re-trigger. **The re-trigger
+repeats the full request shape — focus and the exact head SHA — never a bare
+`@codex review`:** a reaction is terminal only when it sits on a comment that
+named the current head, so a SHA-less retry cannot produce a usable signal even
+when the connector answers it.
 The re-trigger is the sole automatic retry and starts its own 30–35-minute clock
 at its GitHub `created_at`. If that clock also expires without a terminal
 signal, do not re-trigger again. The PR remains unmergeable until a
@@ -294,8 +480,8 @@ An exact-current-head merge authorization lifts only the missing
 connector-signal subgate caused by the silently dropped requested review. It is
 not a connector terminal signal, is not a third automated terminal-signal
 model, and creates no fallback path. It does not waive independent exact-head
-review, green required checks, mergeability, the full
-comment/review/thread/reaction reread, unresolved-feedback handling, or
+review, green required checks, mergeability, a full re-read of
+[the reviewed artifact set](#reviewed-artifact-set), unresolved-feedback handling, or
 project/operator auto-merge authority. If a connector clean signal later
 arrives, its signal-specific settle and reread still apply normally; the
 operator authorization does not masquerade as that signal or inherit its
@@ -308,8 +494,10 @@ absent-request variant, where there is nothing to drop.
 
 If the PR is waiting only for remote checks or remote review state, keep it open
 and create or update a Codex heartbeat attached to the current thread with a
-6-minute cadence. Each heartbeat must re-check the PR checks, review state,
-review threads/comments, automatic connector reactions, and merge state.
+6-minute cadence. Each heartbeat must re-check the PR checks, merge state, and
+[the reviewed artifact set](#reviewed-artifact-set) in full. "Automatic" is dropped
+deliberately: reactions arrive because a review was requested, and a heartbeat that
+waits for an automatic one waits forever.
 
 PR-wait heartbeats are a safety-fuse, not the primary routing path. When a
 heartbeat or queue owner finds actionable PR feedback that needs the implementer
@@ -329,51 +517,101 @@ When the operator has authorized the merge path for the PR or PR class, the
 heartbeat may complete the wait after it verifies the exact current head has
 green required checks, the PR is mergeable with clean `mergeStateStatus`, the
 independent exact-head review is clean, and the full current comment, review,
-inline-comment, and thread payload has no actionable finding. Treat the GitHub
+payload of [the reviewed artifact set](#reviewed-artifact-set) has no actionable finding. Treat the GitHub
 Codex review signal as clean when either:
 
 - the latest top-level `chatgpt-codex-connector` review/comment explicitly
   covers the exact current OID and reports no actionable or major issues, or
-- the watcher observed the connector's eyes-to-`+1` (`thumbs-up`) transition on
-  the latest head, the `+1` postdates that head, and no subsequent push occurred.
-  That attributable reaction is terminal for the bot wait on that head when the
-  required gates above remain clean; do not wait out the remainder of the
-  15-minute fallback.
+- a connector-authored `+1` (`thumbs-up`) sits on **the exact manual-review request
+  comment**, the PR head still equals the SHA that request named, and no subsequent
+  push occurred. Verify all six: the actor, that request comment, the requested SHA,
+  the current head, that this request is the **latest** one for this head, and that it
+  has **not been edited** since the reaction was left. The last two are not optional
+  refinements: GitHub preserves reactions across an edit, so a request edited to swap
+  an old SHA for the current one carries a `+1` for a review of the *old* head and the
+  first four checks all pass. A `+1` attributable only by timestamp, or sitting on any
+  other artifact, is **not** terminal. That reaction is terminal for the bot wait on that
+  head when the required gates above remain clean, and it receives the same
+  approximately five-minute post-clean settle and full re-read as a text verdict.
+
+The re-read that follows a reaction covers
+**all of [the reviewed artifact set](#reviewed-artifact-set)**, and
+revalidates all six reaction conditions. A
+re-review request posted during the settle becomes the latest request for this head
+and supersedes the older request's `+1`, so a re-read that skipped comments could
+merge on a reaction that no longer passes the latest-request check.
 
 For the clean-verdict path, do not merge immediately after the first
 head-named clean artifact. Observe the approximately five-minute post-clean
-settle and then re-read all reviews, review threads, and reactions. When an
+settle and then re-read [the reviewed artifact set](#reviewed-artifact-set) in full. When an
 explicit re-review was requested for the same head, ignore older same-head
 clean artifacts for this path and apply the same settle and re-read to the
 explicit re-review verdict.
 
 If neither a terminal GitHub Codex verdict nor a head-attributable connector
-`+1` exists for the exact current head, use the fallback only for the three
-named no-terminal-artifact variants above and only after at least 15 minutes
-have elapsed since the later of the final push to that head and the
-reviewability timestamp for that head (PR open, marked ready when applicable,
-and visible for review). Commit age cannot pre-expire the fallback before
-automatic review can begin. Eyes or another non-terminal reaction does not
-restart or suppress that fallback after review is no longer pending. Any push
-resets this clock. Explicit requested-review silence follows
-[Explicit requested-review precedence](#explicit-requested-review-precedence)
-instead of this fallback. Proceed only when all of these are true:
+`+1` exists for the exact current head, a Tier A head does not merge — there is
+no elapsed-time substitute. What to do next depends on whether a request exists
+for this head, and the two cases are **not** alternatives:
+
+- **No request for this head** (never made, or staled by an amendment): issue it.
+  That is the only move. The operator-disposition route is not available here —
+  it is reachable only after a request and its single re-trigger have both existed
+  and run out, and offering it as a choice on an unrequested head recreates the
+  closed path where a worker skips review entirely and asks for authorization
+  instead.
+- **A request for this head exists and has gone unanswered**: follow
+  [Explicit requested-review precedence](#explicit-requested-review-precedence)
+  through the single re-trigger to the operator disposition. A Tier B/C head **for which no review was requested**
+needs no connector signal at all. A requested review is pending whatever its tier:
+once a request exists, precedence is tier-agnostic, so a voluntarily or
+operator-requested Tier B/C review is outstanding until a terminal signal or an
+exact-head operator disposition -- exactly as the fixture matrix records it.
+Proceed only when all of these are true:
 
 - the independent exact-head review found no actionable issues
 - required checks are green on the latest head
 - the PR is mergeable and `mergeStateStatus` is clean
-- full PR comments, review bodies, review threads, and inline comments contain
-  no unresolved actionable feedback for the current head
+- **every arriving finding has a thread-linked written outcome, whatever head it was
+  initiated on and whatever its current resolution state.** The origin rule above
+  decides which findings are *about* this head; it does not narrow this checklist.
+  Two ways to lose one, and this bullet closes both: a prior-head thread nobody
+  answered is unadjudicated rather than closed, and a thread someone clicked Resolve
+  on without recording anything is no longer *unresolved* — so a checklist phrased
+  over unresolved threads never looks at it again. Enumerate every thread, resolved
+  or not, and require the written outcome for each
+- [the reviewed artifact set](#reviewed-artifact-set) contains no unresolved actionable feedback, whatever head it was raised
+  on — prose feedback is dropped by a "current head" reading exactly as a thread is
+- **an actionable finding that arrived with no thread carries a written outcome too.**
+  A review body or a top-level comment has no node ID to link, so the
+  thread-identification rule cannot reach it — and "no longer unresolved" is not a
+  standard prose can meet, because nobody resolves a comment. Quote or link the comment
+  and state the outcome, in the same place the thread dispositions go. Without this a
+  finding is discharged by whoever pushes next, which is the rule this section opens by
+  rejecting
 - the project/operator has authorized auto-merge for this PR or queue class
 
-Read current review bodies and reactions directly. Do not infer the current
-result from stale inline review-thread objects alone. The watcher must report
-the exact current-head verdict or the latest-head eyes-to-`+1` lifecycle with
-its timestamps and confirm that no later push occurred. Either terminal signal
-stops the heartbeat from waiting for further artifacts or a fallback timeout;
-it does not waive post-signal handling. For a head-named clean verdict, the
-approximately five-minute post-clean settle and full review/thread/reaction
-re-read remain mandatory before merge. If review feedback lands, fix or respond
+Read [the reviewed artifact set](#reviewed-artifact-set) directly. Do not infer the current
+result from stale inline review-thread objects alone. The watcher must report the
+exact current-head verdict, or the connector-authored `+1` on the manual-review
+request comment together with the SHA that request named, with timestamps, and
+confirm that no later push occurred. Where both request-anchored clocks have expired,
+an exact-head operator disposition has lifted the missing-signal subgate, **and no
+terminal connector signal has arrived since**, the watcher reports **that
+disposition** instead, naming the head it was given for --
+otherwise the one path the precedence section authorises for a silently dropped
+review cannot be completed, because a connector artifact is precisely what does not
+exist there. A signal that arrives late still wins, and that is an action rather than
+a principle: **after selecting the disposition path and before reporting it or
+merging, re-read [the reviewed artifact set](#reviewed-artifact-set) once more.** Choosing the
+branch is not the same as checking it, and without that read a verdict landing in
+between is completed straight past — skipping the settle and full re-read it is owed.
+If the read finds one, abandon the disposition branch and report the signal instead. An operator disposition is
+not a connector terminal signal and never substitutes for one where a signal did
+arrive. Either terminal signal
+stops the heartbeat from waiting for further artifacts;
+it does not waive post-signal handling. For a head-named clean verdict **and for a
+request-comment `+1` alike**, the approximately five-minute post-clean settle and a full
+re-read of [the reviewed artifact set](#reviewed-artifact-set) remain mandatory before merge. If review feedback lands, fix or respond
 to it, push the update, rerun the manual branch-diff review and required
 local/CI checks, then evaluate the new exact head from scratch before
 continuing toward merge.

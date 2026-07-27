@@ -7,23 +7,24 @@ fixed in the llm-collab repo:
             outside the canonical absolute executable under bin/. The
             prose-noun exemption (`axsend confirm`, `--dry-run`) is recognized
             by the absence of a following shell argument list.
-  Class D — silent-fallback ageing must explicitly name and handle the three
-            no-terminal-artifact variants: absent explicit review request,
-            eyes-only current-head artifact, and prior-head-only artifacts
-            after push invalidation.
+  Class D — the three no-terminal-artifact states must be named and handled:
+            absent explicit review request, eyes-only current-head artifact,
+            and prior-head-only artifacts after push invalidation. The silent
+            ageing GH-1549 originally specified for them was deleted on
+            2026-07-26; the three survive as a classification of non-signals,
+            and nothing merges by elapsing.
 
-The fallback-semantics fixtures under tests/fixtures/gh1549_fallback_semantics/
-encode the expected disposition for each variant so a future drift in either
-the docs or a runtime implementation that consumes these scenarios is caught.
+The fixtures under tests/fixtures/gh1549_fallback_semantics/ encode the expected
+disposition for each state so a future drift in either the docs or a runtime
+implementation that consumes these scenarios is caught. Disposition is a function
+of the diff's tier and whether a review is outstanding -- not of the state alone.
 """
 
 from __future__ import annotations
 
-import inspect
 import json
 import re
 import unittest
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -66,16 +67,6 @@ _RUNNABLE_AX_RE = re.compile(
     r"(?:--[\w-]+|<[^>]+>|\w)"  # a shell argument: flag, placeholder, or value
 )
 
-
-def _parse_explicit_timezone_iso8601(value: str) -> datetime:
-    """Parse an explicit-timezone ISO 8601 value and normalize it to UTC."""
-    if not isinstance(value, str) or not value:
-        raise ValueError("timestamp must be a non-empty string")
-    normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
-    parsed = datetime.fromisoformat(normalized)
-    if parsed.tzinfo is None or parsed.utcoffset() is None:
-        raise ValueError("timestamp must include an explicit timezone")
-    return parsed.astimezone(timezone.utc)
 
 
 def _bare_runnable_ax_lines(text: str) -> list[str]:
@@ -235,41 +226,68 @@ class Gh1549ClassARunnableExamplesTest(unittest.TestCase):
 
 
 class Gh1549ClassDFallbackSemanticsTest(unittest.TestCase):
-    """Class D: silent-fallback ageing handles the three named variants."""
+    """Class D: the three named states, and the timer that no longer exists.
 
-    def test_commit_push_prs_doc_names_all_three_variants(self) -> None:
+    Silent-fallback AGEING is gone as of 2026-07-26. Deleting the clock for only the
+    unrequested-review variant left eyes-only and prior-head still ripening a head on
+    silence -- the same defect under a narrower name -- so all three clocks are deleted.
+    The three variants survive purely as a classification of non-signals: they say what
+    an artifact is NOT, and none of them can make a head merge-eligible.
+    """
+
+    def test_commit_push_prs_doc_names_the_surviving_variants(self) -> None:
         text = (
             REPO_ROOT / "docs" / "workflows" / "commit-push-prs.md"
         ).read_text(encoding="utf-8")
-        # The doc must explicitly enumerate the three no-terminal-artifact
-        # variants so future drift cannot silently drop one.
-        self.assertIn("No explicit review request", text)
+        # Both survivors still enumerated, so drift cannot silently drop one.
         self.assertIn("Eyes-only current-head artifact", text)
         self.assertIn("Prior-head artifacts only", text)
 
-    def test_review_and_handoff_doc_references_the_three_variants(self) -> None:
-        text = (
-            REPO_ROOT / "docs" / "workflows" / "review-and-handoff.md"
-        ).read_text(encoding="utf-8")
-        # The compact mirror must name all three variants and point at the
-        # full enumeration in commit-push-prs.md.
-        self.assertIn("no explicit review request", text)
-        self.assertIn("eyes-only current-head", text)
-        self.assertIn("prior-head", text)
-        self.assertIn("commit-push-prs.md", text)
+    def test_no_variant_carries_a_timer(self) -> None:
+        """What was deleted is the CLOCK, not the classification.
 
-    def test_later_of_clock_anchor_is_preserved(self) -> None:
+        Revised 2026-07-26 (GH-313 finding 1). The earlier version asserted the
+        unrequested-review variant had disappeared from the document entirely, which
+        both misstated the ruling and left the other two variants' clocks unexamined --
+        so the suite certified a document that still aged a head into a merge.
+        """
         text = (
             REPO_ROOT / "docs" / "workflows" / "commit-push-prs.md"
         ).read_text(encoding="utf-8")
-        # The GH-1539 invariant: the fallback clock anchors at the later of
-        # the final push and the head becoming reviewable. This must not be
-        # weakened to commit age alone.
-        self.assertRegex(
-            text,
-            r"later of the\s+final push",
-        )
-        self.assertRegex(text, r"head becoming reviewable")
+        self.assertIn("No explicit review request", text)
+        self.assertRegex(text, r"gate violation to fix,\s+not a delay to wait out")
+        self.assertRegex(text, r"with no clock attached to any\s+of them")
+        for revived in (
+            "15-minute",
+            "15 minutes",
+            "resettable fallback",
+            "fallback clock",
+            "fallback timeout",
+        ):
+            self.assertNotIn(
+                revived, text, f"the deleted silence timer came back as {revived!r}"
+            )
+
+    def test_review_and_handoff_doc_references_the_surviving_variants(self) -> None:
+        text = (
+            REPO_ROOT / "docs" / "workflows" / "review-and-handoff.md"
+        ).read_text(encoding="utf-8")
+        self.assertIn("eyes-only current-head", text)
+        self.assertIn("prior-head", text)
+        self.assertIn("commit-push-prs.md", text)
+        self.assertNotIn("no explicit review request (the reviewability clock", text)
+
+    def test_the_clock_anchor_is_gone_with_the_clock(self) -> None:
+        """GH-1539's "later of final push and head-reviewable" anchor is retired.
+
+        It described where the silence fallback started counting. With nothing counting,
+        an anchor is not a weaker invariant -- it is a claim that a clock exists.
+        """
+        text = (
+            REPO_ROOT / "docs" / "workflows" / "commit-push-prs.md"
+        ).read_text(encoding="utf-8")
+        self.assertNotRegex(text, r"later of the\s+final push")
+        self.assertRegex(text, r"no elapsed time is ever a terminal\s+signal")
 
     def test_report_and_escalate_behavior_is_preserved(self) -> None:
         text = (
@@ -308,30 +326,46 @@ class Gh1549ClassDFallbackSemanticsTest(unittest.TestCase):
             "visibility as a required condition (contradicts the "
             "absent-request variant):\n" + "\n".join(contradictory),
         )
-        # Positive anchor: the gate must now state an explicit request is NOT
-        # required, matching the absent-request variant.
+        # Positive anchor, INVERTED 2026-07-25 by the manual-only ruling on llm-collab#310.
+        #
+        # The old anchor required the gate to state that an explicit review request is NOT
+        # required for a head to be reviewable. That was true only because automatic review
+        # existed: a head became reviewable on its own and the fallback clock measured how long
+        # to wait for an unrequested review. With auto review off account-wide, nothing arrives
+        # unrequested, so the old sentence would assert something false and the fallback it
+        # anchored is a path that always ends in silence.
+        #
+        # The replacement pins the invariant that actually governs now: Tier A must request and
+        # never merges on silence, and an unrequested head does not wait at all.
         self.assertRegex(
             text,
-            r"explicit\s+review\s+request\s+is\s+NOT\s+required",
+            r"there is no silence fallback for an unrequested review",
+            "the gate must state that an unrequested review has no fallback; under manual-only "
+            "the old 'a request is NOT required' invariant is false",
         )
+        self.assertRegex(text, r"never merge on silence")
 
 
 class Gh1549FallbackFixturesTest(unittest.TestCase):
-    """Per-project fallback-semantics fixtures execute the variant assertions.
+    """Per-project non-signal fixtures execute the variant assertions.
 
-    Each fixture carries a project_cases array with concrete paired cases for
+    Each fixture carries a project_cases array with concrete cases for
     project_id="amiga" and project_id="nuvyr" (the representative non-Amiga
     project used throughout the existing test suite). llm-collab AGENTS.md
     requires focused coverage for Amiga plus at least one non-Amiga project
-    for shared contracts. subTest iterates each project case through the
-    variant-specific assertions so the shared fallback contract is executed,
-    not just declared as metadata.
+    for shared contracts. Every case also names a tier, because under the
+    manual-only gate the disposition of a non-signal is decided by the tier
+    and by whether a review is outstanding -- not by which non-signal it is.
+    subTest iterates each case so the contract is executed, not just declared.
     """
 
     VARIANT_FILES = {
         "absent_request": "absent_request.json",
         "eyes_only_current_head": "eyes_only_current_head.json",
         "prior_head_artifacts_only": "prior_head_artifacts_only.json",
+        # A request that exists, at each point of its flow -- the others classify
+        # non-signals, this one classifies progress through the request-anchored clocks.
+        "requested_review_phases": "requested_review_phases.json",
     }
     REQUIRED_PROJECTS = ("amiga", "nuvyr")
 
@@ -399,255 +433,639 @@ class Gh1549FallbackFixturesTest(unittest.TestCase):
                 f"{sorted(missing)} (must include both amiga and nuvyr)",
             )
 
-    def test_fallback_fixture_coherence_for_every_case(self) -> None:
+    # The 15-minute coherence machine that lived here -- the timestamp parser, its four
+    # validation tests, the later-of-both-anchors computation, and the meta-guards that
+    # checked the guard -- is deleted with the clock it validated (2026-07-26, GH-313
+    # finding 1). It computed when a silent head became merge-eligible. Nothing becomes
+    # merge-eligible by elapsing now, so the computation has no referent; keeping it
+    # green would certify the retired policy. What replaces it is the guard against
+    # bringing the clock back.
+
+    TIMING_FIELDS = (
+        "clock_anchor",
+        "clock_start_utc",
+        "fallback_eligible_after_utc",
+        "final_push_utc",
+        "head_reviewable_utc",
+    )
+
+    def test_no_fixture_carries_a_timing_field(self) -> None:
         for variant in self.VARIANT_FILES:
             for case in self._project_cases(variant):
-                fallback_utc = case["expected"].get(
-                    "fallback_eligible_after_utc"
+                with self.subTest(project_id=case["project_id"], variant=variant):
+                    present = sorted(
+                        field
+                        for field in self.TIMING_FIELDS
+                        if field in case["expected"] or field in case["pr_state"]
+                    )
+                    self.assertEqual(
+                        [], present,
+                        f"{variant} reintroduced silence-fallback timing: {present}",
+                    )
+
+    def test_every_case_states_that_silence_does_not_ripen_a_head(self) -> None:
+        for variant in self.VARIANT_FILES:
+            for case in self._project_cases(variant):
+                with self.subTest(project_id=case["project_id"], variant=variant):
+                    self.assertIs(
+                        False, case["expected"]["merge_eligible_on_silence"]
+                    )
+
+    def test_no_fixture_mentions_the_deleted_fallback(self) -> None:
+        """The mechanism is gone, so its vocabulary must be too.
+
+        Added 2026-07-26 (GH-313 re-review). Deleting the clock while keeping keys like
+        `eyes_blocks_fallback_when_no_review_pending` left the fixtures asserting how a
+        non-existent mechanism behaves -- assertions no implementation can ever fail, on
+        a thing no implementation can ever have. One description even re-stated the
+        "later of the final push and the head becoming reviewable" anchor that
+        test_the_clock_anchor_is_gone_with_the_clock forbids in the document.
+        """
+        # The one sanctioned use is the denial itself. It is subtracted from the text
+        # rather than exempting the LINE that contains it: JSON puts a whole description
+        # on one line, so a line-level exemption let any forbidden word ride along beside
+        # the denial -- a mutation restoring the "reviewability clock starts at the later
+        # of the final push" anchor passed straight through the first version of this
+        # guard.
+        # Widened 2026-07-26 with the phase model: the REQUEST-ANCHORED clocks were never
+        # deleted -- only the silence fallback's clock for a review nobody asked for. So a
+        # fixture may say a request expired, because that is a retained mechanism it must
+        # be able to describe; what it still may not do is describe the deleted one. The
+        # narrowing is by ANCHOR rather than by vocabulary: a clock attached to a request
+        # artifact is legitimate, a clock attached to silence or to a push is not.
+        # `expire` is back in the forbidden set (GH-313 re-review P2). Dropping it
+        # entirely to make room for request expiry let a fixture reintroduce the deleted
+        # policy as "silence expires after the wait" -- no `fallback`, no `clock`, no
+        # `elapsed`, and this guard would have passed it.
+        #
+        # A request artifact's own `phase` is request-anchored BY CONSTRUCTION, so it is
+        # exempted structurally rather than by a regex that guesses the prose around it:
+        # the exemption follows the JSON position, and only for phase vocabulary the
+        # model actually declares. Prose is still scanned, which is where "silence
+        # expires" would live.
+        sanctioned = re.compile(
+            r"no elapsed time makes the head merge-eligible"
+            r"|request-anchored clocks?"
+            r"|(?:initial request|re-trigger)(?:'s)?(?: own)? clock"
+            r"|(?:an? )?expired (?:initial request|re-trigger)"
+            r"|(?:initial request|re-trigger)(?:'s)? expir\w*"
+            r"|clocks are tier-agnostic",
+            re.I,
+        )
+        forbidden = re.compile(r"fallback|clock|elapsed|expir", re.I)
+
+        request_phases = set(self.REQUEST_PHASES) | {"stale_for_this_head"}
+
+        def scannable(node, key=None, parent_key=None):
+            """Every string in the fixture except a request artifact's declared phase.
+
+            KEYS are scanned too. The first version concatenated only values, so the
+            retired mechanism could come back as a key -- `silence_expiry_after`,
+            `fallback_mode` -- and this guard saw only whatever bland value sat under it.
+            The separate fixed TIMING_FIELDS list does not cover renamed keys either, so
+            nothing was watching the one half of the JSON a new field is named in.
+            """
+            if isinstance(node, dict):
+                return " ".join(
+                    name + " " + scannable(value, name, key)
+                    for name, value in node.items()
                 )
-                if fallback_utc is None:
-                    continue
-                with self.subTest(
-                    project_id=case["project_id"],
-                    variant=variant,
-                ):
-                    self._assert_fallback_case_coherent(case)
+            if isinstance(node, list):
+                return " ".join(scannable(item, key, parent_key) for item in node)
+            if isinstance(node, str):
+                if key == "phase" and parent_key == "review_requests" and node in {
+                    "pending", "expired"
+                }:
+                    return ""
+                if key == "request_phase" and node in request_phases:
+                    return ""
+                return node
+            return ""
 
-    def test_fallback_timestamp_parser_normalizes_explicit_instants_to_utc(
-        self,
-    ) -> None:
-        trailing_z = _parse_explicit_timezone_iso8601(
-            "2026-07-18T12:00:00Z"
+        offenders: dict[str, list[str]] = {}
+        for filename in self.VARIANT_FILES.values():
+            path = FIXTURES_DIR / filename
+            text = scannable(json.loads(path.read_text(encoding="utf-8")))
+            hits = sorted({m.group(0).lower() for m in forbidden.finditer(sanctioned.sub("", text))})
+            if hits:
+                offenders[filename] = hits
+        self.assertFalse(
+            offenders,
+            "fixture still describes the deleted silence fallback:\n"
+            + "\n".join(f"{name}: {v}" for name, v in offenders.items()),
         )
-        explicit_offset = _parse_explicit_timezone_iso8601(
-            "2026-07-18T14:00:00+02:00"
-        )
-        self.assertEqual(trailing_z, explicit_offset)
-        self.assertIs(trailing_z.tzinfo, timezone.utc)
-        self.assertIs(explicit_offset.tzinfo, timezone.utc)
 
-    def test_fallback_timestamp_parser_rejects_naive_timestamp(self) -> None:
-        with self.assertRaisesRegex(ValueError, "explicit timezone"):
-            _parse_explicit_timezone_iso8601("2026-07-18T12:00:00")
+    # The disposition of a non-signal is NOT a property of the variant: it follows from
+    # the tier of the diff and whether a review is actually outstanding. Asserting
+    # "stuck, escalate" for every case (GH-313 re-review P1) was wrong in both
+    # directions -- Tier A with no request is the author's own gate violation to fix,
+    # not a wait to escalate, and Tier B/C with no request has nothing pending at all.
+    DISPOSITION_BY_TIER_AND_REQUEST = {
+        ("A", False): "gate_violation_request_required",
+        ("A", True): "escalate_stuck_review",
+        # A Tier B review is discretionary to REQUEST; once requested it is pending
+        # exactly like a Tier A one, and requested-review precedence keeps it pending
+        # until a terminal signal or a disposition. Omitting this pair let the fixtures
+        # imply that anything below Tier A has nothing to wait for.
+        ("B", True): "escalate_stuck_review",
+        ("B", False): "no_review_pending",
+        # A Tier C change nobody had to request can still BE requested -- by an operator
+        # or another contributor. Requested-review precedence does not consult the tier,
+        # so that request is pending like any other and its findings must be adjudicated.
+        # Omitting the pair let a consumer treat it as (C, False) and merge with a review
+        # outstanding.
+        ("C", True): "escalate_stuck_review",
+        ("C", False): "no_review_pending",
+    }
 
-    def test_fallback_timestamp_parser_rejects_lowercase_z_and_malformed(
-        self,
-    ) -> None:
-        for value in (
-            "2026-07-18T12:00:00z",
-            "not-a-timestamp",
+    # `escalate_stuck_review` is where a requested review ENDS UP, not where it starts.
+    # Collapsing every requested review to it made a just-posted request, an initial
+    # request whose clock has expired, and an expired re-trigger indistinguishable -- so
+    # these fixtures could certify a consumer that escalates immediately, or one that
+    # skips the required re-trigger and goes straight to the operator. The phases are the
+    # request-anchored ones that survived the silence-fallback deletion; the deleted thing
+    # was a clock for a review nobody asked for, and these are clocks anchored to a
+    # request that exists.
+    REQUEST_PHASES = {
+        "initial_pending": "wait_out_initial_request",
+        "initial_expired": "issue_the_single_re_trigger",
+        "retrigger_pending": "wait_out_the_re_trigger",
+        "retrigger_expired": "escalate_stuck_review",
+        # Escalating does not produce the disposition; it asks for one. The head stays
+        # blocked while that decision is pending, and leaving the flow to end at the
+        # escalate ACTION let a consumer either escalate again on every observation or
+        # treat the escalation itself as terminal and merge.
+        "escalated_awaiting_disposition": "blocked_pending_operator_disposition",
+    }
+
+    # GH-313 re-review P1. A stale request used to resolve to the tier's NO-REQUEST
+    # answer, so at Tier B/C an amendment made an outstanding review vanish:
+    # `no_review_pending`, exactly as though nobody had ever asked. An amendment stales a
+    # request -- it does not withdraw the requirement, and only an explicit withdrawal
+    # does. Tier A keeps the sharper name because failing to request there is itself the
+    # gate violation; at B/C nothing was violated, but a new exact-head request is still
+    # owed before the head can move.
+    STALE_REQUEST_DISPOSITION = {
+        "A": "gate_violation_request_required",
+        "B": "rerequest_required_at_new_head",
+        "C": "rerequest_required_at_new_head",
+    }
+
+    def withdrawal_is_valid(self, state):
+        """Withdrawal is an operator decision with an artifact, not a truthy flag.
+
+        Any truthy value used to retire the requirement outright -- no type check, no
+        author, no head binding. A consumer could infer it, or deserialize it by
+        accident, and produce `no_review_pending` without the explicit operator decision
+        the workflow calls the sole exception. So it must be a record that says who
+        decided and which head they decided about, and it only applies to THAT head.
+        """
+        evidence = state.get("review_requirement_withdrawn")
+        if not isinstance(evidence, dict):
+            return False
+        if evidence.get("authority") != "operator":
+            return False
+        if not isinstance(evidence.get("recorded_at"), str) or not evidence["recorded_at"]:
+            return False
+        head = evidence.get("head_oid")
+        return isinstance(head, str) and head == state.get("head_oid")
+
+    def stale_disposition(self, tier, state):
+        if self.withdrawal_is_valid(state):
+            return "no_review_pending"
+        return self.STALE_REQUEST_DISPOSITION[tier]
+
+    def test_withdrawal_needs_operator_evidence_bound_to_this_head(self) -> None:
+        """A bare truthy flag retired a mandatory review requirement.
+
+        Each rejected shape below is a way the requirement could switch itself off:
+        a bool nobody authored, an author who is not the operator, a decision with no
+        record of when, and -- the quiet one -- a real withdrawal for a DIFFERENT head
+        still applying after the branch moved on.
+        """
+        head = "amiga-abc200"
+        valid = {
+            "authority": "operator",
+            "recorded_at": "2026-07-26T00:00:00Z",
+            "head_oid": head,
+        }
+        state = {"head_oid": head, "review_requirement_withdrawn": valid}
+        self.assertEqual("no_review_pending", self.stale_disposition("B", state))
+
+        for name, evidence in (
+            ("a bare boolean", True),
+            ("a truthy string", "yes"),
+            ("no authority", {k: v for k, v in valid.items() if k != "authority"}),
+            ("not the operator", {**valid, "authority": "worker"}),
+            ("no recorded_at", {k: v for k, v in valid.items() if k != "recorded_at"}),
+            ("a prior head", {**valid, "head_oid": "amiga-abc100"}),
+            ("no head binding", {k: v for k, v in valid.items() if k != "head_oid"}),
         ):
-            with self.subTest(value=value):
-                with self.assertRaises(ValueError):
-                    _parse_explicit_timezone_iso8601(value)
+            with self.subTest(evidence=name):
+                self.assertEqual(
+                    "rerequest_required_at_new_head",
+                    self.stale_disposition(
+                        "B", {"head_oid": head, "review_requirement_withdrawn": evidence}
+                    ),
+                    f"{name} must not retire the requirement",
+                )
 
-    def test_fallback_timestamp_parser_requires_non_empty_string(self) -> None:
-        for value in (
-            "",
-            None,
-            0,
-            1,
-            False,
-            True,
-            [],
-            [1],
-            {},
-            {"x": 1},
-            b"x",
-        ):
-            with self.subTest(value=value):
-                with self.assertRaisesRegex(ValueError, "non-empty string"):
-                    _parse_explicit_timezone_iso8601(value)  # type: ignore[arg-type]
+    def test_an_amendment_does_not_withdraw_a_tier_bc_review_requirement(self) -> None:
+        """The tier decides whether a review must be REQUESTED, not whether one survives.
 
-    def test_fallback_clock_uses_later_of_both_anchors(self) -> None:
-        cases = (
-            (
-                "final_push_later",
-                "2026-07-18T12:05:00Z",
-                "2026-07-18T12:00:00Z",
-                "2026-07-18T12:20:00Z",
-            ),
-            (
-                "head_reviewable_later",
-                "2026-07-18T12:00:00Z",
-                "2026-07-18T12:07:00Z",
-                "2026-07-18T12:22:00Z",
-            ),
-        )
-        for name, final_push, head_reviewable, fallback in cases:
-            case = {
-                "pr_state": {
-                    "explicit_review_request": False,
-                    "final_push_utc": final_push,
-                    "head_reviewable_utc": head_reviewable,
-                },
-                "expected": {
-                    "fallback_eligible_after_utc": fallback,
-                },
-            }
-            with self.subTest(name=name):
-                self._assert_fallback_case_coherent(case)
-
-    def test_fallback_coherence_routes_all_timestamps_through_parser(
-        self,
-    ) -> None:
-        source = inspect.getsource(type(self)._assert_fallback_case_coherent)
-        helper_call = "_parse_explicit_timezone_iso8601("
+        Reading a stale request as the tier's no-request answer meant a voluntarily
+        requested Tier B/C review disappeared on the next push. The reviewer had been
+        asked, might already be reading the diff, and the gate had stopped waiting.
+        """
+        for tier in ("B", "C"):
+            with self.subTest(tier=tier):
+                self.assertNotEqual(
+                    "no_review_pending",
+                    self.stale_disposition(tier, {}),
+                    "an amendment must not silently retire a requested review",
+                )
+                self.assertEqual(
+                    self.DISPOSITION_BY_TIER_AND_REQUEST[(tier, False)],
+                    "no_review_pending",
+                    "...which is precisely the answer this used to fall back to",
+                )
+        # Withdrawal is the one thing that does retire it, and it must be explicit --
+        # operator-authored and bound to this head. See
+        # test_withdrawal_needs_operator_evidence_bound_to_this_head for the shapes that
+        # must NOT count; a bare `True` here was one of them.
         self.assertEqual(
-            source.count(helper_call),
-            3,
-            "coherence must route exactly three timestamp fields through "
-            "the Python-3.10-compatible parser",
-        )
-        routed_values = re.findall(
-            r"_parse_explicit_timezone_iso8601\(\s*"
-            r"(pr\[[\"'](?:final_push_utc|head_reviewable_utc)[\"']\]"
-            r"|fallback_utc)\s*\)",
-            source,
+            "no_review_pending",
+            self.stale_disposition("B", {
+                "head_oid": "h1",
+                "review_requirement_withdrawn": {
+                    "authority": "operator",
+                    "recorded_at": "2026-07-26T00:00:00Z",
+                    "head_oid": "h1",
+                },
+            }),
         )
         self.assertEqual(
-            routed_values,
-            [
-                'pr["final_push_utc"]',
-                'pr["head_reviewable_utc"]',
-                "fallback_utc",
-            ],
-            "coherence timestamp routing must remain final push, head "
-            "reviewable, then fallback eligibility",
+            "gate_violation_request_required", self.stale_disposition("A", {})
         )
 
-    def test_fixture_coherence_timestamps_retain_trailing_z(self) -> None:
+    def test_withdrawal_is_covered_on_amiga_and_a_non_amiga_project(self) -> None:
+        """A shared-contract branch proven on one project is proven for one project.
+
+        Withdrawal was reachable through a single Amiga case, and the helper-level
+        assertions carry no project identity at all -- so a project-specific consumer
+        could mishandle withdrawal everywhere except Amiga with the suite fully green.
+        """
+        projects = {
+            case["project_id"]
+            for variant in self.VARIANT_FILES
+            for case in self._project_cases(variant)
+            if self.withdrawal_is_valid(case["pr_state"])
+        }
+        self.assertIn("amiga", projects)
+        self.assertTrue(
+            projects - {"amiga"},
+            f"withdrawal is only covered on {sorted(projects)}; a shared contract needs "
+            "a non-Amiga case too",
+        )
+
+    def test_every_modelled_request_phase_is_reachable_in_a_fixture(self) -> None:
+        """A phase that exists only in this map certifies nothing.
+
+        The fixture's own description claimed every phase was a reachable case; none of
+        them used `initial_expired`, so the transition where the initial window runs out
+        and the single re-trigger must be issued was never exercised. A consumer that
+        skips that recovery entirely -- escalating straight to the operator -- satisfied
+        every scenario in the file.
+        """
+        seen = {
+            case["pr_state"].get("request_phase")
+            for variant in self.VARIANT_FILES
+            for case in self._project_cases(variant)
+        }
+        missing = sorted(set(self.REQUEST_PHASES) - seen)
+        self.assertEqual(
+            [], missing,
+            f"these phases are modelled but no fixture reaches them: {missing}",
+        )
+
+    def test_the_flow_has_a_state_after_escalating(self) -> None:
+        """Escalation is a request for a decision, not the decision.
+
+        A consumer whose last modelled state is the escalate action has nothing to do on
+        the next observation but escalate again -- or, worse, read escalation as the flow's
+        terminal state and proceed.
+        """
+        self.assertEqual(
+            "blocked_pending_operator_disposition",
+            self.REQUEST_PHASES["escalated_awaiting_disposition"],
+        )
+        self.assertNotEqual(
+            self.REQUEST_PHASES["retrigger_expired"],
+            self.REQUEST_PHASES["escalated_awaiting_disposition"],
+            "the action and the state that follows it must be distinguishable",
+        )
+        # And the blocked state is not a merge-eligible one under any tier.
+        self.assertNotIn(
+            "blocked_pending_operator_disposition",
+            set(self.DISPOSITION_BY_TIER_AND_REQUEST.values()),
+            "a tier disposition must never resolve to the pending-decision state",
+        )
+
+    def test_a_fixture_request_is_bound_to_a_head(self) -> None:
+        """An unbound boolean cannot distinguish a stale request from a pending one.
+
+        After a push, a request for the PRIOR head still satisfies
+        `explicit_review_request`, so the fixtures read it as a request for the current
+        head: Tier A could bypass the mandatory new-head request and walk to the waiver,
+        and Tier B/C could be treated as pending on a request that no longer applies.
+        """
         for variant in self.VARIANT_FILES:
             for case in self._project_cases(variant):
-                timestamps = [
-                    case["pr_state"]["final_push_utc"],
-                    case["pr_state"]["head_reviewable_utc"],
-                    case["expected"].get("fallback_eligible_after_utc"),
-                ]
-                for value in timestamps:
-                    if value is not None:
+                state = case["pr_state"]
+                with self.subTest(variant=variant, project_id=case["project_id"]):
+                    if not state["explicit_review_request"]:
+                        continue
+                    self.assertIn(
+                        "review_requests", state,
+                        "a request in a fixture must be an artifact naming its own head",
+                    )
+                    requests = state["review_requests"]
+                    self.assertTrue(requests, "explicit_review_request with no artifact")
+                    for request in requests:
+                        self.assertIn(request["kind"], {"initial", "re_trigger"})
+                        self.assertIn("head_oid", request)
+                        self.assertIn("phase", request)
+                        self.assertIn(
+                            request["phase"], {"pending", "expired"},
+                            "a request artifact's phase vocabulary is pending/expired",
+                        )
+                    # The top-level `request_phase` drives the expected disposition, and
+                    # nothing checked it against the artifacts it claims to summarize. An
+                    # `initial_expired` case whose only initial request said `pending`
+                    # passed and still demanded the re-trigger -- so the fixtures could
+                    # certify a consumer that ignores the artifacts entirely and trusts a
+                    # duplicated field contradicting them.
+                    declared = state.get("request_phase")
+                    by_kind = {r["kind"]: r for r in requests}
+                    expected_artifacts = {
+                        "initial_pending": ("initial", "pending", {"re_trigger"}),
+                        "initial_expired": ("initial", "expired", {"re_trigger"}),
+                        "retrigger_pending": ("re_trigger", "pending", set()),
+                        "retrigger_expired": ("re_trigger", "expired", set()),
+                    }
+                    if declared in expected_artifacts:
+                        kind, phase, forbidden = expected_artifacts[declared]
+                        self.assertIn(
+                            kind, by_kind,
+                            f"{declared} needs a {kind} request artifact to be about",
+                        )
+                        self.assertEqual(
+                            phase, by_kind[kind]["phase"],
+                            f"{declared} contradicts its own {kind} artifact",
+                        )
+                        for absent in forbidden & set(by_kind):
+                            self.fail(
+                                f"{declared} cannot already carry a {absent}: the phase "
+                                "says that step has not happened yet"
+                            )
+                    kinds = [r["kind"] for r in requests]
+                    self.assertEqual(
+                        sorted(set(kinds)), sorted(kinds),
+                        "each request kind appears at most once; the re-trigger is single",
+                    )
+                    if "re_trigger" in kinds:
+                        self.assertIn(
+                            "initial", kinds,
+                            "a re-trigger without an initial request is not a recovery",
+                        )
+                    # Pending for THIS head requires a request naming THIS head. A request
+                    # for a prior head is stale and is modelled as such rather than banned.
+                    for_this_head = [r for r in requests if r["head_oid"] == state["head_oid"]]
+                    if state.get("request_phase") == "stale_for_this_head":
+                        self.assertEqual(
+                            [], for_this_head,
+                            "a stale case must name only prior heads",
+                        )
+                        self.assertFalse(case["expected"]["review_is_pending"])
+                    else:
                         self.assertTrue(
-                            value.endswith("Z"),
-                            f"{variant} coherence timestamp must retain "
-                            f"trailing Z: {value!r}",
+                            for_this_head,
+                            "a pending case must name the current head",
                         )
 
-    def _assert_fallback_case_coherent(self, case: dict) -> None:
-        pr = case["pr_state"]
-        fallback_utc = case["expected"]["fallback_eligible_after_utc"]
-        self.assertFalse(
-            pr["explicit_review_request"],
-            "fallback eligibility and an explicit current-head review request "
-            "are mutually exclusive",
+    def test_a_requested_review_has_phases_not_one_disposition(self) -> None:
+        """Escalation is the END of the request-anchored flow, not the whole of it."""
+        self.assertEqual(
+            "escalate_stuck_review",
+            self.REQUEST_PHASES["retrigger_expired"],
+            "escalation belongs to the expired re-trigger, nothing earlier",
         )
-        clock_start = max(
-            _parse_explicit_timezone_iso8601(pr["final_push_utc"]),
-            _parse_explicit_timezone_iso8601(pr["head_reviewable_utc"]),
+        self.assertNotEqual(
+            self.REQUEST_PHASES["initial_pending"],
+            self.REQUEST_PHASES["retrigger_expired"],
+            "a just-posted request must not be indistinguishable from an exhausted one",
         )
         self.assertEqual(
-            _parse_explicit_timezone_iso8601(fallback_utc),
-            clock_start + timedelta(minutes=15),
-            "fallback eligibility must be exactly 15 minutes after "
-            "later_of(final_push, head_reviewable)",
+            "issue_the_single_re_trigger",
+            self.REQUEST_PHASES["initial_expired"],
+            "the re-trigger is the only recovery, so it cannot be skipped",
         )
+        # The tier matrix answers a different question -- is anything pending at all --
+        # and it may only ever produce the phase flow's entry point or its end, never a
+        # step in the middle.
+        for key, disposition in self.DISPOSITION_BY_TIER_AND_REQUEST.items():
+            if key[1]:
+                with self.subTest(tier=key[0]):
+                    self.assertEqual(
+                        self.REQUEST_PHASES["retrigger_expired"], disposition,
+                        "a requested review's tier disposition is the flow's END; the "
+                        "phases in between are REQUEST_PHASES, and a consumer that reads "
+                        "this matrix as the whole story escalates immediately",
+                    )
 
-    def test_generic_fixture_coherence_guard_is_registered(self) -> None:
-        self.assertTrue(
-            callable(
-                getattr(
-                    type(self),
-                    "test_fallback_fixture_coherence_for_every_case",
-                    None,
+    def test_the_phase_flow_is_documented_where_workers_read_it(self) -> None:
+        """The phases must be findable, or the model here is a private fiction."""
+        doc = (REPO_ROOT / "docs" / "workflows" / "commit-push-prs.md").read_text(
+            encoding="utf-8"
+        )
+        for phrase in (
+            "one initial request per candidate final head",
+            "single request-anchored re-trigger",
+            "operator disposition",
+        ):
+            self.assertIn(phrase, doc)
+
+    def test_disposition_follows_from_tier_and_request_not_from_the_variant(self) -> None:
+        """Two questions, answered by two models, and conflating them was the defect.
+
+        The tier matrix answers **is anything pending** -- a property of the tier and of
+        whether a request exists at all. `REQUEST_PHASES` answers **what to do now** -- a
+        property of how far the request-anchored clocks have run. Mapping every requested
+        review straight to `escalate_stuck_review` collapsed the second question into the
+        first, so a just-posted request and an exhausted one were indistinguishable.
+        """
+        for variant in self.VARIANT_FILES:
+            for case in self._project_cases(variant):
+                state = case["pr_state"]
+                key = (case["tier"], state["explicit_review_request"])
+                with self.subTest(
+                    variant=variant, project_id=case["project_id"], tier=case["tier"]
+                ):
+                    self.assertIn(
+                        key,
+                        self.DISPOSITION_BY_TIER_AND_REQUEST,
+                        f"{variant} declares an unmodelled tier/request pair {key}",
+                    )
+                    phase = state.get("request_phase")
+                    if phase is None:
+                        # No request-anchored clock: the tier answer is the whole answer.
+                        self.assertEqual(
+                            self.DISPOSITION_BY_TIER_AND_REQUEST[key],
+                            case["expected"]["disposition"],
+                        )
+                        continue
+                    if phase == "stale_for_this_head":
+                        self.assertEqual(
+                            self.stale_disposition(case["tier"], state),
+                            case["expected"]["disposition"],
+                        )
+                        continue
+                    self.assertIn(
+                        phase, self.REQUEST_PHASES,
+                        f"{variant} declares an unmodelled request phase {phase!r}",
+                    )
+                    self.assertEqual(
+                        self.REQUEST_PHASES[phase], case["expected"]["disposition"]
+                    )
+
+    def test_every_variant_covers_both_a_tier_a_and_a_tier_bc_case(self) -> None:
+        """A single-tier fixture would re-hide exactly the distinction this restores."""
+        for variant in self.VARIANT_FILES:
+            tiers = {case["tier"] for case in self._project_cases(variant)}
+            with self.subTest(variant=variant):
+                self.assertIn("A", tiers)
+                self.assertTrue(
+                    tiers - {"A"}, f"{variant} models Tier A only: {sorted(tiers)}"
                 )
+
+    def test_a_request_is_pending_whatever_tier_prompted_it(self) -> None:
+        """Requested-review precedence does not consult the tier.
+
+        The matrix held only (A, *) and (B/C, False), so every below-Tier-A fixture said
+        nothing-pending. Tier decides whether a review must be REQUESTED, not what
+        happens once one exists.
+        """
+        for tier in ("A", "B", "C"):
+            with self.subTest(tier=tier):
+                self.assertEqual(
+                    "escalate_stuck_review",
+                    self.DISPOSITION_BY_TIER_AND_REQUEST[(tier, True)],
+                    "a requested review is pending regardless of tier",
+                )
+        self.assertEqual(
+            "gate_violation_request_required",
+            self.DISPOSITION_BY_TIER_AND_REQUEST[("A", False)],
+        )
+        for tier in ("B", "C"):
+            self.assertEqual(
+                "no_review_pending", self.DISPOSITION_BY_TIER_AND_REQUEST[(tier, False)]
             )
+
+    def test_a_requested_tier_b_review_is_pending_like_any_other(self) -> None:
+        """Tier B is discretionary to REQUEST, not discretionary once requested.
+
+        The matrix previously held only ("A", *) and ("C", False), so every non-A
+        fixture said nothing-pending and the suite could not distinguish "no review was
+        owed" from "a review was asked for and never came".
+        """
+        self.assertEqual(
+            "escalate_stuck_review", self.DISPOSITION_BY_TIER_AND_REQUEST[("B", True)]
         )
-        source = inspect.getsource(
-            type(self).test_fallback_fixture_coherence_for_every_case
+        self.assertEqual(
+            "no_review_pending", self.DISPOSITION_BY_TIER_AND_REQUEST[("B", False)]
         )
-        self.assertIn("self._assert_fallback_case_coherent(case)", source)
-
-    def test_fixture_coherence_guard_rejects_named_mutations(self) -> None:
-        case = self._project_cases("eyes_only_current_head")[0]
-        explicit_request = json.loads(json.dumps(case))
-        explicit_request["pr_state"]["explicit_review_request"] = True
-        with self.assertRaises(AssertionError):
-            self._assert_fallback_case_coherent(explicit_request)
-
-        shifted_timestamp = json.loads(json.dumps(case))
-        shifted_timestamp["expected"]["fallback_eligible_after_utc"] = (
-            "2026-07-18T12:16:00Z"
+        requested = [
+            case
+            for variant in self.VARIANT_FILES
+            for case in self._project_cases(variant)
+            if case["tier"] == "B" and case["pr_state"]["explicit_review_request"]
+        ]
+        self.assertTrue(
+            requested, "no fixture exercises a voluntarily requested Tier B review"
         )
-        with self.assertRaises(AssertionError):
-            self._assert_fallback_case_coherent(shifted_timestamp)
+        # A stale request is requested but NOT pending for this head -- that is what
+        # stale means, and it is the one case this claim does not cover. It is asserted
+        # here rather than filtered away silently, because dropping it from the list
+        # without saying so is how a requested review would quietly stop being checked.
+        stale = [
+            case for case in requested
+            if case["pr_state"].get("request_phase") == "stale_for_this_head"
+        ]
+        self.assertTrue(stale, "no fixture exercises a Tier B request staled by a push")
+        for case in stale:
+            self.assertFalse(case["expected"]["review_is_pending"])
+            # Withdrawn is the one stale case that legitimately resolves to
+            # no_review_pending -- and it is asserted through the same helper the
+            # production rule uses, so a fixture cannot declare a withdrawal the rule
+            # would reject and still be believed.
+            expected = self.stale_disposition(case["tier"], case["pr_state"])
+            self.assertEqual(expected, case["expected"]["disposition"])
+            if not self.withdrawal_is_valid(case["pr_state"]):
+                self.assertEqual("rerequest_required_at_new_head", expected)
+        for case in [c for c in requested if c not in stale]:
+            with self.subTest(project_id=case["project_id"]):
+                self.assertTrue(case["expected"]["review_is_pending"])
+                # Pending, and its ACTION comes from the phase exactly as Tier A's does --
+                # that is the whole claim. Asserting `escalate_stuck_review` here would
+                # re-collapse the flow into its last step for Tier B only.
+                phase = case["pr_state"].get("request_phase")
+                expected = (
+                    self.REQUEST_PHASES[phase] if phase
+                    else self.DISPOSITION_BY_TIER_AND_REQUEST[(case["tier"], True)]
+                )
+                self.assertEqual(expected, case["expected"]["disposition"])
 
-    def test_absent_request_variant_per_project(self) -> None:
-        # Absent explicit review request: the reviewability clock still starts
-        # at the later of the final push and the head becoming reviewable;
-        # absence neither pre-expires nor indefinitely extends the fallback;
-        # a stuck state remains reported/escalated.
-        for case in self._project_cases("absent_request"):
-            pid = case["project_id"]
-            pr = case["pr_state"]
-            expected = case["expected"]
-            with self.subTest(project_id=pid, variant="absent_request"):
-                self.assertEqual(
-                    expected["clock_anchor"],
-                    "later_of(final_push, head_reviewable)",
-                )
-                self.assertFalse(expected["fallback_blocked_by_absent_request"])
-                self.assertFalse(
-                    expected["absent_request_extends_fallback_indefinitely"]
-                )
-                self.assertFalse(expected["commit_age_pre_expires_fallback"])
-                self.assertTrue(expected["stuck_state_remains_reported_and_escalated"])
-                # The clock starts at the later of final push and head-reviewable.
-                self.assertEqual(
-                    expected["clock_start_utc"],
-                    max(pr["final_push_utc"], pr["head_reviewable_utc"]),
-                )
+    def test_no_case_is_terminal_and_only_a_pending_review_can_be_stuck(self) -> None:
+        for variant in self.VARIANT_FILES:
+            for case in self._project_cases(variant):
+                expected = case["expected"]
+                with self.subTest(variant=variant, project_id=case["project_id"]):
+                    # Every one of these variants is defined as the ABSENCE of a signal.
+                    self.assertIs(False, expected["terminal_signal_present"])
+                    # A review is outstanding exactly when a request exists **for this
+                    # head**. "A request exists" and "a review is pending" are different
+                    # facts once a push has happened, and conflating them is what let a
+                    # stale prior-head request read as pending -- Tier A could then walk to
+                    # the waiver without ever issuing the mandatory new-head request.
+                    state = case["pr_state"]
+                    requests = state.get("review_requests") or []
+                    if requests:
+                        pending = any(r["head_oid"] == state["head_oid"] for r in requests)
+                    else:
+                        pending = state["explicit_review_request"]
+                    self.assertIs(pending, expected["review_is_pending"])
+                    if expected["disposition"] == "escalate_stuck_review":
+                        self.assertTrue(
+                            expected["review_is_pending"],
+                            "nothing that was never requested can be a stuck review",
+                        )
 
-    def test_eyes_only_variant_per_project(self) -> None:
-        # Eyes-only current-head artifact: non-terminal, non-blocking once no
-        # review is pending, does not restart or suppress the fallback.
-        for case in self._project_cases("eyes_only_current_head"):
-            pid = case["project_id"]
-            expected = case["expected"]
-            with self.subTest(project_id=pid, variant="eyes_only_current_head"):
-                self.assertFalse(expected["eyes_is_terminal"])
-                self.assertFalse(
-                    expected["eyes_blocks_fallback_when_no_review_pending"]
-                )
-                self.assertFalse(expected["eyes_restarts_or_suppresses_fallback"])
-                self.assertTrue(expected["stuck_state_remains_reported_and_escalated"])
-
-    def test_prior_head_variant_per_project(self) -> None:
-        # Prior-head artifacts after a push: neither the stale verdict body
-        # nor the stale reaction is head-attributable for the current head;
-        # the clock anchors to the current head's push/reviewable time, which
-        # must postdate every prior-head artifact.
+    def test_prior_head_artifacts_are_never_the_current_head(self) -> None:
+        """Attribution is head identity alone; recency cannot revive a stale artifact."""
         for case in self._project_cases("prior_head_artifacts_only"):
-            pid = case["project_id"]
-            pr = case["pr_state"]
-            expected = case["expected"]
-            stale = case["stale_artifacts_for_prior_head"]
-            with self.subTest(project_id=pid, variant="prior_head_artifacts_only"):
-                self.assertFalse(
-                    expected["prior_head_verdict_is_head_attributable_for_current_head"]
-                )
-                self.assertFalse(
-                    expected[
-                        "prior_head_reaction_is_head_attributable_for_current_head"
-                    ]
-                )
-                self.assertEqual(
-                    expected["clock_anchor"],
-                    "later_of(final_push, head_reviewable)",
-                )
-                self.assertTrue(expected["stuck_state_remains_reported_and_escalated"])
-                # The clock must anchor to the current head, not to any
-                # prior-head artifact timestamp.
-                for artifact in stale:
-                    self.assertGreater(expected["clock_start_utc"], artifact["utc"])
+            with self.subTest(project_id=case["project_id"], tier=case["tier"]):
+                for artifact in case["stale_artifacts_for_prior_head"]:
+                    self.assertNotEqual(artifact["oid"], case["pr_state"]["head_oid"])
+
+    def test_eyes_only_cases_carry_an_eyes_artifact_on_the_current_head(self) -> None:
+        """Otherwise the variant's own premise goes unchecked."""
+        for case in self._project_cases("eyes_only_current_head"):
+            artifacts = case["artifacts_for_current_head"]
+            with self.subTest(project_id=case["project_id"], tier=case["tier"]):
+                self.assertTrue(artifacts)
+                for artifact in artifacts:
+                    self.assertEqual("eyes", artifact["reaction"])
+                    self.assertEqual(case["pr_state"]["head_oid"], artifact["oid"])
 
 
 if __name__ == "__main__":

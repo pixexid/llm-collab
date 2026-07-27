@@ -163,19 +163,39 @@ unless someone asks. **Do not wait for a review nobody requested.**
 
 Whether you must request one is decided by the Tier A/B/C rule in
 [`AGENTS.md` → Requesting Code Review](../../AGENTS.md#requesting-code-review-all-workers-every-repository).
-Short version: credentials, authority, money, input we do not control, shared
-contract changes, concurrency and partial state, migrations, and anything that can
-weaken proof of those — **must** be requested. Formatting, comments and additive
-tests must not.
+**There is deliberately no short version, of the inclusions or the exclusions.**
+Both paraphrases drifted. The Tier C one dropped the canonical qualifiers —
+normative authority prose is not a comment, and a test that changes a gate, fixture
+or baseline is not additive — and the Tier A one omitted provider and idempotency
+paths and "a defect family that has already produced a finding in this repository",
+so a worker could classify a mandatory change as needing no review. Read the tier
+lists in `AGENTS.md` itself; a summary of them here is a second source that goes
+stale the moment the first one moves.
 
-Request once, on the head you believe is final:
+Issue one *initial* request, on the head you believe is final:
 
 ```
-@codex review for <every Tier A family the diff touches>
+@codex review for <every Tier A family the diff touches> at <exact head SHA>
 ```
+
+State the SHA. A connector `+1` counts as CLEAN only while the head still equals the
+SHA the request named, so a request without one cannot be satisfied by a reaction.
 
 An amendment stales the review; request again on the new final head. Any finding
-that arrives is adjudicated in writing whatever the tier.
+that arrives is adjudicated in writing whatever the tier — including a finding whose
+thread you resolve — the merge checklist enumerates every thread, resolved or not,
+precisely because a resolved-and-unanswered one is the way a finding gets lost.
+
+The one-initial-request limit is not a ban on ever asking twice. If the connector
+silently drops your request and no **terminal** signal arrives, the
+**single request-anchored re-trigger** in
+[`commit-push-prs.md`](commit-push-prs.md) is the explicit exemption and the only
+recovery — without it a Tier A head would sit pending forever.
+
+An `eyes` reaction is not a terminal signal. It does not exit requested-review
+precedence and does not reset the request clock, so a head that got `eyes` and
+nothing else still receives the re-trigger and, if that too stays silent, the
+operator disposition. "A reaction arrived" is not the test; a *terminal* signal is.
 
 ## 8. When something looks wrong
 

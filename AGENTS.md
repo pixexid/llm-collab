@@ -1,4 +1,4 @@
-<!-- CONTRACT_VERSION: 3 -->
+<!-- CONTRACT_VERSION: 4 -->
 # AGENTS.md
 
 ## This file is the source of truth
@@ -19,6 +19,22 @@ addresses the wrong lane once a second project is active.
 
 Read these if your last session predates them.
 
+- **v4 (2026-07-26)** — the merge gate is rewritten and the old rules are unsafe to
+  cache. The silence fallback is **deleted**: no elapsed time is ever a terminal
+  signal, and nothing ripens by waiting. A review request must name the exact head
+  SHA; one *initial* request per candidate final head, with a single request-anchored
+  re-trigger as the only exempted recovery. A connector review **body** listing no
+  findings is not a clean verdict — the findings are inline threads. Bind a finding to
+  a head through `pullRequestReview.commit.oid` (falling back to
+  `originalCommit.oid`), **never** the mutable `comment.commit.oid`. Adjudicate every
+  **arriving finding** whatever head raised it and whatever its current resolution
+  state — enumerate every thread, resolved or not, because a checklist phrased over
+  *unresolved* threads cannot see one that someone clicked Resolve on without
+  recording anything; a push is not an adjudication, and a written disposition must
+  identify the thread *and* be validated by a human. A
+  reaction counts only on the latest unedited request artifact. If your session
+  predates this, discard any cached copy of the old fallback, reaction lifecycle,
+  request shape, or authority rules.
 - **v3 (2026-07-26)** — workers own their own setup: project registration, agent
   entries, chats, session registration, watchers and environment repair are worker work,
   not operator work. See "Workers own their own setup" for what genuinely is the
@@ -43,6 +59,8 @@ Before changing shared tooling or operating a project lane, read:
 - `docs/workflows/collab-thread-quickstart.md` — starting and running a collab
   thread end to end
 - `docs/workflows/task-intake-and-delegation.md`
+- `## Requesting Code Review` in this file — it governs every repository a lane
+  touches, not just this one
 
 Then read the target project's own repository instructions and local policy
 under `{project_state_root}/{project_id}/`.
@@ -154,6 +172,61 @@ Two incidents established this as repo-local policy:
 - PR #198 repeated the same class through the `GH-` autolink; the merge commit
   body put a closing keyword adjacent to the autolinked reference for issue 91,
   and GitHub changed GH-91 to closed.
+
+## Requesting Code Review (all workers, every repository)
+
+Codex code review is **manual only**. Automatic review is off account-wide, so a
+review happens when a worker asks for it and never otherwise. Do **not** wait for a
+bot review that nobody requested.
+
+This section is worker-facing and applies in **every** repository a lane touches, not
+only this one. It is reachable from every worker because this file is Required
+Reading. It is distinct from the `## Code Review Rules` section below, which is read
+by the reviewer when it reviews *this* repository and must be authored per repository
+from that repository's own incidents.
+
+**Tier A — you MUST request a review on the candidate final head.** Any change
+touching credentials, authentication or an authority decision; money, provider or
+idempotency paths; **input we do not control** — network peers, another project's
+data, an external API, or anything a user or third party supplies — including its
+resource and deadline bounds; shared code that changes an observable contract (return or exception
+shape, authority or source selection, side effects, persistence, ordering,
+deadline/resource behaviour, compatibility, failure handling); concurrency, ordering,
+partial state, TOCTOU or atomicity; migrations, DDL, grants or RLS; a defect family
+that has already produced a finding in that repository; or tests and docs that govern
+or can weaken any of the above. **Failing to request is itself a gate violation.**
+
+**Tier B — your discretion.** New feature surface or a multi-module refactor with no
+Tier A contact; proof-reshaping test changes that do not cover a Tier A invariant;
+normative docs for non-Tier-A behaviour.
+
+**Tier C — do not request.** Formatting, lint or mechanical changes; non-normative
+prose and comments; additive tests with no gate, fixture or baseline change;
+single-caller behaviour-preserving edits.
+
+Request with `@codex review for <focus>`, naming **every** Tier A family the diff
+touches, asking for the full diff through those lenses, and **stating the exact head
+SHA the request is for**. The SHA is not decoration: a connector `+1` is terminal only
+while the head still equals the SHA that request named, so a request without one leaves
+the reaction path unsatisfiable and there is nothing to bind the verdict to. Issue **one initial request per
+candidate final head** — an amendment stales the review and needs a new request. That
+limit is on *initial* requests; the single request-anchored re-trigger in
+`docs/workflows/commit-push-prs.md` is an explicit exemption and the only recovery for
+a request the connector silently dropped. Any
+finding that arrives must be adjudicated in writing at every tier. A review is
+P0/P1-scoped, so it complements and never replaces independent exact-head
+verification and defect-verbatim mutation proof.
+
+**"Untrusted" means input we do not control.** Our own workspace — `State/`,
+`Chats/`, `projects.json`, the checkout itself — is not an adversary: anyone who can
+write there can edit `bin/` and already has code execution as this user. Bound those
+reads against *accidents* (a huge directory, a hung mount, a corrupt record) and stop
+there. Hardening a local tool against a hostile local filesystem has no natural floor
+and will loop forever; llm-collab#306 spent eleven review rounds proving it.
+
+Canonical detail, including the terminal-signal rules and ownership:
+`docs/workflows/commit-push-prs.md` and `docs/workflows/review-and-handoff.md`.
+Policy and rationale: `llm-collab#310`.
 
 ## Code Review Rules
 

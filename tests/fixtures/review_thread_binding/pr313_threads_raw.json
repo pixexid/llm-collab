@@ -1,0 +1,517 @@
+{
+  "source": "llm-collab#313 reviewThreads, captured 2026-07-26 at head 5b28b0a594",
+  "why": "Raw GraphQL evidence for two questions only: which head a thread was raised on, and whether it is still unresolved. Closure by written disposition is a MANUAL, human-verified step and is deliberately not modelled here. Four attempts to encode it -- a computed origin OID, a boolean, an invented id mapping, and a preselected artifact list -- each moved the authority decision somewhere the test could not see, ending with a matcher that would let a comment on another PR saying \"Still unresolved: <url>\" close a thread. Parsing free-form prose to automate a manual gate manufactures authority that does not exist.",
+  "head_oid": "5b28b0a59496b1ad0de5be5e07e20c27c8a124cd",
+  "threads": [
+    {
+      "id": "PRRT_kwDOR8xQ286Tzfud",
+      "isResolved": false,
+      "isOutdated": false,
+      "comments": {
+        "nodes": [
+          {
+            "id": "PRRC_kwDOR8xQ287Zo7jJ",
+            "url": "https://github.com/pixexid/llm-collab/pull/313#discussion_r3651385545",
+            "commit": {
+              "oid": "5b28b0a59496b1ad0de5be5e07e20c27c8a124cd"
+            },
+            "originalCommit": {
+              "oid": "a54e33fcd94bce301040ded2a6b70ecb401cd41e"
+            },
+            "pullRequestReview": {
+              "commit": {
+                "oid": "a54e33fcd94bce301040ded2a6b70ecb401cd41e"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "PRRT_kwDOR8xQ286Tzfuh",
+      "isResolved": false,
+      "isOutdated": false,
+      "comments": {
+        "nodes": [
+          {
+            "id": "PRRC_kwDOR8xQ287Zo7jO",
+            "url": "https://github.com/pixexid/llm-collab/pull/313#discussion_r3651385550",
+            "commit": {
+              "oid": "5b28b0a59496b1ad0de5be5e07e20c27c8a124cd"
+            },
+            "originalCommit": {
+              "oid": "a54e33fcd94bce301040ded2a6b70ecb401cd41e"
+            },
+            "pullRequestReview": {
+              "commit": {
+                "oid": "a54e33fcd94bce301040ded2a6b70ecb401cd41e"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "PRRT_kwDOR8xQ286Tzfuk",
+      "isResolved": false,
+      "isOutdated": true,
+      "comments": {
+        "nodes": [
+          {
+            "id": "PRRC_kwDOR8xQ287Zo7jR",
+            "url": "https://github.com/pixexid/llm-collab/pull/313#discussion_r3651385553",
+            "commit": {
+              "oid": "a54e33fcd94bce301040ded2a6b70ecb401cd41e"
+            },
+            "originalCommit": {
+              "oid": "a54e33fcd94bce301040ded2a6b70ecb401cd41e"
+            },
+            "pullRequestReview": {
+              "commit": {
+                "oid": "a54e33fcd94bce301040ded2a6b70ecb401cd41e"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "PRRT_kwDOR8xQ286Tzful",
+      "isResolved": false,
+      "isOutdated": false,
+      "comments": {
+        "nodes": [
+          {
+            "id": "PRRC_kwDOR8xQ287Zo7jS",
+            "url": "https://github.com/pixexid/llm-collab/pull/313#discussion_r3651385554",
+            "commit": {
+              "oid": "5b28b0a59496b1ad0de5be5e07e20c27c8a124cd"
+            },
+            "originalCommit": {
+              "oid": "a54e33fcd94bce301040ded2a6b70ecb401cd41e"
+            },
+            "pullRequestReview": {
+              "commit": {
+                "oid": "a54e33fcd94bce301040ded2a6b70ecb401cd41e"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "PRRT_kwDOR8xQ286TzhnC",
+      "isResolved": false,
+      "isOutdated": false,
+      "comments": {
+        "nodes": [
+          {
+            "id": "PRRC_kwDOR8xQ287Zo-Bn",
+            "url": "https://github.com/pixexid/llm-collab/pull/313#discussion_r3651395687",
+            "commit": {
+              "oid": "5b28b0a59496b1ad0de5be5e07e20c27c8a124cd"
+            },
+            "originalCommit": {
+              "oid": "a54e33fcd94bce301040ded2a6b70ecb401cd41e"
+            },
+            "pullRequestReview": {
+              "commit": {
+                "oid": "a54e33fcd94bce301040ded2a6b70ecb401cd41e"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "PRRT_kwDOR8xQ286TzhnE",
+      "isResolved": false,
+      "isOutdated": false,
+      "comments": {
+        "nodes": [
+          {
+            "id": "PRRC_kwDOR8xQ287Zo-Bq",
+            "url": "https://github.com/pixexid/llm-collab/pull/313#discussion_r3651395690",
+            "commit": {
+              "oid": "5b28b0a59496b1ad0de5be5e07e20c27c8a124cd"
+            },
+            "originalCommit": {
+              "oid": "a54e33fcd94bce301040ded2a6b70ecb401cd41e"
+            },
+            "pullRequestReview": {
+              "commit": {
+                "oid": "a54e33fcd94bce301040ded2a6b70ecb401cd41e"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "PRRT_kwDOR8xQ286TzhnF",
+      "isResolved": false,
+      "isOutdated": false,
+      "comments": {
+        "nodes": [
+          {
+            "id": "PRRC_kwDOR8xQ287Zo-Br",
+            "url": "https://github.com/pixexid/llm-collab/pull/313#discussion_r3651395691",
+            "commit": {
+              "oid": "5b28b0a59496b1ad0de5be5e07e20c27c8a124cd"
+            },
+            "originalCommit": {
+              "oid": "a54e33fcd94bce301040ded2a6b70ecb401cd41e"
+            },
+            "pullRequestReview": {
+              "commit": {
+                "oid": "a54e33fcd94bce301040ded2a6b70ecb401cd41e"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "PRRT_kwDOR8xQ286TzhnH",
+      "isResolved": false,
+      "isOutdated": true,
+      "comments": {
+        "nodes": [
+          {
+            "id": "PRRC_kwDOR8xQ287Zo-Bt",
+            "url": "https://github.com/pixexid/llm-collab/pull/313#discussion_r3651395693",
+            "commit": {
+              "oid": "a54e33fcd94bce301040ded2a6b70ecb401cd41e"
+            },
+            "originalCommit": {
+              "oid": "a54e33fcd94bce301040ded2a6b70ecb401cd41e"
+            },
+            "pullRequestReview": {
+              "commit": {
+                "oid": "a54e33fcd94bce301040ded2a6b70ecb401cd41e"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "PRRT_kwDOR8xQ286TzhnK",
+      "isResolved": false,
+      "isOutdated": false,
+      "comments": {
+        "nodes": [
+          {
+            "id": "PRRC_kwDOR8xQ287Zo-Bw",
+            "url": "https://github.com/pixexid/llm-collab/pull/313#discussion_r3651395696",
+            "commit": {
+              "oid": "5b28b0a59496b1ad0de5be5e07e20c27c8a124cd"
+            },
+            "originalCommit": {
+              "oid": "a54e33fcd94bce301040ded2a6b70ecb401cd41e"
+            },
+            "pullRequestReview": {
+              "commit": {
+                "oid": "a54e33fcd94bce301040ded2a6b70ecb401cd41e"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "PRRT_kwDOR8xQ286TzhnL",
+      "isResolved": false,
+      "isOutdated": true,
+      "comments": {
+        "nodes": [
+          {
+            "id": "PRRC_kwDOR8xQ287Zo-Bx",
+            "url": "https://github.com/pixexid/llm-collab/pull/313#discussion_r3651395697",
+            "commit": {
+              "oid": "a54e33fcd94bce301040ded2a6b70ecb401cd41e"
+            },
+            "originalCommit": {
+              "oid": "a54e33fcd94bce301040ded2a6b70ecb401cd41e"
+            },
+            "pullRequestReview": {
+              "commit": {
+                "oid": "a54e33fcd94bce301040ded2a6b70ecb401cd41e"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "PRRT_kwDOR8xQ286TzhnM",
+      "isResolved": false,
+      "isOutdated": false,
+      "comments": {
+        "nodes": [
+          {
+            "id": "PRRC_kwDOR8xQ287Zo-Bz",
+            "url": "https://github.com/pixexid/llm-collab/pull/313#discussion_r3651395699",
+            "commit": {
+              "oid": "5b28b0a59496b1ad0de5be5e07e20c27c8a124cd"
+            },
+            "originalCommit": {
+              "oid": "a54e33fcd94bce301040ded2a6b70ecb401cd41e"
+            },
+            "pullRequestReview": {
+              "commit": {
+                "oid": "a54e33fcd94bce301040ded2a6b70ecb401cd41e"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "PRRT_kwDOR8xQ286Tzp0R",
+      "isResolved": false,
+      "isOutdated": true,
+      "comments": {
+        "nodes": [
+          {
+            "id": "PRRC_kwDOR8xQ287ZpJfV",
+            "url": "https://github.com/pixexid/llm-collab/pull/313#discussion_r3651442645",
+            "commit": {
+              "oid": "82ae7e92ded3591e55cfc8762ddc0ce537c6f7a1"
+            },
+            "originalCommit": {
+              "oid": "82ae7e92ded3591e55cfc8762ddc0ce537c6f7a1"
+            },
+            "pullRequestReview": {
+              "commit": {
+                "oid": "82ae7e92ded3591e55cfc8762ddc0ce537c6f7a1"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "PRRT_kwDOR8xQ286Tzp0T",
+      "isResolved": false,
+      "isOutdated": false,
+      "comments": {
+        "nodes": [
+          {
+            "id": "PRRC_kwDOR8xQ287ZpJfY",
+            "url": "https://github.com/pixexid/llm-collab/pull/313#discussion_r3651442648",
+            "commit": {
+              "oid": "5b28b0a59496b1ad0de5be5e07e20c27c8a124cd"
+            },
+            "originalCommit": {
+              "oid": "82ae7e92ded3591e55cfc8762ddc0ce537c6f7a1"
+            },
+            "pullRequestReview": {
+              "commit": {
+                "oid": "82ae7e92ded3591e55cfc8762ddc0ce537c6f7a1"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "PRRT_kwDOR8xQ286Tzp0U",
+      "isResolved": false,
+      "isOutdated": false,
+      "comments": {
+        "nodes": [
+          {
+            "id": "PRRC_kwDOR8xQ287ZpJfZ",
+            "url": "https://github.com/pixexid/llm-collab/pull/313#discussion_r3651442649",
+            "commit": {
+              "oid": "5b28b0a59496b1ad0de5be5e07e20c27c8a124cd"
+            },
+            "originalCommit": {
+              "oid": "82ae7e92ded3591e55cfc8762ddc0ce537c6f7a1"
+            },
+            "pullRequestReview": {
+              "commit": {
+                "oid": "82ae7e92ded3591e55cfc8762ddc0ce537c6f7a1"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "PRRT_kwDOR8xQ286Tzp0W",
+      "isResolved": false,
+      "isOutdated": false,
+      "comments": {
+        "nodes": [
+          {
+            "id": "PRRC_kwDOR8xQ287ZpJfb",
+            "url": "https://github.com/pixexid/llm-collab/pull/313#discussion_r3651442651",
+            "commit": {
+              "oid": "5b28b0a59496b1ad0de5be5e07e20c27c8a124cd"
+            },
+            "originalCommit": {
+              "oid": "82ae7e92ded3591e55cfc8762ddc0ce537c6f7a1"
+            },
+            "pullRequestReview": {
+              "commit": {
+                "oid": "82ae7e92ded3591e55cfc8762ddc0ce537c6f7a1"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "PRRT_kwDOR8xQ286Tzp0Y",
+      "isResolved": false,
+      "isOutdated": false,
+      "comments": {
+        "nodes": [
+          {
+            "id": "PRRC_kwDOR8xQ287ZpJfd",
+            "url": "https://github.com/pixexid/llm-collab/pull/313#discussion_r3651442653",
+            "commit": {
+              "oid": "5b28b0a59496b1ad0de5be5e07e20c27c8a124cd"
+            },
+            "originalCommit": {
+              "oid": "82ae7e92ded3591e55cfc8762ddc0ce537c6f7a1"
+            },
+            "pullRequestReview": {
+              "commit": {
+                "oid": "82ae7e92ded3591e55cfc8762ddc0ce537c6f7a1"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "PRRT_kwDOR8xQ286T0l4b",
+      "isResolved": false,
+      "isOutdated": true,
+      "comments": {
+        "nodes": [
+          {
+            "id": "PRRC_kwDOR8xQ287ZqhHV",
+            "url": "https://github.com/pixexid/llm-collab/pull/313#discussion_r3651801557",
+            "commit": {
+              "oid": "07db4787e0bef743a8384ca869bd5b8a5cac4373"
+            },
+            "originalCommit": {
+              "oid": "07db4787e0bef743a8384ca869bd5b8a5cac4373"
+            },
+            "pullRequestReview": {
+              "commit": {
+                "oid": "07db4787e0bef743a8384ca869bd5b8a5cac4373"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "PRRT_kwDOR8xQ286T0v7k",
+      "isResolved": false,
+      "isOutdated": false,
+      "comments": {
+        "nodes": [
+          {
+            "id": "PRRC_kwDOR8xQ287Zquv2",
+            "url": "https://github.com/pixexid/llm-collab/pull/313#discussion_r3651857398",
+            "commit": {
+              "oid": "5b28b0a59496b1ad0de5be5e07e20c27c8a124cd"
+            },
+            "originalCommit": {
+              "oid": "7a402cc916e09392bc67597a090b24b140073d1f"
+            },
+            "pullRequestReview": {
+              "commit": {
+                "oid": "7a402cc916e09392bc67597a090b24b140073d1f"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "PRRT_kwDOR8xQ286T0v7l",
+      "isResolved": false,
+      "isOutdated": false,
+      "comments": {
+        "nodes": [
+          {
+            "id": "PRRC_kwDOR8xQ287Zquv3",
+            "url": "https://github.com/pixexid/llm-collab/pull/313#discussion_r3651857399",
+            "commit": {
+              "oid": "5b28b0a59496b1ad0de5be5e07e20c27c8a124cd"
+            },
+            "originalCommit": {
+              "oid": "7a402cc916e09392bc67597a090b24b140073d1f"
+            },
+            "pullRequestReview": {
+              "commit": {
+                "oid": "7a402cc916e09392bc67597a090b24b140073d1f"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "PRRT_kwDOR8xQ286T0v7m",
+      "isResolved": false,
+      "isOutdated": false,
+      "comments": {
+        "nodes": [
+          {
+            "id": "PRRC_kwDOR8xQ287Zquv4",
+            "url": "https://github.com/pixexid/llm-collab/pull/313#discussion_r3651857400",
+            "commit": {
+              "oid": "5b28b0a59496b1ad0de5be5e07e20c27c8a124cd"
+            },
+            "originalCommit": {
+              "oid": "7a402cc916e09392bc67597a090b24b140073d1f"
+            },
+            "pullRequestReview": {
+              "commit": {
+                "oid": "7a402cc916e09392bc67597a090b24b140073d1f"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "PRRT_kwDOR8xQ286T0v7n",
+      "isResolved": false,
+      "isOutdated": false,
+      "comments": {
+        "nodes": [
+          {
+            "id": "PRRC_kwDOR8xQ287Zquv5",
+            "url": "https://github.com/pixexid/llm-collab/pull/313#discussion_r3651857401",
+            "commit": {
+              "oid": "5b28b0a59496b1ad0de5be5e07e20c27c8a124cd"
+            },
+            "originalCommit": {
+              "oid": "7a402cc916e09392bc67597a090b24b140073d1f"
+            },
+            "pullRequestReview": {
+              "commit": {
+                "oid": "7a402cc916e09392bc67597a090b24b140073d1f"
+              }
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "expected": {
+    "exact_head_findings": 0,
+    "unresolved_total": 21,
+    "naive_comment_commit_count": 16,
+    "unresolved_outdated": 5
+  }
+}
