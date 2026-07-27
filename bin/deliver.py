@@ -422,6 +422,7 @@ def main():
     autobridge_target = None
     autobridge_binding = None
     inactive_pair = None
+    durable_session = None
     binding_unreadable = False
     dispatch_scope_refused = False
     if not thread_coordination_required:
@@ -492,6 +493,7 @@ def main():
     # authoritative record could not be read. Waking them to "go read it" would be the wrong-wake
     # bug again, one cause over.
     dispatch_scope_refused = dispatch_scope_refused or binding_unreadable
+    diagnostic_target = durable_session if dispatch_scope_refused else autobridge_target
 
     # One predicate for every wake lane, so a refusal cannot reach any of them and a lane added
     # later cannot silently miss the gate by re-deriving `not autobridge_ready` on its own.
@@ -716,7 +718,9 @@ def main():
         # An explicit machine-readable blocker, because every wake flag AND activation_unavailable
         # are false in this state and a caller reading only those would see nothing to act on.
         "binding_unreadable_blocker": binding_unreadable,
-        "autobridge_session_id": autobridge_target.get("session_id") if autobridge_target else None,
+        "autobridge_session_id": (
+            diagnostic_target.get("session_id") if diagnostic_target else None
+        ),
     }
     print(json.dumps(result, indent=2))
 
@@ -742,9 +746,9 @@ def main():
             f"packet repo_targets: {packet_repo_targets(args) or '[] (none declared)'}",
             file=sys.stderr,
         )
-        if autobridge_target is not None:
+        if diagnostic_target is not None:
             print(
-                f"subscriber repo_targets: {autobridge_target.get('repo_targets')}",
+                f"subscriber repo_targets: {diagnostic_target.get('repo_targets')}",
                 file=sys.stderr,
             )
         print(file=sys.stderr)

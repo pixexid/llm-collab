@@ -2455,6 +2455,40 @@ class SessionAutobridgeTest(unittest.TestCase):
             self.assertIsNone(inactive_pair)
             self.assertEqual(session_autobridge_lib.EXACT_BINDING_AMBIGUOUS_REASON, reason)
 
+        cross_agent_runtime = {
+            **reused_runtime,
+            "agent_id": "relay",
+        }
+        with patch.object(
+            session_autobridge_lib,
+            "load_binding",
+            return_value={
+                "project_id": "amiga",
+                "chat_id": "CHAT-EXACT-DUP",
+                "agent_id": "claude",
+                "session_id": "SESSION-DUP",
+                "runtime_family": "claude_app",
+                "runtime_session_id": "runtime-dup",
+            },
+        ), patch.object(
+            session_autobridge_lib,
+            "iter_sessions",
+            return_value=[expired_a, cross_agent_runtime],
+        ):
+            pair, reason, inactive_pair = (
+                session_autobridge_lib.resolve_exact_dispatch_pair(
+                    "amiga",
+                    "CHAT-EXACT-DUP",
+                    "claude",
+                )
+            )
+            self.assertIsNone(pair)
+            self.assertIsNone(inactive_pair)
+            self.assertEqual(
+                session_autobridge_lib.EXACT_BINDING_AMBIGUOUS_REASON,
+                reason,
+            )
+
         stopped = dict(duplicate_a)
         stopped["status"] = "stopped"
         with patch.object(
@@ -2837,6 +2871,14 @@ class SessionAutobridgeTest(unittest.TestCase):
                     refused_payload["autobridge_refusal_reason"],
                 )
                 self.assertIsNone(refused_payload["resolved_target_session_id"])
+                self.assertEqual(
+                    session_id,
+                    refused_payload["autobridge_session_id"],
+                )
+                self.assertIn(
+                    "subscriber repo_targets: ['app']",
+                    refused.stderr,
+                )
                 self.assertFalse(refused_payload["ax_doorbell_required"])
                 self.assertFalse(refused_payload["ax_attended_recovery_required"])
                 self.assertFalse(refused_payload["operator_relay_required"])

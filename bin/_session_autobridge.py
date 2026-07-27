@@ -810,9 +810,7 @@ def resolve_exact_dispatch_pair(
     # A caller resolving SEVERAL chats would otherwise rescan the whole session directory once
     # per chat; passing a pre-scanned list makes that one scan for the whole lookup. Defaults to
     # scanning, so every existing caller is unaffected.
-    candidates = iter_sessions(agent_id=agent_id) if sessions is None else [
-        session for session in sessions if session.get("agent_id") == agent_id
-    ]
+    candidates = iter_sessions() if sessions is None else sessions
     exact_matches: list[dict[str, Any]] = []
     live_target_matches: list[dict[str, Any]] = []
     for session in candidates:
@@ -823,6 +821,8 @@ def resolve_exact_dispatch_pair(
             continue
         if session.get("status") in {"active", "parked"}:
             live_target_matches.append(session)
+        if session.get("agent_id") != agent_id:
+            continue
         if session.get("project_id") != project_id or session.get("chat_id") != chat_id:
             continue
         if str(session.get("session_id")) != str(bound_session_id):
