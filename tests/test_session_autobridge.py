@@ -435,6 +435,38 @@ class SessionAutobridgeTest(unittest.TestCase):
         self.assertEqual("route_ambiguous", result["actions"][0]["reason"])
         self.assertEqual("pull_pending", result["actions"][1]["reason"])
 
+    def test_existing_canonical_attempt_stops_automatic_retry(self):
+        session = {
+            "session_id": "SESSION-AMBIGUOUS",
+            "agent_id": "gemini",
+            "mode": "auto-read",
+            "wake_strategy": "runtime_trigger",
+            "binding_id": "binding-ambiguous",
+            "binding_generation": 1,
+            "runtime": {"session_id": "runtime-ambiguous"},
+        }
+        message = {"path": "Chats/ambiguous/packet.md", "frontmatter": {}}
+        runtime_trigger = Mock(return_value={"returncode": 0})
+        with self._dispatch_patch_context(session, [message]), patch.object(
+            session_autobridge_lib,
+            "materialize_selected_runtime_packet",
+            return_value={
+                "resolved": True,
+                "materialized": True,
+                "created": False,
+                "canonical_write_started": True,
+            },
+        ), patch.object(
+            session_autobridge_lib,
+            "execute_runtime_trigger",
+            new=runtime_trigger,
+        ):
+            result = session_autobridge_lib.dispatch_session("SESSION-AMBIGUOUS")
+
+        runtime_trigger.assert_not_called()
+        self.assertEqual("pull_pending", result["actions"][0]["reason"])
+        self.assertNotIn("runtime_result", result["actions"][0])
+
     def test_processed_bound_packet_does_not_retrigger_runtime_before_legacy_mark_read(self):
         session = {
             "session_id": "SESSION-PROCESSED",

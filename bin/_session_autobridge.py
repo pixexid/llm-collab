@@ -2848,6 +2848,14 @@ def dispatch_session(
                     append_event(session_id, event)
                     actions.append(event)
                     continue
+                if (
+                    materialization_result.get("materialized")
+                    and not materialization_result.get("created")
+                ):
+                    event["reason"] = "pull_pending"
+                    append_event(session_id, event)
+                    actions.append(event)
+                    continue
                 if message["path"] not in canonical_settled_message_paths(session):
                     settlement_reason = (
                         "gate_disabled"
