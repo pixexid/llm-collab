@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 
@@ -16,8 +17,22 @@ def main() -> int:
         return 2
     doorbell = Path(sys.argv[1]).expanduser()
     doorbell.parent.mkdir(parents=True, exist_ok=True)
-    doorbell.write_text(pointer + "\n")
-    doorbell.chmod(0o600)
+    fd, temporary = tempfile.mkstemp(
+        dir=doorbell.parent,
+        prefix=f".{doorbell.name}.",
+    )
+    published = False
+    try:
+        with os.fdopen(fd, "w") as handle:
+            os.fchmod(handle.fileno(), 0o600)
+            handle.write(pointer + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, doorbell)
+        published = True
+    finally:
+        if not published:
+            Path(temporary).unlink(missing_ok=True)
     return 0
 
 

@@ -200,7 +200,11 @@ def dispatch_autobridge(
                     },
                     json_output,
                 )
-            elif action.get("effective_action") == "runtime_trigger" and runtime_ok:
+            elif (
+                action.get("effective_action") == "runtime_trigger"
+                and runtime_ok
+                and not runtime_result.get("skipped")
+            ):
                 emit(
                     {
                         "ts": utc_now_str(),

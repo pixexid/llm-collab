@@ -2782,6 +2782,8 @@ def dispatch_session(
 
     actions: list[dict[str, Any]] = []
     for message in completed_settlements:
+        if runtime_metadata(session).get("family") == "pi":
+            continue
         event = {
             "event": "message_already_consumed",
             "message_path": message["path"],
@@ -2810,6 +2812,15 @@ def dispatch_session(
 
         if action == "runtime_trigger":
             runtime = runtime_metadata(session)
+            if (
+                runtime.get("family") == "pi"
+                and not message_needs_canonical_materialization(session, message)
+            ):
+                event["reason"] = EXACT_BINDING_REQUIRED_REASON
+                should_mark_processed = False
+                append_event(session_id, event)
+                actions.append(event)
+                continue
             if message_needs_canonical_materialization(session, message):
                 if not materialization_slot_available:
                     event["reason"] = "pull_pending"
@@ -2855,6 +2866,14 @@ def dispatch_session(
                 if (
                     materialization_result.get("materialized")
                     and not materialization_result.get("created")
+                ):
+                    event["reason"] = "pull_pending"
+                    append_event(session_id, event)
+                    actions.append(event)
+                    continue
+                if (
+                    runtime.get("family") == "pi"
+                    and not materialization_result.get("materialized")
                 ):
                     event["reason"] = "pull_pending"
                     append_event(session_id, event)

@@ -30,6 +30,7 @@ sys.path.insert(0, str(REPO_ROOT / "bin"))
 import _session_autobridge as session_autobridge_lib
 import _activation_cleanup as activation_cleanup_lib
 import _activation_lease as activation_lease_lib
+import pi_doorbell as pi_doorbell_lib
 import watch_inbox as watch_inbox_lib
 from _helpers import parse_frontmatter
 from llm_collab.ledger import LedgerPaths, LedgerStore
@@ -4573,7 +4574,21 @@ class SessionAutobridgeTest(unittest.TestCase):
             chat_id="CHAT-PI-WAKE",
             project_id="amiga",
             title="Pi pointer wake",
+            sender_session_id="codex-pi-wake",
             target_session_id="pi-glim-1",
+            sender_agent_id="codex",
+            repo_targets=["llm-collab"],
+            target_binding_id="binding-pi-glim",
+            target_binding_generation=1,
+        )
+        self.seed_binding_ledger(
+            root,
+            chat_id="CHAT-PI-WAKE",
+            agent_id="glmpi",
+            binding_id="binding-pi-glim",
+            generation=1,
+            endpoint_id="endpoint_pi_glim",
+            native_session_id="pi-glim-1",
         )
         doorbell = root / "State" / "pi" / "glmpi.pointer"
         self.run_cli(
@@ -4598,6 +4613,23 @@ class SessionAutobridgeTest(unittest.TestCase):
             "--runtime-command",
             json.dumps([sys.executable, str(PI_DOORBELL_SCRIPT), str(doorbell)]),
         )
+        session_path = (
+            root
+            / "State"
+            / "session_autobridge"
+            / "sessions"
+            / "SESSION-PI-GLIM.json"
+        )
+        session_payload = json.loads(session_path.read_text())
+        session_payload.update(
+            {
+                "repo_targets": ["llm-collab"],
+                "binding_id": "binding-pi-glim",
+                "binding_generation": 1,
+                "endpoint_id": "endpoint_pi_glim",
+            }
+        )
+        write_json(session_path, session_payload)
 
         command = [
             sys.executable,
@@ -4608,10 +4640,56 @@ class SessionAutobridgeTest(unittest.TestCase):
             "1",
             "--json",
         ]
-        first = subprocess.run(command, cwd=root, text=True, capture_output=True, check=True)
-        second = subprocess.run(command, cwd=root, text=True, capture_output=True, check=True)
+        first = subprocess.run(
+            command,
+            cwd=root,
+            text=True,
+            capture_output=True,
+            env=self.subprocess_env(root),
+            check=True,
+        )
+        event_path = (
+            root
+            / "State"
+            / "session_autobridge"
+            / "events"
+            / "SESSION-PI-GLIM.jsonl"
+        )
+        events_after_wake = event_path.read_text()
+        settled = subprocess.run(
+            command,
+            cwd=root,
+            text=True,
+            capture_output=True,
+            env=self.subprocess_env(root),
+            check=True,
+        )
+        self.assertEqual(events_after_wake, event_path.read_text())
+        session_payload = json.loads(session_path.read_text())
+        self.assertIn(
+            message_rel,
+            session_payload.get("processed_messages", []),
+            first.stdout
+            + first.stderr
+            + event_path.read_text(),
+        )
+        session_payload["processed_messages"].remove(message_rel)
+        write_json(session_path, session_payload)
+        recovered = subprocess.run(
+            command,
+            cwd=root,
+            text=True,
+            capture_output=True,
+            env=self.subprocess_env(root),
+            check=True,
+        )
         first_events = [json.loads(line) for line in first.stdout.splitlines() if line.strip()]
-        second_events = [json.loads(line) for line in second.stdout.splitlines() if line.strip()]
+        settled_events = [
+            json.loads(line) for line in settled.stdout.splitlines() if line.strip()
+        ]
+        recovered_events = [
+            json.loads(line) for line in recovered.stdout.splitlines() if line.strip()
+        ]
 
         self.assertEqual(message_rel + "\n", doorbell.read_text())
         self.assertTrue(
@@ -4622,10 +4700,128 @@ class SessionAutobridgeTest(unittest.TestCase):
             )
         )
         self.assertFalse(any(event["event"] == "autobridge_consumed" for event in first_events))
-        self.assertFalse(any(event["event"] == "autobridge_wake_signaled" for event in second_events))
+        self.assertFalse(
+            any(event["event"] == "autobridge_wake_signaled" for event in settled_events)
+        )
+        self.assertFalse(
+            any(event["event"] == "autobridge_wake_signaled" for event in recovered_events)
+        )
         inbox = json.loads((root / "agents" / "glmpi" / "inbox.json").read_text())
         self.assertIn(message_rel, inbox["unread"])
         self.assertNotIn(message_rel, inbox["read"])
+        paths = LedgerPaths.derive(root / "project-state", "ws_alpha")
+        with patch.object(store_module, "_linked_sqlite_version_info", return_value=SAFE_VERSION):
+            with LedgerStore.open_reader(paths) as store:
+                self.assertEqual(
+                    (1, 1, 1, 1),
+                    store._connection.execute(
+                        """
+                        SELECT
+                          (SELECT count(*) FROM canonical_messages),
+                          (SELECT count(*) FROM canonical_deliveries),
+                          (SELECT count(*) FROM canonical_delivery_attempts),
+                          (SELECT count(*) FROM canonical_delivery_attempt_binding_freezes)
+                        """
+                    ).fetchone(),
+                )
+
+    def test_pi_runtime_refuses_without_an_exact_bound_attempt(self):
+        session = {
+            "session_id": "SESSION-PI-UNBOUND",
+            "agent_id": "glmpi",
+            "project_id": "amiga",
+            "chat_id": "CHAT-PI-UNBOUND",
+            "mode": "auto-read",
+            "wake_strategy": "runtime_trigger",
+            "runtime": {
+                "family": "pi",
+                "session_id": "pi-unbound",
+                "command": [sys.executable, str(PI_DOORBELL_SCRIPT), "/tmp/unused"],
+            },
+        }
+        message = {
+            "path": "Chats/2026-07-27/packet.md",
+            "frontmatter": {"target_session_id": "pi-unbound"},
+        }
+        runtime_trigger = Mock(return_value={"returncode": 0})
+        with self._dispatch_patch_context(session, [message]), patch.object(
+            session_autobridge_lib,
+            "execute_runtime_trigger",
+            new=runtime_trigger,
+        ):
+            result = session_autobridge_lib.dispatch_session("SESSION-PI-UNBOUND")
+
+        runtime_trigger.assert_not_called()
+        self.assertEqual("exact_binding_required", result["actions"][0]["reason"])
+
+        bound_session = {
+            **session,
+            "binding_id": "binding-pi",
+            "binding_generation": 1,
+        }
+        bound_message = {
+            **message,
+            "frontmatter": {
+                **message["frontmatter"],
+                "target_binding_id": "binding-pi",
+                "target_binding_generation": 1,
+            },
+        }
+        with self._dispatch_patch_context(
+            bound_session,
+            [bound_message],
+        ), patch.object(
+            session_autobridge_lib,
+            "materialize_selected_runtime_packet",
+            return_value={
+                "resolved": True,
+                "materialized": False,
+                "created": False,
+                "gate": "disabled",
+                "canonical_write_started": False,
+            },
+        ), patch.object(
+            session_autobridge_lib,
+            "execute_runtime_trigger",
+            new=runtime_trigger,
+        ):
+            result = session_autobridge_lib.dispatch_session("SESSION-PI-UNBOUND")
+
+        runtime_trigger.assert_not_called()
+        self.assertEqual("pull_pending", result["actions"][0]["reason"])
+
+    def test_pi_doorbell_publishes_complete_mode_600_content_atomically(self):
+        root = self.make_workspace()
+        doorbell = root / "State" / "pi" / "glmpi.pointer"
+        original_replace = os.replace
+        observed: dict[str, object] = {}
+
+        def observe_replace(source: str, destination: str) -> None:
+            source_path = Path(source)
+            destination_path = Path(destination)
+            observed["content"] = source_path.read_text()
+            observed["mode"] = source_path.stat().st_mode & 0o777
+            observed["destination_existed"] = destination_path.exists()
+            original_replace(source, destination)
+
+        with patch.dict(
+            os.environ,
+            {"LLM_COLLAB_MESSAGE_PATH": "Chats/2026-07-27/packet.md"},
+        ), patch.object(
+            pi_doorbell_lib.sys,
+            "argv",
+            ["pi_doorbell.py", str(doorbell)],
+        ), patch.object(
+            pi_doorbell_lib.os,
+            "replace",
+            side_effect=observe_replace,
+        ):
+            self.assertEqual(0, pi_doorbell_lib.main())
+
+        self.assertEqual("Chats/2026-07-27/packet.md\n", observed["content"])
+        self.assertEqual(0o600, observed["mode"])
+        self.assertFalse(observed["destination_existed"])
+        self.assertEqual(observed["content"], doorbell.read_text())
 
     def test_watch_inbox_default_off_empty_ledger_preserves_legacy_runtime_trigger(self):
         root = self.make_workspace()
