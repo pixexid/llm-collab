@@ -2053,7 +2053,7 @@ class SessionAutobridgeTest(unittest.TestCase):
     def test_deliver_autobridge_readiness_does_not_reference_first_match_helper(self):
         source = DELIVER_SCRIPT.read_text()
         self.assertNotIn("find_dispatchable_target_session", source)
-        self.assertIn("resolve_exact_dispatch_target", source)
+        self.assertIn("resolve_exact_dispatch_pair", source)
 
     def test_load_binding_rejects_malformed_and_non_object_json(self):
         root = self.make_workspace()
@@ -3170,6 +3170,28 @@ class SessionAutobridgeTest(unittest.TestCase):
             "--runtime-session-source",
             "first_read",
         )
+        session_path = (
+            root
+            / "State"
+            / "session_autobridge"
+            / "sessions"
+            / "SESSION-CLAUDE-BOUND.json"
+        )
+        session = json.loads(session_path.read_text())
+        session.update({"binding_id": "binding-canonical", "binding_generation": 7})
+        write_json(session_path, session)
+        binding_path = (
+            root
+            / "State"
+            / "session_autobridge"
+            / "bindings"
+            / "amiga"
+            / "CHAT-BIND1"
+            / "claude.json"
+        )
+        binding = json.loads(binding_path.read_text())
+        binding.update({"binding_id": "binding-canonical", "binding_generation": 7})
+        write_json(binding_path, binding)
 
         deliver_result = subprocess.run(
             [
@@ -3205,6 +3227,9 @@ class SessionAutobridgeTest(unittest.TestCase):
         self.assertTrue(delivered_candidates)
         delivered_text = delivered_candidates[-1].read_text()
         self.assertIn("target_session_id: claude-bound-session-42", delivered_text)
+        frontmatter, _ = parse_frontmatter(delivered_text)
+        self.assertEqual("binding-canonical", frontmatter["target_binding_id"])
+        self.assertEqual(7, frontmatter["target_binding_generation"])
 
     def test_deliver_false_readiness_engages_fallback_and_writes_packet(self):
         root = self.make_workspace()
