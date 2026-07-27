@@ -1146,9 +1146,74 @@ class ReviewLoopCapContractTest(unittest.TestCase):
         workflow = WORKFLOW_DOC.read_text(encoding="utf-8")
         self.assertEqual(1, workflow.count(block), "the normative block must exist once")
 
-        documents = sorted(REPO_ROOT.glob("docs/**/*.md")) + sorted(REPO_ROOT.glob("*.md"))
+        # Every INSTRUCTION-bearing tree, not just docs/ and the root. The contract
+        # requires project notes and agent guidance to reference this contract rather
+        # than restate it, so `projects/` and `agents/` are exactly where a copied
+        # enumeration lands unseen.
+        #
+        # Scoped by an allowlist rather than by scanning everything: `Chats/`, `Evidence/`
+        # and `Tasks/` are durable RECORDS. A message in which someone once listed the
+        # five artifacts is history and must stay readable as written -- rewriting a
+        # delivered packet to satisfy a lint would falsify the archive.
+        INSTRUCTION_TREES = ("docs", "projects", "agents", "examples", "schemas")
+        documents = sorted(REPO_ROOT.glob("*.md"))
+        for tree in INSTRUCTION_TREES:
+            documents.extend(sorted((REPO_ROOT / tree).rglob("*.md")))
         self.assertIn(WORKFLOW_DOC, documents, "the scan must cover the canonical document")
-        self.assertGreater(len(documents), 2, "the scan must reach beyond the two originals")
+        for required in ("projects", "agents"):
+            self.assertTrue(
+                any(d.is_relative_to(REPO_ROOT / required) for d in documents),
+                f"the scan must reach the {required}/ instruction tree",
+            )
+
+        # A link to the canonical set is stripped, not treated as absolution. Exempting
+        # the whole sentence let a complete restatement pass by appending the link to it:
+        # "re-read comments, review bodies, threads and reactions; see [the reviewed
+        # artifact set](...)" named all five and skipped the check.
+        LINK = re.compile(r"\[[^\]]*\]\([^)]*reviewed-artifact-set\)|`[^`]*reviewed-artifact-set[^`]*`")
+
+        def units(text):
+            """Blocks of prose, with a bulleted list kept WITH its lead-in.
+
+            Splitting before every bullet made a real list -- "Re-read the following:"
+            over four bullets -- read as four unrelated one-item blocks, none of which
+            reached the threshold. Merging every adjacent bullet instead made two
+            unrelated bullets look like one enumeration. The lead-in is what separates
+            them: a line ending in a colon introduces the bullets under it; bullets
+            without one are their own statements.
+            """
+            bullet = re.compile(r"\s*(?:[-*]|\d+\.)\s")
+
+            def flatten(chunk):
+                """Normalize, turning bullet markers into list separators.
+
+                A bulleted enumeration is still an enumeration: joining the lines with
+                spaces left `- comments - review bodies - threads`, which matches no
+                separator, so the run never formed and the list read as prose.
+                """
+                joined = re.sub(r"\n\s*(?:[-*]|\d+\.)\s+", ", ", chunk)
+                return re.sub(r"\s+", " ", joined)
+
+            previous = ""
+            for para in re.split(r"\n\s*\n", text):
+                lines = [l for l in para.split("\n") if l.strip()]
+                if not lines:
+                    continue
+                all_bullets = all(bullet.match(l) for l in lines)
+                # A list introduced by a colon belongs to its lead-in, whether or not a
+                # blank line sits between them -- markdown allows both, and the version
+                # that only handled the no-blank-line case missed the ordinary spelling.
+                if all_bullets and previous.rstrip().endswith(":"):
+                    yield flatten(previous + "\n" + para)
+                    previous = para
+                    continue
+                lead = lines[0].strip()
+                if lead.endswith(":") and any(bullet.match(l) for l in lines[1:]):
+                    yield flatten(para)
+                else:
+                    for chunk in re.split(r"\n(?=\s*(?:[-*]|\d+\.)\s)", para):
+                        yield re.sub(r"\s+", " ", chunk)
+                previous = para
 
         offenders = []
         for document in documents:
@@ -1157,24 +1222,11 @@ class ReviewLoopCapContractTest(unittest.TestCase):
                 start = text.index(block)
                 end = text.index("Referenced, never restated.", start)
                 text = text[:start] + text[end:]
-            # Split into blocks BEFORE normalizing whitespace. Normalizing the whole
-            # document first ran adjacent bullets together, and two unrelated bullets that
-            # each name two kinds then read as one four-kind enumeration -- a false
-            # positive that would have been "fixed" by weakening the real rule.
-            blocks = re.split(r"\n\s*\n|\n(?=\s*(?:[-*]|\d+\.)\s)", text)
-            sentences = []
-            for chunk in blocks:
-                sentences.extend(re.split(r"(?<=[.:;]) ", re.sub(r"\s+", " ", chunk)))
-            for sentence in sentences:
-                # A sentence that links the canonical set is a reference, not a copy: the
-                # artifact names around it are that reference's rationale ("...because a
-                # request lives in a comment"), and forbidding those words would forbid
-                # explaining why the rule exists.
-                if "reviewed-artifact-set" in sentence:
-                    continue
-                named = kinds(sentence)
-                if len(named) >= 3:
-                    offenders.append(f"{document.name}: {sentence.strip()[:110]}")
+            for unit in units(text):
+                for sentence in re.split(r"(?<=[.;]) ", LINK.sub(" ", unit)):
+                    named = kinds(sentence)
+                    if len(named) >= 3:
+                        offenders.append(f"{document.name}: {sentence.strip()[:110]}")
         self.assertEqual(
             [], offenders,
             "these sites restate the artifact list instead of referencing the one place it "
@@ -1199,6 +1251,31 @@ class ReviewLoopCapContractTest(unittest.TestCase):
         self.assertRegex(
             section, r"means the set below for the lane",
             "the set must be selected by lane rather than stated unconditionally",
+        )
+
+    def test_the_mailbox_lane_has_an_equivalent_for_every_github_anchor(self):
+        """A lane that may request a review must be able to finish waiting for one.
+
+        Requested-review precedence anchored both clocks to GitHub `created_at`,
+        re-triggered with a GitHub comment, and waited for two GitHub connector signals.
+        A mailbox lane has none of those, so a Tier A non-GitHub head could request and
+        then stall forever -- or invent its own timing, which is a second contract.
+        """
+        import re
+
+        text = re.sub(r"\s+", " ", WORKFLOW_DOC.read_text(encoding="utf-8"))
+        self.assertIn("every anchor in this section has a mailbox equivalent", text)
+        for equivalent in (
+            "request packet naming the exact commit OID",
+            "recorded delivery timestamp",
+            "marked as the re-trigger",
+            "verdict packet naming that exact OID",
+        ):
+            self.assertIn(equivalent, text, f"no mailbox equivalent for {equivalent!r}")
+        # The clocks and the single-re-trigger rule are properties of the request, so
+        # they must NOT be redefined per lane -- that would be the competing contract.
+        self.assertIn(
+            "are unchanged — they are properties of the request, not of GitHub", text
         )
 
     def test_an_unrequested_tier_a_head_offers_no_waiver_alternative(self):

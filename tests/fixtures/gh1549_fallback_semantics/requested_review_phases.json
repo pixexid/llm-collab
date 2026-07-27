@@ -351,7 +351,42 @@
           }
         ],
         "request_phase": "stale_for_this_head",
-        "review_requirement_withdrawn": true
+        "review_requirement_withdrawn": {
+          "authority": "operator",
+          "recorded_at": "2026-07-26T00:00:00Z",
+          "head_oid": "amiga-abc200"
+        }
+      },
+      "artifacts_for_current_head": [],
+      "expected": {
+        "terminal_signal_present": false,
+        "review_is_pending": false,
+        "disposition": "no_review_pending",
+        "merge_eligible_on_silence": false
+      }
+    },
+    {
+      "project_id": "nuvyr",
+      "tier": "B",
+      "description": "The same operator withdrawal on a non-Amiga project, at Tier B rather than C. Withdrawal was reachable only through one Amiga case and the helper assertion carries no project identity, so a project-specific consumer could mishandle it everywhere except Amiga and every test still passed.",
+      "pr_state": {
+        "head_oid": "nuvyr-abc200",
+        "pr_open": true,
+        "draft_ready": true,
+        "explicit_review_request": true,
+        "review_requests": [
+          {
+            "kind": "initial",
+            "head_oid": "nuvyr-abc100",
+            "phase": "expired"
+          }
+        ],
+        "request_phase": "stale_for_this_head",
+        "review_requirement_withdrawn": {
+          "authority": "operator",
+          "recorded_at": "2026-07-26T00:00:00Z",
+          "head_oid": "nuvyr-abc200"
+        }
       },
       "artifacts_for_current_head": [],
       "expected": {

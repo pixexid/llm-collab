@@ -435,6 +435,25 @@ escalate -- never when to merge. A current-head `eyes` reaction alone is
 non-terminal: it does not exit requested-review precedence or reset that
 request's clock.
 
+**On a lane with no GitHub surface, every anchor in this section has a mailbox
+equivalent, and nothing else about the flow changes.** Without them a Tier A
+non-GitHub lane could request a review and then stall forever, or invent its own
+timing — which is why they are written here rather than left to the lane:
+
+| GitHub anchor | Mailbox equivalent |
+| --- | --- |
+| request comment naming the head | request packet naming the exact commit OID |
+| the comment's `created_at` | the packet's recorded delivery timestamp |
+| `@codex review` re-trigger comment | a second request packet, same exact OID, marked as the re-trigger |
+| the two exact-head terminal signals | a verdict packet naming that exact OID |
+| PR-wait heartbeat | the same heartbeat cadence against the mailbox thread |
+
+The two clocks, the single re-trigger, the ban on a second one, and the
+exact-head operator disposition are unchanged — they are properties of the
+request, not of GitHub. The one asymmetry is the one already stated above: a
+mailbox lane has no reaction-only terminal path, so its terminal signal is
+always a textual verdict packet.
+
 When the initial request's clock expires without a terminal signal, treat that
 request as silently dropped and issue exactly one re-trigger. **The re-trigger
 repeats the full request shape — focus and the exact head SHA — never a bare

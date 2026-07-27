@@ -517,10 +517,18 @@ class Gh1549FallbackFixturesTest(unittest.TestCase):
         request_phases = set(self.REQUEST_PHASES) | {"stale_for_this_head"}
 
         def scannable(node, key=None, parent_key=None):
-            """Every string in the fixture except a request artifact's declared phase."""
+            """Every string in the fixture except a request artifact's declared phase.
+
+            KEYS are scanned too. The first version concatenated only values, so the
+            retired mechanism could come back as a key -- `silence_expiry_after`,
+            `fallback_mode` -- and this guard saw only whatever bland value sat under it.
+            The separate fixed TIMING_FIELDS list does not cover renamed keys either, so
+            nothing was watching the one half of the JSON a new field is named in.
+            """
             if isinstance(node, dict):
                 return " ".join(
-                    scannable(value, name, key) for name, value in node.items()
+                    name + " " + scannable(value, name, key)
+                    for name, value in node.items()
                 )
             if isinstance(node, list):
                 return " ".join(scannable(item, key, parent_key) for item in node)
@@ -603,10 +611,64 @@ class Gh1549FallbackFixturesTest(unittest.TestCase):
         "C": "rerequest_required_at_new_head",
     }
 
+    def withdrawal_is_valid(self, state):
+        """Withdrawal is an operator decision with an artifact, not a truthy flag.
+
+        Any truthy value used to retire the requirement outright -- no type check, no
+        author, no head binding. A consumer could infer it, or deserialize it by
+        accident, and produce `no_review_pending` without the explicit operator decision
+        the workflow calls the sole exception. So it must be a record that says who
+        decided and which head they decided about, and it only applies to THAT head.
+        """
+        evidence = state.get("review_requirement_withdrawn")
+        if not isinstance(evidence, dict):
+            return False
+        if evidence.get("authority") != "operator":
+            return False
+        if not isinstance(evidence.get("recorded_at"), str) or not evidence["recorded_at"]:
+            return False
+        head = evidence.get("head_oid")
+        return isinstance(head, str) and head == state.get("head_oid")
+
     def stale_disposition(self, tier, state):
-        if state.get("review_requirement_withdrawn"):
+        if self.withdrawal_is_valid(state):
             return "no_review_pending"
         return self.STALE_REQUEST_DISPOSITION[tier]
+
+    def test_withdrawal_needs_operator_evidence_bound_to_this_head(self) -> None:
+        """A bare truthy flag retired a mandatory review requirement.
+
+        Each rejected shape below is a way the requirement could switch itself off:
+        a bool nobody authored, an author who is not the operator, a decision with no
+        record of when, and -- the quiet one -- a real withdrawal for a DIFFERENT head
+        still applying after the branch moved on.
+        """
+        head = "amiga-abc200"
+        valid = {
+            "authority": "operator",
+            "recorded_at": "2026-07-26T00:00:00Z",
+            "head_oid": head,
+        }
+        state = {"head_oid": head, "review_requirement_withdrawn": valid}
+        self.assertEqual("no_review_pending", self.stale_disposition("B", state))
+
+        for name, evidence in (
+            ("a bare boolean", True),
+            ("a truthy string", "yes"),
+            ("no authority", {k: v for k, v in valid.items() if k != "authority"}),
+            ("not the operator", {**valid, "authority": "worker"}),
+            ("no recorded_at", {k: v for k, v in valid.items() if k != "recorded_at"}),
+            ("a prior head", {**valid, "head_oid": "amiga-abc100"}),
+            ("no head binding", {k: v for k, v in valid.items() if k != "head_oid"}),
+        ):
+            with self.subTest(evidence=name):
+                self.assertEqual(
+                    "rerequest_required_at_new_head",
+                    self.stale_disposition(
+                        "B", {"head_oid": head, "review_requirement_withdrawn": evidence}
+                    ),
+                    f"{name} must not retire the requirement",
+                )
 
     def test_an_amendment_does_not_withdraw_a_tier_bc_review_requirement(self) -> None:
         """The tier decides whether a review must be REQUESTED, not whether one survives.
@@ -627,13 +689,43 @@ class Gh1549FallbackFixturesTest(unittest.TestCase):
                     "no_review_pending",
                     "...which is precisely the answer this used to fall back to",
                 )
-        # Withdrawal is the one thing that does retire it, and it must be explicit.
+        # Withdrawal is the one thing that does retire it, and it must be explicit --
+        # operator-authored and bound to this head. See
+        # test_withdrawal_needs_operator_evidence_bound_to_this_head for the shapes that
+        # must NOT count; a bare `True` here was one of them.
         self.assertEqual(
             "no_review_pending",
-            self.stale_disposition("B", {"review_requirement_withdrawn": True}),
+            self.stale_disposition("B", {
+                "head_oid": "h1",
+                "review_requirement_withdrawn": {
+                    "authority": "operator",
+                    "recorded_at": "2026-07-26T00:00:00Z",
+                    "head_oid": "h1",
+                },
+            }),
         )
         self.assertEqual(
             "gate_violation_request_required", self.stale_disposition("A", {})
+        )
+
+    def test_withdrawal_is_covered_on_amiga_and_a_non_amiga_project(self) -> None:
+        """A shared-contract branch proven on one project is proven for one project.
+
+        Withdrawal was reachable through a single Amiga case, and the helper-level
+        assertions carry no project identity at all -- so a project-specific consumer
+        could mishandle withdrawal everywhere except Amiga with the suite fully green.
+        """
+        projects = {
+            case["project_id"]
+            for variant in self.VARIANT_FILES
+            for case in self._project_cases(variant)
+            if self.withdrawal_is_valid(case["pr_state"])
+        }
+        self.assertIn("amiga", projects)
+        self.assertTrue(
+            projects - {"amiga"},
+            f"withdrawal is only covered on {sorted(projects)}; a shared contract needs "
+            "a non-Amiga case too",
         )
 
     def test_every_modelled_request_phase_is_reachable_in_a_fixture(self) -> None:
@@ -703,6 +795,39 @@ class Gh1549FallbackFixturesTest(unittest.TestCase):
                         self.assertIn(request["kind"], {"initial", "re_trigger"})
                         self.assertIn("head_oid", request)
                         self.assertIn("phase", request)
+                        self.assertIn(
+                            request["phase"], {"pending", "expired"},
+                            "a request artifact's phase vocabulary is pending/expired",
+                        )
+                    # The top-level `request_phase` drives the expected disposition, and
+                    # nothing checked it against the artifacts it claims to summarize. An
+                    # `initial_expired` case whose only initial request said `pending`
+                    # passed and still demanded the re-trigger -- so the fixtures could
+                    # certify a consumer that ignores the artifacts entirely and trusts a
+                    # duplicated field contradicting them.
+                    declared = state.get("request_phase")
+                    by_kind = {r["kind"]: r for r in requests}
+                    expected_artifacts = {
+                        "initial_pending": ("initial", "pending", {"re_trigger"}),
+                        "initial_expired": ("initial", "expired", {"re_trigger"}),
+                        "retrigger_pending": ("re_trigger", "pending", set()),
+                        "retrigger_expired": ("re_trigger", "expired", set()),
+                    }
+                    if declared in expected_artifacts:
+                        kind, phase, forbidden = expected_artifacts[declared]
+                        self.assertIn(
+                            kind, by_kind,
+                            f"{declared} needs a {kind} request artifact to be about",
+                        )
+                        self.assertEqual(
+                            phase, by_kind[kind]["phase"],
+                            f"{declared} contradicts its own {kind} artifact",
+                        )
+                        for absent in forbidden & set(by_kind):
+                            self.fail(
+                                f"{declared} cannot already carry a {absent}: the phase "
+                                "says that step has not happened yet"
+                            )
                     kinds = [r["kind"] for r in requests]
                     self.assertEqual(
                         sorted(set(kinds)), sorted(kinds),
@@ -879,9 +1004,14 @@ class Gh1549FallbackFixturesTest(unittest.TestCase):
         self.assertTrue(stale, "no fixture exercises a Tier B request staled by a push")
         for case in stale:
             self.assertFalse(case["expected"]["review_is_pending"])
-            self.assertEqual(
-                "rerequest_required_at_new_head", case["expected"]["disposition"]
-            )
+            # Withdrawn is the one stale case that legitimately resolves to
+            # no_review_pending -- and it is asserted through the same helper the
+            # production rule uses, so a fixture cannot declare a withdrawal the rule
+            # would reject and still be believed.
+            expected = self.stale_disposition(case["tier"], case["pr_state"])
+            self.assertEqual(expected, case["expected"]["disposition"])
+            if not self.withdrawal_is_valid(case["pr_state"]):
+                self.assertEqual("rerequest_required_at_new_head", expected)
         for case in [c for c in requested if c not in stale]:
             with self.subTest(project_id=case["project_id"]):
                 self.assertTrue(case["expected"]["review_is_pending"])
