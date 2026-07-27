@@ -767,7 +767,7 @@ def resolve_exact_dispatch_target(
     path afterwards is a TOCTOU, and fields the binding owns and the session does not mirror --
     runtime_home above all -- cannot be recovered by any later cross-check.
     """
-    pair, reason = resolve_exact_dispatch_pair(project_id, chat_id, agent_id)
+    pair, reason, _ = resolve_exact_dispatch_pair(project_id, chat_id, agent_id)
     return (pair[0] if pair else None), reason
 
 
@@ -776,8 +776,12 @@ def resolve_exact_dispatch_pair(
     chat_id: str,
     agent_id: str,
     sessions: list[dict[str, Any]] | None = None,
-) -> tuple[tuple[dict[str, Any], dict[str, Any]] | None, str | None]:
-    """Return ((session, binding), None) or (None, reason).
+) -> tuple[
+    tuple[dict[str, Any], dict[str, Any]] | None,
+    str | None,
+    tuple[dict[str, Any], dict[str, Any]] | None,
+]:
+    """Return the dispatchable pair, refusal reason, and validated expired pair.
 
     Hands back the exact binding snapshot this validation was performed against, so a caller
     never has to reopen the path to read a field the session does not carry. Introduced because
@@ -788,53 +792,57 @@ def resolve_exact_dispatch_pair(
     try:
         binding = load_binding(project_id, chat_id, agent_id)
     except FileNotFoundError:
-        return None, EXACT_BINDING_REQUIRED_REASON
+        return None, EXACT_BINDING_REQUIRED_REASON, None
 
     if (
         binding.get("project_id") != project_id
         or binding.get("chat_id") != chat_id
         or binding.get("agent_id") != agent_id
     ):
-        return None, EXACT_BINDING_MISMATCH_REASON
+        return None, EXACT_BINDING_MISMATCH_REASON, None
 
     bound_session_id = binding.get("session_id")
     bound_runtime_id = binding.get("runtime_session_id")
     bound_runtime_family = binding.get("runtime_family")
     if not bound_session_id or not bound_runtime_id:
-        return None, EXACT_BINDING_REQUIRED_REASON
+        return None, EXACT_BINDING_REQUIRED_REASON, None
 
     # A caller resolving SEVERAL chats would otherwise rescan the whole session directory once
     # per chat; passing a pre-scanned list makes that one scan for the whole lookup. Defaults to
     # scanning, so every existing caller is unaffected.
-    candidates = iter_sessions(agent_id=agent_id) if sessions is None else [
-        session for session in sessions if session.get("agent_id") == agent_id
-    ]
+    candidates = iter_sessions() if sessions is None else sessions
     exact_matches: list[dict[str, Any]] = []
+    live_target_matches: list[dict[str, Any]] = []
     for session in candidates:
-        if session.get("project_id") != project_id or session.get("chat_id") != chat_id:
-            continue
-        if str(session.get("session_id")) != str(bound_session_id):
-            continue
         runtime = runtime_metadata(session)
         if not bound_runtime_family or str(bound_runtime_family) != str(runtime.get("family")):
             continue
         if not runtime.get("session_id") or str(bound_runtime_id) != str(runtime.get("session_id")):
             continue
+        if session.get("status") in {"active", "parked"}:
+            live_target_matches.append(session)
+        if session.get("agent_id") != agent_id:
+            continue
+        if session.get("project_id") != project_id or session.get("chat_id") != chat_id:
+            continue
+        if str(session.get("session_id")) != str(bound_session_id):
+            continue
         exact_matches.append(session)
 
     if not exact_matches:
-        return None, EXACT_BINDING_MISMATCH_REASON
+        return None, EXACT_BINDING_MISMATCH_REASON, None
+    if len(exact_matches) > 1:
+        return None, EXACT_BINDING_AMBIGUOUS_REASON, None
 
-    dispatchable = [
-        session
-        for session in exact_matches
-        if session_is_dispatchable(session)[0]
-    ]
+    session = exact_matches[0]
+    dispatchable, refusal_reason = session_is_dispatchable(session)
+    if not dispatchable and refusal_reason == "lease_expired":
+        if len(live_target_matches) > 1:
+            return None, EXACT_BINDING_AMBIGUOUS_REASON, None
+        return None, EXACT_BINDING_NOT_DISPATCHABLE_REASON, (session, binding)
     if not dispatchable:
-        return None, EXACT_BINDING_NOT_DISPATCHABLE_REASON
-    if len(dispatchable) > 1:
-        return None, EXACT_BINDING_AMBIGUOUS_REASON
-    return (dispatchable[0], binding), None
+        return None, EXACT_BINDING_NOT_DISPATCHABLE_REASON, None
+    return (session, binding), None, None
 
 
 def message_targets_session(

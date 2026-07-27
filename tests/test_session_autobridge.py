@@ -2343,6 +2343,17 @@ class SessionAutobridgeTest(unittest.TestCase):
             "iter_sessions",
             return_value=[duplicate_a, duplicate_b],
         ):
+            pair, reason, inactive_binding = (
+                session_autobridge_lib.resolve_exact_dispatch_pair(
+                    "amiga",
+                    "CHAT-EXACT-DUP",
+                    "claude",
+                )
+            )
+            self.assertIsNone(pair)
+            self.assertIsNone(inactive_binding)
+            self.assertEqual(session_autobridge_lib.EXACT_BINDING_AMBIGUOUS_REASON, reason)
+
             session, reason = session_autobridge_lib.resolve_exact_dispatch_target(
                 "amiga",
                 "CHAT-EXACT-DUP",
@@ -2350,6 +2361,167 @@ class SessionAutobridgeTest(unittest.TestCase):
             )
             self.assertIsNone(session)
             self.assertEqual(session_autobridge_lib.EXACT_BINDING_AMBIGUOUS_REASON, reason)
+
+        expired_a = {**duplicate_a, "lease_expires_utc": "2000-01-01T00:00:00+00:00"}
+        expired_b = dict(expired_a)
+        with patch.object(
+            session_autobridge_lib,
+            "load_binding",
+            return_value={
+                "project_id": "amiga",
+                "chat_id": "CHAT-EXACT-DUP",
+                "agent_id": "claude",
+                "session_id": "SESSION-DUP",
+                "runtime_family": "claude_app",
+                "runtime_session_id": "runtime-dup",
+            },
+        ), patch.object(
+            session_autobridge_lib,
+            "iter_sessions",
+            return_value=[expired_a, expired_b],
+        ):
+            pair, reason, inactive_binding = (
+                session_autobridge_lib.resolve_exact_dispatch_pair(
+                    "amiga",
+                    "CHAT-EXACT-DUP",
+                    "claude",
+                )
+            )
+            self.assertIsNone(pair)
+            self.assertIsNone(inactive_binding)
+            self.assertEqual(session_autobridge_lib.EXACT_BINDING_AMBIGUOUS_REASON, reason)
+
+        reused_runtime = {
+            **expired_a,
+            "session_id": "SESSION-OTHER",
+            "lease_expires_utc": "2999-01-01T00:00:00+00:00",
+        }
+        with patch.object(
+            session_autobridge_lib,
+            "load_binding",
+            return_value={
+                "project_id": "amiga",
+                "chat_id": "CHAT-EXACT-DUP",
+                "agent_id": "claude",
+                "session_id": "SESSION-DUP",
+                "runtime_family": "claude_app",
+                "runtime_session_id": "runtime-dup",
+            },
+        ), patch.object(
+            session_autobridge_lib,
+            "iter_sessions",
+            return_value=[expired_a, reused_runtime],
+        ):
+            pair, reason, inactive_binding = (
+                session_autobridge_lib.resolve_exact_dispatch_pair(
+                    "amiga",
+                    "CHAT-EXACT-DUP",
+                    "claude",
+                )
+            )
+            self.assertIsNone(pair)
+            self.assertIsNone(inactive_binding)
+            self.assertEqual(session_autobridge_lib.EXACT_BINDING_AMBIGUOUS_REASON, reason)
+
+        superseded_runtime = {
+            **reused_runtime,
+            "status": "superseded",
+        }
+        with patch.object(
+            session_autobridge_lib,
+            "load_binding",
+            return_value={
+                "project_id": "amiga",
+                "chat_id": "CHAT-EXACT-DUP",
+                "agent_id": "claude",
+                "session_id": "SESSION-DUP",
+                "runtime_family": "claude_app",
+                "runtime_session_id": "runtime-dup",
+            },
+        ), patch.object(
+            session_autobridge_lib,
+            "iter_sessions",
+            return_value=[expired_a, superseded_runtime],
+        ):
+            pair, reason, inactive_pair = (
+                session_autobridge_lib.resolve_exact_dispatch_pair(
+                    "amiga",
+                    "CHAT-EXACT-DUP",
+                    "claude",
+                )
+            )
+            self.assertIsNone(pair)
+            self.assertEqual(
+                session_autobridge_lib.EXACT_BINDING_NOT_DISPATCHABLE_REASON,
+                reason,
+            )
+            self.assertEqual(expired_a, inactive_pair[0])
+
+        cross_scope_runtime = {
+            **reused_runtime,
+            "project_id": "nuvyr",
+            "chat_id": "CHAT-OTHER",
+        }
+        with patch.object(
+            session_autobridge_lib,
+            "load_binding",
+            return_value={
+                "project_id": "amiga",
+                "chat_id": "CHAT-EXACT-DUP",
+                "agent_id": "claude",
+                "session_id": "SESSION-DUP",
+                "runtime_family": "claude_app",
+                "runtime_session_id": "runtime-dup",
+            },
+        ), patch.object(
+            session_autobridge_lib,
+            "iter_sessions",
+            return_value=[expired_a, cross_scope_runtime],
+        ):
+            pair, reason, inactive_pair = (
+                session_autobridge_lib.resolve_exact_dispatch_pair(
+                    "amiga",
+                    "CHAT-EXACT-DUP",
+                    "claude",
+                )
+            )
+            self.assertIsNone(pair)
+            self.assertIsNone(inactive_pair)
+            self.assertEqual(session_autobridge_lib.EXACT_BINDING_AMBIGUOUS_REASON, reason)
+
+        cross_agent_runtime = {
+            **reused_runtime,
+            "agent_id": "relay",
+        }
+        with patch.object(
+            session_autobridge_lib,
+            "load_binding",
+            return_value={
+                "project_id": "amiga",
+                "chat_id": "CHAT-EXACT-DUP",
+                "agent_id": "claude",
+                "session_id": "SESSION-DUP",
+                "runtime_family": "claude_app",
+                "runtime_session_id": "runtime-dup",
+            },
+        ), patch.object(
+            session_autobridge_lib,
+            "iter_sessions",
+            return_value=[expired_a, cross_agent_runtime],
+        ):
+            pair, reason, inactive_pair = (
+                session_autobridge_lib.resolve_exact_dispatch_pair(
+                    "amiga",
+                    "CHAT-EXACT-DUP",
+                    "claude",
+                )
+            )
+            self.assertIsNone(pair)
+            self.assertIsNone(inactive_pair)
+            self.assertEqual(
+                session_autobridge_lib.EXACT_BINDING_AMBIGUOUS_REASON,
+                reason,
+            )
 
         stopped = dict(duplicate_a)
         stopped["status"] = "stopped"
@@ -2375,6 +2547,19 @@ class SessionAutobridgeTest(unittest.TestCase):
                 "claude",
             )
             self.assertIsNone(session)
+            self.assertEqual(
+                session_autobridge_lib.EXACT_BINDING_NOT_DISPATCHABLE_REASON,
+                reason,
+            )
+            pair, reason, inactive_binding = (
+                session_autobridge_lib.resolve_exact_dispatch_pair(
+                    "amiga",
+                    "CHAT-EXACT-DUP",
+                    "claude",
+                )
+            )
+            self.assertIsNone(pair)
+            self.assertIsNone(inactive_binding)
             self.assertEqual(
                 session_autobridge_lib.EXACT_BINDING_NOT_DISPATCHABLE_REASON,
                 reason,
@@ -2586,6 +2771,223 @@ class SessionAutobridgeTest(unittest.TestCase):
         delivered_candidates = sorted(chat_dir.glob("*_to-claude_*.md"))
         self.assertTrue(delivered_candidates)
         frontmatter, _ = parse_frontmatter(delivered_candidates[-1].read_text())
+        self.assertIsNone(frontmatter["target_session_id"])
+
+    def test_expired_lease_does_not_write_permanently_unroutable_packet(self):
+        for project, chat_id in (
+            ("amiga", "CHAT-EXP-AMIGA"),
+            ("nuvyr", "CHAT-EXP-NUVYR"),
+        ):
+            with self.subTest(project=project):
+                root = self.make_workspace()
+                for agent in ("codex", "claude"):
+                    self.add_agent(
+                        root,
+                        {
+                            "id": agent,
+                            "display_name": agent.title(),
+                            "activation": {
+                                "type": "cli_session",
+                                "watcher_enabled": True,
+                            },
+                        },
+                    )
+                chat_dir = self.create_chat(
+                    root,
+                    chat_dir_name=f"2026-07-27_expired-lease__{chat_id}",
+                    chat_id=chat_id,
+                    project_id=project,
+                )
+                runtime_id = f"claude-runtime-expired-{project}"
+                session_id = f"SESSION-CLAUDE-EXP-{project.upper()}"
+                worker_script = root / "record_dispatch.py"
+                dispatch_output = root / "dispatch.json"
+                write(
+                    worker_script,
+                    "\n".join(
+                        [
+                            "import json, sys",
+                            "from pathlib import Path",
+                            "Path(sys.argv[1]).write_text(json.dumps(json.load(sys.stdin)))",
+                        ]
+                    ),
+                )
+                self.run_cli(
+                    root,
+                    "register",
+                    "--session", session_id,
+                    "--agent", "claude",
+                    "--project", project,
+                    "--chat", chat_id,
+                    "--mode", "auto-read",
+                    "--wake-strategy", "runtime_trigger",
+                    "--runtime-family", "claude_app",
+                    "--runtime-session-id", runtime_id,
+                    "--runtime-session-source", "first_read",
+                    "--runtime-command",
+                    json.dumps([sys.executable, str(worker_script), str(dispatch_output)]),
+                )
+                session_path = (
+                    root / "State" / "session_autobridge" / "sessions"
+                    / f"{session_id}.json"
+                )
+                session = json.loads(session_path.read_text())
+                session["lease_expires_utc"] = "2000-01-01T00:00:00+00:00"
+                write_json(session_path, session)
+
+                result = subprocess.run(
+                    [
+                        sys.executable, str(DELIVER_SCRIPT),
+                        "--chat", chat_id,
+                        "--from", "codex",
+                        "--to", "claude",
+                        "--project", project,
+                        "--title", "Strand guard",
+                        "--sender-session-id", "codex-session-1",
+                        "--body-file", "-",
+                    ],
+                    cwd=root,
+                    text=True,
+                    input="Body for the expired-lease packet.",
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertEqual(0, result.returncode, result.stderr)
+                payload = json.loads(result.stdout.split("\n\n", 1)[0])
+                self.assertFalse(payload["autobridge_ready"])
+                self.assertEqual(
+                    session_autobridge_lib.EXACT_BINDING_NOT_DISPATCHABLE_REASON,
+                    payload["autobridge_refusal_reason"],
+                )
+                self.assertEqual(runtime_id, payload["resolved_target_session_id"])
+
+                packet = sorted(chat_dir.glob("*_to-claude_*.md"))[-1]
+                frontmatter, _ = parse_frontmatter(packet.read_text())
+                self.assertEqual(runtime_id, frontmatter["target_session_id"])
+
+                session["lease_expires_utc"] = "2999-01-01T00:00:00+00:00"
+                session["status"] = "active"
+                write_json(session_path, session)
+                dispatch = self.run_cli(root, "dispatch", "--session", session_id)
+                packet_rel = str(packet.relative_to(root))
+                self.assertEqual(1, dispatch["matched_messages"])
+                self.assertEqual(packet_rel, dispatch["actions"][0]["message_path"])
+                self.assertIn("runtime_result", dispatch["actions"][0], dispatch)
+                self.assertEqual(0, dispatch["actions"][0]["runtime_result"]["returncode"])
+                self.assertEqual(packet_rel, json.loads(dispatch_output.read_text())["message"]["path"])
+                renewed_session = json.loads(session_path.read_text())
+                self.assertIn(packet_rel, renewed_session["processed_messages"])
+
+                session["lease_expires_utc"] = "2000-01-01T00:00:00+00:00"
+                session["repo_targets"] = ["app"]
+                write_json(session_path, session)
+                refused = subprocess.run(
+                    [
+                        sys.executable, str(DELIVER_SCRIPT),
+                        "--chat", chat_id,
+                        "--from", "codex",
+                        "--to", "claude",
+                        "--project", project,
+                        "--title", "Expired scope refusal",
+                        "--sender-session-id", "codex-session-1",
+                        "--body-file", "-",
+                    ],
+                    cwd=root,
+                    text=True,
+                    input="This packet cannot satisfy the registered repo scope.",
+                    capture_output=True,
+                    check=True,
+                )
+                refused_payload = json.loads(refused.stdout.split("\n\n", 1)[0])
+                self.assertFalse(refused_payload["autobridge_ready"])
+                self.assertEqual(
+                    session_autobridge_lib.ROUTE_AMBIGUOUS_REASON,
+                    refused_payload["autobridge_refusal_reason"],
+                )
+                self.assertIsNone(refused_payload["resolved_target_session_id"])
+                self.assertEqual(
+                    session_id,
+                    refused_payload["autobridge_session_id"],
+                )
+                self.assertIn(
+                    "subscriber repo_targets: ['app']",
+                    refused.stderr,
+                )
+                self.assertFalse(refused_payload["ax_doorbell_required"])
+                self.assertFalse(refused_payload["ax_attended_recovery_required"])
+                self.assertFalse(refused_payload["operator_relay_required"])
+                self.assertFalse(refused_payload["activation_unavailable"])
+                refused_frontmatter = next(
+                    frontmatter
+                    for candidate in chat_dir.glob("*_to-claude_*.md")
+                    for frontmatter, _ in [parse_frontmatter(candidate.read_text())]
+                    if frontmatter.get("title") == "Expired scope refusal"
+                )
+                self.assertIsNone(refused_frontmatter["target_session_id"])
+
+    def test_mismatched_binding_never_supplies_a_durable_target(self):
+        root = self.make_workspace()
+        for agent in ("codex", "claude"):
+            self.add_agent(
+                root,
+                {
+                    "id": agent,
+                    "display_name": agent.title(),
+                    "activation": {"type": "cli_session", "watcher_enabled": True},
+                },
+            )
+        chat_id = "CHAT-BINDING-DRIFT"
+        chat_dir = self.create_chat(
+            root,
+            chat_dir_name=f"2026-07-27_binding-drift__{chat_id}",
+            chat_id=chat_id,
+            project_id="amiga",
+        )
+        self.run_cli(
+            root,
+            "register",
+            "--session", "SESSION-CLAUDE-DRIFT",
+            "--agent", "claude",
+            "--project", "amiga",
+            "--chat", chat_id,
+            "--mode", "auto-read",
+            "--runtime-family", "claude_app",
+            "--runtime-session-id", "foreign-runtime",
+            "--runtime-session-source", "first_read",
+        )
+        session_path = (
+            root / "State" / "session_autobridge" / "sessions"
+            / "SESSION-CLAUDE-DRIFT.json"
+        )
+        session = json.loads(session_path.read_text())
+        session["runtime"]["session_id"] = "current-runtime"
+        write_json(session_path, session)
+
+        result = subprocess.run(
+            [
+                sys.executable, str(DELIVER_SCRIPT),
+                "--chat", chat_id,
+                "--from", "codex",
+                "--to", "claude",
+                "--project", "amiga",
+                "--title", "Binding drift",
+                "--sender-session-id", "codex-session-1",
+                "--body-file", "-",
+            ],
+            cwd=root,
+            text=True,
+            input="Do not target the rejected binding.",
+            capture_output=True,
+            check=True,
+        )
+        payload = json.loads(result.stdout.split("\n\n", 1)[0])
+        self.assertEqual(
+            session_autobridge_lib.EXACT_BINDING_MISMATCH_REASON,
+            payload["autobridge_refusal_reason"],
+        )
+        self.assertIsNone(payload["resolved_target_session_id"])
+        packet = sorted(chat_dir.glob("*_to-claude_*.md"))[-1]
+        frontmatter, _ = parse_frontmatter(packet.read_text())
         self.assertIsNone(frontmatter["target_session_id"])
 
     def deliver_with_scope(self, root, chat_id, *, repo_targets=None, project="amiga"):

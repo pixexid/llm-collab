@@ -523,11 +523,13 @@ class LookupByteBudget:
 
 
 def bounded_sessions(agent: str, budget: "LookupByteBudget | None" = None) -> list[dict]:
-    """Every session for this agent, read ONCE, under a count and a per-file byte cap.
+    """Every workspace session, read ONCE, under a count and a per-file byte cap.
 
     The shared resolver scans the session directory itself, which is right for a single lookup
     and wrong for a loop: delegating per chat repeated that whole scan once per candidate. This
-    scan happens once and is handed to each call.
+    scan happens once and is handed to each call. It must stay workspace-wide because runtime
+    ownership collisions can cross agent, project, and chat scope; the resolver applies the
+    requested agent filter only when selecting the exact bound session.
 
     Bounded because the directory is untrusted: the count is charged at the enumeration boundary
     before any filtering, and each file is read with one bounded read rather than a stat followed
@@ -575,7 +577,7 @@ def bounded_sessions(agent: str, budget: "LookupByteBudget | None" = None) -> li
             # a malformed session cannot describe a live worker; the resolver's own scan skips
             # these too, so skipping matches the behaviour this replaces
             continue
-        if isinstance(record, dict) and record.get("agent_id") == agent:
+        if isinstance(record, dict):
             sessions.append(record)
     return sessions
 
@@ -594,8 +596,9 @@ def resolve_one(project: str, chat: str, agent: str, *, fatal: bool,
     nothing left to reopen and nothing to reconcile.
     """
     try:
-        pair, reason = autobridge.resolve_exact_dispatch_pair(project, chat, agent,
-                                                             sessions=sessions)
+        pair, reason, _ = autobridge.resolve_exact_dispatch_pair(
+            project, chat, agent, sessions=sessions
+        )
     except autobridge.BindingUnreadable as error:
         # Reported, never collapsed: an oversized or unreadable binding is a present record we
         # refused to parse, not an absent one. Turning it into "no live session" would name the
