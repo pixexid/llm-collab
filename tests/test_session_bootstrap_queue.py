@@ -28,7 +28,11 @@ class SessionBootstrapQueueTest(unittest.TestCase):
                                 "projection": {"project_id": "amiga", "lanes": []},
                             },
                         ):
-                            summaries = session_bootstrap.queue_summaries()
+                            # Unpatched, this reaches load_queue() and so the real project
+                            # registry: the case then passes or fails on whether the host
+                            # running it has an 'amiga' project. (#325)
+                            with patch.object(session_bootstrap.issue_queue, "projection_input_changed", return_value=True):
+                                summaries = session_bootstrap.queue_summaries()
 
         self.assertEqual(summaries[0]["backlog_status"], "drift")
         self.assertEqual(summaries[0]["missing_issues"], [678])
