@@ -771,7 +771,7 @@ Live tests use disposable sessions. Expected route quality is:
 | Managed Codex App Server | managed | authoritative only after exact proof gates |
 | Codex Desktop | AX/UI attached or pull | best effort plus acknowledgment |
 | Claude Code | native attached | automatic receive when bound |
-| Claude Desktop | native bridge if supported, otherwise AX/pull | capability-specific; no universal claim |
+| Claude Desktop | durable packet plus the app's own background inbox watcher | never AX, Computer Use, or CLI resume |
 | pi | native attached | automatic receive when bound |
 | OpenCode | native attached | automatic receive when bound |
 | ZCode | AX/UI attached | best effort |

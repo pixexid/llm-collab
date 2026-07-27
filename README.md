@@ -24,8 +24,9 @@ notifications are optional adapters for teams that need them.
   independent review, project preflight, and post-merge cleanup are supported
   as mechanical gates.
 - **Explicit activation transports** — runtime sessions, AX-capable desktop
-  apps, project-configured Claude Desktop fallback, and human relay are distinct
-  activation paths. Missing transports report `activation_unavailable`.
+  apps, and human relay are distinct activation paths; Claude is woken only by
+  its durable packet and its own background inbox watcher. Missing transports
+  report `activation_unavailable`.
 - **Local project state** — real queues, runbooks, routing policy, and memory
   templates live under `{project_state_root}/{project_id}/`, normally outside
   this public Git checkout.

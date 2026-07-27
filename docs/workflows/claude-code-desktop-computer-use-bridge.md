@@ -12,9 +12,11 @@ dedicated desktop apps (e.g. Claude in `/Applications/Claude.app`, Codex in
 > bounded, provisional **safety-fuse** (see below), not as the primary path.
 
 This desktop-app workflow applies only between distinct collaborator app
-identities. External workers such as Claude and ZCode may ring root Codex, and
-root Codex may ring those external apps. It does not apply to `codex -> codex`,
-root self-handoffs, or managed Codex workers.
+identities. External workers such as Claude and ZCode may ring root Codex. Root
+Codex may ring those external apps **except Claude**, which is never a ring
+target: it is woken by its durable packet and the Claude app's own background
+inbox watcher. It does not apply to `codex -> codex`, root self-handoffs, or
+managed Codex workers.
 
 ## Communication tiers: llm-collab vs direct ax (choose by PURPOSE)
 
@@ -69,7 +71,7 @@ pointer is absent on the same proven target, one re-ring is allowed. Never
 re-ring an exit-0 queued/unconfirmed result or an identity-loss/ambiguous
 result. Other non-zero results enter recovery. NEVER use Computer
 Use/screenshots to verify an AX send. Routine target composers are validated
-for Codex and Claude Desktop. ZCode or Antigravity may originate a ring to a
+for Codex. ZCode or Antigravity may originate a ring to a
 supported target, but when either app is the target its `AXValue`-opaque or
 otherwise unprovable composer requires hold and attended recovery; never use a
 blind key-typed AX ring. Busy alone is not a hold after composer safety is
@@ -124,9 +126,10 @@ or claiming exact-thread delivery. Use `--dry-run` first on any new app and
 not proof of delivery). The idle input gate applies only to attended screenshot/keyboard
 Computer Use fallback. Any collaborator (Codex, Claude, Gemini, ZCode) can call
 `axsend-ensure` via shell for a distinct-app route, but Codex must not target
-itself or a managed Codex worker. Needs the running process enabled in Privacy &
-Security → Accessibility. Falls back to screenshot Computer Use only if AX
-fails for an external-app target. Full reference:
+itself, a managed Codex worker, or Claude. Needs the running process enabled in
+Privacy & Security → Accessibility. Falls back to screenshot Computer Use only if
+AX fails for an external-app target that is a valid ring target at all — never
+for Claude. Full reference:
 `tools/axbridge/README.md` and the Claude Code `ax-doorbell` skill.
 
 **Per-app routine target safety:**
@@ -134,7 +137,7 @@ fails for an external-app target. Full reference:
 | App | Composer write | Submit | Status |
 |-----|----------------|--------|--------|
 | Codex | `AXValue` | send-arrow `AXPress` | ✅ proven bidirectional |
-| Claude Desktop | `AXValue` | `key-return` | ✅ proven |
+| Claude Desktop | — | — | ⛔ never a routine target: durable packet + its own background inbox watcher |
 | ZCode | `AXValue`-opaque | attended recovery only | ⚠️ routine ring holds because emptiness is unprovable |
 | Antigravity (Gemini) | unreadable/unproven | attended recovery only | ⚠️ routine AX target unsupported until composer safety is provable |
 

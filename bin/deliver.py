@@ -251,6 +251,15 @@ def ax_attended_only(recipient_agent: dict) -> bool:
     return bool(recipient_agent.get("activation", {}).get("ax_attended_only"))
 
 
+def is_watcher_only_target(recipient_id: str) -> bool:
+    """Claude: the durable packet plus the app's own background inbox watcher is the
+    whole wake path. Every producer below asks this, because excluding it from one
+    selector only pushes delivery into the next: the routine doorbell falls through to
+    attended recovery, and a suppressed desktop bridge falls through to human relay.
+    Both were emitted defects, not hypotheticals."""
+    return recipient_id == "claude"
+
+
 def is_codex_self_target(sender_id: str, recipient_id: str) -> bool:
     return sender_id == "codex" and recipient_id == "codex"
 
@@ -265,11 +274,7 @@ def is_ax_doorbell_target(
     return (
         not is_codex_self_target(sender_id, recipient_id)
         and recipient_id != "operator"
-        # Claude is woken by its durable packet and the app's own background inbox
-        # watcher. Its agents.json entry is a cli_session with ax_app "Claude", so
-        # without this it falls into the doorbell and deliver.py prints a runnable
-        # ring -- the exact wake the canonical docs forbid.
-        and recipient_id != "claude"
+        and not is_watcher_only_target(recipient_id)
         and activation_type == "cli_session"
         and ax_doorbell_app(recipient_agent) is not None
         # GH-1547: an AXValue-opaque target never gets a routine doorbell —
@@ -294,6 +299,7 @@ def is_ax_attended_recovery_target(
     return (
         not is_codex_self_target(sender_id, recipient_id)
         and recipient_id != "operator"
+        and not is_watcher_only_target(recipient_id)
         and ax_attended_only(recipient_agent)
     )
 
@@ -645,6 +651,7 @@ def main():
         and not desktop_bridge_required
         and not ax_doorbell_required
         and not ax_attended_recovery_required
+        and not is_watcher_only_target(args.recipient)
         and is_human_relay(recipient_agent)
     )
     activation_unavailable = (
@@ -658,7 +665,18 @@ def main():
     )
     activation_unavailable_reason = None
     if activation_unavailable:
-        if autobridge_refusal_reason and recipient_type == "cli_session":
+        if is_watcher_only_target(args.recipient):
+            # Never "no ax_app": Claude usually has one, and it is irrelevant. The
+            # packet is durable and the repair is the binding or the watcher.
+            activation_unavailable_reason = (
+                "claude is woken by its background inbox watcher: no dispatchable "
+                "binding resolved for this chat, so repair the binding or the watcher "
+                f"({autobridge_refusal_reason})"
+                if autobridge_refusal_reason
+                else "claude is woken by its background inbox watcher: no dispatchable "
+                "binding resolved for this chat, so repair the binding or the watcher"
+            )
+        elif autobridge_refusal_reason and recipient_type == "cli_session":
             activation_unavailable_reason = autobridge_refusal_reason
         elif recipient_type == "cli_session":
             activation_unavailable_reason = (
@@ -847,7 +865,11 @@ def main():
         )
         print()
         print(f"Reason: {activation_unavailable_reason}")
-        print("Configure a dispatchable runtime session or activation.ax_app, then retry the wake.")
+        if is_watcher_only_target(args.recipient):
+            print("Repair the binding or the app's background inbox watcher. Do not ring,")
+            print("relay, resume, or type into the app to deliver this packet.")
+        else:
+            print("Configure a dispatchable runtime session or activation.ax_app, then retry the wake.")
         print()
         print(border)
 

@@ -230,8 +230,8 @@ app restart — coarse Claude bridge health checks and recording an
 accessibility/capture blocker are diagnosis, not a wake. Keep or create the heartbeat and record
 `observed_state`, `expected_outcome`, `why_not_done`, and
 `next_unlock_action`. Do not ask the operator to relay, paste, click, or
-manually wake Claude; repair Computer Use/app access or continue monitoring the
-Claude app until Codex can inspect and act safely.
+manually wake Claude, and do not reach for Computer Use to do it either: repair
+the binding or the watcher, or keep monitoring and report the blocker.
 
 For programmatic runtime targeting that does not require visible desktop state,
 use a separate non-desktop adapter. For Claude desktop work, do not use

@@ -6,7 +6,8 @@ This script does not read or operate Claude Desktop content. It only reports
 coarse machine/app state that helps distinguish "Claude is not running" from
 "Claude appears visible but Computer Use cannot inspect it".
 
-Use Computer Use, not this script, for actual Claude desktop interaction.
+This script is diagnosis only. Claude is not woken by Computer Use or AX: it reads
+its durable collab packet through its own background inbox watcher.
 """
 
 from __future__ import annotations
@@ -165,7 +166,6 @@ def collect_health() -> dict:
         "visible_app_count": len(visible_names),
         "claude_local_agent_process_count": claude_local_agent_count(),
         "power_assertions": power_assertions_summary(),
-        "computer_use_required_for_bridge": True,
         "diagnostic_scope": "shell-only app/process visibility; not proof that the Claude Desktop prompt is inspectable or usable",
         "errors": {
             "frontmost": frontmost.stderr if not frontmost.ok else "",
@@ -203,7 +203,8 @@ def main() -> int:
         print(f"Computer Use power assertion present: {power['computer_use_assertion_present']}")
     else:
         print(f"Power assertions unavailable: {power.get('error')}")
-    print("Bridge interaction still requires Computer Use app inspection.")
+    print("Diagnosis only: Claude is woken by its durable packet and its own background")
+    print("inbox watcher. Do not use this output to justify a Computer Use wake.")
     return 0
 
 

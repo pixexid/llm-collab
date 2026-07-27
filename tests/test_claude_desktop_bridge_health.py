@@ -45,7 +45,9 @@ class ClaudeDesktopBridgeHealthTest(unittest.TestCase):
         self.assertEqual(health["claude_main_process_metrics"]["cpu_percent_total"], 42.5)
         self.assertTrue(health["claude_main_process_metrics"]["busy"])
         self.assertEqual(health["claude_local_agent_process_count"], 1)
-        self.assertTrue(health["computer_use_required_for_bridge"])
+        # The key is gone, not flipped: this script is diagnosis, and its output must
+        # not carry a field a worker could read as authorization to wake Claude. (#342)
+        self.assertNotIn("computer_use_required_for_bridge", health)
         self.assertIn("not proof", health["diagnostic_scope"])
 
     def test_process_metrics_parse_ps_output(self) -> None:

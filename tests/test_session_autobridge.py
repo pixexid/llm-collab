@@ -3887,14 +3887,18 @@ class SessionAutobridgeTest(unittest.TestCase):
         )
         body_file = root / "readiness-drift-body.txt"
         write(body_file, "Durably deliver this packet and wake the receiver.")
+        # Same identity as the harness and the delivered packet. Left as claude, the
+        # message_targets_session assertion below returned route_ambiguous trivially --
+        # the packet was simply addressed to someone else -- instead of proving that a
+        # session claiming readiness it cannot back is rejected.
         target = {
             "session_id": "SESSION-READY-DRIFT",
-            "agent_id": "claude",
+            "agent_id": "relay",
             "project_id": "amiga",
             "chat_id": "CHAT-READY-DRIFT",
             "status": "parked",
             "wake_strategy": "runtime_trigger",
-            "runtime": {"family": "claude_app", "session_id": "claude-runtime-drift"},
+            "runtime": {"family": "zcode_cli", "session_id": "relay-runtime-drift"},
         }
         harness = root / "deliver_readiness_drift.py"
         write(
@@ -3941,6 +3945,11 @@ class SessionAutobridgeTest(unittest.TestCase):
         self.assertTrue(delivered_candidates)
         frontmatter, _ = parse_frontmatter(delivered_candidates[-1].read_text())
         self.assertEqual("Readiness drift", frontmatter["title"])
+        # Identity now matches the delivered packet, so the refusal has to come from the
+        # real cause -- no exact target was written for a session whose readiness was
+        # false -- rather than from the packet being addressed to another agent.
+        self.assertEqual("relay", frontmatter["to"])
+        self.assertIsNone(frontmatter.get("target_session_id"))
         self.assertEqual(
             (False, session_autobridge_lib.ROUTE_AMBIGUOUS_REASON),
             session_autobridge_lib.message_targets_session(
@@ -4227,14 +4236,95 @@ class SessionAutobridgeTest(unittest.TestCase):
         self.assertIsNone(result_payload["ax_doorbell_prompt"])
         self.assertFalse(result_payload["desktop_bridge_required"])
         self.assertFalse(result_payload["operator_relay_required"])
+        # Every lane, not just the one that used to fire: excluding Claude from the
+        # routine doorbell alone pushed delivery into attended recovery, and
+        # suppressing the desktop bridge pushed it into human relay. Both shipped.
+        self.assertFalse(result_payload["ax_attended_recovery_required"])
+        self.assertIsNone(result_payload["ax_attended_recovery_prompt"])
         self.assertNotIn("AX DOORBELL REQUIRED", deliver_result.stdout)
+        self.assertNotIn("ATTENDED RECOVERY REQUIRED", deliver_result.stdout.upper())
+        self.assertNotIn("RELAY REQUIRED", deliver_result.stdout.upper())
+        # The banner used to end with "configure ... activation.ax_app", which is both
+        # wrong for Claude and an invitation to wire up a wake path.
+        self.assertNotIn("then retry the wake", deliver_result.stdout)
+        self.assertIn("background inbox watcher", deliver_result.stdout)
         self.assertNotIn("axsend", deliver_result.stdout)
         self.assertNotIn("Computer Use", deliver_result.stdout)
 
         # The packet is durable and the output names the repair, not a second wake path.
         self.assertTrue((root / result_payload["to_file"]).exists())
         self.assertTrue(result_payload["activation_unavailable"])
-        self.assertIsNotNone(result_payload["activation_unavailable_reason"])
+        reason = result_payload["activation_unavailable_reason"]
+        self.assertIn("watcher", reason)
+        self.assertIn("binding", reason)
+        # The old generic reason claimed the ax_app was missing. This Claude has one.
+        self.assertNotIn("activation.ax_app", reason)
+
+    def test_deliver_never_attends_recovery_for_an_opaque_claude(self):
+        # ax_attended_only routes a target to Codex-attended AX/Computer Use. Excluding
+        # Claude from the routine doorbell alone left this lane wide open.
+        root = self.make_workspace()
+        self.add_agent(
+            root,
+            {
+                "id": "codex",
+                "display_name": "Codex",
+                "activation": {"type": "cli_session", "watcher_enabled": True},
+            },
+        )
+        self.add_agent(
+            root,
+            {
+                "id": "claude",
+                "display_name": "Claude",
+                "activation": {
+                    "type": "cli_session",
+                    "watcher_enabled": True,
+                    "ax_app": "Claude",
+                    "ax_attended_only": True,
+                },
+            },
+        )
+        self.create_chat(
+            root,
+            chat_dir_name="2026-04-23_claude-opaque__CHAT-OPAQUE",
+            chat_id="CHAT-OPAQUE",
+            project_id="amiga",
+        )
+
+        deliver_result = subprocess.run(
+            [
+                sys.executable,
+                str(DELIVER_SCRIPT),
+                "--chat",
+                "CHAT-OPAQUE",
+                "--from",
+                "codex",
+                "--to",
+                "claude",
+                "--project",
+                "amiga",
+                "--title",
+                "Opaque composer Claude",
+                "--body-file",
+                "-",
+            ],
+            cwd=root,
+            text=True,
+            input="Durable packet only.",
+            capture_output=True,
+            check=True,
+        )
+
+        result_payload = json.loads(deliver_result.stdout.split("\n\n", 1)[0])
+        self.assertFalse(result_payload["ax_attended_recovery_required"])
+        self.assertIsNone(result_payload["ax_attended_recovery_prompt"])
+        self.assertFalse(result_payload["ax_doorbell_required"])
+        self.assertFalse(result_payload["operator_relay_required"])
+        self.assertNotIn("ATTENDED RECOVERY REQUIRED", deliver_result.stdout.upper())
+        self.assertNotIn("axsend", deliver_result.stdout)
+        self.assertNotIn("Computer Use", deliver_result.stdout)
+        self.assertTrue((root / result_payload["to_file"]).exists())
 
     def test_deliver_never_uses_computer_use_for_a_desktop_bridge_project(self):
         # amiga carries claude_desktop_bridge: true in the fixture, and this Claude is
@@ -4295,6 +4385,13 @@ class SessionAutobridgeTest(unittest.TestCase):
         self.assertNotIn("CLAUDE DESKTOP BRIDGE REQUIRED", deliver_result.stdout)
         self.assertNotIn("Computer Use", deliver_result.stdout)
         self.assertNotIn("Claude.app", deliver_result.stdout)
+
+        # This registration is human_relay, so suppressing the desktop bridge handed the
+        # packet to the operator-relay branch instead: a printed handoff asking the
+        # operator to activate Claude. One forbidden wake replaced by another.
+        self.assertFalse(result_payload["operator_relay_required"])
+        self.assertFalse(result_payload["relay_required"])
+        self.assertNotIn("RELAY REQUIRED", deliver_result.stdout.upper())
 
         self.assertTrue((root / result_payload["to_file"]).exists())
 
