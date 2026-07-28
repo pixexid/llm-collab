@@ -505,7 +505,8 @@ def save_agent_inbox(agent_id: str, data: dict) -> None:
 
 
 @contextmanager
-def _agent_inbox_mutation_lock(agent_id: str):
+def agent_state_lock(agent_id: str):
+    """Serialize exact session authority and inbox state for one agent."""
     lock_path = agent_dir(agent_id) / ".inbox.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
@@ -524,10 +525,15 @@ def update_agent_inbox(
     load: Callable[[], dict] | None = None,
 ) -> None:
     """Serialize one inbox read-modify-write with every inbox writer."""
-    with _agent_inbox_mutation_lock(agent_id):
+    from _session_autobridge import AtomicWriteCommitted
+
+    with agent_state_lock(agent_id):
         inbox = load() if load is not None else load_agent_inbox(agent_id)
         update(inbox)
-        save_agent_inbox(agent_id, inbox)
+        try:
+            save_agent_inbox(agent_id, inbox)
+        except AtomicWriteCommitted as error:
+            print(f"[inbox] Warning: {error}", file=sys.stderr)
 
 
 def add_to_inbox(agent_id: str, message_path: str | Path) -> None:

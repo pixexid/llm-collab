@@ -34,6 +34,7 @@ HEURISTIC_RUNTIME_DISCOVERY_FAMILIES = frozenset(
 
 from _helpers import (
     ROOT,
+    agent_state_lock,
     agent_inbox_path,
     build_handoff_prompt,
     config_get,
@@ -225,7 +226,8 @@ def save_binding(payload: dict) -> None:
     )
     path.parent.mkdir(parents=True, exist_ok=True)
     payload["updated_utc"] = utc_iso()
-    write_regular_file_atomically(path, json.dumps(payload, indent=2, sort_keys=True))
+    with agent_state_lock(str(payload["agent_id"])):
+        write_regular_file_atomically(path, json.dumps(payload, indent=2, sort_keys=True))
 
 
 def write_regular_file_atomically(path: Path, content: str) -> None:
@@ -356,7 +358,12 @@ def save_session(payload: dict) -> None:
     path = autobridge_session_path(session_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     payload["updated_utc"] = utc_iso()
-    write_regular_file_atomically(path, json.dumps(payload, indent=2, sort_keys=True))
+    agent_id = payload.get("agent_id")
+    if agent_id and payload.get("project_id") and payload.get("chat_id"):
+        with agent_state_lock(str(agent_id)):
+            write_regular_file_atomically(path, json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        write_regular_file_atomically(path, json.dumps(payload, indent=2, sort_keys=True))
 
 
 def binding_payload_from_session(

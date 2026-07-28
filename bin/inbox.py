@@ -33,7 +33,15 @@ from datetime import datetime
 sys.path.insert(0, str(Path(__file__).parent))
 from _activation_cleanup import claim_activation_lease
 from _activation_identity import classify_activation, lease_key
-from _activation_lease import LeaseRefused, load_lease, owner_summary, pid_from_env, runtime_id_from_env
+from _activation_lease import (
+    LeaseRefused,
+    load_lease,
+    owner_summary,
+    pid_from_env,
+    release_lease,
+    runtime_id_from_env,
+    with_lease_fence,
+)
 from _helpers import (
     ROOT,
     agent_inbox_path,
@@ -47,7 +55,6 @@ from _helpers import (
     utc_iso,
 )
 from _session_autobridge import (
-    AtomicWriteCommitted,
     BindingUnreadable,
     ExactSessionReadBudget,
     HEURISTIC_RUNTIME_DISCOVERY_FAMILIES,
@@ -438,6 +445,9 @@ def gate_activation_message(
         "authorized": True,
         "reason": "claimed",
         "identity": identity,
+        "owner_session_id": session_id,
+        "owner_pid": owner_pid,
+        "claimant_runtime_id": runtime_id,
         "lease": claim["lease"],
         "fence_token": claim["fence_token"],
         "poller_audit": claim["poller_audit"],
@@ -480,10 +490,7 @@ def mark_exact_messages_read(
                 read.append(path)
                 read_set.add(path)
 
-    try:
-        update_agent_inbox(agent_id, mark, load=load)
-    except AtomicWriteCommitted as error:
-        print(f"[inbox] Warning: {error}", file=sys.stderr)
+    update_agent_inbox(agent_id, mark, load=load)
     return claimed
 
 
@@ -626,6 +633,7 @@ def main():
     published_runtime = publish_runtime_identity(args)
 
     exact_session = None
+    exact_binding = None
     exact_read_budget = None
     exact_session_requested = bool(args.session and not args.publish_session)
     repo_scope_refused: list[dict] = []
@@ -657,7 +665,7 @@ def main():
                 )
                 if pair is None or str(pair[0].get("session_id")) != str(args.session):
                     raise ValueError(refusal or "exact_binding_mismatch")
-                exact_session = pair[0]
+                exact_session, exact_binding = pair
                 reader_runtime_id = activation_reader_runtime_id()
                 exact_runtime_id = runtime_metadata(exact_session).get("session_id")
                 if reader_runtime_id and reader_runtime_id != exact_runtime_id:
@@ -761,6 +769,7 @@ def main():
 
     consume = not args.peek and not args.show_all
     refused_gates: list[dict] = []
+    authorized_gates: dict[str, dict] = {}
 
     def gate_selected_paths(paths: list[str]) -> set[str]:
         selected = set(paths)
@@ -780,7 +789,37 @@ def main():
             if consume and not gate.get("authorized"):
                 refused_gates.append({"path": message["path"], **gate})
                 refused.add(message["path"])
+            elif consume:
+                authorized_gates[message["path"]] = gate
         return refused
+
+    def release_authorized_gates(paths: set[str]) -> None:
+        for path in paths:
+            gate = authorized_gates.get(path)
+            if gate is None:
+                continue
+            try:
+                release_lease(
+                    gate["identity"],
+                    owner_session_id=gate["owner_session_id"],
+                    fence_token=gate["fence_token"],
+                    owner_pid=gate["owner_pid"],
+                    claimant_runtime_id=gate["claimant_runtime_id"],
+                )
+            except LeaseRefused:
+                pass
+
+    rendered_text: dict[str, str] = {}
+
+    def print_messages(selected_messages: list[dict]) -> None:
+        if not selected_messages:
+            return
+        print(
+            f"\n[inbox] {len(selected_messages)} "
+            f"{'message(s)' if args.show_all else 'unread message(s)'} for {args.me}\n"
+        )
+        for message in selected_messages:
+            print(rendered_text[message["path"]])
 
     def exit_if_activation_refused() -> None:
         if not refused_gates:
@@ -789,6 +828,14 @@ def main():
         if args.json_output:
             print(json.dumps(payload, indent=2, sort_keys=True))
         else:
+            refused_paths = {gate["path"] for gate in refused_gates}
+            print_messages(
+                [
+                    message
+                    for message in messages
+                    if message["path"] not in refused_paths
+                ]
+            )
             for gate in refused_gates:
                 print(
                     f"[activation] refused {gate['path']}: {gate.get('reason')}",
@@ -802,42 +849,97 @@ def main():
                     )
         sys.exit(75)
 
+    gate_selected_paths(
+        [
+            message["path"]
+            for message in messages
+            if not (consume and exact_session is not None and message.get("read"))
+        ]
+    )
     if not (consume and exact_session is not None):
-        gate_selected_paths([message["path"] for message in messages])
         exit_if_activation_refused()
 
     shown_paths = [m["path"] for m in messages if not m.get("read")]
+    if consume and exact_session is not None:
+        try:
+            if args.json_output:
+                json.dumps(messages, sort_keys=True)
+            else:
+                rendered_text = {
+                    message["path"]: format_message(message, index)
+                    for index, message in enumerate(messages)
+                }
+        except (TypeError, ValueError) as exc:
+            release_authorized_gates(set(authorized_gates))
+            print(
+                f"[inbox] Exact-session read refused before output: {exc}",
+                file=sys.stderr,
+            )
+            sys.exit(75)
+
     if consume and exact_session is None:
         shown_paths, late_refused = recheck_repo_scope_before_read(
             args.me, shown_paths, args.repo_target, args.project
         )
         repo_scope_refused.extend(late_refused)
     elif consume:
+        def validate_claim(paths: list[str]) -> set[str]:
+            pair, refusal, _ = resolve_exact_dispatch_pair(
+                str(exact_session["project_id"]),
+                str(exact_session["chat_id"]),
+                args.me,
+            )
+            if pair != (exact_session, exact_binding):
+                raise ValueError(refusal or "exact_session_changed_before_claim")
+            for path in paths:
+                gate = authorized_gates.get(path)
+                if gate is None:
+                    continue
+                with_lease_fence(
+                    gate["identity"],
+                    owner_session_id=gate["owner_session_id"],
+                    fence_token=gate["fence_token"],
+                    owner_pid=gate["owner_pid"],
+                    claimant_runtime_id=gate["claimant_runtime_id"],
+                    mutation=lambda: None,
+                )
+            refused = {gate["path"] for gate in refused_gates}
+            return {path for path in paths if path in refused}
+
         try:
             with active_read_budget(exact_read_budget):
                 shown_paths = mark_exact_messages_read(
                     args.me,
                     shown_paths,
                     budget=exact_read_budget,
-                    claim_paths=gate_selected_paths,
+                    claim_paths=validate_claim,
                 )
         except (
             UnreadableFile,
             UnicodeDecodeError,
             json.JSONDecodeError,
             ValueError,
+            LeaseRefused,
+            OSError,
         ) as exc:
+            release_authorized_gates(set(authorized_gates))
             print(
                 f"[inbox] Exact-session read refused before output: {exc}",
                 file=sys.stderr,
             )
             sys.exit(75)
         claimed = set(shown_paths)
+        release_authorized_gates(set(authorized_gates) - claimed)
         refused = {gate["path"] for gate in refused_gates}
+        read_selected = {
+            message["path"] for message in messages if message.get("read")
+        }
         messages = [
             message
             for message in messages
-            if message["path"] in claimed or message["path"] in refused
+            if message["path"] in claimed
+            or message["path"] in refused
+            or message["path"] in read_selected
         ]
         exit_if_activation_refused()
 
@@ -863,9 +965,12 @@ def main():
                     f"{published_runtime['session']['runtime']['session_id']} "
                     f"for {published_runtime['session']['session_id']}\n"
                 )
-        print(f"\n[inbox] {len(messages)} {'message(s)' if args.show_all else 'unread message(s)'} for {args.me}\n")
-        for i, msg in enumerate(messages):
-            print(format_message(msg, i))
+        if exact_session is not None:
+            print_messages(messages)
+        else:
+            print(f"\n[inbox] {len(messages)} {'message(s)' if args.show_all else 'unread message(s)'} for {args.me}\n")
+            for i, msg in enumerate(messages):
+                print(format_message(msg, i))
         for refused in repo_scope_refused:
             print(
                 f"[inbox] Repo-scope refused {refused['path']}: {refused['reason']}",
