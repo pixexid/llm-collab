@@ -34,7 +34,6 @@ HEURISTIC_RUNTIME_DISCOVERY_FAMILIES = frozenset(
 
 from _helpers import (
     ROOT,
-    agent_state_lock,
     agent_inbox_path,
     build_handoff_prompt,
     config_get,
@@ -174,10 +173,6 @@ class BindingUnreadable(RuntimeError):
     """
 
 
-class AtomicWriteCommitted(OSError):
-    """The replacement is visible, but its parent directory did not fsync."""
-
-
 def load_binding(project_id: str, chat_id: str, agent_id: str) -> dict:
     path = autobridge_binding_path(project_id, chat_id, agent_id)
     if not path.exists():
@@ -226,8 +221,7 @@ def save_binding(payload: dict) -> None:
     )
     path.parent.mkdir(parents=True, exist_ok=True)
     payload["updated_utc"] = utc_iso()
-    with agent_state_lock(str(payload["agent_id"])):
-        write_regular_file_atomically(path, json.dumps(payload, indent=2, sort_keys=True))
+    write_regular_file_atomically(path, json.dumps(payload, indent=2, sort_keys=True))
 
 
 def write_regular_file_atomically(path: Path, content: str) -> None:
@@ -269,9 +263,10 @@ def write_regular_file_atomically(path: Path, content: str) -> None:
             finally:
                 os.close(directory_fd)
         except OSError as error:
-            raise AtomicWriteCommitted(
-                f"{path} was replaced, but its directory did not fsync: {error}"
-            ) from error
+            print(
+                f"[warning] {path} was replaced, but its directory did not fsync: {error}",
+                file=sys.stderr,
+            )
     except BaseException:
         try:
             os.unlink(temporary)
@@ -358,12 +353,7 @@ def save_session(payload: dict) -> None:
     path = autobridge_session_path(session_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     payload["updated_utc"] = utc_iso()
-    agent_id = payload.get("agent_id")
-    if agent_id and payload.get("project_id") and payload.get("chat_id"):
-        with agent_state_lock(str(agent_id)):
-            write_regular_file_atomically(path, json.dumps(payload, indent=2, sort_keys=True))
-    else:
-        write_regular_file_atomically(path, json.dumps(payload, indent=2, sort_keys=True))
+    write_regular_file_atomically(path, json.dumps(payload, indent=2, sort_keys=True))
 
 
 def binding_payload_from_session(
