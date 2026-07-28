@@ -29,6 +29,15 @@ class AxTrustStatus:
         return asdict(self)
 
 
+def ax_app_supports_routine_doorbell(ax_app: object) -> bool:
+    """Match axsend's target refusal for the Claude app profile."""
+    return (
+        isinstance(ax_app, str)
+        and bool(ax_app.strip())
+        and "claude" not in ax_app.casefold()
+    )
+
+
 def has_ax_doorbell_capability(agent: dict) -> bool:
     """Match deliver.py's activation capability allowlist."""
     activation = agent.get("activation", {})
@@ -36,8 +45,7 @@ def has_ax_doorbell_capability(agent: dict) -> bool:
     return (
         agent.get("id") != "claude"
         and activation.get("type") == "cli_session"
-        and isinstance(ax_app, str)
-        and bool(ax_app.strip())
+        and ax_app_supports_routine_doorbell(ax_app)
         and not activation.get("ax_attended_only")
     )
 

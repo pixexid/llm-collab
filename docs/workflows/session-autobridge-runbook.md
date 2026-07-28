@@ -27,7 +27,7 @@ preserve the durable mailbox packet, record the unconfirmed blocker/follow-up,
 and never re-ring. The idle input gate applies only to attended
 screenshot/keyboard Computer Use fallback, not to AX `ring`. Computer Use is
 the recovery path when AX cannot safely target or verify the native composer or
-its empty state, and for an explicitly configured non-CLI desktop bridge.
+its empty state.
 `llm-collab` remains the durable mailbox. Routine/continuous polling is
 **deprecated** as the primary wake — it wastes tokens and a heartbeat set on
 guessed timing can fire into changed context.

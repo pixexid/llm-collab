@@ -120,6 +120,20 @@ class AxAttendedRecoveryRoutingTest(unittest.TestCase):
             deliver.is_ax_attended_recovery_target(claude, "claude", sender_id="codex")
         )
 
+    def test_custom_identity_cannot_route_to_the_claude_app(self) -> None:
+        agent = {
+            "id": "custom",
+            "activation": {
+                "type": "cli_session",
+                "watcher_enabled": True,
+                "ax_app": "Claude",
+            },
+        }
+        self.assertIsNone(deliver.ax_doorbell_app(agent))
+        self.assertFalse(
+            deliver.is_ax_doorbell_target(agent, "custom", sender_id="codex")
+        )
+
     def test_attended_only_target_is_not_routine_doorbell(self) -> None:
         self.assertTrue(deliver.ax_attended_only(self.ZCODE))
         self.assertFalse(

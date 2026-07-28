@@ -176,8 +176,8 @@ watcher alone.
   `QUEUED (UNCONFIRMED)` exit 0 preserves the mailbox/blocker follow-up but does
   not prove exact-thread delivery and must not be re-rung
 - use attended Computer Use only as fallback/recovery when AX cannot safely
-  inspect/target/send, or for an explicitly project-configured non-CLI desktop
-  bridge; apply the idle input gate before this screenshot/keyboard fallback
+  inspect/target/send; apply the idle input gate before this screenshot/keyboard
+  fallback
 - PM2/heartbeat remains a bounded observation safety-fuse, not the primary wake
 
 Why:
@@ -207,9 +207,8 @@ below excludes canonical `claude`; inbound Claude-to-Codex AX is unchanged.
   turn with Computer Use plus
   `bin/axsend-ensure tree --app <app> --editable-only` to remove/blank the
   competing field and verify the real native prompt before resuming AX
-- fallback: use Computer Use to send only when AX remains unavailable/unsafe or
-  the project explicitly configured a non-CLI desktop bridge; apply the Computer
-  Use idle input gate and one-line pointer rule
+- fallback: use Computer Use to send only when AX remains unavailable/unsafe;
+  apply the Computer Use idle input gate and one-line pointer rule
 - never convert one AX targeting incident into a standing mailbox-only or
   AX-disabled policy
 - unsafe: claim a PM2 watcher created a new app-visible desktop thread

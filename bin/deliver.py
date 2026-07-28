@@ -70,6 +70,7 @@ from _activation_identity import (
     canonical_worktree,
     normalized_identity_field,
 )
+from _ax_trust import ax_app_supports_routine_doorbell
 
 # Lane C (GH-1572) flips this to True in the same commit that makes the
 # packet's claim command (`inbox.py --packet`) runnable. Deliberately a code
@@ -239,7 +240,7 @@ def resolve_bound_runtime_session_id(project_id: str, chat_id: str, agent_id: st
 
 def ax_doorbell_app(recipient_agent: dict) -> str | None:
     ax_app = recipient_agent.get("activation", {}).get("ax_app")
-    if not isinstance(ax_app, str) or not ax_app.strip():
+    if not ax_app_supports_routine_doorbell(ax_app):
         return None
     return ax_app.strip()
 

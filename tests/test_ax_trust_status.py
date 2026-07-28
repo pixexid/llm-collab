@@ -286,6 +286,25 @@ class AxTrustProbeTest(unittest.TestCase):
         )
         runner.assert_not_called()
 
+    def test_custom_identity_targeting_claude_is_not_ax_capable(self) -> None:
+        runner = mock.Mock()
+        result = _ax_trust.probe_ax_trust(
+            {
+                "id": "custom",
+                "activation": {
+                    "type": "cli_session",
+                    "ax_app": "Claude",
+                    "watcher_enabled": True,
+                },
+            },
+            platform_name="Darwin",
+            binary_path=self.binary,
+            runner=runner,
+        )
+
+        self.assertEqual(result.status, "n/a")
+        runner.assert_not_called()
+
     def test_down_human_line_is_honest_and_portable(self) -> None:
         case = self.paired_cases(
             scenario="down", probe_outcome=2, expected=DOWN
