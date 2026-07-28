@@ -47,6 +47,8 @@ from _helpers import (
     utc_iso,
 )
 from _session_autobridge import (
+    AtomicWriteCommitted,
+    BindingUnreadable,
     ExactSessionReadBudget,
     HEURISTIC_RUNTIME_DISCOVERY_FAMILIES,
     HEURISTIC_RUNTIME_DISCOVERY_REFUSED_REASON,
@@ -447,6 +449,7 @@ def mark_exact_messages_read(
     paths: list[str],
     *,
     budget: ExactSessionReadBudget,
+    claim_paths=None,
 ) -> list[str]:
     selected = set(paths)
     claimed: list[str] = []
@@ -467,15 +470,20 @@ def mark_exact_messages_read(
             read,
             max_entries=MAX_EXACT_SESSION_INBOX_ENTRIES,
         )
-        claimed.extend(path for path in unread if path in selected)
+        current = [path for path in unread if path in selected]
+        refused = set(claim_paths(current) if claim_paths else ())
+        claimed.extend(path for path in current if path not in refused)
         read_set = set(read)
-        inbox["unread"] = [path for path in unread if path not in selected]
+        inbox["unread"] = [path for path in unread if path not in claimed]
         for path in claimed:
             if path not in read_set:
                 read.append(path)
                 read_set.add(path)
 
-    update_agent_inbox(agent_id, mark, load=load)
+    try:
+        update_agent_inbox(agent_id, mark, load=load)
+    except AtomicWriteCommitted as error:
+        print(f"[inbox] Warning: {error}", file=sys.stderr)
     return claimed
 
 
@@ -660,8 +668,15 @@ def main():
                     repo_scope_refusals=repo_scope_refused,
                     max_entries=MAX_EXACT_SESSION_INBOX_ENTRIES,
                     read_budget=exact_read_budget,
+                    include_read=bool(args.packet),
                 )
-        except (UnreadableFile, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        except (
+            BindingUnreadable,
+            UnreadableFile,
+            UnicodeDecodeError,
+            json.JSONDecodeError,
+            ValueError,
+        ) as exc:
             if args.json_output:
                 print(
                     json.dumps(
@@ -746,19 +761,30 @@ def main():
 
     consume = not args.peek and not args.show_all
     refused_gates: list[dict] = []
-    for message in messages:
-        gate = gate_activation_message(
-            args,
-            message,
-            consume=consume,
-            exact_session=exact_session,
-        )
-        if gate is not None:
+
+    def gate_selected_paths(paths: list[str]) -> set[str]:
+        selected = set(paths)
+        refused: set[str] = set()
+        for message in messages:
+            if message["path"] not in selected:
+                continue
+            gate = gate_activation_message(
+                args,
+                message,
+                consume=consume,
+                exact_session=exact_session,
+            )
+            if gate is None:
+                continue
             message["activation_gate"] = gate
             if consume and not gate.get("authorized"):
                 refused_gates.append({"path": message["path"], **gate})
+                refused.add(message["path"])
+        return refused
 
-    if refused_gates:
+    def exit_if_activation_refused() -> None:
+        if not refused_gates:
+            return
         payload = {"activation_refused": refused_gates, "messages": messages}
         if args.json_output:
             print(json.dumps(payload, indent=2, sort_keys=True))
@@ -770,8 +796,15 @@ def main():
                 )
                 owner = gate.get("owner")
                 if owner:
-                    print(f"  owner: {json.dumps(owner, sort_keys=True)}", file=sys.stderr)
+                    print(
+                        f"  owner: {json.dumps(owner, sort_keys=True)}",
+                        file=sys.stderr,
+                    )
         sys.exit(75)
+
+    if not (consume and exact_session is not None):
+        gate_selected_paths([message["path"] for message in messages])
+        exit_if_activation_refused()
 
     shown_paths = [m["path"] for m in messages if not m.get("read")]
     if consume and exact_session is None:
@@ -786,6 +819,7 @@ def main():
                     args.me,
                     shown_paths,
                     budget=exact_read_budget,
+                    claim_paths=gate_selected_paths,
                 )
         except (
             UnreadableFile,
@@ -799,7 +833,13 @@ def main():
             )
             sys.exit(75)
         claimed = set(shown_paths)
-        messages = [message for message in messages if message["path"] in claimed]
+        refused = {gate["path"] for gate in refused_gates}
+        messages = [
+            message
+            for message in messages
+            if message["path"] in claimed or message["path"] in refused
+        ]
+        exit_if_activation_refused()
 
     if args.json_output:
         payload: dict[str, object] = {"messages": messages}

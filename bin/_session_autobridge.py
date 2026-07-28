@@ -173,6 +173,10 @@ class BindingUnreadable(RuntimeError):
     """
 
 
+class AtomicWriteCommitted(OSError):
+    """The replacement is visible, but its parent directory did not fsync."""
+
+
 def load_binding(project_id: str, chat_id: str, agent_id: str) -> dict:
     path = autobridge_binding_path(project_id, chat_id, agent_id)
     if not path.exists():
@@ -256,11 +260,16 @@ def write_regular_file_atomically(path: Path, content: str) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
-        directory_fd = os.open(path.parent, os.O_RDONLY)
         try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
+            directory_fd = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        except OSError as error:
+            raise AtomicWriteCommitted(
+                f"{path} was replaced, but its directory did not fsync: {error}"
+            ) from error
     except BaseException:
         try:
             os.unlink(temporary)
@@ -978,6 +987,7 @@ def matching_unread_messages(
     repo_scope_refusals: list[dict] | None = None,
     max_entries: int | None = None,
     read_budget: ExactSessionReadBudget | None = None,
+    include_read: bool = False,
 ) -> list[dict]:
     if max_entries is None:
         messages = get_unread_messages(str(session["agent_id"]))
@@ -999,7 +1009,7 @@ def matching_unread_messages(
         read = inbox.get("read")
         validate_exact_inbox_entries(unread, read, max_entries=max_entries)
         messages = []
-        for rel_path in unread:
+        for rel_path in [*unread, *(read if include_read else [])]:
             message_path = ROOT / rel_path
             try:
                 raw = read_regular_file_bounded(
@@ -1010,7 +1020,12 @@ def matching_unread_messages(
                 continue
             frontmatter, body = parse_frontmatter(raw.decode("utf-8"))
             messages.append(
-                {"path": rel_path, "frontmatter": frontmatter, "body": body}
+                {
+                    "path": rel_path,
+                    "read": rel_path in read,
+                    "frontmatter": frontmatter,
+                    "body": body,
+                }
             )
     project_id = session.get("project_id")
     chat_id = session.get("chat_id")
