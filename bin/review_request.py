@@ -37,8 +37,11 @@ require_python()
 
 import argparse
 import json
+import os
 import re
 import subprocess
+
+from _helpers import parse_frontmatter
 
 REQUEST_MARKER = "@codex review"
 COMMENT_PAGE_SIZE = 100
@@ -48,6 +51,8 @@ COMMENT_PAGE_SIZE = 100
 COMMENT_HARD_CAP = 1000
 COMMENT_PAGE_HARD_CAP = COMMENT_HARD_CAP // COMMENT_PAGE_SIZE
 PROJECTS_MAX_BYTES = 1_000_000
+TASK_CONTRACT_ENTRY_HARD_CAP = 5000
+TASK_CONTRACT_MAX_BYTES = 1_000_000
 SCRIPT_CHECKOUT_ROOT = Path(__file__).resolve().parent.parent
 TASK_CONTRACT_RE = re.compile(r"TASK-[A-Z0-9]+")
 GH_READ_TIMEOUT_SECONDS = 30
@@ -60,10 +65,11 @@ RETRIGGER_NOTE = (
 )
 
 COMMENTS_QUERY = f"""query($owner: String!, $name: String!, $pr: Int!, $after: String) {{
+  viewer {{ login }}
   repository(owner: $owner, name: $name) {{
     pullRequest(number: $pr) {{
       comments(first: {COMMENT_PAGE_SIZE}, after: $after) {{
-        nodes {{ body }}
+        nodes {{ body author {{ login }} }}
         pageInfo {{ hasNextPage endCursor }}
       }}
     }}
@@ -159,7 +165,9 @@ def pr_head(pr: int, owner: str, name: str) -> str:
     return data["headRefOid"]
 
 
-def require_contract(contract: str, owner: str, name: str) -> None:
+def require_contract(
+    contract: str, project_id: str, owner: str, name: str
+) -> None:
     if contract.isdecimal() and int(contract) > 0:
         run_json(
             [
@@ -170,12 +178,56 @@ def require_contract(contract: str, owner: str, name: str) -> None:
         return
     if TASK_CONTRACT_RE.fullmatch(contract):
         root = coordination_root()
-        if any(
-            any((root / "Tasks" / folder).glob(f"*__{contract}.md"))
-            for folder in ("active", "backlog", "done")
+        matches: list[Path] = []
+        entries = 0
+        try:
+            for folder in ("active", "backlog", "done"):
+                task_dir = root / "Tasks" / folder
+                if not task_dir.is_dir():
+                    continue
+                with os.scandir(task_dir) as task_entries:
+                    for entry in task_entries:
+                        entries += 1
+                        if entries > TASK_CONTRACT_ENTRY_HARD_CAP:
+                            raise SystemExit(
+                                "error: task-contract scan exceeds the declared "
+                                f"entry bound ({TASK_CONTRACT_ENTRY_HARD_CAP}); "
+                                "failing closed"
+                            )
+                        if (
+                            entry.name.endswith(f"__{contract}.md")
+                            and entry.is_file()
+                        ):
+                            matches.append(Path(entry.path))
+        except OSError as error:
+            raise SystemExit(f"error: cannot scan task contracts: {error}")
+        if not matches:
+            raise SystemExit(
+                f"error: task-hosted lane contract {contract} does not exist"
+            )
+        if len(matches) != 1:
+            raise SystemExit(
+                f"error: task-hosted lane contract {contract} is ambiguous"
+            )
+        path = matches[0]
+        try:
+            if path.stat().st_size > TASK_CONTRACT_MAX_BYTES:
+                raise SystemExit(
+                    f"error: {path} exceeds the {TASK_CONTRACT_MAX_BYTES}-byte "
+                    "task-contract bound"
+                )
+            frontmatter, _ = parse_frontmatter(path.read_text())
+        except OSError as error:
+            raise SystemExit(f"error: cannot read task contract {path}: {error}")
+        if (
+            frontmatter.get("task_id") != contract
+            or frontmatter.get("project_id") != project_id
         ):
-            return
-        raise SystemExit(f"error: task-hosted lane contract {contract} does not exist")
+            raise SystemExit(
+                f"error: task-hosted lane contract {contract} is not bound to "
+                f"project {project_id!r}"
+            )
+        return
     raise SystemExit(
         "error: --contract must be a positive issue number or TASK-id"
     )
@@ -201,8 +253,13 @@ def pr_comment_bodies(pr: int, owner: str, name: str) -> list[str]:
         if after is not None:
             argv += ["-f", f"after={after}"]
         data = run_json(argv)
+        viewer_login = data["data"]["viewer"]["login"]
         comments = data["data"]["repository"]["pullRequest"]["comments"]
-        bodies.extend(node["body"] for node in comments["nodes"])
+        bodies.extend(
+            node["body"]
+            for node in comments["nodes"]
+            if node.get("author", {}).get("login") == viewer_login
+        )
         if len(bodies) > COMMENT_HARD_CAP:
             raise SystemExit(
                 f"error: comment history exceeds the declared bound "
@@ -349,7 +406,7 @@ def main(argv: list[str] | None = None) -> int:
 
     owner, name = repo_coordinates(args.project)
     if args.tier == "A":
-        require_contract(args.contract, owner, name)
+        require_contract(args.contract, args.project, owner, name)
     sha = pr_head(args.pr, owner, name)
     local = local_head()
     if local != sha:

@@ -42,13 +42,24 @@ INITIAL_ARGS = [
 ]
 
 
-def page(bodies: list[str], *, next_page: bool = False, cursor: str | None = None):
+def page(
+    bodies: list[str],
+    *,
+    next_page: bool = False,
+    cursor: str | None = None,
+    author: str = "pixexid",
+    viewer: str = "pixexid",
+):
     return {
         "data": {
+            "viewer": {"login": viewer},
             "repository": {
                 "pullRequest": {
                     "comments": {
-                        "nodes": [{"body": body} for body in bodies],
+                        "nodes": [
+                            {"body": body, "author": {"login": author}}
+                            for body in bodies
+                        ],
                         "pageInfo": {
                             "hasNextPage": next_page,
                             "endCursor": cursor,
@@ -191,6 +202,18 @@ class RequestHistoryTest(unittest.TestCase):
         ):
             with self.assertRaisesRegex(SystemExit, "page bound"):
                 review_request.pr_comment_bodies(1, "pixexid", "llm-collab")
+
+    def test_ignores_requests_from_other_commenters(self):
+        request = f"@codex review for lenses at exact head `{SHA}`."
+        with mock.patch.object(
+            review_request,
+            "run_json",
+            return_value=page([request], author="untrusted-commenter"),
+        ):
+            self.assertEqual(
+                review_request.pr_comment_bodies(1, "pixexid", "llm-collab"),
+                [],
+            )
 
 
 class MainFlowTest(unittest.TestCase):
@@ -357,26 +380,59 @@ class CommandContractTest(unittest.TestCase):
 
     def test_lane_contract_must_be_an_existing_issue_or_task(self):
         with self.assertRaisesRegex(SystemExit, "positive issue number or TASK-id"):
-            review_request.require_contract("0", "pixexid", "llm-collab")
+            review_request.require_contract(
+                "0", "llm-collab", "pixexid", "llm-collab"
+            )
         with mock.patch.object(
             review_request, "run_json", return_value={"number": 352}
         ) as run_json:
-            review_request.require_contract("352", "pixexid", "llm-collab")
+            review_request.require_contract(
+                "352", "llm-collab", "pixexid", "llm-collab"
+            )
         self.assertIn("issue", run_json.call_args.args[0])
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             task_dir = root / "Tasks" / "active"
             task_dir.mkdir(parents=True)
-            (task_dir / "lane__TASK-ABC123.md").write_text("contract")
+            (task_dir / "lane__TASK-ABC123.md").write_text(
+                "---\ntask_id: TASK-ABC123\nproject_id: llm-collab\n---\ncontract"
+            )
             with mock.patch.object(
                 review_request, "coordination_root", return_value=root
             ):
                 review_request.require_contract(
-                    "TASK-ABC123", "pixexid", "llm-collab"
+                    "TASK-ABC123", "llm-collab", "pixexid", "llm-collab"
                 )
+                with self.assertRaisesRegex(SystemExit, "not bound to project"):
+                    review_request.require_contract(
+                        "TASK-ABC123", "amiga", "pixexid", "llm-collab"
+                    )
                 with self.assertRaisesRegex(SystemExit, "does not exist"):
                     review_request.require_contract(
-                        "TASK-MISSING", "pixexid", "llm-collab"
+                        "TASK-MISSING", "llm-collab", "pixexid", "llm-collab"
+                    )
+
+    def test_task_contract_scan_is_cumulative_and_bounded(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task_dir = root / "Tasks" / "active"
+            task_dir.mkdir(parents=True)
+            (task_dir / "foreign-one.md").write_text("one")
+            (task_dir / "foreign-two.md").write_text("two")
+            with (
+                mock.patch.object(
+                    review_request, "coordination_root", return_value=root
+                ),
+                mock.patch.object(
+                    review_request, "TASK_CONTRACT_ENTRY_HARD_CAP", 1
+                ),
+            ):
+                with self.assertRaisesRegex(SystemExit, "entry bound"):
+                    review_request.require_contract(
+                        "TASK-MISSING",
+                        "llm-collab",
+                        "pixexid",
+                        "llm-collab",
                     )
 
 

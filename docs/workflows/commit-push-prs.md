@@ -639,9 +639,12 @@ worker-requested Tier B/C review is outstanding until a terminal signal or an
 exact-head release-gate disposition -- exactly as the fixture matrix records it.
 Proceed only when all of these are true:
 
-- when a connector review was requested, it completed for the exact head and
-  every finding has a written disposition accepted by the lane owner and
-  release-gate worker; required local exact-head verification also passed
+- when a connector review was requested, either it completed for the exact head
+  and every finding has a written disposition accepted by the lane owner and
+  release-gate worker, or both request-anchored clocks expired and an exact-head
+  release-gate disposition lifted the missing review-completion subgate without
+  claiming the connector completed; required local exact-head verification also
+  passed
 - required checks are green on the latest head
 - the PR is mergeable and `mergeStateStatus` is clean
 - **every arriving finding has a thread-linked written outcome, whatever head it was

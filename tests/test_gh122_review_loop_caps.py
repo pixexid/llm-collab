@@ -1510,6 +1510,18 @@ class ReviewLoopCapContractTest(unittest.TestCase):
         ):
             self.assertIn(phrase, section)
 
+    def test_the_silence_disposition_satisfies_review_completion(self):
+        section = contract_section(
+            WORKFLOW_DOC.read_text(encoding="utf-8"),
+            "Proceed only when all of these are true:",
+            "Read [the reviewed artifact set](#reviewed-artifact-set) directly.",
+        )
+        self.assertIn(
+            "release-gate disposition lifted the missing review-completion "
+            "subgate without claiming the connector completed",
+            normalized(section),
+        )
+
     def test_the_compact_handoff_requires_a_new_request_after_a_fix_push(self):
         """With automatic review off, nothing replaces an invalidated signal.
 
