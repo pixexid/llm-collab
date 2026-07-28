@@ -37,10 +37,9 @@ from _helpers import (
     parse_frontmatter,
 )
 from _session_autobridge import (
-    SESSIONS_DIR,
     active_read_budget,
     dispatch_session,
-    load_session,
+    iter_sessions,
     repo_scope_matches,
 )
 from inbox import (
@@ -134,20 +133,12 @@ def exact_session_messages(args) -> list[dict]:
 
 
 def autobridge_session_ids(agent_id: str, project_id: str | None = None) -> list[str]:
-    if not SESSIONS_DIR.exists():
-        return []
-
     session_ids: list[str] = []
-    for path in sorted(SESSIONS_DIR.glob("*.json")):
-        try:
-            session = load_session(path.stem)
-        except (FileNotFoundError, json.JSONDecodeError):
-            continue
-        if session.get("agent_id") != agent_id:
-            continue
+    for session in iter_sessions(agent_id=agent_id):
         if project_id is not None and session.get("project_id") != project_id:
             continue
-        session_ids.append(path.stem)
+        if session.get("session_id"):
+            session_ids.append(str(session["session_id"]))
     return session_ids
 
 

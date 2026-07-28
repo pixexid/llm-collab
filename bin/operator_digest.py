@@ -417,16 +417,11 @@ def worker_sessions() -> tuple[list[dict], int]:
     dispatchable sessions are shown; the rest are counted.
     """
     sys.path.insert(0, str(ROOT / "bin"))
-    from _session_autobridge import session_is_dispatchable
+    from _session_autobridge import iter_sessions, session_is_dispatchable
 
-    sessions_dir = ROOT / "State" / "session_autobridge" / "sessions"
     live: list[dict] = []
     stale = 0
-    for path in sorted(sessions_dir.glob("*.json")):
-        try:
-            record = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
+    for record in iter_sessions():
         if record.get("status") not in {"active", "parked"}:
             continue
         dispatchable, _ = session_is_dispatchable(record)

@@ -138,7 +138,7 @@ def iter_sessions(agent_id: str | None = None) -> list[dict]:
             )
             spent += len(raw)
             session = json.loads(raw.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError):
+        except json.JSONDecodeError:
             continue
         if not isinstance(session, dict):
             raise ValueError(f"Malformed session: {path.stem}")
@@ -395,21 +395,36 @@ def prepare_session_write(payload: dict) -> tuple[dict, str]:
     return candidate, content
 
 
-def save_session(payload: dict) -> None:
+def save_session(
+    payload: dict,
+    prepared: tuple[dict, str] | None = None,
+) -> None:
     session_id = str(payload["session_id"])
     path = autobridge_session_path(session_id)
     path.parent.mkdir(parents=True, exist_ok=True)
-    candidate, content = prepare_session_write(payload)
+    candidate, content = prepared or prepare_session_write(payload)
     write_regular_file_atomically(path, content)
     payload.clear()
     payload.update(candidate)
 
 
-def ensure_message_processed_will_fit(session: dict, message_path: str) -> None:
+def reserve_message_result(
+    session: dict,
+    message: dict,
+    *,
+    include_canonical: bool,
+) -> None:
+    message_path = str(message["path"])
     processed = list(session.get("processed_messages", []))
     if message_path not in processed:
         processed.append(message_path)
-    prepare_session_write({**session, "processed_messages": processed})
+    candidate = {**session, "processed_messages": processed}
+    if include_canonical and message_needs_canonical_materialization(session, message):
+        canonical = session.get("canonical_settled_messages", {})
+        canonical = dict(canonical) if isinstance(canonical, dict) else {}
+        canonical.setdefault(message_path, {"reason": "gate_disabled"})
+        candidate["canonical_settled_messages"] = canonical
+    prepare_session_write(candidate)
 
 
 def binding_payload_from_session(
@@ -2896,6 +2911,26 @@ def dispatch_session(
                     "reason": skip_reason,
                 },
             )
+            try:
+                reserve_message_result(session, message, include_canonical=False)
+            except (
+                FileNotFoundError,
+                UnreadableFile,
+                UnicodeDecodeError,
+                json.JSONDecodeError,
+                KeyError,
+                ValueError,
+            ) as error:
+                append_event(
+                    session_id,
+                    {
+                        "event": "message_skipped_unprocessed",
+                        "message_path": message["path"],
+                        "reason": "session_capacity_refused",
+                        "detail": str(error),
+                    },
+                )
+                continue
             fenced, assertion_event, _ = activation_fenced_mutation(
                 session,
                 message,
@@ -2913,31 +2948,6 @@ def dispatch_session(
                         "reason": assertion_event["reason"] if assertion_event else "activation_assert_refused",
                     },
                 )
-            continue
-        activation_allowed, activation_event = claim_message_activation(session, message)
-        if activation_event is not None:
-            append_event(session_id, activation_event)
-        if not activation_allowed:
-            continue
-        try:
-            ensure_message_processed_will_fit(session, message["path"])
-        except (
-            FileNotFoundError,
-            UnreadableFile,
-            UnicodeDecodeError,
-            json.JSONDecodeError,
-            KeyError,
-            ValueError,
-        ) as error:
-            append_event(
-                session_id,
-                {
-                    "event": "message_skipped",
-                    "message_path": message["path"],
-                    "reason": "session_capacity_refused",
-                    "detail": str(error),
-                },
-            )
             continue
         matched.append(message)
 
@@ -2958,6 +2968,49 @@ def dispatch_session(
         actions.append(event)
     materialization_slot_available = True
     for message in matched:
+        try:
+            reserve_message_result(session, message, include_canonical=False)
+        except (
+            FileNotFoundError,
+            UnreadableFile,
+            UnicodeDecodeError,
+            json.JSONDecodeError,
+            KeyError,
+            ValueError,
+        ) as error:
+            event = {
+                "event": "message_skipped",
+                "message_path": message["path"],
+                "reason": "session_capacity_refused",
+                "detail": str(error),
+            }
+            append_event(session_id, event)
+            actions.append(event)
+            continue
+        activation_allowed, activation_event = claim_message_activation(session, message)
+        if activation_event is not None:
+            append_event(session_id, activation_event)
+        if not activation_allowed:
+            continue
+        try:
+            reserve_message_result(session, message, include_canonical=True)
+        except (
+            FileNotFoundError,
+            UnreadableFile,
+            UnicodeDecodeError,
+            json.JSONDecodeError,
+            KeyError,
+            ValueError,
+        ) as error:
+            event = {
+                "event": "message_skipped",
+                "message_path": message["path"],
+                "reason": "session_capacity_refused",
+                "detail": str(error),
+            }
+            append_event(session_id, event)
+            actions.append(event)
+            continue
         action, action_reason = resolve_effective_action(session, message)
         event: dict[str, Any] = {
             "event": "message_dispatched",
