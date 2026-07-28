@@ -275,7 +275,11 @@ one-request, one-external-review rule internally consistent.
 from GitHub and the local checkout,
 refuses on mismatch, and enforces one initial request per head plus the single
 exempted re-trigger. It has no option to pass a SHA by hand — a hand-typed SHA
-is how #347 came to contain a fabricated, later-retracted request.
+is how #347 came to contain a fabricated, later-retracted request. It also
+shapes the request (GH-357): a first request is a full audit, a later-head
+request is scoped to the delta from the previous requested head, `--settled`
+names adjudicated families the reviewer must not re-raise, and every request
+carries the lane's threat model and recorded accepted risks.
 
 **"Untrusted" means input we do not control.** Our own workspace — `State/`,
 `Chats/`, `projects.json`, the checkout itself — is not an adversary: anyone who can

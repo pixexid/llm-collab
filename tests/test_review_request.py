@@ -338,6 +338,100 @@ class MainFlowTest(unittest.TestCase):
         post.assert_not_called()
 
 
+class RequestShapingTest(unittest.TestCase):
+    """GH-357: requests are shaped to cost one audit, not five."""
+
+    def test_every_initial_request_carries_the_threat_model(self):
+        body = review_request.build_request_body("lenses", SHA)
+        self.assertIn("private repository", body)
+        self.assertIn("not an adversary", body)
+        self.assertIn("non-goals", body)
+
+    def test_delta_scoped_body_names_base_and_p0_only_rule(self):
+        body = review_request.build_request_body(
+            "lenses", SHA, contract=352, delta_base=OTHER_SHA
+        )
+        self.assertIn(f"delta `{OTHER_SHA}..{SHA}`", body)
+        self.assertIn("outside the delta only when P0", body)
+        self.assertIn("lane contract in #352", body)
+        self.assertNotIn("full diff", body)
+
+    def test_full_audit_body_when_no_delta_base(self):
+        body = review_request.build_request_body("lenses", SHA, contract=352)
+        self.assertIn("full diff", body)
+
+    def test_settled_families_are_named_as_do_not_reraise(self):
+        body = review_request.build_request_body(
+            "lenses", SHA, settled="budget reconstruction, hostile filesystem"
+        )
+        self.assertIn("do not re-raise", body)
+        self.assertIn("budget reconstruction, hostile filesystem", body)
+
+    def test_settled_text_cannot_name_a_head(self):
+        with self.assertRaisesRegex(SystemExit, "caller text"):
+            review_request.reject_caller_supplied_shas({"settled": f"at {SHA}"})
+
+    def test_prior_heads_skip_unparseable_and_non_request_bodies(self):
+        bodies = [
+            f"@codex review for lenses at exact head `{OTHER_SHA}`.",
+            "@codex review for lenses with no head",
+            "unrelated comment",
+            f"@codex review for lenses at exact head `{SHA}`.",
+        ]
+        self.assertEqual(
+            review_request.prior_request_heads(bodies), [OTHER_SHA, SHA]
+        )
+
+
+class DeltaScopeMainTest(unittest.TestCase):
+    def setUp(self):
+        patcher = mock.patch.object(review_request, "require_contract")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def patches(self, *, comments: list[str]):
+        return (
+            mock.patch.object(
+                review_request,
+                "repo_coordinates",
+                return_value=("pixexid", "llm-collab"),
+            ),
+            mock.patch.object(
+                review_request, "pr_head", side_effect=[SHA, SHA, SHA]
+            ),
+            mock.patch.object(review_request, "local_head", return_value=SHA),
+            mock.patch.object(
+                review_request, "pr_comment_bodies", return_value=comments
+            ),
+            mock.patch.object(review_request, "post_comment"),
+        )
+
+    def test_delta_request_uses_prior_head_and_carries_settled(self):
+        prior = f"@codex review for lenses at exact head `{OTHER_SHA}`."
+        patches = self.patches(comments=[prior])
+        with patches[0], patches[1], patches[2], patches[3], patches[4] as post:
+            self.assertEqual(
+                review_request.main([*INITIAL_ARGS, "--settled", "budget family"]), 0
+            )
+        body = post.call_args.args[-1]
+        self.assertIn(f"delta `{OTHER_SHA}..{SHA}`", body)
+        self.assertIn("do not re-raise: budget family", body)
+
+    def test_first_request_on_a_pr_remains_a_full_audit(self):
+        patches = self.patches(comments=["unrelated comment"])
+        with patches[0], patches[1], patches[2], patches[3], patches[4] as post:
+            self.assertEqual(review_request.main(INITIAL_ARGS), 0)
+        body = post.call_args.args[-1]
+        self.assertIn("full diff", body)
+        self.assertIn("private repository", body)
+
+    def test_unparseable_prior_falls_back_to_full_audit(self):
+        patches = self.patches(comments=["@codex review for lenses with no head"])
+        with patches[0], patches[1], patches[2], patches[3], patches[4] as post:
+            self.assertEqual(review_request.main(INITIAL_ARGS), 0)
+        self.assertIn("full diff", post.call_args.args[-1])
+
+
 class CommandContractTest(unittest.TestCase):
     def test_string_refusal_is_exit_two(self):
         with (
