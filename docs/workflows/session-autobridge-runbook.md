@@ -67,9 +67,12 @@ remove it and rely on the doorbell + mailbox-drain self-heal.
 - Treat Claude desktop as a human-visible UI, not as a
   `session_autobridge.py` runtime target. **Claude has exactly one routine wake
   path: the durable collab packet, picked up by an exact-session background
-  inbox watcher owned by that Claude task.** An agent-wide PM2 watcher is not
-  that proof. The poller leaves the activation unclaimed for the native watcher.
-  Do not claim a PM2 watcher, CLI resume, or filesystem write reached the app.
+  inbox watcher streamed through a persistent native Monitor owned by that
+  Claude task.** The Monitor surfaces each event without waiting for the watcher
+  command to exit or re-arming after a turn. An ordinary background task or
+  agent-wide PM2 watcher is not that proof. The poller leaves the activation
+  unclaimed for the native watcher. Do not claim a PM2 watcher, CLI resume, or
+  filesystem write reached the app.
 - A binding whose canonical `agent_id` is `claude` must use `notify` mode.
   Only that identity suppresses `claude -p` / `claude --resume`; its background
   inbox watcher owns pickup.

@@ -114,10 +114,17 @@ def utc_now_str() -> str:
     return datetime.utcnow().isoformat(timespec="seconds")
 
 
+class ExactWatcherAuthorityError(RuntimeError):
+    pass
+
+
 def exact_session_messages(args) -> list[dict]:
     budget = ExactReadBudget(MAX_EXACT_SESSION_BYTES)
     with active_read_budget(budget):
-        session = exact_read_session(args, budget)
+        try:
+            session = exact_read_session(args, budget)
+        except Exception as error:
+            raise ExactWatcherAuthorityError(str(error)) from error
         messages, _ = exact_read_messages(args, session, budget)
     return messages
 
@@ -279,9 +286,24 @@ def main():
 
     if args.skip_existing:
         if args.session:
-            seen_paths = {
-                message["path"] for message in exact_session_messages(args)
-            }
+            while True:
+                try:
+                    seen_paths = {
+                        message["path"] for message in exact_session_messages(args)
+                    }
+                    break
+                except Exception as error:
+                    emit(
+                        {
+                            "ts": utc_now_str(),
+                            "event": "error",
+                            "detail": str(error),
+                        },
+                        args.json_output,
+                    )
+                    if isinstance(error, ExactWatcherAuthorityError):
+                        sys.exit(75)
+                    time.sleep(poll_interval)
         elif inbox_path.exists():
             data = load_agent_inbox(args.me)
             seen_paths = set(data.get("unread", []))
@@ -353,7 +375,7 @@ def main():
         except Exception as e:
             ts_str = utc_now_str()
             emit({"ts": ts_str, "event": "error", "detail": str(e)}, args.json_output)
-            if args.session:
+            if args.session and isinstance(e, ExactWatcherAuthorityError):
                 sys.exit(75)
 
         polls += 1
