@@ -221,6 +221,11 @@ class MainFlowTest(unittest.TestCase):
         patcher = mock.patch.object(review_request, "require_contract")
         patcher.start()
         self.addCleanup(patcher.stop)
+        visibility = mock.patch.object(
+            review_request, "repo_is_private", return_value=True
+        )
+        visibility.start()
+        self.addCleanup(visibility.stop)
 
     def patches(
         self,
@@ -337,15 +342,43 @@ class MainFlowTest(unittest.TestCase):
             self.assertEqual(review_request.main(args), 0)
         post.assert_not_called()
 
+    def test_public_repo_request_claims_untrusted_comment_content(self):
+        patches = self.patches()
+        with (
+            mock.patch.object(
+                review_request, "repo_is_private", return_value=False
+            ),
+            patches[0],
+            patches[1],
+            patches[2],
+            patches[3],
+            patches[4] as post,
+        ):
+            self.assertEqual(review_request.main(INITIAL_ARGS), 0)
+        body = post.call_args.args[-1]
+        self.assertIn("public repository", body)
+        self.assertIn("untrusted input", body)
+        self.assertNotIn("private repository", body)
+
 
 class RequestShapingTest(unittest.TestCase):
     """GH-357: requests are shaped to cost one audit, not five."""
 
     def test_every_initial_request_carries_the_threat_model(self):
         body = review_request.build_request_body("lenses", SHA)
-        self.assertIn("private repository", body)
         self.assertIn("not an adversary", body)
         self.assertIn("non-goals", body)
+
+    def test_visibility_is_never_hardcoded(self):
+        private = review_request.build_request_body("lenses", SHA, is_private=True)
+        self.assertIn("private repository", private)
+        public = review_request.build_request_body("lenses", SHA, is_private=False)
+        self.assertIn("public repository", public)
+        self.assertIn("untrusted input", public)
+        self.assertNotIn("private repository", public)
+        unknown = review_request.build_request_body("lenses", SHA)
+        self.assertNotIn("private repository", unknown)
+        self.assertNotIn("public repository", unknown)
 
     def test_delta_scoped_body_names_base_and_p0_only_rule(self):
         body = review_request.build_request_body(
@@ -388,6 +421,11 @@ class DeltaScopeMainTest(unittest.TestCase):
         patcher = mock.patch.object(review_request, "require_contract")
         patcher.start()
         self.addCleanup(patcher.stop)
+        visibility = mock.patch.object(
+            review_request, "repo_is_private", return_value=True
+        )
+        visibility.start()
+        self.addCleanup(visibility.stop)
 
     def patches(self, *, comments: list[str]):
         return (

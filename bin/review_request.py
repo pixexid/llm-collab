@@ -77,12 +77,28 @@ RETRIGGER_NOTE = (
 REQUEST_HEAD_RE = re.compile(r"`([0-9a-f]{40})`")
 # Carried by every initial request so the reviewer audits the adversaries the
 # lane actually defends against, instead of inventing ones it does not.
-THREAT_MODEL_NOTE = (
-    "Context: private repository — commenters are the operator and registered "
-    "worker accounts, and our own workspace is not an adversary (bound "
-    "accidents, not attacks). Do not raise findings about the lane contract's "
-    "non-goals or about risks already recorded as accepted on this PR."
+# Repository visibility is sourced from GitHub per invocation — never
+# hardcoded: llm-collab is public, and a false "private" claim tells the
+# reviewer to ignore commenter-origin risks that are real.
+WORKSPACE_TRUST_NOTE = (
+    "our own workspace is not an adversary (bound accidents, not attacks). "
+    "Do not raise findings about the lane contract's non-goals or about "
+    "risks already recorded as accepted on this PR."
 )
+
+
+def threat_model_note(is_private: bool | None) -> str:
+    if is_private is True:
+        return (
+            "Context: private repository — commenters are the operator and "
+            "registered worker accounts; " + WORKSPACE_TRUST_NOTE
+        )
+    if is_private is False:
+        return (
+            "Context: public repository — comment content is untrusted "
+            "input; " + WORKSPACE_TRUST_NOTE
+        )
+    return "Context: " + WORKSPACE_TRUST_NOTE
 
 COMMENTS_QUERY = f"""query($owner: String!, $name: String!, $pr: Int!, $after: String) {{
   viewer {{ login }}
@@ -183,6 +199,19 @@ def pr_head(pr: int, owner: str, name: str) -> str:
             f"error: {owner}/{name}#{pr} is not open; refusing to post a review request"
         )
     return data["headRefOid"]
+
+
+def repo_is_private(owner: str, name: str) -> bool:
+    data = run_json(
+        ["gh", "repo", "view", f"{owner}/{name}", "--json", "isPrivate"]
+    )
+    is_private = data.get("isPrivate")
+    if not isinstance(is_private, bool):
+        raise SystemExit(
+            f"error: cannot determine visibility of {owner}/{name}; failing "
+            "closed rather than guessing the threat model"
+        )
+    return is_private
 
 
 def require_contract(
@@ -345,6 +374,7 @@ def build_request_body(
     note: str | None = None,
     delta_base: str | None = None,
     settled: str | None = None,
+    is_private: bool | None = None,
 ) -> str:
     if not focus.strip():
         raise SystemExit("error: --focus must name at least one review lens")
@@ -372,7 +402,7 @@ def build_request_body(
         )
     if note:
         parts.append(note.strip())
-    parts.append(THREAT_MODEL_NOTE)
+    parts.append(threat_model_note(is_private))
     return " ".join(parts)
 
 
@@ -513,6 +543,7 @@ def main(argv: list[str] | None = None) -> int:
             args.note,
             delta_base=delta_base,
             settled=args.settled,
+            is_private=repo_is_private(owner, name),
         )
 
     if args.dry_run:
