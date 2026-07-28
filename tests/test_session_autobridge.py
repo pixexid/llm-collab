@@ -6283,6 +6283,291 @@ class SessionAutobridgeTest(unittest.TestCase):
         )
         notify.assert_called_once()
 
+    def test_watcher_exact_session_emits_only_that_sessions_packets(self):
+        root = self.make_workspace()
+        self.add_agent(
+            root,
+            {
+                "id": "claude",
+                "display_name": "Claude",
+                "activation": {"type": "cli_session", "watcher_enabled": True},
+            },
+        )
+        self.run_cli(
+            root,
+            "register",
+            "--session",
+            "SESSION-CLAUDE-A",
+            "--agent",
+            "claude",
+            "--project",
+            "amiga",
+            "--chat",
+            "CHAT-CLAUDE-A",
+            "--repo-target",
+            "app",
+            "--mode",
+            "notify",
+            "--runtime-family",
+            "claude_app",
+            "--runtime-session-id",
+            "runtime-claude-a",
+            "--runtime-session-source",
+            "test_fixture",
+        )
+        packet_a = self.add_message(
+            root,
+            agent_id="claude",
+            chat_id="CHAT-CLAUDE-A",
+            project_id="amiga",
+            title="For A",
+            target_session_id="runtime-claude-a",
+            repo_targets=["app"],
+            packet_slug="for-a",
+        )
+        self.add_message(
+            root,
+            agent_id="claude",
+            chat_id="CHAT-CLAUDE-A",
+            project_id="amiga",
+            title="For B",
+            target_session_id="runtime-claude-b",
+            repo_targets=["app"],
+            packet_slug="for-b",
+        )
+
+        command = [
+            sys.executable,
+            str(WATCH_INBOX_SCRIPT),
+            "--me",
+            "claude",
+            "--project",
+            "amiga",
+            "--chat",
+            "CHAT-CLAUDE-A",
+            "--session",
+            "SESSION-CLAUDE-A",
+            "--repo-target",
+            "app",
+            "--max-polls",
+            "1",
+            "--json",
+        ]
+        result = subprocess.run(
+            command,
+            cwd=root,
+            text=True,
+            capture_output=True,
+            env={
+                **self.subprocess_env(root),
+                "LLM_COLLAB_READER_RUNTIME_ID": "runtime-claude-a",
+            },
+            check=True,
+        )
+
+        events = [json.loads(line) for line in result.stdout.splitlines()]
+        self.assertEqual(
+            [packet_a],
+            [event["detail"] for event in events if event["event"] == "new_message"],
+            result.stdout + result.stderr,
+        )
+        self.assertFalse(
+            any(event["event"].startswith("autobridge_") for event in events)
+        )
+        self.assertEqual(
+            2,
+            len(json.loads((root / "agents" / "claude" / "inbox.json").read_text())["unread"]),
+        )
+        stale = subprocess.run(
+            command,
+            cwd=root,
+            text=True,
+            capture_output=True,
+            env={
+                **self.subprocess_env(root),
+                "LLM_COLLAB_READER_RUNTIME_ID": "runtime-claude-b",
+            },
+        )
+        self.assertEqual(75, stale.returncode)
+        self.assertIn("exact_session_runtime_mismatch", stale.stdout)
+
+    def test_exact_watcher_stays_armed_and_emits_a_later_packet(self):
+        old = {
+            "path": "Chats/exact/old.md",
+            "frontmatter": {
+                "project_id": "llm-collab",
+                "repo_targets": ["llm-collab"],
+            },
+        }
+        new = {
+            "path": "Chats/exact/new.md",
+            "frontmatter": {
+                "project_id": "llm-collab",
+                "repo_targets": ["llm-collab"],
+            },
+        }
+        stdout = StringIO()
+        argv = [
+            "watch_inbox.py",
+            "--me",
+            "claude",
+            "--project",
+            "llm-collab",
+            "--chat",
+            "CHAT-EXACT",
+            "--session",
+            "SESSION-EXACT",
+            "--repo-target",
+            "llm-collab",
+            "--skip-existing",
+            "--max-polls",
+            "2",
+            "--poll-seconds",
+            "1",
+            "--json",
+        ]
+        with patch.object(sys, "argv", argv), patch.object(
+            watch_inbox_lib, "agent_ids", return_value=["claude"]
+        ), patch.object(
+            watch_inbox_lib,
+            "exact_session_messages",
+            side_effect=[[old], [old], [old, new]],
+        ), patch.object(watch_inbox_lib.time, "sleep"), redirect_stdout(stdout):
+            watch_inbox_lib.main()
+
+        events = [json.loads(line) for line in stdout.getvalue().splitlines()]
+        self.assertEqual(
+            [new["path"]],
+            [event["detail"] for event in events if event["event"] == "new_message"],
+        )
+
+    def test_exact_watcher_retries_a_transient_read_failure(self):
+        message = {
+            "path": "Chats/exact/recovered.md",
+            "frontmatter": {
+                "project_id": "llm-collab",
+                "repo_targets": ["llm-collab"],
+            },
+        }
+        stdout = StringIO()
+        argv = [
+            "watch_inbox.py",
+            "--me",
+            "claude",
+            "--project",
+            "llm-collab",
+            "--chat",
+            "CHAT-EXACT",
+            "--session",
+            "SESSION-EXACT",
+            "--repo-target",
+            "llm-collab",
+            "--max-polls",
+            "2",
+            "--poll-seconds",
+            "1",
+            "--json",
+        ]
+        with patch.object(sys, "argv", argv), patch.object(
+            watch_inbox_lib, "agent_ids", return_value=["claude"]
+        ), patch.object(
+            watch_inbox_lib,
+            "exact_session_messages",
+            side_effect=[ValueError("temporary read failure"), [message]],
+        ), patch.object(watch_inbox_lib.time, "sleep"), redirect_stdout(stdout):
+            watch_inbox_lib.main()
+
+        events = [json.loads(line) for line in stdout.getvalue().splitlines()]
+        self.assertEqual(["error", "new_message"], [event["event"] for event in events])
+        self.assertEqual(message["path"], events[-1]["detail"])
+
+    def test_exact_watcher_retries_a_transient_baseline_failure(self):
+        old = {
+            "path": "Chats/exact/old.md",
+            "frontmatter": {
+                "project_id": "llm-collab",
+                "repo_targets": ["llm-collab"],
+            },
+        }
+        new = {
+            "path": "Chats/exact/new.md",
+            "frontmatter": {
+                "project_id": "llm-collab",
+                "repo_targets": ["llm-collab"],
+            },
+        }
+        stdout = StringIO()
+        argv = [
+            "watch_inbox.py",
+            "--me",
+            "claude",
+            "--project",
+            "llm-collab",
+            "--chat",
+            "CHAT-EXACT",
+            "--session",
+            "SESSION-EXACT",
+            "--repo-target",
+            "llm-collab",
+            "--skip-existing",
+            "--max-polls",
+            "1",
+            "--poll-seconds",
+            "1",
+            "--json",
+        ]
+        with patch.object(sys, "argv", argv), patch.object(
+            watch_inbox_lib, "agent_ids", return_value=["claude"]
+        ), patch.object(
+            watch_inbox_lib,
+            "exact_session_messages",
+            side_effect=[ValueError("temporary baseline failure"), [old], [old, new]],
+        ), patch.object(watch_inbox_lib.time, "sleep"), redirect_stdout(stdout):
+            watch_inbox_lib.main()
+
+        events = [json.loads(line) for line in stdout.getvalue().splitlines()]
+        self.assertEqual(["error", "new_message"], [event["event"] for event in events])
+        self.assertEqual(new["path"], events[-1]["detail"])
+
+    def test_exact_watcher_uses_only_the_bounded_registry_reader(self):
+        argv = [
+            "watch_inbox.py",
+            "--me",
+            "claude",
+            "--project",
+            "llm-collab",
+            "--chat",
+            "CHAT-EXACT",
+            "--session",
+            "SESSION-EXACT",
+            "--max-polls",
+            "1",
+            "--json",
+        ]
+        with patch.object(sys, "argv", argv), patch.object(
+            watch_inbox_lib, "agent_ids", side_effect=AssertionError("unbounded read")
+        ), patch.object(
+            watch_inbox_lib, "config_get", return_value=1
+        ), patch.object(
+            watch_inbox_lib, "exact_session_messages", return_value=[]
+        ):
+            watch_inbox_lib.main()
+
+    def test_exact_watcher_refuses_repository_scope_mismatch(self):
+        args = object()
+        with patch.object(
+            watch_inbox_lib, "exact_read_session", return_value={}
+        ), patch.object(
+            watch_inbox_lib,
+            "exact_read_messages",
+            return_value=([], [{"path": "Chats/exact/wrong.md", "reason": "repo_mismatch"}]),
+        ):
+            with self.assertRaisesRegex(
+                watch_inbox_lib.ExactWatcherAuthorityError,
+                "exact_session_repo_scope_refused",
+            ):
+                watch_inbox_lib.exact_session_messages(args)
+
     def test_register_persists_explicit_repo_subscription(self):
         root = self.make_workspace()
         self.add_agent(

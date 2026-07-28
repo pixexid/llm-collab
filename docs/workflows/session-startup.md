@@ -11,6 +11,12 @@ cd <workspace_root>
 python bin/session_bootstrap.py --agent <agent_id>
 ```
 
+For an interactive collab worker, startup is not complete until the exact
+native session watcher and its target/sibling probes pass. Follow
+[`collab-thread-quickstart.md` → Bootstrap](collab-thread-quickstart.md#1-bootstrap).
+Do not treat the agent-wide watcher reported by `session_bootstrap.py` as that
+proof.
+
 ## Keep The Tooling Current
 
 `llm-collab` is the shared coordination tool. Before using a persistent checkout

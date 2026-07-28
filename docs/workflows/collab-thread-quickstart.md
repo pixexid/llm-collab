@@ -81,8 +81,44 @@ python bin/deliver.py --project demo-app --chat CHAT-2F8529C5   --from codex --t
 python bin/session_bootstrap.py --agent <agent_id>
 ```
 
-Starts your inbox watcher and prints your identity, current project, and recent
-mail. Run it once per session, before anything else.
+Prints your identity, current project, recent mail, and the legacy agent-wide
+watcher status. Run it once per session, before anything else.
+
+An agent-wide watcher is not enough for an interactive collab worker: it cannot
+attach an event to one native session and can observe sibling sessions. Before
+the first work packet, install and prove one event watcher owned by the exact
+binding registered in step 0.
+
+For a Claude Desktop task, have that same task run this command in a
+**persistent native Monitor**:
+
+```bash
+export LLM_COLLAB_READER_RUNTIME_ID=<native-runtime-session-id>
+python bin/watch_inbox.py \
+  --me <agent_id> --project <project_id> --chat <CHAT-ID> \
+  --session <SESSION-ID> --repo-target <repo-id> --skip-existing --json
+```
+
+The Monitor streams each JSON event into that task as it arrives; it does not
+wait for the command to exit and does not need re-arming after a turn. A normal
+background Bash task is the wrong native shape: it only surfaces completion, so
+an infinite watcher can log packets without waking the task.
+
+For Glim, Relay, or Kimi on Pi, install `pi-event-monitor`'s `/monitor-watch`
+on the exact pointer path stored in that session's runtime command. Do not add a
+shell poller beside the native monitor.
+
+Setup is complete only after a disposable packet addressed to the binding
+starts a turn in that native session while idle, another packet surfaces during
+a running turn, and a packet addressed to a sibling session produces no event.
+A helper with Computer Use or AX may install and validate this watcher once;
+after the proof, stop UI steering and let the worker's event watcher own pickup.
+A new, forked, or replaced native session needs a new watcher, and the old
+watcher must stop.
+
+Codex is the current exception: it has no native session event watcher. When it
+is not polling its inbox, use the attended AX wake described in
+`session-autobridge-runbook.md`.
 
 ## 2. Know your three coordinates
 
@@ -101,11 +137,14 @@ to be watching.
 ## 3. Read your inbox
 
 ```bash
-python bin/inbox.py --me <agent_id> --project <project_id> --chat <CHAT-ID> --limit 5
+export LLM_COLLAB_READER_RUNTIME_ID=<native-runtime-session-id>
+python bin/inbox.py \
+  --me <agent_id> --project <project_id> --chat <CHAT-ID> \
+  --session <SESSION-ID> --repo-target <repo-id> --peek --limit 5
 ```
 
-Scope it. `--chat` matches a substring, and an unscoped read across a busy
-workspace will surface another project's traffic.
+Keep the read bound to the same native session as the watcher. Exact reads are
+read-only; they cannot consume a sibling session's packet.
 
 ## 4. Send a packet
 
