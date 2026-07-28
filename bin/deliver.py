@@ -648,6 +648,9 @@ def main():
     # in the result so the scope-refusal wake-flag guard keeps covering them.
     desktop_bridge_required = False
     desktop_bridge_prompt = None
+    recipient_activation = recipient_agent.get("activation", {})
+    recipient_ax_app_present = "ax_app" in recipient_activation
+    recipient_ax_profile = ax_app_profile(recipient_activation.get("ax_app"))
     operator_relay_required = (
         args.recipient != "operator"
         and not thread_coordination_required
@@ -656,8 +659,10 @@ def main():
         and not ax_doorbell_required
         and not ax_attended_recovery_required
         and not is_watcher_only_target(args.recipient)
-        and ax_app_profile(recipient_agent.get("activation", {}).get("ax_app"))
-        in {None, "codex", "zcode"}
+        and (
+            not recipient_ax_app_present
+            or recipient_ax_profile in {"codex", "zcode"}
+        )
         and is_human_relay(recipient_agent)
     )
     activation_unavailable = (
@@ -682,12 +687,16 @@ def main():
                 else "claude is woken by its background inbox watcher: no dispatchable "
                 "binding resolved for this chat, so repair the binding or the watcher"
             )
-        elif ax_app_profile(recipient_agent.get("activation", {}).get("ax_app")) == "claude":
+        elif recipient_ax_app_present and recipient_ax_profile is None:
+            activation_unavailable_reason = (
+                "activation.ax_app must be a non-empty string when present"
+            )
+        elif recipient_ax_profile == "claude":
             activation_unavailable_reason = (
                 "activation.ax_app resolves to the Claude profile, which cannot be a "
                 "target-side wake transport"
             )
-        elif ax_app_profile(recipient_agent.get("activation", {}).get("ax_app")) == "unknown":
+        elif recipient_ax_profile == "unknown":
             activation_unavailable_reason = (
                 "activation.ax_app has no supported native composer profile"
             )

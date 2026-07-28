@@ -3395,46 +3395,49 @@ class SessionAutobridgeTest(unittest.TestCase):
         self.assertTrue(payload["activation_unavailable"])
         self.assertIn("Claude profile", payload["activation_unavailable_reason"])
 
-    def test_unknown_profile_cannot_fall_through_to_human_relay(self):
-        root = self.make_workspace()
-        for agent, activation in (
-            ("codex", {"type": "cli_session", "watcher_enabled": True}),
-            (
-                "custom",
-                {
-                    "type": "human_relay",
-                    "watcher_enabled": False,
-                    "ax_app": "Unknown Electron App",
-                },
-            ),
-        ):
-            self.add_agent(
-                root,
-                {
-                    "id": agent,
-                    "display_name": agent.title(),
-                    "activation": activation,
-                },
-            )
-        self.create_chat(
-            root,
-            chat_dir_name="2026-07-27_unknown-profile-relay__CHAT-UNKNOWN-PROFILE",
-            chat_id="CHAT-UNKNOWN-PROFILE",
-            project_id="amiga",
-        )
+    def test_unsupported_profile_cannot_fall_through_to_human_relay(self):
+        for index, ax_app in enumerate(("Unknown Electron App", "", 7)):
+            with self.subTest(ax_app=ax_app):
+                root = self.make_workspace()
+                for agent, activation in (
+                    ("codex", {"type": "cli_session", "watcher_enabled": True}),
+                    (
+                        "custom",
+                        {
+                            "type": "human_relay",
+                            "watcher_enabled": False,
+                            "ax_app": ax_app,
+                        },
+                    ),
+                ):
+                    self.add_agent(
+                        root,
+                        {
+                            "id": agent,
+                            "display_name": agent.title(),
+                            "activation": activation,
+                        },
+                    )
+                chat_id = f"CHAT-UNSUPPORTED-PROFILE-{index}"
+                self.create_chat(
+                    root,
+                    chat_dir_name=f"2026-07-27_unsupported-profile-relay__{chat_id}",
+                    chat_id=chat_id,
+                    project_id="amiga",
+                )
 
-        payload, _stderr = self.deliver_with_scope(
-            root,
-            "CHAT-UNKNOWN-PROFILE",
-            recipient="custom",
-        )
+                payload, _stderr = self.deliver_with_scope(
+                    root,
+                    chat_id,
+                    recipient="custom",
+                )
 
-        self.assertFalse(payload["operator_relay_required"])
-        self.assertTrue(payload["activation_unavailable"])
-        self.assertIn(
-            "no supported native composer profile",
-            payload["activation_unavailable_reason"],
-        )
+                self.assertFalse(payload["operator_relay_required"])
+                self.assertTrue(payload["activation_unavailable"])
+                self.assertIn(
+                    "activation.ax_app",
+                    payload["activation_unavailable_reason"],
+                )
 
     def test_no_wake_lane_re_derives_the_flag_it_must_not_use(self):
         """Structural: five lanes each gated on `not autobridge_ready` is five chances to miss one.
