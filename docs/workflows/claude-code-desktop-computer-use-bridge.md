@@ -5,11 +5,10 @@ dedicated desktop apps (e.g. Claude in `/Applications/Claude.app`, Codex in
 `/Applications/Codex.app`). It is intentionally separate from `claude --resume`,
 `claude -p`, and other CLI/session-file flows.
 
-> Supersedes the earlier one-directional model in which only Codex drove Claude
-> and the sole wake mechanism was a Codex heartbeat. The doorbell is now
-> **bidirectional and event-driven**: whichever agent finishes a unit of work or
-> needs something rings the other immediately. The heartbeat survives only as a
-> bounded, provisional **safety-fuse** (see below), not as the primary path.
+> Claude may ring Codex after writing a durable packet. Codex never rings
+> Claude: Claude is woken by its durable packet and the Claude app's own
+> background inbox watcher. The heartbeat survives only as a bounded,
+> provisional **safety-fuse** (see below), not as the primary path.
 
 This desktop-app workflow applies only between distinct collaborator app
 identities. External workers such as Claude and ZCode may ring root Codex. Root

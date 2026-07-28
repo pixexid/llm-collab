@@ -28,8 +28,7 @@ universal is the exception.
 
 1. Add a `projects.json` entry with `id`, `display_name`, `repos`,
    `default_branch_base`, `preflight_command`, and `github`. Add
-   `ui_ux.required_design_docs`, `db.*`, or `claude_desktop_bridge` only when
-   applicable.
+   `ui_ux.required_design_docs` or `db.*` only when applicable.
 2. Initialize `{project_state_root}/{project_id}/` through queue reconciliation,
    then add a project README that records the coordination chat, roles, and
    routing policy.
@@ -87,7 +86,6 @@ Edit `projects.json` (or regenerate with `python scripts/init.py`):
       },
       "default_branch_base": "main",
       "preflight_command": ["pnpm", "preflight", "--json"],
-      "claude_desktop_bridge": false,
       "ui_ux": {
         "required_design_docs": ["/absolute/path/to/my-app/DESIGN.md"]
       },
