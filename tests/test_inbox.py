@@ -17,6 +17,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 INBOX_SCRIPT = REPO_ROOT / "bin" / "inbox.py"
 sys.path.insert(0, str(REPO_ROOT / "bin"))
 import inbox as inbox_lib
+from _activation_lease import RUNTIME_ID_ENV_VARS
 
 
 def write(path: Path, content: str) -> None:
@@ -445,27 +446,40 @@ class InboxMarkAllReadTest(unittest.TestCase):
                 self.assertEqual(75, result.returncode, result.stderr)
                 self.assertNotIn(secret, result.stdout)
 
-    def test_exact_session_requires_runtime_identity(self) -> None:
+    def test_exact_session_distinguishes_absent_from_foreign_runtime_identity(
+        self,
+    ) -> None:
         self.add_exact_session()
         secret = self.add_exact_message("secret")
-
-        result = self.run_inbox(
-            "--project",
-            "amiga",
-            "--chat",
-            "CHAT-EXACT",
-            "--session",
-            "SESSION-EXACT",
-            "--peek",
-            "--json",
+        cleared = {name: "" for name in RUNTIME_ID_ENV_VARS}
+        cases = (
+            ("exact_session_runtime_missing", cleared),
+            (
+                "exact_session_runtime_mismatch",
+                {**cleared, "LLM_COLLAB_READER_RUNTIME_ID": "pi-foreign"},
+            ),
         )
 
-        self.assertEqual(75, result.returncode, result.stderr)
-        self.assertEqual(
-            "exact_session_runtime_missing",
-            json.loads(result.stdout)["exact_session_refused"],
-        )
-        self.assertNotIn(secret, result.stdout)
+        for expected, env in cases:
+            with self.subTest(expected=expected):
+                result = self.run_inbox(
+                    "--project",
+                    "amiga",
+                    "--chat",
+                    "CHAT-EXACT",
+                    "--session",
+                    "SESSION-EXACT",
+                    "--peek",
+                    "--json",
+                    env=env,
+                )
+
+                self.assertEqual(75, result.returncode, result.stderr)
+                self.assertEqual(
+                    expected,
+                    json.loads(result.stdout)["exact_session_refused"],
+                )
+                self.assertNotIn(secret, result.stdout)
 
     def test_exact_session_uses_frontmatter_not_the_packet_path_for_chat(self) -> None:
         self.add_exact_session()

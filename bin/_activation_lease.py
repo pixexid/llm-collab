@@ -281,13 +281,16 @@ def _claim_grant_lock() -> _BlockingLock:
     return _BlockingLock(ACTIVATION_GRANT_LOCK)
 
 
+RUNTIME_ID_ENV_VARS = (
+    "LLM_COLLAB_READER_RUNTIME_ID",
+    "CODEX_SESSION_ID",
+    "CLAUDE_CODE_SESSION_ID",
+    "GEMINI_SESSION_ID",
+)
+
+
 def runtime_id_from_env() -> str | None:
-    for name in (
-        "LLM_COLLAB_READER_RUNTIME_ID",
-        "CODEX_SESSION_ID",
-        "CLAUDE_CODE_SESSION_ID",
-        "GEMINI_SESSION_ID",
-    ):
+    for name in RUNTIME_ID_ENV_VARS:
         value = os.environ.get(name)
         if value and value.strip():
             return value.strip()
