@@ -73,6 +73,12 @@ class RequestBodyTest(unittest.TestCase):
         self.assertIn(f"at exact head `{SHA}`.", body)
         self.assertIn("lane contract in #352", body)
 
+    def test_body_accepts_task_hosted_contract(self):
+        body = review_request.build_request_body(
+            "authority selection", SHA, contract="TASK-ABC123"
+        )
+        self.assertIn("lane contract in TASK-ABC123", body)
+
     def test_empty_focus_is_rejected(self):
         with self.assertRaisesRegex(SystemExit, "at least one review lens"):
             review_request.build_request_body("   ", SHA)
@@ -107,16 +113,13 @@ class ProjectResolutionTest(unittest.TestCase):
         with self.assertRaisesRegex(SystemExit, "no enabled GitHub"):
             review_request.repo_coordinates("llm-collab", projects)
 
-    def test_linked_worktree_reads_the_common_checkout_registry(self):
+    def test_product_worktree_reads_the_coordination_registry(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            common = root / ".git"
-            common.mkdir()
             (root / "projects.json").write_text(json.dumps({"projects": PROJECTS}))
-            result = subprocess.CompletedProcess(
-                ["git"], 0, stdout=str(common) + "\n", stderr=""
-            )
-            with mock.patch.object(review_request, "run", return_value=result):
+            with mock.patch.object(
+                review_request, "coordination_root", return_value=root
+            ):
                 self.assertEqual(
                     review_request.repo_coordinates("llm-collab"),
                     ("pixexid", "llm-collab"),
@@ -172,6 +175,21 @@ class RequestHistoryTest(unittest.TestCase):
             ],
         ):
             with self.assertRaisesRegex(SystemExit, "did not advance"):
+                review_request.pr_comment_bodies(1, "pixexid", "llm-collab")
+
+    def test_fails_closed_when_page_bound_is_exhausted(self):
+        with (
+            mock.patch.object(review_request, "COMMENT_PAGE_HARD_CAP", 2),
+            mock.patch.object(
+                review_request,
+                "run_json",
+                side_effect=[
+                    page([], next_page=True, cursor="one"),
+                    page([], next_page=True, cursor="two"),
+                ],
+            ),
+        ):
+            with self.assertRaisesRegex(SystemExit, "page bound"):
                 review_request.pr_comment_bodies(1, "pixexid", "llm-collab")
 
 
@@ -266,6 +284,15 @@ class MainFlowTest(unittest.TestCase):
         with self.assertRaisesRegex(SystemExit, "Tier A requires --contract"):
             review_request.main(args)
 
+    def test_tier_c_is_refused_before_posting(self):
+        with self.assertRaisesRegex(SystemExit, "Tier C changes do not request"):
+            review_request.main(
+                [
+                    "--pr", "1", "--project", "llm-collab", "--tier", "C",
+                    "--focus", "mechanical prose",
+                ]
+            )
+
     def test_head_move_before_post_has_no_side_effect(self):
         patches = self.patches(heads=[SHA, OTHER_SHA])
         with patches[0], patches[1], patches[2], patches[3], patches[4] as post:
@@ -308,6 +335,17 @@ class CommandContractTest(unittest.TestCase):
             with self.assertRaisesRegex(SystemExit, "cannot run gh"):
                 review_request.run(["gh", "pr", "view"], 1)
 
+    def test_malformed_json_is_a_refusal(self):
+        with mock.patch.object(
+            review_request,
+            "run",
+            return_value=subprocess.CompletedProcess(
+                ["gh"], 0, stdout="{", stderr=""
+            ),
+        ):
+            with self.assertRaisesRegex(SystemExit, "malformed JSON"):
+                review_request.run_json(["gh", "pr", "view"])
+
     def test_closed_pr_is_refused(self):
         with mock.patch.object(
             review_request,
@@ -317,14 +355,29 @@ class CommandContractTest(unittest.TestCase):
             with self.assertRaisesRegex(SystemExit, "is not open"):
                 review_request.pr_head(1, "pixexid", "llm-collab")
 
-    def test_lane_contract_must_be_positive_and_exist(self):
-        with self.assertRaisesRegex(SystemExit, "positive issue number"):
-            review_request.require_contract(0, "pixexid", "llm-collab")
+    def test_lane_contract_must_be_an_existing_issue_or_task(self):
+        with self.assertRaisesRegex(SystemExit, "positive issue number or TASK-id"):
+            review_request.require_contract("0", "pixexid", "llm-collab")
         with mock.patch.object(
             review_request, "run_json", return_value={"number": 352}
         ) as run_json:
-            review_request.require_contract(352, "pixexid", "llm-collab")
+            review_request.require_contract("352", "pixexid", "llm-collab")
         self.assertIn("issue", run_json.call_args.args[0])
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task_dir = root / "Tasks" / "active"
+            task_dir.mkdir(parents=True)
+            (task_dir / "lane__TASK-ABC123.md").write_text("contract")
+            with mock.patch.object(
+                review_request, "coordination_root", return_value=root
+            ):
+                review_request.require_contract(
+                    "TASK-ABC123", "pixexid", "llm-collab"
+                )
+                with self.assertRaisesRegex(SystemExit, "does not exist"):
+                    review_request.require_contract(
+                        "TASK-MISSING", "pixexid", "llm-collab"
+                    )
 
 
 if __name__ == "__main__":

@@ -201,18 +201,20 @@ receive local exact-head verification and the requested connector review, not a
 second independent model review. Merge
 from the current thread only after the exact current head has green required
 checks, the PR is mergeable with clean merge state, the requested connector
-review and required local exact-head verification are clean, and
+review gate is complete, required local exact-head verification is clean, and
 [the reviewed artifact set](commit-push-prs.md#reviewed-artifact-set) has no
 actionable finding. Reviews are MANUAL ONLY as of 2026-07-25; nothing arrives unrequested, and whether a change must be reviewed is decided by the Tier A/B/C rule in
 [`AGENTS.md` → Requesting Code Review](../../AGENTS.md#requesting-code-review-all-workers-every-repository),
 which is the only place that defines it.
-The GitHub Codex signal is clean when either the latest
+The GitHub Codex gate is complete when the latest
 `chatgpt-codex-connector` review/comment explicitly covers that exact OID with
 no actionable issues, or a connector-authored `+1` (`thumbs-up`) sits on the exact
 manual-review request comment while the head still equals the SHA that request
-named. A bare `eyes` reaction is accepted-and-in-progress, never a verdict. Either signal is terminal for the bot wait on that
-head, and these remain the only two exact-head terminal signal sources. Their
-post-signal handling differs. A terminal signal stops waiting for further
+named, or the connector completed an exact-head review and every thread it
+initiated has a thread-linked disposition accepted by the lane owner and
+release-gate worker. A bare `eyes` reaction is accepted-and-in-progress, never
+a verdict. Each outcome is terminal for the bot wait on that head. Their
+post-signal handling differs. A terminal outcome stops waiting for further
 artifacts only; it does not waive the handling below:
 
 - A head-named clean connector verdict is not merge-immediate. Hold an
@@ -231,6 +233,9 @@ artifacts only; it does not waive the handling below:
   plus adjudication, so exempting it from the settle would remove the evidence
   the rule depends on. Required CI, mergeability, independent review, and full
   inspection of [the reviewed artifact set](commit-push-prs.md#reviewed-artifact-set) still apply.
+- A disposed-review completion receives the same approximately five-minute
+  settle and full artifact re-read. Any new or unadjudicated finding cancels
+  that completion.
 
 Whether a review must be requested at all is the Tier A/B/C rule in
 [`AGENTS.md` → Requesting Code Review](../../AGENTS.md#requesting-code-review-all-workers-every-repository),

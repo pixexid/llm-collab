@@ -41,7 +41,7 @@ the task or linked issue, using the template in
   constrain requested scope but never excuse a regression introduced by the diff.
 
 Reviews then verify the diff against that page: review requests name it ("review
-the full diff against the lane contract in <issue> through these lenses: ..."),
+the full diff against the lane contract in <issue|TASK-id> through these lenses: ..."),
 and the per-finding disposition below routes every arriving finding as
 contract-violating, out-of-contract, or contract-gap. The contract stays one
 page: a lane that cannot state its boundary on one page is two lanes. Split it
@@ -174,12 +174,12 @@ Hard cycle cap, independent of family counting:
   follow-up issue, never another cycle.
 - At the cap, inspect the exact current head. Only when actionable findings
   remain open at the capped head is exactly one terminal action required
-  before any further amendment. **The default terminal action is to merge at
-  the current head with `risk-accepted-followup`** (open findings move to a
-  new issue). `descope`, `split`, and `backend-first` remain available but are
-  no longer defaults: choosing one requires recording, in the same disposition,
-  what capability is being un-shipped and why merging the current head with
-  follow-ups is unsafe. A durable operator escalation packet remains the escape
+  before any further amendment. The lane owner and release-gate worker must
+  choose explicitly: accept each remaining contract violation as a named,
+  bounded risk with a follow-up issue and merge that exact head; or descope,
+  split, use `backend-first`, or close the lane. `merge-with-followups` remains the default for
+  findings classified deferrable before the cap; it is never a silent default
+  for a contract violation. A durable operator escalation packet remains the escape
   only when the lane owner and release-gate worker cannot resolve the trade-off
   without operator-only input. Under per-finding defer-first
   most findings never reach the cap: only contract-violating findings are
@@ -213,8 +213,9 @@ exactly one of the five values above.
 
 One final exact-head full-diff gate is mandatory before merge. Automated-review
 findings on the current head that were classified contract-violating remain
-blocking; out-of-contract findings follow the defer-first disposition above and
-do not block. After a pushed
+blocking until fixed or individually accepted under the bounded-risk cap
+disposition above; out-of-contract findings follow the defer-first disposition
+and do not block. After a pushed
 amendment, stale review-attestation CI is an expected transitional state rather
 than evidence that product verification failed. Refresh the PR body only after
 the amended head passes its required review.
@@ -304,7 +305,10 @@ policy:
   review for Tier A would deadlock whenever the connector's clean protocol is
   reaction-only, and the request plus a connector-authored `+1` is already a durable
   GitHub artifact
-- these are the only two exact-head terminal signal models; nothing else in
+- the clean verdict and request-comment `+1` are the only two connector-authored
+  clean signal models. A completed non-clean review becomes a third terminal
+  gate outcome only after every thread it initiated has the accepted
+  dispositions defined below; nothing else in
   [the reviewed artifact set](#reviewed-artifact-set) is terminal
 - **a connector review body that lists no findings is not a clean verdict.** The
   connector posts its findings as inline review threads, and the review body can be
@@ -426,7 +430,9 @@ else is a second source that goes stale the moment this one moves.
   thread-linked disposition accepted by the lane owner and release-gate worker.
   Do not request another connector review on the unchanged head; the exact-head
   review already happened, and another request would violate the one-external-
-  review-per-head rule
+  review-per-head rule. Once every thread from that exact-head review has such
+  a disposition, the completed review is a terminal gate outcome and receives
+  the same settle and full artifact re-read as a clean verdict
 - report the exact verdict, or the connector-authored `+1` on the manual-review
   request comment with its timestamps and the SHA that request named, and confirm
   that no later push occurred
@@ -493,7 +499,8 @@ classification of non-signals, with no clock attached to any of them:
 #### Explicit requested-review precedence
 
 An explicitly requested review remains pending until its roughly 30–35-minute
-clock expires unless one of the two exact-head terminal signals arrives; it
+clock expires unless one of the two connector clean signals or a disposed-review
+completion arrives; it
 never ages into a merge-eligible state, because no silence fallback exists to
 age into. Anchor each clock to the corresponding explicit request artifact's
 GitHub `created_at`, never to the latest push or the time the head became
@@ -512,7 +519,7 @@ timing — which is why they are written here rather than left to the lane:
 | request comment naming the head | request packet naming the exact commit OID |
 | the comment's `created_at` | the packet's recorded delivery timestamp |
 | `@codex review` re-trigger comment | a second request packet, same exact OID, marked as the re-trigger |
-| the two exact-head terminal signals | a verdict packet naming that exact OID |
+| the three exact-head terminal outcomes | a verdict or disposition packet naming that exact OID |
 | PR-wait heartbeat | the same heartbeat cadence against the mailbox thread |
 
 The two clocks, the single re-trigger, the ban on a second one, and the
@@ -580,7 +587,7 @@ exact current head has
 green required checks, the PR is mergeable with clean `mergeStateStatus`, the
 required local exact-head verification is clean, and the full current comment, review,
 payload of [the reviewed artifact set](#reviewed-artifact-set) has no actionable finding. Treat the GitHub
-Codex review signal as clean when either:
+Codex review gate as complete when any of these holds:
 
 - the latest top-level `chatgpt-codex-connector` review/comment explicitly
   covers the exact current OID and reports no actionable or major issues, or
@@ -594,7 +601,12 @@ Codex review signal as clean when either:
   first four checks all pass. A `+1` attributable only by timestamp, or sitting on any
   other artifact, is **not** terminal. That reaction is terminal for the bot wait on that
   head when the required gates above remain clean, and it receives the same
-  approximately five-minute post-clean settle and full re-read as a text verdict.
+  approximately five-minute post-clean settle and full re-read as a text verdict,
+  or
+- the connector completed a review for the exact current OID and every thread
+  it initiated has a thread-linked disposition accepted by the lane owner and
+  release-gate worker. This disposed-review completion is terminal for the wait
+  on that head and receives the same settle and full artifact re-read.
 
 The re-read that follows a reaction covers
 **all of [the reviewed artifact set](#reviewed-artifact-set)**, and
@@ -607,8 +619,8 @@ settle and then re-read [the reviewed artifact set](#reviewed-artifact-set) in f
 exact-head review raises findings, apply their written dispositions; do not
 request another connector review on the unchanged head.
 
-If neither a terminal GitHub Codex verdict nor a head-attributable connector
-`+1` exists for the exact current head, a Tier A head does not merge — there is
+If no clean verdict, head-attributable connector `+1`, or disposed-review
+completion exists for the exact current head, a Tier A head does not merge — there is
 no elapsed-time substitute. What to do next depends on whether a request exists
 for this head, and the two cases are **not** alternatives:
 
@@ -669,7 +681,7 @@ branch is not the same as checking it, and without that read a verdict landing i
 between is completed straight past — skipping the settle and full re-read it is owed.
 If the read finds one, abandon the disposition branch and report the signal instead. A release-gate disposition is
 not a connector terminal signal and never substitutes for one where a signal did
-arrive. Either terminal signal
+arrive. Any terminal outcome
 stops the heartbeat from waiting for further artifacts;
 it does not waive post-signal handling. For a head-named clean verdict **and for a
 request-comment `+1` alike**, the approximately five-minute post-clean settle and a full

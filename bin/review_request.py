@@ -46,7 +46,10 @@ COMMENT_PAGE_SIZE = 100
 # outstanding fails closed: a truncated history must never read as "no prior
 # request", because that is exactly how a budget silently resets.
 COMMENT_HARD_CAP = 1000
+COMMENT_PAGE_HARD_CAP = COMMENT_HARD_CAP // COMMENT_PAGE_SIZE
 PROJECTS_MAX_BYTES = 1_000_000
+SCRIPT_CHECKOUT_ROOT = Path(__file__).resolve().parent.parent
+TASK_CONTRACT_RE = re.compile(r"TASK-[A-Z0-9]+")
 GH_READ_TIMEOUT_SECONDS = 30
 GH_POST_TIMEOUT_SECONDS = 45
 SHA_SHAPED_RE = re.compile(r"\b[0-9a-f]{40}\b", re.IGNORECASE)
@@ -86,17 +89,29 @@ def run(argv: list[str], timeout: int) -> subprocess.CompletedProcess:
 
 
 def run_json(argv: list[str], timeout: int = GH_READ_TIMEOUT_SECONDS) -> object:
-    return json.loads(run(argv, timeout).stdout)
+    try:
+        return json.loads(run(argv, timeout).stdout)
+    except json.JSONDecodeError as error:
+        raise SystemExit(
+            f"error: {' '.join(argv[:3])} returned malformed JSON: {error}"
+        )
 
 
-def common_checkout_projects() -> list[dict]:
+def coordination_root() -> Path:
     common_dir = Path(
         run(
-            ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            [
+                "git", "-C", str(SCRIPT_CHECKOUT_ROOT), "rev-parse",
+                "--path-format=absolute", "--git-common-dir",
+            ],
             GH_READ_TIMEOUT_SECONDS,
         ).stdout.strip()
     )
-    path = common_dir.parent / "projects.json"
+    return common_dir.parent
+
+
+def common_checkout_projects() -> list[dict]:
+    path = coordination_root() / "projects.json"
     try:
         if path.stat().st_size > PROJECTS_MAX_BYTES:
             raise SystemExit(
@@ -144,14 +159,25 @@ def pr_head(pr: int, owner: str, name: str) -> str:
     return data["headRefOid"]
 
 
-def require_contract(issue: int, owner: str, name: str) -> None:
-    if issue <= 0:
-        raise SystemExit("error: --contract must be a positive issue number")
-    run_json(
-        [
-            "gh", "issue", "view", str(issue), "--repo", f"{owner}/{name}",
-            "--json", "number",
-        ]
+def require_contract(contract: str, owner: str, name: str) -> None:
+    if contract.isdecimal() and int(contract) > 0:
+        run_json(
+            [
+                "gh", "issue", "view", contract, "--repo", f"{owner}/{name}",
+                "--json", "number",
+            ]
+        )
+        return
+    if TASK_CONTRACT_RE.fullmatch(contract):
+        root = coordination_root()
+        if any(
+            any((root / "Tasks" / folder).glob(f"*__{contract}.md"))
+            for folder in ("active", "backlog", "done")
+        ):
+            return
+        raise SystemExit(f"error: task-hosted lane contract {contract} does not exist")
+    raise SystemExit(
+        "error: --contract must be a positive issue number or TASK-id"
     )
 
 
@@ -159,7 +185,14 @@ def pr_comment_bodies(pr: int, owner: str, name: str) -> list[str]:
     bodies: list[str] = []
     after: str | None = None
     cursors: set[str] = set()
+    pages = 0
     while True:
+        pages += 1
+        if pages > COMMENT_PAGE_HARD_CAP:
+            raise SystemExit(
+                f"error: comment history exceeds the declared page bound "
+                f"({COMMENT_PAGE_HARD_CAP}); failing closed"
+            )
         argv = [
             "gh", "api", "graphql",
             "-F", f"owner={owner}", "-F", f"name={name}", "-F", f"pr={pr}",
@@ -212,14 +245,17 @@ def reject_caller_supplied_shas(fields: dict[str, str]) -> None:
 
 
 def build_request_body(
-    focus: str, sha: str, contract: int | None = None, note: str | None = None
+    focus: str, sha: str, contract: str | int | None = None, note: str | None = None
 ) -> str:
     if not focus.strip():
         raise SystemExit("error: --focus must name at least one review lens")
     parts = [f"{REQUEST_MARKER} for {focus.strip()} at exact head `{sha}`."]
     if contract is not None:
+        contract_ref = str(contract)
+        if contract_ref.isdecimal():
+            contract_ref = f"#{contract_ref}"
         parts.append(
-            f"Review the full diff against the lane contract in #{contract} "
+            f"Review the full diff against the lane contract in {contract_ref} "
             "through those lenses."
         )
     else:
@@ -271,8 +307,8 @@ def main(argv: list[str] | None = None) -> int:
         help="comma-separated review lenses (every Tier A family the diff touches)",
     )
     parser.add_argument(
-        "--contract", type=int, default=None,
-        help="issue number carrying the lane contract (required for --tier A)",
+        "--contract", default=None,
+        help="issue number or TASK-id carrying the lane contract (required for --tier A)",
     )
     parser.add_argument("--note", default=None, help="one extra sentence appended verbatim")
     parser.add_argument(
@@ -297,6 +333,8 @@ def main(argv: list[str] | None = None) -> int:
     else:
         if args.tier is None:
             raise SystemExit("error: --tier is required for an initial request")
+        if args.tier == "C":
+            raise SystemExit("error: Tier C changes do not request review")
         if args.focus is None:
             raise SystemExit("error: --focus is required for an initial request")
         if args.tier == "A" and args.contract is None:

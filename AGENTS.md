@@ -271,7 +271,7 @@ the written dispositions is the external-review evidence. This keeps the
 one-request, one-external-review rule internally consistent.
 
 **Generate review requests mechanically.** Use `bin/review_request.py --pr <n>
---project <id> --tier A --contract <issue> --focus "..."`: it reads the head SHA
+--project <id> --tier A --contract <issue|TASK-id> --focus "..."`: it reads the head SHA
 from GitHub and the local checkout,
 refuses on mismatch, and enforces one initial request per head plus the single
 exempted re-trigger. It has no option to pass a SHA by hand — a hand-typed SHA

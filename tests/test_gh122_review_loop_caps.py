@@ -288,7 +288,8 @@ class ReviewLoopCapContractTest(unittest.TestCase):
                     "the approximately five-minute post-clean settle and a full "
                     "re-read of [the reviewed artifact set](#reviewed-artifact-set) "
                     "remain mandatory before merge",
-                    "these are the only two exact-head terminal signal models",
+                    "only two connector-authored clean signal models",
+                    "third terminal gate outcome",
                 ),
             ),
             (
@@ -303,10 +304,11 @@ class ReviewLoopCapContractTest(unittest.TestCase):
                     "clocks, current-head invalidation, the post-timeout disposition "
                     "choices, and every effect of an exact-head release-gate disposition; "
                     "this compact guidance defines no separate disposition effect",
-                    "A terminal signal stops waiting for further artifacts only; it does "
+                    "A terminal outcome stops waiting for further artifacts only; it does "
                     "not waive the handling below",
                     "approximately five-minute mandatory post-clean settle",
-                    "these remain the only two exact-head terminal signal sources",
+                    "connector completed an exact-head review",
+                    "Each outcome is terminal for the bot wait",
                 ),
             ),
         )
@@ -534,8 +536,12 @@ class ReviewLoopCapContractTest(unittest.TestCase):
             "### Per-finding disposition at arrival (defer-first)", text
         )
         self.assertIn(
-            "The default terminal action is to merge at the current head with "
-            "`risk-accepted-followup`",
+            "accept each remaining contract violation as a named, bounded risk "
+            "with a follow-up issue and merge that exact head",
+            text,
+        )
+        self.assertIn(
+            "it is never a silent default for a contract violation",
             text,
         )
         self.assertIn(
@@ -575,9 +581,10 @@ class ReviewLoopCapContractTest(unittest.TestCase):
                 sources["review_policy"],
             )
             self.assertIn(
-                "these are the only two exact-head terminal signal models",
+                "only two connector-authored clean signal models",
                 sources["review_policy"],
             )
+            self.assertIn("third terminal gate outcome", sources["review_policy"])
 
         self.assert_scenario_cases("canonical_wait_gate", check)
 
@@ -1299,7 +1306,7 @@ class ReviewLoopCapContractTest(unittest.TestCase):
             "request packet naming the exact commit OID",
             "recorded delivery timestamp",
             "marked as the re-trigger",
-            "verdict packet naming that exact OID",
+            "verdict or disposition packet naming that exact OID",
         ):
             self.assertIn(equivalent, text, f"no mailbox equivalent for {equivalent!r}")
         # The clocks and the single-re-trigger rule are properties of the request, so
@@ -1688,7 +1695,7 @@ class ReviewLoopCapContractTest(unittest.TestCase):
     def test_plan_cap_terminal_actions_include_backend_first(self):
         def check(case, sources):
             self.assertIn(
-                "`descope`, `split`, `backend-first`, or a durable operator escalation",
+                "`descope`, `split`, `backend-first`, or close",
                 sources["plan"],
             )
 
@@ -1701,7 +1708,7 @@ class ReviewLoopCapContractTest(unittest.TestCase):
                 sources["plan"],
             )
             self.assertIn(
-                "two exact-head terminal-signal models", sources["plan"]
+                "three exact-head terminal outcomes", sources["plan"]
             )
             # Pinned by reference rather than by spelling: this sentence used to restate
             # the artifact list itself, and restating it is the defect the canonical block
@@ -1737,9 +1744,10 @@ class ReviewLoopCapContractTest(unittest.TestCase):
                 handoff,
             )
             self.assertIn(
-                "these remain the only two exact-head terminal signal sources",
+                "connector completed an exact-head review",
                 handoff,
             )
+            self.assertIn("Each outcome is terminal for the bot wait", handoff)
 
         self.assert_scenario_cases("compact_wait_gate", check)
 
@@ -1843,8 +1851,8 @@ class ReviewLoopCapContractTest(unittest.TestCase):
             (
                 "terminal signal source altered",
                 "workflow",
-                "these are the only two exact-head terminal signal models",
-                "these are two common exact-head terminal signal models",
+                "third terminal\n  gate outcome",
+                "optional disposed-review\n  outcome",
             ),
             (
                 "only the canonical document updated",
