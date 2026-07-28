@@ -11,8 +11,13 @@ autonomous.
 Current `deliver.py` gives a matching dispatchable session autobridge precedence
 and suppresses `ax_doorbell_required` for that packet. The primary wake for an
 AX-capable `cli_session` only when no such autobridge resolves is the busy-safe
-**bidirectional AX doorbell** (`bin/axsend-ensure ring --submit --verify`, run from the llm-collab checkout root; see
-`claude-code-desktop-computer-use-bridge.md`). First prove through readable
+**bidirectional AX doorbell**. This applies only to a worker with no background
+event pickup of its own — Codex today. The canonical `claude` agent is woken by
+its durable packet and its own inbox watcher alone; see the Claude bullets
+below, which override this paragraph for that identity.
+The doorbell is `bin/axsend-ensure ring --submit --verify`, run from the
+llm-collab checkout root; see
+`claude-code-desktop-computer-use-bridge.md`. First prove through readable
 `AXValue` that the native composer is empty, then ring once even when the
 recipient is busy; busy alone is not a hold after that proof. A non-empty,
 unreadable, unprovable, or `AXValue`-opaque composer means hold and enter
@@ -22,7 +27,7 @@ preserve the durable mailbox packet, record the unconfirmed blocker/follow-up,
 and never re-ring. The idle input gate applies only to attended
 screenshot/keyboard Computer Use fallback, not to AX `ring`. Computer Use is
 the recovery path when AX cannot safely target or verify the native composer or
-its empty state, and for an explicitly configured non-CLI desktop bridge.
+its empty state.
 `llm-collab` remains the durable mailbox. Routine/continuous polling is
 **deprecated** as the primary wake — it wastes tokens and a heartbeat set on
 guessed timing can fire into changed context.
@@ -60,40 +65,26 @@ remove it and rely on the doorbell + mailbox-drain self-heal.
   visible in `Chats/`.
 - Do not target an active operator thread for retry tests.
 - Treat Claude desktop as a human-visible UI, not as a
-  `session_autobridge.py` runtime target. Ring an existing native composer
-  through AX first only after readable `AXValue` proves it is empty. A
-  non-empty, unreadable, unprovable, or `AXValue`-opaque composer means hold and
-  attended recovery. Computer Use owns attended AX recovery/fallback and fresh
-  thread creation: generate a UUID plus short title, click `New session`, send
-  the first prompt beginning with
-  `[BRIDGE <8-char-uuid-prefix>] <short title>`, then verify the sidebar title
-  and `local_*` URL. Do not claim a PM2 watcher, CLI resume, or filesystem write
-  created a desktop-visible thread.
-- If AX resolves an embedded preview/web field or cannot verify the native
-  prompt or its empty state, stop sending but preserve the durable packet. Use
-  attended Computer Use plus
-  `bin/axsend-ensure tree --app <app> --editable-only` to remove/blank the
-  competing field, select the correct window, clear probes, and verify the real
-  native composer. Resume AX only when its empty state is provable; an
-  `AXValue`-opaque composer stays on the attended path. Do not record a standing
-  mailbox-only or AX-disabled policy from one targeting incident.
+  `session_autobridge.py` runtime target. **Claude has exactly one wake path:
+  the durable collab packet, picked up by the app's own background inbox
+  watcher.** The poller leaves the activation unclaimed for that watcher. Do not
+  claim a PM2 watcher, CLI resume, or filesystem write reached the app.
+- A binding whose canonical `agent_id` is `claude` must use `notify` mode.
+  Only that identity suppresses `claude -p` / `claude --resume`; its background
+  inbox watcher owns pickup.
+- Workers must not synthesize a second wake path for Claude: no AX ring, no
+  `claude --resume` or `claude -p`, no app reload or restart, no Computer Use
+  typing, and no replacement thread or task. These are not attended-recovery
+  escape hatches — a worker has no condition under which it may use them.
 - For Claude-owned collaboration lanes, inspect the visible Claude app before
-  treating inbox or queue state as final. If Claude is visibly asking a related
-  question, waiting for direction, or reporting Read/Agent/tool errors, Codex
-  must answer or unblock it in that same visible thread when safe; do not wait
-  for a final inbox handoff while Claude is blocked in the app.
-- If Claude is stale, idle with no durable progress, or repeatedly erroring,
-  first try to wake or repair the same thread with a durable unblock packet plus
-  one short AX bridge only after the native composer is provably empty; it may
-  queue behind an active turn, and busy alone is not a hold. A non-empty,
-  unreadable, unprovable, or `AXValue`-opaque composer means hold and recovery.
-  Apply the idle input gate only if recovery falls back to screenshot/keyboard
-  Computer Use. Restart or reopen Claude only from an attended Codex recovery
-  turn or after explicit operator instruction; unattended heartbeats must notify
-  with the observed blocker instead of interrupting or restarting Claude. Create
-  a new Claude thread only when the current thread is full, unrecoverably
-  corrupted, repeatedly loses tool access, or still cannot continue after
-  attended recovery; include a full continuity packet for the same task.
+  treating inbox or queue state as final: if Claude is visibly asking a related
+  question, waiting for direction, or reporting Read/Agent/tool errors, that is
+  diagnosis, and the answer goes back as a durable packet like any other.
+- If Claude is stale, idle with no durable progress, or repeatedly erroring, its
+  background watcher is not picking up. Preserve the durable packet, report the
+  watcher failure with the observed blocker, and stop for repair or operator
+  attention. Reopening, restarting, or re-threading Claude is an operator action
+  on an unhealthy watcher, never a worker's way around one.
 
 ## Activate A Session
 

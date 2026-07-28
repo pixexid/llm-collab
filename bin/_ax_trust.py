@@ -29,14 +29,33 @@ class AxTrustStatus:
         return asdict(self)
 
 
+def ax_app_profile(ax_app: object) -> str | None:
+    """Mirror axsend's ordered app-profile selection."""
+    if not isinstance(ax_app, str) or not ax_app.strip():
+        return None
+    app = ax_app.strip().casefold()
+    if "codex" in app or app == "chatgpt":
+        return "codex"
+    if "zcode" in app:
+        return "zcode"
+    if "claude" in app:
+        return "claude"
+    return "unknown"
+
+
+def ax_app_supports_routine_doorbell(ax_app: object) -> bool:
+    """Match axsend's only AX-readable routine profile."""
+    return ax_app_profile(ax_app) == "codex"
+
+
 def has_ax_doorbell_capability(agent: dict) -> bool:
     """Match deliver.py's activation capability allowlist."""
     activation = agent.get("activation", {})
     ax_app = activation.get("ax_app")
     return (
-        activation.get("type") == "cli_session"
-        and isinstance(ax_app, str)
-        and bool(ax_app.strip())
+        agent.get("id") != "claude"
+        and activation.get("type") == "cli_session"
+        and ax_app_supports_routine_doorbell(ax_app)
         and not activation.get("ax_attended_only")
     )
 

@@ -121,8 +121,8 @@ For an existing workspace, update `projects.json` directly. Do not rerun
 `scripts/init.py` unless the intent is to reinitialize the whole workspace.
 
 1. Register a unique `id`, display name, repositories, base branch, preflight,
-   and GitHub configuration. Add project-specific `ui_ux`, `db`, and
-   `claude_desktop_bridge` configuration only when applicable.
+   and GitHub configuration. Add project-specific `ui_ux` and `db`
+   configuration only when applicable.
 2. Create local state at `{project_state_root}/{project_id}/`; keep real project
    state outside this public Git checkout.
 3. Add repository-level `AGENTS.md` and worker guidance to the product repo.

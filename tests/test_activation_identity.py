@@ -425,7 +425,7 @@ class DeliverFoundationTest(unittest.TestCase):
             {"projects": [{"id": "amiga", "display_name": "Amiga", "repos": {"app": "."}}]},
         )
         write_json(root / "agents.json", {"agents": []})
-        for agent in ("codex", "claude"):
+        for agent in ("codex", "claude", "relay"):
             payload = json.loads((root / "agents.json").read_text())
             payload["agents"].append(
                 {"id": agent, "display_name": agent,
@@ -512,12 +512,14 @@ class DeliverFoundationTest(unittest.TestCase):
         self.assertIn("--chat CHAT-TEST0001", content)
 
     def test_activation_ax_budget_failure_only_when_ax_selected(self):
+        # The AX-selected subject is relay, not claude: Claude is excluded from the
+        # doorbell selector, so it can no longer be used to reach the AX branch.
         root = self.make_workspace()
         agents_path = root / "agents.json"
         agents = json.loads(agents_path.read_text())
         for agent in agents["agents"]:
-            if agent["id"] == "claude":
-                agent["activation"]["ax_app"] = "Claude"
+            if agent["id"] == "relay":
+                agent["activation"]["ax_app"] = "Codex"
         write_json(agents_path, agents)
         body = root / "b.md"
         write(body, "work")
@@ -530,7 +532,7 @@ class DeliverFoundationTest(unittest.TestCase):
             "-c",
             self.WRAPPER.format(extra_patch=patch_prompt),
             str(REPO_ROOT / "bin"),
-            *self.BASE,
+            *[a if a != "claude" else "relay" for a in self.BASE],
             "--body-file",
             str(body),
             "--activation",
@@ -550,20 +552,20 @@ class DeliverFoundationTest(unittest.TestCase):
         self.assertIn("long-root budget", ax_selected.stderr)
 
         write_json(
-            root / "State" / "session_autobridge" / "sessions" / "SESSION-CLAUDE-EXACT.json",
+            root / "State" / "session_autobridge" / "sessions" / "SESSION-RELAY-EXACT.json",
             {
-                "session_id": "SESSION-CLAUDE-EXACT",
-                "agent_id": "claude",
+                "session_id": "SESSION-RELAY-EXACT",
+                "agent_id": "relay",
                 "project_id": "amiga",
                 "chat_id": "CHAT-TEST0001",
                 "mode": "auto-read",
                 "status": "parked",
                 "wake_strategy": "runtime_trigger",
-                "lease_owner": "claude",
+                "lease_owner": "relay",
                 "lease_expires_utc": "2099-01-01T00:00:00+00:00",
                 "runtime": {
-                    "family": "claude_app",
-                    "session_id": "claude-runtime",
+                    "family": "zcode_cli",
+                    "session_id": "relay-runtime",
                     "session_source": "test_fixture",
                 },
             },
@@ -575,14 +577,14 @@ class DeliverFoundationTest(unittest.TestCase):
             / "bindings"
             / "amiga"
             / "CHAT-TEST0001"
-            / "claude.json",
+            / "relay.json",
             {
                 "project_id": "amiga",
                 "chat_id": "CHAT-TEST0001",
-                "agent_id": "claude",
-                "session_id": "SESSION-CLAUDE-EXACT",
-                "runtime_family": "claude_app",
-                "runtime_session_id": "claude-runtime",
+                "agent_id": "relay",
+                "session_id": "SESSION-RELAY-EXACT",
+                "runtime_family": "zcode_cli",
+                "runtime_session_id": "relay-runtime",
                 "runtime_session_source": "test_fixture",
             },
         )

@@ -97,8 +97,6 @@ next action:
 - `inbox.py --me codex --project <project_id> --limit 5 --peek` or the
   project-approved unread check
 - canonical issue/design queue validation
-- `project_design_queue.py bridge-status --project <project_id> --json` when a
-  design/Claude Desktop lane may be active
 - active task mirrors and worker checkpoint status
 - active PR checks, merge state, branch freshness, and the full reviewed artifact
   set (`commit-push-prs.md#reviewed-artifact-set`)
@@ -122,13 +120,14 @@ Do not stop on these states:
 
 `llm-collab` messages are part of the loop, not a side channel. Before sending a
 worker follow-up, update the task/issue if scope changed, write one consolidated
-message, and use the approved worker bridge. For a `cli_session` worker with
-`activation.ax_app` (and not `ax_attended_only`), use the AX command printed by
-`deliver.py`; an `ax_attended_only` worker reports `ax_attended_recovery_required`
-instead — route control to Codex-attended recovery, never a routine ring. A terminal-only
-CLI worker needs a dispatchable runtime session. Use Computer Use only when
-`deliver.py` reports the project-configured non-CLI `desktop_bridge_required`
-fallback. Treat `activation_unavailable` as a configuration blocker, record it
+message, and use the approved worker bridge. For a `cli_session` worker with a
+supported AX-readable `activation.ax_app` profile, use the AX command printed by
+`deliver.py`; a supported `ax_attended_only` target reports
+`ax_attended_recovery_required` instead — route control to Codex-attended
+recovery, never a routine ring. A terminal-only
+CLI worker needs a dispatchable runtime session. Claude is never rung or typed
+into: it is woken by its durable packet and the app's own background inbox
+watcher, and `deliver.py` reports no AX or Computer Use fallback for it. Treat `activation_unavailable` as a configuration blocker, record it
 precisely, and do not misreport it as routine operator relay.
 
 There should be one active queue-runner heartbeat for a project loop. A

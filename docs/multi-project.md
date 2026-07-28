@@ -28,8 +28,7 @@ universal is the exception.
 
 1. Add a `projects.json` entry with `id`, `display_name`, `repos`,
    `default_branch_base`, `preflight_command`, and `github`. Add
-   `ui_ux.required_design_docs`, `db.*`, or `claude_desktop_bridge` only when
-   applicable.
+   `ui_ux.required_design_docs` or `db.*` only when applicable.
 2. Initialize `{project_state_root}/{project_id}/` through queue reconciliation,
    then add a project README that records the coordination chat, roles, and
    routing policy.
@@ -87,7 +86,6 @@ Edit `projects.json` (or regenerate with `python scripts/init.py`):
       },
       "default_branch_base": "main",
       "preflight_command": ["pnpm", "preflight", "--json"],
-      "claude_desktop_bridge": false,
       "ui_ux": {
         "required_design_docs": ["/absolute/path/to/my-app/DESIGN.md"]
       },
@@ -146,11 +144,13 @@ uses only the task's exact registered `project_id`; missing, empty, null,
 unknown, or foreign IDs never inherit another project's guard, ref, or tool
 surfaces.
 
-`claude_desktop_bridge` is an opt-in fallback for Claude targets that are not
-configured as CLI sessions. A CLI-session worker uses the project-independent AX
-doorbell only when its agent entry explicitly sets `activation.ax_app` AND
-`ax_attended_only` is not `true` (an opaque-composer target instead reports
-`ax_attended_recovery_required` and routes to Codex-attended recovery); otherwise
+`claude_desktop_bridge` no longer selects a wake path: Claude is woken by its
+durable packet and the Claude app's own background inbox watcher in every project
+and registration shape. A non-Claude CLI-session worker uses the
+project-independent AX doorbell only when its agent entry selects a supported
+AX-readable `activation.ax_app` profile (a supported opaque-composer target
+instead reports `ax_attended_recovery_required` and routes to Codex-attended
+recovery); otherwise
 it needs a dispatchable runtime session.
 
 ### Project state root

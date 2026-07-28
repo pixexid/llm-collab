@@ -10,8 +10,8 @@ Recommended read order:
 
 1. `session-startup.md`
 2. `claude-code-desktop-computer-use-bridge.md` — the canonical agent-to-agent
-   comms reference (bidirectional Computer-Use doorbell + `llm-collab` mailbox);
-   read whenever desktop-app agents need to notify each other
+   comms reference (`llm-collab` mailbox plus supported one-way Computer-Use
+   doorbells); read whenever desktop-app agents need to notify each other
 3. `session-autobridge-runbook.md` — provisional safety-fuse only (polling is no
    longer the primary wake; see the doorbell doc)
 4. `thread-event-runner-rfc.md` — Phase 1 architecture/threat contract for a

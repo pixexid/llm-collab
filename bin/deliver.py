@@ -16,14 +16,15 @@ deliver.py — Send a message from one agent to another.
 Writes the message to Chats/ (canonical record) and appends
 a pointer to the recipient's agents/{id}/inbox.json.
 
-If a CLI-session recipient explicitly configures activation.ax_app (and is not
-ax_attended_only), prints an AX doorbell instruction; an ax_attended_only
-recipient (AXValue-opaque composer) instead gets an ATTENDED RECOVERY REQUIRED
-instruction routing control to Codex (GH-1547). Codex-to-Codex delivery is a
+If a non-Claude CLI-session recipient configures a supported AX-readable
+activation.ax_app profile, prints an AX doorbell instruction; a supported
+ax_attended_only recipient (AXValue-opaque composer) instead gets an ATTENDED
+RECOVERY REQUIRED instruction routing control to Codex (GH-1547). Codex-to-Codex delivery is a
 deliberate exception:
 the durable packet is preserved, but app activation is suppressed in favor of
-Thread Coordination. Projects may opt Claude into a desktop-bridge fallback for
-non-CLI targets. If the recipient has activation.type == "human_relay", prints
+Thread Coordination. Canonical Claude is also excluded: its durable packet and
+background inbox watcher are its only target-side wake path. If the recipient
+has activation.type == "human_relay", prints
 a ready-to-paste handoff prompt for the human operator. Other unresolved
 activation types report an explicit unavailable state.
 
@@ -69,6 +70,7 @@ from _activation_identity import (
     canonical_worktree,
     normalized_identity_field,
 )
+from _ax_trust import ax_app_profile, ax_app_supports_routine_doorbell
 
 # Lane C (GH-1572) flips this to True in the same commit that makes the
 # packet's claim command (`inbox.py --packet`) runnable. Deliberately a code
@@ -236,23 +238,9 @@ def resolve_bound_runtime_session_id(project_id: str, chat_id: str, agent_id: st
     return str(runtime_session_id)
 
 
-def is_claude_desktop_bridge_target(
-    project_id: str,
-    recipient_agent: dict,
-    recipient_id: str,
-) -> bool:
-    project = get_project(project_id) or {}
-    activation_type = recipient_agent.get("activation", {}).get("type")
-    return (
-        bool(project.get("claude_desktop_bridge"))
-        and recipient_id == "claude"
-        and activation_type != "cli_session"
-    )
-
-
 def ax_doorbell_app(recipient_agent: dict) -> str | None:
     ax_app = recipient_agent.get("activation", {}).get("ax_app")
-    if not isinstance(ax_app, str) or not ax_app.strip():
+    if ax_app_profile(ax_app) not in {"codex", "zcode"}:
         return None
     return ax_app.strip()
 
@@ -265,6 +253,15 @@ def ax_attended_only(recipient_agent: dict) -> bool:
     return bool(recipient_agent.get("activation", {}).get("ax_attended_only"))
 
 
+def is_watcher_only_target(recipient_id: str) -> bool:
+    """Claude: the durable packet plus the app's own background inbox watcher is the
+    whole wake path. Every producer below asks this, because excluding it from one
+    selector only pushes delivery into the next: the routine doorbell falls through to
+    attended recovery, and a suppressed desktop bridge falls through to human relay.
+    Both were emitted defects, not hypotheticals."""
+    return recipient_id == "claude"
+
+
 def is_codex_self_target(sender_id: str, recipient_id: str) -> bool:
     return sender_id == "codex" and recipient_id == "codex"
 
@@ -275,12 +272,13 @@ def is_ax_doorbell_target(
     *,
     sender_id: str,
 ) -> bool:
-    activation_type = recipient_agent.get("activation", {}).get("type")
+    activation = recipient_agent.get("activation", {})
     return (
         not is_codex_self_target(sender_id, recipient_id)
         and recipient_id != "operator"
-        and activation_type == "cli_session"
-        and ax_doorbell_app(recipient_agent) is not None
+        and not is_watcher_only_target(recipient_id)
+        and activation.get("type") == "cli_session"
+        and ax_app_supports_routine_doorbell(activation.get("ax_app"))
         # GH-1547: an AXValue-opaque target never gets a routine doorbell —
         # it routes to Codex-attended recovery instead (never silently to
         # mailbox-only).
@@ -300,20 +298,18 @@ def is_ax_attended_recovery_target(
     has an ax_app, or an attended Computer-Use intervention when it does not
     (Antigravity). This supersedes human-relay routing for flagged targets: the
     operator is never the routine relay for an agent Codex can supervise."""
+    activation = recipient_agent.get("activation", {})
+    profile = ax_app_profile(activation.get("ax_app"))
     return (
         not is_codex_self_target(sender_id, recipient_id)
         and recipient_id != "operator"
+        and not is_watcher_only_target(recipient_id)
+        and (
+            ("ax_app" not in activation and profile is None)
+            or profile in {"codex", "zcode"}
+        )
         and ax_attended_only(recipient_agent)
     )
-
-
-def build_desktop_bridge_prompt(chat_id: str, recipient_id: str, message_path: Path) -> str:
-    bridge_id = shortid(8)
-    filename = message_path.name
-    prompt = f"[BRIDGE {bridge_id}] Read latest {recipient_id} packet in {chat_id}: {filename}"
-    if len(prompt) <= 240:
-        return prompt
-    return f"[BRIDGE {bridge_id}] Read latest {recipient_id} inbox packet for {chat_id} and respond here."
 
 
 def main():
@@ -651,19 +647,14 @@ def main():
         if ax_attended_recovery_required
         else None
     )
-    desktop_bridge_required = (
-        args.recipient != "operator"
-        and not thread_coordination_required
-        and wake_fallback_allowed
-        and not ax_doorbell_required
-        and not ax_attended_recovery_required
-        and is_claude_desktop_bridge_target(args.project, recipient_agent, args.recipient)
-    )
-    desktop_bridge_prompt = (
-        build_desktop_bridge_prompt(chat_id, args.recipient, to_path)
-        if desktop_bridge_required
-        else None
-    )
+    # The project-configured Computer Use fallback was Claude-only, and Claude is
+    # never woken by typing into its app. Its only producer is deleted; the keys stay
+    # in the result so the scope-refusal wake-flag guard keeps covering them.
+    desktop_bridge_required = False
+    desktop_bridge_prompt = None
+    recipient_activation = recipient_agent.get("activation", {})
+    recipient_ax_app_present = "ax_app" in recipient_activation
+    recipient_ax_profile = ax_app_profile(recipient_activation.get("ax_app"))
     operator_relay_required = (
         args.recipient != "operator"
         and not thread_coordination_required
@@ -671,6 +662,11 @@ def main():
         and not desktop_bridge_required
         and not ax_doorbell_required
         and not ax_attended_recovery_required
+        and not is_watcher_only_target(args.recipient)
+        and (
+            not recipient_ax_app_present
+            or recipient_ax_profile in {"codex", "zcode"}
+        )
         and is_human_relay(recipient_agent)
     )
     activation_unavailable = (
@@ -684,7 +680,31 @@ def main():
     )
     activation_unavailable_reason = None
     if activation_unavailable:
-        if autobridge_refusal_reason and recipient_type == "cli_session":
+        if is_watcher_only_target(args.recipient):
+            # Never "no ax_app": Claude usually has one, and it is irrelevant. The
+            # packet is durable and the repair is the binding or the watcher.
+            activation_unavailable_reason = (
+                "claude is woken by its background inbox watcher: no dispatchable "
+                "binding resolved for this chat, so repair the binding or the watcher "
+                f"({autobridge_refusal_reason})"
+                if autobridge_refusal_reason
+                else "claude is woken by its background inbox watcher: no dispatchable "
+                "binding resolved for this chat, so repair the binding or the watcher"
+            )
+        elif recipient_ax_app_present and recipient_ax_profile is None:
+            activation_unavailable_reason = (
+                "activation.ax_app must be a non-empty string when present"
+            )
+        elif recipient_ax_profile == "claude":
+            activation_unavailable_reason = (
+                "activation.ax_app resolves to the Claude profile, which cannot be a "
+                "target-side wake transport"
+            )
+        elif recipient_ax_profile == "unknown":
+            activation_unavailable_reason = (
+                "activation.ax_app has no supported native composer profile"
+            )
+        elif autobridge_refusal_reason and recipient_type == "cli_session":
             activation_unavailable_reason = autobridge_refusal_reason
         elif recipient_type == "cli_session":
             activation_unavailable_reason = (
@@ -778,25 +798,6 @@ def main():
         print("unblocks with send_message_to_thread. Use native subagent coordination")
         print("for bounded local support. Do not use AX or Computer Use to route this")
         print("packet to a Codex task.")
-        print(border)
-    elif desktop_bridge_required:
-        recipient_display = recipient_agent.get("display_name", args.recipient)
-        border = "━" * 60
-        print(f"\n{border}")
-        print("🖥️  CLAUDE DESKTOP BRIDGE REQUIRED")
-        print(border)
-        print()
-        print(
-            f"Use Computer Use against /Applications/Claude.app to wake "
-            f"{recipient_display} ({args.recipient}) for chat {chat_id}."
-        )
-        print("Do not ask the operator to relay, paste, click, or manually wake Claude.")
-        print()
-        print("Visible one-line prompt:")
-        print(desktop_bridge_prompt)
-        print()
-        print("If Computer Use is blocked or Claude is not idle, keep the heartbeat active,")
-        print("retry through Codex/Computer Use when appropriate, and record exact failed attempts.")
         print(border)
     # GH-1547 (#110 P2 3609336511): the relay print must mirror the computed
     # operator_relay_required (which excludes attended-recovery targets) — the
@@ -892,7 +893,11 @@ def main():
         )
         print()
         print(f"Reason: {activation_unavailable_reason}")
-        print("Configure a dispatchable runtime session or activation.ax_app, then retry the wake.")
+        if is_watcher_only_target(args.recipient):
+            print("Repair the binding or the app's background inbox watcher. Do not ring,")
+            print("relay, resume, or type into the app to deliver this packet.")
+        else:
+            print("Configure a dispatchable runtime session or a supported AX profile, then retry the wake.")
         print()
         print(border)
 

@@ -100,6 +100,108 @@ class AxAttendedRecoveryRoutingTest(unittest.TestCase):
         },
     }
 
+    def test_claude_is_never_a_routine_doorbell_target(self) -> None:
+        # agents.json registers Claude as a cli_session with ax_app "Claude", which is
+        # exactly the shape the selector accepts. The exclusion is what keeps
+        # deliver.py from printing a runnable ring for it.
+        claude = {
+            "id": "claude",
+            "activation": {
+                "type": "cli_session",
+                "watcher_enabled": True,
+                "ax_app": "Claude",
+            },
+        }
+        self.assertFalse(deliver.ax_attended_only(claude))
+        self.assertFalse(
+            deliver.is_ax_doorbell_target(claude, "claude", sender_id="codex")
+        )
+        self.assertFalse(
+            deliver.is_ax_attended_recovery_target(claude, "claude", sender_id="codex")
+        )
+
+    def test_custom_identity_cannot_route_to_the_claude_app(self) -> None:
+        agent = {
+            "id": "custom",
+            "activation": {
+                "type": "cli_session",
+                "watcher_enabled": True,
+                "ax_app": "Claude",
+            },
+        }
+        self.assertIsNone(deliver.ax_doorbell_app(agent))
+        self.assertFalse(
+            deliver.is_ax_doorbell_target(agent, "custom", sender_id="codex")
+        )
+
+    def test_binary_profile_precedence_is_preserved(self) -> None:
+        for app, profile in (
+            ("Codex Claude", "codex"),
+            ("ZCode Claude", "zcode"),
+        ):
+            agent = {
+                "id": "custom",
+                "activation": {
+                    "type": "cli_session",
+                    "watcher_enabled": True,
+                    "ax_app": app,
+                },
+            }
+            self.assertEqual(deliver.ax_doorbell_app(agent), app)
+            self.assertEqual(deliver.ax_app_profile(app), profile)
+
+    def test_only_the_native_codex_profile_is_routine_capable(self) -> None:
+        for app, expected in (
+            ("Codex", True),
+            ("ChatGPT", True),
+            ("ZCode", False),
+            ("Claude", False),
+            ("Unknown Electron App", False),
+        ):
+            self.assertEqual(
+                deliver.ax_app_supports_routine_doorbell(app),
+                expected,
+            )
+
+    def test_claude_app_cannot_route_to_attended_recovery(self) -> None:
+        agent = {
+            "id": "custom",
+            "activation": {
+                "type": "cli_session",
+                "watcher_enabled": True,
+                "ax_app": "Claude",
+                "ax_attended_only": True,
+            },
+        }
+        self.assertFalse(
+            deliver.is_ax_attended_recovery_target(
+                agent, "custom", sender_id="codex"
+            )
+        )
+
+    def test_unsupported_app_cannot_route_to_routine_or_attended_ax(self) -> None:
+        for ax_app in ("Unknown Electron App", "", 7):
+            with self.subTest(ax_app=ax_app):
+                agent = {
+                    "id": "custom",
+                    "activation": {
+                        "type": "cli_session",
+                        "watcher_enabled": True,
+                        "ax_app": ax_app,
+                        "ax_attended_only": True,
+                    },
+                }
+                self.assertFalse(
+                    deliver.is_ax_doorbell_target(
+                        agent, "custom", sender_id="codex"
+                    )
+                )
+                self.assertFalse(
+                    deliver.is_ax_attended_recovery_target(
+                        agent, "custom", sender_id="codex"
+                    )
+                )
+
     def test_attended_only_target_is_not_routine_doorbell(self) -> None:
         self.assertTrue(deliver.ax_attended_only(self.ZCODE))
         self.assertFalse(
@@ -114,7 +216,10 @@ class AxAttendedRecoveryRoutingTest(unittest.TestCase):
         )
 
     def test_readable_targets_keep_routine_doorbell(self) -> None:
-        for agent_id, app in (("codex", "Codex"), ("claude", "Claude")):
+        # Claude is deliberately absent: it is excluded from the doorbell selector
+        # entirely (its own background inbox watcher owns pickup), and
+        # test_claude_is_never_a_routine_doorbell_target below covers that.
+        for agent_id, app in (("codex", "Codex"), ("relay", "Codex")):
             agent = {
                 "id": agent_id,
                 "activation": {
@@ -184,6 +289,11 @@ class AxAttendedRecoveryRoutingTest(unittest.TestCase):
         self.assertTrue(
             deliver.is_ax_attended_recovery_target(
                 agents["zcode"], "zcode", sender_id="codex"
+            )
+        )
+        self.assertFalse(
+            deliver.is_ax_attended_recovery_target(
+                agents["kimi"], "kimi", sender_id="codex"
             )
         )
 
@@ -261,7 +371,7 @@ class AxRegistryBinaryAgreementTest(unittest.TestCase):
                 f"binary says readable={readable}, registry ax_attended_only={attended_only}",
             )
             checked += 1
-        self.assertGreaterEqual(checked, 3)  # codex, claude, zcode at minimum
+        self.assertGreaterEqual(checked, 2)  # codex plus one attended-only app
 
 
 class AxRecoveryWordingPinTest(unittest.TestCase):
@@ -289,10 +399,12 @@ class AxRecoveryWordingPinTest(unittest.TestCase):
     def test_schema_reference_doorbell_claim_is_conditional(self) -> None:
         # GH-1547 PR #110 a369 P2: the schema-reference routing note must not
         # claim unconditionally that ax_app => ax_doorbell_required; flagged
-        # targets emit ax_attended_recovery_required instead.
+        # supported targets emit attended recovery and unsupported profiles
+        # fail closed instead.
         schema = (REPO_ROOT / "docs" / "schema-reference.md").read_text()
-        self.assertIn("ONLY when `ax_attended_only` is not `true`", schema)
-        self.assertIn("ax_attended_recovery_required", schema)
+        self.assertIn("supported app profile", schema)
+        self.assertIn("ATTENDED RECOVERY REQUIRED", schema)
+        self.assertIn("Unknown and Claude profiles fail closed", schema)
 
     AUTHORITATIVE_ROUTING_DOCS = (
         "README.md",

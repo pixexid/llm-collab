@@ -157,6 +157,10 @@ adapters, but it cannot perform Codex Computer Use recovery.
 
 Current safe ordering:
 
+These target-side AX and Computer Use steps apply only to non-Claude workers.
+Canonical `agent_id == "claude"` uses its durable packet and background inbox
+watcher alone.
+
 - if AX must be the primary wake, first ensure no matching dispatchable session
   autobridge is active; current `deliver.py` gives `autobridge_ready` precedence
   and suppresses `ax_doorbell_required`
@@ -172,8 +176,8 @@ Current safe ordering:
   `QUEUED (UNCONFIRMED)` exit 0 preserves the mailbox/blocker follow-up but does
   not prove exact-thread delivery and must not be re-rung
 - use attended Computer Use only as fallback/recovery when AX cannot safely
-  inspect/target/send, or for an explicitly project-configured non-CLI desktop
-  bridge; apply the idle input gate before this screenshot/keyboard fallback
+  inspect/target/send; apply the idle input gate before this screenshot/keyboard
+  fallback
 - PM2/heartbeat remains a bounded observation safety-fuse, not the primary wake
 
 Why:
@@ -188,7 +192,8 @@ Why:
 Watcher policy for desktop-app agents:
 
 PM2/heartbeat is only the bounded, provisional safety-fuse described in
-`session-autobridge-runbook.md`.
+`session-autobridge-runbook.md`. The target-side AX and Computer Use policy
+below excludes canonical `claude`; inbound Claude-to-Codex AX is unchanged.
 
 - primary: after readable `AXValue` proves the native composer is empty, ring
   the registered AX app once, even while it is busy, with one short pointer to
@@ -202,9 +207,8 @@ PM2/heartbeat is only the bounded, provisional safety-fuse described in
   turn with Computer Use plus
   `bin/axsend-ensure tree --app <app> --editable-only` to remove/blank the
   competing field and verify the real native prompt before resuming AX
-- fallback: use Computer Use to send only when AX remains unavailable/unsafe or
-  the project explicitly configured a non-CLI desktop bridge; apply the Computer
-  Use idle input gate and one-line pointer rule
+- fallback: use Computer Use to send only when AX remains unavailable/unsafe;
+  apply the Computer Use idle input gate and one-line pointer rule
 - never convert one AX targeting incident into a standing mailbox-only or
   AX-disabled policy
 - unsafe: claim a PM2 watcher created a new app-visible desktop thread

@@ -85,8 +85,8 @@ Agent roster. Created by `scripts/init.py`. Gitignored.
 |-------|------|----------|-------------|
 | `type` | string | yes | `"cli_session"`, `"human_relay"`, `"human"`, `"api_trigger"` |
 | `watcher_enabled` | bool | no | Whether the current PM2 ecosystem should instantiate a background watcher. The ecosystem checks this flag only; it does not filter by activation `type`. |
-| `ax_app` | string | no | For AX-capable `cli_session` agents: localized macOS app name or bundle ID used by `axsend`. Omit for terminal-only sessions. |
-| `ax_attended_only` | bool | no | GH-1547: set `true` when the agent's composer is `AXValue`-opaque (emptiness unprovable — e.g. ZCode, Antigravity). `deliver.py` then never emits a routine AX doorbell and instead prints an ATTENDED RECOVERY REQUIRED instruction routing control to Codex; this supersedes `human_relay` operator routing for the flagged agent. Must agree with the `axsend` binary's composer opacity table (`tools/axbridge/send-resolution.swift`) — `tests/test_deliver_ax_routing.py` enforces the agreement. |
+| `ax_app` | string | no | For AX-capable `cli_session` agents: a localized macOS app name or bundle ID resolving to a supported native composer profile. Omit for terminal-only sessions. |
+| `ax_attended_only` | bool | no | GH-1547: set `true` when a supported app profile's composer is `AXValue`-opaque (ZCode), or for a no-app target requiring attended Computer Use. `deliver.py` then never emits a routine AX doorbell and instead prints an ATTENDED RECOVERY REQUIRED instruction routing control to Codex; this supersedes `human_relay` operator routing for the flagged agent. Unknown and Claude profiles fail closed. Must agree with the `axsend` binary's composer opacity table (`tools/axbridge/send-resolution.swift`) — `tests/test_deliver_ax_routing.py` enforces the agreement. |
 | `base_model` | string | no | For `human_relay`: which LLM this maps to (informational) |
 | `identity_note` | string | no | For `human_relay`: shown in handoff prompt to disambiguate identity |
 
@@ -162,7 +162,7 @@ Project registry. Created by `scripts/init.py`. Gitignored.
 | `repos` | object | Map of repo ID → path (relative to `projects_root` or absolute) |
 | `default_branch_base` | string | Default git ref for worktree creation |
 | `preflight_command` | string[] or null | Command to validate before task integration |
-| `claude_desktop_bridge` | bool | Optional Claude Desktop fallback for a non-CLI Claude target. CLI-session workers use AX first. |
+| `claude_desktop_bridge` | bool | Retained for compatibility; selects nothing. Claude is woken by its durable packet and the app's own background inbox watcher, never AX or Computer Use. |
 | `ui_ux.direct_app_only` | bool | Optional, default-off direct-app gate. When `true`, every non-`done` task must avoid design/sandbox/spec/handoff/parity, bare-template, and template-design-only lane types, repository-root `design/**` targets, and dependency materialization of newly authored `design/**` artifacts. Explicit implementation lanes such as `template-implementation`, `src/design/**`, and read-only `required_design_docs` remain valid. Absolute related/dependency paths require a complete resolvable project `repos` mapping so repository-root scope can be evaluated. A present non-boolean value is a configuration error. |
 | `ui_ux.required_design_docs` | string[] | Optional project-specific design sources prepended to every UI/UX task contract. Non-Amiga projects must configure these or provide explicit task-level design docs. |
 | `db.production_schema_guard` | bool | Optional strict boolean, default `false`. When `true` for the task's exact project, assignment/review/PR/done validation rejects schema-changing tasks classified as `none`, restricts `local-schema-only` to the exact operator-approved dev-only exception, and treats concrete `db/migrations/**` or `db/schema.sql` paths as schema changes even after `manual_false`. A present non-boolean fails closed; projects never inherit another project's value. |
@@ -1634,66 +1634,6 @@ Do not use `design-queue.json` as a second backlog source. New design-first work
 
 ---
 
-## project_state_root/{project_id}/claude-desktop-bridge-state.json
-
-Runtime-local state for the Claude desktop Computer Use bridge.
-
-This file is outside the public checkout when `project_state_root` points to a
-local runtime directory. It records recent Computer Use capture/accessibility
-timeouts for the current ready design lane so unattended heartbeats can apply a
-cooldown instead of repeatedly spending long tool timeouts on the same blocked
-desktop state.
-
-```json
-{
-  "project_id": "my-app",
-  "updated_utc": "2026-01-01T00:00:00+00:00",
-  "computer_use_timeouts": {
-    "TASK-DESIGN1": {
-      "last_timeout_utc": "2026-01-01T00:00:00+00:00",
-      "timeout_count": 1,
-      "reason": "Computer Use get_app_state timed out after 120s",
-      "issue": 101,
-      "bridge_thread_uuid": "00000000-0000-0000-0000-000000000000",
-      "worktree": "/path/to/worktree",
-      "branch": "codex/claude/task-design1"
-    }
-  }
-}
-```
-
-### Bridge state fields
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `project_id` | string | Project identifier |
-| `updated_utc` | string | Last write timestamp |
-| `computer_use_timeouts` | object | Map of task id to the latest idle-time Computer Use timeout blocker |
-| `last_timeout_utc` | string | Timestamp used to calculate the retry cooldown |
-| `timeout_count` | int | Consecutive timeout count for the task; repeated failures increase the retry cooldown |
-| `reason` | string | Short operator-readable blocker reason |
-| `issue` | int | GitHub issue number for the ready lane |
-| `bridge_thread_uuid` | string or null | Claude desktop bridge UUID for audit/binding |
-| `worktree` | string or null | Assigned implementation/design worktree |
-| `branch` | string or null | Assigned branch |
-
-Use `python3 bin/project_design_queue.py record-computer-use-timeout --project
-<project_id> --reason "..."` to update this state. Use `python3
-bin/project_design_queue.py bridge-status --project <project_id> --json` to read
-the current classification. When it reports
-`computer-use-cooldown-no-durable-progress`, keep checking durable evidence but
-do not call Computer Use again until the cooldown expires.
-
-Repeated timeouts use exponential backoff from 30 minutes up to a 2-hour cap.
-This prevents unattended loops from spending a 120-second Computer Use timeout
-on every heartbeat when Claude Desktop accessibility/capture is blocked.
-`bridge-status --json` also reports `recommended_next_check_seconds` and
-`recommended_next_check_minutes` inside `computer_use_blocker`; heartbeat loops
-should use that value as their next wake cadence while no durable progress is
-visible.
-
----
-
 Read first by `session_bootstrap.py` so the LLM immediately knows its identity.
 
 ---
@@ -1759,8 +1699,8 @@ Notes:
   the same setup contract as human-relay recipients
 - `human_relay` recipients also receive the onboarding in the printed handoff
   prompt; later deliveries omit it once awareness is tracked locally
-- AX-capable `cli_session` workers configure `activation.ax_app`. For those
-  sends — ONLY when `ax_attended_only` is not `true` — `deliver.py` reports
+- AX-capable `cli_session` workers configure a supported `activation.ax_app`
+  profile. For AX-readable Codex/ChatGPT sends, `deliver.py` reports
   `ax_doorbell_required` and prints the `bin/axsend-ensure ring --submit
   --verify` command (from the llm-collab checkout root) the sender should run.
   An `ax_attended_only: true` target (opaque composer, e.g. ZCode) instead
@@ -1779,6 +1719,7 @@ Notes:
 - A terminal-only `cli_session` needs a dispatchable runtime session. Without
   either transport, `deliver.py` reports `activation_unavailable` instead of
   silently requesting operator relay.
-- A project may enable `claude_desktop_bridge` for a non-CLI Claude target. Only
-  that fallback reports `desktop_bridge_required` and uses Computer Use; it does
-  not override AX routing for a Claude agent registered as `cli_session`.
+- `claude_desktop_bridge` no longer selects anything. Claude is woken by its
+  durable packet and the app's own background inbox watcher, so `deliver.py`
+  emits neither `ax_doorbell_required` nor `desktop_bridge_required` for it;
+  `desktop_bridge_required` is retained in the result shape and is always false.

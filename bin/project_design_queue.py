@@ -5,9 +5,6 @@ project_design_queue.py — show/validate/render a project-level design-first qu
 Usage:
   python3 bin/project_design_queue.py show --project amiga
   python3 bin/project_design_queue.py ready-context --project amiga
-  python3 bin/project_design_queue.py bridge-status --project amiga --json
-  python3 bin/project_design_queue.py record-computer-use-timeout --project amiga
-  python3 bin/project_design_queue.py desktop-prompt --project amiga
   python3 bin/project_design_queue.py ensure-bridge-metadata --project amiga --all-active
   python3 bin/project_design_queue.py validate --project amiga
   python3 bin/project_design_queue.py validate --project amiga --check-github
@@ -30,12 +27,10 @@ import json
 import shutil
 import subprocess
 import uuid
-from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, str(Path(__file__).parent))
 import project_issue_queue as issue_queue
-import claude_desktop_bridge_health as bridge_health
-from _helpers import ROOT, display_path, dump_frontmatter, find_task_by_id, get_project, parse_frontmatter, project_state_dir, utc_iso, write_file
+from _helpers import display_path, dump_frontmatter, find_task_by_id, get_project, parse_frontmatter, project_state_dir, utc_iso, write_file
 from task_contract import validate_direct_app_policy
 
 QUEUE_STATES = {"ready", "queued", "blocked", "active", "review", "done"}
@@ -43,9 +38,6 @@ DESIGN_FILE_NAME = "design-queue.json"
 MARKDOWN_FILE_NAME = "design-queue.md"
 HISTORY_DIR_NAME = "history"
 ISSUE_QUEUE_FILE_NAME = "issue-queue.json"
-BRIDGE_STATE_FILE_NAME = "claude-desktop-bridge-state.json"
-COMPUTER_USE_TIMEOUT_COOLDOWN_SECONDS = 30 * 60
-COMPUTER_USE_TIMEOUT_MAX_COOLDOWN_SECONDS = 2 * 60 * 60
 DESIGN_OWNER = "claude"
 DESIGN_LANE_KEYWORDS = (
     "design",
@@ -68,9 +60,6 @@ def parse_args() -> argparse.Namespace:
         choices=(
             "show",
             "ready-context",
-            "bridge-status",
-            "record-computer-use-timeout",
-            "desktop-prompt",
             "ensure-bridge-metadata",
             "validate",
             "sync-markdown",
@@ -88,11 +77,6 @@ def parse_args() -> argparse.Namespace:
         "--check-github",
         action="store_true",
         help="Use gh to verify active queued issues are still open.",
-    )
-    parser.add_argument(
-        "--reason",
-        default="computer-use get_app_state timed out",
-        help="Reason to store for record-computer-use-timeout.",
     )
     return parser.parse_args()
 
@@ -117,10 +101,6 @@ def issue_queue_json_path(project_id: str) -> Path:
     return project_state_dir(project_id) / ISSUE_QUEUE_FILE_NAME
 
 
-def bridge_state_path(project_id: str) -> Path:
-    return project_state_dir(project_id) / BRIDGE_STATE_FILE_NAME
-
-
 def load_queue(project_id: str) -> dict:
     if get_project(project_id) is None:
         raise SystemExit(f"[error] Unknown project_id: {project_id!r}")
@@ -135,17 +115,6 @@ def load_issue_queue(project_id: str) -> dict | None:
     if not path.exists():
         return None
     return json.loads(path.read_text())
-
-
-def load_bridge_state(project_id: str) -> dict:
-    path = bridge_state_path(project_id)
-    if not path.exists():
-        return {"project_id": project_id, "computer_use_timeouts": {}}
-    return json.loads(path.read_text())
-
-
-def save_bridge_state(project_id: str, payload: dict) -> None:
-    write_file(bridge_state_path(project_id), json.dumps(payload, indent=2) + "\n")
 
 
 def save_queue(project_id: str, payload: dict) -> None:
@@ -666,303 +635,6 @@ def render_ready_context(context: dict) -> str:
     return "\n".join(lines)
 
 
-def render_desktop_prompt(context: dict) -> str:
-    if not context.get("ready"):
-        raise SystemExit("[error] No ready design lane.")
-    if not context.get("bridge_metadata_complete"):
-        missing = ", ".join(context.get("missing_bridge_metadata", [])) or "unknown"
-        raise SystemExit(f"[error] Ready design lane is missing bridge metadata: {missing}")
-
-    return "\n".join(
-        [
-            str(context["bridge_visible_prefix"]),
-            f"bridge_thread_uuid: {context['bridge_thread_uuid']}",
-            f"Project: {context['project_id']}",
-            f"Current lane: GH-{context['issue']} / {context['task_id']} — {context['title']}",
-            "",
-            "Please read the llm-collab activation packet and work only in the assigned worktree/branch:",
-            str(context["claude_activation_message_path"]),
-            "",
-            "Assigned worktree:",
-            str(context["worktree"]),
-            "",
-            "Assigned branch:",
-            str(context["branch"]),
-            "",
-            "Start with session bootstrap as claude, then follow the activation packet exactly. Do not use the Claude CLI bridge. Do not write into the project's main checkout or any internal .claude worktree.",
-        ]
-    )
-
-
-def relative_workspace_path(path_value: object) -> str | None:
-    if not isinstance(path_value, str) or not path_value:
-        return None
-    path = Path(path_value)
-    try:
-        return str(path.resolve().relative_to(ROOT))
-    except (OSError, ValueError):
-        return path_value
-
-
-def load_agent_inbox(agent: str) -> dict:
-    path = ROOT / "agents" / agent / "inbox.json"
-    if not path.exists():
-        return {"unread": [], "read": [], "missing": True}
-    return json.loads(path.read_text())
-
-
-def message_frontmatter_from_relpath(relpath: str) -> dict:
-    path = ROOT / relpath
-    if not path.exists():
-        return {}
-    frontmatter, _ = parse_frontmatter(path.read_text())
-    return frontmatter
-
-
-def activation_packet_state(context: dict) -> str:
-    activation_path = relative_workspace_path(context.get("claude_activation_message_path"))
-    if not activation_path:
-        return "missing"
-    inbox = load_agent_inbox("claude")
-    if activation_path in inbox.get("unread", []):
-        return "unread"
-    if activation_path in inbox.get("read", []):
-        return "read"
-    return "not-indexed"
-
-
-def unread_messages_from(agent: str, *, sender: str, project_id: str | None) -> list[str]:
-    inbox = load_agent_inbox(agent)
-    matches: list[str] = []
-    for relpath in inbox.get("unread", []):
-        frontmatter = message_frontmatter_from_relpath(str(relpath))
-        if frontmatter.get("from") != sender and frontmatter.get("sender_agent_id") != sender:
-            continue
-        if project_id and frontmatter.get("project_id") != project_id:
-            continue
-        matches.append(str(relpath))
-    return matches
-
-
-def worktree_state(worktree_value: object) -> dict:
-    if not isinstance(worktree_value, str) or not worktree_value:
-        return {"exists": False, "dirty": False, "status_entries": [], "head": None}
-    worktree = Path(worktree_value)
-    if not worktree.exists():
-        return {"exists": False, "dirty": False, "status_entries": [], "head": None}
-
-    status = subprocess.run(
-        ["git", "-C", str(worktree), "status", "--short", "--branch", "--untracked-files=all"],
-        check=False,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    head = subprocess.run(
-        ["git", "-C", str(worktree), "log", "-1", "--oneline", "--decorate"],
-        check=False,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    status_lines = [line for line in status.stdout.splitlines() if line.strip()]
-    entries = [line for line in status_lines if not line.startswith("## ")]
-    return {
-        "exists": True,
-        "dirty": bool(entries),
-        "status_header": status_lines[0] if status_lines else "",
-        "status_entries": entries,
-        "head": head.stdout.strip() if head.returncode == 0 else None,
-        "errors": {
-            "status": status.stderr.strip() if status.returncode != 0 else "",
-            "head": head.stderr.strip() if head.returncode != 0 else "",
-        },
-    }
-
-
-def task_state(context: dict) -> dict:
-    task_path_value = context.get("task_path")
-    if not isinstance(task_path_value, str) or not task_path_value:
-        return {"exists": False, "status": None, "activity_log_entries": 0}
-    path = Path(task_path_value)
-    if not path.exists():
-        return {"exists": False, "status": None, "activity_log_entries": 0}
-    frontmatter, body = parse_frontmatter(path.read_text())
-    return {
-        "exists": True,
-        "status": frontmatter.get("status"),
-        "owner": frontmatter.get("owner"),
-        "activity_log_entries": body.count("\n- "),
-    }
-
-
-def parse_utc_datetime(value: object) -> datetime | None:
-    if not isinstance(value, str) or not value:
-        return None
-    try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
-
-
-def computer_use_timeout_status(project_id: str, task_id: object, *, now: datetime | None = None) -> dict:
-    if not isinstance(task_id, str) or not task_id:
-        return {"active": False, "last_timeout_utc": None, "cooldown_until_utc": None, "seconds_remaining": 0}
-
-    state = load_bridge_state(project_id)
-    entry = state.get("computer_use_timeouts", {}).get(task_id, {})
-    last_timeout = parse_utc_datetime(entry.get("last_timeout_utc"))
-    if last_timeout is None:
-        return {"active": False, "last_timeout_utc": None, "cooldown_until_utc": None, "seconds_remaining": 0}
-
-    current = now or datetime.now(timezone.utc)
-    try:
-        timeout_count = max(1, int(entry.get("timeout_count", 1)))
-    except (TypeError, ValueError):
-        timeout_count = 1
-    cooldown_seconds = min(
-        COMPUTER_USE_TIMEOUT_COOLDOWN_SECONDS * (2 ** (timeout_count - 1)),
-        COMPUTER_USE_TIMEOUT_MAX_COOLDOWN_SECONDS,
-    )
-    cooldown_until = last_timeout + timedelta(seconds=cooldown_seconds)
-    seconds_remaining = max(0, int((cooldown_until - current).total_seconds()))
-    next_check_seconds = min(seconds_remaining, 30 * 60) if seconds_remaining > 0 else 0
-    return {
-        "active": seconds_remaining > 0,
-        "last_timeout_utc": entry.get("last_timeout_utc"),
-        "cooldown_until_utc": cooldown_until.isoformat(),
-        "cooldown_seconds": cooldown_seconds,
-        "seconds_remaining": seconds_remaining,
-        "recommended_next_check_seconds": next_check_seconds,
-        "recommended_next_check_minutes": int((next_check_seconds + 59) / 60) if next_check_seconds else 0,
-        "timeout_count": timeout_count,
-        "reason": entry.get("reason"),
-    }
-
-
-def active_computer_use_timeout_count(entry: dict, *, now: datetime) -> int:
-    last_timeout = parse_utc_datetime(entry.get("last_timeout_utc"))
-    if last_timeout is None:
-        return 0
-    try:
-        timeout_count = max(1, int(entry.get("timeout_count", 1)))
-    except (TypeError, ValueError):
-        timeout_count = 1
-    cooldown_seconds = min(
-        COMPUTER_USE_TIMEOUT_COOLDOWN_SECONDS * (2 ** (timeout_count - 1)),
-        COMPUTER_USE_TIMEOUT_MAX_COOLDOWN_SECONDS,
-    )
-    if last_timeout + timedelta(seconds=cooldown_seconds) <= now:
-        return 0
-    return timeout_count
-
-
-def record_computer_use_timeout(project_id: str, payload: dict, *, reason: str) -> dict:
-    context = ready_context(project_id, payload)
-    if not context.get("ready"):
-        raise SystemExit("[error] No ready design lane to record a Computer Use timeout for.")
-
-    task_id = str(context["task_id"])
-    state = load_bridge_state(project_id)
-    timeouts = state.setdefault("computer_use_timeouts", {})
-    previous = timeouts.get(task_id, {})
-    current = datetime.now(timezone.utc)
-    current_iso = current.isoformat()
-    previous_count = active_computer_use_timeout_count(previous, now=current)
-    timeouts[task_id] = {
-        "last_timeout_utc": current_iso,
-        "timeout_count": previous_count + 1,
-        "reason": reason,
-        "issue": context.get("issue"),
-        "bridge_thread_uuid": context.get("bridge_thread_uuid"),
-        "worktree": context.get("worktree"),
-        "branch": context.get("branch"),
-    }
-    state["project_id"] = project_id
-    state["updated_utc"] = current_iso
-    save_bridge_state(project_id, state)
-    return {
-        "project_id": project_id,
-        "task_id": task_id,
-        "path": display_path(bridge_state_path(project_id)),
-        "computer_use_blocker": computer_use_timeout_status(project_id, task_id),
-    }
-
-
-def bridge_status(project_id: str, payload: dict) -> dict:
-    context = ready_context(project_id, payload)
-    health = bridge_health.collect_health()
-    if not context.get("ready"):
-        return {
-            "project_id": project_id,
-            "ready_context": context,
-            "claude_health": health,
-            "classification": "queue-empty" if context.get("queue_empty") else "no-ready-lane",
-            "durable_progress": False,
-        }
-
-    task = task_state(context)
-    worktree = worktree_state(context.get("worktree"))
-    codex_handoffs = unread_messages_from("codex", sender="claude", project_id=project_id)
-    activation_state = activation_packet_state(context)
-    computer_use_blocker = computer_use_timeout_status(project_id, context.get("task_id"))
-    task_status = task.get("status")
-    durable_progress = bool(
-        codex_handoffs
-        or task_status in {"review", "blocked", "done"}
-        or worktree.get("dirty")
-    )
-
-    health_metrics = health.get("claude_main_process_metrics", {})
-    if not context.get("bridge_metadata_complete"):
-        classification = "missing-bridge-metadata"
-    elif durable_progress:
-        classification = "durable-progress-visible"
-    elif computer_use_blocker.get("active"):
-        classification = "computer-use-cooldown-no-durable-progress"
-    elif health_metrics.get("busy"):
-        classification = "cpu-busy-no-durable-progress"
-    else:
-        classification = "idle-no-durable-progress"
-
-    return {
-        "project_id": project_id,
-        "ready_context": context,
-        "activation_packet_state": activation_state,
-        "codex_unread_from_claude": codex_handoffs,
-        "task": task,
-        "worktree": worktree,
-        "claude_health": health,
-        "computer_use_blocker": computer_use_blocker,
-        "durable_progress": durable_progress,
-        "classification": classification,
-    }
-
-
-def render_bridge_status(status: dict) -> str:
-    context = status.get("ready_context", {})
-    if not context.get("ready"):
-        return f"Bridge status: {status['classification']}"
-    health_metrics = status.get("claude_health", {}).get("claude_main_process_metrics", {})
-    lines = [
-        f"Bridge status: {status['classification']}",
-        f"Ready lane: GH-{context.get('issue')} / {context.get('task_id')} / {context.get('owner')}",
-        f"Activation packet: {status.get('activation_packet_state')}",
-        f"Durable progress: {status.get('durable_progress')}",
-        f"Task status: {status.get('task', {}).get('status')}",
-        f"Worktree dirty: {status.get('worktree', {}).get('dirty')}",
-        f"Worktree head: {status.get('worktree', {}).get('head')}",
-        f"Codex unread handoffs from Claude: {len(status.get('codex_unread_from_claude', []))}",
-        f"Claude frontmost/visible: {status.get('claude_health', {}).get('claude_frontmost')} / {status.get('claude_health', {}).get('claude_visible')}",
-        f"Claude CPU busy: {health_metrics.get('busy')} ({health_metrics.get('cpu_percent_total')}%)",
-        f"Computer Use blocker active: {status.get('computer_use_blocker', {}).get('active')}",
-    ]
-    return "\n".join(lines)
-
-
 def ensure_bridge_metadata(project_id: str, payload: dict, *, all_active: bool) -> dict:
     candidate_lanes = active_design_lanes(payload)
     if not all_active:
@@ -1211,30 +883,6 @@ def main() -> int:
             print(json.dumps(context, indent=2, sort_keys=True))
         else:
             print(render_ready_context(context))
-        return 0
-
-    if args.command == "bridge-status":
-        status = bridge_status(args.project, payload)
-        if args.json:
-            print(json.dumps(status, indent=2, sort_keys=True))
-        else:
-            print(render_bridge_status(status))
-        return 0
-
-    if args.command == "record-computer-use-timeout":
-        result = record_computer_use_timeout(args.project, payload, reason=args.reason)
-        if args.json:
-            print(json.dumps(result, indent=2, sort_keys=True))
-        else:
-            blocker = result["computer_use_blocker"]
-            print(f"recorded Computer Use timeout for {result['task_id']}")
-            print(f"state: {result['path']}")
-            print(f"cooldown active: {blocker.get('active')}")
-            print(f"cooldown until: {blocker.get('cooldown_until_utc')}")
-        return 0
-
-    if args.command == "desktop-prompt":
-        print(render_desktop_prompt(ready_context(args.project, payload)))
         return 0
 
     if args.command == "ensure-bridge-metadata":

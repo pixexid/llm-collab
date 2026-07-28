@@ -210,6 +210,10 @@ check(profileFor("ChatGPT") == .codex,
       "updated localized ChatGPT app name selects the Codex profile")
 check(profileFor("Claude") == .claude,
       "Claude app name remains isolated to the Claude profile")
+check(profileFor("Codex Claude") == .codex,
+      "Codex profile keeps precedence over a later Claude substring")
+check(profileFor("ZCode Claude") == .zcode,
+      "ZCode profile keeps precedence over a later Claude substring")
 check(profileFor("unknown-electron-app") == .unknown,
       "unrecognized app name remains fail-closed")
 
