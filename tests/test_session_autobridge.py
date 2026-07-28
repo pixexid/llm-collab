@@ -6529,6 +6529,45 @@ class SessionAutobridgeTest(unittest.TestCase):
         self.assertEqual(["error", "new_message"], [event["event"] for event in events])
         self.assertEqual(new["path"], events[-1]["detail"])
 
+    def test_exact_watcher_uses_only_the_bounded_registry_reader(self):
+        argv = [
+            "watch_inbox.py",
+            "--me",
+            "claude",
+            "--project",
+            "llm-collab",
+            "--chat",
+            "CHAT-EXACT",
+            "--session",
+            "SESSION-EXACT",
+            "--max-polls",
+            "1",
+            "--json",
+        ]
+        with patch.object(sys, "argv", argv), patch.object(
+            watch_inbox_lib, "agent_ids", side_effect=AssertionError("unbounded read")
+        ), patch.object(
+            watch_inbox_lib, "config_get", return_value=1
+        ), patch.object(
+            watch_inbox_lib, "exact_session_messages", return_value=[]
+        ):
+            watch_inbox_lib.main()
+
+    def test_exact_watcher_refuses_repository_scope_mismatch(self):
+        args = object()
+        with patch.object(
+            watch_inbox_lib, "exact_read_session", return_value={}
+        ), patch.object(
+            watch_inbox_lib,
+            "exact_read_messages",
+            return_value=([], [{"path": "Chats/exact/wrong.md", "reason": "repo_mismatch"}]),
+        ):
+            with self.assertRaisesRegex(
+                watch_inbox_lib.ExactWatcherAuthorityError,
+                "exact_session_repo_scope_refused",
+            ):
+                watch_inbox_lib.exact_session_messages(args)
+
     def test_register_persists_explicit_repo_subscription(self):
         root = self.make_workspace()
         self.add_agent(

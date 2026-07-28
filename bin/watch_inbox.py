@@ -125,7 +125,11 @@ def exact_session_messages(args) -> list[dict]:
             session = exact_read_session(args, budget)
         except Exception as error:
             raise ExactWatcherAuthorityError(str(error)) from error
-        messages, _ = exact_read_messages(args, session, budget)
+        messages, refusals = exact_read_messages(args, session, budget)
+        if refusals:
+            raise ExactWatcherAuthorityError(
+                f"exact_session_repo_scope_refused: {json.dumps(refusals, sort_keys=True)}"
+            )
     return messages
 
 
@@ -274,10 +278,11 @@ def dispatch_autobridge(
 def main():
     args = parse_args()
 
-    known = agent_ids()
-    if args.me not in known:
-        print(f"[error] Unknown agent: {args.me!r}", file=sys.stderr)
-        sys.exit(1)
+    if not args.session:
+        known = agent_ids()
+        if args.me not in known:
+            print(f"[error] Unknown agent: {args.me!r}", file=sys.stderr)
+            sys.exit(1)
 
     poll_interval = args.poll_seconds or config_get("poll_interval_seconds", 15)
     inbox_path = agent_inbox_path(args.me)

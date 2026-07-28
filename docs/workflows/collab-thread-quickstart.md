@@ -137,11 +137,14 @@ to be watching.
 ## 3. Read your inbox
 
 ```bash
-python bin/inbox.py --me <agent_id> --project <project_id> --chat <CHAT-ID> --limit 5
+export LLM_COLLAB_READER_RUNTIME_ID=<native-runtime-session-id>
+python bin/inbox.py \
+  --me <agent_id> --project <project_id> --chat <CHAT-ID> \
+  --session <SESSION-ID> --repo-target <repo-id> --peek --limit 5
 ```
 
-Scope it. `--chat` matches a substring, and an unscoped read across a busy
-workspace will surface another project's traffic.
+Keep the read bound to the same native session as the watcher. Exact reads are
+read-only; they cannot consume a sibling session's packet.
 
 ## 4. Send a packet
 
