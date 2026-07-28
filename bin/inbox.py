@@ -413,7 +413,6 @@ def gate_activation_message(
                 "identity": identity,
                 "owner": existing,
             }
-        runtime_id = registered_runtime_id
     owner_pid = None if runtime_id else activation_reader_pid()
     session_id = activation_reader_session_id(args, identity)
     ensure_reader_session(session_id, args.me, identity, runtime_id=runtime_id)

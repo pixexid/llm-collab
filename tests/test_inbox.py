@@ -947,6 +947,53 @@ class InboxMarkAllReadTest(unittest.TestCase):
         self.assertEqual([], inbox["unread"])
         self.assertEqual([path], inbox["read"])
 
+    def test_exact_activation_without_runtime_evidence_claims_as_the_live_reader_pid(
+        self,
+    ) -> None:
+        args = SimpleNamespace(me="codex", session="SESSION-EXACT")
+        message = {
+            "frontmatter": {
+                "activation": True,
+                "to": "codex",
+                "project_id": "amiga",
+                "chat_id": "CHAT-EXACT",
+                "related_task": "TASK-EXACT",
+                "worktree": str(self.worktree),
+                "branch": "codex/exact",
+            }
+        }
+        session = {
+            "session_id": "SESSION-EXACT",
+            "runtime": {"family": "pi", "session_id": "pi-exact"},
+        }
+        claim_result = {
+            "lease": {},
+            "fence_token": 1,
+            "poller_audit": [],
+        }
+
+        with patch.object(
+            inbox_lib, "activation_reader_runtime_id", return_value=None
+        ), patch.object(
+            inbox_lib, "activation_reader_pid", return_value=4321
+        ), patch.object(
+            inbox_lib, "load_lease", return_value=None
+        ), patch.object(
+            inbox_lib, "ensure_reader_session"
+        ), patch.object(
+            inbox_lib, "claim_activation_lease", return_value=claim_result
+        ) as claim:
+            result = inbox_lib.gate_activation_message(
+                args,
+                message,
+                consume=True,
+                exact_session=session,
+            )
+
+        self.assertTrue(result["authorized"])
+        self.assertEqual(4321, claim.call_args.kwargs["owner_pid"])
+        self.assertIsNone(claim.call_args.kwargs["claimant_runtime_id"])
+
     def test_malformed_activation_packet_exits_75_without_consuming(self) -> None:
         path = self.add_malformed_activation("BAD")
 
