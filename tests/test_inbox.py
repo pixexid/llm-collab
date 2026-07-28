@@ -464,7 +464,7 @@ class InboxMarkAllReadTest(unittest.TestCase):
         ), patch.object(
             inbox_lib,
             "mark_exact_messages_read",
-            side_effect=lambda *_args, **kwargs: record(None, kwargs["budget"]),
+            side_effect=lambda *args, **kwargs: record(args[1], kwargs["budget"]),
         ), redirect_stdout(stdout), patch.object(
             sys,
             "argv",
@@ -485,6 +485,138 @@ class InboxMarkAllReadTest(unittest.TestCase):
 
         self.assertEqual(4, len(observed))
         self.assertTrue(all(budget is observed[0] for budget in observed))
+
+    def test_exact_session_honors_the_requested_limit(self) -> None:
+        self.add_exact_session()
+        paths = []
+        for index in range(12):
+            path = f"Chats/exact__CHAT-EXACT/{index}.md"
+            paths.append(path)
+            write(
+                self.root / path,
+                "\n".join(
+                    [
+                        "---",
+                        "chat_id: CHAT-EXACT",
+                        "project_id: amiga",
+                        "from: claude",
+                        "to: codex",
+                        "target_session_id: SESSION-EXACT",
+                        "---",
+                        "",
+                        str(index),
+                    ]
+                ),
+            )
+        write_json(
+            self.root / "agents" / "codex" / "inbox.json",
+            {"agent": "codex", "unread": paths, "read": []},
+        )
+
+        result = self.run_inbox(
+            "--project",
+            "amiga",
+            "--chat",
+            "CHAT-EXACT",
+            "--session",
+            "SESSION-EXACT",
+            "--json",
+        )
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual(10, len(json.loads(result.stdout)["messages"]))
+        self.assertEqual(paths[10:], self.load_inbox()["unread"])
+        self.assertEqual(paths[:10], self.load_inbox()["read"])
+
+    def test_exact_session_refuses_a_foreign_reader_runtime(self) -> None:
+        self.add_exact_session()
+        path = "Chats/exact__CHAT-EXACT/ordinary.md"
+        write(
+            self.root / path,
+            "\n".join(
+                [
+                    "---",
+                    "chat_id: CHAT-EXACT",
+                    "project_id: amiga",
+                    "from: claude",
+                    "to: codex",
+                    "target_session_id: SESSION-EXACT",
+                    "---",
+                    "",
+                    "ordinary packet",
+                ]
+            ),
+        )
+        write_json(
+            self.root / "agents" / "codex" / "inbox.json",
+            {"agent": "codex", "unread": [path], "read": []},
+        )
+
+        result = self.run_inbox(
+            "--project",
+            "amiga",
+            "--chat",
+            "CHAT-EXACT",
+            "--session",
+            "SESSION-EXACT",
+            "--json",
+            env={"LLM_COLLAB_READER_RUNTIME_ID": "pi-foreign"},
+        )
+
+        self.assertEqual(75, result.returncode, result.stderr)
+        self.assertEqual(
+            "exact_session_runtime_mismatch",
+            json.loads(result.stdout)["exact_session_refused"],
+        )
+        self.assertEqual([path], self.load_inbox()["unread"])
+
+    def test_exact_reader_emits_only_pointers_it_claimed(self) -> None:
+        session = {
+            "session_id": "SESSION-EXACT",
+            "agent_id": "codex",
+            "project_id": "amiga",
+            "chat_id": "CHAT-EXACT",
+            "runtime": {"family": "pi", "session_id": "pi-exact"},
+        }
+        message = {
+            "path": "Chats/CHAT-EXACT/exact.md",
+            "frontmatter": {"project_id": "amiga", "chat_id": "CHAT-EXACT"},
+            "body": "must not be emitted",
+        }
+        stdout = StringIO()
+        with patch.object(inbox_lib, "agent_ids", return_value=["codex"]), patch.object(
+            inbox_lib, "load_session", return_value=session
+        ), patch.object(
+            inbox_lib,
+            "resolve_exact_dispatch_pair",
+            return_value=((session, {}), None, None),
+        ), patch.object(
+            inbox_lib, "matching_unread_messages", return_value=[message]
+        ), patch.object(
+            inbox_lib, "gate_activation_message", return_value=None
+        ), patch.object(
+            inbox_lib, "mark_exact_messages_read", return_value=[]
+        ) as claim, redirect_stdout(stdout), patch.object(
+            sys,
+            "argv",
+            [
+                "inbox.py",
+                "--me",
+                "codex",
+                "--project",
+                "amiga",
+                "--chat",
+                "CHAT-EXACT",
+                "--session",
+                "SESSION-EXACT",
+                "--json",
+            ],
+        ):
+            inbox_lib.main()
+
+        claim.assert_called_once()
+        self.assertEqual([], json.loads(stdout.getvalue())["messages"])
+        self.assertNotIn("must not be emitted", stdout.getvalue())
 
     def test_exact_consume_serializes_with_delivery(self) -> None:
         old_path = "Chats/old.md"
@@ -583,14 +715,34 @@ class InboxMarkAllReadTest(unittest.TestCase):
             update(inbox)
 
         with patch.object(inbox_lib, "update_agent_inbox", side_effect=apply):
-            inbox_lib.mark_exact_messages_read(
+            first = inbox_lib.mark_exact_messages_read(
+                "codex",
+                ["Chats/old.md"],
+                budget=autobridge_lib.ExactSessionReadBudget(1),
+            )
+            second = inbox_lib.mark_exact_messages_read(
                 "codex",
                 ["Chats/old.md"],
                 budget=autobridge_lib.ExactSessionReadBudget(1),
             )
 
+        self.assertEqual(["Chats/old.md"], first)
+        self.assertEqual([], second)
         self.assertEqual([], inbox["unread"])
         self.assertEqual(["Chats/already.md", "Chats/old.md"], inbox["read"])
+
+    def test_unscoped_session_scan_has_one_cumulative_byte_budget(self) -> None:
+        sessions = self.root / "sessions"
+        write_json(sessions / "one.json", {"session_id": "one", "pad": "x" * 40})
+        write_json(sessions / "two.json", {"session_id": "two", "pad": "x" * 40})
+
+        with patch.object(autobridge_lib, "SESSIONS_DIR", sessions), patch.object(
+            autobridge_lib, "MAX_SESSION_SCAN_BYTES", 100
+        ):
+            with self.assertRaisesRegex(
+                autobridge_lib.UnreadableFile, "100 byte limit"
+            ):
+                autobridge_lib.iter_sessions()
 
     def test_session_save_is_atomic_and_durable(self) -> None:
         sessions = self.root / "sessions"

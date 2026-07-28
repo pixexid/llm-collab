@@ -447,8 +447,9 @@ def mark_exact_messages_read(
     paths: list[str],
     *,
     budget: ExactSessionReadBudget,
-) -> None:
+) -> list[str]:
     selected = set(paths)
+    claimed: list[str] = []
 
     def load() -> dict:
         path = agent_inbox_path(agent_id)
@@ -470,14 +471,16 @@ def mark_exact_messages_read(
                 "exact-session inbox entries exceed the "
                 f"{MAX_EXACT_SESSION_INBOX_ENTRIES} entry limit"
             )
+        claimed.extend(path for path in unread if path in selected)
         read_set = set(read)
         inbox["unread"] = [path for path in unread if path not in selected]
-        for path in paths:
+        for path in claimed:
             if path not in read_set:
                 read.append(path)
                 read_set.add(path)
 
     update_agent_inbox(agent_id, mark, load=load)
+    return claimed
 
 
 UNSCOPED_PROJECT_BUCKET = "<unscoped-or-missing-project>"
@@ -651,6 +654,10 @@ def main():
                 if pair is None or str(pair[0].get("session_id")) != str(args.session):
                     raise ValueError(refusal or "exact_binding_mismatch")
                 exact_session = pair[0]
+                reader_runtime_id = activation_reader_runtime_id()
+                exact_runtime_id = runtime_metadata(exact_session).get("session_id")
+                if reader_runtime_id and reader_runtime_id != exact_runtime_id:
+                    raise ValueError("exact_session_runtime_mismatch")
                 messages = matching_unread_messages(
                     exact_session,
                     invocation_repo_targets=args.repo_target,
@@ -702,7 +709,7 @@ def main():
                     file=sys.stderr,
                 )
         sys.exit(75)
-    if not args.packet and exact_session is None:
+    if not args.packet:
         messages = messages[: args.limit]
 
     if not messages:
@@ -776,6 +783,27 @@ def main():
             args.me, shown_paths, args.repo_target, args.project
         )
         repo_scope_refused.extend(late_refused)
+    elif consume:
+        try:
+            with active_read_budget(exact_read_budget):
+                shown_paths = mark_exact_messages_read(
+                    args.me,
+                    shown_paths,
+                    budget=exact_read_budget,
+                )
+        except (
+            UnreadableFile,
+            UnicodeDecodeError,
+            json.JSONDecodeError,
+            ValueError,
+        ) as exc:
+            print(
+                f"[inbox] Exact-session read refused before output: {exc}",
+                file=sys.stderr,
+            )
+            sys.exit(75)
+        claimed = set(shown_paths)
+        messages = [message for message in messages if message["path"] in claimed]
 
     if args.json_output:
         payload: dict[str, object] = {"messages": messages}
@@ -808,28 +836,8 @@ def main():
                 file=sys.stderr,
             )
 
-    if consume:
-        if exact_session is None:
-            mark_messages_read(args.me, shown_paths)
-        else:
-            try:
-                with active_read_budget(exact_read_budget):
-                    mark_exact_messages_read(
-                        args.me,
-                        shown_paths,
-                        budget=exact_read_budget,
-                    )
-            except (
-                UnreadableFile,
-                UnicodeDecodeError,
-                json.JSONDecodeError,
-                ValueError,
-            ) as exc:
-                print(
-                    f"[inbox] Exact-session read refused after output: {exc}",
-                    file=sys.stderr,
-                )
-                sys.exit(75)
+    if consume and exact_session is None:
+        mark_messages_read(args.me, shown_paths)
 
 
 if __name__ == "__main__":

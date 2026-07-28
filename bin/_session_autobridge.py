@@ -16,6 +16,7 @@ import sys
 import time
 import urllib.parse
 import urllib.request
+from contextlib import nullcontext
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -59,6 +60,7 @@ SESSION_STATUSES = ("active", "parked", "stopping", "stopped", "superseded")
 WAKE_STRATEGIES = ("none", "notify", "relay", "runtime_trigger")
 MAX_SCANNED_SESSIONS = 5_000
 MAX_SESSION_BYTES = 256 * 1024
+MAX_SESSION_SCAN_BYTES = 16 * 1024 * 1024
 
 
 def parse_iso8601(value: str | None) -> datetime | None:
@@ -119,27 +121,33 @@ def iter_sessions(agent_id: str | None = None) -> list[dict]:
 
     sessions: list[dict] = []
     paths: list[Path] = []
-    with scan:
-        for count, entry in enumerate(scan, start=1):
-            if count > MAX_SCANNED_SESSIONS:
-                raise UnreadableFile(
-                    f"session records exceed the {MAX_SCANNED_SESSIONS} entry limit"
-                )
-            if entry.name.endswith(".json"):
-                paths.append(Path(entry.path))
-    for path in sorted(paths):
-        try:
-            raw = read_regular_file_bounded(path, MAX_SESSION_BYTES)
-            session = json.loads(raw.decode("utf-8"))
-        except FileNotFoundError:
-            continue
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            continue
-        if not isinstance(session, dict):
-            continue
-        if agent_id is not None and session.get("agent_id") != agent_id:
-            continue
-        sessions.append(session)
+    scan_budget = (
+        None
+        if _ACTIVE_READ_BUDGET
+        else ExactSessionReadBudget(MAX_SESSION_SCAN_BYTES)
+    )
+    with active_read_budget(scan_budget) if scan_budget else nullcontext():
+        with scan:
+            for count, entry in enumerate(scan, start=1):
+                if count > MAX_SCANNED_SESSIONS:
+                    raise UnreadableFile(
+                        f"session records exceed the {MAX_SCANNED_SESSIONS} entry limit"
+                    )
+                if entry.name.endswith(".json"):
+                    paths.append(Path(entry.path))
+        for path in sorted(paths):
+            try:
+                raw = read_regular_file_bounded(path, MAX_SESSION_BYTES)
+                session = json.loads(raw.decode("utf-8"))
+            except FileNotFoundError:
+                continue
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                continue
+            if not isinstance(session, dict):
+                continue
+            if agent_id is not None and session.get("agent_id") != agent_id:
+                continue
+            sessions.append(session)
     return sessions
 
 
