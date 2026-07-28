@@ -1,4 +1,4 @@
-<!-- CONTRACT_VERSION: 4 -->
+<!-- CONTRACT_VERSION: 5 -->
 # AGENTS.md
 
 ## This file is the source of truth
@@ -19,6 +19,26 @@ addresses the wrong lane once a second project is active.
 
 Read these if your last session predates them.
 
+- **v5 (2026-07-28)** — the merge gate gets a reachable terminal state and Tier A
+  gets a contract-before-branch gate; several habits formed under v4 are now
+  violations. A Tier A lane writes a one-page **lane contract** (authority
+  boundary, commit point, retry behavior, non-goals —
+  `docs/workflows/lane-contract.md`) **before the first branch**; reviews verify
+  that contract instead of discovering it. Findings route **per-finding at
+  arrival**: a finding that violates the lane contract blocks; any other finding
+  is adjudicated in writing and defers to a follow-up issue while the lane ships
+  — deferral is no longer cap-time-only (GH-162). **One external reviewer per
+  head**: a requested connector review is the external gate for that head, and
+  running a second independent model review on it consumes cycle budget without
+  adding signal. The cap default becomes **merge-with-followups**;
+  `descope`/`split` must now record what is being un-shipped and why merging is
+  unsafe. Lanes carry a wall-clock budget — 3 amended heads or 4 hours in
+  review-fix escalates to the operator as a merge-or-kill decision. Review
+  requests are generated mechanically (`bin/review_request.py`); a hand-typed
+  SHA is a process defect (one was fabricated and retracted on #347). At most
+  **two active implementation lanes**; capped-PR fragments go to triage, not
+  straight onto the board. If your session predates this, discard cached
+  cap-default, deferral, reviewer-count, and request-format rules.
 - **v4 (2026-07-26)** — the merge gate is rewritten and the old rules are unsafe to
   cache. The silence fallback is **deleted**: no elapsed time is ever a terminal
   signal, and nothing ripens by waiting. A review request must name the exact head
@@ -216,6 +236,34 @@ a request the connector silently dropped. Any
 finding that arrives must be adjudicated in writing at every tier. A review is
 P0/P1-scoped, so it complements and never replaces independent exact-head
 verification and defect-verbatim mutation proof.
+
+**Tier A opens with a lane contract.** Before the first branch, write one page —
+template in `docs/workflows/lane-contract.md` — naming the authority boundary,
+the commit point, retry behavior, and explicit non-goals, in the task or linked
+issue. The review request then asks the reviewer to verify the diff *against
+that contract*, and findings are routed per-finding at arrival: a finding that
+violates the lane contract blocks and is fixed; a finding about a guarantee the
+lane never promised defers to a follow-up issue and the lane still ships —
+deferral is the default for that class, not a cap-time privilege (this restores
+the GH-162 defer-first rule); a finding showing the feature would be wrong *as
+specified* amends the contract once (`contract-clarified`), then blocks.
+Classification is written and auditable; a deferred finding that was in fact
+contract-violating is a gate violation attributable to the classifier.
+
+**One external reviewer per head.** When a connector review has been requested
+on a head, that review is the external gate for that head. The independent
+exact-head obligation is discharged by the lane's required local verification
+and CI — not by a second independent model review, which consumes cycle budget
+without adding signal and must not be run. The mandatory pre-PR cold full-diff
+review in `docs/workflows/commit-push-prs.md` is unchanged: it happens once,
+before the first PR-ready head, and is where the lane contract itself gets
+challenged.
+
+**Generate review requests mechanically.** Use `bin/review_request.py --pr <n>
+--focus "..."`: it reads the head SHA from GitHub and the local checkout,
+refuses on mismatch, and enforces one initial request per head plus the single
+exempted re-trigger. It has no option to pass a SHA by hand — a hand-typed SHA
+is how #347 came to contain a fabricated, later-retracted request.
 
 **"Untrusted" means input we do not control.** Our own workspace — `State/`,
 `Chats/`, `projects.json`, the checkout itself — is not an adversary: anyone who can

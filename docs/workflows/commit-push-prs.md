@@ -22,6 +22,34 @@ No lane is PR-ready until local validation and required metadata are complete.
   `git branch --show-current` before each commit; out-of-scope work becomes a
   separate task/branch/PR so no shared repo/branch is left dirty
 
+## Lane contract (Tier A, before the first branch)
+
+A Tier A lane does not cut its first branch until one page of contract exists in
+the task or linked issue, using the template in
+[`lane-contract.md`](lane-contract.md):
+
+- **authority boundary** — the one component that owns the decision or state
+  this lane changes (a canonical store, a sole writer, a named module), and what
+  every other component may assume. A guarantee that needs exactly-once,
+  atomicity, or ordering must name a boundary capable of providing it; if no
+  existing component can, that is the lane's first finding, resolved on the
+  page — not discovered at review cycle five.
+- **commit point** — the single operation after which the change is durable and
+  visible.
+- **retry behavior** — what a retry may repeat, and what it must never repeat.
+- **non-goals** — the guarantees this lane explicitly does not provide. Findings
+  about non-goals defer; they never block.
+
+Reviews then verify the diff against that page: review requests name it ("review
+the full diff against the lane contract in <issue> through these lenses: ..."),
+and the per-finding disposition below routes every arriving finding as
+contract-violating, out-of-contract, or contract-gap. The contract stays one
+page: a lane that cannot state its boundary on one page is two lanes. Split it
+at intake, where splitting is cheap — not at the convergence cap, where it
+costs a PR generation. The #345 → #346 → #347 → #349/#350 → #351 family spent
+three PR generations discovering its boundary; naming it up front is the whole
+point of this gate.
+
 ## Suggested branch layers
 
 - worker branch: implementation
@@ -94,6 +122,29 @@ irreversible writes, a new product flow, or any file outside the accepted
 contract's changed-file set. These boundaries override the same-reviewer
 allowance.
 
+### Per-finding disposition at arrival (defer-first)
+
+Every arriving finding is classified in writing against the lane contract the
+moment it arrives, before any fix work starts:
+
+- **contract-violating** — the diff fails a guarantee the lane contract
+  promised. Block and fix; this consumes a review-fix cycle.
+- **out-of-contract** — real, but about a guarantee the lane never promised: a
+  named non-goal, a different layer, a broadening. Adjudicate in writing, file
+  a follow-up issue identifying the finding's thread, and continue; the lane
+  still ships. Deferral is the default for this class, not a cap-time
+  privilege. This restores the defer-first default that GH-107 inverted to
+  cap-time-only (tracked in GH-162).
+- **contract-gap** — the finding shows the shipped feature would be wrong or
+  unsafe *as specified*, despite sitting outside the written contract. Amend
+  the lane contract once (`contract-clarified`, at most one use per family per
+  PR as below); thereafter the finding is contract-violating.
+
+The classification is auditable: it names the lane-contract clause or non-goal
+relied on, and a deferred finding that was in fact contract-violating is a gate
+violation attributable to the classifier. The written classifications are what
+the operator reviews at escalation.
+
 Apply a convergence circuit breaker per finding family:
 
 - A finding belongs to the same family when it is anchored to the same file or
@@ -130,9 +181,17 @@ Hard cycle cap, independent of family counting:
   follow-up issue, never another cycle.
 - At the cap, inspect the exact current head. Only when actionable findings
   remain open at the capped head is exactly one terminal action required
-  before any further amendment: merge at the current head with
-  `risk-accepted-followup` (open findings move to a new issue), `descope`,
-  `split`, `backend-first`, or a durable operator escalation packet. A capped
+  before any further amendment. **The default terminal action is to merge at
+  the current head with `risk-accepted-followup`** (open findings move to a
+  new issue). `descope`, `split`, and `backend-first` remain available but are
+  no longer defaults: choosing one requires recording, in the same disposition,
+  what capability is being un-shipped and why merging the current head with
+  follow-ups is unsafe. A durable operator escalation packet remains the escape
+  when the worker cannot judge that trade-off. Under per-finding defer-first
+  most findings never reach the cap: only contract-violating findings are
+  still open here, so a cap disposition is the rare case where the lane
+  contract itself could not be satisfied — which usually means the authority
+  boundary was wrong, and the fix is a new contract, not another reorder. A capped
   head with zero open actionable findings and a clean exact-head re-review
   follows the normal merge gate with no convergence-disposition label.
   "No further amendment" bars content changes only; the publication steps the
@@ -147,16 +206,24 @@ Hard cycle cap, independent of family counting:
 - Reaching the applicable cap requires an operator-visible escalation message
   recorded independently, whether or not open findings require a terminal
   disposition. When open findings do require a terminal disposition, record
-  the escalation alongside it. Spending more than 2 hours of wall-clock time
-  in the review-fix state requires escalation before the next cycle; a lane
-  found past its cap is a process violation that must also be escalated.
+  the escalation alongside it. **A lane also has a wall-clock budget: more than
+  4 hours in the review-fix state, or a third amended head, escalates to the
+  operator as a merge-or-kill decision** — merge the current head with
+  follow-ups, or close the lane — posted to the operator digest / decision
+  queue before any further cycle starts. The operator's recorded decision is
+  the terminal signal for that lane. This budget ends loops; it does not ripen
+  heads: review signals remain exact-head only, and no clock substitutes for
+  one. A lane found past its cap or budget without an escalation is a process
+  violation that must also be escalated.
 
 When a project supports structured review notes, the disposition may be
 recorded as the optional line `Convergence-disposition: <value>` and must use
 exactly one of the five values above.
 
-One final exact-head full-diff gate is mandatory before merge, and actionable
-automated-review findings on the current head remain blocking. After a pushed
+One final exact-head full-diff gate is mandatory before merge. Automated-review
+findings on the current head that were classified contract-violating remain
+blocking; out-of-contract findings follow the defer-first disposition above and
+do not block. After a pushed
 amendment, stale review-attestation CI is an expected transitional state rather
 than evidence that product verification failed. Refresh the PR body only after
 the amended head passes its required review.
@@ -410,7 +477,14 @@ else is a second source that goes stale the moment this one moves.
   waits exactly as a Tier A head does. Heartbeat inspections observe the wait and
   merge nothing
 - neither a bot verdict nor a reaction waives required CI, mergeability, the
-  independent exact-head review, or full inspection of [the reviewed artifact set](#reviewed-artifact-set)
+  lane's required local verification (tests and defect-verbatim mutation
+  proof), or full inspection of [the reviewed artifact set](#reviewed-artifact-set).
+  On a head where a connector review has been requested, that review is the
+  external gate for the head: the independent exact-head obligation is
+  discharged by that local verification, and a second independent model review
+  on the same head must not be run — it consumes cycle budget and manufactures
+  new findings instead of adding signal. The pre-PR cold full-diff review is
+  unchanged and happens once, before the first PR-ready head.
 
 **All three former no-terminal-artifact fallback variants are deleted, not
 shortened.** Each one measured how long to wait for a review that manual-only

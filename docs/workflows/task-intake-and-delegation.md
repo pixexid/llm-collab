@@ -69,6 +69,20 @@ durable background Codex thread:
 
 Thread Coordination is an execution surface, not a queue source of truth.
 
+## Lane WIP limit
+
+At most **two implementation lanes** are active (`in_progress`) at once across
+the workspace. A lane is active from its first branch until its PR merges or
+its terminal disposition is recorded. Before activating a third lane, one of
+the two must ship, merge-with-followups, or be killed by the operator.
+
+Fragments spawned by a capped PR (descope/split/backend-first children) do not
+enter the board automatically: they go to triage, and each is activated only
+when a WIP slot is free and — for Tier A — it carries the lane contract its
+parent lacked. A split, successor PR, or new child issue is not progress
+unless it shortens the path to `main`; count it as the same lane until it
+proves otherwise.
+
 ## Canonical ordered queue
 
 If the project defines a canonical queue artifact, treat it as the ordered source of truth for

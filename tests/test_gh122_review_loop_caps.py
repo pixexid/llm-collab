@@ -518,9 +518,44 @@ class ReviewLoopCapContractTest(unittest.TestCase):
                 "the escalation alongside it",
                 sources["cap"],
             )
-            self.assertIn("2 hours of wall-clock", sources["cap"])
+            # v5 (2026-07-28): the 2-hour escalation became the wall-clock lane
+            # budget — 4 hours or a third amended head is an operator
+            # merge-or-kill decision, which is how a lane terminates.
+            self.assertIn("4 hours in the review-fix state", sources["cap"])
+            self.assertIn("third amended head", sources["cap"])
+            self.assertIn("merge-or-kill", sources["cap"])
 
         self.assert_scenario_cases("review_loop_cap", check)
+
+    def test_v5_lane_contract_defer_first_and_one_reviewer(self):
+        """v5 gate: contract before branch, defer-first findings, one reviewer.
+
+        PR #347 showed the old shape: no lane contract, every finding blocking,
+        up to three reviewers per head, and a cap whose only used exits were
+        descope/split. Pin the v5 wording so a later edit cannot silently
+        restore it.
+        """
+        text = normalized(WORKFLOW_DOC.read_text(encoding="utf-8"))
+        self.assertIn("## Lane contract (Tier A, before the first branch)", text)
+        self.assertIn(
+            "### Per-finding disposition at arrival (defer-first)", text
+        )
+        self.assertIn(
+            "The default terminal action is to merge at the current head with "
+            "`risk-accepted-followup`",
+            text,
+        )
+        self.assertIn(
+            "a second independent model review on the same head must not be run",
+            text,
+        )
+        intake = normalized(
+            (REPO_ROOT / "docs" / "workflows" / "task-intake-and-delegation.md")
+            .read_text(encoding="utf-8")
+        )
+        self.assertIn("## Lane WIP limit", intake)
+        template = REPO_ROOT / "docs" / "workflows" / "lane-contract.md"
+        self.assertTrue(template.is_file())
 
     def test_exact_head_signal_models_remain_exclusive(self):
         def check(case, sources):
@@ -1424,10 +1459,12 @@ class ReviewLoopCapContractTest(unittest.TestCase):
         """A cached copy of the old gate can produce a wrong merge.
 
         Workers bootstrapped on v3 get no signal that the fallback, reaction lifecycle,
-        request shape and authority rules changed underneath them.
+        request shape and authority rules changed underneath them; workers on v4 get
+        no signal that v5 added the lane contract, defer-first findings, one reviewer
+        per head, and the merge-or-kill lane budget.
         """
         text = AGENTS_DOC.read_text(encoding="utf-8")
-        self.assertIn("<!-- CONTRACT_VERSION: 4 -->", text)
+        self.assertIn("<!-- CONTRACT_VERSION: 5 -->", text)
         self.assertNotIn("<!-- CONTRACT_VERSION: 3 -->", text)
         entry = contract_section(text, "- **v4 (2026-07-26)**", "- **v3 (2026-07-26)**")
         for phrase in (
@@ -1439,6 +1476,19 @@ class ReviewLoopCapContractTest(unittest.TestCase):
             "latest unedited request artifact",
         ):
             self.assertIn(normalized(phrase), entry)
+        v5_entry = contract_section(
+            text, "- **v5 (2026-07-28)**", "- **v4 (2026-07-26)**"
+        )
+        for phrase in (
+            "lane contract",
+            "per-finding",
+            "One external reviewer per head",
+            "merge-with-followups",
+            "merge-or-kill",
+            "review_request.py",
+            "two active implementation lanes",
+        ):
+            self.assertIn(normalized(phrase), v5_entry)
 
     def test_the_merge_checklist_does_not_inherit_the_origin_rule_narrowing(self):
         """The hole the origin rule opened in the checklist below it.
