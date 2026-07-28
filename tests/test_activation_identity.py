@@ -519,7 +519,7 @@ class DeliverFoundationTest(unittest.TestCase):
         agents = json.loads(agents_path.read_text())
         for agent in agents["agents"]:
             if agent["id"] == "relay":
-                agent["activation"]["ax_app"] = "Relay"
+                agent["activation"]["ax_app"] = "Codex"
         write_json(agents_path, agents)
         body = root / "b.md"
         write(body, "work")
