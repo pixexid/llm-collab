@@ -943,6 +943,34 @@ def message_targets_session(
     return False, "target_session_mismatch"
 
 
+def validate_exact_inbox_entries(
+    unread: object,
+    read: object,
+    *,
+    max_entries: int,
+) -> list[str]:
+    if not isinstance(unread, list) or not isinstance(read, list):
+        raise ValueError("exact-session inbox index must contain unread and read lists")
+    entries = [*unread, *read]
+    if len(entries) > max_entries:
+        raise ValueError(
+            f"exact-session inbox entries exceed the {max_entries} entry limit"
+        )
+    if any(
+        not isinstance(rel_path, str)
+        or not rel_path
+        or rel_path != rel_path.strip()
+        or "\x00" in rel_path
+        or Path(rel_path).is_absolute()
+        or ".." in Path(rel_path).parts
+        for rel_path in entries
+    ):
+        raise ValueError("exact-session inbox entries must be relative path strings")
+    if len(set(entries)) != len(entries):
+        raise ValueError("exact-session inbox index contains duplicate pointers")
+    return entries
+
+
 def matching_unread_messages(
     session: dict,
     *,
@@ -969,25 +997,7 @@ def matching_unread_messages(
             raise ValueError("exact-session inbox index must be an object")
         unread = inbox.get("unread")
         read = inbox.get("read")
-        if not isinstance(unread, list) or not isinstance(read, list):
-            raise ValueError("exact-session inbox index must contain unread and read lists")
-        entries = [*unread, *read]
-        if len(entries) > max_entries:
-            raise ValueError(
-                f"exact-session inbox entries exceed the {max_entries} entry limit"
-            )
-        if any(
-            not isinstance(rel_path, str)
-            or not rel_path
-            or rel_path != rel_path.strip()
-            or "\x00" in rel_path
-            or Path(rel_path).is_absolute()
-            or ".." in Path(rel_path).parts
-            for rel_path in entries
-        ):
-            raise ValueError(
-                "exact-session inbox entries must be relative path strings"
-            )
+        validate_exact_inbox_entries(unread, read, max_entries=max_entries)
         messages = []
         for rel_path in unread:
             message_path = ROOT / rel_path

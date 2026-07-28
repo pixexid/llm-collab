@@ -60,6 +60,7 @@ from _session_autobridge import (
     resolve_exact_dispatch_pair,
     runtime_metadata,
     save_session,
+    validate_exact_inbox_entries,
 )
 from session_autobridge import register_session
 
@@ -461,15 +462,11 @@ def mark_exact_messages_read(
     def mark(inbox: dict) -> None:
         unread = inbox.get("unread")
         read = inbox.get("read")
-        if not isinstance(unread, list) or not isinstance(read, list):
-            raise ValueError(
-                "exact-session inbox index must contain unread and read lists"
-            )
-        if len(unread) + len(read) > MAX_EXACT_SESSION_INBOX_ENTRIES:
-            raise ValueError(
-                "exact-session inbox entries exceed the "
-                f"{MAX_EXACT_SESSION_INBOX_ENTRIES} entry limit"
-            )
+        validate_exact_inbox_entries(
+            unread,
+            read,
+            max_entries=MAX_EXACT_SESSION_INBOX_ENTRIES,
+        )
         claimed.extend(path for path in unread if path in selected)
         read_set = set(read)
         inbox["unread"] = [path for path in unread if path not in selected]

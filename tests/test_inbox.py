@@ -570,6 +570,51 @@ class InboxMarkAllReadTest(unittest.TestCase):
         )
         self.assertEqual([path], self.load_inbox()["unread"])
 
+    def test_exact_session_refuses_duplicate_inbox_pointers_before_output(
+        self,
+    ) -> None:
+        self.add_exact_session()
+        path = "Chats/exact__CHAT-EXACT/duplicate.md"
+        write(
+            self.root / path,
+            "\n".join(
+                [
+                    "---",
+                    "chat_id: CHAT-EXACT",
+                    "project_id: amiga",
+                    "from: claude",
+                    "to: codex",
+                    "target_session_id: SESSION-EXACT",
+                    "---",
+                    "",
+                    "must not be duplicated",
+                ]
+            ),
+        )
+        write_json(
+            self.root / "agents" / "codex" / "inbox.json",
+            {"agent": "codex", "unread": [path, path], "read": []},
+        )
+
+        result = self.run_inbox(
+            "--project",
+            "amiga",
+            "--chat",
+            "CHAT-EXACT",
+            "--session",
+            "SESSION-EXACT",
+            "--json",
+            env={"LLM_COLLAB_READER_RUNTIME_ID": "pi-exact"},
+        )
+
+        self.assertEqual(75, result.returncode, result.stderr)
+        self.assertIn(
+            "duplicate pointers",
+            json.loads(result.stdout)["exact_session_refused"],
+        )
+        self.assertNotIn("must not be duplicated", result.stdout)
+        self.assertEqual([path, path], self.load_inbox()["unread"])
+
     def test_exact_reader_emits_only_pointers_it_claimed(self) -> None:
         session = {
             "session_id": "SESSION-EXACT",
@@ -730,6 +775,31 @@ class InboxMarkAllReadTest(unittest.TestCase):
         self.assertEqual([], second)
         self.assertEqual([], inbox["unread"])
         self.assertEqual(["Chats/already.md", "Chats/old.md"], inbox["read"])
+
+    def test_exact_mark_rechecks_duplicate_pointers_under_lock(self) -> None:
+        inbox = {
+            "unread": ["Chats/duplicate.md"],
+            "read": ["Chats/duplicate.md"],
+        }
+
+        def apply(_agent_id, update, *, load):
+            update(inbox)
+
+        with patch.object(inbox_lib, "update_agent_inbox", side_effect=apply):
+            with self.assertRaisesRegex(ValueError, "duplicate pointers"):
+                inbox_lib.mark_exact_messages_read(
+                    "codex",
+                    ["Chats/duplicate.md"],
+                    budget=autobridge_lib.ExactSessionReadBudget(1),
+                )
+
+        self.assertEqual(
+            {
+                "unread": ["Chats/duplicate.md"],
+                "read": ["Chats/duplicate.md"],
+            },
+            inbox,
+        )
 
     def test_unscoped_session_scan_has_one_cumulative_byte_budget(self) -> None:
         sessions = self.root / "sessions"
