@@ -372,6 +372,19 @@ class AxTrustCallerTest(unittest.TestCase):
                         no_watcher=watcher_result is None,
                     ),
                 ),
+                # The tooling-currency gate (#370) exits before identity when the
+                # checkout is behind main. These cases invoke main() for its AX and
+                # identity behaviour, so leaving the gate live coupled their outcome
+                # to the state of a remote branch: every lane branch started before a
+                # later merge failed all five, and a merge landing mid-run flipped
+                # them. The fixture already isolates every other external dependency
+                # of main(); this is the one that was added after it.
+                mock.patch.object(
+                    session_bootstrap,
+                    "tooling_currency",
+                    return_value={"state": "current", "head": "test", "origin_main": "test",
+                                  "branch": "test", "fetched": True},
+                ),
                 mock.patch.object(session_bootstrap, "agent_ids", return_value=["codex"]),
                 mock.patch.object(session_bootstrap, "get_agent", return_value=agent),
                 mock.patch.object(
