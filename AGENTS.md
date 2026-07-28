@@ -33,7 +33,8 @@ Read these if your last session predates them.
   adding signal. The cap default becomes **merge-with-followups**;
   `descope`/`split` must now record what is being un-shipped and why merging is
   unsafe. Lanes carry a wall-clock budget — 3 amended heads or 4 hours in
-  review-fix escalates to the operator as a merge-or-kill decision. Review
+  review-fix forces the lane owner and release-gate worker to record a
+  merge-with-followups-or-close decision. Review
   requests are generated mechanically (`bin/review_request.py`); a hand-typed
   SHA is a process defect (one was fabricated and retracted on #347). At most
   **two active implementation lanes**; capped-PR fragments go to triage, not
@@ -127,11 +128,14 @@ runtime session, starting your watcher, and repairing your own environment. An o
 naming the work — "implement X with zcode on project Y" — is the whole instruction; the
 setup it implies is yours.
 
-**Genuinely operator-owned**, and worth stopping for: anything irreversible or
-outward-facing (merging, publishing, contacting someone), credentials and account
-settings, and scope or priority trade-offs. Workers may accept a known, bounded
-risk within the lane contract when they record it and preserve the follow-up;
-expanding scope or weakening a promised guarantee still needs an operator decision.
+**Genuinely operator-owned**, and worth stopping for: credentials and account
+settings, legal or financial commitments, destructive actions outside normal
+recovery, and product decisions for which the workers have no stated authority.
+Routine merges, releases, issue closure, and bounded risk acceptance are worker
+work when the objective gates and standing project policy permit them. The lane
+owner and release-gate worker must discuss material trade-offs, record the
+decision and preserve any follow-up. Escalate to the operator only when those
+workers cannot reach or execute a safe decision without operator-only input.
 
 The test is not "is this tedious" or "did they mention it" — it is whether you could do
 it and check that it worked. If you could, it is yours.
@@ -258,6 +262,13 @@ without adding signal and must not be run. The mandatory pre-PR cold full-diff
 review in `docs/workflows/commit-push-prs.md` is unchanged: it happens once,
 before the first PR-ready head, and is where the lane contract itself gets
 challenged.
+
+When that connector review raises a finding, either fix it and request the new
+head, or record a thread-linked disposition accepted by the lane owner and
+release-gate worker. A rejected or deferred finding does not require another
+connector request on the unchanged head: the completed exact-head review plus
+the written dispositions is the external-review evidence. This keeps the
+one-request, one-external-review rule internally consistent.
 
 **Generate review requests mechanically.** Use `bin/review_request.py --pr <n>
 --project <id> --tier A --contract <issue> --focus "..."`: it reads the head SHA

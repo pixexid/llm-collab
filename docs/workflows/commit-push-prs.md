@@ -77,9 +77,9 @@ not the implementer. Treat this as the primary code-review gate:
 - rerun the affected verification after fixes
 - only then commit, push, and open the PR
 
-This manual branch-diff review is the repeated review loop. GitHub Codex PR
-review is an external safety net, not the mechanism that should discover routine
-issues for the first time.
+This manual branch-diff review happens once before the initial PR-ready head.
+GitHub Codex PR review is the external reviewer for later exact heads, not the
+mechanism that should discover routine issues for the first time.
 
 The standard Amiga mechanism is collab/doorbell review: the implementer sends
 the final branch, base ref or merge base, final head SHA, scope, and verification
@@ -109,18 +109,10 @@ mandatory before the initial PR-ready head. Implementer/reviewer identity
 separation, fresh-context attestation, full changed-file coverage, and exact
 live-head SHA binding remain mandatory.
 
-Batch related findings locally into one reviewed amendment instead of producing
-one pushed head per micro-fix. When an amendment stays inside both the accepted
-contract and its changed-file set, the same independent reviewer may inspect the
-batched delta, the affected invariants, and the resulting full-diff coherence at
-the new exact head. The resulting attestation must still cover the complete
-base-to-head diff at that exact head; a delta-only review is never sufficient.
-
-Create a new cold context-isolated reviewer for the complete amended diff when
-the amendment touches payments, auth, permissions, schema or migrations,
-irreversible writes, a new product flow, or any file outside the accepted
-contract's changed-file set. These boundaries override the same-reviewer
-allowance.
+Batch related findings locally into one amendment instead of producing one
+pushed head per micro-fix. Verify the affected invariants and resulting
+base-to-head coherence locally, then use the connector as the external reviewer
+for the new exact head. Do not run a second independent model review.
 
 ### Per-finding disposition at arrival (defer-first)
 
@@ -142,9 +134,9 @@ moment it arrives, before any fix work starts:
 The classification is auditable: it names the lane-contract clause or
 pre-existing/broadening boundary relied on, and a deferred finding that was in
 fact contract-violating is a gate violation attributable to the classifier.
-The lane owner may accept a known, bounded risk within the contract by recording
-it and preserving the follow-up; operator involvement is required only when the
-choice expands scope or weakens a promised guarantee.
+The lane owner and release-gate worker may accept a known, bounded risk by
+recording it and preserving the follow-up. Escalate only when they cannot reach
+or execute a safe decision without operator-only input.
 
 Apply a convergence circuit breaker per finding family:
 
@@ -188,12 +180,13 @@ Hard cycle cap, independent of family counting:
   no longer defaults: choosing one requires recording, in the same disposition,
   what capability is being un-shipped and why merging the current head with
   follow-ups is unsafe. A durable operator escalation packet remains the escape
-  when the worker cannot judge that trade-off. Under per-finding defer-first
+  only when the lane owner and release-gate worker cannot resolve the trade-off
+  without operator-only input. Under per-finding defer-first
   most findings never reach the cap: only contract-violating findings are
   still open here, so a cap disposition is the rare case where the lane
   contract itself could not be satisfied — which usually means the authority
   boundary was wrong, and the fix is a new contract, not another reorder. A capped
-  head with zero open actionable findings and a clean exact-head re-review
+  head with zero open actionable findings and a completed exact-head connector review
   follows the normal merge gate with no convergence-disposition label.
   "No further amendment" bars content changes only; the publication steps the
   chosen disposition itself requires — pushing the already-reviewed head,
@@ -204,20 +197,15 @@ Hard cycle cap, independent of family counting:
   fix cycle, not waiting: the capped exact head must still pass the complete
   gate below, including its exact-head signal model and post-clean guard,
   before merge.
-- Reaching the applicable cap requires an operator-visible escalation message
-  recorded independently, whether or not open findings require a terminal
-  disposition. When open findings do require a terminal disposition, record
-  the escalation alongside it. **A lane also has a wall-clock budget: more than
-  4 hours in the review-fix state, or a third amended head, escalates to the
-  operator as a merge-or-kill decision bound to the exact current SHA** —
-  merge that exact head with
-  follow-ups, or close the lane — posted to the operator digest / decision
-  queue before any further cycle starts. Any later push invalidates that
-  decision. The operator's exact-head decision is the terminal signal for that
-  head. This budget ends loops; it does not ripen
-  heads: review signals remain exact-head only, and no clock substitutes for
-  one. A lane found past its cap or budget without an escalation is a process
-  violation that must also be escalated.
+- Reaching the applicable cap requires a durable, operator-visible disposition,
+  but visibility is not an approval gate. **A lane also has a wall-clock budget:
+  more than 4 hours in the review-fix state, or a third amended head, forces the
+  lane owner and release-gate worker to decide, for the exact current SHA,
+  merge-with-followups or close.** Any later push invalidates that decision.
+  This budget ends review-fix loops; it is not a connector terminal signal and
+  waives none of the exact-head merge gates. Escalate to the operator only when
+  the workers cannot reach or execute either safe outcome without operator-only
+  input.
 
 When a project supports structured review notes, the disposition may be
 recorded as the optional line `Convergence-disposition: <value>` and must use
@@ -419,9 +407,8 @@ else is a second source that goes stale the moment this one moves.
 
 - a head-named clean connector verdict is not merge-immediate. Hold an
   approximately five-minute post-clean settle, then re-read [the reviewed artifact set](#reviewed-artifact-set) in full before
-  merge, because the connector can emit multiple reviews for the same head — and because
-  a same-head re-review request posted during the settle lives in a comment and
-  supersedes the artifact being settled
+  merge, because the connector can emit multiple review artifacts for the same
+  head
 - **a reaction counts only on the latest, unedited request artifact.** GitHub keeps
   reactions across an edit, so a request comment edited to swap an old SHA for the
   current one still carries the `+1` the connector left for the *old* head, and all
@@ -432,16 +419,14 @@ else is a second source that goes stale the moment this one moves.
   request-anchored re-trigger for this head has not been used, use it. If it has been
   used — whether it is still valid, or was since edited, deleted or otherwise made
   invalid — the budget is spent and there is no further request to issue: continue to
-  the exact-head operator disposition. Reading this as "issue one whenever no valid
+  the exact-head release-gate disposition. Reading this as "issue one whenever no valid
   latest request exists" produces a third same-head request every time an artifact is
   tampered with, and the single re-trigger is the only exempted recovery
-- when a re-review was explicitly requested, that re-review supersedes artifacts attached to **older requests** -- clean verdicts and
-  reactions alike. It does **not** disable the reaction path: a connector `+1` on
-  the latest unedited request naming the current head is terminal for the re-review
-  exactly as a fresh textual verdict is.
-  Requiring text merely because this is a re-review would leave the connector's own
-  reaction-only clean protocol unable to satisfy a request it answered. Either terminal
-  form receives the same approximately five-minute post-clean settle and full re-read
+- a finding rejected or deferred without a code change is completed by its
+  thread-linked disposition accepted by the lane owner and release-gate worker.
+  Do not request another connector review on the unchanged head; the exact-head
+  review already happened, and another request would violate the one-external-
+  review-per-head rule
 - report the exact verdict, or the connector-authored `+1` on the manual-review
   request comment with its timestamps and the SHA that request named, and confirm
   that no later push occurred
@@ -455,20 +440,20 @@ else is a second source that goes stale the moment this one moves.
   mandatory step, and no waiver is available for skipping it. Only once the request
   exists does the precedence flow below apply: the initial request, its single
   request-anchored re-trigger, and the two request-anchored expiries, at the end of
-  which an operator waiver is the defined outcome. A Tier B/C head with no request
+  which a release-gate disposition is the defined outcome. A Tier B/C head with no request
   does not wait at all. At no tier is quiet a signal: never merge on silence
 - **no elapsed time is ever a terminal signal.** There is no resettable settle
   that ripens a head for merge. Waiting is what a Tier A head does while a
   requested review is outstanding; it is not a way to acquire the signal
 - **the worker who pushed the change owns re-requesting the amended head, at every
-  tier.** Tier decides whether a review must be *initiated*; once an operator has
+  tier.** Tier decides whether a review must be *initiated*; once a worker has
   explicitly requested one, every amended candidate head needs a new exact-head request
-  from the change owner, unless the operator withdraws the review requirement **for that
-  exact head**. A withdrawal is a durable operator-authored artifact naming the commit OID
+  from the change owner, unless the release-gate worker withdraws the review requirement **for that
+  exact head**. A withdrawal is a durable artifact naming the commit OID
   it applies to, and **a later push invalidates it**: the next head owes a new request
   like any other. "Explicit" alone was not enough — a withdrawal recorded on an earlier
   head could be read as retiring the obligation for every head after it, which turns one
-  operator decision into a standing exemption nobody granted.
+  decision into a standing exemption nobody granted.
   Tier C does not make an old-head artifact valid, and a requested Tier C review with no
   named owner is how an amended head sits waiting for a re-request nobody believes is
   theirs
@@ -531,7 +516,7 @@ timing — which is why they are written here rather than left to the lane:
 | PR-wait heartbeat | the same heartbeat cadence against the mailbox thread |
 
 The two clocks, the single re-trigger, the ban on a second one, and the
-exact-head operator disposition are unchanged — they are properties of the
+exact-head release-gate disposition are unchanged — they are properties of the
 request, not of GitHub. The one asymmetry is the one already stated above: a
 mailbox lane has no reaction-only terminal path, so its terminal signal is
 always a textual verdict packet.
@@ -544,9 +529,9 @@ named the current head, so a SHA-less retry cannot produce a usable signal even
 when the connector answers it.
 The re-trigger is the sole automatic retry and starts its own 30–35-minute clock
 at its GitHub `created_at`. If that clock also expires without a terminal
-signal, do not re-trigger again. The PR remains unmergeable until a
-human/operator records an explicit disposition bound to the exact current
-head. The disposition must state exactly one of these outcomes: merge of that
+signal, do not re-trigger again. The PR remains unmergeable until the lane
+owner and release-gate worker record an explicit disposition bound to the exact
+current head. The disposition must state exactly one of these outcomes: merge of that
 exact head is authorized despite the absent connector terminal signal; or that
 exact head must not merge and remains blocked or is closed. An ambiguous note,
 a disposition not bound to the current head, or an older-head disposition does
@@ -558,13 +543,13 @@ connector-signal subgate caused by the silently dropped requested review. It is
 not a connector terminal signal, is not a third automated terminal-signal
 model, and creates no fallback path. It does not waive required local exact-head
 verification, green required checks, mergeability, a full re-read of
-[the reviewed artifact set](#reviewed-artifact-set), unresolved-feedback handling, or
-project/operator auto-merge authority. If a connector clean signal later
+[the reviewed artifact set](#reviewed-artifact-set), or unresolved-feedback
+handling. If a connector clean signal later
 arrives, its signal-specific settle and reread still apply normally; the
-operator authorization does not masquerade as that signal or inherit its
+release-gate disposition does not masquerade as that signal or inherit its
 handling. Report and escalate the stuck review at each expiry. The existing
 PR-wait heartbeat observes these clocks; neither the re-trigger nor the
-operator authorization is a new terminal signal or watcher mechanism. The
+release-gate disposition is a new terminal signal or watcher mechanism. The
 longer request-anchored timer exists because a dropped request is
 indistinguishable from a review that is still processing, unlike the
 absent-request variant, where there is nothing to drop.
@@ -590,8 +575,8 @@ re-rung. The idle input gate applies only if attended screenshot/keyboard
 Computer Use is needed as fallback. Do not silently wait for the next heartbeat
 or depend on the operator to notice the PR comment.
 
-When the operator has authorized the merge path for the PR or PR class, the
-heartbeat may complete the wait after it verifies the exact current head has
+The heartbeat may complete the wait after the release-gate worker verifies the
+exact current head has
 green required checks, the PR is mergeable with clean `mergeStateStatus`, the
 required local exact-head verification is clean, and the full current comment, review,
 payload of [the reviewed artifact set](#reviewed-artifact-set) has no actionable finding. Treat the GitHub
@@ -614,16 +599,13 @@ Codex review signal as clean when either:
 The re-read that follows a reaction covers
 **all of [the reviewed artifact set](#reviewed-artifact-set)**, and
 revalidates all six reaction conditions. A
-re-review request posted during the settle becomes the latest request for this head
-and supersedes the older request's `+1`, so a re-read that skipped comments could
-merge on a reaction that no longer passes the latest-request check.
+new request for an amended head invalidates the older head's `+1`.
 
 For the clean-verdict path, do not merge immediately after the first
 head-named clean artifact. Observe the approximately five-minute post-clean
 settle and then re-read [the reviewed artifact set](#reviewed-artifact-set) in full. When an
-explicit re-review was requested for the same head, ignore older same-head
-clean artifacts for this path and apply the same settle and re-read to the
-explicit re-review verdict.
+exact-head review raises findings, apply their written dispositions; do not
+request another connector review on the unchanged head.
 
 If neither a terminal GitHub Codex verdict nor a head-attributable connector
 `+1` exists for the exact current head, a Tier A head does not merge — there is
@@ -631,21 +613,23 @@ no elapsed-time substitute. What to do next depends on whether a request exists
 for this head, and the two cases are **not** alternatives:
 
 - **No request for this head** (never made, or staled by an amendment): issue it.
-  That is the only move. The operator-disposition route is not available here —
+  That is the only move. The release-gate-disposition route is not available here —
   it is reachable only after a request and its single re-trigger have both existed
   and run out, and offering it as a choice on an unrequested head recreates the
   closed path where a worker skips review entirely and asks for authorization
   instead.
 - **A request for this head exists and has gone unanswered**: follow
   [Explicit requested-review precedence](#explicit-requested-review-precedence)
-  through the single re-trigger to the operator disposition. A Tier B/C head **for which no review was requested**
+  through the single re-trigger to the release-gate disposition. A Tier B/C head **for which no review was requested**
 needs no connector signal at all. A requested review is pending whatever its tier:
 once a request exists, precedence is tier-agnostic, so a voluntarily or
-operator-requested Tier B/C review is outstanding until a terminal signal or an
-exact-head operator disposition -- exactly as the fixture matrix records it.
+worker-requested Tier B/C review is outstanding until a terminal signal or an
+exact-head release-gate disposition -- exactly as the fixture matrix records it.
 Proceed only when all of these are true:
 
-- the requested connector review and required local exact-head verification found no actionable issues
+- when a connector review was requested, it completed for the exact head and
+  every finding has a written disposition accepted by the lane owner and
+  release-gate worker; required local exact-head verification also passed
 - required checks are green on the latest head
 - the PR is mergeable and `mergeStateStatus` is clean
 - **every arriving finding has a thread-linked written outcome, whatever head it was
@@ -665,14 +649,15 @@ Proceed only when all of these are true:
   and state the outcome, in the same place the thread dispositions go. Without this a
   finding is discharged by whoever pushes next, which is the rule this section opens by
   rejecting
-- the project/operator has authorized auto-merge for this PR or queue class
+- the release-gate worker has recorded the merge decision under the standing
+  project policy
 
 Read [the reviewed artifact set](#reviewed-artifact-set) directly. Do not infer the current
 result from stale inline review-thread objects alone. The watcher must report the
 exact current-head verdict, or the connector-authored `+1` on the manual-review
 request comment together with the SHA that request named, with timestamps, and
 confirm that no later push occurred. Where both request-anchored clocks have expired,
-an exact-head operator disposition has lifted the missing-signal subgate, **and no
+an exact-head release-gate disposition has lifted the missing-signal subgate, **and no
 terminal connector signal has arrived since**, the watcher reports **that
 disposition** instead, naming the head it was given for --
 otherwise the one path the precedence section authorises for a silently dropped
@@ -682,15 +667,15 @@ a principle: **after selecting the disposition path and before reporting it or
 merging, re-read [the reviewed artifact set](#reviewed-artifact-set) once more.** Choosing the
 branch is not the same as checking it, and without that read a verdict landing in
 between is completed straight past — skipping the settle and full re-read it is owed.
-If the read finds one, abandon the disposition branch and report the signal instead. An operator disposition is
+If the read finds one, abandon the disposition branch and report the signal instead. A release-gate disposition is
 not a connector terminal signal and never substitutes for one where a signal did
 arrive. Either terminal signal
 stops the heartbeat from waiting for further artifacts;
 it does not waive post-signal handling. For a head-named clean verdict **and for a
 request-comment `+1` alike**, the approximately five-minute post-clean settle and a full
 re-read of [the reviewed artifact set](#reviewed-artifact-set) remain mandatory before merge. If review feedback lands, fix or respond
-to it, push the update, rerun the manual branch-diff review and required
-local/CI checks, then evaluate the new exact head from scratch before
+to it, push the update, rerun required local/CI checks, then evaluate the new
+exact head from scratch before
 continuing toward merge.
 
 If the wait cannot self-progress because checks stalled, review state is

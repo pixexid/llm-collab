@@ -24,6 +24,10 @@ PROJECTS = [
         "github": {"enabled": True, "repo": "pixexid/llm-collab"},
     }
 ]
+AMIGA_PROJECT = {
+    "id": "amiga",
+    "github": {"enabled": True, "repo": "pixexid/amiga"},
+}
 INITIAL_ARGS = [
     "--pr",
     "1",
@@ -87,6 +91,12 @@ class ProjectResolutionTest(unittest.TestCase):
             ("pixexid", "llm-collab"),
         )
 
+    def test_amiga_registration_supplies_amiga_repo(self):
+        self.assertEqual(
+            review_request.repo_coordinates("amiga", [*PROJECTS, AMIGA_PROJECT]),
+            ("pixexid", "amiga"),
+        )
+
     def test_disabled_project_is_refused(self):
         projects = [
             {
@@ -106,10 +116,7 @@ class ProjectResolutionTest(unittest.TestCase):
             result = subprocess.CompletedProcess(
                 ["git"], 0, stdout=str(common) + "\n", stderr=""
             )
-            with (
-                mock.patch.object(review_request, "get_project", return_value=None),
-                mock.patch.object(review_request, "run", return_value=result),
-            ):
+            with mock.patch.object(review_request, "run", return_value=result):
                 self.assertEqual(
                     review_request.repo_coordinates("llm-collab"),
                     ("pixexid", "llm-collab"),
@@ -155,8 +162,25 @@ class RequestHistoryTest(unittest.TestCase):
             with self.assertRaisesRegex(SystemExit, "declared bound"):
                 review_request.pr_comment_bodies(1, "pixexid", "llm-collab")
 
+    def test_fails_closed_when_pagination_cursor_does_not_advance(self):
+        with mock.patch.object(
+            review_request,
+            "run_json",
+            side_effect=[
+                page(["one"], next_page=True, cursor="same"),
+                page([], next_page=True, cursor="same"),
+            ],
+        ):
+            with self.assertRaisesRegex(SystemExit, "did not advance"):
+                review_request.pr_comment_bodies(1, "pixexid", "llm-collab")
+
 
 class MainFlowTest(unittest.TestCase):
+    def setUp(self):
+        patcher = mock.patch.object(review_request, "require_contract")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def patches(
         self,
         *,
@@ -276,6 +300,31 @@ class CommandContractTest(unittest.TestCase):
 
     def test_script_is_executable(self):
         self.assertTrue(os.access(ROOT / "bin" / "review_request.py", os.X_OK))
+
+    def test_missing_command_is_a_refusal(self):
+        with mock.patch.object(
+            subprocess, "run", side_effect=FileNotFoundError("missing")
+        ):
+            with self.assertRaisesRegex(SystemExit, "cannot run gh"):
+                review_request.run(["gh", "pr", "view"], 1)
+
+    def test_closed_pr_is_refused(self):
+        with mock.patch.object(
+            review_request,
+            "run_json",
+            return_value={"headRefOid": SHA, "state": "CLOSED"},
+        ):
+            with self.assertRaisesRegex(SystemExit, "is not open"):
+                review_request.pr_head(1, "pixexid", "llm-collab")
+
+    def test_lane_contract_must_be_positive_and_exist(self):
+        with self.assertRaisesRegex(SystemExit, "positive issue number"):
+            review_request.require_contract(0, "pixexid", "llm-collab")
+        with mock.patch.object(
+            review_request, "run_json", return_value={"number": 352}
+        ) as run_json:
+            review_request.require_contract(352, "pixexid", "llm-collab")
+        self.assertIn("issue", run_json.call_args.args[0])
 
 
 if __name__ == "__main__":

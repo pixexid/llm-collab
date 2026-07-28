@@ -40,8 +40,6 @@ import json
 import re
 import subprocess
 
-from _helpers import get_project
-
 REQUEST_MARKER = "@codex review"
 COMMENT_PAGE_SIZE = 100
 # Declared bound on the exhaustive enumeration. Hitting it with pages still
@@ -80,6 +78,8 @@ def run(argv: list[str], timeout: int) -> subprocess.CompletedProcess:
             f"error: {' '.join(argv[:3])} exceeded its {timeout}s deadline; "
             "failing closed rather than judging on a stalled read"
         )
+    except OSError as error:
+        raise SystemExit(f"error: cannot run {argv[0]}: {error}")
     if proc.returncode != 0:
         raise SystemExit(f"error: {' '.join(argv[:3])} failed: {proc.stderr.strip()}")
     return proc
@@ -113,12 +113,8 @@ def common_checkout_projects() -> list[dict]:
 
 def repo_coordinates(project_id: str, projects: list[dict] | None = None) -> tuple[str, str]:
     if projects is None:
-        project = get_project(project_id)
-        if project is None:
-            projects = common_checkout_projects()
-            project = next((p for p in projects if p.get("id") == project_id), None)
-    else:
-        project = next((p for p in projects if p.get("id") == project_id), None)
+        projects = common_checkout_projects()
+    project = next((p for p in projects if p.get("id") == project_id), None)
     if project is None:
         raise SystemExit(f"error: unknown project_id: {project_id!r}")
     github = project.get("github")
@@ -139,14 +135,30 @@ def repo_coordinates(project_id: str, projects: list[dict] | None = None) -> tup
 def pr_head(pr: int, owner: str, name: str) -> str:
     data = run_json(
         ["gh", "pr", "view", str(pr), "--repo", f"{owner}/{name}",
-         "--json", "headRefOid"]
+         "--json", "headRefOid,state"]
     )
+    if data.get("state") != "OPEN":
+        raise SystemExit(
+            f"error: {owner}/{name}#{pr} is not open; refusing to post a review request"
+        )
     return data["headRefOid"]
+
+
+def require_contract(issue: int, owner: str, name: str) -> None:
+    if issue <= 0:
+        raise SystemExit("error: --contract must be a positive issue number")
+    run_json(
+        [
+            "gh", "issue", "view", str(issue), "--repo", f"{owner}/{name}",
+            "--json", "number",
+        ]
+    )
 
 
 def pr_comment_bodies(pr: int, owner: str, name: str) -> list[str]:
     bodies: list[str] = []
     after: str | None = None
+    cursors: set[str] = set()
     while True:
         argv = [
             "gh", "api", "graphql",
@@ -172,7 +184,13 @@ def pr_comment_bodies(pr: int, owner: str, name: str) -> list[str]:
                 f"({COMMENT_HARD_CAP}) with pages still outstanding; failing "
                 "closed rather than treating a truncated history as an empty one"
             )
-        after = page["endCursor"]
+        cursor = page.get("endCursor")
+        if not cursor or cursor == after or cursor in cursors:
+            raise SystemExit(
+                "error: GitHub comment pagination did not advance; failing closed"
+            )
+        cursors.add(cursor)
+        after = cursor
 
 
 def local_head() -> str:
@@ -224,6 +242,10 @@ def post_comment(pr: int, owner: str, name: str, body: str) -> None:
         raise SystemExit(
             "error: posting the request timed out; the comment may or may not "
             "have landed — inspect the PR before retrying"
+        )
+    except OSError as error:
+        raise SystemExit(
+            f"error: cannot run gh: {error}; no review request was posted"
         )
     if proc.returncode != 0:
         raise SystemExit(
@@ -288,6 +310,8 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     owner, name = repo_coordinates(args.project)
+    if args.tier == "A":
+        require_contract(args.contract, owner, name)
     sha = pr_head(args.pr, owner, name)
     local = local_head()
     if local != sha:
@@ -308,7 +332,7 @@ def main(argv: list[str] | None = None) -> int:
             raise SystemExit(
                 f"error: request budget for this head is spent ({len(priors)} "
                 "requests already); there is no further request to issue — "
-                "continue to the exact-head operator disposition"
+                "continue to the exact-head release-gate disposition"
             )
         body = priors[0] + "\n\n" + RETRIGGER_NOTE
     else:

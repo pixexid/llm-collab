@@ -122,11 +122,11 @@ class ReviewLoopCapContractTest(unittest.TestCase):
         cls.canonical_clean_verdict = contract_section(
             workflow_text,
             "- a head-named clean connector verdict is not merge-immediate",
-            "- when a re-review was explicitly requested",
+            "- a finding rejected or deferred without a code change",
         )
         cls.canonical_rereview = contract_section(
             workflow_text,
-            "- when a re-review was explicitly requested",
+            "- a finding rejected or deferred without a code change",
             "- report the exact verdict",
         )
         plan_text = PLAN_DOC.read_text(encoding="utf-8")
@@ -261,9 +261,9 @@ class ReviewLoopCapContractTest(unittest.TestCase):
                     "is not a third automated terminal-signal model",
                     "It does not waive required local exact-head verification, green "
                     "required checks, mergeability, a full re-read of "
-                    "[the reviewed artifact set](#reviewed-artifact-set), unresolved-feedback "
-                    "handling, or project/operator auto-merge authority",
-                    "the operator authorization does not masquerade as that "
+                    "[the reviewed artifact set](#reviewed-artifact-set), or "
+                    "unresolved-feedback handling",
+                    "the release-gate disposition does not masquerade as that "
                     "signal or inherit its handling",
                     "a dropped request is indistinguishable from a review that "
                     "is still processing",
@@ -301,7 +301,7 @@ class ReviewLoopCapContractTest(unittest.TestCase):
                     "no further automatic retry is allowed",
                     "The canonical section is the sole authority for the request-anchored "
                     "clocks, current-head invalidation, the post-timeout disposition "
-                    "choices, and every effect of an exact-head operator authorization; "
+                    "choices, and every effect of an exact-head release-gate disposition; "
                     "this compact guidance defines no separate disposition effect",
                     "A terminal signal stops waiting for further artifacts only; it does "
                     "not waive the handling below",
@@ -326,7 +326,7 @@ class ReviewLoopCapContractTest(unittest.TestCase):
                 'issue exactly one re-trigger, repeating the focus and exact head SHA of the original '
                 'request, and no further automatic retry is allowed. The canonical section is the sole '
                 'authority for the request-anchored clocks, current-head invalidation, the post-timeout '
-                'disposition choices, and every effect of an exact-head operator authorization; this '
+                'disposition choices, and every effect of an exact-head release-gate disposition; this '
                 'compact guidance defines no separate disposition effect. **No silence fallback exists.** '
                 'All three former no-terminal-artifact variants — no explicit review request, eyes-only '
                 'current-head artifact, prior-head artifacts only — are deleted, not shortened. Each '
@@ -473,8 +473,8 @@ class ReviewLoopCapContractTest(unittest.TestCase):
                 sources["cap"],
             )
             self.assertIn(
-                "A capped head with zero open actionable findings and a clean "
-                "exact-head re-review follows the normal merge gate with no "
+                "A capped head with zero open actionable findings and a completed "
+                "exact-head connector review follows the normal merge gate with no "
                 "convergence-disposition label",
                 sources["cap"],
             )
@@ -508,22 +508,15 @@ class ReviewLoopCapContractTest(unittest.TestCase):
     def test_cap_escalation_is_independent_of_terminal_disposition(self):
         def check(case, sources):
             self.assertIn(
-                "Reaching the applicable cap requires an operator-visible "
-                "escalation message recorded independently, whether or not open "
-                "findings require a terminal disposition",
-                sources["cap"],
-            )
-            self.assertIn(
-                "When open findings do require a terminal disposition, record "
-                "the escalation alongside it",
+                "Reaching the applicable cap requires a durable, operator-visible "
+                "disposition, but visibility is not an approval gate",
                 sources["cap"],
             )
             # v5 (2026-07-28): the 2-hour escalation became the wall-clock lane
-            # budget — 4 hours or a third amended head is an operator
-            # merge-or-kill decision, which is how a lane terminates.
+            # budget — 4 hours or a third amended head forces a worker decision.
             self.assertIn("4 hours in the review-fix state", sources["cap"])
             self.assertIn("third amended head", sources["cap"])
-            self.assertIn("merge-or-kill", sources["cap"])
+            self.assertIn("merge-with-followups or close", sources["cap"])
 
         self.assert_scenario_cases("review_loop_cap", check)
 
@@ -599,15 +592,11 @@ class ReviewLoopCapContractTest(unittest.TestCase):
                 sources["canonical_clean_verdict"],
             )
             self.assertIn(
-                "that re-review supersedes artifacts attached to **older requests** -- clean verdicts and reactions alike",
+                "Do not request another connector review on the unchanged head",
                 sources["canonical_rereview"],
             )
             self.assertIn(
-                # Inverted, not restored: this pinned the claim GH-313 ruled against -- that a
-                # re-review can only be completed by text. A reaction on its own request is
-                # terminal too, and asserting otherwise made the connector's reaction-only
-                # protocol unable to satisfy a request it had answered.
-                "It does **not** disable the reaction path",
+                "the exact-head review already happened",
                 sources["canonical_rereview"],
             )
 
@@ -1093,10 +1082,7 @@ class ReviewLoopCapContractTest(unittest.TestCase):
             text = normalized(doc.read_text(encoding="utf-8"))
             with self.subTest(doc=doc.name):
                 self.assertIn("latest, unedited request artifact", text)
-                self.assertIn("artifacts attached to **older requests**", text)
-                # And the corollary the supersession rule must not swallow: a re-review is
-                # still completable by a reaction on its own request.
-                self.assertIn("does **not** disable the reaction path", text)
+                self.assertNotIn("same-head re-review request", text)
 
     def test_resolution_state_never_removes_a_thread_from_an_output(self):
         """`isResolved` is metadata, not adjudication.
@@ -1355,15 +1341,13 @@ class ReviewLoopCapContractTest(unittest.TestCase):
         text = re.sub(r"\s+", " ", HANDOFF_DOC.read_text(encoding="utf-8"))
         self.assertIn("adjudicated in writing — which is not the same as accepted", text)
         self.assertIn("**Reject it.**", text)
-        self.assertIn("no code changes, so there is no amended head".lower(),
+        self.assertIn("no code changes means no amended head".lower(),
                       text.lower())
-        # The distinction the fix path depends on: rejecting does not stale the request.
-        # Rejecting adjudicates the finding but produces no terminal signal, so the
-        # request stays open unless a same-head re-review is REQUIRED. Optional left it
-        # pending forever, or sent it down the dropped-request escalation path for a
-        # review that was answered rather than dropped.
-        self.assertIn("**Request a re-review on the same head.**", text)
-        self.assertIn("not** satisfied by the disposition", text)
+        self.assertIn("no new request", text)
+        self.assertIn(
+            "completed exact-head review plus that disposition is sufficient",
+            text,
+        )
 
     def test_a_withdrawal_is_bound_to_the_head_it_was_granted_on(self):
         """An operator decision about one head was readable as a standing exemption.
@@ -1484,7 +1468,7 @@ class ReviewLoopCapContractTest(unittest.TestCase):
             "per-finding",
             "One external reviewer per head",
             "merge-with-followups",
-            "merge-or-kill",
+            "merge-with-followups-or-close",
             "review_request.py",
             "two active implementation lanes",
         ):
@@ -1573,7 +1557,7 @@ class ReviewLoopCapContractTest(unittest.TestCase):
         section = contract_section(
             WORKFLOW_DOC.read_text(encoding="utf-8"),
             "- **a connector review body that lists no findings is not a clean verdict.**",
-            "- when a re-review was explicitly requested",
+            "- a finding rejected or deferred without a code change",
         )
         for phrase in (
             "posts its findings as inline review threads",
@@ -1632,7 +1616,7 @@ class ReviewLoopCapContractTest(unittest.TestCase):
 
         self.assert_scenario_cases("canonical_wait_gate", check)
 
-    def test_operator_authorization_is_exact_head_and_narrow(self):
+    def test_release_gate_disposition_is_exact_head_and_narrow(self):
         def check(case, sources):
             self.assertEqual(
                 case["expected_outcome"],
@@ -1768,11 +1752,7 @@ class ReviewLoopCapContractTest(unittest.TestCase):
             self.assertIn(
                 "re-read of [the reviewed artifact set](commit-push-prs.md#reviewed-artifact-set)", handoff
             )
-            self.assertIn(
-                "that re-review supersedes artifacts attached to **older requests** -- clean verdicts and reactions alike",
-                handoff,
-            )
-            self.assertIn("either receives the same settle and full re-read", handoff)
+            self.assertNotIn("same-head re-review request", handoff)
             self.assertNotIn(
                 "timestamps immediately and do not wait out the remainder", handoff
             )
@@ -1929,8 +1909,8 @@ class ReviewLoopCapContractTest(unittest.TestCase):
                 "workflow",
                 "It does not waive required local exact-head\nverification, green "
                 "required checks, mergeability, a full re-read of\n"
-                "[the reviewed artifact set](#reviewed-artifact-set), unresolved-feedback "
-                "handling, or\nproject/operator auto-merge authority",
+                "[the reviewed artifact set](#reviewed-artifact-set), or unresolved-feedback\n"
+                "handling",
                 "It waives independent review, checks, and reread",
             ),
             (

@@ -49,13 +49,14 @@ explicitly disjoint.
 4. create/update the task
 5. run the Claude planning/refinement gate for non-trivial tasks (see
    Refinement Gate below)
-6. update the queue when owner/order/dependency/activation state changes
-7. provision branch/worktree first when the lane is isolated-worker implementation
-8. assign one implementation owner
-9. send one clear delegation message
-10. move task to `in_progress` (gated — requires `refined_by: claude` or `skip_refinement: true`)
-11. then activate the assigned worker directly through the approved mailbox + doorbell path
-12. then begin implementation
+6. classify the review tier; for Tier A, write the lane contract before any branch
+7. update the queue when owner/order/dependency/activation state changes
+8. provision branch/worktree when the lane is isolated-worker implementation
+9. assign one implementation owner
+10. send one clear delegation message
+11. move task to `in_progress` (gated — requires `refined_by: claude` or `skip_refinement: true`)
+12. then activate the assigned worker directly through the approved mailbox + doorbell path
+13. then begin implementation
 
 For Codex-owned implementation, the implementation owner is a managed Codex
 Thread Coordination worker. Use Thread Coordination when that owner needs a
@@ -74,7 +75,8 @@ Thread Coordination is an execution surface, not a queue source of truth.
 At most **two implementation lanes** are active (`in_progress`) at once across
 the workspace. A lane is active from its first branch until its PR merges or
 its terminal disposition is recorded. Before activating a third lane, one of
-the two must ship, merge-with-followups, or be killed by the operator.
+the two must ship, merge-with-followups, or be closed by the lane owner and
+release-gate worker.
 
 Fragments spawned by a capped PR (descope/split/backend-first children) do not
 enter the board automatically: they go to triage, and each is activated only

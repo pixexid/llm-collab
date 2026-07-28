@@ -79,12 +79,9 @@ from implementation (see role model in `task-intake-and-delegation.md`).
   not the pre-PR review of record.
 
 For amended heads, follow the canonical bounded-amendment and convergence rules
-in `commit-push-prs.md`. Batch related findings locally. The same independent
-reviewer may re-review only when the amendment stays inside the accepted
-contract and changed-file set, and must inspect the batched delta, affected
-invariants, and complete base-to-head coherence at the new exact head. Payments,
-auth, permissions, schema/migrations, irreversible writes, a new product flow,
-or any newly touched file require a new cold reviewer.
+in `commit-push-prs.md`. Batch related findings locally, run the required local
+exact-head verification, and use the requested connector review as the one
+external reviewer for that head. Do not add another independent model review.
 
 Count finding rounds by family, where same-family means the same file or the
 same named invariant/mechanism across files. The second round makes the family
@@ -198,9 +195,10 @@ changes. If workflow docs, repo instructions, skills, queue scripts, bridge
 runtime docs, or agent memory changed during the lane, classify and persist
 those changes before starting the next lane or ending the thread.
 
-For PR-review wait heartbeats, follow `commit-push-prs.md`: the repeated review
-loop is the orchestrator's manual branch-diff review before commit/PR and after
-any review-fix patch. When the operator has authorized the merge path, merge
+For PR-review wait heartbeats, follow `commit-push-prs.md`: the manual
+branch-diff review happens once before the initial PR-ready head. Amended heads
+receive local exact-head verification and the requested connector review, not a
+second independent model review. Merge
 from the current thread only after the exact current head has green required
 checks, the PR is mergeable with clean merge state, the requested connector
 review and required local exact-head verification are clean, and
@@ -219,15 +217,9 @@ artifacts only; it does not waive the handling below:
 
 - A head-named clean connector verdict is not merge-immediate. Hold an
   approximately five-minute mandatory post-clean settle, then perform a full
-  re-read of [the reviewed artifact set](commit-push-prs.md#reviewed-artifact-set) because the connector can emit multiple reviews for one head --
-  and because a same-head re-review request posted during the settle lives in a comment,
-  supersedes the verdict or reaction being settled, and is invisible to a re-read that
-  skips comments. When a re-review was explicitly
-  requested, that re-review supersedes artifacts attached to **older requests** -- clean verdicts and
-  reactions alike. It does **not** disable the reaction path: a connector `+1` on
-  the latest unedited request naming the current head is terminal for the re-review
-  exactly as a fresh textual verdict is, and either receives the same
-  settle and full re-read. A reaction counts
+  re-read of [the reviewed artifact set](commit-push-prs.md#reviewed-artifact-set)
+  because the connector can emit multiple review artifacts for one head. A
+  reaction counts
   only on the latest, unedited request artifact -- GitHub keeps reactions across an
   edit, so an edited request comment can still carry a `+1` left for an older head.
 - A connector-authored `+1` on the exact manual-review request comment is
@@ -252,7 +244,7 @@ Automation may issue exactly one re-trigger, repeating the focus and exact head
 SHA of the original request, and no further automatic retry is allowed. The
 canonical section is the sole authority for the request-anchored clocks,
 current-head invalidation, the post-timeout disposition choices, and every
-effect of an exact-head operator authorization; this compact guidance defines no
+effect of an exact-head release-gate disposition; this compact guidance defines no
 separate disposition effect.
 
 **No silence fallback exists.** All three former no-terminal-artifact variants —
@@ -268,16 +260,14 @@ If GitHub Codex comments on the PR, every finding is adjudicated in writing —
 which is not the same as accepted. Two paths, and which one applies depends on
 whether the code changes:
 
-- **Fix it.** Repair the pointed issue, rerun the manual branch-diff review and
-  required checks, then **issue a new exact-head request for the amended head**.
+- **Fix it.** Repair the pointed issue, rerun required local verification and
+  checks, then **issue a new exact-head request for the amended head**. Do not
+  run a second independent model review on that head.
 - **Reject it.** A finding that is wrong, out of scope, or already handled is
   answered with a written disposition posted on that thread, naming the head it
-  was judged at. No code changes, so there is no amended head — but the request is
-  **not** satisfied by the disposition: adjudicating a finding produces neither
-  exact-head terminal signal, and automatic review is off, so nothing further
-  arrives unasked. **Request a re-review on the same head.** Leaving it optional
-  left the request pending forever, or pushed it down the silently-dropped-request
-  escalation path for a review that was answered rather than dropped.
+  was judged at, and accepted by the lane owner and release-gate worker. No code
+  changes means no amended head and no new request: the completed exact-head
+  review plus that disposition is sufficient evidence.
 
 Requiring a fix for every finding left an invalid one with no legal move — a
 worker had to either make an unwarranted change or stall — and the governing
