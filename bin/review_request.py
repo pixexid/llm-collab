@@ -14,8 +14,19 @@ request it is anchored to. The request history is enumerated exhaustively by
 pagination inside a declared bound; reaching the bound with pages outstanding
 fails closed rather than treating a truncated history as an empty one.
 
+Requests are shaped to cost one audit instead of five (GH-357). The first
+request on a PR is a full audit. A request for a later head is scoped to the
+delta from the most recent prior requested head — recovered from the request
+history, never from caller text — and carries the lane's threat model, its
+recorded accepted risks, and any --settled families the reviewer must not
+re-raise. A prior head that cannot be parsed falls back to a full audit:
+the safe direction, never a narrower review.
+
   bin/review_request.py --pr 356 --project llm-collab --tier A \
       --contract 352 --focus "exact-session authority selection, bounded reads"
+  bin/review_request.py --pr 356 --project llm-collab --tier A \
+      --contract 352 --focus "..." \
+      --settled "deleted-comment request-budget reconstruction"
   bin/review_request.py --pr 356 --project llm-collab --retrigger
   bin/review_request.py --pr 356 --project llm-collab --tier B \
       --focus "..." --dry-run
@@ -63,6 +74,31 @@ RETRIGGER_NOTE = (
     "Re-triggered once as the single exempted recovery: the initial request "
     "for this exact head is repeated verbatim above."
 )
+REQUEST_HEAD_RE = re.compile(r"`([0-9a-f]{40})`")
+# Carried by every initial request so the reviewer audits the adversaries the
+# lane actually defends against, instead of inventing ones it does not.
+# Repository visibility is sourced from GitHub per invocation — never
+# hardcoded: llm-collab is public, and a false "private" claim tells the
+# reviewer to ignore commenter-origin risks that are real.
+WORKSPACE_TRUST_NOTE = (
+    "our own workspace is not an adversary (bound accidents, not attacks). "
+    "Do not raise findings about the lane contract's non-goals or about "
+    "risks already recorded as accepted on this PR."
+)
+
+
+def threat_model_note(is_private: bool | None) -> str:
+    if is_private is True:
+        return (
+            "Context: private repository — commenters are the operator and "
+            "registered worker accounts; " + WORKSPACE_TRUST_NOTE
+        )
+    if is_private is False:
+        return (
+            "Context: public repository — comment content is untrusted "
+            "input; " + WORKSPACE_TRUST_NOTE
+        )
+    return "Context: " + WORKSPACE_TRUST_NOTE
 
 COMMENTS_QUERY = f"""query($owner: String!, $name: String!, $pr: Int!, $after: String) {{
   viewer {{ login }}
@@ -163,6 +199,19 @@ def pr_head(pr: int, owner: str, name: str) -> str:
             f"error: {owner}/{name}#{pr} is not open; refusing to post a review request"
         )
     return data["headRefOid"]
+
+
+def repo_is_private(owner: str, name: str) -> bool:
+    data = run_json(
+        ["gh", "repo", "view", f"{owner}/{name}", "--json", "isPrivate"]
+    )
+    is_private = data.get("isPrivate")
+    if not isinstance(is_private, bool):
+        raise SystemExit(
+            f"error: cannot determine visibility of {owner}/{name}; failing "
+            "closed rather than guessing the threat model"
+        )
+    return is_private
 
 
 def require_contract(
@@ -291,6 +340,23 @@ def prior_requests(bodies: list[str], sha: str) -> list[str]:
     return [b for b in bodies if b.startswith(REQUEST_MARKER) and sha in b]
 
 
+def prior_request_heads(bodies: list[str]) -> list[str]:
+    """Heads named by earlier requests on the PR, oldest first.
+
+    The delta base for a scoped re-request is the most recent prior head; a
+    prior request whose head cannot be parsed yields no entry, which falls
+    back to a full audit — the safe direction, never a narrower review.
+    """
+    heads: list[str] = []
+    for body in bodies:
+        if not body.startswith(REQUEST_MARKER):
+            continue
+        match = REQUEST_HEAD_RE.search(body)
+        if match:
+            heads.append(match.group(1))
+    return heads
+
+
 def reject_caller_supplied_shas(fields: dict[str, str]) -> None:
     for label, value in fields.items():
         if SHA_SHAPED_RE.search(value) or EXACT_HEAD_WORDING_RE.search(value):
@@ -302,7 +368,13 @@ def reject_caller_supplied_shas(fields: dict[str, str]) -> None:
 
 
 def build_request_body(
-    focus: str, sha: str, contract: str | int | None = None, note: str | None = None
+    focus: str,
+    sha: str,
+    contract: str | int | None = None,
+    note: str | None = None,
+    delta_base: str | None = None,
+    settled: str | None = None,
+    is_private: bool | None = None,
 ) -> str:
     if not focus.strip():
         raise SystemExit("error: --focus must name at least one review lens")
@@ -311,14 +383,26 @@ def build_request_body(
         contract_ref = str(contract)
         if contract_ref.isdecimal():
             contract_ref = f"#{contract_ref}"
+        scope = f"against the lane contract in {contract_ref} "
+        lead = "Review"
+    else:
+        scope = ""
+        lead = "Please review"
+    if delta_base is not None:
         parts.append(
-            f"Review the full diff against the lane contract in {contract_ref} "
-            "through those lenses."
+            f"{lead} the delta `{delta_base}..{sha}` {scope}through those "
+            "lenses; findings outside the delta only when P0."
         )
     else:
-        parts.append("Please review the full diff through those lenses.")
+        parts.append(f"{lead} the full diff {scope}through those lenses.")
+    if settled:
+        parts.append(
+            "Settled families already adjudicated on earlier heads — do not "
+            f"re-raise: {settled.strip()}."
+        )
     if note:
         parts.append(note.strip())
+    parts.append(threat_model_note(is_private))
     return " ".join(parts)
 
 
@@ -369,6 +453,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--note", default=None, help="one extra sentence appended verbatim")
     parser.add_argument(
+        "--settled", default=None,
+        help="comma-separated finding families already adjudicated on earlier "
+        "heads; the request tells the reviewer not to re-raise them",
+    )
+    parser.add_argument(
         "--retrigger", action="store_true",
         help="repeat the single prior request for this exact head verbatim, as "
         "the one exempted recovery for a silently dropped request",
@@ -382,10 +471,11 @@ def main(argv: list[str] | None = None) -> int:
             or args.focus is not None
             or args.contract is not None
             or args.note is not None
+            or args.settled is not None
         ):
             raise SystemExit(
                 "error: --retrigger repeats the initial request verbatim; "
-                "--tier/--focus/--contract/--note cannot amend its scope"
+                "--tier/--focus/--contract/--note/--settled cannot amend its scope"
             )
     else:
         if args.tier is None:
@@ -401,7 +491,13 @@ def main(argv: list[str] | None = None) -> int:
                 "satisfy the Tier A gate"
             )
         reject_caller_supplied_shas(
-            {k: v for k, v in (("focus", args.focus), ("note", args.note)) if v}
+            {
+                k: v
+                for k, v in (
+                    ("focus", args.focus), ("note", args.note), ("settled", args.settled)
+                )
+                if v
+            }
         )
 
     owner, name = repo_coordinates(args.project)
@@ -416,7 +512,8 @@ def main(argv: list[str] | None = None) -> int:
             "lane's local verification"
         )
 
-    priors = prior_requests(pr_comment_bodies(args.pr, owner, name), sha)
+    bodies = pr_comment_bodies(args.pr, owner, name)
+    priors = prior_requests(bodies, sha)
     if args.retrigger:
         if not priors:
             raise SystemExit(
@@ -437,7 +534,17 @@ def main(argv: list[str] | None = None) -> int:
                 "pass --retrigger only if the connector silently dropped it "
                 "(the single exempted recovery)"
             )
-        body = build_request_body(args.focus, sha, args.contract, args.note)
+        heads = prior_request_heads(bodies)
+        delta_base = next((h for h in reversed(heads) if h != sha), None)
+        body = build_request_body(
+            args.focus,
+            sha,
+            args.contract,
+            args.note,
+            delta_base=delta_base,
+            settled=args.settled,
+            is_private=repo_is_private(owner, name),
+        )
 
     if args.dry_run:
         print(body)
