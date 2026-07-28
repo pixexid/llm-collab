@@ -47,7 +47,112 @@ def parse_args():
     p.add_argument("--limit", type=int, default=5, help="Inbox items to show (default: 5)")
     p.add_argument("--no-watcher", action="store_true", help="Skip starting the inbox watcher")
     p.add_argument("--json", dest="json_output", action="store_true", help="Emit JSON summary")
+    p.add_argument(
+        "--allow-stale-tooling",
+        action="store_true",
+        help=(
+            "Proceed on a checkout that is missing merged work. The staleness is "
+            "still reported; only the refusal is waived."
+        ),
+    )
     return p.parse_args()
+
+
+TOOLING_CURRENT = "current"
+TOOLING_STALE = "stale"
+TOOLING_UNKNOWN = "unknown"
+
+
+def _git(*args: str, timeout: int = 15) -> subprocess.CompletedProcess | None:
+    try:
+        return subprocess.run(
+            ["git", "-C", str(ROOT), *args],
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def tooling_currency() -> dict:
+    """Is this checkout missing work that is already on origin/main?
+
+    Staleness is not a style question. A checkout pinned to a branch that predates
+    a merged change runs that change's *absence* as if it were the contract: on
+    2026-07-28 a checkout eight merges behind accepted `--session` on inbox.py and
+    ignored it, so a watcher believed it was session-bound, was not, and lost five
+    packets before anyone noticed.
+
+    The test is ancestry, not equality — a lane branch ahead of main is current;
+    one that cannot reach origin/main is missing merged work.
+    """
+    if not (ROOT / ".git").exists():
+        return {"state": TOOLING_UNKNOWN, "reason": "not a git checkout"}
+
+    fetched = _git("fetch", "origin", "main", "--quiet", timeout=20)
+    fetch_ok = bool(fetched and fetched.returncode == 0)
+
+    base = _git("rev-parse", "origin/main")
+    if base is None or base.returncode != 0:
+        return {
+            "state": TOOLING_UNKNOWN,
+            "reason": "no origin/main ref to compare against",
+            "fetched": fetch_ok,
+        }
+
+    ancestor = _git("merge-base", "--is-ancestor", "origin/main", "HEAD")
+    if ancestor is None:
+        return {"state": TOOLING_UNKNOWN, "reason": "ancestry check failed", "fetched": fetch_ok}
+
+    head = _git("rev-parse", "--short", "HEAD")
+    branch = _git("rev-parse", "--abbrev-ref", "HEAD")
+    detail = {
+        "state": TOOLING_CURRENT if ancestor.returncode == 0 else TOOLING_STALE,
+        "head": head.stdout.strip() if head and head.returncode == 0 else "unknown",
+        "branch": branch.stdout.strip() if branch and branch.returncode == 0 else "unknown",
+        "origin_main": base.stdout.strip()[:7],
+        "fetched": fetch_ok,
+    }
+    if detail["state"] == TOOLING_STALE:
+        behind = _git("rev-list", "--count", "HEAD..origin/main")
+        if behind and behind.returncode == 0:
+            detail["commits_behind"] = int(behind.stdout.strip() or 0)
+    return detail
+
+
+def announce_tooling(currency: dict, *, allowed: bool) -> None:
+    state = currency["state"]
+    if state == TOOLING_CURRENT:
+        print(f"[tooling] checkout {currency['head']} has origin/main — current")
+        return
+    if state == TOOLING_UNKNOWN:
+        print(f"[tooling] currency UNKNOWN: {currency.get('reason')}")
+        print("[tooling] treat inbox, watcher, task, queue and delivery results as unverified")
+        return
+
+    behind = currency.get("commits_behind")
+    behind_text = f", {behind} commit(s) behind" if behind else ""
+    if not currency.get("fetched"):
+        behind_text += " (origin unreachable; compared against the last fetched ref)"
+    print("━" * 60)
+    print("⚠️  STALE TOOLING — this checkout is missing merged work")
+    print("━" * 60)
+    print(f"  branch      {currency['branch']} @ {currency['head']}{behind_text}")
+    print(f"  origin/main {currency['origin_main']}")
+    print()
+    print("  Inbox, watcher, task, queue and delivery commands run from here")
+    print("  execute an older contract. A flag this checkout does not implement")
+    print("  is accepted and ignored rather than refused, so the failure looks")
+    print("  like working software. See docs/workflows/session-startup.md")
+    print("  → 'Keep The Tooling Current'.")
+    print()
+    if allowed:
+        print("  Proceeding: --allow-stale-tooling was passed. Every result below")
+        print("  is bound to the older tooling, including anything you report.")
+        print("━" * 60)
+        return
+    print("  Fix the checkout, or run tooling from one that is current, or pass")
+    print("  --allow-stale-tooling to proceed deliberately.")
+    print("━" * 60)
 
 
 def start_watcher(agent_id: str) -> dict:
@@ -156,6 +261,17 @@ def main():
         sys.exit(1)
 
     agent = get_agent(args.agent)
+
+    # Before anything reads the inbox or starts a watcher: is this checkout even
+    # allowed to speak for the workspace? A stale one answers every later question
+    # with an older contract, so the refusal belongs ahead of the first answer.
+    currency = tooling_currency()
+    if not args.json_output:
+        announce_tooling(currency, allowed=getattr(args, "allow_stale_tooling", False))
+    if currency["state"] == TOOLING_STALE and not getattr(args, "allow_stale_tooling", False):
+        if args.json_output:
+            print(json.dumps({"tooling": currency, "bootstrap": "refused"}, sort_keys=True))
+        sys.exit(1)
 
     if not args.json_output:
         announce_contract(args.agent)
@@ -277,6 +393,7 @@ def main():
         print(json.dumps({
             "agent": args.agent,
             "bootstrapped_utc": utc_iso(),
+            "tooling": currency,
             "identity_loaded": identity_content is not None,
             "inbox": inbox_summary,
             "queues": queue_info,
