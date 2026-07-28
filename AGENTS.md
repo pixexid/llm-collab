@@ -5,70 +5,38 @@
 
 This file plus `docs/workflows/` is the canonical worker contract. Memory files,
 skills, project notes and branch-local docs must **point at it, never restate it** — a
-restated command is a cached copy that goes stale without telling anyone.
-
-Not theoretical: on 2026-07-25 all eight agent memory files still taught the
-`deliver.py` invocation **without `--repo-targets`**, the exact command that had just
-silently dropped 27 packets over eleven hours, and several taught `--chat last`, which
-addresses the wrong lane once a second project is active.
+restated command is a cached copy that goes stale without telling anyone. On
+2026-07-25 that cost 27 packets over eleven hours: eight memory files taught a
+`deliver.py` invocation without `--repo-targets`, and nothing reported it.
 
 `python bin/contract_drift.py --agent <you>` reports your own stale copies;
 `session_bootstrap.py` runs it for you and prints the contract version at session start.
 
-### Recent contract changes
-
-Read these if your last session predates them.
-
-- **v5 (2026-07-28)** — the merge gate gets a reachable terminal state and Tier A
-  gets a contract-before-branch gate; several habits formed under v4 are now
-  violations. A Tier A lane writes a one-page **lane contract** (authority
-  boundary, commit point, retry behavior, non-goals —
-  `docs/workflows/lane-contract.md`) **before the first branch**; reviews verify
-  that contract instead of discovering it. Findings route **per-finding at
-  arrival**: a finding that violates the lane contract or is a regression
-  introduced by the diff blocks; pre-existing issues and requested broadenings
-  are adjudicated in writing and defer while the lane ships. **One external reviewer per
-  head**: a requested connector review is the external gate for that head, and
-  running a second independent model review on it consumes cycle budget without
-  adding signal. The cap default becomes **merge-with-followups**;
-  `descope`/`split` must now record what is being un-shipped and why merging is
-  unsafe. Lanes carry a wall-clock budget — 3 amended heads or 4 hours in
-  review-fix forces the lane owner and release-gate worker to record a
-  merge-with-followups-or-close decision. Review
-  requests are generated mechanically (`bin/review_request.py`); a hand-typed
-  SHA is a process defect (one was fabricated and retracted on #347). At most
-  **two active implementation lanes**; capped-PR fragments go to triage, not
-  straight onto the board. If your session predates this, discard cached
-  cap-default, deferral, reviewer-count, and request-format rules.
-- **v4 (2026-07-26)** — the merge gate is rewritten and the old rules are unsafe to
-  cache. The silence fallback is **deleted**: no elapsed time is ever a terminal
-  signal, and nothing ripens by waiting. A review request must name the exact head
-  SHA; one *initial* request per candidate final head, with a single request-anchored
-  re-trigger as the only exempted recovery. A connector review **body** listing no
-  findings is not a clean verdict — the findings are inline threads. Bind a finding to
-  a head through `pullRequestReview.commit.oid` (falling back to
-  `originalCommit.oid`), **never** the mutable `comment.commit.oid`. Adjudicate every
-  **arriving finding** whatever head raised it and whatever its current resolution
-  state — enumerate every thread, resolved or not, because a checklist phrased over
-  *unresolved* threads cannot see one that someone clicked Resolve on without
-  recording anything; a push is not an adjudication, and a written disposition must
-  identify the thread *and* be validated by a human. A
-  reaction counts only on the latest unedited request artifact. If your session
-  predates this, discard any cached copy of the old fallback, reaction lifecycle,
-  request shape, or authority rules.
-- **v3 (2026-07-26)** — workers own their own setup: project registration, agent
-  entries, chats, session registration, watchers and environment repair are worker work,
-  not operator work. See "Workers own their own setup" for what genuinely is the
-  operator's.
-- **v2 (2026-07-25)** — Codex review is **manual only**: nothing arrives unless
-  requested, and the Tier A/B/C rule below decides when you must ask. `--repo-targets`
-  is effectively mandatory on `deliver.py`. New: `docs/workflows/collab-thread-quickstart.md`
-  for the end-to-end collab path, and `bin/codex_stream.py` to watch a peer's thread live.
-- **v1** — everything before that.
-
-
 This repository is the shared `llm-collab` coordination runtime. It is not the
 Amiga workspace, the Nuvyr workspace, or any other product repository.
+
+### Recent contract changes
+
+Contract v5 (2026-07-28) rewrote the merge gate and the Tier A entry conditions.
+If your last session predates it, discard cached cap-default, deferral,
+reviewer-count and request-format rules, and read
+[`commit-push-prs.md`](docs/workflows/commit-push-prs.md), which is canonical for
+all of it:
+
+- a Tier A lane writes a one-page **lane contract** before the first branch, and
+  the review verifies the diff against it;
+- findings route **per-finding** at arrival — contract violations and regressions
+  block, pre-existing issues and broadenings defer in writing;
+- **One external reviewer per head**: the requested connector review is that
+  head's external gate, and a second model review must not be run;
+- the cap default is **merge-with-followups**; 3 amended heads or 4 hours in
+  review-fix forces a recorded merge-with-followups-or-close decision;
+- review requests are generated mechanically by `bin/review_request.py`; a
+  hand-typed SHA is a process defect;
+- at most **two active implementation lanes**.
+
+Earlier versions are in the git history of this file. Nothing below depends on
+reading them.
 
 ## Required Reading
 
@@ -142,36 +110,17 @@ it and check that it worked. If you could, it is yours.
 
 ## Adding A Project
 
-For an existing workspace, update `projects.json` directly. Do not rerun
-`scripts/init.py` unless the intent is to reinitialize the whole workspace.
+`docs/multi-project.md` → `### Onboarding a new project`. Do not rerun
+`scripts/init.py` on an existing workspace unless the intent is to reinitialize
+the whole thing.
 
-1. Register a unique `id`, display name, repositories, base branch, preflight,
-   and GitHub configuration. Add project-specific `ui_ux` and `db`
-   configuration only when applicable.
-2. Create local state at `{project_state_root}/{project_id}/`; keep real project
-   state outside this public Git checkout.
-3. Add repository-level `AGENTS.md` and worker guidance to the product repo.
-   Bind examples and commands to the exact checkout and `--project <id>`.
-4. For a GitHub-backed project, materialize and validate the project queue:
+## One writer per lane
 
-   ```bash
-   bin/llm-collab project_issue_queue.py reconcile --project <id> --write
-   bin/llm-collab project_issue_queue.py validate --project <id>
-   ```
-
-   Projects without GitHub integration can use the local task board without a
-   GitHub-backed issue queue.
-
-5. Create a representative project-scoped chat and task, sync its contract,
-   and validate it before activating a worker:
-
-   ```bash
-   bin/llm-collab task_contract.py sync --task TASK-... --write
-   bin/llm-collab task_contract.py validate --task TASK-... --stage assignment
-   ```
-
-6. Confirm that the task, queue, generated guidance, and runtime state contain
-   no paths, database refs, tool surfaces, or policies from another project.
+A lane has exactly one writer: one worktree, one branch, one owner. If another
+writer is already active on a change, yield and coordinate through the mailbox
+rather than opening a parallel lane. The mailbox is the only channel between
+workers — a PR comment is not a message, and a GitHub verdict is not a substitute
+for draining the inbox before you open a PR or merge.
 
 ## Shared Checkout Safety
 
@@ -190,13 +139,10 @@ comments, even inside negated prose. Use neutral wording such as `Related
 GH-123`, `Related #123`, or a full issue URL when the referenced issue should
 stay open.
 
-Two incidents established this as repo-local policy:
-
-- PR #153 placed negated non-resolution wording adjacent to issue #135 and
-  GitHub changed issue #135 to closed when the PR merged.
-- PR #198 repeated the same class through the `GH-` autolink; the merge commit
-  body put a closing keyword adjacent to the autolinked reference for issue 91,
-  and GitHub changed GH-91 to closed.
+This is repo-local policy because it has happened twice — PRs #153 and #198 each
+closed an issue nobody intended to close, the second time through the `GH-`
+autolink in a merge commit body, and in both cases the adjacent prose was
+*negated*.
 
 ## Requesting Code Review (all workers, every repository)
 
@@ -237,49 +183,18 @@ the reaction path unsatisfiable and there is nothing to bind the verdict to. Iss
 candidate final head** — an amendment stales the review and needs a new request. That
 limit is on *initial* requests; the single request-anchored re-trigger in
 `docs/workflows/commit-push-prs.md` is an explicit exemption and the only recovery for
-a request the connector silently dropped. Any
-finding that arrives must be adjudicated in writing at every tier. A review is
-P0/P1-scoped, so it complements and never replaces the exact-head verification
-model below or defect-verbatim mutation proof.
+a request the connector silently dropped.
 
-**Tier A opens with a lane contract.** Before the first branch, write one page —
-template in `docs/workflows/lane-contract.md` — naming the authority boundary,
-the commit point, retry behavior, and explicit non-goals, in the task or linked
-issue. The review request then asks the reviewer to verify the diff *against
-that contract*, and findings are routed per-finding at arrival: a finding that
-violates the lane contract or shows a regression introduced by the diff blocks
-and is fixed; a pre-existing issue or requested broadening defers to a follow-up
-issue and the lane still ships; a finding showing the feature would be wrong
-*as specified* amends the contract once (`contract-clarified`), then blocks.
-Classification is written and auditable; a deferred finding that was in fact
-contract-violating is a gate violation attributable to the classifier.
+Every **arriving finding** must be adjudicated in writing at every tier, whatever
+head raised it and whatever its current resolution state — enumerate every thread,
+resolved or not, because a checklist phrased over *unresolved* threads cannot see
+one someone clicked Resolve on without recording anything. A push is not an
+adjudication. A review is P0/P1-scoped, so it complements and never replaces the
+exact-head verification model or defect-verbatim mutation proof.
 
-**One external reviewer per head.** When a connector review has been requested
-on a head, that review is the external gate for that head. The other exact-head
-verification obligations are discharged by the lane's required local verification
-and CI — not by a second independent model review, which consumes cycle budget
-without adding signal and must not be run. The mandatory pre-PR cold full-diff
-review in `docs/workflows/commit-push-prs.md` is unchanged: it happens once,
-before the first PR-ready head, and is where the lane contract itself gets
-challenged.
-
-When that connector review raises a finding, either fix it and request the new
-head, or record a thread-linked disposition accepted by the lane owner and
-release-gate worker. A rejected or deferred finding does not require another
-connector request on the unchanged head: the completed exact-head review plus
-the written dispositions is the external-review evidence. This keeps the
-one-request, one-external-review rule internally consistent.
-
-**Generate review requests mechanically.** Use `bin/review_request.py --pr <n>
---project <id> --tier A --contract <issue|TASK-id> --focus "..."`: it reads the head SHA
-from GitHub and the local checkout,
-refuses on mismatch, and enforces one initial request per head plus the single
-exempted re-trigger. It has no option to pass a SHA by hand — a hand-typed SHA
-is how #347 came to contain a fabricated, later-retracted request. It also
-shapes the request (GH-357): a first request is a full audit, a later-head
-request is scoped to the delta from the previous requested head, `--settled`
-names adjudicated families the reviewer must not re-raise, and every request
-carries the lane's threat model and recorded accepted risks.
+Generate the request mechanically — `bin/review_request.py --pr <n> --project <id>
+--tier A --contract <issue|TASK-id> --focus "..."` reads the head SHA rather than
+accepting one by hand, which is how #347 came to carry a fabricated request.
 
 **"Untrusted" means input we do not control.** Our own workspace — `State/`,
 `Chats/`, `projects.json`, the checkout itself — is not an adversary: anyone who can
@@ -288,9 +203,11 @@ reads against *accidents* (a huge directory, a hung mount, a corrupt record) and
 there. Hardening a local tool against a hostile local filesystem has no natural floor
 and will loop forever; llm-collab#306 spent eleven review rounds proving it.
 
-Canonical detail, including the terminal-signal rules and ownership:
+Canonical detail — lane contract, per-finding routing, one reviewer per head,
+terminal signals, the lane budget, and ownership — is in
 `docs/workflows/commit-push-prs.md` and `docs/workflows/review-and-handoff.md`.
-Policy and rationale: `llm-collab#310`.
+Which repositories are enrolled and what the rule audit found:
+`docs/multi-project.md`. Policy and rationale: `llm-collab#310`.
 
 ## Code Review Rules
 

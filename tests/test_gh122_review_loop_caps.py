@@ -1449,26 +1449,23 @@ class ReviewLoopCapContractTest(unittest.TestCase):
     def test_the_contract_version_advanced_with_the_gate_rewrite(self):
         """A cached copy of the old gate can produce a wrong merge.
 
-        Workers bootstrapped on v3 get no signal that the fallback, reaction lifecycle,
-        request shape and authority rules changed underneath them; workers on v4 get
-        no signal that v5 added the lane contract, defer-first findings, one reviewer
-        per head, and the merge-or-kill lane budget.
+        Workers on v4 get no signal that v5 added the lane contract, defer-first
+        findings, one reviewer per head, and the merge-or-kill lane budget, so the
+        version marker and the v5 summary have to move together.
+
+        The v4 and v3 changelog entries used to be pinned here too, in AGENTS.md.
+        They were deleted with the rest of the v1-v4 narrative (GH-365): a changelog
+        entry is a second normative copy of rules that `commit-push-prs.md` already
+        owns, and every worker paid for it on every lane. What matters is that those
+        rules still exist somewhere canonical, not that AGENTS.md retells them, so
+        the assertions below moved to the document that owns them.
         """
         text = AGENTS_DOC.read_text(encoding="utf-8")
         self.assertIn("<!-- CONTRACT_VERSION: 5 -->", text)
         self.assertNotIn("<!-- CONTRACT_VERSION: 3 -->", text)
-        entry = contract_section(text, "- **v4 (2026-07-26)**", "- **v3 (2026-07-26)**")
-        for phrase in (
-            "silence fallback is **deleted**",
-            "one *initial* request per candidate final head",
-            "body** listing no findings is not a clean verdict",
-            "never** the mutable `comment.commit.oid`",
-            "a push is not an adjudication",
-            "latest unedited request artifact",
-        ):
-            self.assertIn(normalized(phrase), entry)
+
         v5_entry = contract_section(
-            text, "- **v5 (2026-07-28)**", "- **v4 (2026-07-26)**"
+            text, "### Recent contract changes", "## Required Reading"
         )
         for phrase in (
             "lane contract",
@@ -1480,6 +1477,21 @@ class ReviewLoopCapContractTest(unittest.TestCase):
             "two active implementation lanes",
         ):
             self.assertIn(normalized(phrase), v5_entry)
+        # The summary is only safe to keep short because it names where the full
+        # rules live. Without this the section becomes a lossy paraphrase.
+        self.assertIn("commit-push-prs.md", v5_entry)
+
+        workflow = normalized(WORKFLOW_DOC.read_text(encoding="utf-8"))
+        for phrase in (
+            "silence fallback",
+            "one initial request per candidate final head",
+            "a connector review body that lists no findings is not a clean verdict",
+            "Never `comments.nodes[0].commit.oid`",
+            "**A push is not an adjudication**",
+            "latest, unedited request artifact",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(normalized(phrase), workflow)
 
     def test_the_merge_checklist_does_not_inherit_the_origin_rule_narrowing(self):
         """The hole the origin rule opened in the checklist below it.
