@@ -152,6 +152,282 @@ class SessionAutobridgeTest(unittest.TestCase):
         write(root / "agents" / agent["id"] / "identity.md", f"# Identity: {agent['id']}\n")
         write_json(root / "agents" / agent["id"] / "inbox.json", {"agent": agent["id"], "unread": [], "read": []})
 
+    def test_committed_atomic_write_ignores_a_broken_warning_stream(self):
+        root = self.make_workspace()
+        path = root / "State" / "session.json"
+        path.parent.mkdir(parents=True)
+
+        class BrokenStream:
+            def write(self, _value):
+                raise BrokenPipeError("closed")
+
+        with patch.object(
+            session_autobridge_lib.os,
+            "fsync",
+            side_effect=(None, OSError("directory fsync failed")),
+        ), patch.object(session_autobridge_lib.sys, "stderr", BrokenStream()):
+            try:
+                session_autobridge_lib.write_regular_file_atomically(path, "committed")
+            except Exception as error:
+                self.fail(f"committed replacement raised: {error}")
+
+        self.assertEqual("committed", path.read_text())
+
+    def test_atomic_write_fsyncs_the_parent_chain(self):
+        root = self.make_workspace()
+        path = root / "State" / "nested" / "session.json"
+        path.parent.mkdir(parents=True)
+        opened_directories = []
+        original_open = os.open
+
+        def observe_open(candidate, flags, *args):
+            descriptor = original_open(candidate, flags, *args)
+            candidate_path = Path(candidate)
+            if candidate_path.is_dir():
+                opened_directories.append(candidate_path)
+            return descriptor
+
+        with patch.object(
+            session_autobridge_lib.os,
+            "open",
+            side_effect=observe_open,
+        ):
+            session_autobridge_lib.write_regular_file_atomically(path, "durable")
+
+        self.assertIn(path.parent, opened_directories)
+        self.assertIn(path.parent.parent, opened_directories)
+
+    def test_session_save_compacts_only_histories_already_read_from_the_inbox(self):
+        root = self.make_workspace()
+        sessions = root / "State" / "session_autobridge" / "sessions"
+        inbox_path = root / "agents" / "codex" / "inbox.json"
+        read_paths = [f"Chats/read/{index:02d}-{'x' * 40}.md" for index in range(40)]
+        unread_path = "Chats/unread/keep-authority.md"
+        write_json(
+            inbox_path,
+            {"agent": "codex", "unread": [unread_path], "read": read_paths},
+        )
+        session = {
+            "session_id": "SESSION-COMPACT",
+            "agent_id": "codex",
+            "processed_messages": [*read_paths, unread_path],
+            "canonical_settled_messages": {
+                path: {"reason": "accepted"} for path in [*read_paths, unread_path]
+            },
+        }
+
+        with patch.object(
+            session_autobridge_lib, "SESSIONS_DIR", sessions
+        ), patch.object(
+            session_autobridge_lib,
+            "agent_inbox_path",
+            return_value=inbox_path,
+        ), patch.object(
+            session_autobridge_lib,
+            "MAX_SESSION_BYTES",
+            1024,
+        ):
+            try:
+                session_autobridge_lib.save_session(session)
+            except Exception as error:
+                self.fail(f"read-history compaction raised: {error}")
+            loaded = session_autobridge_lib.load_session("SESSION-COMPACT")
+
+        self.assertEqual([unread_path], loaded["processed_messages"])
+        self.assertEqual(
+            {unread_path},
+            set(loaded["canonical_settled_messages"]),
+        )
+
+    def test_session_save_refuses_to_drop_unread_duplicate_authority(self):
+        root = self.make_workspace()
+        sessions = root / "State" / "session_autobridge" / "sessions"
+        session_path = sessions / "SESSION-UNREAD.json"
+        inbox_path = root / "agents" / "codex" / "inbox.json"
+        unread_paths = [f"Chats/unread/{index:02d}-{'x' * 40}.md" for index in range(40)]
+        write_json(
+            inbox_path,
+            {"agent": "codex", "unread": unread_paths, "read": []},
+        )
+        write(session_path, "previous")
+        session = {
+            "session_id": "SESSION-UNREAD",
+            "agent_id": "codex",
+            "processed_messages": unread_paths,
+        }
+
+        with patch.object(
+            session_autobridge_lib, "SESSIONS_DIR", sessions
+        ), patch.object(
+            session_autobridge_lib,
+            "agent_inbox_path",
+            return_value=inbox_path,
+        ), patch.object(
+            session_autobridge_lib,
+            "MAX_SESSION_BYTES",
+            1024,
+        ):
+            with self.assertRaisesRegex(ValueError, "session payload exceeds"):
+                session_autobridge_lib.save_session(session)
+
+        self.assertEqual("previous", session_path.read_text())
+        self.assertEqual(unread_paths, session["processed_messages"])
+
+    def test_session_reader_refuses_state_above_the_writer_limit(self):
+        root = self.make_workspace()
+        sessions = root / "State" / "session_autobridge" / "sessions"
+        write_json(
+            sessions / "SESSION-OVERSIZED.json",
+            {"session_id": "SESSION-OVERSIZED", "padding": "x" * 1024},
+        )
+
+        with patch.object(
+            session_autobridge_lib, "SESSIONS_DIR", sessions
+        ), patch.object(
+            session_autobridge_lib,
+            "MAX_SESSION_BYTES",
+            256,
+        ):
+            with self.assertRaisesRegex(
+                session_autobridge_lib.UnreadableFile,
+                "exceeds the 256 byte limit",
+            ):
+                session_autobridge_lib.load_session("SESSION-OVERSIZED")
+
+    def test_session_save_refuses_overlapping_inbox_authority(self):
+        root = self.make_workspace()
+        sessions = root / "State" / "session_autobridge" / "sessions"
+        inbox_path = root / "agents" / "codex" / "inbox.json"
+        shared_path = "Chats/shared/must-remain-authoritative.md"
+        write_json(
+            inbox_path,
+            {"agent": "codex", "unread": [shared_path], "read": [shared_path]},
+        )
+        session = {
+            "session_id": "SESSION-OVERLAP",
+            "agent_id": "codex",
+            "processed_messages": [shared_path] * 100,
+        }
+
+        with patch.object(
+            session_autobridge_lib, "SESSIONS_DIR", sessions
+        ), patch.object(
+            session_autobridge_lib,
+            "agent_inbox_path",
+            return_value=inbox_path,
+        ), patch.object(
+            session_autobridge_lib,
+            "MAX_SESSION_BYTES",
+            1024,
+        ):
+            with self.assertRaisesRegex(ValueError, "must not overlap"):
+                session_autobridge_lib.save_session(session)
+
+        self.assertFalse((sessions / "SESSION-OVERLAP.json").exists())
+
+    def test_session_scan_propagates_an_oversized_record(self):
+        root = self.make_workspace()
+        sessions = root / "State" / "session_autobridge" / "sessions"
+        write_json(
+            sessions / "SESSION-OVERSIZED.json",
+            {"session_id": "SESSION-OVERSIZED", "padding": "x" * 1024},
+        )
+
+        with patch.object(
+            session_autobridge_lib, "SESSIONS_DIR", sessions
+        ), patch.object(
+            session_autobridge_lib,
+            "MAX_SESSION_BYTES",
+            256,
+        ):
+            with self.assertRaisesRegex(
+                session_autobridge_lib.UnreadableFile,
+                "exceeds the 256 byte limit",
+            ):
+                session_autobridge_lib.iter_sessions()
+
+    def test_session_scan_counts_entries_before_filtering(self):
+        root = self.make_workspace()
+        sessions = root / "State" / "session_autobridge" / "sessions"
+        for index in range(3):
+            write(sessions / f"foreign-{index}.tmp", "ignored")
+
+        with patch.object(
+            session_autobridge_lib, "SESSIONS_DIR", sessions
+        ), patch.object(
+            session_autobridge_lib,
+            "MAX_SCANNED_SESSIONS",
+            2,
+        ):
+            with self.assertRaisesRegex(
+                session_autobridge_lib.UnreadableFile,
+                "exceed the 2 entry limit",
+            ):
+                session_autobridge_lib.iter_sessions()
+
+    def test_session_scan_has_one_cumulative_byte_budget(self):
+        root = self.make_workspace()
+        sessions = root / "State" / "session_autobridge" / "sessions"
+        for index in range(2):
+            write_json(
+                sessions / f"SESSION-{index}.json",
+                {"session_id": f"SESSION-{index}", "padding": "x" * 128},
+            )
+
+        with patch.object(
+            session_autobridge_lib, "SESSIONS_DIR", sessions
+        ), patch.object(
+            session_autobridge_lib,
+            "MAX_SESSION_BYTES",
+            1024,
+        ), patch.object(
+            session_autobridge_lib,
+            "MAX_SESSION_SCAN_BYTES",
+            256,
+        ):
+            with self.assertRaisesRegex(
+                session_autobridge_lib.UnreadableFile,
+                "exceeds the",
+            ):
+                session_autobridge_lib.iter_sessions()
+
+    def test_dispatch_refuses_capacity_before_the_runtime_side_effect(self):
+        root = self.make_workspace()
+        inbox_path = root / "agents" / "gemini" / "inbox.json"
+        message_path = "Chats/capacity/packet.md"
+        write_json(
+            inbox_path,
+            {"agent": "gemini", "unread": [message_path], "read": []},
+        )
+        session = {
+            "session_id": "SESSION-CAPACITY",
+            "agent_id": "gemini",
+            "mode": "auto-read",
+            "wake_strategy": "runtime_trigger",
+            "runtime": {"family": "gemini_cli", "session_id": "runtime-capacity"},
+            "padding": "x" * 256,
+        }
+        message = {"path": message_path, "frontmatter": {}}
+        baseline = {
+            **session,
+            "updated_utc": "2026-07-28T06:00:00+00:00",
+        }
+        limit = len(json.dumps(baseline, indent=2, sort_keys=True).encode("utf-8")) + 1
+
+        with self._dispatch_patch_context(session, [message]), patch.object(
+            session_autobridge_lib,
+            "agent_inbox_path",
+            return_value=inbox_path,
+        ), patch.object(
+            session_autobridge_lib,
+            "MAX_SESSION_BYTES",
+            limit,
+        ):
+            result = session_autobridge_lib.dispatch_session("SESSION-CAPACITY")
+
+        self.assertEqual(0, result["matched_messages"])
+        self.assertEqual([], result["actions"])
+
     def add_message(
         self,
         root: Path,

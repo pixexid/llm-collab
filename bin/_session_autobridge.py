@@ -33,6 +33,7 @@ HEURISTIC_RUNTIME_DISCOVERY_FAMILIES = frozenset(
 
 from _helpers import (
     ROOT,
+    agent_inbox_path,
     build_handoff_prompt,
     config_get,
     get_agent,
@@ -55,6 +56,10 @@ THREAD_PAIRS_DIR = AUTOBRIDGE_ROOT / "thread_pairs"
 SESSION_MODES = ("manual", "notify", "auto-read", "auto-reply")
 SESSION_STATUSES = ("active", "parked", "stopping", "stopped", "superseded")
 WAKE_STRATEGIES = ("none", "notify", "relay", "runtime_trigger")
+MAX_SESSION_BYTES = 256 * 1024
+MAX_SESSION_INBOX_BYTES = 16 * 1024 * 1024
+MAX_SCANNED_SESSIONS = 5_000
+MAX_SESSION_SCAN_BYTES = 16 * 1024 * 1024
 
 
 def parse_iso8601(value: str | None) -> datetime | None:
@@ -95,20 +100,48 @@ def autobridge_thread_pair_path(project_id: str, chat_id: str, agent_a: str, age
 
 def load_session(session_id: str) -> dict:
     path = autobridge_session_path(session_id)
-    if not path.exists():
+    try:
+        raw = read_regular_file_bounded(path, MAX_SESSION_BYTES)
+    except FileNotFoundError:
         raise FileNotFoundError(f"Unknown session: {session_id}")
-    return json.loads(path.read_text())
+    payload = json.loads(raw.decode("utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"Malformed session: {session_id}")
+    return payload
 
 
 def iter_sessions(agent_id: str | None = None) -> list[dict]:
-    if not SESSIONS_DIR.exists():
+    try:
+        scan = os.scandir(SESSIONS_DIR)
+    except FileNotFoundError:
         return []
+    except OSError as error:
+        raise UnreadableFile(f"cannot scan session records: {error}") from error
+
+    paths = []
+    with scan:
+        for count, entry in enumerate(scan, start=1):
+            if count > MAX_SCANNED_SESSIONS:
+                raise UnreadableFile(
+                    f"session records exceed the {MAX_SCANNED_SESSIONS} entry limit"
+                )
+            if entry.name.endswith(".json"):
+                paths.append(Path(entry.path))
+
     sessions: list[dict] = []
-    for path in sorted(SESSIONS_DIR.glob("*.json")):
+    spent = 0
+    for path in sorted(paths):
         try:
-            session = json.loads(path.read_text())
-        except json.JSONDecodeError:
+            raw = read_regular_file_bounded(
+                path,
+                min(MAX_SESSION_BYTES, MAX_SESSION_SCAN_BYTES - spent),
+            )
+            spent += len(raw)
+            session = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
             continue
+        if not isinstance(session, dict):
+            raise ValueError(f"Malformed session: {path.stem}")
         if agent_id is not None and session.get("agent_id") != agent_id:
             continue
         sessions.append(session)
@@ -217,7 +250,28 @@ def write_regular_file_atomically(path: Path, content: str) -> None:
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
             handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
         os.replace(temporary, path)
+        try:
+            directory = path.parent
+            while True:
+                directory_fd = os.open(directory, os.O_RDONLY)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+                if directory == ROOT or directory.parent == directory:
+                    break
+                directory = directory.parent
+        except OSError as error:
+            try:
+                print(
+                    f"[warning] {path} was replaced, but its directory did not fsync: {error}",
+                    file=sys.stderr,
+                )
+            except Exception:
+                pass
     except BaseException:
         try:
             os.unlink(temporary)
@@ -299,12 +353,63 @@ def update_thread_pair(
     return pair
 
 
+def prepare_session_write(payload: dict) -> tuple[dict, str]:
+    candidate = {**payload, "updated_utc": utc_iso()}
+    content = json.dumps(candidate, indent=2, sort_keys=True)
+    if len(content.encode("utf-8")) > MAX_SESSION_BYTES:
+        inbox_raw = read_regular_file_bounded(
+            agent_inbox_path(str(candidate["agent_id"])),
+            MAX_SESSION_INBOX_BYTES,
+        )
+        inbox = json.loads(inbox_raw.decode("utf-8"))
+        read = inbox.get("read") if isinstance(inbox, dict) else None
+        unread = inbox.get("unread") if isinstance(inbox, dict) else None
+        if (
+            not isinstance(read, list)
+            or not isinstance(unread, list)
+            or any(not isinstance(path, str) for path in [*read, *unread])
+        ):
+            raise ValueError("agent inbox must contain unread and read path lists")
+        if set(read) & set(unread):
+            raise ValueError("agent inbox unread and read paths must not overlap")
+        settled = set(read)
+        processed = candidate.get("processed_messages")
+        if isinstance(processed, list):
+            candidate["processed_messages"] = [
+                message_path
+                for message_path in processed
+                if message_path not in settled
+            ]
+        canonical = candidate.get("canonical_settled_messages")
+        if isinstance(canonical, dict):
+            candidate["canonical_settled_messages"] = {
+                message_path: value
+                for message_path, value in canonical.items()
+                if message_path not in settled
+            }
+        content = json.dumps(candidate, indent=2, sort_keys=True)
+    if len(content.encode("utf-8")) > MAX_SESSION_BYTES:
+        raise ValueError(
+            f"session payload exceeds the {MAX_SESSION_BYTES} byte limit"
+        )
+    return candidate, content
+
+
 def save_session(payload: dict) -> None:
     session_id = str(payload["session_id"])
     path = autobridge_session_path(session_id)
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload["updated_utc"] = utc_iso()
-    write_file(path, json.dumps(payload, indent=2, sort_keys=True))
+    candidate, content = prepare_session_write(payload)
+    write_regular_file_atomically(path, content)
+    payload.clear()
+    payload.update(candidate)
+
+
+def ensure_message_processed_will_fit(session: dict, message_path: str) -> None:
+    processed = list(session.get("processed_messages", []))
+    if message_path not in processed:
+        processed.append(message_path)
+    prepare_session_write({**session, "processed_messages": processed})
 
 
 def binding_payload_from_session(
@@ -2813,6 +2918,26 @@ def dispatch_session(
         if activation_event is not None:
             append_event(session_id, activation_event)
         if not activation_allowed:
+            continue
+        try:
+            ensure_message_processed_will_fit(session, message["path"])
+        except (
+            FileNotFoundError,
+            UnreadableFile,
+            UnicodeDecodeError,
+            json.JSONDecodeError,
+            KeyError,
+            ValueError,
+        ) as error:
+            append_event(
+                session_id,
+                {
+                    "event": "message_skipped",
+                    "message_path": message["path"],
+                    "reason": "session_capacity_refused",
+                    "detail": str(error),
+                },
+            )
             continue
         matched.append(message)
 
