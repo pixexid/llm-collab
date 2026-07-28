@@ -13,9 +13,11 @@ import shutil
 import subprocess
 import sys
 import uuid
+import fcntl
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 # ---------------------------------------------------------------------------
 # Root resolution
@@ -497,26 +499,59 @@ def save_agent_inbox(agent_id: str, data: dict) -> None:
     path = agent_inbox_path(agent_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     data["updated_utc"] = utc_iso()
-    write_file(path, json.dumps(data, indent=2))
+    from _session_autobridge import write_regular_file_atomically
+
+    write_regular_file_atomically(path, json.dumps(data, indent=2))
+
+
+@contextmanager
+def _agent_inbox_mutation_lock(agent_id: str):
+    lock_path = agent_dir(agent_id) / ".inbox.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+
+
+def update_agent_inbox(
+    agent_id: str,
+    update: Callable[[dict], None],
+    *,
+    load: Callable[[], dict] | None = None,
+) -> None:
+    """Serialize one inbox read-modify-write with every inbox writer."""
+    with _agent_inbox_mutation_lock(agent_id):
+        inbox = load() if load is not None else load_agent_inbox(agent_id)
+        update(inbox)
+        save_agent_inbox(agent_id, inbox)
 
 
 def add_to_inbox(agent_id: str, message_path: str | Path) -> None:
     """Append a message path (relative to ROOT) to the agent's unread list."""
     rel = str(Path(message_path).relative_to(ROOT)) if Path(message_path).is_absolute() else str(message_path)
-    inbox = load_agent_inbox(agent_id)
-    if rel not in inbox["unread"] and rel not in inbox["read"]:
-        inbox["unread"].append(rel)
-    save_agent_inbox(agent_id, inbox)
+
+    def add(inbox: dict) -> None:
+        if rel not in inbox["unread"] and rel not in inbox["read"]:
+            inbox["unread"].append(rel)
+
+    update_agent_inbox(agent_id, add)
 
 
 def mark_messages_read(agent_id: str, paths: list[str]) -> None:
-    inbox = load_agent_inbox(agent_id)
-    for p in paths:
-        if p in inbox["unread"]:
-            inbox["unread"].remove(p)
-        if p not in inbox["read"]:
-            inbox["read"].append(p)
-    save_agent_inbox(agent_id, inbox)
+    def mark(inbox: dict) -> None:
+        selected = set(paths)
+        inbox["unread"] = [path for path in inbox["unread"] if path not in selected]
+        read = set(inbox["read"])
+        for path in paths:
+            if path not in read:
+                inbox["read"].append(path)
+                read.add(path)
+
+    update_agent_inbox(agent_id, mark)
 
 
 def get_unread_messages(agent_id: str) -> list[dict]:

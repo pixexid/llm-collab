@@ -33,11 +33,13 @@ HEURISTIC_RUNTIME_DISCOVERY_FAMILIES = frozenset(
 
 from _helpers import (
     ROOT,
+    agent_inbox_path,
     build_handoff_prompt,
     config_get,
     get_agent,
     get_unread_messages,
     now_utc,
+    parse_frontmatter,
     project_state_root,
     utc_iso,
     write_file,
@@ -55,6 +57,8 @@ THREAD_PAIRS_DIR = AUTOBRIDGE_ROOT / "thread_pairs"
 SESSION_MODES = ("manual", "notify", "auto-read", "auto-reply")
 SESSION_STATUSES = ("active", "parked", "stopping", "stopped", "superseded")
 WAKE_STRATEGIES = ("none", "notify", "relay", "runtime_trigger")
+MAX_SCANNED_SESSIONS = 5_000
+MAX_SESSION_BYTES = 256 * 1024
 
 
 def parse_iso8601(value: str | None) -> datetime | None:
@@ -95,19 +99,43 @@ def autobridge_thread_pair_path(project_id: str, chat_id: str, agent_a: str, age
 
 def load_session(session_id: str) -> dict:
     path = autobridge_session_path(session_id)
-    if not path.exists():
+    try:
+        raw = read_regular_file_bounded(path, MAX_SESSION_BYTES)
+    except FileNotFoundError:
         raise FileNotFoundError(f"Unknown session: {session_id}")
-    return json.loads(path.read_text())
+    payload = json.loads(raw.decode("utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"Malformed session: {session_id}")
+    return payload
 
 
 def iter_sessions(agent_id: str | None = None) -> list[dict]:
-    if not SESSIONS_DIR.exists():
+    try:
+        scan = os.scandir(SESSIONS_DIR)
+    except FileNotFoundError:
         return []
+    except OSError as error:
+        raise UnreadableFile(f"cannot scan session records: {error}") from error
+
     sessions: list[dict] = []
-    for path in sorted(SESSIONS_DIR.glob("*.json")):
+    paths: list[Path] = []
+    with scan:
+        for count, entry in enumerate(scan, start=1):
+            if count > MAX_SCANNED_SESSIONS:
+                raise UnreadableFile(
+                    f"session records exceed the {MAX_SCANNED_SESSIONS} entry limit"
+                )
+            if entry.name.endswith(".json"):
+                paths.append(Path(entry.path))
+    for path in sorted(paths):
         try:
-            session = json.loads(path.read_text())
-        except json.JSONDecodeError:
+            raw = read_regular_file_bounded(path, MAX_SESSION_BYTES)
+            session = json.loads(raw.decode("utf-8"))
+        except FileNotFoundError:
+            continue
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if not isinstance(session, dict):
             continue
         if agent_id is not None and session.get("agent_id") != agent_id:
             continue
@@ -217,7 +245,14 @@ def write_regular_file_atomically(path: Path, content: str) -> None:
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
             handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
         os.replace(temporary, path)
+        directory_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
     except BaseException:
         try:
             os.unlink(temporary)
@@ -304,7 +339,7 @@ def save_session(payload: dict) -> None:
     path = autobridge_session_path(session_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     payload["updated_utc"] = utc_iso()
-    write_file(path, json.dumps(payload, indent=2, sort_keys=True))
+    write_regular_file_atomically(path, json.dumps(payload, indent=2, sort_keys=True))
 
 
 def binding_payload_from_session(
@@ -905,8 +940,60 @@ def matching_unread_messages(
     *,
     invocation_repo_targets: Any = None,
     repo_scope_refusals: list[dict] | None = None,
+    max_entries: int | None = None,
+    read_budget: ExactSessionReadBudget | None = None,
 ) -> list[dict]:
-    messages = get_unread_messages(str(session["agent_id"]))
+    if max_entries is None:
+        messages = get_unread_messages(str(session["agent_id"]))
+    else:
+        if read_budget is None:
+            raise ValueError("exact-session reads require one cumulative budget")
+        inbox_path = agent_inbox_path(str(session["agent_id"]))
+        try:
+            inbox_raw = read_regular_file_bounded(
+                inbox_path,
+                max(0, read_budget.remaining),
+            )
+        except FileNotFoundError:
+            inbox_raw = b'{"unread":[],"read":[]}'
+        inbox = json.loads(inbox_raw.decode("utf-8"))
+        if not isinstance(inbox, dict):
+            raise ValueError("exact-session inbox index must be an object")
+        unread = inbox.get("unread")
+        read = inbox.get("read")
+        if not isinstance(unread, list) or not isinstance(read, list):
+            raise ValueError("exact-session inbox index must contain unread and read lists")
+        entries = [*unread, *read]
+        if len(entries) > max_entries:
+            raise ValueError(
+                f"exact-session inbox entries exceed the {max_entries} entry limit"
+            )
+        if any(
+            not isinstance(rel_path, str)
+            or not rel_path
+            or rel_path != rel_path.strip()
+            or "\x00" in rel_path
+            or Path(rel_path).is_absolute()
+            or ".." in Path(rel_path).parts
+            for rel_path in entries
+        ):
+            raise ValueError(
+                "exact-session inbox entries must be relative path strings"
+            )
+        messages = []
+        for rel_path in unread:
+            message_path = ROOT / rel_path
+            try:
+                raw = read_regular_file_bounded(
+                    message_path,
+                    max(0, read_budget.remaining),
+                )
+            except FileNotFoundError:
+                continue
+            frontmatter, body = parse_frontmatter(raw.decode("utf-8"))
+            messages.append(
+                {"path": rel_path, "frontmatter": frontmatter, "body": body}
+            )
     project_id = session.get("project_id")
     chat_id = session.get("chat_id")
     if project_id:
@@ -915,6 +1002,12 @@ def matching_unread_messages(
         messages = [m for m in messages if m["frontmatter"].get("chat_id") == chat_id]
     matched_messages: list[dict] = []
     for message in messages:
+        target_session_id = message["frontmatter"].get("target_session_id")
+        if (
+            target_session_id
+            and str(target_session_id) not in session_target_ids(session)
+        ):
+            continue
         repo_match, repo_reason = _session_repo_scope_matches(
             session, message, invocation_repo_targets
         )
@@ -1920,6 +2013,25 @@ class active_read_budget:
     def __exit__(self, *exc) -> bool:
         _ACTIVE_READ_BUDGET.pop()
         return False
+
+
+class ExactSessionReadBudget:
+    """One cumulative byte budget for an exact-session authority read."""
+
+    def __init__(self, limit: int) -> None:
+        self.limit = limit
+        self.spent = 0
+
+    @property
+    def remaining(self) -> int:
+        return self.limit - self.spent
+
+    def charge(self, count: int, path: Path) -> None:
+        self.spent += count
+        if self.spent > self.limit:
+            raise UnreadableFile(
+                f"exact-session read exceeds the {self.limit} byte limit at {path}"
+            )
 
 
 def read_regular_file_bounded(path: Path, limit: int) -> bytes:

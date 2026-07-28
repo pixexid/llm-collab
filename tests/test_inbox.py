@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from contextlib import redirect_stdout
 from io import StringIO
@@ -16,6 +17,8 @@ from unittest.mock import patch
 REPO_ROOT = Path(__file__).resolve().parents[1]
 INBOX_SCRIPT = REPO_ROOT / "bin" / "inbox.py"
 sys.path.insert(0, str(REPO_ROOT / "bin"))
+import _helpers as helpers_lib
+import _session_autobridge as autobridge_lib
 import inbox as inbox_lib
 
 
@@ -152,6 +155,43 @@ class InboxMarkAllReadTest(unittest.TestCase):
     def load_inbox(self) -> dict:
         return json.loads(
             (self.root / "agents" / "codex" / "inbox.json").read_text()
+        )
+
+    def add_exact_session(self) -> None:
+        session = {
+            "session_id": "SESSION-EXACT",
+            "agent_id": "codex",
+            "project_id": "amiga",
+            "chat_id": "CHAT-EXACT",
+            "status": "active",
+            "lease_expires_utc": "2099-01-01T00:00:00+00:00",
+            "runtime": {"family": "pi", "session_id": "pi-exact"},
+        }
+        binding = {
+            "project_id": "amiga",
+            "chat_id": "CHAT-EXACT",
+            "agent_id": "codex",
+            "session_id": "SESSION-EXACT",
+            "runtime_family": "pi",
+            "runtime_session_id": "pi-exact",
+        }
+        write_json(
+            self.root
+            / "State"
+            / "session_autobridge"
+            / "sessions"
+            / "SESSION-EXACT.json",
+            session,
+        )
+        write_json(
+            self.root
+            / "State"
+            / "session_autobridge"
+            / "bindings"
+            / "amiga"
+            / "CHAT-EXACT"
+            / "codex.json",
+            binding,
         )
 
     def run_inbox(
@@ -335,6 +375,238 @@ class InboxMarkAllReadTest(unittest.TestCase):
         self.assertEqual(
             [{"path": message["path"], "reason": "route_ambiguous"}],
             payload["repo_scope_refused"],
+        )
+
+    def test_exact_packet_uniqueness_is_checked_after_session_selection(self) -> None:
+        self.add_exact_session()
+        exact = "Chats/exact__CHAT-EXACT/packet.md"
+        foreign = "Chats/foreign__CHAT-EXACT/packet.md"
+        for path, chat, target in (
+            (exact, "CHAT-EXACT", "SESSION-EXACT"),
+            (foreign, "CHAT-EXACT", "SESSION-FOREIGN"),
+        ):
+            write(
+                self.root / path,
+                "\n".join(
+                    [
+                        "---",
+                        f"chat_id: {chat}",
+                        "project_id: amiga",
+                        "from: claude",
+                        "to: codex",
+                        f"target_session_id: {target}",
+                        "---",
+                        "",
+                        path,
+                    ]
+                ),
+            )
+        write_json(
+            self.root / "agents" / "codex" / "inbox.json",
+            {"agent": "codex", "unread": [foreign, exact], "read": []},
+        )
+
+        result = self.run_inbox(
+            "--project",
+            "amiga",
+            "--chat",
+            "CHAT-EXACT",
+            "--session",
+            "SESSION-EXACT",
+            "--packet",
+            "packet.md",
+            "--json",
+        )
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual(
+            [exact],
+            [message["path"] for message in json.loads(result.stdout)["messages"]],
+        )
+        self.assertEqual([foreign], self.load_inbox()["unread"])
+        self.assertEqual([exact], self.load_inbox()["read"])
+
+    def test_one_budget_covers_authority_selection_and_consumption(self) -> None:
+        session = {
+            "session_id": "SESSION-EXACT",
+            "agent_id": "codex",
+            "project_id": "amiga",
+            "chat_id": "CHAT-EXACT",
+            "runtime": {"family": "pi", "session_id": "pi-exact"},
+        }
+        message = {
+            "path": "Chats/CHAT-EXACT/exact.md",
+            "frontmatter": {"project_id": "amiga", "chat_id": "CHAT-EXACT"},
+            "body": "exact",
+        }
+        observed = []
+
+        def record(value, expected=None):
+            active = autobridge_lib._ACTIVE_READ_BUDGET[-1]
+            if expected is not None:
+                self.assertIs(active, expected)
+            observed.append(active)
+            return value
+
+        stdout = StringIO()
+        with patch.object(inbox_lib, "agent_ids", return_value=["codex"]), patch.object(
+            inbox_lib, "load_session", side_effect=lambda _session: record(session)
+        ), patch.object(
+            inbox_lib,
+            "resolve_exact_dispatch_pair",
+            side_effect=lambda *_args: record(((session, {}), None, None)),
+        ), patch.object(
+            inbox_lib,
+            "matching_unread_messages",
+            side_effect=lambda *_args, **kwargs: record(
+                [message], kwargs["read_budget"]
+            ),
+        ), patch.object(
+            inbox_lib,
+            "mark_exact_messages_read",
+            side_effect=lambda *_args, **kwargs: record(None, kwargs["budget"]),
+        ), redirect_stdout(stdout), patch.object(
+            sys,
+            "argv",
+            [
+                "inbox.py",
+                "--me",
+                "codex",
+                "--project",
+                "amiga",
+                "--chat",
+                "CHAT-EXACT",
+                "--session",
+                "SESSION-EXACT",
+                "--json",
+            ],
+        ):
+            inbox_lib.main()
+
+        self.assertEqual(4, len(observed))
+        self.assertTrue(all(budget is observed[0] for budget in observed))
+
+    def test_exact_consume_serializes_with_delivery(self) -> None:
+        old_path = "Chats/old.md"
+        new_path = "Chats/new.md"
+        write_json(
+            self.root / "agents" / "codex" / "inbox.json",
+            {"agent": "codex", "unread": [old_path], "read": []},
+        )
+        read_started = threading.Event()
+        release_read = threading.Event()
+        writer_started = threading.Event()
+        writer_done = threading.Event()
+        original_read = inbox_lib.read_regular_file_bounded
+
+        def blocked_read(path, limit):
+            raw = original_read(path, limit)
+            read_started.set()
+            self.assertTrue(release_read.wait(2))
+            return raw
+
+        def consume():
+            budget = autobridge_lib.ExactSessionReadBudget(1024 * 1024)
+            with autobridge_lib.active_read_budget(budget), patch.object(
+                inbox_lib, "read_regular_file_bounded", side_effect=blocked_read
+            ):
+                inbox_lib.mark_exact_messages_read(
+                    "codex", [old_path], budget=budget
+                )
+
+        def deliver():
+            writer_started.set()
+            helpers_lib.add_to_inbox("codex", new_path)
+            writer_done.set()
+
+        with patch.object(helpers_lib, "ROOT", self.root), patch.object(
+            helpers_lib, "AGENTS_DIR", self.root / "agents"
+        ):
+            consumer = threading.Thread(target=consume)
+            writer = threading.Thread(target=deliver)
+            consumer.start()
+            self.assertTrue(read_started.wait(2))
+            writer.start()
+            self.assertTrue(writer_started.wait(2))
+            try:
+                self.assertFalse(writer_done.wait(0.05))
+            finally:
+                release_read.set()
+            consumer.join(2)
+            writer.join(2)
+
+        self.assertFalse(consumer.is_alive())
+        self.assertFalse(writer.is_alive())
+        self.assertEqual([new_path], self.load_inbox()["unread"])
+        self.assertEqual([old_path], self.load_inbox()["read"])
+
+    def test_exact_inbox_bound_counts_read_history(self) -> None:
+        write_json(
+            self.root / "agents" / "codex" / "inbox.json",
+            {
+                "agent": "codex",
+                "unread": [],
+                "read": [f"Chats/{index}.md" for index in range(3)],
+            },
+        )
+        session = {
+            "agent_id": "codex",
+            "session_id": "SESSION-EXACT",
+            "project_id": "amiga",
+            "chat_id": "CHAT-EXACT",
+        }
+        budget = autobridge_lib.ExactSessionReadBudget(1024 * 1024)
+
+        with patch.object(helpers_lib, "ROOT", self.root), patch.object(
+            helpers_lib, "AGENTS_DIR", self.root / "agents"
+        ), patch.object(autobridge_lib, "ROOT", self.root), autobridge_lib.active_read_budget(
+            budget
+        ):
+            with self.assertRaisesRegex(ValueError, "2 entry limit"):
+                autobridge_lib.matching_unread_messages(
+                    session,
+                    max_entries=2,
+                    read_budget=budget,
+                )
+
+    def test_exact_mark_indexes_read_history(self) -> None:
+        class RefuseLinearMembership(list):
+            def __contains__(self, _item):
+                raise AssertionError("read history must be indexed once")
+
+        inbox = {
+            "unread": ["Chats/old.md"],
+            "read": RefuseLinearMembership(["Chats/already.md"]),
+        }
+
+        def apply(_agent_id, update, *, load):
+            update(inbox)
+
+        with patch.object(inbox_lib, "update_agent_inbox", side_effect=apply):
+            inbox_lib.mark_exact_messages_read(
+                "codex",
+                ["Chats/old.md"],
+                budget=autobridge_lib.ExactSessionReadBudget(1),
+            )
+
+        self.assertEqual([], inbox["unread"])
+        self.assertEqual(["Chats/already.md", "Chats/old.md"], inbox["read"])
+
+    def test_session_save_is_atomic_and_durable(self) -> None:
+        sessions = self.root / "sessions"
+        original_replace = os.replace
+        with patch.object(autobridge_lib, "SESSIONS_DIR", sessions), patch.object(
+            autobridge_lib.os, "replace", wraps=original_replace
+        ) as replace, patch.object(
+            autobridge_lib.os, "fsync", wraps=os.fsync
+        ) as fsync:
+            autobridge_lib.save_session({"session_id": "SESSION-DURABLE"})
+
+        self.assertEqual(1, replace.call_count)
+        self.assertEqual(2, fsync.call_count)
+        self.assertEqual(
+            "SESSION-DURABLE",
+            json.loads((sessions / "SESSION-DURABLE.json").read_text())["session_id"],
         )
 
     def test_repo_target_requires_project_scope(self) -> None:
