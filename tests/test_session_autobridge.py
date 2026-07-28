@@ -3250,22 +3250,30 @@ class SessionAutobridgeTest(unittest.TestCase):
                       f"stdout:\n{done.stdout[-1500:]}\nstderr:\n{done.stderr[-1500:]}")
         return json.loads(done.stdout.split("\n\n", 1)[0]), done.stderr
 
-    def scoped_subscriber_workspace(self, *, subscriber_repo_targets, claude_ax_app=None,
+    def scoped_subscriber_workspace(self, *, subscriber_repo_targets, subscriber_ax_app=None,
+                                    subscriber_agent="claude", runtime_family="claude_app",
+                                    register_session=True,
                                     project="amiga", chat_id="CHAT-SCOPE1"):
-        """A claude session bound to `chat_id` in `project`, optionally declaring a repo scope.
+        """A bound session in `chat_id`/`project`, optionally declaring a repo scope.
 
         Parameterized by project because this patch changes the SHARED deliver.py routing contract,
         and AGENTS.md:43-44 requires focused coverage for Amiga and at least one non-Amiga project.
         Hard-coding amiga in the helper meant every case could only ever exercise one project, so a
         project-specific behaviour leaking into the universal path would have been invisible.
+
+        Parameterized by subscriber because the canonical `claude` identity is no longer an AX
+        doorbell target at all: a scope-refusal case written against it asserts `False` for the
+        wrong reason. The AX-lane cases pass a non-Claude agent with a Codex-profile `ax_app`,
+        which is a real doorbell target, so their assertions bind scope refusal rather than
+        identity exclusion. (#344)
         """
         root = self.make_workspace()
-        for agent in ("codex", "claude"):
+        for agent in ("codex", subscriber_agent):
             activation = {"type": "cli_session", "watcher_enabled": True}
-            if agent == "claude" and claude_ax_app:
+            if agent == subscriber_agent and subscriber_ax_app:
                 # The real shape that makes this a doorbell target: a cli_session recipient with an
                 # explicit activation.ax_app. Codex reproduced the wrong-wake with exactly this.
-                activation["ax_app"] = claude_ax_app
+                activation["ax_app"] = subscriber_ax_app
             self.add_agent(root, {
                 "id": agent,
                 "display_name": agent.title(),
@@ -3278,16 +3286,18 @@ class SessionAutobridgeTest(unittest.TestCase):
             project_id=project,
         )
         register = [
-            "register", "--session", f"SESSION-CLAUDE-SCOPED-{project.upper()}",
-            "--agent", "claude",
+            "register",
+            "--session", f"SESSION-{subscriber_agent.upper()}-SCOPED-{project.upper()}",
+            "--agent", subscriber_agent,
             "--project", project, "--chat", chat_id, "--mode", "notify",
-            "--runtime-family", "claude_app",
-            "--runtime-session-id", "claude-scoped-session",
+            "--runtime-family", runtime_family,
+            "--runtime-session-id", f"{subscriber_agent}-scoped-session",
             "--runtime-session-source", "first_read",
         ]
         for target in subscriber_repo_targets or []:
             register += ["--repo-target", target]
-        self.run_cli(root, *register)
+        if register_session:
+            self.run_cli(root, *register)
         return root, chat_dir
 
     # --- deliver.py must apply the SAME routing contract the watcher will apply -------------
@@ -3309,11 +3319,34 @@ class SessionAutobridgeTest(unittest.TestCase):
                   "desktop_bridge_required", "operator_relay_required")
     WAKE_PROMPTS = ("ax_doorbell_prompt", "ax_attended_recovery_prompt", "desktop_bridge_prompt")
 
-    def test_a_scope_refusal_wakes_the_recipient_by_no_lane_at_all(self):
-        """Codex's reproduction: scoped cli_session + activation.ax_app, empty packet scope."""
+    def test_the_scope_refusal_fixture_reaches_AX_when_there_is_no_session(self):
+        """Positive control for the AX lane, on the same fixture the refusal case uses.
+
+        With no session registered there is nothing to refuse, so `ax_doorbell_required` must be
+        true. If this ever goes false the refusal case below proves nothing: a subject that can
+        never reach the selector asserts False for free. (#344)
+        """
         root, _chat_dir = self.scoped_subscriber_workspace(
-            subscriber_repo_targets=["llm-collab"], claude_ax_app="Claude")
-        payload, stderr = self.deliver_with_scope(root, "CHAT-SCOPE1")
+            subscriber_repo_targets=["llm-collab"], subscriber_ax_app="Codex",
+            subscriber_agent="relay", runtime_family="codex_app",
+            register_session=False)
+        payload, _stderr = self.deliver_with_scope(root, "CHAT-SCOPE1", recipient="relay")
+        self.assertFalse(payload["autobridge_ready"])
+        self.assertTrue(payload["ax_doorbell_required"],
+                        "no bound session means nothing to refuse, so the doorbell stands")
+        self.assertIsNotNone(payload["ax_doorbell_prompt"])
+
+    def test_a_scope_refusal_wakes_the_recipient_by_no_lane_at_all(self):
+        """Codex's reproduction: scoped cli_session + activation.ax_app, empty packet scope.
+
+        The subject is a non-Claude agent with a Codex-profile ax_app, which is a real doorbell
+        target. Written against canonical `claude` this asserted False because that identity is
+        excluded from the selector outright, not because the refusal suppressed the lane. (#344)
+        """
+        root, _chat_dir = self.scoped_subscriber_workspace(
+            subscriber_repo_targets=["llm-collab"], subscriber_ax_app="Codex",
+            subscriber_agent="relay", runtime_family="codex_app")
+        payload, stderr = self.deliver_with_scope(root, "CHAT-SCOPE1", recipient="relay")
         self.assertFalse(payload["autobridge_ready"])
         self.assertEqual("route_ambiguous", payload["autobridge_refusal_reason"])
         for flag in self.WAKE_FLAGS:
@@ -3327,9 +3360,11 @@ class SessionAutobridgeTest(unittest.TestCase):
     def test_the_same_agent_shape_DOES_get_a_doorbell_when_scope_matches(self):
         """Otherwise the test above would pass by disabling the doorbell entirely."""
         root, _chat_dir = self.scoped_subscriber_workspace(
-            subscriber_repo_targets=["llm-collab"], claude_ax_app="Claude")
+            subscriber_repo_targets=["llm-collab"], subscriber_ax_app="Codex",
+            subscriber_agent="relay", runtime_family="codex_app")
         payload, _stderr = self.deliver_with_scope(root, "CHAT-SCOPE1",
-                                                  repo_targets="llm-collab")
+                                                  repo_targets="llm-collab",
+                                                  recipient="relay")
         self.assertTrue(payload["autobridge_ready"])
         self.assertFalse(payload["ax_doorbell_required"],
                          "a dispatchable packet needs no doorbell either -- autobridge has it")
@@ -3711,7 +3746,7 @@ class SessionAutobridgeTest(unittest.TestCase):
 
     def test_an_oversized_recipient_binding_still_writes_the_durable_packet(self):
         root, chat_dir = self.scoped_subscriber_workspace(
-            subscriber_repo_targets=["llm-collab"], claude_ax_app="Claude")
+            subscriber_repo_targets=["llm-collab"], subscriber_ax_app="Claude")
         self.oversize_recipient_binding(root)
         payload, stderr = self.deliver_with_scope(root, "CHAT-SCOPE1",
                                                  repo_targets="llm-collab")
@@ -3725,7 +3760,7 @@ class SessionAutobridgeTest(unittest.TestCase):
 
     def test_an_oversized_recipient_binding_wakes_nobody(self):
         root, _chat_dir = self.scoped_subscriber_workspace(
-            subscriber_repo_targets=["llm-collab"], claude_ax_app="Claude")
+            subscriber_repo_targets=["llm-collab"], subscriber_ax_app="Claude")
         self.oversize_recipient_binding(root)
         payload, _stderr = self.deliver_with_scope(root, "CHAT-SCOPE1",
                                                   repo_targets="llm-collab")
@@ -3739,7 +3774,7 @@ class SessionAutobridgeTest(unittest.TestCase):
     def test_an_IO_failed_recipient_binding_behaves_the_same(self):
         """Permission denied, not oversize -- the other half of "unreadable"."""
         root, chat_dir = self.scoped_subscriber_workspace(
-            subscriber_repo_targets=["llm-collab"], claude_ax_app="Claude")
+            subscriber_repo_targets=["llm-collab"], subscriber_ax_app="Claude")
         path = (root / "State" / "session_autobridge" / "bindings" / "amiga" / "CHAT-SCOPE1"
                 / "claude.json")
         done = run_cli_with_eacces_on(
@@ -3761,7 +3796,7 @@ class SessionAutobridgeTest(unittest.TestCase):
     def test_a_readable_binding_is_unaffected(self):
         """The control: this must still dispatch, or the tests above prove only that I broke it."""
         root, _chat_dir = self.scoped_subscriber_workspace(
-            subscriber_repo_targets=["llm-collab"], claude_ax_app="Claude")
+            subscriber_repo_targets=["llm-collab"], subscriber_ax_app="Claude")
         payload, _stderr = self.deliver_with_scope(root, "CHAT-SCOPE1",
                                                    repo_targets="llm-collab")
         self.assertTrue(payload["autobridge_ready"])
@@ -3777,7 +3812,7 @@ class SessionAutobridgeTest(unittest.TestCase):
         for project, chat_id in (("amiga", "CHAT-SCOPE-A"), ("nuvyr", "CHAT-SCOPE-N")):
             with self.subTest(project=project):
                 root, chat_dir = self.scoped_subscriber_workspace(
-                    subscriber_repo_targets=["llm-collab"], claude_ax_app="Claude",
+                    subscriber_repo_targets=["llm-collab"], subscriber_ax_app="Claude",
                     project=project, chat_id=chat_id)
 
                 refused, stderr = self.deliver_with_scope(root, chat_id, project=project)
