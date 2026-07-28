@@ -891,7 +891,7 @@ class Gh1549FallbackFixturesTest(unittest.TestCase):
         for phrase in (
             "one initial request per candidate final head",
             "single request-anchored re-trigger",
-            "operator disposition",
+            "release-gate disposition",
         ):
             self.assertIn(phrase, doc)
 

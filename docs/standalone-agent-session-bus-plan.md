@@ -841,15 +841,15 @@ Every implementation slice follows this sequence:
    scope includes payments, auth, permissions, schema/migrations, or
    irreversible writes; docs-only lanes with a proven zero-consumer scan always
    cap at 2), after which a terminal disposition is mandatory only when
-   actionable findings remain open at the capped head: merge at the current
-   head with `risk-accepted-followup` (open findings move to a new issue),
-   `descope`, `split`, `backend-first`, or a durable operator escalation. A
+   actionable findings remain open at the capped head: explicitly accept each
+   remaining contract violation as a bounded risk with a follow-up and merge,
+   or choose `descope`, `split`, `backend-first`, or close. A
    clean capped head follows the normal merge gate with no disposition label;
 10. publish a focused ready-for-review PR with scope, non-goals, compatibility,
     security, verification, migration, and rollback evidence;
 11. merge only the reviewed exact head after the full PR Review Wait Gate in
-    `docs/workflows/commit-push-prs.md` passes, including its two exact-head
-    terminal-signal models, post-clean settle and full re-read of the reviewed
+    `docs/workflows/commit-push-prs.md` passes, including its three exact-head
+    terminal outcomes, post-clean settle and full re-read of the reviewed
     artifact set defined there; then reconcile task/issue state. There is no silence fallback for an
     unrequested review -- see the Tier A/B/C rule in AGENTS.md.
 
