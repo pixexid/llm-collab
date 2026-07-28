@@ -301,9 +301,9 @@ the rule audit found. Zero rules is a valid outcome — it just has to be writte
 | Repository | Owner | Incident-derived rules | Where they live |
 |---|---|---|---|
 | `llm-collab` | codex | 3 | `## Code Review Rules` below |
-| `amiga` | codex | 2 — paid/provider idempotency and replace-lock authority; public Supabase RPC role execution | `amiga` `AGENTS.md` → `### Code Review Rules` |
+| `amiga` | codex | 2 — paid/provider idempotency and replace-lock authority; public Supabase RPC role execution | `amiga` `AGENTS.md` → `### Code Review Rules`, **not on `main` yet**: branch `claude/gh310-manual-review-policy` |
 | `amiga_house_cleaning_company_docs` | codex | 0 — content repository, no executable surface | n/a |
-| `nuvyr_app` | codex | 0 — no adjudicated incident yet | n/a |
+| `nuvyr_app` | kimi | 0 — no adjudicated incident yet | n/a |
 
 Do not restate another repository's rules here. A copy goes stale without telling
 anyone, which is the failure `## This file is the source of truth` exists to prevent.
