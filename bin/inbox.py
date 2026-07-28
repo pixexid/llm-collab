@@ -371,7 +371,6 @@ def gate_activation_message(
     msg: dict,
     *,
     consume: bool,
-    exact_session: dict | None = None,
 ) -> dict | None:
     kind, detail = classify_activation(msg["frontmatter"], target_agent=args.me)
     if kind == "none":
@@ -398,22 +397,6 @@ def gate_activation_message(
         }
 
     runtime_id = activation_reader_runtime_id()
-    if exact_session is not None:
-        registered_runtime_id = runtime_metadata(exact_session).get("session_id")
-        if not registered_runtime_id:
-            return {
-                "authorized": False,
-                "reason": "exact_session_runtime_unavailable",
-                "identity": identity,
-                "owner": existing,
-            }
-        if runtime_id and runtime_id != registered_runtime_id:
-            return {
-                "authorized": False,
-                "reason": "exact_session_runtime_mismatch",
-                "identity": identity,
-                "owner": existing,
-            }
     owner_pid = None if runtime_id else activation_reader_pid()
     session_id = activation_reader_session_id(args, identity)
     ensure_reader_session(session_id, args.me, identity, runtime_id=runtime_id)
@@ -727,7 +710,6 @@ def main():
                 args,
                 message,
                 consume=consume,
-                exact_session=exact_session,
             )
             if gate is None:
                 continue
