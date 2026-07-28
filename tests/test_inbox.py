@@ -441,7 +441,7 @@ class InboxMarkAllReadTest(unittest.TestCase):
         self.assertEqual([foreign, exact], self.load_inbox()["unread"])
         self.assertEqual([], self.load_inbox()["read"])
 
-    def test_one_budget_covers_exact_authority_selection(self) -> None:
+    def test_exact_selection_has_one_budget_and_skips_activation_gating(self) -> None:
         session = {
             "session_id": "SESSION-EXACT",
             "agent_id": "codex",
@@ -476,7 +476,9 @@ class InboxMarkAllReadTest(unittest.TestCase):
             side_effect=lambda *_args, **kwargs: record(
                 [message], kwargs["read_budget"]
             ),
-        ), redirect_stdout(stdout), patch.object(
+        ), patch.object(
+            inbox_lib, "gate_activation_message"
+        ) as activation_gate, redirect_stdout(stdout), patch.object(
             sys,
             "argv",
             [
@@ -495,6 +497,7 @@ class InboxMarkAllReadTest(unittest.TestCase):
         ):
             inbox_lib.main()
 
+        activation_gate.assert_not_called()
         self.assertEqual(3, len(observed))
         self.assertTrue(all(budget is observed[0] for budget in observed))
 

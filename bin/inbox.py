@@ -757,8 +757,9 @@ def main():
                     )
         sys.exit(75)
 
-    gate_selected_paths([message["path"] for message in messages])
-    exit_if_activation_refused()
+    if exact_session is None:
+        gate_selected_paths([message["path"] for message in messages])
+        exit_if_activation_refused()
 
     shown_paths = [m["path"] for m in messages if not m.get("read")]
     if consume and exact_session is None:
