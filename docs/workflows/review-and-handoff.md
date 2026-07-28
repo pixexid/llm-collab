@@ -93,6 +93,51 @@ corrected invariant is written into the task/spec. Current-head actionable bot
 findings still block, and the final merge gate remains a full-diff attestation
 bound to the exact current head.
 
+## Review-rule enrollment inventory
+
+The Tier A/B/C request policy in [`AGENTS.md`](../../AGENTS.md#requesting-code-review-all-workers-every-repository)
+is universal. Path-scoped *rules* are not: each repository's incident-derived
+rules live in that repository's own `AGENTS.md` and are authored from that
+repository's own incidents. This section records the enrollment — who owns it,
+how many rules each repository has, and where they live. Zero rules is a valid
+outcome; it just has to be written down.
+
+**Owner is a governance decision, not a derived fact.** Nothing in
+`projects.json` defines review-enrollment ownership — `release_gate_agent` is
+about merges, not about who authors and prunes a repository's review rules. The
+owner below is chosen and recorded here; change it by changing this table.
+
+| Repository | Owner | Incident-derived rules | Where they live |
+|---|---|---|---|
+| `llm-collab` | codex | 3 | `AGENTS.md` → `## Code Review Rules` |
+| `amiga` | codex | 2 — paid/provider idempotency and replace-lock authority; public Supabase RPC role execution | `amiga` `AGENTS.md` → `### Code Review Rules`, **not on `main` yet**: branch `claude/gh310-manual-review-policy` |
+| `amiga_house_cleaning_company_docs` | codex | 0 — content repository, no executable surface | n/a |
+| `nuvyr_app` | kimi | 0 — no adjudicated incident yet | n/a |
+
+Do not restate another repository's rules here. A copy goes stale without
+telling anyone, which is the failure `AGENTS.md` → `## This file is the source
+of truth` exists to prevent.
+
+### Rule usefulness and noise re-check
+
+Recorded 2026-07-28 against the first representative run under manual-only
+review: PRs #340, #342, #345 and #348, sixteen connector findings across nine
+requested exact-head reviews.
+
+Every finding that was independently reproduced was real. None was a false
+positive attributable to a rule firing on an unrelated change, so no rule is
+removed. Two observations worth keeping rather than acting on yet:
+
+- The findings clustered in Tier A families the rules already name — authority
+  selection, wake-path/observable-contract changes, and proof integrity — which
+  is the tiering working rather than evidence for a new rule.
+- Several rounds found defects in *test* artefacts that masked production
+  behaviour. That is `#306`'s "test-only is not intrinsically low risk" holding
+  up under a second, independent run.
+
+Re-check again after the next comparable run; remove any rule that starts
+producing findings nobody acts on.
+
 ## Task status guide
 
 - `open`: created, not started

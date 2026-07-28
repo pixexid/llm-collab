@@ -292,41 +292,9 @@ Canonical detail, including the terminal-signal rules and ownership:
 `docs/workflows/commit-push-prs.md` and `docs/workflows/review-and-handoff.md`.
 Policy and rationale: `llm-collab#310`.
 
-### Enrolled repositories
-
-The policy above is universal. Each repository's own incident-derived rules live in
-that repository's `AGENTS.md`; this table records who owns the enrollment and what
-the rule audit found. Zero rules is a valid outcome — it just has to be written down.
-
-| Repository | Owner | Incident-derived rules | Where they live |
-|---|---|---|---|
-| `llm-collab` | codex | 3 | `## Code Review Rules` below |
-| `amiga` | codex | 2 — paid/provider idempotency and replace-lock authority; public Supabase RPC role execution | `amiga` `AGENTS.md` → `### Code Review Rules`, **not on `main` yet**: branch `claude/gh310-manual-review-policy` |
-| `amiga_house_cleaning_company_docs` | codex | 0 — content repository, no executable surface | n/a |
-| `nuvyr_app` | kimi | 0 — no adjudicated incident yet | n/a |
-
-Do not restate another repository's rules here. A copy goes stale without telling
-anyone, which is the failure `## This file is the source of truth` exists to prevent.
-
-### Rule usefulness and noise re-check
-
-Recorded 2026-07-28 against the first representative run under manual-only review:
-PRs #340, #342, #345 and #348, sixteen connector findings across nine requested
-exact-head reviews.
-
-Every finding that was independently reproduced was real. None was a false positive
-attributable to a rule firing on an unrelated change, so no rule is removed. Two
-observations worth keeping rather than acting on yet:
-
-- The findings clustered in Tier A families the rules already name — authority
-  selection, wake-path/observable-contract changes, and proof integrity — which is
-  the tiering working rather than evidence for a new rule.
-- Several rounds found defects in *test* artefacts that masked production behaviour.
-  That is `#306`'s "test-only is not intrinsically low risk" holding up under a
-  second, independent run.
-
-Re-check again after the next comparable run; remove any rule that starts producing
-findings nobody acts on.
+Which repositories are enrolled, who owns each enrollment, and what the rule
+audit found: `docs/workflows/review-and-handoff.md` → `## Review-rule enrollment
+inventory`.
 
 ## Code Review Rules
 
