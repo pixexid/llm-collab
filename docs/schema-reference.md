@@ -85,8 +85,8 @@ Agent roster. Created by `scripts/init.py`. Gitignored.
 |-------|------|----------|-------------|
 | `type` | string | yes | `"cli_session"`, `"human_relay"`, `"human"`, `"api_trigger"` |
 | `watcher_enabled` | bool | no | Whether the current PM2 ecosystem should instantiate a background watcher. The ecosystem checks this flag only; it does not filter by activation `type`. |
-| `ax_app` | string | no | For AX-capable `cli_session` agents: localized macOS app name or bundle ID used by `axsend`. Omit for terminal-only sessions. |
-| `ax_attended_only` | bool | no | GH-1547: set `true` when the agent's composer is `AXValue`-opaque (emptiness unprovable — e.g. ZCode, Antigravity). `deliver.py` then never emits a routine AX doorbell and instead prints an ATTENDED RECOVERY REQUIRED instruction routing control to Codex; this supersedes `human_relay` operator routing for the flagged agent. Must agree with the `axsend` binary's composer opacity table (`tools/axbridge/send-resolution.swift`) — `tests/test_deliver_ax_routing.py` enforces the agreement. |
+| `ax_app` | string | no | For AX-capable `cli_session` agents: a localized macOS app name or bundle ID resolving to a supported native composer profile. Omit for terminal-only sessions. |
+| `ax_attended_only` | bool | no | GH-1547: set `true` when a supported app profile's composer is `AXValue`-opaque (ZCode), or for a no-app target requiring attended Computer Use. `deliver.py` then never emits a routine AX doorbell and instead prints an ATTENDED RECOVERY REQUIRED instruction routing control to Codex; this supersedes `human_relay` operator routing for the flagged agent. Unknown and Claude profiles fail closed. Must agree with the `axsend` binary's composer opacity table (`tools/axbridge/send-resolution.swift`) — `tests/test_deliver_ax_routing.py` enforces the agreement. |
 | `base_model` | string | no | For `human_relay`: which LLM this maps to (informational) |
 | `identity_note` | string | no | For `human_relay`: shown in handoff prompt to disambiguate identity |
 
@@ -1699,8 +1699,8 @@ Notes:
   the same setup contract as human-relay recipients
 - `human_relay` recipients also receive the onboarding in the printed handoff
   prompt; later deliveries omit it once awareness is tracked locally
-- AX-capable `cli_session` workers configure `activation.ax_app`. For those
-  sends — ONLY when `ax_attended_only` is not `true` — `deliver.py` reports
+- AX-capable `cli_session` workers configure a supported `activation.ax_app`
+  profile. For AX-readable Codex/ChatGPT sends, `deliver.py` reports
   `ax_doorbell_required` and prints the `bin/axsend-ensure ring --submit
   --verify` command (from the llm-collab checkout root) the sender should run.
   An `ax_attended_only: true` target (opaque composer, e.g. ZCode) instead

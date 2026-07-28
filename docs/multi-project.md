@@ -147,10 +147,10 @@ surfaces.
 `claude_desktop_bridge` no longer selects a wake path: Claude is woken by its
 durable packet and the Claude app's own background inbox watcher in every project
 and registration shape. A non-Claude CLI-session worker uses the
-project-independent AX
-doorbell only when its agent entry explicitly sets `activation.ax_app` AND
-`ax_attended_only` is not `true` (an opaque-composer target instead reports
-`ax_attended_recovery_required` and routes to Codex-attended recovery); otherwise
+project-independent AX doorbell only when its agent entry selects a supported
+AX-readable `activation.ax_app` profile (a supported opaque-composer target
+instead reports `ax_attended_recovery_required` and routes to Codex-attended
+recovery); otherwise
 it needs a dispatchable runtime session.
 
 ### Project state root

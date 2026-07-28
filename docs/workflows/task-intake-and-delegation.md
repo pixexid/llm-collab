@@ -120,10 +120,11 @@ Do not stop on these states:
 
 `llm-collab` messages are part of the loop, not a side channel. Before sending a
 worker follow-up, update the task/issue if scope changed, write one consolidated
-message, and use the approved worker bridge. For a `cli_session` worker with
-`activation.ax_app` (and not `ax_attended_only`), use the AX command printed by
-`deliver.py`; an `ax_attended_only` worker reports `ax_attended_recovery_required`
-instead — route control to Codex-attended recovery, never a routine ring. A terminal-only
+message, and use the approved worker bridge. For a `cli_session` worker with a
+supported AX-readable `activation.ax_app` profile, use the AX command printed by
+`deliver.py`; a supported `ax_attended_only` target reports
+`ax_attended_recovery_required` instead — route control to Codex-attended
+recovery, never a routine ring. A terminal-only
 CLI worker needs a dispatchable runtime session. Claude is never rung or typed
 into: it is woken by its durable packet and the app's own background inbox
 watcher, and `deliver.py` reports no AX or Computer Use fallback for it. Treat `activation_unavailable` as a configuration blocker, record it

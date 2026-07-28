@@ -44,8 +44,8 @@ def ax_app_profile(ax_app: object) -> str | None:
 
 
 def ax_app_supports_routine_doorbell(ax_app: object) -> bool:
-    """Match axsend's target refusal for the Claude app profile."""
-    return ax_app_profile(ax_app) not in {None, "claude"}
+    """Match axsend's only AX-readable routine profile."""
+    return ax_app_profile(ax_app) == "codex"
 
 
 def has_ax_doorbell_capability(agent: dict) -> bool:

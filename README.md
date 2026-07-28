@@ -294,8 +294,8 @@ For GitHub-backed projects:
 | Activation | Behavior |
 |---|---|
 | Dispatchable runtime session | Message can be routed to the bound runtime session |
-| Non-Claude `cli_session` with `activation.ax_app` (and `ax_attended_only` not `true`) | `deliver.py` prints an AX doorbell command |
-| `ax_attended_only: true` (opaque composer, e.g. ZCode/Antigravity) | Reports `ax_attended_recovery_required`; Codex-attended recovery, no routine ring |
+| Non-Claude `cli_session` with a supported AX-readable `activation.ax_app` profile (Codex/ChatGPT) | `deliver.py` prints an AX doorbell command |
+| `ax_attended_only: true` with a supported opaque profile (ZCode) or no app profile | Reports `ax_attended_recovery_required`; Codex-attended recovery, no routine ring |
 | Terminal-only `cli_session` | Requires a dispatchable runtime session |
 | `human_relay` | Prints a human handoff prompt |
 | Missing transport | Reports `activation_unavailable` with a reason |

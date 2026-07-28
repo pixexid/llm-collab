@@ -3345,7 +3345,7 @@ class SessionAutobridgeTest(unittest.TestCase):
         root = self.make_workspace()
         for agent, activation in (
             ("codex", {"type": "cli_session", "watcher_enabled": True}),
-            ("relay", {"type": "cli_session", "watcher_enabled": True, "ax_app": "Relay"}),
+            ("relay", {"type": "cli_session", "watcher_enabled": True, "ax_app": "Codex"}),
         ):
             self.add_agent(root, {"id": agent, "display_name": agent.title(),
                                   "activation": activation})
@@ -3356,6 +3356,44 @@ class SessionAutobridgeTest(unittest.TestCase):
         self.assertTrue(payload["ax_doorbell_required"],
                         "with no bound session there is nothing to refuse, so the doorbell stands")
         self.assertIsNotNone(payload["ax_doorbell_prompt"])
+
+    def test_claude_profile_cannot_fall_through_to_human_relay(self):
+        root = self.make_workspace()
+        for agent, activation in (
+            ("codex", {"type": "cli_session", "watcher_enabled": True}),
+            (
+                "custom",
+                {
+                    "type": "human_relay",
+                    "watcher_enabled": False,
+                    "ax_app": "Claude",
+                },
+            ),
+        ):
+            self.add_agent(
+                root,
+                {
+                    "id": agent,
+                    "display_name": agent.title(),
+                    "activation": activation,
+                },
+            )
+        self.create_chat(
+            root,
+            chat_dir_name="2026-07-27_claude-profile-relay__CHAT-CLAUDE-PROFILE",
+            chat_id="CHAT-CLAUDE-PROFILE",
+            project_id="amiga",
+        )
+
+        payload, _stderr = self.deliver_with_scope(
+            root,
+            "CHAT-CLAUDE-PROFILE",
+            recipient="custom",
+        )
+
+        self.assertFalse(payload["operator_relay_required"])
+        self.assertTrue(payload["activation_unavailable"])
+        self.assertIn("Claude profile", payload["activation_unavailable_reason"])
 
     def test_no_wake_lane_re_derives_the_flag_it_must_not_use(self):
         """Structural: five lanes each gated on `not autobridge_ready` is five chances to miss one.
@@ -3897,7 +3935,7 @@ class SessionAutobridgeTest(unittest.TestCase):
                 "activation": {
                     "type": "cli_session",
                     "watcher_enabled": True,
-                    "ax_app": "Relay",
+                    "ax_app": "Codex",
                 },
             },
         )
@@ -4417,7 +4455,7 @@ class SessionAutobridgeTest(unittest.TestCase):
 
         self.assertTrue((root / result_payload["to_file"]).exists())
 
-    def test_deliver_prints_ax_doorbell_for_cli_session_worker_without_operator_relay(self):
+    def test_deliver_prints_ax_doorbell_for_supported_cli_session_worker(self):
         root = self.make_workspace()
         self.add_agent(
             root,
@@ -4430,15 +4468,15 @@ class SessionAutobridgeTest(unittest.TestCase):
         self.add_agent(
             root,
             {
-                "id": "zcode",
-                "display_name": "ZCode Worker",
-                "activation": {"type": "cli_session", "watcher_enabled": True, "ax_app": "ZCode"},
+                "id": "cdx2",
+                "display_name": "Codex Worker",
+                "activation": {"type": "cli_session", "watcher_enabled": True, "ax_app": "Codex"},
             },
         )
         self.create_chat(
             root,
-            chat_dir_name="2026-06-26_zcode-doorbell__CHAT-ZCODE1",
-            chat_id="CHAT-ZCODE1",
+            chat_dir_name="2026-06-26_codex-doorbell__CHAT-CODEX2",
+            chat_id="CHAT-CODEX2",
             project_id="nuvyr",
         )
 
@@ -4447,21 +4485,21 @@ class SessionAutobridgeTest(unittest.TestCase):
                 sys.executable,
                 str(DELIVER_SCRIPT),
                 "--chat",
-                "CHAT-ZCODE1",
+                "CHAT-CODEX2",
                 "--from",
                 "codex",
                 "--to",
-                "zcode",
+                "cdx2",
                 "--project",
                 "nuvyr",
                 "--title",
-                "ZCode doorbell",
+                "Codex doorbell",
                 "--body-file",
                 "-",
             ],
             cwd=root,
             text=True,
-            input="Use the durable packet, then ring ZCode with axsend.",
+            input="Use the durable packet, then ring Codex with axsend.",
             capture_output=True,
             check=True,
         )
@@ -4473,18 +4511,18 @@ class SessionAutobridgeTest(unittest.TestCase):
         self.assertTrue(result_payload["ax_doorbell_required"])
         self.assertIn("[from codex]", result_payload["ax_doorbell_prompt"])
         self.assertIn("AX DOORBELL REQUIRED", deliver_result.stdout)
-        self.assertIn('axsend-ensure ring --app "ZCode"', deliver_result.stdout)
-        self.assertNotIn('--app "ZCode Worker"', deliver_result.stdout)
+        self.assertIn('axsend-ensure ring --app "Codex"', deliver_result.stdout)
+        self.assertNotIn('--app "Codex Worker"', deliver_result.stdout)
         self.assertIn("do not ask the operator to relay", deliver_result.stdout)
         self.assertNotIn("RELAY REQUIRED FOR OPERATOR", deliver_result.stdout)
         delivered_candidates = sorted(
-            (root / "Chats" / "2026-06-26_zcode-doorbell__CHAT-ZCODE1").glob("*_to-zcode_*.md")
+            (root / "Chats" / "2026-06-26_codex-doorbell__CHAT-CODEX2").glob("*_to-cdx2_*.md")
         )
         self.assertTrue(delivered_candidates)
         delivered_text = delivered_candidates[-1].read_text()
         self.assertIn("First-time setup required before task work:", delivered_text)
         self.assertIn(f"{root}/AGENTS.md", delivered_text)
-        self.assertIn("Use the durable packet, then ring ZCode with axsend.", delivered_text)
+        self.assertIn("Use the durable packet, then ring Codex with axsend.", delivered_text)
 
     def test_deliver_reports_terminal_only_cli_session_as_unavailable(self):
         # #given

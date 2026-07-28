@@ -166,9 +166,9 @@ python bin/deliver.py \
   --title "Auth implementation task"
 ```
 
-For non-Claude `cli_session` recipients with `activation.ax_app` — when
-`ax_attended_only` is not `true` — `deliver.py` prints an AX doorbell command;
-run that instead of asking the operator to relay. Canonical Claude uses its
+For non-Claude `cli_session` recipients with a supported AX-readable
+`activation.ax_app` profile, `deliver.py` prints an AX doorbell command; run
+that instead of asking the operator to relay. Canonical Claude uses its
 durable packet and background inbox watcher only. An `ax_attended_only: true`
 recipient (opaque
 composer) instead reports `ax_attended_recovery_required` and routes control to
