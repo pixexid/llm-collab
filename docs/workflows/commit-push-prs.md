@@ -37,8 +37,8 @@ the task or linked issue, using the template in
 - **commit point** — the single operation after which the change is durable and
   visible.
 - **retry behavior** — what a retry may repeat, and what it must never repeat.
-- **non-goals** — the guarantees this lane explicitly does not provide. Findings
-  about non-goals defer; they never block.
+- **non-goals** — the guarantees this lane explicitly does not provide. They
+  constrain requested scope but never excuse a regression introduced by the diff.
 
 Reviews then verify the diff against that page: review requests name it ("review
 the full diff against the lane contract in <issue> through these lenses: ..."),
@@ -128,22 +128,23 @@ Every arriving finding is classified in writing against the lane contract the
 moment it arrives, before any fix work starts:
 
 - **contract-violating** — the diff fails a guarantee the lane contract
-  promised. Block and fix; this consumes a review-fix cycle.
-- **out-of-contract** — real, but about a guarantee the lane never promised: a
-  named non-goal, a different layer, a broadening. Adjudicate in writing, file
-  a follow-up issue identifying the finding's thread, and continue; the lane
-  still ships. Deferral is the default for this class, not a cap-time
-  privilege. This restores the defer-first default that GH-107 inverted to
-  cap-time-only (tracked in GH-162).
+  promised, or introduces a regression to an existing guarantee even when the
+  lane contract omitted it. Block and fix; this consumes a review-fix cycle.
+- **out-of-contract** — real, but pre-existing or a requested broadening beyond
+  this diff. Adjudicate in writing, file a follow-up issue identifying the
+  finding's thread, and continue; the lane still ships. A named non-goal does
+  not excuse a regression introduced by the diff.
 - **contract-gap** — the finding shows the shipped feature would be wrong or
   unsafe *as specified*, despite sitting outside the written contract. Amend
   the lane contract once (`contract-clarified`, at most one use per family per
   PR as below); thereafter the finding is contract-violating.
 
-The classification is auditable: it names the lane-contract clause or non-goal
-relied on, and a deferred finding that was in fact contract-violating is a gate
-violation attributable to the classifier. The written classifications are what
-the operator reviews at escalation.
+The classification is auditable: it names the lane-contract clause or
+pre-existing/broadening boundary relied on, and a deferred finding that was in
+fact contract-violating is a gate violation attributable to the classifier.
+The lane owner may accept a known, bounded risk within the contract by recording
+it and preserving the follow-up; operator involvement is required only when the
+choice expands scope or weakens a promised guarantee.
 
 Apply a convergence circuit breaker per finding family:
 
@@ -208,10 +209,12 @@ Hard cycle cap, independent of family counting:
   disposition. When open findings do require a terminal disposition, record
   the escalation alongside it. **A lane also has a wall-clock budget: more than
   4 hours in the review-fix state, or a third amended head, escalates to the
-  operator as a merge-or-kill decision** — merge the current head with
+  operator as a merge-or-kill decision bound to the exact current SHA** —
+  merge that exact head with
   follow-ups, or close the lane — posted to the operator digest / decision
-  queue before any further cycle starts. The operator's recorded decision is
-  the terminal signal for that lane. This budget ends loops; it does not ripen
+  queue before any further cycle starts. Any later push invalidates that
+  decision. The operator's exact-head decision is the terminal signal for that
+  head. This budget ends loops; it does not ripen
   heads: review signals remain exact-head only, and no clock substitutes for
   one. A lane found past its cap or budget without an escalation is a process
   violation that must also be escalated.
@@ -308,7 +311,7 @@ policy:
   non-terminal, and a bare `eyes` reaction or the request comment itself is never a
   verdict — `eyes` means accepted and in progress
 - the meaning of `+1` does **not** vary by tier. Tier A takes its strength from the
-  mandatory final-head request, independent exact-head P0–P2 review, mutation and
+  mandatory final-head request, required local exact-head verification, mutation and
   verification evidence, and settle plus adjudication. Requiring a posted text
   review for Tier A would deadlock whenever the connector's clean protocol is
   reaction-only, and the request plus a connector-authored `+1` is already a durable
@@ -480,7 +483,7 @@ else is a second source that goes stale the moment this one moves.
   lane's required local verification (tests and defect-verbatim mutation
   proof), or full inspection of [the reviewed artifact set](#reviewed-artifact-set).
   On a head where a connector review has been requested, that review is the
-  external gate for the head: the independent exact-head obligation is
+  external gate for the head: the other exact-head obligations are
   discharged by that local verification, and a second independent model review
   on the same head must not be run — it consumes cycle budget and manufactures
   new findings instead of adding signal. The pre-PR cold full-diff review is
@@ -553,8 +556,8 @@ restarts exact-head evaluation.
 An exact-current-head merge authorization lifts only the missing
 connector-signal subgate caused by the silently dropped requested review. It is
 not a connector terminal signal, is not a third automated terminal-signal
-model, and creates no fallback path. It does not waive independent exact-head
-review, green required checks, mergeability, a full re-read of
+model, and creates no fallback path. It does not waive required local exact-head
+verification, green required checks, mergeability, a full re-read of
 [the reviewed artifact set](#reviewed-artifact-set), unresolved-feedback handling, or
 project/operator auto-merge authority. If a connector clean signal later
 arrives, its signal-specific settle and reread still apply normally; the
@@ -590,7 +593,7 @@ or depend on the operator to notice the PR comment.
 When the operator has authorized the merge path for the PR or PR class, the
 heartbeat may complete the wait after it verifies the exact current head has
 green required checks, the PR is mergeable with clean `mergeStateStatus`, the
-independent exact-head review is clean, and the full current comment, review,
+required local exact-head verification is clean, and the full current comment, review,
 payload of [the reviewed artifact set](#reviewed-artifact-set) has no actionable finding. Treat the GitHub
 Codex review signal as clean when either:
 
@@ -642,7 +645,7 @@ operator-requested Tier B/C review is outstanding until a terminal signal or an
 exact-head operator disposition -- exactly as the fixture matrix records it.
 Proceed only when all of these are true:
 
-- the independent exact-head review found no actionable issues
+- the requested connector review and required local exact-head verification found no actionable issues
 - required checks are green on the latest head
 - the PR is mergeable and `mergeStateStatus` is clean
 - **every arriving finding has a thread-linked written outcome, whatever head it was

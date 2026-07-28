@@ -259,7 +259,7 @@ class ReviewLoopCapContractTest(unittest.TestCase):
                     "exact-head evaluation",
                     "lifts only the missing connector-signal subgate",
                     "is not a third automated terminal-signal model",
-                    "It does not waive independent exact-head review, green "
+                    "It does not waive required local exact-head verification, green "
                     "required checks, mergeability, a full re-read of "
                     "[the reviewed artifact set](#reviewed-artifact-set), unresolved-feedback "
                     "handling, or project/operator auto-merge authority",
@@ -1927,7 +1927,7 @@ class ReviewLoopCapContractTest(unittest.TestCase):
             (
                 "authorization waives independent gates",
                 "workflow",
-                "It does not waive independent exact-head\nreview, green "
+                "It does not waive required local exact-head\nverification, green "
                 "required checks, mergeability, a full re-read of\n"
                 "[the reviewed artifact set](#reviewed-artifact-set), unresolved-feedback "
                 "handling, or\nproject/operator auto-merge authority",

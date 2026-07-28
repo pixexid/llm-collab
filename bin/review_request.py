@@ -5,19 +5,24 @@ review_request.py — post a Codex review request whose SHA can only be real.
 The exact-head SHA in a review request is what every terminal signal binds to,
 so it must never be hand-typed: PR #347 came to contain a fabricated,
 later-retracted SHA precisely because a model typed one. This tool has no
---sha option. It reads the PR head from GitHub, reads the local HEAD, refuses
-on mismatch, and enforces the request budget from docs/workflows/
-commit-push-prs.md: one initial request per candidate head, plus the single
-request-anchored re-trigger as the only exempted recovery.
+--sha option and rejects SHA-shaped caller text. It reads the PR head from
+GitHub, reads the local HEAD, and refuses on mismatch — there is no bypass
+flag. It enforces the request budget from docs/workflows/commit-push-prs.md:
+one initial request per candidate head, plus the single request-anchored
+re-trigger as the only exempted recovery, repeated verbatim from the initial
+request it is anchored to. The request history is enumerated exhaustively by
+pagination inside a declared bound; reaching the bound with pages outstanding
+fails closed rather than treating a truncated history as an empty one.
 
-  python bin/review_request.py --pr 351 \
-      --focus "exact-session authority selection, cumulative bounds" \
-      --contract 349
-  python bin/review_request.py --pr 351 --focus "..." --retrigger
-  python bin/review_request.py --pr 351 --focus "..." --dry-run
+  bin/review_request.py --pr 356 --project llm-collab --tier A \
+      --contract 352 --focus "exact-session authority selection, bounded reads"
+  bin/review_request.py --pr 356 --project llm-collab --retrigger
+  bin/review_request.py --pr 356 --project llm-collab --tier B \
+      --focus "..." --dry-run
 
-Exits 0 after posting (or printing with --dry-run); exits 2 with the reason on
-any refusal. Read-only against the workspace; the only write is the PR comment.
+Exits 0 after posting (or printing with --dry-run); exits 2 with the
+reason on any refusal. Read-only against the workspace; the only write is the
+PR comment.
 """
 
 from __future__ import annotations
@@ -32,63 +37,160 @@ require_python()
 
 import argparse
 import json
+import re
 import subprocess
 
+from _helpers import get_project
+
 REQUEST_MARKER = "@codex review"
-COMMENT_SCAN_LIMIT = 200
+COMMENT_PAGE_SIZE = 100
+# Declared bound on the exhaustive enumeration. Hitting it with pages still
+# outstanding fails closed: a truncated history must never read as "no prior
+# request", because that is exactly how a budget silently resets.
+COMMENT_HARD_CAP = 1000
+PROJECTS_MAX_BYTES = 1_000_000
+GH_READ_TIMEOUT_SECONDS = 30
+GH_POST_TIMEOUT_SECONDS = 45
+SHA_SHAPED_RE = re.compile(r"\b[0-9a-f]{40}\b", re.IGNORECASE)
+EXACT_HEAD_WORDING_RE = re.compile(r"exact\s+head", re.IGNORECASE)
+RETRIGGER_NOTE = (
+    "Re-triggered once as the single exempted recovery: the initial request "
+    "for this exact head is repeated verbatim above."
+)
+
+COMMENTS_QUERY = f"""query($owner: String!, $name: String!, $pr: Int!, $after: String) {{
+  repository(owner: $owner, name: $name) {{
+    pullRequest(number: $pr) {{
+      comments(first: {COMMENT_PAGE_SIZE}, after: $after) {{
+        nodes {{ body }}
+        pageInfo {{ hasNextPage endCursor }}
+      }}
+    }}
+  }}
+}}"""
 
 
-def run_json(argv: list[str]) -> object:
-    proc = subprocess.run(argv, capture_output=True, text=True)
+def run(argv: list[str], timeout: int) -> subprocess.CompletedProcess:
+    try:
+        proc = subprocess.run(
+            argv, capture_output=True, text=True, timeout=timeout
+        )
+    except subprocess.TimeoutExpired:
+        raise SystemExit(
+            f"error: {' '.join(argv[:3])} exceeded its {timeout}s deadline; "
+            "failing closed rather than judging on a stalled read"
+        )
     if proc.returncode != 0:
-        raise SystemExit(f"error: {' '.join(argv)} failed: {proc.stderr.strip()}")
-    return json.loads(proc.stdout)
+        raise SystemExit(f"error: {' '.join(argv[:3])} failed: {proc.stderr.strip()}")
+    return proc
 
 
-def pr_head(pr: int) -> str:
-    data = run_json(["gh", "pr", "view", str(pr), "--json", "headRefOid"])
+def run_json(argv: list[str], timeout: int = GH_READ_TIMEOUT_SECONDS) -> object:
+    return json.loads(run(argv, timeout).stdout)
+
+
+def common_checkout_projects() -> list[dict]:
+    common_dir = Path(
+        run(
+            ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            GH_READ_TIMEOUT_SECONDS,
+        ).stdout.strip()
+    )
+    path = common_dir.parent / "projects.json"
+    try:
+        if path.stat().st_size > PROJECTS_MAX_BYTES:
+            raise SystemExit(
+                f"error: {path} exceeds the {PROJECTS_MAX_BYTES}-byte registry bound"
+            )
+        payload = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        raise SystemExit(f"error: cannot read registered projects from {path}: {error}")
+    projects = payload.get("projects")
+    if not isinstance(projects, list):
+        raise SystemExit(f"error: {path} has no valid projects list")
+    return projects
+
+
+def repo_coordinates(project_id: str, projects: list[dict] | None = None) -> tuple[str, str]:
+    if projects is None:
+        project = get_project(project_id)
+        if project is None:
+            projects = common_checkout_projects()
+            project = next((p for p in projects if p.get("id") == project_id), None)
+    else:
+        project = next((p for p in projects if p.get("id") == project_id), None)
+    if project is None:
+        raise SystemExit(f"error: unknown project_id: {project_id!r}")
+    github = project.get("github")
+    if not isinstance(github, dict) or github.get("enabled") is not True:
+        raise SystemExit(
+            f"error: project {project_id!r} has no enabled GitHub registration"
+        )
+    repo = github.get("repo", "")
+    if "/" not in repo:
+        raise SystemExit(
+            f"error: project {project_id!r} has no github.repo registration; "
+            "refusing to infer the repository from ambient checkout state"
+        )
+    owner, name = repo.split("/", 1)
+    return owner, name
+
+
+def pr_head(pr: int, owner: str, name: str) -> str:
+    data = run_json(
+        ["gh", "pr", "view", str(pr), "--repo", f"{owner}/{name}",
+         "--json", "headRefOid"]
+    )
     return data["headRefOid"]
 
 
-def pr_comment_bodies(pr: int) -> list[str]:
-    data = run_json(
-        ["gh", "pr", "view", str(pr), "--json", "comments", "--jq",
-         f"[.comments[-{COMMENT_SCAN_LIMIT}:][].body]"]
-    )
-    return list(data)
+def pr_comment_bodies(pr: int, owner: str, name: str) -> list[str]:
+    bodies: list[str] = []
+    after: str | None = None
+    while True:
+        argv = [
+            "gh", "api", "graphql",
+            "-F", f"owner={owner}", "-F", f"name={name}", "-F", f"pr={pr}",
+            "-f", f"query={COMMENTS_QUERY}",
+        ]
+        if after is not None:
+            argv += ["-f", f"after={after}"]
+        data = run_json(argv)
+        comments = data["data"]["repository"]["pullRequest"]["comments"]
+        bodies.extend(node["body"] for node in comments["nodes"])
+        if len(bodies) > COMMENT_HARD_CAP:
+            raise SystemExit(
+                f"error: comment history exceeds the declared bound "
+                f"({COMMENT_HARD_CAP}); failing closed"
+            )
+        page = comments["pageInfo"]
+        if not page["hasNextPage"]:
+            return bodies
+        if len(bodies) >= COMMENT_HARD_CAP:
+            raise SystemExit(
+                f"error: comment history exceeds the declared bound "
+                f"({COMMENT_HARD_CAP}) with pages still outstanding; failing "
+                "closed rather than treating a truncated history as an empty one"
+            )
+        after = page["endCursor"]
 
 
 def local_head() -> str:
-    proc = subprocess.run(
-        ["git", "rev-parse", "HEAD"], capture_output=True, text=True
-    )
-    if proc.returncode != 0:
-        raise SystemExit(f"error: git rev-parse HEAD failed: {proc.stderr.strip()}")
-    return proc.stdout.strip()
+    return run(["git", "rev-parse", "HEAD"], GH_READ_TIMEOUT_SECONDS).stdout.strip()
 
 
-def count_prior_requests(bodies: list[str], sha: str) -> int:
-    return sum(
-        1 for body in bodies if body.startswith(REQUEST_MARKER) and sha in body
-    )
+def prior_requests(bodies: list[str], sha: str) -> list[str]:
+    return [b for b in bodies if b.startswith(REQUEST_MARKER) and sha in b]
 
 
-def refusal_reason(prior: int, retrigger: bool) -> str | None:
-    if prior == 0:
-        return None
-    if prior == 1 and retrigger:
-        return None
-    if prior >= 2:
-        return (
-            f"request budget for this head is spent ({prior} requests already); "
-            "there is no further request to issue — continue to the exact-head "
-            "operator disposition"
-        )
-    return (
-        "an initial request for this exact head already exists; pass "
-        "--retrigger only if the connector silently dropped it (the single "
-        "exempted recovery)"
-    )
+def reject_caller_supplied_shas(fields: dict[str, str]) -> None:
+    for label, value in fields.items():
+        if SHA_SHAPED_RE.search(value) or EXACT_HEAD_WORDING_RE.search(value):
+            raise SystemExit(
+                f"error: --{label} contains a SHA-shaped value or exact-head "
+                "wording; the head is sourced from GitHub and the checkout, "
+                "never from caller text"
+            )
 
 
 def build_request_body(
@@ -109,61 +211,141 @@ def build_request_body(
     return " ".join(parts)
 
 
-def post_comment(pr: int, body: str) -> None:
-    proc = subprocess.run(
-        ["gh", "pr", "comment", str(pr), "--body", body],
-        capture_output=True,
-        text=True,
-    )
+def post_comment(pr: int, owner: str, name: str, body: str) -> None:
+    try:
+        proc = subprocess.run(
+            ["gh", "pr", "comment", str(pr), "--repo", f"{owner}/{name}",
+             "--body", body],
+            capture_output=True,
+            text=True,
+            timeout=GH_POST_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        raise SystemExit(
+            "error: posting the request timed out; the comment may or may not "
+            "have landed — inspect the PR before retrying"
+        )
     if proc.returncode != 0:
-        raise SystemExit(f"error: posting the request failed: {proc.stderr.strip()}")
+        raise SystemExit(
+            f"error: posting the request failed: {proc.stderr.strip()}; the "
+            "comment may or may not have landed — inspect the PR before retrying"
+        )
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--pr", type=int, required=True, help="PR number")
     parser.add_argument(
-        "--focus", required=True,
+        "--project", required=True,
+        help="registered project_id; the repository is resolved from its "
+        "projects.json entry, never from ambient checkout state",
+    )
+    parser.add_argument(
+        "--tier", choices=("A", "B", "C"),
+        help="review tier; Tier A requires --contract naming the lane-contract issue",
+    )
+    parser.add_argument(
+        "--focus",
         help="comma-separated review lenses (every Tier A family the diff touches)",
     )
     parser.add_argument(
         "--contract", type=int, default=None,
-        help="issue number carrying the lane contract, for Tier A lanes",
+        help="issue number carrying the lane contract (required for --tier A)",
     )
     parser.add_argument("--note", default=None, help="one extra sentence appended verbatim")
     parser.add_argument(
         "--retrigger", action="store_true",
-        help="use the single exempted re-trigger for a silently dropped request",
-    )
-    parser.add_argument(
-        "--no-local-check", action="store_true",
-        help="skip verifying that local HEAD equals the PR head",
+        help="repeat the single prior request for this exact head verbatim, as "
+        "the one exempted recovery for a silently dropped request",
     )
     parser.add_argument("--dry-run", action="store_true", help="print, do not post")
     args = parser.parse_args(argv)
 
-    sha = pr_head(args.pr)
-    if not args.no_local_check:
-        local = local_head()
-        if local != sha:
+    if args.retrigger:
+        if (
+            args.tier is not None
+            or args.focus is not None
+            or args.contract is not None
+            or args.note is not None
+        ):
             raise SystemExit(
-                f"error: local HEAD {local} != PR head {sha}; push first, or "
-                "pass --no-local-check if you are requesting from outside the lane"
+                "error: --retrigger repeats the initial request verbatim; "
+                "--tier/--focus/--contract/--note cannot amend its scope"
             )
+    else:
+        if args.tier is None:
+            raise SystemExit("error: --tier is required for an initial request")
+        if args.focus is None:
+            raise SystemExit("error: --focus is required for an initial request")
+        if args.tier == "A" and args.contract is None:
+            raise SystemExit(
+                "error: Tier A requires --contract naming the issue that carries "
+                "the lane contract; a generic full-diff request does not "
+                "satisfy the Tier A gate"
+            )
+        reject_caller_supplied_shas(
+            {k: v for k, v in (("focus", args.focus), ("note", args.note)) if v}
+        )
 
-    prior = count_prior_requests(pr_comment_bodies(args.pr), sha)
-    reason = refusal_reason(prior, args.retrigger)
-    if reason:
-        raise SystemExit(f"error: {reason}")
+    owner, name = repo_coordinates(args.project)
+    sha = pr_head(args.pr, owner, name)
+    local = local_head()
+    if local != sha:
+        raise SystemExit(
+            f"error: local HEAD {local} != PR head {sha}; push the verified "
+            "head first — the request must bind to the head that received the "
+            "lane's local verification"
+        )
 
-    body = build_request_body(args.focus, sha, args.contract, args.note)
+    priors = prior_requests(pr_comment_bodies(args.pr, owner, name), sha)
+    if args.retrigger:
+        if not priors:
+            raise SystemExit(
+                "error: no initial request for this exact head exists to "
+                "repeat; a re-trigger must anchor to one"
+            )
+        if len(priors) >= 2:
+            raise SystemExit(
+                f"error: request budget for this head is spent ({len(priors)} "
+                "requests already); there is no further request to issue — "
+                "continue to the exact-head operator disposition"
+            )
+        body = priors[0] + "\n\n" + RETRIGGER_NOTE
+    else:
+        if priors:
+            raise SystemExit(
+                "error: an initial request for this exact head already exists; "
+                "pass --retrigger only if the connector silently dropped it "
+                "(the single exempted recovery)"
+            )
+        body = build_request_body(args.focus, sha, args.contract, args.note)
+
     if args.dry_run:
         print(body)
         return 0
-    post_comment(args.pr, body)
-    print(f"posted review request for exact head {sha} on PR #{args.pr}")
+    if pr_head(args.pr, owner, name) != sha:
+        raise SystemExit(
+            "error: PR head changed while constructing the request; nothing was posted"
+        )
+    post_comment(args.pr, owner, name, body)
+    if pr_head(args.pr, owner, name) != sha:
+        raise SystemExit(
+            "error: review request was posted, but the PR head changed during "
+            "publication; the posted request is stale and a new-head request is required"
+        )
+    print(f"posted review request for exact head {sha} on {owner}/{name}#{args.pr}")
     return 0
 
 
+def cli() -> int:
+    try:
+        return main()
+    except SystemExit as error:
+        if isinstance(error.code, str):
+            print(error.code, file=sys.stderr)
+            return 2
+        raise
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(cli())

@@ -25,9 +25,9 @@ Read these if your last session predates them.
   boundary, commit point, retry behavior, non-goals —
   `docs/workflows/lane-contract.md`) **before the first branch**; reviews verify
   that contract instead of discovering it. Findings route **per-finding at
-  arrival**: a finding that violates the lane contract blocks; any other finding
-  is adjudicated in writing and defers to a follow-up issue while the lane ships
-  — deferral is no longer cap-time-only (GH-162). **One external reviewer per
+  arrival**: a finding that violates the lane contract or is a regression
+  introduced by the diff blocks; pre-existing issues and requested broadenings
+  are adjudicated in writing and defer while the lane ships. **One external reviewer per
   head**: a requested connector review is the external gate for that head, and
   running a second independent model review on it consumes cycle budget without
   adding signal. The cap default becomes **merge-with-followups**;
@@ -129,8 +129,9 @@ setup it implies is yours.
 
 **Genuinely operator-owned**, and worth stopping for: anything irreversible or
 outward-facing (merging, publishing, contacting someone), credentials and account
-settings, accepting a risk, and scope or priority trade-offs. Those need a decision, not
-a pair of hands.
+settings, and scope or priority trade-offs. Workers may accept a known, bounded
+risk within the lane contract when they record it and preserve the follow-up;
+expanding scope or weakening a promised guarantee still needs an operator decision.
 
 The test is not "is this tedious" or "did they mention it" — it is whether you could do
 it and check that it worked. If you could, it is yours.
@@ -234,25 +235,24 @@ limit is on *initial* requests; the single request-anchored re-trigger in
 `docs/workflows/commit-push-prs.md` is an explicit exemption and the only recovery for
 a request the connector silently dropped. Any
 finding that arrives must be adjudicated in writing at every tier. A review is
-P0/P1-scoped, so it complements and never replaces independent exact-head
-verification and defect-verbatim mutation proof.
+P0/P1-scoped, so it complements and never replaces the exact-head verification
+model below or defect-verbatim mutation proof.
 
 **Tier A opens with a lane contract.** Before the first branch, write one page —
 template in `docs/workflows/lane-contract.md` — naming the authority boundary,
 the commit point, retry behavior, and explicit non-goals, in the task or linked
 issue. The review request then asks the reviewer to verify the diff *against
 that contract*, and findings are routed per-finding at arrival: a finding that
-violates the lane contract blocks and is fixed; a finding about a guarantee the
-lane never promised defers to a follow-up issue and the lane still ships —
-deferral is the default for that class, not a cap-time privilege (this restores
-the GH-162 defer-first rule); a finding showing the feature would be wrong *as
-specified* amends the contract once (`contract-clarified`), then blocks.
+violates the lane contract or shows a regression introduced by the diff blocks
+and is fixed; a pre-existing issue or requested broadening defers to a follow-up
+issue and the lane still ships; a finding showing the feature would be wrong
+*as specified* amends the contract once (`contract-clarified`), then blocks.
 Classification is written and auditable; a deferred finding that was in fact
 contract-violating is a gate violation attributable to the classifier.
 
 **One external reviewer per head.** When a connector review has been requested
-on a head, that review is the external gate for that head. The independent
-exact-head obligation is discharged by the lane's required local verification
+on a head, that review is the external gate for that head. The other exact-head
+verification obligations are discharged by the lane's required local verification
 and CI — not by a second independent model review, which consumes cycle budget
 without adding signal and must not be run. The mandatory pre-PR cold full-diff
 review in `docs/workflows/commit-push-prs.md` is unchanged: it happens once,
@@ -260,7 +260,8 @@ before the first PR-ready head, and is where the lane contract itself gets
 challenged.
 
 **Generate review requests mechanically.** Use `bin/review_request.py --pr <n>
---focus "..."`: it reads the head SHA from GitHub and the local checkout,
+--project <id> --tier A --contract <issue> --focus "..."`: it reads the head SHA
+from GitHub and the local checkout,
 refuses on mismatch, and enforces one initial request per head plus the single
 exempted re-trigger. It has no option to pass a SHA by hand — a hand-typed SHA
 is how #347 came to contain a fabricated, later-retracted request.
