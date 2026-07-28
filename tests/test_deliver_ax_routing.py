@@ -134,6 +134,34 @@ class AxAttendedRecoveryRoutingTest(unittest.TestCase):
             deliver.is_ax_doorbell_target(agent, "custom", sender_id="codex")
         )
 
+    def test_binary_profile_precedence_is_preserved(self) -> None:
+        for app in ("Codex Claude", "ZCode Claude"):
+            agent = {
+                "id": "custom",
+                "activation": {
+                    "type": "cli_session",
+                    "watcher_enabled": True,
+                    "ax_app": app,
+                },
+            }
+            self.assertEqual(deliver.ax_doorbell_app(agent), app)
+
+    def test_claude_app_cannot_route_to_attended_recovery(self) -> None:
+        agent = {
+            "id": "custom",
+            "activation": {
+                "type": "cli_session",
+                "watcher_enabled": True,
+                "ax_app": "Claude",
+                "ax_attended_only": True,
+            },
+        }
+        self.assertFalse(
+            deliver.is_ax_attended_recovery_target(
+                agent, "custom", sender_id="codex"
+            )
+        )
+
     def test_attended_only_target_is_not_routine_doorbell(self) -> None:
         self.assertTrue(deliver.ax_attended_only(self.ZCODE))
         self.assertFalse(

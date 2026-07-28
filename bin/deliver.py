@@ -70,7 +70,7 @@ from _activation_identity import (
     canonical_worktree,
     normalized_identity_field,
 )
-from _ax_trust import ax_app_supports_routine_doorbell
+from _ax_trust import ax_app_profile, ax_app_supports_routine_doorbell
 
 # Lane C (GH-1572) flips this to True in the same commit that makes the
 # packet's claim command (`inbox.py --packet`) runnable. Deliberately a code
@@ -302,6 +302,8 @@ def is_ax_attended_recovery_target(
         not is_codex_self_target(sender_id, recipient_id)
         and recipient_id != "operator"
         and not is_watcher_only_target(recipient_id)
+        and ax_app_profile(recipient_agent.get("activation", {}).get("ax_app"))
+        != "claude"
         and ax_attended_only(recipient_agent)
     )
 
