@@ -24,6 +24,35 @@ universal is the exception.
   resolves from that project's `projects.json` entry or is stated explicitly
   at task level. Hardcoding one project's value in `bin/` is a defect.
 
+### Review-policy enrollment
+
+Each repository's incident-derived rules live in that repository's `AGENTS.md`.
+This inventory records the enrollment owner and audit outcome; zero rules is valid.
+
+| Repository | Owner | Incident-derived rules | Where they live |
+|---|---|---|---|
+| `llm-collab` | codex | 3 | root `AGENTS.md` → `## Code Review Rules` |
+| `amiga` | codex | 2 — paid/provider idempotency and replace-lock authority; public Supabase RPC role execution | `amiga` `AGENTS.md` → `### Code Review Rules`, **not on `main` yet**: branch `claude/gh310-manual-review-policy` |
+| `amiga_house_cleaning_company_docs` | codex | 0 — content repository, no executable surface | n/a |
+| `nuvyr_app` | kimi | 0 — no adjudicated incident yet | n/a |
+
+Enrollment ownership is an explicit governance decision; it is not inferred from a
+project's release-gate worker. Do not restate another repository's rules here.
+
+#### Rule usefulness and noise re-check
+
+Recorded 2026-07-28 against the first representative run under manual-only review:
+PRs #340, #342, #345 and #348, sixteen connector findings across nine requested
+exact-head reviews.
+
+Every independently reproduced finding was real, and none was rule noise, so no
+rule is removed. Findings clustered in Tier A families the rules already name, and
+several rounds found test artefacts masking production behaviour, independently
+confirming #306's "test-only is not intrinsically low risk" rule.
+
+Re-check after the next comparable run; remove any rule that starts producing
+findings nobody acts on.
+
 ### Onboarding a new project
 
 1. Add a `projects.json` entry with `id`, `display_name`, `repos`,
