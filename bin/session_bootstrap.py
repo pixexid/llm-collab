@@ -276,6 +276,238 @@ def announce_contract(agent_id: str) -> None:
     print()
 
 
+# (filename, test_critical). The file is the semantic boundary: requirements-dev
+# holds what the suite needs to run truthfully — the schema-validator pins whose
+# absence makes the conformance validators raise instead of skip, so the run
+# reports conformance failures and collects fewer tests than exist. A missing one
+# of those falsifies the suite. requirements-runtime holds the file-events pin,
+# which ObservationEngine.start() catches on ImportError and
+# tests/test_collabd_observe.py proves reconciliation continues without; its absence
+# degrades the runtime, it does not falsify a test result. So they are reported, but
+# not under the same banner. (Package names are deliberately not spelled here: the
+# pins are read from the files, and a runtime file that named the dev validator
+# would be a dependency on it — see test_runtime_directories_do_not_consume_dev.)
+REQUIREMENTS = (
+    ("requirements-dev.txt", True),
+    ("requirements-runtime.txt", False),
+)
+MAX_REQUIREMENTS_BYTES = 256 * 1024
+
+
+class RequirementsUnreadable(RuntimeError):
+    """A requirements file exists but could not be read, or is over-sized.
+
+    Distinct from absence: an unknown pin set must never silently become an empty
+    one, because an empty set reports the environment as complete.
+    """
+
+
+def _read_requirements_bounded(path: Path, remaining: int) -> str | None:
+    """Read one requirements file under a cumulative byte budget.
+
+    Returns None when the file is legitimately absent — a workspace may carry only
+    one — and raises RequirementsUnreadable when the file is over-budget, unreadable,
+    or not valid UTF-8.
+
+    The bound is applied at the READ, not via stat-then-read: a `stat` size check
+    can pass and the file grow before `read_text()` reaches EOF, which is unbounded
+    again. Reading at most `remaining + 1` bytes is bounded regardless of what the
+    file does after the open. Invalid UTF-8 becomes a read failure rather than an
+    uncaught UnicodeDecodeError that would crash bootstrap on a corrupt file.
+    """
+    try:
+        with open(path, "rb") as handle:
+            data = handle.read(remaining + 1)
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        raise RequirementsUnreadable(f"cannot read {path.name}: {error}") from error
+    if len(data) > remaining:
+        raise RequirementsUnreadable(
+            f"{path.name} exceeds the remaining {remaining} byte budget"
+        )
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise RequirementsUnreadable(f"{path.name} is not valid UTF-8: {error}") from error
+
+
+# The interpreter the required suite actually runs on. AGENTS.md's command is
+# `python3.11 -m unittest discover -s tests`, and the bin/llm-collab wrapper will
+# happily launch bootstrap under a different 3.10+ interpreter — so asking our own
+# importlib.metadata answers the wrong question. We probe python3.11.
+TEST_INTERPRETER = "python3.11"
+
+
+def parse_requirements() -> tuple[list[dict], list[dict]]:
+    """Return (pins, read_failures).
+
+    Each pin is {name, pinned_version|None, test_critical}. Each read_failure is
+    {detail, test_critical}: a file that exists but cannot be read makes ITS pin set
+    UNKNOWN, and the criticality has to travel with it — an unreadable degradable
+    file must not be shouted under the test-critical banner, and an unreadable
+    test-critical file must be. An UNKNOWN set must never silently become an empty
+    (complete-looking) one.
+    """
+    pins: list[dict] = []
+    read_failures: list[dict] = []
+    seen: set[str] = set()
+    remaining = MAX_REQUIREMENTS_BYTES
+    for filename, test_critical in REQUIREMENTS:
+        try:
+            text = _read_requirements_bounded(ROOT / filename, remaining)
+        except RequirementsUnreadable as error:
+            read_failures.append({"detail": str(error), "test_critical": test_critical})
+            continue
+        if text is None:
+            continue
+        remaining -= len(text.encode("utf-8"))
+        for line in text.splitlines():
+            entry = line.split("#", 1)[0].strip()
+            if not entry or entry.startswith("-"):
+                continue
+            name = re.split(r"[=<>!~\[; ]", entry, maxsplit=1)[0].strip()
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            exact = re.search(r"==\s*([0-9][^\s;#]*)", entry)
+            pins.append({
+                "name": name,
+                "pinned_version": exact.group(1) if exact else None,
+                "test_critical": test_critical,
+            })
+    return pins, read_failures
+
+
+def _installed_versions(names: list[str]) -> dict[str, str | None] | None:
+    """Ask the test interpreter which pins it has, and at what version.
+
+    Returns {name: version | None(absent) | '?'(metadata unreadable)}, or None when
+    the test interpreter cannot be probed at all — which is UNKNOWN, not complete.
+    Runs one short subprocess under python3.11 rather than reading our own
+    importlib.metadata, because the suite's environment is the one that must be
+    truthful and it may not be this process's.
+    """
+    if not names:
+        return {}
+    probe = (
+        "import json,sys\n"
+        "from importlib.metadata import version, PackageNotFoundError\n"
+        "out={}\n"
+        "for n in sys.argv[1:]:\n"
+        "    try: out[n]=version(n)\n"
+        "    except PackageNotFoundError: out[n]=None\n"
+        "    except Exception: out[n]='?'\n"
+        "print(json.dumps(out))\n"
+    )
+    try:
+        done = subprocess.run(
+            [TEST_INTERPRETER, "-c", probe, *names],
+            capture_output=True, text=True, timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if done.returncode != 0:
+        return None
+    try:
+        return json.loads(done.stdout)
+    except (json.JSONDecodeError, ValueError):
+        return None
+
+
+def dependency_report() -> dict:
+    """Classify the pinned environment as it exists for the test interpreter.
+
+    Missing/mismatched split by criticality, because only a test-critical gap
+    falsifies a test result — that earns the loud banner; a runtime gap is reported,
+    not shouted (GH-357/#362 ruling). Version is enforced, not merely presence: a
+    pin bumped on a long-lived interpreter that still has the old wheel is exactly
+    how the suite runs outside its declared environment while looking complete.
+    """
+    pins, read_failures = parse_requirements()
+    report = {
+        "test_interpreter": TEST_INTERPRETER,
+        "interpreter_unprobeable": False,
+        "critical_missing": [], "critical_mismatched": [],
+        "runtime_missing": [], "runtime_mismatched": [],
+        "read_failures": read_failures,
+    }
+    installed = _installed_versions([pin["name"] for pin in pins])
+    if installed is None:
+        # Cannot verify the suite's environment at all. That is UNKNOWN and
+        # test-critical: proceeding as if complete is the exact silent-pass this
+        # gate exists to stop.
+        report["interpreter_unprobeable"] = True
+        return report
+
+    for pin in pins:
+        missing_key = "critical_missing" if pin["test_critical"] else "runtime_missing"
+        mism_key = "critical_mismatched" if pin["test_critical"] else "runtime_mismatched"
+        found = installed.get(pin["name"])
+        if found is None:
+            report[missing_key].append(pin["name"])
+            continue
+        if found == "?":
+            # Metadata unreadable is not the same as absent: reporting it as missing
+            # would send a worker to install what is already installed (#370's
+            # error-is-not-an-answer). Leave it out of both lists.
+            continue
+        if pin["pinned_version"] and found != pin["pinned_version"]:
+            report[mism_key].append(f"{pin['name']} {found} != pinned {pin['pinned_version']}")
+    return report
+
+
+def announce_dependencies(report: dict) -> None:
+    interpreter = report.get("test_interpreter", "the test interpreter")
+    critical_reads = [f["detail"] for f in report["read_failures"] if f["test_critical"]]
+    runtime_reads = [f["detail"] for f in report["read_failures"] if not f["test_critical"]]
+    critical = (report["critical_missing"] + report["critical_mismatched"]
+                + critical_reads)
+    runtime = report["runtime_missing"] + report["runtime_mismatched"] + runtime_reads
+
+    if report.get("interpreter_unprobeable"):
+        print("━" * 60)
+        print(f"⚠️  CANNOT VERIFY {interpreter} — test results here are not real")
+        print("━" * 60)
+        print(f"  {interpreter} could not be run to check its installed pins, so")
+        print(f"  the environment the required suite runs in is UNKNOWN — which is")
+        print(f"  not the same as complete. Install {interpreter} and its pins")
+        print("  before running or quoting any test result.")
+        print("━" * 60)
+        return
+
+    if critical:
+        print("━" * 60)
+        print("⚠️  TEST-CRITICAL DEPENDENCIES WRONG — test results here are not real")
+        print("━" * 60)
+        print(f"  {interpreter} (the interpreter the required suite runs on):")
+        for item in report["critical_missing"]:
+            print(f"    missing     {item}")
+        for item in report["critical_mismatched"]:
+            print(f"    wrong ver   {item}")
+        for failure in critical_reads:
+            print(f"    unreadable  {failure} (pin set is UNKNOWN, not empty)")
+        print()
+        print("  The suite does not skip what it cannot import. The runtime-adapter")
+        print("  conformance validators raise instead, so the run reports failures")
+        print("  in conformance rather than a missing package, and silently collects")
+        print("  fewer tests than exist. A worker who reads that output concludes")
+        print("  main is broken; one who reports it hands a collaborator a false")
+        print("  baseline. Both happened on 2026-07-28: 1700 tests with 131 failures")
+        print("  and 31 errors, against a main that is 1856 and green.")
+        print()
+        print("  Install the declared pins before running or quoting any test result:")
+        print("    requirements-dev.txt")
+        print("━" * 60)
+
+    if runtime:
+        # Reported, not shouted: a degradable pin's absence (or an unreadable
+        # degradable file) is caught and tested, and does not falsify a test result.
+        print("[deps] runtime pins not satisfied (degradable, not test-critical):")
+        for item in runtime:
+            print(f"[deps]   {item}")
+
+
 def main():
     args = parse_args()
 
@@ -297,6 +529,10 @@ def main():
         if args.json_output:
             print(json.dumps({"tooling": currency, "bootstrap": "refused"}, sort_keys=True))
         sys.exit(1)
+
+    dependencies = dependency_report()
+    if not args.json_output:
+        announce_dependencies(dependencies)
 
     if not args.json_output:
         announce_contract(args.agent)
@@ -419,6 +655,7 @@ def main():
             "agent": args.agent,
             "bootstrapped_utc": utc_iso(),
             "tooling": currency,
+            "dependencies": dependencies,
             "identity_loaded": identity_content is not None,
             "inbox": inbox_summary,
             "queues": queue_info,
