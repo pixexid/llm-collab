@@ -43,7 +43,12 @@ class InboxMarkAllReadTest(unittest.TestCase):
         )
         write_json(
             self.root / "projects.json",
-            {"projects": [{"id": "amiga", "display_name": "Amiga", "repos": {"app": "."}}]},
+            {
+                "projects": [
+                    {"id": "amiga", "display_name": "Amiga", "repos": {"app": "."}},
+                    {"id": "nuvyr", "display_name": "Nuvyr", "repos": {"app": "."}},
+                ]
+            },
         )
         write_json(
             self.root / "agents.json",
@@ -154,6 +159,104 @@ class InboxMarkAllReadTest(unittest.TestCase):
             (self.root / "agents" / "codex" / "inbox.json").read_text()
         )
 
+    def add_exact_session(
+        self,
+        *,
+        project_id: str = "amiga",
+        chat_id: str = "CHAT-EXACT",
+        status: str = "active",
+        binding_id: str | None = None,
+        binding_generation: int | None = None,
+    ) -> None:
+        session = {
+            "session_id": "SESSION-EXACT",
+            "agent_id": "codex",
+            "project_id": project_id,
+            "chat_id": chat_id,
+            "status": status,
+            "wake_strategy": "runtime_trigger",
+            "runtime": {"family": "pi", "session_id": "pi-exact"},
+        }
+        binding = {
+            "project_id": project_id,
+            "chat_id": chat_id,
+            "agent_id": "codex",
+            "session_id": "SESSION-EXACT",
+            "runtime_family": "pi",
+            "runtime_session_id": "pi-exact",
+        }
+        if binding_id is not None:
+            session["binding_id"] = binding_id
+            binding["binding_id"] = binding_id
+        if binding_generation is not None:
+            session["binding_generation"] = binding_generation
+            binding["binding_generation"] = binding_generation
+        write_json(
+            self.root
+            / "State"
+            / "session_autobridge"
+            / "sessions"
+            / "SESSION-EXACT.json",
+            session,
+        )
+        write_json(
+            self.root
+            / "State"
+            / "session_autobridge"
+            / "bindings"
+            / project_id
+            / chat_id
+            / "codex.json",
+            binding,
+        )
+
+    def add_exact_message(
+        self,
+        name: str,
+        *,
+        project_id: str = "amiga",
+        chat_id: str = "CHAT-EXACT",
+        target_session_id: str = "SESSION-EXACT",
+        recipient: str = "codex",
+        sender: str = "claude",
+        activation: bool = False,
+        path: str | None = None,
+        repo_targets: list[object] | None = None,
+        target_binding_id: str | None = None,
+        target_binding_generation: int | None = None,
+    ) -> str:
+        path = path or f"Chats/exact__{chat_id}/{name}.md"
+        lines = [
+            "---",
+            f"chat_id: {chat_id}",
+            f"project_id: {project_id}",
+            f"from: {sender}",
+            f"to: {recipient}",
+            f"target_session_id: {target_session_id}",
+        ]
+        if target_binding_id is not None:
+            lines.append(f"target_binding_id: {target_binding_id}")
+        if target_binding_generation is not None:
+            lines.append(
+                f"target_binding_generation: {target_binding_generation}"
+            )
+        if repo_targets is not None:
+            lines.append("repo_targets: " + json.dumps(repo_targets))
+        if activation:
+            lines.extend(
+                [
+                    "activation: true",
+                    f"worktree: {self.worktree}",
+                    "branch: codex/exact",
+                ]
+            )
+        lines.extend(["---", "", name])
+        write(self.root / path, "\n".join(lines))
+        inbox = self.load_inbox()
+        inbox["unread"].append(path)
+        write_json(self.root / "agents" / "codex" / "inbox.json", inbox)
+        return path
+
     def run_inbox(
         self,
         *args: str,
@@ -196,6 +299,529 @@ class InboxMarkAllReadTest(unittest.TestCase):
         inbox = self.load_inbox()
         self.assertEqual([amiga], inbox["read"])
         self.assertEqual([nuvyr, missing, empty, null], inbox["unread"])
+
+    def test_empty_exact_session_refuses_before_ordinary_inbox_loading(self) -> None:
+        self.add_message("SECRET", project_line="amiga")
+
+        result = self.run_inbox(
+            "--project",
+            "amiga",
+            "--chat",
+            "CHAT-EXACT",
+            "--session",
+            "",
+            "--peek",
+            "--json",
+        )
+
+        self.assertEqual(2, result.returncode)
+        self.assertIn("--session requires a non-empty session id", result.stderr)
+        self.assertNotIn("Test message", result.stdout)
+
+    def test_empty_exact_packet_selector_refuses(self) -> None:
+        self.add_exact_session()
+        self.add_exact_message("secret")
+
+        result = self.run_inbox(
+            "--project",
+            "amiga",
+            "--chat",
+            "CHAT-EXACT",
+            "--session",
+            "SESSION-EXACT",
+            "--packet",
+            "",
+            "--peek",
+            "--json",
+            env={"LLM_COLLAB_READER_RUNTIME_ID": "pi-exact"},
+        )
+
+        self.assertEqual(2, result.returncode)
+        self.assertIn("--packet requires a non-empty packet selector", result.stderr)
+        self.assertNotIn("secret", result.stdout)
+
+    def test_exact_session_returns_every_match_without_the_display_limit(self) -> None:
+        self.add_exact_session()
+        paths = [self.add_exact_message(str(index)) for index in range(12)]
+
+        result = self.run_inbox(
+            "--project",
+            "amiga",
+            "--chat",
+            "CHAT-EXACT",
+            "--session",
+            "SESSION-EXACT",
+            "--limit",
+            "1",
+            "--peek",
+            "--json",
+            env={"LLM_COLLAB_READER_RUNTIME_ID": "pi-exact"},
+        )
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual(
+            paths,
+            [message["path"] for message in json.loads(result.stdout)["messages"]],
+        )
+        self.assertEqual(paths, self.load_inbox()["unread"])
+
+    def test_exact_session_refuses_a_missing_packet_with_its_path(self) -> None:
+        self.add_exact_session()
+        missing = self.add_missing_message_pointer("EXACT")
+
+        result = self.run_inbox(
+            "--project",
+            "amiga",
+            "--chat",
+            "CHAT-EXACT",
+            "--session",
+            "SESSION-EXACT",
+            "--peek",
+            "--json",
+            env={"LLM_COLLAB_READER_RUNTIME_ID": "pi-exact"},
+        )
+
+        self.assertEqual(75, result.returncode, result.stderr)
+        self.assertIn(
+            missing,
+            json.loads(result.stdout)["exact_session_refused"],
+        )
+
+    def test_exact_packet_selection_ignores_unrelated_missing_archive_entries(self) -> None:
+        self.add_exact_session()
+        selected = self.add_exact_message("selected")
+        self.add_missing_message_pointer("UNRELATED")
+
+        result = self.run_inbox(
+            "--project",
+            "amiga",
+            "--chat",
+            "CHAT-EXACT",
+            "--session",
+            "SESSION-EXACT",
+            "--packet",
+            Path(selected).name,
+            "--peek",
+            "--json",
+            env={"LLM_COLLAB_READER_RUNTIME_ID": "pi-exact"},
+        )
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual(
+            [selected],
+            [
+                message["path"]
+                for message in json.loads(result.stdout)["messages"]
+            ],
+        )
+
+    def test_exact_session_refuses_foreign_scope_and_runtime(self) -> None:
+        self.add_exact_session()
+        secret = self.add_exact_message("secret")
+        cases = (
+            (
+                ["--project", "nuvyr", "--chat", "CHAT-EXACT"],
+                {"LLM_COLLAB_READER_RUNTIME_ID": "pi-exact"},
+            ),
+            (
+                ["--project", "amiga", "--chat", "CHAT-FOREIGN"],
+                {"LLM_COLLAB_READER_RUNTIME_ID": "pi-exact"},
+            ),
+            (
+                ["--project", "amiga", "--chat", "CHAT-EXACT"],
+                {"LLM_COLLAB_READER_RUNTIME_ID": "pi-foreign"},
+            ),
+        )
+        for scope, env in cases:
+            with self.subTest(scope=scope, env=env):
+                result = self.run_inbox(
+                    *scope,
+                    "--session",
+                    "SESSION-EXACT",
+                    "--peek",
+                    "--json",
+                    env=env,
+                )
+                self.assertEqual(75, result.returncode, result.stderr)
+                self.assertNotIn(secret, result.stdout)
+
+    def test_exact_session_requires_runtime_identity(self) -> None:
+        self.add_exact_session()
+        secret = self.add_exact_message("secret")
+
+        result = self.run_inbox(
+            "--project",
+            "amiga",
+            "--chat",
+            "CHAT-EXACT",
+            "--session",
+            "SESSION-EXACT",
+            "--peek",
+            "--json",
+        )
+
+        self.assertEqual(75, result.returncode, result.stderr)
+        self.assertEqual(
+            "exact_session_runtime_missing",
+            json.loads(result.stdout)["exact_session_refused"],
+        )
+        self.assertNotIn(secret, result.stdout)
+
+    def test_exact_session_uses_frontmatter_not_the_packet_path_for_chat(self) -> None:
+        self.add_exact_session()
+        exact = self.add_exact_message(
+            "exact",
+            path="Chats/no-chat-id-here/exact.md",
+        )
+
+        result = self.run_inbox(
+            "--project",
+            "amiga",
+            "--chat",
+            "CHAT-EXACT",
+            "--session",
+            "SESSION-EXACT",
+            "--peek",
+            "--json",
+            env={"LLM_COLLAB_READER_RUNTIME_ID": "pi-exact"},
+        )
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertIsInstance(payload, dict)
+        self.assertEqual(
+            [exact],
+            [message["path"] for message in payload["messages"]],
+        )
+
+    def test_exact_session_refuses_an_unregistered_project(self) -> None:
+        self.add_exact_session(project_id="ghost", chat_id="CHAT-GHOST")
+        secret = self.add_exact_message(
+            "secret",
+            project_id="ghost",
+            chat_id="CHAT-GHOST",
+        )
+
+        result = self.run_inbox(
+            "--project",
+            "ghost",
+            "--chat",
+            "CHAT-GHOST",
+            "--session",
+            "SESSION-EXACT",
+            "--peek",
+            "--json",
+            env={"LLM_COLLAB_READER_RUNTIME_ID": "pi-exact"},
+        )
+
+        self.assertEqual(75, result.returncode, result.stderr)
+        self.assertEqual(
+            "unknown_project",
+            json.loads(result.stdout)["exact_session_refused"],
+        )
+        self.assertNotIn(secret, result.stdout)
+
+    def test_exact_session_charges_the_project_registry_to_its_budget(self) -> None:
+        self.add_exact_session()
+        self.add_exact_message("exact")
+        write_json(
+            self.root / "projects.json",
+            {
+                "projects": [
+                    {
+                        "id": "amiga",
+                        "display_name": "Amiga",
+                        "repos": {"app": "."},
+                        "padding": "x" * inbox_lib.MAX_EXACT_SESSION_BYTES,
+                    }
+                ]
+            },
+        )
+
+        result = self.run_inbox(
+            "--project",
+            "amiga",
+            "--chat",
+            "CHAT-EXACT",
+            "--session",
+            "SESSION-EXACT",
+            "--peek",
+            "--json",
+            env={"LLM_COLLAB_READER_RUNTIME_ID": "pi-exact"},
+        )
+
+        self.assertEqual(75, result.returncode, result.stderr)
+        self.assertIn(
+            "projects.json",
+            json.loads(result.stdout)["exact_session_refused"],
+        )
+
+    def test_exact_session_charges_the_agent_registry_to_its_budget(self) -> None:
+        self.add_exact_session()
+        self.add_exact_message("exact")
+        write_json(
+            self.root / "agents.json",
+            {
+                "agents": [
+                    {
+                        "id": "codex",
+                        "padding": "x" * inbox_lib.MAX_EXACT_SESSION_BYTES,
+                    }
+                ]
+            },
+        )
+
+        result = self.run_inbox(
+            "--project",
+            "amiga",
+            "--chat",
+            "CHAT-EXACT",
+            "--session",
+            "SESSION-EXACT",
+            "--peek",
+            "--json",
+            env={"LLM_COLLAB_READER_RUNTIME_ID": "pi-exact"},
+        )
+
+        self.assertEqual(75, result.returncode, result.stderr)
+        self.assertIn(
+            "agents.json",
+            json.loads(result.stdout)["exact_session_refused"],
+        )
+
+    def test_exact_session_refuses_an_inactive_record(self) -> None:
+        self.add_exact_session(status="superseded")
+        secret = self.add_exact_message("secret")
+
+        result = self.run_inbox(
+            "--project",
+            "amiga",
+            "--chat",
+            "CHAT-EXACT",
+            "--session",
+            "SESSION-EXACT",
+            "--peek",
+            "--json",
+            env={"LLM_COLLAB_READER_RUNTIME_ID": "pi-exact"},
+        )
+
+        self.assertEqual(75, result.returncode, result.stderr)
+        self.assertEqual(
+            "exact_session_inactive",
+            json.loads(result.stdout)["exact_session_refused"],
+        )
+        self.assertNotIn(secret, result.stdout)
+
+    def test_exact_session_refuses_a_stale_binding_generation(self) -> None:
+        self.add_exact_session(
+            binding_id="binding-exact",
+            binding_generation=3,
+        )
+        binding_path = (
+            self.root
+            / "State"
+            / "session_autobridge"
+            / "bindings"
+            / "amiga"
+            / "CHAT-EXACT"
+            / "codex.json"
+        )
+        binding = json.loads(binding_path.read_text())
+        binding["binding_generation"] = 4
+        write_json(binding_path, binding)
+        secret = self.add_exact_message("secret")
+
+        result = self.run_inbox(
+            "--project",
+            "amiga",
+            "--chat",
+            "CHAT-EXACT",
+            "--session",
+            "SESSION-EXACT",
+            "--peek",
+            "--json",
+            env={"LLM_COLLAB_READER_RUNTIME_ID": "pi-exact"},
+        )
+
+        self.assertEqual(75, result.returncode, result.stderr)
+        self.assertEqual(
+            "exact_binding_generation_mismatch",
+            json.loads(result.stdout)["exact_session_refused"],
+        )
+        self.assertNotIn(secret, result.stdout)
+
+    def test_exact_session_refuses_a_stale_self_target_packet_generation(self) -> None:
+        self.add_exact_session(
+            binding_id="binding-exact",
+            binding_generation=3,
+        )
+        stale = self.add_exact_message(
+            "stale",
+            sender="codex",
+            target_binding_id="binding-exact",
+            target_binding_generation=2,
+        )
+
+        result = self.run_inbox(
+            "--project",
+            "amiga",
+            "--chat",
+            "CHAT-EXACT",
+            "--session",
+            "SESSION-EXACT",
+            "--peek",
+            "--json",
+            env={"LLM_COLLAB_READER_RUNTIME_ID": "pi-exact"},
+        )
+
+        self.assertEqual(75, result.returncode, result.stderr)
+        self.assertEqual(
+            [stale],
+            [
+                refusal["path"]
+                for refusal in json.loads(result.stdout)["repo_scope_refused"]
+            ],
+        )
+
+    def test_exact_session_reports_repo_scope_refusal(self) -> None:
+        self.add_exact_session()
+        refused = self.add_exact_message("refused", repo_targets=["amiga"])
+
+        result = self.run_inbox(
+            "--project",
+            "amiga",
+            "--chat",
+            "CHAT-EXACT",
+            "--session",
+            "SESSION-EXACT",
+            "--repo-target",
+            "llm-collab",
+            "--peek",
+            "--json",
+            env={"LLM_COLLAB_READER_RUNTIME_ID": "pi-exact"},
+        )
+
+        self.assertEqual(75, result.returncode, result.stderr)
+        self.assertEqual(
+            [{"path": refused, "reason": "route_ambiguous"}],
+            json.loads(result.stdout)["repo_scope_refused"],
+        )
+
+    def test_exact_session_refuses_malformed_repo_targets_before_rendering(self) -> None:
+        self.add_exact_session()
+        self.add_exact_message("TAIL-MARKER", repo_targets=[1])
+
+        result = self.run_inbox(
+            "--project",
+            "amiga",
+            "--chat",
+            "CHAT-EXACT",
+            "--session",
+            "SESSION-EXACT",
+            "--peek",
+            env={"LLM_COLLAB_READER_RUNTIME_ID": "pi-exact"},
+        )
+
+        self.assertEqual(75, result.returncode, result.stderr)
+        self.assertIn("malformed exact-session packet repo_targets", result.stderr)
+        self.assertNotIn("TAIL-MARKER", result.stdout)
+
+    def test_exact_session_reuses_complete_repo_target_validation(self) -> None:
+        self.add_exact_session()
+        self.add_exact_message("TAIL-MARKER", repo_targets=[" app "])
+
+        result = self.run_inbox(
+            "--project",
+            "amiga",
+            "--chat",
+            "CHAT-EXACT",
+            "--session",
+            "SESSION-EXACT",
+            "--peek",
+            "--json",
+            env={"LLM_COLLAB_READER_RUNTIME_ID": "pi-exact"},
+        )
+
+        self.assertEqual(75, result.returncode, result.stderr)
+        self.assertIn(
+            "malformed exact-session packet repo_targets",
+            json.loads(result.stdout)["exact_session_refused"],
+        )
+
+    def test_exact_session_does_not_return_another_agents_packet(self) -> None:
+        self.add_exact_session()
+        foreign = self.add_exact_message("foreign", recipient="relay")
+
+        result = self.run_inbox(
+            "--project",
+            "amiga",
+            "--chat",
+            "CHAT-EXACT",
+            "--session",
+            "SESSION-EXACT",
+            "--peek",
+            "--json",
+            env={"LLM_COLLAB_READER_RUNTIME_ID": "pi-exact"},
+        )
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual([], json.loads(result.stdout))
+        self.assertEqual([foreign], self.load_inbox()["unread"])
+
+    def test_exact_session_is_project_independent_and_skips_foreign_target(
+        self,
+    ) -> None:
+        self.add_exact_session(project_id="nuvyr", chat_id="CHAT-NUVYR")
+        exact = self.add_exact_message(
+            "exact",
+            project_id="nuvyr",
+            chat_id="CHAT-NUVYR",
+        )
+        self.add_exact_message(
+            "foreign",
+            project_id="nuvyr",
+            chat_id="CHAT-NUVYR",
+            target_session_id="SESSION-FOREIGN",
+        )
+
+        result = self.run_inbox(
+            "--project",
+            "nuvyr",
+            "--chat",
+            "CHAT-NUVYR",
+            "--session",
+            "SESSION-EXACT",
+            "--peek",
+            "--json",
+            env={"LLM_COLLAB_READER_RUNTIME_ID": "pi-exact"},
+        )
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual(
+            [exact],
+            [message["path"] for message in json.loads(result.stdout)["messages"]],
+        )
+
+    def test_exact_session_is_read_only_and_does_not_gate_activation(self) -> None:
+        self.add_exact_session()
+        path = self.add_exact_message("activation", activation=True)
+
+        result = self.run_inbox(
+            "--project",
+            "amiga",
+            "--chat",
+            "CHAT-EXACT",
+            "--session",
+            "SESSION-EXACT",
+            "--peek",
+            "--json",
+            env={"LLM_COLLAB_READER_RUNTIME_ID": "pi-exact"},
+        )
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        message = json.loads(result.stdout)["messages"][0]
+        self.assertNotIn("activation_gate", message)
+        self.assertEqual([path], self.load_inbox()["unread"])
 
     def test_unscoped_mark_all_fails_without_mutating(self) -> None:
         amiga = self.add_message("AMIGA", project_line="amiga")
