@@ -298,12 +298,16 @@ def is_ax_attended_recovery_target(
     has an ax_app, or an attended Computer-Use intervention when it does not
     (Antigravity). This supersedes human-relay routing for flagged targets: the
     operator is never the routine relay for an agent Codex can supervise."""
-    profile = ax_app_profile(recipient_agent.get("activation", {}).get("ax_app"))
+    activation = recipient_agent.get("activation", {})
+    profile = ax_app_profile(activation.get("ax_app"))
     return (
         not is_codex_self_target(sender_id, recipient_id)
         and recipient_id != "operator"
         and not is_watcher_only_target(recipient_id)
-        and profile in {None, "codex", "zcode"}
+        and (
+            ("ax_app" not in activation and profile is None)
+            or profile in {"codex", "zcode"}
+        )
         and ax_attended_only(recipient_agent)
     )
 

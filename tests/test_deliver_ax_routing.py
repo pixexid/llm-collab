@@ -179,24 +179,28 @@ class AxAttendedRecoveryRoutingTest(unittest.TestCase):
             )
         )
 
-    def test_unknown_app_cannot_route_to_routine_or_attended_ax(self) -> None:
-        agent = {
-            "id": "custom",
-            "activation": {
-                "type": "cli_session",
-                "watcher_enabled": True,
-                "ax_app": "Unknown Electron App",
-                "ax_attended_only": True,
-            },
-        }
-        self.assertFalse(
-            deliver.is_ax_doorbell_target(agent, "custom", sender_id="codex")
-        )
-        self.assertFalse(
-            deliver.is_ax_attended_recovery_target(
-                agent, "custom", sender_id="codex"
-            )
-        )
+    def test_unsupported_app_cannot_route_to_routine_or_attended_ax(self) -> None:
+        for ax_app in ("Unknown Electron App", "", 7):
+            with self.subTest(ax_app=ax_app):
+                agent = {
+                    "id": "custom",
+                    "activation": {
+                        "type": "cli_session",
+                        "watcher_enabled": True,
+                        "ax_app": ax_app,
+                        "ax_attended_only": True,
+                    },
+                }
+                self.assertFalse(
+                    deliver.is_ax_doorbell_target(
+                        agent, "custom", sender_id="codex"
+                    )
+                )
+                self.assertFalse(
+                    deliver.is_ax_attended_recovery_target(
+                        agent, "custom", sender_id="codex"
+                    )
+                )
 
     def test_attended_only_target_is_not_routine_doorbell(self) -> None:
         self.assertTrue(deliver.ax_attended_only(self.ZCODE))
