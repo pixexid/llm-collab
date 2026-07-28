@@ -657,7 +657,7 @@ def main():
         and not ax_attended_recovery_required
         and not is_watcher_only_target(args.recipient)
         and ax_app_profile(recipient_agent.get("activation", {}).get("ax_app"))
-        != "claude"
+        in {None, "codex", "zcode"}
         and is_human_relay(recipient_agent)
     )
     activation_unavailable = (
