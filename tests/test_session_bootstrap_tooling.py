@@ -109,6 +109,28 @@ class ToolingCurrencyTest(unittest.TestCase):
         self.assertEqual(session_bootstrap.TOOLING_STALE, result["state"])
         self.assertFalse(result["fetched"])
 
+    def test_an_ancestry_command_error_is_unknown_not_stale(self) -> None:
+        """git reserves exit 1 for "not an ancestor". Anything else — 128 on a
+        broken or partial repository — means the question was never answered, and
+        folding it into `stale` blocks bootstrap on a verdict git did not give.
+        """
+        with patch.object(
+            session_bootstrap, "_git", side_effect=git_responses(is_ancestor=128)
+        ):
+            result = session_bootstrap.tooling_currency()
+        self.assertEqual(session_bootstrap.TOOLING_UNKNOWN, result["state"])
+        self.assertNotIn("commits_behind", result)
+        self.assertIn("128", result["reason"])
+
+    def test_exit_one_is_still_stale(self) -> None:
+        """The sibling of the case above: separating error from answer must not
+        cost the one exit code that is a real negative answer."""
+        with patch.object(
+            session_bootstrap, "_git", side_effect=git_responses(is_ancestor=1, behind="24")
+        ):
+            result = session_bootstrap.tooling_currency()
+        self.assertEqual(session_bootstrap.TOOLING_STALE, result["state"])
+
     def test_a_git_failure_is_unknown_rather_than_an_exception(self) -> None:
         with patch.object(session_bootstrap, "_git", return_value=None):
             result = session_bootstrap.tooling_currency()
@@ -182,6 +204,22 @@ class StaleAnnouncementTest(unittest.TestCase):
     def test_an_unreachable_origin_is_disclosed_in_the_banner(self) -> None:
         stale_offline = {**StaleBootstrapRefusesTest.STALE, "fetched": False}
         self.assertIn("origin unreachable", self.announce(stale_offline, allowed=False))
+
+    def test_an_offline_pass_is_not_announced_like_a_fetched_pass(self) -> None:
+        """A `current` computed against a cached ref carries less assurance than one
+        computed against the remote. Printing them identically is how a checkout
+        proceeds unknowingly behind main — the failure this gate exists to stop.
+        """
+        online = {"state": "current", "head": "e421f90", "origin_main": "e421f90", "fetched": True}
+        offline = {**online, "fetched": False}
+
+        online_text = self.announce(online, allowed=False)
+        offline_text = self.announce(offline, allowed=False)
+
+        self.assertNotEqual(online_text, offline_text)
+        self.assertIn("last fetched", offline_text)
+        self.assertIn("may have moved", offline_text)
+        self.assertNotIn("may have moved", online_text)
 
     def test_the_override_banner_says_results_are_bound_to_old_tooling(self) -> None:
         text = self.announce(StaleBootstrapRefusesTest.STALE, allowed=True)

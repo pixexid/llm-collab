@@ -103,10 +103,25 @@ def tooling_currency() -> dict:
     if ancestor is None:
         return {"state": TOOLING_UNKNOWN, "reason": "ancestry check failed", "fetched": fetch_ok}
 
+    # git reserves exit 1 for "not an ancestor" and uses other codes (128 and up)
+    # for "the question could not be answered". Folding those together would block
+    # bootstrap on a broken repository while claiming it is behind — an answer the
+    # command never gave.
+    if ancestor.returncode == 0:
+        state = TOOLING_CURRENT
+    elif ancestor.returncode == 1:
+        state = TOOLING_STALE
+    else:
+        return {
+            "state": TOOLING_UNKNOWN,
+            "reason": f"ancestry check failed (git exit {ancestor.returncode})",
+            "fetched": fetch_ok,
+        }
+
     head = _git("rev-parse", "--short", "HEAD")
     branch = _git("rev-parse", "--abbrev-ref", "HEAD")
     detail = {
-        "state": TOOLING_CURRENT if ancestor.returncode == 0 else TOOLING_STALE,
+        "state": state,
         "head": head.stdout.strip() if head and head.returncode == 0 else "unknown",
         "branch": branch.stdout.strip() if branch and branch.returncode == 0 else "unknown",
         "origin_main": base.stdout.strip()[:7],
@@ -122,7 +137,17 @@ def tooling_currency() -> dict:
 def announce_tooling(currency: dict, *, allowed: bool) -> None:
     state = currency["state"]
     if state == TOOLING_CURRENT:
-        print(f"[tooling] checkout {currency['head']} has origin/main — current")
+        if currency.get("fetched"):
+            print(f"[tooling] checkout {currency['head']} has origin/main — current")
+        else:
+            # A pass computed against a cached ref is not the same assurance as one
+            # computed against the remote, and printing them identically is how a
+            # checkout proceeds unknowingly behind main again.
+            print(
+                f"[tooling] checkout {currency['head']} has the last fetched "
+                f"origin/main ({currency['origin_main']}) — current as of that ref"
+            )
+            print("[tooling] origin was unreachable, so remote main may have moved since")
         return
     if state == TOOLING_UNKNOWN:
         print(f"[tooling] currency UNKNOWN: {currency.get('reason')}")
