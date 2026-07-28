@@ -81,8 +81,38 @@ python bin/deliver.py --project demo-app --chat CHAT-2F8529C5   --from codex --t
 python bin/session_bootstrap.py --agent <agent_id>
 ```
 
-Starts your inbox watcher and prints your identity, current project, and recent
-mail. Run it once per session, before anything else.
+Prints your identity, current project, recent mail, and the legacy agent-wide
+watcher status. Run it once per session, before anything else.
+
+An agent-wide watcher is not enough for an interactive collab worker: it cannot
+attach an event to one native session and can observe sibling sessions. Before
+the first work packet, install and prove one event watcher owned by the exact
+binding registered in step 0.
+
+For a Claude Desktop task, run this as a background task in that same native
+session:
+
+```bash
+export LLM_COLLAB_READER_RUNTIME_ID=<native-runtime-session-id>
+python bin/watch_inbox.py \
+  --me <agent_id> --project <project_id> --chat <CHAT-ID> \
+  --session <SESSION-ID> --repo-target <repo-id> --json
+```
+
+For Glim, Relay, or Kimi on Pi, install `pi-event-monitor`'s `/monitor-watch`
+on the exact pointer path stored in that session's runtime command. Do not add a
+shell poller beside the native monitor.
+
+Setup is complete only after a disposable packet addressed to the binding
+produces an event in that native session and a packet addressed to a sibling
+session does not. A helper with Computer Use or AX may install and validate this
+watcher once; after the proof, stop UI steering and let the worker's event
+watcher own pickup. A new, forked, or replaced native session needs a new
+watcher, and the old watcher must stop.
+
+Codex is the current exception: it has no native session event watcher. When it
+is not polling its inbox, use the attended AX wake described in
+`session-autobridge-runbook.md`.
 
 ## 2. Know your three coordinates
 

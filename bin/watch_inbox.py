@@ -38,9 +38,16 @@ from _helpers import (
 )
 from _session_autobridge import (
     SESSIONS_DIR,
+    active_read_budget,
     dispatch_session,
     load_session,
     repo_scope_matches,
+)
+from inbox import (
+    MAX_EXACT_SESSION_BYTES,
+    ExactReadBudget,
+    exact_read_messages,
+    exact_read_session,
 )
 
 
@@ -48,6 +55,12 @@ def parse_args():
     p = argparse.ArgumentParser(description="Background inbox watcher.")
     p.add_argument("--me", required=True, help="Agent ID to watch for")
     p.add_argument("--project", default=None, help="Filter by exact project_id")
+    p.add_argument("--chat", default=None, help="Filter by exact chat_id")
+    p.add_argument(
+        "--session",
+        default=None,
+        help="Watch one exact llm-collab session; requires --project and --chat",
+    )
     p.add_argument("--poll-seconds", type=int, default=None, help="Poll interval (default: from config)")
     p.add_argument("--max-polls", type=int, default=0, help="Stop after N polls; 0 = forever")
     p.add_argument("--notify", action="store_true", help="Send desktop notification on new messages")
@@ -63,6 +76,14 @@ def parse_args():
     args = p.parse_args()
     if args.repo_target is not None and args.project is None:
         p.error("--repo-target requires --project <id>")
+    if args.chat is not None and args.session is None:
+        p.error("--chat requires --session")
+    if args.session is not None:
+        if not args.session.strip() or args.session != args.session.strip():
+            p.error("--session requires a non-empty session id")
+        if not args.project or not args.chat:
+            p.error("--session requires --project and --chat")
+        args.packet = None
     return args
 
 
@@ -91,6 +112,14 @@ def emit(msg: dict, json_output: bool) -> None:
 
 def utc_now_str() -> str:
     return datetime.utcnow().isoformat(timespec="seconds")
+
+
+def exact_session_messages(args) -> list[dict]:
+    budget = ExactReadBudget(MAX_EXACT_SESSION_BYTES)
+    with active_read_budget(budget):
+        session = exact_read_session(args, budget)
+        messages, _ = exact_read_messages(args, session, budget)
+    return messages
 
 
 def autobridge_session_ids(agent_id: str, project_id: str | None = None) -> list[str]:
@@ -249,18 +278,32 @@ def main():
     seen_paths: set[str] = set()
 
     if args.skip_existing:
-        if inbox_path.exists():
+        if args.session:
+            seen_paths = {
+                message["path"] for message in exact_session_messages(args)
+            }
+        elif inbox_path.exists():
             data = load_agent_inbox(args.me)
             seen_paths = set(data.get("unread", []))
 
     polls = 0
     while True:
         try:
-            if inbox_path.exists():
+            if args.session:
+                exact_messages = exact_session_messages(args)
+                unread = {message["path"] for message in exact_messages}
+                messages = {
+                    message["path"]: message for message in exact_messages
+                }
+            elif inbox_path.exists():
                 data = load_agent_inbox(args.me)
                 unread = set(data.get("unread", []))
-                new_msgs = unread - seen_paths
                 messages = {message["path"]: message for message in get_unread_messages(args.me)}
+            else:
+                unread = set()
+                messages = {}
+            if unread:
+                new_msgs = unread - seen_paths
                 visible_new_msgs: list[str] = []
                 for path in sorted(new_msgs):
                     message = messages.get(path, {"frontmatter": {}})
@@ -295,7 +338,7 @@ def main():
                             f"llm-collab: {args.me}",
                             f"New message: {Path(path).stem}",
                         )
-                if unread and not args.no_autobridge:
+                if not args.session and not args.no_autobridge:
                     consumed_paths = sorted(
                         set(
                             dispatch_autobridge(
@@ -310,6 +353,8 @@ def main():
         except Exception as e:
             ts_str = utc_now_str()
             emit({"ts": ts_str, "event": "error", "detail": str(e)}, args.json_output)
+            if args.session:
+                sys.exit(75)
 
         polls += 1
         if args.max_polls and polls >= args.max_polls:

@@ -65,26 +65,30 @@ remove it and rely on the doorbell + mailbox-drain self-heal.
   visible in `Chats/`.
 - Do not target an active operator thread for retry tests.
 - Treat Claude desktop as a human-visible UI, not as a
-  `session_autobridge.py` runtime target. **Claude has exactly one wake path:
-  the durable collab packet, picked up by the app's own background inbox
-  watcher.** The poller leaves the activation unclaimed for that watcher. Do not
-  claim a PM2 watcher, CLI resume, or filesystem write reached the app.
+  `session_autobridge.py` runtime target. **Claude has exactly one routine wake
+  path: the durable collab packet, picked up by an exact-session background
+  inbox watcher owned by that Claude task.** An agent-wide PM2 watcher is not
+  that proof. The poller leaves the activation unclaimed for the native watcher.
+  Do not claim a PM2 watcher, CLI resume, or filesystem write reached the app.
 - A binding whose canonical `agent_id` is `claude` must use `notify` mode.
   Only that identity suppresses `claude -p` / `claude --resume`; its background
   inbox watcher owns pickup.
-- Workers must not synthesize a second wake path for Claude: no AX ring, no
-  `claude --resume` or `claude -p`, no app reload or restart, no Computer Use
-  typing, and no replacement thread or task. These are not attended-recovery
-  escape hatches — a worker has no condition under which it may use them.
+- Workers must not synthesize a second routine wake path for Claude: no AX
+  ring, `claude --resume`, `claude -p`, app reload, replacement thread, or
+  repeated Computer Use typing. One attended Computer Use or AX interaction is
+  allowed only to install or repair the exact-session watcher and prove a
+  disposable packet wakes that task. Stop UI steering immediately after that
+  proof.
 - For Claude-owned collaboration lanes, inspect the visible Claude app before
   treating inbox or queue state as final: if Claude is visibly asking a related
   question, waiting for direction, or reporting Read/Agent/tool errors, that is
   diagnosis, and the answer goes back as a durable packet like any other.
 - If Claude is stale, idle with no durable progress, or repeatedly erroring, its
-  background watcher is not picking up. Preserve the durable packet, report the
-  watcher failure with the observed blocker, and stop for repair or operator
-  attention. Reopening, restarting, or re-threading Claude is an operator action
-  on an unhealthy watcher, never a worker's way around one.
+  exact-session watcher is not picking up. Preserve the durable packet and
+  repair or reinstall that watcher from an attended worker, then prove pickup
+  with one disposable exact-session packet. Escalate to the operator only when
+  the watcher cannot be repaired without credentials, an irreversible action,
+  or a scope decision.
 
 ## Activate A Session
 

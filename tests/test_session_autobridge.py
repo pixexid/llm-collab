@@ -6283,6 +6283,114 @@ class SessionAutobridgeTest(unittest.TestCase):
         )
         notify.assert_called_once()
 
+    def test_watcher_exact_session_emits_only_that_sessions_packets(self):
+        root = self.make_workspace()
+        self.add_agent(
+            root,
+            {
+                "id": "claude",
+                "display_name": "Claude",
+                "activation": {"type": "cli_session", "watcher_enabled": True},
+            },
+        )
+        self.run_cli(
+            root,
+            "register",
+            "--session",
+            "SESSION-CLAUDE-A",
+            "--agent",
+            "claude",
+            "--project",
+            "amiga",
+            "--chat",
+            "CHAT-CLAUDE-A",
+            "--repo-target",
+            "app",
+            "--mode",
+            "notify",
+            "--runtime-family",
+            "claude_app",
+            "--runtime-session-id",
+            "runtime-claude-a",
+            "--runtime-session-source",
+            "test_fixture",
+        )
+        packet_a = self.add_message(
+            root,
+            agent_id="claude",
+            chat_id="CHAT-CLAUDE-A",
+            project_id="amiga",
+            title="For A",
+            target_session_id="runtime-claude-a",
+            repo_targets=["app"],
+            packet_slug="for-a",
+        )
+        self.add_message(
+            root,
+            agent_id="claude",
+            chat_id="CHAT-CLAUDE-A",
+            project_id="amiga",
+            title="For B",
+            target_session_id="runtime-claude-b",
+            repo_targets=["app"],
+            packet_slug="for-b",
+        )
+
+        command = [
+            sys.executable,
+            str(WATCH_INBOX_SCRIPT),
+            "--me",
+            "claude",
+            "--project",
+            "amiga",
+            "--chat",
+            "CHAT-CLAUDE-A",
+            "--session",
+            "SESSION-CLAUDE-A",
+            "--repo-target",
+            "app",
+            "--max-polls",
+            "1",
+            "--json",
+        ]
+        result = subprocess.run(
+            command,
+            cwd=root,
+            text=True,
+            capture_output=True,
+            env={
+                **self.subprocess_env(root),
+                "LLM_COLLAB_READER_RUNTIME_ID": "runtime-claude-a",
+            },
+            check=True,
+        )
+
+        events = [json.loads(line) for line in result.stdout.splitlines()]
+        self.assertEqual(
+            [packet_a],
+            [event["detail"] for event in events if event["event"] == "new_message"],
+            result.stdout + result.stderr,
+        )
+        self.assertFalse(
+            any(event["event"].startswith("autobridge_") for event in events)
+        )
+        self.assertEqual(
+            2,
+            len(json.loads((root / "agents" / "claude" / "inbox.json").read_text())["unread"]),
+        )
+        stale = subprocess.run(
+            command,
+            cwd=root,
+            text=True,
+            capture_output=True,
+            env={
+                **self.subprocess_env(root),
+                "LLM_COLLAB_READER_RUNTIME_ID": "runtime-claude-b",
+            },
+        )
+        self.assertEqual(75, stale.returncode)
+        self.assertIn("exact_session_runtime_mismatch", stale.stdout)
+
     def test_register_persists_explicit_repo_subscription(self):
         root = self.make_workspace()
         self.add_agent(
