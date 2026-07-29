@@ -104,24 +104,73 @@ wait for the command to exit and does not need re-arming after a turn. A normal
 background Bash task is the wrong native shape: it only surfaces completion, so
 an infinite watcher can log packets without waking the task.
 
-For Glim, Relay, or Kimi on Pi, install `pi-event-monitor`'s `/monitor-watch`
-on that session's durable event log,
-`State/session_autobridge/events/<SESSION-ID>.jsonl` — delivery appends one synced
-`pi_inbox_wake` event there, never a mutable pointer file. On a wake, drain the
-durable queue rather than the event: `bin/inbox.py --me <agent-id> --session
-<SESSION-ID> --project <id> --chat <CHAT-ID> --acknowledge` reads every unread
-packet bound to that exact session, prints their bodies, and marks exactly that
-set read. A coalesced wake is harmless —
-the unread queue, not the event count, is the work. Do not add a shell poller
-beside the native monitor.
+### Pi workers
 
-Setup is complete only after a disposable packet addressed to the binding
-starts a turn in that native session while idle, another packet surfaces during
-a running turn, and a packet addressed to a sibling session produces no event.
-A helper with Computer Use or AX may install and validate this watcher once;
-after the proof, stop UI steering and let the worker's event watcher own pickup.
-A new, forked, or replaced native session needs a new watcher, and the old
-watcher must stop.
+A Pi collaboration session has one scope:
+
+```text
+project + chat + agent + native Pi session + repository
+```
+
+Use a different native Pi session for another project or chat. The logical
+agent ID may be reused, but its native session and binding may not. This keeps
+project context isolated and lets several Pi workers run side by side.
+
+Register the exact native Pi session with `session_autobridge.py register`,
+using `--runtime-family pi`, `--status active`, and the exact project, chat, and
+repository. Nobody sends native IDs to peers: registration is the shared
+address book. Senders use only `--project`, `--chat`, `--to`, and
+`--repo-targets`; `deliver.py` resolves the target binding.
+
+Registration is not complete until `show` and `show-binding` agree on all of:
+
+- native runtime session ID;
+- canonical binding ID and generation;
+- endpoint ID;
+- project, chat, agent, and repository.
+
+Missing canonical fields are a failed setup, not a pull-only success. Do not
+install a monitor or claim automatic wake until the binding is complete. Pinned
+provider, model, and thinking-level capture plus a pre-wake drift check are
+required before this setup can claim fingerprint enforcement; the current
+runtime does not enforce them yet.
+
+The exact-session event log contains diagnostics as well as wake events, so a
+plain `/monitor-watch` on the file is wrong: refusals and lease diagnostics
+would wake the worker repeatedly. Use `pi-event-monitor`'s native shell monitor
+to emit only `pi_inbox_wake` records:
+
+```text
+monitor_start(
+  description = "llm-collab inbox for <project>/<chat>/<agent>",
+  command = "tail -n 0 -F '<absolute-workspace>/State/session_autobridge/events/<SESSION-ID>.jsonl' | jq --unbuffered -c 'select(.event == \"pi_inbox_wake\")'",
+  persistent = true,
+  instruction = "Ignore the event body. Drain the exact llm-collab inbox now with: LLM_COLLAB_READER_RUNTIME_ID=<native-pi-session-id> python '<absolute-workspace>/bin/inbox.py' --me <agent-id> --session <SESSION-ID> --project <project-id> --chat <CHAT-ID> --repo-target <repo-id> --acknowledge"
+)
+```
+
+This is an event-driven Pi monitor, not a polling loop. It watches one exact
+session log and filters before waking the model. The durable packet and unread
+inbox remain the only work authority; the monitor line is only a prompt to
+look. Duplicate or coalesced wake lines are harmless because the inbox command
+drains the exact unread set and acknowledges exactly what it printed.
+
+Before starting the monitor, run its exact `inbox.py --acknowledge` command once.
+`tail -n 0` deliberately ignores old log lines, so this first drain picks up
+packets queued while the monitor was down.
+
+Setup is complete only after disposable probes prove:
+
+1. an exact packet wakes this Pi session while idle and is acknowledged;
+2. another exact packet surfaces during a running turn;
+3. a sibling project/chat/session packet produces no wake here;
+4. a diagnostic event produces no wake here.
+
+A helper with Computer Use may identify the current native Pi session, install
+the monitor, and run these probes once. After proof, stop UI steering. Pi owns
+pickup through its monitor. A session switch, fork, reload, replacement, or app
+restart stops the old monitor and makes automatic wake unavailable until that
+new native session is registered and its monitor is proven.
 
 Codex is the current exception: it has no native session event watcher. When it
 is not polling its inbox, use the attended AX wake described in
