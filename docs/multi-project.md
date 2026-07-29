@@ -61,9 +61,11 @@ findings nobody acts on.
 2. Initialize `{project_state_root}/{project_id}/` through queue reconciliation,
    then add a project README that records the coordination chat, roles, and
    routing policy.
-3. Add product-repository instructions such as `AGENTS.md`, worker-specific
-   files, and a collaboration skill that bind agents to the exact checkout and
-   `--project <id>`.
+3. Add product-repository instructions such as `AGENTS.md` and worker-specific
+   files. For skill-capable agents, point onboarding at the in-repo
+   `skills/llm-collab-join/SKILL.md`; keep project-local `CLAUDE.md` or generic
+   markdown only as thin fallback pointers, and keep the exact checkout /
+   `--project <id>` binding in the product repo's own instructions.
 4. Run that project's inbox, task, and queue checks. Sync a representative task
    contract and confirm that no other project's defaults appear.
 
@@ -209,25 +211,10 @@ to manage those files.
 
 ## Sending project-scoped messages
 
-```bash
-# Scoped to a project
-python bin/deliver.py \
-  --chat last \
-  --from orchestrator \
-  --to worker \
-  --title "Implement checkout flow" \
-  --project my-app \
-  --repo-targets app,api \
-  --path-targets "src/routes/checkout.ts,src/types/order.ts"
-
-# Meta/planning work still attaches to its owning registered project
-python bin/deliver.py \
-  --chat last \
-  --from orchestrator \
-  --to researcher \
-  --project my-app \
-  --title "Research caching strategies"
-```
+Use `skills/llm-collab-join/SKILL.md` and
+`docs/workflows/collab-thread-quickstart.md` for current durable-mailbox send
+examples. This guide does not duplicate `deliver.py` command families because
+chat selection and repo-target rules are contract-sensitive.
 
 ### Filtering inbox by project
 
@@ -333,23 +320,11 @@ python bin/inbox.py --me orchestrator
 # Focus on my-app
 python bin/task_board.py --project my-app --status in_progress
 python bin/inbox.py --me orchestrator --project my-app
-
-# Delegate a my-app task to worker
-python bin/deliver.py \
-  --chat last \
-  --from orchestrator \
-  --to worker \
-  --project my-app \
-  --title "Fix the broken auth middleware"
-
-# Delegate a docs task to researcher
-python bin/deliver.py \
-  --chat last \
-  --from orchestrator \
-  --to researcher \
-  --project docs \
-  --title "Research headless CMS options"
 ```
+
+For project-scoped delegation examples, use the join skill plus
+`docs/workflows/collab-thread-quickstart.md` instead of copied `deliver.py`
+walkthroughs here.
 
 ---
 

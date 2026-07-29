@@ -77,7 +77,7 @@ Init generates:
 - `projects.json` (if projects added)
 - `agents/{id}/identity.md` for each LLM agent
 - `agents/{id}/memory.md` for each LLM agent
-- `agents/{id}/inbox.json` for each LLM agent
+- a per-agent inbox pointer file for each LLM agent
 
 Project-specific overrides can live under:
 
@@ -93,21 +93,27 @@ Existing workspaces are not rewritten by a code upgrade: add the key manually
 to each existing local `projects.json` entry, choosing a known enabled agent,
 before attempting any new `review -> done` transition.
 
-## Step 3: Generate memory snippets
+## Step 3: Point agents at the join skill
 
-Make each LLM agent aware of the workspace by generating a memory snippet.
+The primary agent entry path is the in-repo join skill:
+
+- `skills/llm-collab-join/SKILL.md`
+
+For skill-capable runtimes, generate a thin memory pointer to that skill plus
+bootstrap. Keep generic markdown and project `CLAUDE.md` only as thin fallback
+pointers for runtimes without installable skills.
 
 ```bash
-# Claude Code: writes directly to ~/.claude/projects/.../memory/
+# Claude Code: writes a thin pointer to ~/.claude/projects/.../memory/
 python bin/init_agent_memory.py --agent claude --target claude-code --write
 
-# Codex: prints snippet to copy into Codex memory
+# Codex: prints a thin pointer to copy into Codex memory
 python bin/init_agent_memory.py --agent codex --target codex
 
-# Any LLM: universal markdown block
+# Any LLM: universal markdown fallback pointer
 python bin/init_agent_memory.py --agent orchestrator --target generic
 
-# Inject into a project's CLAUDE.md
+# Inject a thin fallback pointer into a project's CLAUDE.md
 python bin/init_agent_memory.py --agent claude --target claude-md \
   --project-path ~/Projects/my-app --write
 ```
@@ -140,109 +146,22 @@ python bin/pm2_watchers.py status --all
 python bin/pm2_watchers.py logs --agent orchestrator
 ```
 
-Watchers poll `agents/{id}/inbox.json` every N seconds and send desktop notifications when new messages arrive.
+Watchers provide background wake behavior. Treat `skills/llm-collab-join/SKILL.md`
+and the canonical workflow docs as the current authority for mailbox, wake, and
+handoff behavior rather than copying inbox or deliver command families here.
 
-## Step 6: Create your first chat and task
+## Step 6: Start your first collaboration lane
 
-```bash
-# Create a chat thread
-python bin/new_chat.py --title "Sprint planning" --project my-app
+Use the initial project setup commands above, then move to the canonical
+workflow docs for lane operation:
 
-# Create a task
-python bin/new_task.py \
-  --title "Implement user authentication" \
-  --created-by orchestrator \
-  --owner worker \
-  --project my-app \
-  --priority high
+- `skills/llm-collab-join/SKILL.md`
+- `docs/workflows/collab-thread-quickstart.md`
+- `docs/workflows/task-intake-and-delegation.md`
+- `docs/workflows/session-startup.md`
 
-# Send a message
-echo "Please implement the auth flow per the spec in /docs/auth.md" | \
-python bin/deliver.py \
-  --chat last \
-  --from orchestrator \
-  --to worker \
-  --project my-app \
-  --title "Auth implementation task"
-```
-
-For non-Claude `cli_session` recipients with a supported AX-readable
-`activation.ax_app` profile, `deliver.py` prints an AX doorbell command; run
-that instead of asking the operator to relay. Canonical Claude uses its
-durable packet and background inbox watcher only. An `ax_attended_only: true`
-recipient (opaque
-composer) instead reports `ax_attended_recovery_required` and routes control to
-Codex-attended recovery; never ring it routinely. Terminal-only
-CLI sessions require a dispatchable runtime session and otherwise report
-`activation_unavailable`. The first durable packet to any non-human recipient
-includes the collaboration onboarding contract (read docs + update memory
-files) before awareness is recorded. True `human_relay` recipients also receive
-that setup in the printed handoff prompt. Later deliveries use short “check
-inbox” prompts once awareness is tracked locally.
-
-## Daily workflow
-
-### For an orchestrator agent
-
-```bash
-# Start of session
-python bin/session_bootstrap.py --agent orchestrator
-
-# Review inbox
-python bin/inbox.py --me orchestrator
-
-# Check task board
-python bin/task_board.py --project my-app
-
-# Delegate work
-python bin/deliver.py --chat last --from orchestrator --to worker --project my-app --title "..."
-
-# Update task status
-python bin/claim_task.py --task TASK-xxx --owner orchestrator --status review
-```
-
-### For a worker agent
-
-```bash
-# Start of session
-python bin/session_bootstrap.py --agent worker
-
-# Read inbox (full content)
-python bin/inbox.py --me worker
-
-# Claim task after the orchestrator provisions the lane
-python bin/claim_task.py --task TASK-xxx --owner worker --status in_progress
-
-# ... do the work ...
-
-# Submit for independent review
-python bin/claim_task.py --task TASK-xxx --owner worker --status review
-
-# After acceptance, the configured release-gate agent records closure
-python bin/claim_task.py --task TASK-xxx --owner worker --status done \
-  --released-by <release-gate-agent> \
-  --release-evidence \
-  '{"merge_sha":"<full-40-hex-merge-sha>","verdict":"success","run_id":123456}'
-python bin/deliver.py --chat last --from worker --to orchestrator \
-  --project my-app \
-  --title "Auth implementation complete" \
-  --related-task TASK-xxx
-```
-
-### For a human-relay agent
-
-The human operator receives the handoff prompt automatically when a message is sent to this agent. They paste it into a new LLM session:
-
-```
-You are Worker (worker). Read only messages addressed to 'worker'.
-
-Bootstrap your session by running:
-  python /path/to/_collab/bin/session_bootstrap.py --agent worker
-
-Then read your inbox and execute your latest task.
-```
-
-The LLM runs the bootstrap command and immediately sees its identity and unread messages.
+Those sources own the current send, inbox, task-claim, and human-relay
+procedures. This getting-started guide does not duplicate them.
 
 ## Troubleshooting
 
@@ -262,7 +181,7 @@ Check `project_state_root` in `collab.config.json`. Real queues should live at `
 Check `agents.json` — the ID must match exactly (case-sensitive).
 
 **Messages not appearing in inbox**
-Ensure `deliver.py` completed without errors. Check `agents/{id}/inbox.json` directly.
+Return to `skills/llm-collab-join/SKILL.md` and `docs/workflows/collab-thread-quickstart.md` for the current mailbox and wake path instead of inspecting runtime pointer files directly.
 
 **PM2 watchers not starting**
 Install PM2: `npm install -g pm2`. Check logs: `python bin/pm2_watchers.py logs --agent <id>`.
