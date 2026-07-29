@@ -74,7 +74,9 @@ RETRIGGER_NOTE = (
     "Re-triggered once as the single exempted recovery: the initial request "
     "for this exact head is repeated verbatim above."
 )
-REQUEST_HEAD_RE = re.compile(r"`([0-9a-f]{40})`")
+REQUEST_HEAD_RE = re.compile(
+    r"at\s+exact\s+head\s+`([0-9a-f]{40})`", re.IGNORECASE
+)
 # Carried by every initial request so the reviewer audits the adversaries the
 # lane actually defends against, instead of inventing ones it does not.
 # Repository visibility is sourced from GitHub per invocation — never
@@ -337,7 +339,13 @@ def local_head() -> str:
 
 
 def prior_requests(bodies: list[str], sha: str) -> list[str]:
-    return [b for b in bodies if b.startswith(REQUEST_MARKER) and sha in b]
+    return [
+        body
+        for body in bodies
+        if body.startswith(REQUEST_MARKER)
+        and (match := REQUEST_HEAD_RE.search(body))
+        and match.group(1) == sha
+    ]
 
 
 def prior_request_heads(bodies: list[str]) -> list[str]:
@@ -536,6 +544,11 @@ def main(argv: list[str] | None = None) -> int:
             )
         heads = prior_request_heads(bodies)
         delta_base = next((h for h in reversed(heads) if h != sha), None)
+        if args.settled and delta_base is None:
+            raise SystemExit(
+                "error: --settled requires a prior requested head whose "
+                "adjudication can support the exclusion"
+            )
         body = build_request_body(
             args.focus,
             sha,
