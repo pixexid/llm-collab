@@ -925,7 +925,13 @@ class LifecycleTest(unittest.TestCase):
         # Pi registration (#378) drives reserve/consume to mint the canonical
         # binding, so this exact file references the lifecycle. Any OTHER runtime
         # path importing it is still an offender.
-        allowed = {Path("bin/_session_autobridge.py")}
+        allowed = {
+            Path("bin/_session_autobridge.py"),
+            # Worker projection (#396) composes the read-only operator
+            # inspection seam for `worker show/list`; it is query-only and
+            # never calls the provider or a mutation path.
+            Path("llm_collab/worker.py"),
+        }
         offenders = []
         for checked in (root / "bin", root / "scripts", root / "llm_collab"):
             for path in checked.rglob("*.py"):
