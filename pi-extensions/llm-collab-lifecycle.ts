@@ -1,7 +1,11 @@
+import { realpathSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const cli = resolve(dirname(fileURLToPath(import.meta.url)), "../bin/llm-collab");
+export const resolveCli = (moduleUrl) =>
+	resolve(dirname(realpathSync(fileURLToPath(moduleUrl))), "../bin/llm-collab");
+
+const cli = resolveCli(import.meta.url);
 
 export default function (pi) {
 	let nativeSessionId;

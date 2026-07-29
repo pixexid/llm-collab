@@ -550,7 +550,7 @@ def register_session(args) -> dict:
         if args.supersedes_session and str(args.supersedes_session) != str(args.session):
             retire_superseded_session(str(args.supersedes_session), payload)
         binding = update_binding_from_session(payload, existing=existing_binding)
-        save_session(payload, prepared=prepared)
+        save_session(payload, prepared=prepared, allow_reactivation=True)
         if binding is not None:
             payload["binding"] = binding
         return payload
@@ -639,7 +639,7 @@ def register_session(args) -> dict:
     if retirement is not None:
         commit_superseded_retirement(*retirement)
     binding = update_binding_from_session(payload, prepared=prepared_binding)
-    save_session(payload, prepared=prepared)
+    save_session(payload, prepared=prepared, allow_reactivation=True)
     if binding is not None:
         payload["binding"] = binding
     return payload

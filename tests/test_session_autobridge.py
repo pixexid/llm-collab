@@ -6994,10 +6994,48 @@ class SessionAutobridgeTest(unittest.TestCase):
             )["deactivated_sessions"],
         )
 
-    def test_pi_lifecycle_extension_deactivates_on_start_and_shutdown(self):
+        stale = {
+            "session_id": "SESSION-PI-A",
+            "agent_id": "glmpi",
+            "status": "active",
+            "runtime": {"family": "pi", "session_id": "native-a"},
+            "processed_messages": ["late"],
+        }
+        with patch.object(
+            session_autobridge_lib, "SESSIONS_DIR", sessions
+        ), patch.object(
+            session_autobridge_lib,
+            "SESSION_WRITE_LOCK",
+            root / "State" / "session_autobridge" / ".session-write.lock",
+        ), self.assertRaisesRegex(
+            ValueError, "refusing to resurrect stopped session"
+        ):
+            session_autobridge_lib.save_session(stale)
+        self.assertEqual(
+            "stopped", json.loads((sessions / "SESSION-PI-A.json").read_text())["status"]
+        )
+        with patch.object(
+            session_autobridge_lib, "SESSIONS_DIR", sessions
+        ), patch.object(
+            session_autobridge_lib,
+            "SESSION_WRITE_LOCK",
+            root / "State" / "session_autobridge" / ".session-write.lock",
+        ):
+            session_autobridge_lib.save_session(stale, allow_reactivation=True)
+        self.assertEqual(
+            "active", json.loads((sessions / "SESSION-PI-A.json").read_text())["status"]
+        )
+
+    def test_pi_lifecycle_extension_deactivates_from_symlink(self):
         node = shutil.which("node")
         if node is None:
             self.skipTest("Node is required to execute the Pi extension")
+        if subprocess.run(
+            [node, "--experimental-strip-types", "--input-type=module", "-e", ""],
+            text=True,
+            capture_output=True,
+        ).returncode:
+            self.skipTest("Node must support TypeScript type stripping")
         extension = REPO_ROOT / "pi-extensions" / "llm-collab-lifecycle.ts"
         installed = Path(tempfile.mkdtemp(prefix="pi-extension-", dir="/tmp")) / extension.name
         installed.symlink_to(extension)
@@ -7019,15 +7057,28 @@ class SessionAutobridgeTest(unittest.TestCase):
             await handlers.session_before_switch({}, ctx);
             await handlers.session_before_fork({}, ctx);
             await handlers.session_shutdown({}, ctx);
-            process.stdout.write(JSON.stringify(calls));
+            process.stdout.write(JSON.stringify({
+              calls,
+              cli: extension.resolveCli(pathToFileURL(process.argv[2]).href),
+            }));
         """
         result = subprocess.run(
-            [node, "--experimental-strip-types", "--input-type=module", "-e", program, str(installed)],
+            [
+                node,
+                "--experimental-strip-types",
+                "--input-type=module",
+                "-e",
+                program,
+                str(extension),
+                str(installed),
+            ],
             text=True,
             capture_output=True,
             check=True,
         )
-        calls = json.loads(result.stdout)
+        output = json.loads(result.stdout)
+        self.assertEqual(str(REPO_ROOT / "bin" / "llm-collab"), output["cli"])
+        calls = output["calls"]
         self.assertEqual(4, len(calls))
         for call in calls:
             self.assertEqual(str(REPO_ROOT / "bin" / "llm-collab"), call["command"])
