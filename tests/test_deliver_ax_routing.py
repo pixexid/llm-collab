@@ -9,6 +9,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "bin"))
 
 import deliver
+import _helpers
 
 
 class AxDoorbellRoutingTest(unittest.TestCase):
@@ -286,7 +287,9 @@ class AxAttendedRecoveryRoutingTest(unittest.TestCase):
                 agents["antigravity"], "antigravity", sender_id="codex"
             )
         )
-        self.assertTrue(
+        # zcode is now legacy_disabled_implementation (no AX route): not an
+        # attended-recovery target.
+        self.assertFalse(
             deliver.is_ax_attended_recovery_target(
                 agents["zcode"], "zcode", sender_id="codex"
             )
@@ -297,17 +300,23 @@ class AxAttendedRecoveryRoutingTest(unittest.TestCase):
             )
         )
 
-    def test_live_registry_marks_zcode_and_antigravity_attended_only(self) -> None:
+    def test_live_registry_marks_antigravity_attended_and_zcode_disabled(self) -> None:
         import json as _json
 
         agents = {
             a["id"]: a
             for a in _json.loads((REPO_ROOT / "agents.json").read_text())["agents"]
         }
-        self.assertTrue(deliver.ax_attended_only(agents["zcode"]))
+        # zcode is now legacy_disabled_implementation (no AX route).
+        self.assertFalse(deliver.ax_attended_only(agents["zcode"]))
         self.assertTrue(deliver.ax_attended_only(agents["antigravity"]))
         self.assertFalse(deliver.ax_attended_only(agents["codex"]))
         self.assertFalse(deliver.ax_attended_only(agents["claude"]))
+        # Primary acceptance: zcode accepts no new work; glmpi/relay/kimi stay enabled.
+        self.assertTrue(_helpers.is_agent_disabled(agents["zcode"]))
+        self.assertFalse(_helpers.is_agent_disabled(agents["glmpi"]))
+        self.assertFalse(_helpers.is_agent_disabled(agents["relay"]))
+        self.assertFalse(_helpers.is_agent_disabled(agents["kimi"]))
 
 
 class AxRegistryBinaryAgreementTest(unittest.TestCase):

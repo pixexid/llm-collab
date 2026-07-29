@@ -60,13 +60,10 @@
     {
       "id": "zcode",
       "display_name": "ZCode",
-      "role": "implementation",
-      "notes": "Implementation and secondary review. GLM-5.2 (builtin:zai-coding-plan/GLM-5.2).",
+      "role": "legacy_disabled_implementation",
       "activation": {
-        "type": "cli_session",
-        "watcher_enabled": true,
-        "ax_app": "ZCode",
-        "ax_attended_only": true
+        "type": "human_relay",
+        "watcher_enabled": false
       }
     },
     {
@@ -91,12 +88,9 @@
       "id": "kimi",
       "display_name": "Kimi",
       "role": "implementation",
-      "notes": "K3 model (Kimi Mac app).",
       "activation": {
         "type": "cli_session",
-        "watcher_enabled": true,
-        "ax_app": "Kimi",
-        "ax_attended_only": true
+        "watcher_enabled": true
       }
     }
   ]
