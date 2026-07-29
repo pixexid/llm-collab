@@ -567,6 +567,19 @@ result, and runtime validation. Concrete `db/migrations/**` paths and the exact
 `db_schema_change_detection: manual_false`; a body-only documentation keyword
 match may still be manually overridden.
 
+Together these close the GH-82 done gate with existing authority — no separate
+release scanner is needed. On an auto-guarded shared-Supabase project, a
+production-impacting schema change cannot classify as `none` or `local-schema-only`
+(without the exact dev-only exception), so it must be `shared-supabase-required`;
+and `validate_db_contract` (invoked at the `claim_task` `done` transition) then
+refuses `done` unless the shared apply result, schema assertion, migration files,
+advisors result, and runtime validation are present. A merged production-impacting
+task therefore cannot reach `done` while shared apply/assertion evidence is
+missing. A separate pre-deploy schema-dependency check is deliberately **not**
+added: the pre-merge/`done` authority above already blocks completion without a
+proven shared apply, and blindly applying the full historical `db/migrations/**`
+directory at deploy time is explicitly out of scope.
+
 ### Done transition and release evidence
 
 Only a task whose current status is exactly `review` may newly transition to
