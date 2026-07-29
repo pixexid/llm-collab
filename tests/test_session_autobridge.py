@@ -7179,6 +7179,68 @@ class SessionAutobridgeTest(unittest.TestCase):
             json.loads(self._session_json(root, "SESSION-OLD").read_text()).get("status"),
         )
 
+    def test_pi_replacement_does_not_prepare_again_after_the_swap(self):
+        args = SimpleNamespace(
+            session="SESSION-NEW", agent="glmpi", project="amiga", chat="CHAT-R",
+            repo_targets=["app"], mode="auto-read", status="active",
+            wake_strategy="runtime_trigger", lease_owner=None, ttl_seconds=3600,
+            allowed_actions=[], runtime_family="pi", runtime_session_id="pi-new",
+            runtime_session_source="/tmp/pi-new.jsonl", runtime_home="/tmp/pi-home",
+            runtime_command=None, runtime_timeout=30, endpoint_id="endpoint-new",
+            runtime_instance_id="pi-web", cwd="/tmp/work",
+            supersedes_session="SESSION-OLD",
+        )
+        settled = {
+            "session_id": "SESSION-NEW",
+            "agent_id": "glmpi",
+            "project_id": "amiga",
+            "chat_id": "CHAT-R",
+            "runtime": {"family": "pi", "session_id": "pi-new"},
+            "updated_utc": "2026-07-29T09:00:00+00:00",
+        }
+        with patch.object(
+            session_autobridge_cli, "get_agent", return_value={"activation": {}}
+        ), patch.object(
+            session_autobridge_cli,
+            "read_pi_session_fingerprint",
+            return_value={
+                "provider": "zai", "model": "glm-5.2", "thinking_level": "max",
+                "cwd": "/tmp/work",
+            },
+        ), patch.object(
+            session_autobridge_cli,
+            "resolve_active_canonical_binding",
+            side_effect=session_autobridge_cli.CanonicalBindingNativeMismatch(
+                canonical_native_session_id="pi-old",
+                requested_runtime_session_id="pi-new",
+            ),
+        ), patch.object(
+            session_autobridge_cli,
+            "_authorize_pi_replacement_or_refuse",
+            return_value={"binding_id": "binding-old", "generation": 1},
+        ), patch.object(
+            session_autobridge_cli,
+            "_replace_pi_binding_or_refuse",
+            return_value={
+                "binding_id": "binding-new", "binding_generation": 2,
+                "endpoint_id": "endpoint-new",
+            },
+        ), patch.object(
+            session_autobridge_cli,
+            "prepare_session_write",
+            side_effect=[(settled, json.dumps(settled)), AssertionError("prepared twice")],
+        ) as prepare, patch.object(
+            session_autobridge_cli, "existing_binding_snapshot_or_refuse", return_value={}
+        ), patch.object(
+            session_autobridge_cli, "plan_superseded_retirement", return_value=None
+        ), patch.object(
+            session_autobridge_cli, "update_binding_from_session", return_value=None
+        ), patch.object(session_autobridge_cli, "save_session") as save:
+            session_autobridge_cli.register_session(args)
+
+        prepare.assert_called_once()
+        self.assertEqual("binding-new", save.call_args.kwargs["prepared"][0]["binding_id"])
+
     def test_pi_register_requires_and_persists_complete_fingerprint(self):
         # #378 fingerprint: registration reads + pins the exact native source's
         # provider/model/thinking/cwd BEFORE any canonical write. A missing/incomplete

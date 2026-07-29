@@ -605,12 +605,16 @@ def register_session(args) -> dict:
         else:
             canonical = _provision_pi_binding_or_refuse(args, runtime, pi_native_session_id)
     payload.update(canonical)
+    prepared_candidate = dict(payload)
+    prepared = (
+        prepared_candidate,
+        json.dumps(prepared_candidate, indent=2, sort_keys=True),
+    )
     # Swap done. Retire the predecessor legacy record (carried prepared tuple, no
     # reopen), then write the new binding, then the new session (carried prepared).
     if retirement is not None:
         commit_superseded_retirement(*retirement)
     binding = update_binding_from_session(payload, existing=existing_binding)
-    prepared = prepare_session_write(payload)
     save_session(payload, prepared=prepared)
     if binding is not None:
         payload["binding"] = binding
