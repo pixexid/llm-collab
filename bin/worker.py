@@ -24,27 +24,48 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from _helpers import config_get, ensure_project, project_state_root
 from llm_collab.ledger import LedgerPaths, LedgerStore
-from llm_collab.worker import WorkerLookupError, list_workers, show_worker
+from llm_collab.worker import (
+    WorkerLookupError,
+    list_workers,
+    retire_worker,
+    show_worker,
+)
 
 
-def open_store() -> LedgerStore:
+def open_store(*, writer: bool = False) -> LedgerStore:
     workspace_id = config_get("workspace_id")
     if not workspace_id:
         raise SystemExit("[error] collab.config.json lacks workspace_id")
-    return LedgerStore.open_reader(
-        LedgerPaths.derive(project_state_root(), str(workspace_id))
-    )
+    paths = LedgerPaths.derive(project_state_root(), str(workspace_id))
+    return LedgerStore.open_writer(paths) if writer else LedgerStore.open_reader(paths)
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="llm-collab worker")
     commands = parser.add_subparsers(dest="command", required=True)
-    for name in ("show", "list"):
+    for name in ("show", "list", "retire"):
         sub = commands.add_parser(name)
         sub.add_argument("--project", required=True, help="Exact project id")
-    commands.choices["show"].add_argument("worker_id")
+    for name in ("show", "retire"):
+        commands.choices[name].add_argument("worker_id")
     args = parser.parse_args(argv)
     ensure_project(args.project, allow_none=False)
+
+    if args.command == "retire":
+        with open_store(writer=True) as store:
+            try:
+                retired = retire_worker(
+                    store,
+                    workspace_id=store.paths.workspace_id,
+                    project_id=args.project,
+                    worker_id=args.worker_id,
+                )
+            except WorkerLookupError as exc:
+                print(f"[error] {exc}", file=sys.stderr)
+                return 1
+        for key, value in retired.items():
+            print(f"{key}: {value}")
+        return 0
 
     with open_store() as store:
         if args.command == "list":

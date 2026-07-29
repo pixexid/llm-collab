@@ -131,3 +131,75 @@ def show_worker(
     if len(matches) > 1:
         raise WorkerLookupError(f"worker id {worker_id} is ambiguous in project {project_id}")
     return matches[0]
+
+
+def _resolve_subject(
+    store: LedgerStore, *, workspace_id: str, project_id: str, worker_id: str
+) -> LifecycleSubject:
+    matches = [
+        row
+        for row in _participants(store, workspace_id=workspace_id, project_id=project_id)
+        if derive_worker_id(
+            workspace_id=workspace_id,
+            scope_kind=row["scope_kind"],
+            scope_identity=row["scope_identity"],
+            conversation_id=row["conversation_id"],
+            participant_id=row["participant_id"],
+        )
+        == worker_id
+    ]
+    if not matches:
+        raise WorkerLookupError(f"no worker {worker_id} in project {project_id}")
+    if len(matches) > 1:
+        raise WorkerLookupError(f"worker id {worker_id} is ambiguous in project {project_id}")
+    row = matches[0]
+    return LifecycleSubject(
+        workspace_id=workspace_id,
+        scope_kind=row["scope_kind"],
+        scope_identity=row["scope_identity"],
+        conversation_id=row["conversation_id"],
+        participant_id=row["participant_id"],
+        agent_id=row["agent_id"],
+        endpoint_id=_UNUSED,
+        native_session_id=_UNUSED,
+        runtime_instance_id=_UNUSED,
+    )
+
+
+def retire_worker(
+    store: LedgerStore, *, workspace_id: str, project_id: str, worker_id: str
+) -> dict[str, object]:
+    """Release the worker's active mutation ownership via the existing lifecycle
+    retire authority. Refuses anything that is not the single active,
+    mutation-capable binding; the binding row, generation, and session_ref are
+    preserved (only ``state`` moves to ``retired``)."""
+
+    subject = _resolve_subject(
+        store, workspace_id=workspace_id, project_id=project_id, worker_id=worker_id
+    )
+    resolved = _INSPECTION.inspect(store, subject)
+    if (
+        not resolved.get("resolved")
+        or resolved.get("state") != "active"
+        or resolved.get("mutation_capable") != 1
+    ):
+        raise WorkerLookupError(
+            f"worker {worker_id} is not an active mutation-capable binding "
+            f"(state={resolved.get('state')!r}, reason={resolved.get('reason')!r}); "
+            "refusing to retire"
+        )
+    # Snapshot the pre-retire identity: core.retire() leaves resolution at
+    # pull_pending with no active binding fields, so the result is reported from
+    # this snapshot, never a post-retire projection.
+    retired = {
+        "worker_id": worker_id,
+        "agent_id": subject.agent_id,
+        "conversation_id": subject.conversation_id,
+        "participant_id": subject.participant_id,
+        "binding_id": resolved["binding_id"],
+        "generation": resolved["generation"],
+        "session_ref_id": resolved["session_ref_id"],
+    }
+    _INSPECTION.retire(store, subject, resolved)
+    retired["state"] = "retired"
+    return retired
