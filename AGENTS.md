@@ -1,4 +1,4 @@
-<!-- CONTRACT_VERSION: 5 -->
+<!-- CONTRACT_VERSION: 6 -->
 # AGENTS.md
 
 ## This file is the source of truth
@@ -16,6 +16,11 @@ This repository is the shared `llm-collab` coordination runtime. It is not the
 Amiga workspace, the Nuvyr workspace, or any other product repository.
 
 ### Recent contract changes
+
+Contract v6 (2026-07-28) makes the installed **Ponytail** skill mandatory at
+full intensity before every task: planning, review, implementation, testing,
+documentation, and operations. Load it first; missing Ponytail is incomplete
+worker setup to repair, not permission to continue without it.
 
 Contract v5 (2026-07-28) rewrote the merge gate and the Tier A entry conditions.
 If your last session predates it, discard cached cap-default, deferral,
@@ -42,6 +47,7 @@ reading them.
 
 Before changing shared tooling or operating a project lane, read:
 
+- the installed `ponytail` skill and apply it at full intensity;
 - `README.md`
 - `docs/multi-project.md`
 - `docs/workflows/session-startup.md`
