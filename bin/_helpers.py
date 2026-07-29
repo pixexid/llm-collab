@@ -7,6 +7,8 @@ outside the Git checkout via collab.config.json `project_state_root`.
 from __future__ import annotations
 
 import json
+import contextlib
+import fcntl
 import os
 import re
 import shutil
@@ -503,23 +505,48 @@ def save_agent_inbox(agent_id: str, data: dict) -> None:
     write_file_durably(path, json.dumps(data, indent=2))
 
 
+@contextlib.contextmanager
+def inbox_write_lock(agent_id: str):
+    """Serialize the load-modify-save on one agent's inbox index.
+
+    Delivery (add_to_inbox) and the Pi acknowledgment drain (mark_messages_read)
+    both read the index, modify it, and write it back. Unlocked, a delivery that
+    reads between an acknowledgment's read and write is lost, or an acknowledgment
+    resurrects a packet a concurrent delivery added — the same lost-update the Pi
+    coalesced-wake path exposes. One blocking flock per agent inbox makes each RMW
+    atomic against the others. ponytail: per-agent lock, which is as narrow as the
+    contention is (all writers to one inbox), so no finer granularity is needed.
+    """
+    lock_path = agent_inbox_path(agent_id).with_suffix(".json.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
 def add_to_inbox(agent_id: str, message_path: str | Path) -> None:
     """Append a message path (relative to ROOT) to the agent's unread list."""
     rel = str(Path(message_path).relative_to(ROOT)) if Path(message_path).is_absolute() else str(message_path)
-    inbox = load_agent_inbox(agent_id)
-    if rel not in inbox["unread"] and rel not in inbox["read"]:
-        inbox["unread"].append(rel)
-    save_agent_inbox(agent_id, inbox)
+    with inbox_write_lock(agent_id):
+        inbox = load_agent_inbox(agent_id)
+        if rel not in inbox["unread"] and rel not in inbox["read"]:
+            inbox["unread"].append(rel)
+        save_agent_inbox(agent_id, inbox)
 
 
 def mark_messages_read(agent_id: str, paths: list[str]) -> None:
-    inbox = load_agent_inbox(agent_id)
-    for p in paths:
-        if p in inbox["unread"]:
-            inbox["unread"].remove(p)
-        if p not in inbox["read"]:
-            inbox["read"].append(p)
-    save_agent_inbox(agent_id, inbox)
+    with inbox_write_lock(agent_id):
+        inbox = load_agent_inbox(agent_id)
+        for p in paths:
+            if p in inbox["unread"]:
+                inbox["unread"].remove(p)
+            if p not in inbox["read"]:
+                inbox["read"].append(p)
+        save_agent_inbox(agent_id, inbox)
 
 
 def get_unread_messages(agent_id: str) -> list[dict]:

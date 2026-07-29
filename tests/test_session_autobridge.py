@@ -24,7 +24,6 @@ SCRIPT_PATH = REPO_ROOT / "bin" / "session_autobridge.py"
 DELIVER_SCRIPT = REPO_ROOT / "bin" / "deliver.py"
 INBOX_SCRIPT = REPO_ROOT / "bin" / "inbox.py"
 WATCH_INBOX_SCRIPT = REPO_ROOT / "bin" / "watch_inbox.py"
-PI_DOORBELL_SCRIPT = REPO_ROOT / "bin" / "pi_doorbell.py"
 sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(REPO_ROOT / "bin"))
 
@@ -34,7 +33,6 @@ import _helpers as helpers_lib
 import _activation_cleanup as activation_cleanup_lib
 import _activation_lease as activation_lease_lib
 import operator_digest as operator_digest_lib
-import pi_doorbell as pi_doorbell_lib
 import session_autobridge as session_autobridge_cli
 import watch_inbox as watch_inbox_lib
 from _helpers import parse_frontmatter
@@ -6298,7 +6296,7 @@ class SessionAutobridgeTest(unittest.TestCase):
             "--runtime-session-id",
             "pi-glim-1",
             "--runtime-command",
-            json.dumps([sys.executable, str(PI_DOORBELL_SCRIPT), str(doorbell)]),
+            json.dumps([sys.executable, "-c", "pass"]),
         )
         session_path = (
             root
@@ -6378,7 +6376,18 @@ class SessionAutobridgeTest(unittest.TestCase):
             json.loads(line) for line in recovered.stdout.splitlines() if line.strip()
         ]
 
-        self.assertEqual(message_rel + "\n", doorbell.read_text())
+        # #343: the wake is one durable pi_inbox_wake on the exact-session event
+        # log, not a mutable doorbell pointer file (pi_doorbell.py is deleted).
+        self.assertFalse(doorbell.exists(), "no pointer file is written any more")
+        self.assertTrue(
+            any(
+                event.get("event") == "pi_inbox_wake"
+                and event.get("message_path") == message_rel
+                for event in (json.loads(line)
+                              for line in event_path.read_text().splitlines() if line.strip())
+            ),
+            "the durable event log must carry a pi_inbox_wake for the packet",
+        )
         self.assertTrue(
             any(
                 event["event"] == "autobridge_wake_signaled"
@@ -6423,7 +6432,7 @@ class SessionAutobridgeTest(unittest.TestCase):
             "runtime": {
                 "family": "pi",
                 "session_id": "pi-unbound",
-                "command": [sys.executable, str(PI_DOORBELL_SCRIPT), "/tmp/unused"],
+                "command": [sys.executable, "-c", "pass"],
             },
         }
         message = {
@@ -6476,39 +6485,6 @@ class SessionAutobridgeTest(unittest.TestCase):
 
         runtime_trigger.assert_not_called()
         self.assertEqual("pull_pending", result["actions"][0]["reason"])
-
-    def test_pi_doorbell_publishes_complete_mode_600_content_atomically(self):
-        root = self.make_workspace()
-        doorbell = root / "State" / "pi" / "glmpi.pointer"
-        original_replace = os.replace
-        observed: dict[str, object] = {}
-
-        def observe_replace(source: str, destination: str) -> None:
-            source_path = Path(source)
-            destination_path = Path(destination)
-            observed["content"] = source_path.read_text()
-            observed["mode"] = source_path.stat().st_mode & 0o777
-            observed["destination_existed"] = destination_path.exists()
-            original_replace(source, destination)
-
-        with patch.dict(
-            os.environ,
-            {"LLM_COLLAB_MESSAGE_PATH": "Chats/2026-07-27/packet.md"},
-        ), patch.object(
-            pi_doorbell_lib.sys,
-            "argv",
-            ["pi_doorbell.py", str(doorbell)],
-        ), patch.object(
-            pi_doorbell_lib.os,
-            "replace",
-            side_effect=observe_replace,
-        ):
-            self.assertEqual(0, pi_doorbell_lib.main())
-
-        self.assertEqual("Chats/2026-07-27/packet.md\n", observed["content"])
-        self.assertEqual(0o600, observed["mode"])
-        self.assertFalse(observed["destination_existed"])
-        self.assertEqual(observed["content"], doorbell.read_text())
 
     def test_watch_inbox_default_off_empty_ledger_preserves_legacy_runtime_trigger(self):
         root = self.make_workspace()

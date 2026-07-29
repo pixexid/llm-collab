@@ -105,8 +105,15 @@ background Bash task is the wrong native shape: it only surfaces completion, so
 an infinite watcher can log packets without waking the task.
 
 For Glim, Relay, or Kimi on Pi, install `pi-event-monitor`'s `/monitor-watch`
-on the exact pointer path stored in that session's runtime command. Do not add a
-shell poller beside the native monitor.
+on that session's durable event log,
+`State/session_autobridge/events/<SESSION-ID>.jsonl` — delivery appends one synced
+`pi_inbox_wake` event there, never a mutable pointer file. On a wake, drain the
+durable queue rather than the event: `bin/inbox.py --me <agent-id> --session
+<SESSION-ID> --project <id> --chat <CHAT-ID> --acknowledge` reads every unread
+packet bound to that exact session, prints their bodies, and marks exactly that
+set read. A coalesced wake is harmless —
+the unread queue, not the event count, is the work. Do not add a shell poller
+beside the native monitor.
 
 Setup is complete only after a disposable packet addressed to the binding
 starts a turn in that native session while idle, another packet surfaces during
