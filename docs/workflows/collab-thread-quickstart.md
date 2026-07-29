@@ -170,9 +170,10 @@ ln -sfn \
 Reload Pi after installing it. The extension routes Pi's existing
 `session_start`, `session_before_switch`, `session_before_fork`, and
 `session_shutdown` events into the existing exact-session deactivation command.
-Switch, fork, reload, quit, and restart therefore stop the old session's
-automatic wake; only explicit registration of the current native session
-restores it.
+Switch, fork, reload, quit, and a clean restart therefore stop the old session's
+automatic wake; only explicit registration of the current native session restores
+it. An unclean process crash cannot emit a lifecycle event; its durable unread work
+stays available for pull/recovery rather than being rerouted automatically.
 
 Setup is complete only after disposable probes prove:
 
