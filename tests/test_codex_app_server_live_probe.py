@@ -10,12 +10,17 @@ from llm_collab.codex_app_server_live_probe import (
     _envelope,
     EXPECTED_SERVER,
     EXPECTED_SERVER_CAPABILITIES,
+    OBSERVATION_ADMISSIBLE,
+    OBSERVATION_BUSY,
+    OBSERVATION_UNCERTAIN,
     PROTOCOL_VERSION,
     READ_ONLY_NOTIFICATION_METHODS,
     READ_ONLY_REQUEST_METHODS,
     CodexAppServerExactThreadResult,
     CodexAppServerLiveProbeError,
     THREAD_READ_METHOD,
+    classify_thread_observation,
+    observe_exact_thread,
     probe_exact_thread,
     probe_live_codex_app_server,
 )
@@ -26,8 +31,10 @@ MODULE = Path("llm_collab/codex_app_server_live_probe.py")
 
 class FakeTransport:
     def __init__(self, *, version=PROTOCOL_VERSION, capabilities=None, server_name=EXPECTED_SERVER, raw=None,
-                 known_thread_ids=None, thread_read_error=False, thread_read_raw=None, thread_read_return_id=None):
+                 known_thread_ids=None, thread_read_error=False, thread_read_raw=None, thread_read_return_id=None,
+                 init_result=None):
         self.version = version
+        self.init_result = init_result
         self.capabilities = {"tools": {"listChanged": True}} if capabilities is None else dict(capabilities)
         self.server_name = server_name
         self.raw = raw
@@ -43,6 +50,8 @@ class FakeTransport:
         if self.raw is not None:
             return self.raw
         if frame["method"] == "initialize":
+            if self.init_result is not None:
+                return {"id": frame["id"], "result": self.init_result}
             return {
                 "jsonrpc": "2.0",
                 "id": frame["id"],
@@ -473,6 +482,95 @@ class CodexAppServerLiveProbeTests(unittest.TestCase):
             {value for value in literals if value in {"initialize", "initialized", "model/list"}},
             {"initialize", "initialized", "model/list"},
         )
+
+
+
+INIT_RESULT = {
+    "codexHome": "/Users/test/.codex",
+    "userAgent": "llm-collab-pm2-verify/0.146.0-alpha.3.1 (Mac OS 27.0.0; arm64)",
+    "platformFamily": "unix",
+    "platformOs": "macos",
+}
+HOME = "/Users/test/.codex"
+UA_PREFIXES = frozenset(("llm-collab-pm2-verify/0.146",))
+THREAD_ID = "019faff9-e265-7e43-bee3-006d49e8e505"
+
+
+def observe_transport(thread_result=None, *, thread_error=False, init_result=INIT_RESULT):
+    raw = None
+    if thread_result is not None:
+        raw = {"id": "llm-collab-2", "result": {"thread": thread_result}}
+    return FakeTransport(init_result=init_result, thread_read_raw=raw, thread_read_error=thread_error)
+
+
+def observe(transport, **overrides):
+    kwargs = {
+        "expected_runtime_home": HOME,
+        "supported_user_agent_prefixes": UA_PREFIXES,
+        "transport": transport,
+    }
+    kwargs.update(overrides)
+    return observe_exact_thread(THREAD_ID, **kwargs)
+
+
+class CodexAppServerThreadObservationTests(unittest.TestCase):
+    def test_classification_table(self):
+        cases = [
+            ({"id": THREAD_ID, "status": {"type": "idle"}, "canAcceptDirectInput": True}, OBSERVATION_ADMISSIBLE),
+            # Load-bearing: direct input stays true during active turns, so it
+            # can never be the busy discriminator — active + true is busy.
+            ({"id": THREAD_ID, "status": {"type": "active", "activeFlags": []}, "canAcceptDirectInput": True}, OBSERVATION_BUSY),
+            ({"id": THREAD_ID, "status": {"type": "notLoaded"}, "canAcceptDirectInput": None}, OBSERVATION_UNCERTAIN),
+            ({"id": THREAD_ID, "status": {"type": "paused"}, "canAcceptDirectInput": True}, OBSERVATION_UNCERTAIN),
+            ({"id": THREAD_ID, "canAcceptDirectInput": True}, OBSERVATION_UNCERTAIN),
+            ({"id": THREAD_ID, "status": "idle", "canAcceptDirectInput": True}, OBSERVATION_UNCERTAIN),
+            ({"id": THREAD_ID, "status": {"type": 7}, "canAcceptDirectInput": True}, OBSERVATION_UNCERTAIN),
+            ({"id": THREAD_ID, "status": {"type": "idle"}}, OBSERVATION_UNCERTAIN),
+            ({"id": THREAD_ID, "status": {"type": "idle"}, "canAcceptDirectInput": False}, OBSERVATION_UNCERTAIN),
+        ]
+        for thread_result, expected in cases:
+            with self.subTest(thread_result=thread_result):
+                self.assertEqual(observe(observe_transport(thread_result)).classification, expected)
+
+    def test_admissible_observation_captures_identity_and_stays_read_only(self):
+        transport = observe_transport({"id": THREAD_ID, "status": {"type": "idle"},
+                                       "canAcceptDirectInput": True, "turns": []})
+        observation = observe(transport)
+        self.assertEqual(observation.classification, OBSERVATION_ADMISSIBLE)
+        self.assertEqual(observation.status_type, "idle")
+        self.assertIs(observation.can_accept_direct_input, True)
+        self.assertEqual(observation.codex_home, HOME)
+        self.assertTrue(observation.user_agent.startswith("llm-collab-pm2-verify/0.146"))
+        self.assertEqual([f["method"] for f in transport.requests], ["initialize", "thread/read"])
+        self.assertEqual(transport.requests[1]["params"],
+                         {"threadId": THREAD_ID, "includeTurns": False})
+
+    def test_read_failure_after_identity_proof_is_uncertain_not_a_crash(self):
+        observation = observe(observe_transport(thread_error=True))
+        self.assertEqual(observation.classification, OBSERVATION_UNCERTAIN)
+        self.assertIsNone(observation.status_type)
+        self.assertIsNone(observation.can_accept_direct_input)
+        self.assertEqual(observation.codex_home, HOME)
+
+    def test_runtime_home_drift_fails_closed(self):
+        with self.assertRaises(CodexAppServerLiveProbeError):
+            observe(observe_transport(), expected_runtime_home="/Users/other/.codex")
+
+    def test_user_agent_drift_fails_closed(self):
+        with self.assertRaises(CodexAppServerLiveProbeError):
+            observe(observe_transport(), supported_user_agent_prefixes=frozenset(("other-server/1.",)))
+
+    def test_returned_thread_id_mismatch_fails_closed(self):
+        transport = observe_transport({"id": "019faffa-e76c-7800-811f-3f6716b8b753",
+                                       "status": {"type": "idle"}, "canAcceptDirectInput": True})
+        with self.assertRaises(CodexAppServerLiveProbeError):
+            observe(transport)
+
+    def test_runtime_home_must_be_an_absolute_normalized_realpath(self):
+        for bad in ("/tmp/..", "relative/path", "", None, "/Users/test/.cod\x00ex"):
+            with self.subTest(bad=bad):
+                with self.assertRaises(CodexAppServerLiveProbeError):
+                    observe(observe_transport(), expected_runtime_home=bad)
 
 
 if __name__ == "__main__":

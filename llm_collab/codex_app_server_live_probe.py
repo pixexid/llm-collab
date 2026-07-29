@@ -163,15 +163,13 @@ def probe_exact_thread(
         return _probe_exact_thread_transport(live_transport, thread_id)
 
 
-def _probe_exact_thread_transport(
-    transport: Any, thread_id: str
-) -> CodexAppServerExactThreadResult:
+def _minimal_initialize(transport: Any) -> Mapping[str, Any]:
     # Minimal initialize: issue the request + initialized notification the server
     # needs before thread/read. The native initialize response carries no
     # protocolVersion/serverInfo/capabilities, so none are validated or reported
     # here (the existing probe_live validator is left untouched for its own
     # older observable contract).
-    _request(
+    initialize = _request(
         transport,
         1,
         "initialize",
@@ -183,6 +181,10 @@ def _probe_exact_thread_transport(
         require_jsonrpc=False,
     )
     _notify(transport, "initialized")
+    return initialize
+
+
+def _read_exact_thread(transport: Any, thread_id: str) -> Mapping[str, Any]:
     result = _request(
         transport, 2, THREAD_READ_METHOD, {"threadId": thread_id, "includeTurns": False},
         require_jsonrpc=False,
@@ -190,9 +192,142 @@ def _probe_exact_thread_transport(
     thread = _required_mapping(result, "thread")
     if _required_string(thread, "id") != thread_id:
         raise CodexAppServerLiveProbeError("thread/read returned a different thread id")
+    return thread
+
+
+def _probe_exact_thread_transport(
+    transport: Any, thread_id: str
+) -> CodexAppServerExactThreadResult:
+    _minimal_initialize(transport)
+    _read_exact_thread(transport, thread_id)
     return CodexAppServerExactThreadResult(
         thread_id=thread_id,
         methods=("initialize", THREAD_READ_METHOD),
+    )
+
+
+OBSERVATION_ADMISSIBLE = "admissible"
+OBSERVATION_BUSY = "busy"
+OBSERVATION_UNCERTAIN = "uncertain"
+
+
+@dataclass(frozen=True)
+class CodexAppServerThreadObservation:
+    """Strict read-only observation of one exact native thread (#93): the proven
+    identity plus the live-proven classification — status.type "idle" with
+    canAcceptDirectInput true is admissible, "active" is busy (direct input
+    stays true during active turns, so it never discriminates busy), and
+    everything else, including a failed read, is uncertain."""
+
+    thread_id: str
+    codex_home: str
+    user_agent: str
+    status_type: str | None
+    can_accept_direct_input: bool | None
+    classification: str
+
+
+def classify_thread_observation(
+    status_type: str | None, can_accept_direct_input: bool | None
+) -> str:
+    if status_type == "idle" and can_accept_direct_input is True:
+        return OBSERVATION_ADMISSIBLE
+    if status_type == "active":
+        return OBSERVATION_BUSY
+    return OBSERVATION_UNCERTAIN
+
+
+def observe_exact_thread(
+    thread_id: str,
+    *,
+    expected_runtime_home: str,
+    supported_user_agent_prefixes: frozenset[str] | tuple[str, ...],
+    endpoint_url: str | None = None,
+    transport: Any | None = None,
+    timeout_seconds: float = 5,
+    token: str | None = None,
+) -> CodexAppServerThreadObservation:
+    """Strict read-only exact-thread observation (#93). Validates the initialize
+    identity (codexHome equals the caller's absolute normalized runtime-home
+    realpath; userAgent starts with a supported prefix) and the exact returned
+    thread id, then captures status.type/canAcceptDirectInput and classifies
+    with classify_thread_observation. includeTurns stays false; no
+    resume/start/fork/turn/archive is issued. Identity failures raise; a
+    thread/read request failure after identity proof classifies uncertain."""
+    _require_thread_id(thread_id)
+    if (
+        not isinstance(expected_runtime_home, str)
+        or not expected_runtime_home
+        or "\x00" in expected_runtime_home
+        or expected_runtime_home != os.path.realpath(expected_runtime_home)
+    ):
+        raise CodexAppServerLiveProbeError(
+            "expected_runtime_home must be an absolute normalized realpath"
+        )
+    if (
+        not isinstance(supported_user_agent_prefixes, (frozenset, tuple))
+        or not supported_user_agent_prefixes
+        or any(not isinstance(prefix, str) or not prefix for prefix in supported_user_agent_prefixes)
+    ):
+        raise CodexAppServerLiveProbeError("supported_user_agent_prefixes must be non-empty strings")
+    if (endpoint_url is None) == (transport is None):
+        raise CodexAppServerLiveProbeError("supply exactly one endpoint_url or transport")
+    if transport is not None:
+        return _observe_exact_thread_transport(
+            transport, thread_id, expected_runtime_home, supported_user_agent_prefixes
+        )
+    with _WebSocketJsonRpcTransport(
+        endpoint_url, timeout_seconds=timeout_seconds, token=token
+    ) as live_transport:
+        return _observe_exact_thread_transport(
+            live_transport, thread_id, expected_runtime_home, supported_user_agent_prefixes
+        )
+
+
+def _observe_exact_thread_transport(
+    transport: Any,
+    thread_id: str,
+    expected_runtime_home: str,
+    supported_user_agent_prefixes: frozenset[str] | tuple[str, ...],
+) -> CodexAppServerThreadObservation:
+    initialize = _minimal_initialize(transport)
+    codex_home = initialize.get("codexHome")
+    if codex_home != expected_runtime_home:
+        raise CodexAppServerLiveProbeError(
+            "initialize codexHome does not match the expected runtime home"
+        )
+    user_agent = initialize.get("userAgent")
+    if not isinstance(user_agent, str) or not any(
+        user_agent.startswith(prefix) for prefix in supported_user_agent_prefixes
+    ):
+        raise CodexAppServerLiveProbeError("unsupported app server user agent")
+    try:
+        result = _request(
+            transport, 2, THREAD_READ_METHOD, {"threadId": thread_id, "includeTurns": False},
+            require_jsonrpc=False,
+        )
+    except CodexAppServerLiveProbeError:
+        result = None
+    if result is None:
+        status_type = can_accept = None
+    else:
+        thread = _required_mapping(result, "thread")
+        if _required_string(thread, "id") != thread_id:
+            raise CodexAppServerLiveProbeError("thread/read returned a different thread id")
+        status = thread.get("status")
+        status_type = status.get("type") if isinstance(status, Mapping) else None
+        if not isinstance(status_type, str) or not status_type:
+            status_type = None
+        can_accept = thread.get("canAcceptDirectInput")
+        if not isinstance(can_accept, bool):
+            can_accept = None
+    return CodexAppServerThreadObservation(
+        thread_id=thread_id,
+        codex_home=codex_home,
+        user_agent=user_agent,
+        status_type=status_type,
+        can_accept_direct_input=can_accept,
+        classification=classify_thread_observation(status_type, can_accept),
     )
 
 
