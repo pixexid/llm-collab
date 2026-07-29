@@ -540,8 +540,12 @@ class SessionAutobridgeTest(unittest.TestCase):
         claim = Mock(return_value=(True, None))
         trigger = Mock(return_value={"returncode": 0})
 
-        def mark_processed(_session, path):
-            _session.setdefault("processed_messages", []).append(path)
+        def mark_processed(_session, path, *, prepared=None):
+            if prepared is not None:
+                _session.clear()
+                _session.update(prepared[0])
+            else:
+                _session.setdefault("processed_messages", []).append(path)
 
         with self._dispatch_patch_context(session, messages), patch.object(
             session_autobridge_lib, "claim_message_activation", claim
@@ -659,15 +663,10 @@ class SessionAutobridgeTest(unittest.TestCase):
             ):
                 session_autobridge_lib.prepare_session_write(session)
 
+        recovered = json.loads(inbox_path.read_text())
+        recovered["read"] = ["Chats/durable/read.md"]
         with patch.object(helpers_lib, "agent_inbox_path", return_value=inbox_path):
-            helpers_lib.save_agent_inbox(
-                "codex",
-                {
-                    "agent": "codex",
-                    "unread": [],
-                    "read": ["Chats/durable/read.md"],
-                },
-            )
+            helpers_lib.save_agent_inbox("codex", recovered)
         self.assertNotIn("_durability_pending", json.loads(inbox_path.read_text()))
         with patch.object(
             session_autobridge_lib, "agent_inbox_path", return_value=inbox_path
@@ -676,6 +675,37 @@ class SessionAutobridgeTest(unittest.TestCase):
         ):
             candidate, _ = session_autobridge_lib.prepare_session_write(session)
         self.assertEqual([], candidate["processed_messages"])
+
+    def test_dispatch_carries_the_prepared_result_through_the_post_effect_save(self):
+        session = {
+            "session_id": "SESSION-PINNED",
+            "agent_id": "gemini",
+            "mode": "auto-read",
+            "wake_strategy": "runtime_trigger",
+            "runtime": {"family": "gemini_cli", "session_id": "runtime-pinned"},
+        }
+        message = {"path": "Chats/pinned/packet.md", "frontmatter": {}}
+        prepared = (
+            {**session, "processed_messages": [message["path"]]},
+            "prepared bytes",
+        )
+        mark = Mock()
+        with self._dispatch_patch_context(session, [message]), patch.object(
+            session_autobridge_lib,
+            "reserve_message_result",
+            return_value=prepared,
+        ), patch.object(
+            session_autobridge_lib,
+            "mark_message_processed",
+            mark,
+        ):
+            session_autobridge_lib.dispatch_session("SESSION-PINNED")
+
+        mark.assert_called_once_with(
+            session,
+            message["path"],
+            prepared=prepared,
+        )
 
     def test_watcher_and_digest_use_the_bounded_session_iterator(self):
         sessions = [
@@ -1038,6 +1068,12 @@ class SessionAutobridgeTest(unittest.TestCase):
         message = {"path": "Chats/processed/packet.md", "frontmatter": {}}
         runtime_trigger = Mock(return_value={"returncode": 0})
         original_mark_message_processed = session_autobridge_lib.mark_message_processed
+
+        def apply_prepared(payload, prepared=None):
+            if prepared is not None:
+                payload.clear()
+                payload.update(prepared[0])
+
         with self._dispatch_patch_context(session, [message]), patch.object(
             session_autobridge_lib,
             "materialize_selected_runtime_packet",
@@ -1055,6 +1091,10 @@ class SessionAutobridgeTest(unittest.TestCase):
             session_autobridge_lib,
             "mark_message_processed",
             wraps=original_mark_message_processed,
+        ), patch.object(
+            session_autobridge_lib,
+            "save_session",
+            side_effect=apply_prepared,
         ):
             first = session_autobridge_lib.dispatch_session("SESSION-PROCESSED")
             second = session_autobridge_lib.dispatch_session("SESSION-PROCESSED")
@@ -6733,7 +6773,7 @@ class SessionAutobridgeTest(unittest.TestCase):
 
         saved_sessions = []
 
-        def record_saved(saved, _path):
+        def record_saved(saved, _path, *, prepared=None):
             saved_sessions.append(dict(saved))
 
         with self._dispatch_patch_context(session, [message]), patch.object(

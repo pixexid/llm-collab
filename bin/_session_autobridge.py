@@ -417,7 +417,7 @@ def reserve_message_result(
     message: dict,
     *,
     include_canonical: bool,
-) -> None:
+) -> tuple[dict, str]:
     message_path = str(message["path"])
     processed = list(session.get("processed_messages", []))
     if message_path not in processed:
@@ -428,7 +428,7 @@ def reserve_message_result(
         canonical = dict(canonical) if isinstance(canonical, dict) else {}
         canonical.setdefault(message_path, {"reason": "gate_disabled"})
         candidate["canonical_settled_messages"] = canonical
-    prepare_session_write(candidate)
+    return prepare_session_write(candidate)
 
 
 def binding_payload_from_session(
@@ -1090,7 +1090,15 @@ def canonical_settled_message_paths(session: dict) -> set[str]:
     return set()
 
 
-def mark_message_processed(session: dict, message_path: str) -> None:
+def mark_message_processed(
+    session: dict,
+    message_path: str,
+    *,
+    prepared: tuple[dict, str] | None = None,
+) -> None:
+    if prepared is not None:
+        save_session(session, prepared=prepared)
+        return
     existing = session.get("processed_messages", [])
     if message_path not in existing:
         existing.append(message_path)
@@ -2988,7 +2996,11 @@ def dispatch_session(
             )
             continue
         try:
-            reserve_message_result(session, message, include_canonical=True)
+            prepared_result = reserve_message_result(
+                session,
+                message,
+                include_canonical=True,
+            )
         except (
             FileNotFoundError,
             UnreadableFile,
@@ -3120,6 +3132,19 @@ def dispatch_session(
                         append_event(session_id, event)
                         actions.append(event)
                         continue
+                prepared_candidate = {
+                    **prepared_result[0],
+                    "canonical_settled_messages": dict(
+                        session.get("canonical_settled_messages", {})
+                    ),
+                    "updated_utc": session.get(
+                        "updated_utc", prepared_result[0].get("updated_utc")
+                    ),
+                }
+                prepared_result = (
+                    prepared_candidate,
+                    json.dumps(prepared_candidate, indent=2, sort_keys=True),
+                )
             asserted, assertion_event, _ = activation_fenced_mutation(
                 session,
                 message,
@@ -3210,7 +3235,11 @@ def dispatch_session(
                     session,
                     message,
                     boundary="mark_message_processed",
-                    mutation=lambda: mark_message_processed(session, message["path"]),
+                    mutation=lambda: mark_message_processed(
+                        session,
+                        message["path"],
+                        prepared=prepared_result,
+                    ),
                 )
                 if assertion_event is not None:
                     event.setdefault("activation_assertions", []).append(assertion_event)
@@ -3221,7 +3250,11 @@ def dispatch_session(
                 mark_after_event = True
         append_event(session_id, event)
         if should_mark_processed and mark_after_event:
-            mark_message_processed(session, message["path"])
+            mark_message_processed(
+                session,
+                message["path"],
+                prepared=prepared_result,
+            )
         actions.append(event)
 
     for refusal in repo_scope_refusals:
