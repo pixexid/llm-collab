@@ -100,6 +100,16 @@ class RequestBodyTest(unittest.TestCase):
                 with self.assertRaisesRegex(SystemExit, "caller text"):
                     review_request.reject_caller_supplied_shas({"focus": value})
 
+    def test_caller_text_cannot_close_an_autolinked_issue(self):
+        for label, value in (
+            ("focus", "fix GH-123"),
+            ("note", "resolved GH-456"),
+            ("settled", "closes GH-789"),
+        ):
+            with self.subTest(label=label):
+                with self.assertRaisesRegex(SystemExit, "closing keyword"):
+                    review_request.reject_caller_supplied_shas({label: value})
+
 
 class ProjectResolutionTest(unittest.TestCase):
     def test_registered_project_supplies_exact_repo(self):
@@ -135,6 +145,17 @@ class ProjectResolutionTest(unittest.TestCase):
                     review_request.repo_coordinates("llm-collab"),
                     ("pixexid", "llm-collab"),
                 )
+
+    def test_malformed_project_registry_uses_the_documented_refusal(self):
+        for payload in (None, [], {"projects": [None]}):
+            with self.subTest(payload=payload), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                (root / "projects.json").write_text(json.dumps(payload))
+                with mock.patch.object(
+                    review_request, "coordination_root", return_value=root
+                ):
+                    with self.assertRaisesRegex(SystemExit, "valid projects list"):
+                        review_request.common_checkout_projects()
 
 
 class RequestHistoryTest(unittest.TestCase):
@@ -539,7 +560,7 @@ class CommandContractTest(unittest.TestCase):
             root = Path(tmp)
             task_dir = root / "Tasks" / "active"
             task_dir.mkdir(parents=True)
-            (task_dir / "lane__TASK-ABC123.md").write_text(
+            (task_dir / "renamed-lane.md").write_text(
                 "---\ntask_id: TASK-ABC123\nproject_id: llm-collab\n---\ncontract"
             )
             with mock.patch.object(
@@ -573,6 +594,27 @@ class CommandContractTest(unittest.TestCase):
                 ),
             ):
                 with self.assertRaisesRegex(SystemExit, "entry bound"):
+                    review_request.require_contract(
+                        "TASK-MISSING",
+                        "llm-collab",
+                        "pixexid",
+                        "llm-collab",
+                    )
+
+    def test_task_contract_frontmatter_reads_are_cumulatively_bounded(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task_dir = root / "Tasks" / "active"
+            task_dir.mkdir(parents=True)
+            (task_dir / "one.md").write_text("one")
+            (task_dir / "two.md").write_text("two")
+            with (
+                mock.patch.object(
+                    review_request, "coordination_root", return_value=root
+                ),
+                mock.patch.object(review_request, "TASK_CONTRACT_MAX_BYTES", 5),
+            ):
+                with self.assertRaisesRegex(SystemExit, "cumulative"):
                     review_request.require_contract(
                         "TASK-MISSING",
                         "llm-collab",

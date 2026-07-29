@@ -103,7 +103,7 @@ belongs to this program.
 | Artifact/task age could support retired-form compatibility. | Rejected. Only an exact entry in a sealed, cutoff-policy-bound, content-addressed legacy manifest with authoritative import/observation provenance qualifies. |
 | Session identity started from the earlier session-autobridge vocabulary. | Rebased to include the current-main exact activation tuple and malformed-never-downgrades behavior as v2 migration input. |
 | Later work could begin from the original linear phase diagram alone. | Rebased to the actual GH-88–GH-104 dependency graph and explicit external writer gates. |
-| One planning or implementation context could continue across the program. | Each write lane receives one fresh implementation worker, and each initial PR-ready head receives one fresh context-isolated reviewer. In-contract repair rounds reuse that reviewer under the bounded amendment rules in `docs/workflows/commit-push-prs.md`; a new cold reviewer is required only for the boundary-crossing amendments defined there. |
+| One planning or implementation context could continue across the program. | Each write lane receives one fresh implementation worker. Review follows the one-external-reviewer flow in `docs/workflows/commit-push-prs.md`; amended heads receive no second model review. |
 
 ## Program outcome
 
@@ -835,8 +835,10 @@ Every implementation slice follows this sequence:
 7. create exactly one local checkpoint commit;
 8. activate one fresh context-isolated reviewer against the exact checkpoint
    SHA;
-9. repair findings in a separately controlled writer turn and re-review at the
-   new exact head, reusing the same reviewer for in-contract amendments; at
+9. repair findings in a separately controlled writer turn, then follow the
+   amendment and one-external-reviewer flow in
+   `docs/workflows/commit-push-prs.md`; do not run a second model review on an
+   amended head. At
    most 2 review-fix cycles follow the initial review (3 when the contract
    scope includes payments, auth, permissions, schema/migrations, or
    irreversible writes; docs-only lanes with a proven zero-consumer scan always
@@ -854,8 +856,8 @@ Every implementation slice follows this sequence:
     unrequested review -- see the Tier A/B/C rule in AGENTS.md.
 
 A worker/reviewer task is never reused for a later phase or a different write
-lane; within its own lane's review-fix cycles, reviewer reuse follows the
-bounded amendment rules above. One worker owns
+lane; amended heads follow the one-external-reviewer flow in
+`docs/workflows/commit-push-prs.md` and receive no second model review. One worker owns
 one write lane. Review and planning may run in parallel when read-only; separate
 implementation writers run in parallel only with recorded path/state/resource
 non-overlap and merge order.
@@ -872,9 +874,8 @@ A phase is complete only when:
 - focused and full configured tests pass at the exact head;
 - schema/protocol/compatibility impact is recorded;
 - security and migration ownership are explicit;
-- an independent reviewer accepts the exact head — fresh and context-isolated
-  for the initial PR-ready head, reused per the bounded amendment rules in
-  `docs/workflows/commit-push-prs.md` for in-contract amended heads;
+- the exact head passes the one-external-reviewer flow in
+  `docs/workflows/commit-push-prs.md`;
 - the issue, task, and release state reflect the real result.
 
 The epic is complete only when the minimal standalone profile works, supported

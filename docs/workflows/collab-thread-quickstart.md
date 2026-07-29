@@ -218,14 +218,18 @@ so a worker could classify a mandatory change as needing no review. Read the tie
 lists in `AGENTS.md` itself; a summary of them here is a second source that goes
 stale the moment the first one moves.
 
-Issue one *initial* request, on the head you believe is final:
+Issue one *initial* request, on the head you believe is final. The command reads
+the PR and local heads itself; never type the SHA:
 
-```
-@codex review for <every Tier A family the diff touches> at <exact head SHA>
+```bash
+python bin/review_request.py --pr <number> --project <project_id> \
+  --tier A --contract <issue-number-or-TASK-id> \
+  --focus "<every Tier A family the diff touches>"
 ```
 
-State the SHA. A connector `+1` counts as CLEAN only while the head still equals the
-SHA the request named, so a request without one cannot be satisfied by a reaction.
+The generated comment states the SHA. A connector `+1` counts as CLEAN only while
+the head still equals the SHA the request named, so a request without one cannot be
+satisfied by a reaction.
 
 An amendment stales the review; request again on the new final head. Any finding
 that arrives is adjudicated in writing whatever the tier — including a finding whose
@@ -241,7 +245,8 @@ recovery — without it a Tier A head would sit pending forever.
 An `eyes` reaction is not a terminal signal. It does not exit requested-review
 precedence and does not reset the request clock, so a head that got `eyes` and
 nothing else still receives the re-trigger and, if that too stays silent, the
-operator disposition. "A reaction arrived" is not the test; a *terminal* signal is.
+lane owner and release-gate worker's exact-head disposition. "A reaction arrived"
+is not the test; a *terminal* signal is.
 
 ## 8. When something looks wrong
 

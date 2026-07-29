@@ -70,6 +70,10 @@ GH_READ_TIMEOUT_SECONDS = 30
 GH_POST_TIMEOUT_SECONDS = 45
 SHA_SHAPED_RE = re.compile(r"\b[0-9a-f]{40}\b", re.IGNORECASE)
 EXACT_HEAD_WORDING_RE = re.compile(r"exact\s+head", re.IGNORECASE)
+AUTOLINK_CLOSING_RE = re.compile(
+    r"\b(?:close(?:s|d)?|fix(?:es|ed)?|resolve(?:s|d)?)\s+GH-\d+\b",
+    re.IGNORECASE,
+)
 RETRIGGER_NOTE = (
     "Re-triggered once as the single exempted recovery: the initial request "
     "for this exact head is repeated verbatim above."
@@ -164,8 +168,10 @@ def common_checkout_projects() -> list[dict]:
         payload = json.loads(path.read_text())
     except (OSError, json.JSONDecodeError) as error:
         raise SystemExit(f"error: cannot read registered projects from {path}: {error}")
-    projects = payload.get("projects")
-    if not isinstance(projects, list):
+    projects = payload.get("projects") if isinstance(payload, dict) else None
+    if not isinstance(projects, list) or not all(
+        isinstance(project, dict) for project in projects
+    ):
         raise SystemExit(f"error: {path} has no valid projects list")
     return projects
 
@@ -229,8 +235,9 @@ def require_contract(
         return
     if TASK_CONTRACT_RE.fullmatch(contract):
         root = coordination_root()
-        matches: list[Path] = []
+        matches: list[tuple[Path, dict]] = []
         entries = 0
+        bytes_read = 0
         try:
             for folder in ("active", "backlog", "done"):
                 task_dir = root / "Tasks" / folder
@@ -245,11 +252,18 @@ def require_contract(
                                 f"entry bound ({TASK_CONTRACT_ENTRY_HARD_CAP}); "
                                 "failing closed"
                             )
-                        if (
-                            entry.name.endswith(f"__{contract}.md")
-                            and entry.is_file()
-                        ):
-                            matches.append(Path(entry.path))
+                        if not entry.is_file() or not entry.name.endswith(".md"):
+                            continue
+                        path = Path(entry.path)
+                        bytes_read += path.stat().st_size
+                        if bytes_read > TASK_CONTRACT_MAX_BYTES:
+                            raise SystemExit(
+                                "error: task-contract scan exceeds the cumulative "
+                                f"{TASK_CONTRACT_MAX_BYTES}-byte bound"
+                            )
+                        frontmatter, _ = parse_frontmatter(path.read_text())
+                        if frontmatter.get("task_id") == contract:
+                            matches.append((path, frontmatter))
         except OSError as error:
             raise SystemExit(f"error: cannot scan task contracts: {error}")
         if not matches:
@@ -260,16 +274,7 @@ def require_contract(
             raise SystemExit(
                 f"error: task-hosted lane contract {contract} is ambiguous"
             )
-        path = matches[0]
-        try:
-            if path.stat().st_size > TASK_CONTRACT_MAX_BYTES:
-                raise SystemExit(
-                    f"error: {path} exceeds the {TASK_CONTRACT_MAX_BYTES}-byte "
-                    "task-contract bound"
-                )
-            frontmatter, _ = parse_frontmatter(path.read_text())
-        except OSError as error:
-            raise SystemExit(f"error: cannot read task contract {path}: {error}")
+        path, frontmatter = matches[0]
         if (
             frontmatter.get("task_id") != contract
             or frontmatter.get("project_id") != project_id
@@ -372,6 +377,11 @@ def reject_caller_supplied_shas(fields: dict[str, str]) -> None:
                 f"error: --{label} contains a SHA-shaped value or exact-head "
                 "wording; the head is sourced from GitHub and the checkout, "
                 "never from caller text"
+            )
+        if AUTOLINK_CLOSING_RE.search(value):
+            raise SystemExit(
+                f"error: --{label} contains a GitHub closing keyword adjacent "
+                "to an autolink; use neutral reference wording"
             )
 
 

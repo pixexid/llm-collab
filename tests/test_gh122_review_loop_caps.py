@@ -1446,6 +1446,13 @@ class ReviewLoopCapContractTest(unittest.TestCase):
         )
         self.assertNotIn("Short version:", text)
 
+    def test_the_quickstart_uses_the_generator_and_current_silence_owner(self):
+        text = QUICKSTART_DOC.read_text(encoding="utf-8")
+        self.assertIn("python bin/review_request.py --pr", text)
+        self.assertNotIn("@codex review for <every Tier A family", text)
+        self.assertNotIn("operator disposition", text)
+        self.assertIn("lane owner and release-gate worker", text)
+
     def test_the_contract_version_advanced_with_the_gate_rewrite(self):
         """A cached copy of the old gate can produce a wrong merge.
 
@@ -1660,15 +1667,19 @@ class ReviewLoopCapContractTest(unittest.TestCase):
 
         self.assert_scenario_cases("operator_head_authorization", check)
 
-    def test_plan_doc_reuses_reviewer_for_in_contract_amendments(self):
+    def test_plan_doc_uses_the_one_external_reviewer_flow(self):
+        plan = PLAN_DOC.read_text(encoding="utf-8")
+        self.assertNotIn("reuse that reviewer", plan)
+        self.assertNotIn("reusing the same reviewer", plan)
+        self.assertNotIn("reused per the bounded amendment rules", plan)
+
         def check(case, sources):
             self.assertIn(
-                "reusing the same reviewer for in-contract amendments",
+                "one-external-reviewer flow",
                 sources["plan"],
             )
             self.assertNotIn(
-                "Every implementation worker and every exact-head reviewer receives "
-                "a separate fresh task/thread",
+                "reusing the same reviewer for in-contract amendments",
                 sources["plan"],
             )
 
@@ -1683,15 +1694,15 @@ class ReviewLoopCapContractTest(unittest.TestCase):
 
         self.assert_scenario_cases("review_loop_cap", check)
 
-    def test_phase_completion_gate_permits_reviewer_reuse(self):
+    def test_phase_completion_gate_uses_the_canonical_reviewer_flow(self):
         def check(case, sources):
             self.assertIn(
-                "reused per the bounded amendment rules in "
-                "`docs/workflows/commit-push-prs.md` for in-contract amended heads",
+                "passes the one-external-reviewer flow in "
+                "`docs/workflows/commit-push-prs.md`",
                 sources["phase_completion"],
             )
             self.assertNotIn(
-                "a fresh independent reviewer accepts the exact head",
+                "reused per the bounded amendment rules",
                 sources["phase_completion"],
             )
 
