@@ -52,7 +52,7 @@ DB_IMPACT_VALUES = {"none", "local-schema-only", "shared-supabase-required"}
 PRODUCTION_SCHEMA_GUARD_STAGES = {"assignment", "review", "pr", "done"}
 DB_LOCAL_SCHEMA_ONLY_EXCEPTION = "dev-only-non-production"
 DB_LOCAL_SCHEMA_ONLY_APPROVER = "operator"
-DEFAULT_DESIGN_SKILLS = ["impeccable"]
+AMIGA_DESIGN_SKILLS = ["impeccable"]
 DESIGN_THINKING_DISPOSITIONS = {"shipped", "deferred", "out_of_scope"}
 DIRECT_APP_ONLY_LANE_TOKENS = {
     "design",
@@ -169,9 +169,52 @@ def _project_required_design_docs(frontmatter: dict, *, project_override=_PROJEC
         legacy_design_doc = _normalize_text(ui_ux_config.get("design_doc"))
         if legacy_design_doc:
             return [legacy_design_doc]
-    if project_id == "amiga":
+    if project_id == "amiga" and project is not None:
         return [AMIGA_DESIGN_DOC]
     return []
+
+
+def _resolve_project_required_design_skills(
+    frontmatter: dict,
+    *,
+    project_override=_PROJECT_UNSET,
+) -> tuple[list[str], str | None]:
+    project_id = frontmatter.get("project_id")
+    project = _exact_task_project(frontmatter, project_override)
+    ui_ux_config = project.get("ui_ux") if isinstance(project, dict) else None
+    if isinstance(ui_ux_config, dict) and "required_design_skills" in ui_ux_config:
+        raw_skills = ui_ux_config.get("required_design_skills")
+        if isinstance(raw_skills, list) and all(
+            isinstance(skill, str) and skill.strip() for skill in raw_skills
+        ):
+            return [skill.strip() for skill in raw_skills], None
+        return [], (
+            f"Project {project_id!r} has malformed `ui_ux.required_design_skills`: "
+            f"expected a list of non-empty strings, found {raw_skills!r}."
+        )
+    if project_id == "amiga" and project is not None:
+        return list(AMIGA_DESIGN_SKILLS), None
+    return [], None
+
+
+def _project_required_design_skills(frontmatter: dict, *, project_override=_PROJECT_UNSET) -> list[str]:
+    skills, _error = _resolve_project_required_design_skills(
+        frontmatter,
+        project_override=project_override,
+    )
+    return skills
+
+
+def _project_required_design_skills_config_error(
+    frontmatter: dict,
+    *,
+    project_override=_PROJECT_UNSET,
+) -> str | None:
+    _skills, error = _resolve_project_required_design_skills(
+        frontmatter,
+        project_override=project_override,
+    )
+    return error
 
 
 def _project_db_contract(frontmatter: dict, *, project_override=_PROJECT_UNSET) -> tuple[str, list[str]]:
@@ -766,23 +809,33 @@ def sync_ui_ux_contract(
             updated["required_design_docs"] = required_docs
             changed.append("required_design_docs")
 
-        required_skills = _normalize_list(updated.get("required_design_skills"))
-        if required_skills != list(DEFAULT_DESIGN_SKILLS):
-            updated["required_design_skills"] = list(DEFAULT_DESIGN_SKILLS)
+        required_skills = _project_required_design_skills(
+            updated,
+            project_override=project,
+        )
+        if updated.get("required_design_skills") != required_skills:
+            updated["required_design_skills"] = required_skills
             changed.append("required_design_skills")
 
-        if _normalize_bool(updated.get("impeccable_required")) is not True:
-            updated["impeccable_required"] = True
+        impeccable_enabled = "impeccable" in required_skills
+        impeccable_required = impeccable_enabled
+        if _normalize_bool(updated.get("impeccable_required")) is not impeccable_required:
+            updated["impeccable_required"] = impeccable_required
             changed.append("impeccable_required")
-        if _normalize_bool(updated.get("impeccable_antipatterns_enforced")) is not True:
-            updated["impeccable_antipatterns_enforced"] = True
+        impeccable_antipatterns_enforced = impeccable_enabled
+        if _normalize_bool(updated.get("impeccable_antipatterns_enforced")) is not impeccable_antipatterns_enforced:
+            updated["impeccable_antipatterns_enforced"] = impeccable_antipatterns_enforced
             changed.append("impeccable_antipatterns_enforced")
         if _normalize_bool(updated.get("design_doc_update_review_required")) is not True:
             updated["design_doc_update_review_required"] = True
             changed.append("design_doc_update_review_required")
 
-        required_commands = _normalize_impeccable_commands(updated.get("impeccable_commands_required"))
-        if not required_commands:
+        required_commands = (
+            _normalize_impeccable_commands(updated.get("impeccable_commands_required"))
+            if impeccable_enabled
+            else []
+        )
+        if impeccable_enabled and not required_commands:
             required_commands = _default_impeccable_commands(updated["ui_ux_mode"])
         if updated.get("impeccable_commands_required") != required_commands:
             updated["impeccable_commands_required"] = required_commands
@@ -791,8 +844,14 @@ def sync_ui_ux_contract(
         evidence_defaults: dict[str, object] = {
             "design_docs_read": _normalize_list(updated.get("design_docs_read")),
             "design_skills_used": _normalize_list(updated.get("design_skills_used")),
-            "impeccable_commands_used": _normalize_impeccable_commands(updated.get("impeccable_commands_used")),
-            "impeccable_detect_result": updated.get("impeccable_detect_result"),
+            "impeccable_commands_used": (
+                _normalize_impeccable_commands(updated.get("impeccable_commands_used"))
+                if impeccable_enabled
+                else []
+            ),
+            "impeccable_detect_result": (
+                updated.get("impeccable_detect_result") if impeccable_enabled else None
+            ),
             "browser_validation_desktop": updated.get("browser_validation_desktop"),
             "browser_validation_mobile": updated.get("browser_validation_mobile"),
             "operator_visual_feedback_requested": _normalize_bool(updated.get("operator_visual_feedback_requested"))
@@ -811,6 +870,15 @@ def sync_ui_ux_contract(
             if key not in updated:
                 updated[key] = default
                 changed.append(key)
+
+        if not impeccable_enabled:
+            for key, default in (
+                ("impeccable_commands_used", []),
+                ("impeccable_detect_result", None),
+            ):
+                if updated.get(key) != default:
+                    updated[key] = default
+                    changed.append(key)
 
         if updated["ui_ux_mode"] == "docs_only":
             for field in ("browser_validation_desktop", "browser_validation_mobile"):
@@ -930,6 +998,12 @@ def validate_ui_ux_contract(
 ) -> tuple[list[str], dict]:
     errors: list[str] = []
     project = _exact_task_project(frontmatter, project_override)
+    design_skills_error = _project_required_design_skills_config_error(
+        frontmatter,
+        project_override=project,
+    )
+    if design_skills_error:
+        errors.append(design_skills_error)
     fm, _ = sync_ui_ux_contract(
         frontmatter,
         body,
@@ -949,6 +1023,10 @@ def validate_ui_ux_contract(
 
     required_docs = _normalize_list(fm.get("required_design_docs"))
     required_skills = _normalize_list(fm.get("required_design_skills"))
+    project_required_skills = _project_required_design_skills(
+        fm,
+        project_override=project,
+    )
     required_commands = _normalize_impeccable_commands(fm.get("impeccable_commands_required"))
     mode = _normalize_text(fm.get("ui_ux_mode"))
     project_required_docs = _project_required_design_docs(fm)
@@ -960,26 +1038,32 @@ def validate_ui_ux_contract(
         )
     if not required_docs:
         errors.append("UI/UX lane must list at least one project design source in `required_design_docs`.")
-    if required_skills != list(DEFAULT_DESIGN_SKILLS):
-        errors.append("UI/UX lane must set `required_design_skills: [impeccable]`.")
-    if _normalize_bool(fm.get("impeccable_required")) is not True:
+    if required_skills != project_required_skills:
+        errors.append(
+            "UI/UX lane must set project-configured `required_design_skills`: "
+            + repr(project_required_skills)
+        )
+    impeccable_enabled = "impeccable" in project_required_skills
+    if impeccable_enabled and _normalize_bool(fm.get("impeccable_required")) is not True:
         errors.append("UI/UX lane must set `impeccable_required: true`.")
-    if _normalize_bool(fm.get("impeccable_antipatterns_enforced")) is not True:
+    if impeccable_enabled and _normalize_bool(fm.get("impeccable_antipatterns_enforced")) is not True:
         errors.append("UI/UX lane must set `impeccable_antipatterns_enforced: true`.")
     if _normalize_bool(fm.get("design_doc_update_review_required")) is not True:
         errors.append("UI/UX lane must set `design_doc_update_review_required: true`.")
     if mode not in {"implementation", "docs_only"}:
         errors.append("UI/UX lane must set `ui_ux_mode` to `implementation` or `docs_only`.")
-    if not required_commands:
+    if impeccable_enabled and not required_commands:
         errors.append("UI/UX lane must record `impeccable_commands_required`.")
     invalid_required_commands = [
         command for command in required_commands if command not in IMPECCABLE_ALLOWED_COMMANDS
     ]
-    if invalid_required_commands:
+    if impeccable_enabled and invalid_required_commands:
         errors.append(
             "UI/UX lane has invalid `impeccable_commands_required`: " + ", ".join(invalid_required_commands)
         )
-    if required_commands and not any(command in IMPECCABLE_STEERING_COMMANDS for command in required_commands):
+    if impeccable_enabled and required_commands and not any(
+        command in IMPECCABLE_STEERING_COMMANDS for command in required_commands
+    ):
         errors.append("UI/UX lane must plan at least one Impeccable steering command.")
 
     if mode == "implementation":
@@ -1004,29 +1088,34 @@ def validate_ui_ux_contract(
             )
 
         design_skills_used = _normalize_list(fm.get("design_skills_used"))
-        if design_skills_used != list(DEFAULT_DESIGN_SKILLS):
-            errors.append("UI/UX review evidence must record `design_skills_used: [impeccable]`.")
-
-        commands_used = _normalize_impeccable_commands(fm.get("impeccable_commands_used"))
-        if not commands_used:
-            errors.append("UI/UX review evidence must include `impeccable_commands_used`.")
-        invalid_used_commands = [command for command in commands_used if command not in IMPECCABLE_ALLOWED_COMMANDS]
-        if invalid_used_commands:
+        if design_skills_used != project_required_skills:
             errors.append(
-                "UI/UX review evidence has invalid `impeccable_commands_used`: "
-                + ", ".join(invalid_used_commands)
-            )
-        if commands_used and not any(command in IMPECCABLE_STEERING_COMMANDS for command in commands_used):
-            errors.append("UI/UX review evidence must include at least one Impeccable steering command.")
-        missing_required_commands = [command for command in required_commands if command not in commands_used]
-        if missing_required_commands:
-            errors.append(
-                "UI/UX review evidence is missing planned `impeccable_commands_required`: "
-                + ", ".join(missing_required_commands)
+                "UI/UX review evidence must record project-configured "
+                "`design_skills_used`: "
+                + repr(project_required_skills)
             )
 
-        if not _normalize_text(fm.get("impeccable_detect_result")):
-            errors.append("UI/UX review evidence must include `impeccable_detect_result`.")
+        if impeccable_enabled:
+            commands_used = _normalize_impeccable_commands(fm.get("impeccable_commands_used"))
+            if not commands_used:
+                errors.append("UI/UX review evidence must include `impeccable_commands_used`.")
+            invalid_used_commands = [command for command in commands_used if command not in IMPECCABLE_ALLOWED_COMMANDS]
+            if invalid_used_commands:
+                errors.append(
+                    "UI/UX review evidence has invalid `impeccable_commands_used`: "
+                    + ", ".join(invalid_used_commands)
+                )
+            if commands_used and not any(command in IMPECCABLE_STEERING_COMMANDS for command in commands_used):
+                errors.append("UI/UX review evidence must include at least one Impeccable steering command.")
+            missing_required_commands = [command for command in required_commands if command not in commands_used]
+            if missing_required_commands:
+                errors.append(
+                    "UI/UX review evidence is missing planned `impeccable_commands_required`: "
+                    + ", ".join(missing_required_commands)
+                )
+
+            if not _normalize_text(fm.get("impeccable_detect_result")):
+                errors.append("UI/UX review evidence must include `impeccable_detect_result`.")
 
         desktop = _normalize_text(fm.get("browser_validation_desktop"))
         mobile = _normalize_text(fm.get("browser_validation_mobile"))

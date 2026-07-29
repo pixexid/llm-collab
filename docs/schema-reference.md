@@ -126,7 +126,8 @@ Project registry. Created by `scripts/init.py`. Gitignored.
       "claude_desktop_bridge": false,
       "ui_ux": {
         "direct_app_only": false,
-        "required_design_docs": ["/absolute/path/to/project/DESIGN.md"]
+        "required_design_docs": ["/absolute/path/to/project/DESIGN.md"],
+        "required_design_skills": ["impeccable"]
       },
       "db": {
         "production_schema_guard": false,
@@ -165,6 +166,7 @@ Project registry. Created by `scripts/init.py`. Gitignored.
 | `claude_desktop_bridge` | bool | Retained for compatibility; selects nothing. Claude is woken by its durable packet and the app's own background inbox watcher, never AX or Computer Use. |
 | `ui_ux.direct_app_only` | bool | Optional, default-off direct-app gate. When `true`, every non-`done` task must avoid design/sandbox/spec/handoff/parity, bare-template, and template-design-only lane types, repository-root `design/**` targets, and dependency materialization of newly authored `design/**` artifacts. Explicit implementation lanes such as `template-implementation`, `src/design/**`, and read-only `required_design_docs` remain valid. Absolute related/dependency paths require a complete resolvable project `repos` mapping so repository-root scope can be evaluated. A present non-boolean value is a configuration error. |
 | `ui_ux.required_design_docs` | string[] | Optional project-specific design sources prepended to every UI/UX task contract. Non-Amiga projects must configure these or provide explicit task-level design docs. |
+| `ui_ux.required_design_skills` | string[] | Optional project-specific design-skill family list. If omitted, only the exact `amiga` project uses the legacy `[impeccable]` fallback; non-Amiga projects inherit no design-skill default. |
 | `db.production_schema_guard` | bool | Optional strict boolean. Auto-enabled when the project declares `db.shared_supabase_project_ref` (the shared project is the acceptance DB); set `true` to force it on, or `false` to opt a shared-Supabase project out. When enabled for the task's exact project, assignment/review/PR/done validation rejects schema-changing tasks classified as `none`, restricts `local-schema-only` to the exact operator-approved dev-only exception, and treats concrete `db/migrations/**` or `db/schema.sql` paths as schema changes even after `manual_false`. A present non-boolean fails closed; projects never inherit another project's value. |
 | `db.shared_supabase_project_ref` | string | Optional shared Supabase project ref required by database-impact task contracts. Non-Amiga projects do not inherit Amiga's ref. |
 | `db.required_surfaces` | string[] | Optional project-specific CLI or MCP surfaces required by shared-database task contracts. |
@@ -506,18 +508,18 @@ release_evidence: null
 | `ui_ux_detection` | string | `auto`, `manual_true`, or `manual_false` |
 | `ui_ux_detection_reasons` | string[] | Why the lane was auto-flagged |
 | `required_design_docs` | string[] | UI docs the worker must read before starting |
-| `required_design_skills` | string[] | Design skill family expected for the lane; for Amiga UI/UX lanes this must be `[impeccable]` |
-| `impeccable_commands_required` | string[] | Planned Impeccable steering commands for the lane |
-| `impeccable_required` | bool | Whether `impeccable detect` is mandatory |
-| `impeccable_antipatterns_enforced` | bool | Whether Impeccable curated anti-patterns are treated as a hard guardrail |
+| `required_design_skills` | string[] | Design skill family expected for the lane, sourced from the exact project's `ui_ux.required_design_skills`; only the exact `amiga` project falls back to `[impeccable]` when that setting is absent. |
+| `impeccable_commands_required` | string[] | Planned Impeccable steering commands for the lane when `impeccable` is in the exact project's required design skills; otherwise empty. |
+| `impeccable_required` | bool | Whether `impeccable detect` is mandatory; true only when the exact project's required design skills include `impeccable`. |
+| `impeccable_antipatterns_enforced` | bool | Whether Impeccable curated anti-patterns are treated as a hard guardrail; false when `impeccable` is not required. |
 | `design_doc_update_review_required` | bool | Whether the lane must record a DESIGN.md review/update decision |
 | `design_thinking_polish_budget_loc` | int or null | UI/UX implementation lanes only: refinement-time D8 polish budget, roughly 10–20% of the implementation LOC estimate |
 | `design_thinking_polish_seeds` | string[] | UI/UX implementation lanes only: at least 2 surface-specific D8 polish vectors seeded during refinement |
 | `design_thinking_pass_items` | object[] | UI/UX implementation lanes only: review/PR evidence for the D8 pass; at least 3 items with `finding`, `disposition`, and optional `evidence` |
 | `design_docs_read` | string[] | Design docs the worker explicitly confirms were read |
-| `design_skills_used` | string[] | Design skills actually used during the lane; for Amiga UI/UX lanes this must be `[impeccable]` |
-| `impeccable_commands_used` | string[] | Impeccable commands actually used during the lane |
-| `impeccable_detect_result` | string or null | Captured `impeccable detect` evidence summary |
+| `design_skills_used` | string[] | Design skills actually used during the lane; validation requires the exact project's configured `required_design_skills` (or the exact Amiga fallback). |
+| `impeccable_commands_used` | string[] | Impeccable commands actually used during the lane when the exact project's required design skills include `impeccable`; otherwise empty. |
+| `impeccable_detect_result` | string or null | Captured `impeccable detect` evidence summary when `impeccable` is required; otherwise null. |
 | `browser_validation_desktop` | string or null | Worker-owned desktop browser validation evidence |
 | `browser_validation_mobile` | string or null | Worker-owned mobile browser validation evidence |
 | `operator_visual_feedback_requested` | bool | Whether the operator was explicitly asked for visual review feedback |

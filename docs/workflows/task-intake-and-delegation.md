@@ -394,12 +394,14 @@ For UI/UX lanes, also require:
 - `ui_ux_lane: true`
 - `ui_ux_mode: implementation | docs_only`
 - `required_design_docs`
-- `required_design_skills`
-- `impeccable_commands_required`
-- `impeccable_required: true`
-- `impeccable_antipatterns_enforced: true`
+- `required_design_skills` from the exact project's `ui_ux.required_design_skills` (or the exact Amiga fallback)
 - `design_doc_update_review_required: true`
 - for `ui_ux_mode: implementation`: `design_thinking_polish_budget_loc` and at least 2 `design_thinking_polish_seeds`
+
+When the exact project's required design skills include `impeccable`, also require
+`impeccable_commands_required`, `impeccable_required: true`, and
+`impeccable_antipatterns_enforced: true`. Otherwise those Impeccable-specific
+fields are false/empty and are not a gate.
 
 For DB lanes, also require:
 - `db_impact: none | local-schema-only | shared-supabase-required`
@@ -476,14 +478,16 @@ Do not phrase a planned branch/worktree as already assigned.
 
 For UI/UX implementation lanes, the delegation brief must also name:
 - required design docs to read first, including `DESIGN.md`
-- required Impeccable-family skill usage (`required_design_skills: [impeccable]`)
-- planned Impeccable steering commands for the lane
-- the requirement to enforce Impeccable curated anti-patterns
+- the exact project's required design-skill list
 - the D8 design-thinking-in-details budget and seeded polish vectors from the task contract
-- the mandatory `pnpm ui:impeccable:detect -- <paths>` step
 - the exact browser-validation expectation
 - the requirement for a handoff `Design-thinking pass` section with at least 3 findings and dispositions
 - the requirement to record UI evidence back onto the task contract before moving to `review`
+
+When that exact project's required design skills include `impeccable`, the brief
+must additionally name the planned Impeccable steering commands, the requirement
+to enforce Impeccable curated anti-patterns, and the mandatory
+`pnpm ui:impeccable:detect -- <paths>` step.
 
 For `shared-supabase-required` lanes, the delegation brief must also name:
 - the required `db_impact` classification and shared project ref
@@ -493,7 +497,8 @@ For `shared-supabase-required` lanes, the delegation brief must also name:
 - the worker-account MCP preflight and the exact fallback/remediation path for
   access-control failures
 
-Canonical UI evidence recording command:
+For an exact project whose required design skills include `impeccable`, record
+Impeccable evidence with:
 
 ```bash
 /Users/pixexid/Projects/llm-collab/bin/llm-collab task_contract.py record-ui-evidence \

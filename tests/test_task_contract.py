@@ -99,7 +99,12 @@ class TaskContractUiVisualFeedbackTest(unittest.TestCase):
         body = "Update src/components/ui/change-request-review-panel.tsx."
 
         # #when
-        errors, _summary = task_contract.validate_ui_ux_contract(frontmatter, body, stage="review")
+        with patch.object(task_contract, "get_project", return_value={"id": "amiga"}):
+            errors, _summary = task_contract.validate_ui_ux_contract(
+                frontmatter,
+                body,
+                stage="review",
+            )
 
         # #then
         self.assertEqual(errors, [])
@@ -115,7 +120,11 @@ class TaskContractProjectDesignDocsTest(unittest.TestCase):
         }
 
         # #when
-        synced, _changed = task_contract.sync_ui_ux_contract(frontmatter, "Update UI workflow docs.")
+        with patch.object(task_contract, "get_project", return_value={"id": "amiga"}):
+            synced, _changed = task_contract.sync_ui_ux_contract(
+                frontmatter,
+                "Update UI workflow docs.",
+            )
 
         # #then
         self.assertEqual(synced["required_design_docs"], [task_contract.AMIGA_DESIGN_DOC])
@@ -171,6 +180,140 @@ class TaskContractProjectDesignDocsTest(unittest.TestCase):
             "UI/UX lane must list at least one project design source in `required_design_docs`.",
             errors,
         )
+
+    def test_amiga_design_skill_fallback_is_project_scoped(self) -> None:
+        frontmatter = {
+            "project_id": "amiga",
+            "ui_ux_lane": True,
+            "ui_ux_mode": "docs_only",
+        }
+
+        with patch.object(task_contract, "get_project", return_value={"id": "amiga"}):
+            synced, _changed = task_contract.sync_ui_ux_contract(frontmatter, "Update UI workflow docs.")
+
+        self.assertEqual(synced["required_design_skills"], ["impeccable"])
+
+    def test_amiga_design_skill_fallback_requires_registered_exact_project(self) -> None:
+        frontmatter = {
+            "project_id": "amiga",
+            "ui_ux_lane": True,
+            "ui_ux_mode": "docs_only",
+        }
+
+        for registered_project in (None, {"id": "other"}):
+            with self.subTest(registered_project=registered_project), patch.object(
+                task_contract,
+                "get_project",
+                return_value=registered_project,
+            ):
+                synced, _changed = task_contract.sync_ui_ux_contract(
+                    frontmatter,
+                    "Update UI workflow docs.",
+                )
+
+            self.assertEqual(synced["required_design_skills"], [])
+
+    def test_configured_non_amiga_design_skills_are_used_for_sync_and_validation(self) -> None:
+        frontmatter = {
+            "project_id": "nuvyr",
+            "ui_ux_lane": True,
+            "ui_ux_mode": "docs_only",
+            "required_design_docs": ["/projects/nuvyr/DESIGN.md"],
+        }
+        project = {
+            "id": "nuvyr",
+            "ui_ux": {
+                "required_design_docs": ["/projects/nuvyr/DESIGN.md"],
+                "required_design_skills": ["taste"],
+            },
+        }
+
+        with patch.object(task_contract, "get_project", return_value=project):
+            synced, _changed = task_contract.sync_ui_ux_contract(frontmatter, "Update public UI docs.")
+            review = {
+                **synced,
+                "design_docs_read": ["/projects/nuvyr/DESIGN.md"],
+                "design_skills_used": ["taste"],
+                "browser_validation_desktop": "skipped (docs-only)",
+                "browser_validation_mobile": "skipped (docs-only)",
+                "design_doc_update_decision": "reviewed; no docs change needed",
+            }
+            errors, summary = task_contract.validate_ui_ux_contract(
+                review,
+                "Update public UI docs.",
+                stage="review",
+            )
+
+        self.assertEqual(synced["required_design_skills"], ["taste"])
+        self.assertFalse(synced["impeccable_required"])
+        self.assertFalse(synced["impeccable_antipatterns_enforced"])
+        self.assertEqual(synced["impeccable_commands_required"], [])
+        self.assertIsNone(synced["impeccable_detect_result"])
+        self.assertEqual(summary["required_design_skills"], ["taste"])
+        self.assertEqual(errors, [])
+
+    def test_unconfigured_non_amiga_design_skills_do_not_inherit_impeccable(self) -> None:
+        frontmatter = {
+            "project_id": "other",
+            "ui_ux_lane": True,
+            "ui_ux_mode": "docs_only",
+            "impeccable_commands_used": ["/polish"],
+            "impeccable_detect_result": "stale pass",
+        }
+        project = {
+            "id": "other",
+            "ui_ux": {"required_design_docs": ["/projects/other/DESIGN.md"]},
+        }
+
+        with patch.object(task_contract, "get_project", return_value=project):
+            synced, _changed = task_contract.sync_ui_ux_contract(frontmatter, "Update public UI docs.")
+            review = {
+                **synced,
+                "design_docs_read": ["/projects/other/DESIGN.md"],
+                "design_skills_used": [],
+                "browser_validation_desktop": "skipped (docs-only)",
+                "browser_validation_mobile": "skipped (docs-only)",
+                "design_doc_update_decision": "reviewed; no docs change needed",
+            }
+            errors, _summary = task_contract.validate_ui_ux_contract(
+                review,
+                "Update public UI docs.",
+                stage="review",
+            )
+
+        self.assertEqual(synced["required_design_skills"], [])
+        self.assertFalse(synced["impeccable_required"])
+        self.assertFalse(synced["impeccable_antipatterns_enforced"])
+        self.assertEqual(synced["impeccable_commands_required"], [])
+        self.assertEqual(synced["impeccable_commands_used"], [])
+        self.assertIsNone(synced["impeccable_detect_result"])
+        self.assertEqual(errors, [])
+
+    def test_malformed_project_design_skills_are_reported_once_with_direct_app_violation(self) -> None:
+        frontmatter = {
+            "project_id": "nuvyr",
+            "ui_ux_lane": True,
+            "ui_ux_mode": "docs_only",
+            "lane_type": "design",
+        }
+        project = {
+            "id": "nuvyr",
+            "ui_ux": {
+                "required_design_skills": "impeccable",
+                "direct_app_only": True,
+            },
+        }
+
+        with patch.object(task_contract, "get_project", return_value=project):
+            errors, _summary = task_contract.validate_task_contract(
+                frontmatter,
+                "Update public UI docs.",
+                stage="plan",
+            )
+
+        malformed = [error for error in errors if "malformed `ui_ux.required_design_skills`" in error]
+        self.assertEqual(len(malformed), 1)
+        self.assertTrue(any("direct_app_only: true" in error for error in errors))
 
 
 class TaskContractProjectDbConfigTest(unittest.TestCase):
