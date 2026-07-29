@@ -35,6 +35,7 @@ from _session_autobridge import (
     WAKE_STRATEGIES,
     discover_runtime_session,
     dispatch_session,
+    iter_sessions,
     load_binding,
     load_session,
     binding_payload_from_session,
@@ -175,6 +176,13 @@ def parse_args():
     deactivate.add_argument("--status", default="stopped", choices=("stopped", "superseded"))
     deactivate.add_argument("--superseded-by", default=None)
     deactivate.add_argument("--json", dest="json_output", action="store_true")
+
+    deactivate_pi = subparsers.add_parser(
+        "deactivate-pi",
+        help="Stop every registered session for one exact native Pi session",
+    )
+    deactivate_pi.add_argument("--native-session-id", required=True)
+    deactivate_pi.add_argument("--json", dest="json_output", action="store_true")
 
     def add_activation_identity(subparser):
         subparser.add_argument("--project", required=True)
@@ -729,6 +737,26 @@ def deactivate_session(args) -> dict:
     return payload
 
 
+def deactivate_pi_session(args) -> dict:
+    stopped = []
+    for payload in iter_sessions():
+        runtime = payload.get("runtime")
+        if (
+            not isinstance(runtime, dict)
+            or runtime.get("family") != "pi"
+            or runtime.get("session_id") != args.native_session_id
+            or payload.get("status") not in {"active", "parked"}
+        ):
+            continue
+        payload["status"] = "stopped"
+        save_session(payload)
+        stopped.append(str(payload["session_id"]))
+    return {
+        "native_session_id": args.native_session_id,
+        "deactivated_sessions": stopped,
+    }
+
+
 def _refusal_payload(kind: str, identity: dict, refusal: LeaseRefused) -> dict:
     payload = {
         kind: False,
@@ -831,6 +859,8 @@ def main():
         result, exit_code = lease_assert_command(args)
     elif args.command == "lease-release":
         result, exit_code = lease_release_command(args)
+    elif args.command == "deactivate-pi":
+        result = deactivate_pi_session(args)
     else:
         result = deactivate_session(args)
     emit(result, getattr(args, "json_output", False))
