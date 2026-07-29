@@ -12,6 +12,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -495,9 +496,11 @@ def load_agent_inbox(agent_id: str) -> dict:
 
 def save_agent_inbox(agent_id: str, data: dict) -> None:
     path = agent_inbox_path(agent_id)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    data.pop("_durability_pending", None)
     data["updated_utc"] = utc_iso()
-    write_file(path, json.dumps(data, indent=2))
+    pending = {**data, "_durability_pending": True}
+    write_file_durably(path, json.dumps(pending, indent=2))
+    write_file_durably(path, json.dumps(data, indent=2))
 
 
 def add_to_inbox(agent_id: str, message_path: str | Path) -> None:
@@ -637,6 +640,30 @@ def read_json(path: Path) -> dict | list:
 def write_file(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content)
+
+
+def write_file_durably(path: Path, content: str) -> None:
+    """Atomically replace one file and persist the replacement."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        dir=path.parent,
+        prefix=f".{path.name}.",
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        directory_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
 
 
 # ---------------------------------------------------------------------------

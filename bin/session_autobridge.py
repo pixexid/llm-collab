@@ -36,6 +36,7 @@ from _session_autobridge import (
     dispatch_session,
     load_binding,
     load_session,
+    prepare_session_write,
     runtime_home_from_source,
     save_session,
     update_binding_from_session,
@@ -287,6 +288,7 @@ def register_session(args) -> dict:
     repo_targets = getattr(args, "repo_targets", None)
     if repo_targets is not None:
         payload["repo_targets"] = repo_targets
+    prepared = prepare_session_write(payload)
     # ONE read of the existing binding, before any write, and the resulting snapshot is carried
     # forward. A preflight that validates and then lets the update REOPEN the path is a TOCTOU: a
     # second read failing where the first succeeded still lands between save_session() and the
@@ -308,7 +310,7 @@ def register_session(args) -> dict:
     # claim. Two independent writes cannot be made atomic; the order only chooses which failure
     # mode we get.
     binding = update_binding_from_session(payload, existing=existing_binding)
-    save_session(payload)
+    save_session(payload, prepared=prepared)
     if binding is not None:
         payload["binding"] = binding
     return payload

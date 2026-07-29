@@ -33,6 +33,7 @@ HEURISTIC_RUNTIME_DISCOVERY_FAMILIES = frozenset(
 
 from _helpers import (
     ROOT,
+    agent_inbox_path,
     build_handoff_prompt,
     config_get,
     get_agent,
@@ -55,6 +56,10 @@ THREAD_PAIRS_DIR = AUTOBRIDGE_ROOT / "thread_pairs"
 SESSION_MODES = ("manual", "notify", "auto-read", "auto-reply")
 SESSION_STATUSES = ("active", "parked", "stopping", "stopped", "superseded")
 WAKE_STRATEGIES = ("none", "notify", "relay", "runtime_trigger")
+MAX_SESSION_BYTES = 256 * 1024
+MAX_SESSION_INBOX_BYTES = 16 * 1024 * 1024
+MAX_SCANNED_SESSIONS = 5_000
+MAX_SESSION_SCAN_BYTES = 16 * 1024 * 1024
 
 
 def parse_iso8601(value: str | None) -> datetime | None:
@@ -95,20 +100,50 @@ def autobridge_thread_pair_path(project_id: str, chat_id: str, agent_a: str, age
 
 def load_session(session_id: str) -> dict:
     path = autobridge_session_path(session_id)
-    if not path.exists():
+    try:
+        raw = read_regular_file_bounded(path, MAX_SESSION_BYTES)
+    except FileNotFoundError:
         raise FileNotFoundError(f"Unknown session: {session_id}")
-    return json.loads(path.read_text())
+    payload = json.loads(raw.decode("utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"Malformed session: {session_id}")
+    return payload
 
 
 def iter_sessions(agent_id: str | None = None) -> list[dict]:
-    if not SESSIONS_DIR.exists():
+    try:
+        scan = os.scandir(SESSIONS_DIR)
+    except FileNotFoundError:
         return []
+    except OSError as error:
+        raise UnreadableFile(f"cannot scan session records: {error}") from error
+
+    paths = []
+    with scan:
+        for count, entry in enumerate(scan, start=1):
+            if count > MAX_SCANNED_SESSIONS:
+                raise UnreadableFile(
+                    f"session records exceed the {MAX_SCANNED_SESSIONS} entry limit"
+                )
+            if entry.name.endswith(".json"):
+                paths.append(Path(entry.path))
+
     sessions: list[dict] = []
-    for path in sorted(SESSIONS_DIR.glob("*.json")):
+    spent = 0
+    for path in sorted(paths):
         try:
-            session = json.loads(path.read_text())
+            raw = read_regular_file_bounded(
+                path,
+                min(MAX_SESSION_BYTES, MAX_SESSION_SCAN_BYTES - spent),
+            )
+            spent += len(raw)
+            session = json.loads(raw.decode("utf-8"))
         except json.JSONDecodeError:
             continue
+        if not isinstance(session, dict):
+            raise ValueError(f"Malformed session: {path.stem}")
+        if str(session.get("session_id") or "") != path.stem:
+            raise ValueError(f"Session identity does not match filename: {path.stem}")
         if agent_id is not None and session.get("agent_id") != agent_id:
             continue
         sessions.append(session)
@@ -217,7 +252,28 @@ def write_regular_file_atomically(path: Path, content: str) -> None:
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
             handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
         os.replace(temporary, path)
+        try:
+            directory = path.parent
+            while True:
+                directory_fd = os.open(directory, os.O_RDONLY)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+                if directory == ROOT or directory.parent == directory:
+                    break
+                directory = directory.parent
+        except OSError as error:
+            try:
+                print(
+                    f"[warning] {path} was replaced, but its directory did not fsync: {error}",
+                    file=sys.stderr,
+                )
+            except Exception:
+                pass
     except BaseException:
         try:
             os.unlink(temporary)
@@ -299,12 +355,80 @@ def update_thread_pair(
     return pair
 
 
-def save_session(payload: dict) -> None:
+def prepare_session_write(payload: dict) -> tuple[dict, str]:
+    candidate = {**payload, "updated_utc": utc_iso()}
+    content = json.dumps(candidate, indent=2, sort_keys=True)
+    if len(content.encode("utf-8")) > MAX_SESSION_BYTES:
+        inbox_raw = read_regular_file_bounded(
+            agent_inbox_path(str(candidate["agent_id"])),
+            MAX_SESSION_INBOX_BYTES,
+        )
+        inbox = json.loads(inbox_raw.decode("utf-8"))
+        if isinstance(inbox, dict) and inbox.get("_durability_pending") is True:
+            raise UnreadableFile("agent inbox durability is unconfirmed")
+        read = inbox.get("read") if isinstance(inbox, dict) else None
+        unread = inbox.get("unread") if isinstance(inbox, dict) else None
+        if (
+            not isinstance(read, list)
+            or not isinstance(unread, list)
+            or any(not isinstance(path, str) for path in [*read, *unread])
+        ):
+            raise ValueError("agent inbox must contain unread and read path lists")
+        if set(read) & set(unread):
+            raise ValueError("agent inbox unread and read paths must not overlap")
+        settled = set(read)
+        processed = candidate.get("processed_messages")
+        if isinstance(processed, list):
+            candidate["processed_messages"] = [
+                message_path
+                for message_path in processed
+                if message_path not in settled
+            ]
+        canonical = candidate.get("canonical_settled_messages")
+        if isinstance(canonical, dict):
+            candidate["canonical_settled_messages"] = {
+                message_path: value
+                for message_path, value in canonical.items()
+                if message_path not in settled
+            }
+        content = json.dumps(candidate, indent=2, sort_keys=True)
+    if len(content.encode("utf-8")) > MAX_SESSION_BYTES:
+        raise ValueError(
+            f"session payload exceeds the {MAX_SESSION_BYTES} byte limit"
+        )
+    return candidate, content
+
+
+def save_session(
+    payload: dict,
+    prepared: tuple[dict, str] | None = None,
+) -> None:
     session_id = str(payload["session_id"])
     path = autobridge_session_path(session_id)
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload["updated_utc"] = utc_iso()
-    write_file(path, json.dumps(payload, indent=2, sort_keys=True))
+    candidate, content = prepared or prepare_session_write(payload)
+    write_regular_file_atomically(path, content)
+    payload.clear()
+    payload.update(candidate)
+
+
+def reserve_message_result(
+    session: dict,
+    message: dict,
+    *,
+    include_canonical: bool,
+) -> tuple[dict, str]:
+    message_path = str(message["path"])
+    processed = list(session.get("processed_messages", []))
+    if message_path not in processed:
+        processed.append(message_path)
+    candidate = {**session, "processed_messages": processed}
+    if include_canonical and message_needs_canonical_materialization(session, message):
+        canonical = session.get("canonical_settled_messages", {})
+        canonical = dict(canonical) if isinstance(canonical, dict) else {}
+        canonical.setdefault(message_path, {"reason": "gate_disabled"})
+        candidate["canonical_settled_messages"] = canonical
+    return prepare_session_write(candidate)
 
 
 def binding_payload_from_session(
@@ -966,7 +1090,15 @@ def canonical_settled_message_paths(session: dict) -> set[str]:
     return set()
 
 
-def mark_message_processed(session: dict, message_path: str) -> None:
+def mark_message_processed(
+    session: dict,
+    message_path: str,
+    *,
+    prepared: tuple[dict, str] | None = None,
+) -> None:
+    if prepared is not None:
+        save_session(session, prepared=prepared)
+        return
     existing = session.get("processed_messages", [])
     if message_path not in existing:
         existing.append(message_path)
@@ -2791,6 +2923,26 @@ def dispatch_session(
                     "reason": skip_reason,
                 },
             )
+            try:
+                reserve_message_result(session, message, include_canonical=False)
+            except (
+                FileNotFoundError,
+                UnreadableFile,
+                UnicodeDecodeError,
+                json.JSONDecodeError,
+                KeyError,
+                ValueError,
+            ) as error:
+                append_event(
+                    session_id,
+                    {
+                        "event": "message_skipped_unprocessed",
+                        "message_path": message["path"],
+                        "reason": "session_capacity_refused",
+                        "detail": str(error),
+                    },
+                )
+                continue
             fenced, assertion_event, _ = activation_fenced_mutation(
                 session,
                 message,
@@ -2808,11 +2960,6 @@ def dispatch_session(
                         "reason": assertion_event["reason"] if assertion_event else "activation_assert_refused",
                     },
                 )
-            continue
-        activation_allowed, activation_event = claim_message_activation(session, message)
-        if activation_event is not None:
-            append_event(session_id, activation_event)
-        if not activation_allowed:
             continue
         matched.append(message)
 
@@ -2833,6 +2980,49 @@ def dispatch_session(
         actions.append(event)
     materialization_slot_available = True
     for message in matched:
+        activation_kind, activation_detail = classify_activation(
+            message.get("frontmatter", {}),
+            target_agent=str(session["agent_id"]),
+        )
+        if activation_kind == "malformed":
+            append_event(
+                session_id,
+                {
+                    "event": "activation_refused",
+                    "message_path": message["path"],
+                    "reason": "malformed_activation",
+                    "detail": activation_detail,
+                },
+            )
+            continue
+        try:
+            prepared_result = reserve_message_result(
+                session,
+                message,
+                include_canonical=True,
+            )
+        except (
+            FileNotFoundError,
+            UnreadableFile,
+            UnicodeDecodeError,
+            json.JSONDecodeError,
+            KeyError,
+            ValueError,
+        ) as error:
+            event = {
+                "event": "message_skipped",
+                "message_path": message["path"],
+                "reason": "session_capacity_refused",
+                "detail": str(error),
+            }
+            append_event(session_id, event)
+            actions.append(event)
+            continue
+        activation_allowed, activation_event = claim_message_activation(session, message)
+        if activation_event is not None:
+            append_event(session_id, activation_event)
+        if not activation_allowed:
+            continue
         action, action_reason = resolve_effective_action(session, message)
         event: dict[str, Any] = {
             "event": "message_dispatched",
@@ -2942,6 +3132,19 @@ def dispatch_session(
                         append_event(session_id, event)
                         actions.append(event)
                         continue
+                prepared_candidate = {
+                    **prepared_result[0],
+                    "canonical_settled_messages": dict(
+                        session.get("canonical_settled_messages", {})
+                    ),
+                    "updated_utc": session.get(
+                        "updated_utc", prepared_result[0].get("updated_utc")
+                    ),
+                }
+                prepared_result = (
+                    prepared_candidate,
+                    json.dumps(prepared_candidate, indent=2, sort_keys=True),
+                )
             asserted, assertion_event, _ = activation_fenced_mutation(
                 session,
                 message,
@@ -3032,7 +3235,11 @@ def dispatch_session(
                     session,
                     message,
                     boundary="mark_message_processed",
-                    mutation=lambda: mark_message_processed(session, message["path"]),
+                    mutation=lambda: mark_message_processed(
+                        session,
+                        message["path"],
+                        prepared=prepared_result,
+                    ),
                 )
                 if assertion_event is not None:
                     event.setdefault("activation_assertions", []).append(assertion_event)
@@ -3043,7 +3250,11 @@ def dispatch_session(
                 mark_after_event = True
         append_event(session_id, event)
         if should_mark_processed and mark_after_event:
-            mark_message_processed(session, message["path"])
+            mark_message_processed(
+                session,
+                message["path"],
+                prepared=prepared_result,
+            )
         actions.append(event)
 
     for refusal in repo_scope_refusals:
