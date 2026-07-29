@@ -478,6 +478,17 @@ class AxTrustCallerTest(unittest.TestCase):
                             json_output=False,
                         ),
                     ),
+                    # Same tooling-currency isolation as patched_bootstrap. This
+                    # case builds its own patch stack, so the fixture's stub does
+                    # not reach it; without this the #370 gate exits before
+                    # identity whenever the branch does not contain origin/main,
+                    # which the connector reproduced by forcing stale currency.
+                    mock.patch.object(
+                        session_bootstrap,
+                        "tooling_currency",
+                        return_value={"state": "current", "head": "test", "origin_main": "test",
+                                      "branch": "test", "fetched": True},
+                    ),
                     mock.patch.object(session_bootstrap, "agent_ids", return_value=["claude"]),
                     mock.patch.object(session_bootstrap, "get_agent", return_value=claude),
                     mock.patch.object(
