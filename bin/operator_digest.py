@@ -5,9 +5,9 @@ operator_digest.py — render one readable page answering the operator's two que
   1. What is blocked on me?
   2. What is each worker doing, and is any idle with work outstanding?
 
-Reads the mailboxes, session records and (optionally) GitHub. Writes one markdown file.
-Read-only apart from that file: it creates no bindings, answers no approvals, and
-changes no session state.
+Reads the mailboxes, session records and (optionally) GitHub. The default report is
+read-only apart from its markdown output. `--reply` delegates one durable reply to
+deliver.py and marks that source packet read only after delivery exits successfully.
 
   python bin/operator_digest.py            # writes State/operator-digest.md
   python bin/operator_digest.py --stdout   # print instead
@@ -29,7 +29,13 @@ import re
 import subprocess
 from datetime import datetime, timezone
 
-from _helpers import ROOT, agent_ids, resolve_project_repo_path
+from _helpers import (
+    ROOT,
+    agent_ids,
+    mark_messages_read,
+    parse_frontmatter,
+    resolve_project_repo_path,
+)
 
 DECISION_MARKERS = ("decision", "required", "approve", "ratify", "recommend", "blocked")
 # Bounded so one packet citing many PRs cannot stall the digest on network calls.
@@ -206,6 +212,29 @@ def read_inbox(agent: str) -> dict:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
+
+
+def packet_frontmatter(relpath: str) -> dict:
+    try:
+        return parse_frontmatter((ROOT / relpath).read_text(encoding="utf-8"))[0]
+    except OSError:
+        return {}
+
+
+def filtered_unread(
+    agent: str,
+    project_id: str | None = None,
+    chat_id: str | None = None,
+) -> list[str]:
+    rows = []
+    for relpath in read_inbox(agent).get("unread", []):
+        fm = packet_frontmatter(relpath)
+        if project_id is not None and fm.get("project_id") != project_id:
+            continue
+        if chat_id is not None and fm.get("chat_id") != chat_id:
+            continue
+        rows.append(relpath)
+    return rows
 
 
 def packet_title(relpath: str) -> str:
@@ -399,16 +428,22 @@ def decision_status(relpath: str) -> str:
     return f"**awaiting you** — {note}"
 
 
-def pending_for_operator() -> list[tuple[datetime | None, str, str]]:
+def pending_for_operator(
+    project_id: str | None = None,
+    chat_id: str | None = None,
+) -> list[tuple[datetime | None, str, str]]:
     rows = []
-    for relpath in read_inbox("operator").get("unread", []):
+    for relpath in filtered_unread("operator", project_id, chat_id):
         stamp = parse_stamp(Path(relpath).name)
         rows.append((stamp, packet_title(relpath), relpath))
     rows.sort(key=lambda r: (r[0] is None, r[0] or now()), reverse=True)
     return rows
 
 
-def worker_sessions() -> tuple[list[dict], int]:
+def worker_sessions(
+    project_id: str | None = None,
+    chat_id: str | None = None,
+) -> tuple[list[dict], int]:
     """Return (dispatchable sessions, count of stale ones).
 
     Status alone is misleading: a record can sit at status=active with an expired lease
@@ -422,6 +457,10 @@ def worker_sessions() -> tuple[list[dict], int]:
     live: list[dict] = []
     stale = 0
     for record in iter_sessions():
+        if project_id is not None and record.get("project_id") != project_id:
+            continue
+        if chat_id is not None and record.get("chat_id") != chat_id:
+            continue
         if record.get("status") not in {"active", "parked"}:
             continue
         dispatchable, _ = session_is_dispatchable(record)
@@ -443,7 +482,25 @@ def duplicate_native_ids(sessions: list[dict]) -> dict[str, list[str]]:
     return {k: v for k, v in seen.items() if len(v) > 1}
 
 
-def open_prs() -> tuple[list[dict], list[str]]:
+def project_repo_slugs(project_id: str) -> set[str]:
+    projects = [p for p in load_projects() if p.get("id") == project_id]
+    if len(projects) != 1:
+        return set()
+    project = projects[0]
+    slugs = {
+        slug for slug in [(project.get("github") or {}).get("repo")]
+        if isinstance(slug, str) and "/" in slug
+    }
+    repos = project.get("repos")
+    if isinstance(repos, dict):
+        for repo_key in repos:
+            slug = checkout_origin_slug(project_id, repo_key)
+            if slug:
+                slugs.add(slug)
+    return slugs
+
+
+def open_prs(project_id: str | None = None) -> tuple[list[dict], list[str]]:
     """Open PRs across every registered repo, plus the repos that could not be read.
 
     Querying one repo under the heading "Open pull requests" let the digest report None
@@ -452,7 +509,8 @@ def open_prs() -> tuple[list[dict], list[str]]:
     """
     rows: list[dict] = []
     unreachable: list[str] = []
-    for slug in sorted(set(known_repo_targets().values())):
+    slugs = project_repo_slugs(project_id) if project_id else set(known_repo_targets().values())
+    for slug in sorted(slugs):
         try:
             raw = subprocess.run(
                 ["gh", "pr", "list", "--repo", slug, "--state", "open",
@@ -467,23 +525,30 @@ def open_prs() -> tuple[list[dict], list[str]]:
     return rows, unreachable
 
 
-def unread_counts() -> list[tuple[str, int]]:
+def unread_counts(
+    project_id: str | None = None,
+    chat_id: str | None = None,
+) -> list[tuple[str, int]]:
     rows = []
     for agent in agent_ids():
-        count = len(read_inbox(agent).get("unread", []))
+        count = len(filtered_unread(agent, project_id, chat_id))
         if count:
             rows.append((agent, count))
     rows.sort(key=lambda r: -r[1])
     return rows
 
 
-def render() -> str:
+def render(project_id: str | None = None, chat_id: str | None = None) -> str:
     lines: list[str] = []
     add = lines.append
     add(f"# Operator digest — {now().strftime('%Y-%m-%d %H:%M')} UTC")
     add("")
 
-    pending = pending_for_operator()
+    if project_id or chat_id:
+        add(f"Scope: project `{project_id or '*'}`, chat `{chat_id or '*'}`.")
+        add("")
+
+    pending = pending_for_operator(project_id, chat_id)
     decisions = [r for r in pending if any(m in r[1].lower() for m in DECISION_MARKERS)]
     add("## 1. Blocked on you")
     add("")
@@ -509,7 +574,7 @@ def render() -> str:
 
     add("## 2. Workers")
     add("")
-    sessions, stale = worker_sessions()
+    sessions, stale = worker_sessions(project_id, chat_id)
     if not sessions:
         add("No dispatchable sessions.")
     else:
@@ -535,11 +600,13 @@ def render() -> str:
             add(f"> - `{native}` ← {', '.join(chats)}")
         add("")
 
-    prs, unreachable_repos = open_prs()
-    queried = sorted(set(known_repo_targets().values()))
+    prs, unreachable_repos = open_prs(project_id)
+    queried = sorted(project_repo_slugs(project_id)
+                     if project_id else set(known_repo_targets().values()))
     add("## 3. Open pull requests")
     add("")
-    add(f"Across every registered repo: {', '.join(queried) or 'none registered'}.")
+    scope = "the selected project's registered repos" if project_id else "every registered repo"
+    add(f"Across {scope}: {', '.join(queried) or 'none registered'}.")
     add("")
     if not prs:
         add("None open in any registered repo.")
@@ -558,27 +625,88 @@ def render() -> str:
         add(f"Could not read: {', '.join(unreachable_repos)} — treat as unknown, not empty.")
     add("")
 
-    counts = unread_counts()
+    counts = unread_counts(project_id, chat_id)
     if counts:
         add("## 4. Unread mail per agent")
         add("")
-        add(", ".join(f"**{agent}**: {count}" for agent, count in counts))
+        live_agents = {str(s.get("agent_id")) for s in sessions}
+        add(", ".join(
+            f"**{agent}**: {count}"
+            + ("" if agent in live_agents else " — work waiting; no dispatchable session")
+            for agent, count in counts
+        ))
         add("")
 
     add("---")
     add("")
-    add("Regenerate with `python bin/operator_digest.py`. Read-only: creates no "
-        "bindings, answers no approvals, changes no session state.")
+    add("Regenerate with `python bin/operator_digest.py`. Report mode is read-only; "
+        "`--reply` delegates delivery to `deliver.py`.")
     return "\n".join(lines) + "\n"
+
+
+def reply_to_operator_packet(
+    relpath: str,
+    body_file: str,
+    title: str | None = None,
+) -> int:
+    if relpath not in read_inbox("operator").get("unread", []):
+        raise ValueError("reply target is not unread operator mail")
+    fm = packet_frontmatter(relpath)
+    project_id = fm.get("project_id")
+    chat_id = fm.get("chat_id")
+    recipient = fm.get("sender_agent_id") or fm.get("from")
+    if not all(isinstance(value, str) and value for value in (project_id, chat_id, recipient)):
+        raise ValueError("reply target lacks project, chat, or sender identity")
+
+    command = [
+        sys.executable,
+        str(ROOT / "bin" / "deliver.py"),
+        "--project", project_id,
+        "--chat", chat_id,
+        "--from", "operator",
+        "--to", recipient,
+        "--title", title or f"Re: {fm.get('title') or packet_title(relpath)}",
+        "--body-file", body_file,
+    ]
+    repo_targets = fm.get("repo_targets")
+    if isinstance(repo_targets, list) and repo_targets:
+        command.extend(["--repo-targets", ",".join(str(v) for v in repo_targets)])
+    related_task = fm.get("related_task")
+    if isinstance(related_task, str) and related_task:
+        command.extend(["--related-task", related_task])
+
+    result = subprocess.run(command, cwd=str(ROOT))
+    if result.returncode == 0:
+        mark_messages_read("operator", [relpath])
+    return result.returncode
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Render the operator digest.")
     parser.add_argument("--out", default=str(ROOT / "State" / "operator-digest.md"))
     parser.add_argument("--stdout", action="store_true", help="Print instead of writing")
+    parser.add_argument("--project", help="Show only this exact project")
+    parser.add_argument("--chat", help="Show only this exact chat")
+    parser.add_argument("--reply", metavar="PACKET", help="Reply to one unread operator packet")
+    parser.add_argument("--body-file", help="Reply body file (required with --reply)")
+    parser.add_argument("--title", help="Reply title")
     args = parser.parse_args()
 
-    text = render()
+    if args.reply:
+        if not args.body_file:
+            parser.error("--body-file is required with --reply")
+        fm = packet_frontmatter(args.reply)
+        if args.project and fm.get("project_id") != args.project:
+            parser.error("reply packet does not match --project")
+        if args.chat and fm.get("chat_id") != args.chat:
+            parser.error("reply packet does not match --chat")
+        try:
+            code = reply_to_operator_packet(args.reply, args.body_file, args.title)
+        except ValueError as exc:
+            parser.error(str(exc))
+        raise SystemExit(code)
+
+    text = render(args.project, args.chat)
     if args.stdout:
         print(text)
         return

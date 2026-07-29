@@ -530,3 +530,108 @@ class PathHelperDelegationTest(unittest.TestCase):
         with mock.patch.object(operator_digest, "resolve_project_repo_path",
                                side_effect=SystemExit(1)):
             self.assertIsNone(operator_digest.resolved_repo_path("amiga", "app"))
+
+
+class ScopedDigestTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory(dir="/tmp")
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+        (self.root / "agents" / "operator").mkdir(parents=True)
+        patcher = mock.patch.object(operator_digest, "ROOT", self.root)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def packet(self, name: str, *, project: str, chat: str, sender: str = "claude") -> str:
+        relpath = f"Chats/{name}.md"
+        path = self.root / relpath
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            "---\n"
+            f"chat_id: {chat}\n"
+            f"from: {sender}\n"
+            f"sender_agent_id: {sender}\n"
+            f"title: {name}\n"
+            f"project_id: {project}\n"
+            'repo_targets: ["llm-collab"]\n'
+            "---\n\nbody\n",
+            encoding="utf-8",
+        )
+        return relpath
+
+    def test_project_and_chat_filter_unread_exactly(self) -> None:
+        keep = self.packet("keep", project="llm-collab", chat="CHAT-A")
+        other_chat = self.packet("other-chat", project="llm-collab", chat="CHAT-B")
+        other_project = self.packet("other-project", project="amiga", chat="CHAT-A")
+        inbox = {"unread": [keep, other_chat, other_project], "read": []}
+        (self.root / "agents" / "operator" / "inbox.json").write_text(
+            json.dumps(inbox), encoding="utf-8")
+
+        self.assertEqual(
+            [keep],
+            operator_digest.filtered_unread("operator", "llm-collab", "CHAT-A"),
+        )
+
+    def test_project_and_chat_filter_sessions_exactly(self) -> None:
+        records = [
+            {"status": "active", "project_id": "llm-collab", "chat_id": "CHAT-A",
+             "agent_id": "glim"},
+            {"status": "active", "project_id": "llm-collab", "chat_id": "CHAT-B",
+             "agent_id": "relay"},
+            {"status": "active", "project_id": "amiga", "chat_id": "CHAT-A",
+             "agent_id": "kimi"},
+        ]
+        with mock.patch("_session_autobridge.iter_sessions", return_value=records), \
+             mock.patch("_session_autobridge.session_is_dispatchable",
+                        return_value=(True, "")):
+            live, stale = operator_digest.worker_sessions("llm-collab", "CHAT-A")
+        self.assertEqual(["glim"], [record["agent_id"] for record in live])
+        self.assertEqual(0, stale)
+
+    def test_reply_delegates_to_deliver_without_reusing_sender_session(self) -> None:
+        relpath = self.packet("decision", project="llm-collab", chat="CHAT-A")
+        inbox_path = self.root / "agents" / "operator" / "inbox.json"
+        inbox_path.write_text(json.dumps({"unread": [relpath], "read": []}), encoding="utf-8")
+        marked = []
+
+        with mock.patch.object(
+            operator_digest.subprocess, "run", return_value=mock.Mock(returncode=0)
+        ) as run, mock.patch.object(
+            operator_digest, "mark_messages_read",
+            side_effect=lambda agent, paths: marked.append((agent, paths)),
+        ):
+            code = operator_digest.reply_to_operator_packet(relpath, "/tmp/reply.md")
+
+        command = run.call_args.args[0]
+        self.assertEqual(0, code)
+        self.assertEqual(["operator", [relpath]], [marked[0][0], marked[0][1]])
+        self.assertNotIn("--target-session-id", command)
+        self.assertEqual("claude", command[command.index("--to") + 1])
+        self.assertEqual("CHAT-A", command[command.index("--chat") + 1])
+
+    def test_nonzero_delivery_keeps_source_unread(self) -> None:
+        relpath = self.packet("decision", project="llm-collab", chat="CHAT-A")
+        (self.root / "agents" / "operator" / "inbox.json").write_text(
+            json.dumps({"unread": [relpath], "read": []}), encoding="utf-8")
+
+        with mock.patch.object(
+            operator_digest.subprocess, "run", return_value=mock.Mock(returncode=2)
+        ), mock.patch.object(operator_digest, "mark_messages_read") as mark:
+            self.assertEqual(
+                2, operator_digest.reply_to_operator_packet(relpath, "/tmp/reply.md"))
+        mark.assert_not_called()
+
+    def test_unread_without_matching_dispatchable_session_is_reported(self) -> None:
+        relpath = self.packet("work", project="llm-collab", chat="CHAT-A", sender="glim")
+        (self.root / "agents" / "operator" / "inbox.json").write_text(
+            json.dumps({"unread": [], "read": []}), encoding="utf-8")
+        (self.root / "agents" / "glim").mkdir(parents=True)
+        (self.root / "agents" / "glim" / "inbox.json").write_text(
+            json.dumps({"unread": [relpath], "read": []}), encoding="utf-8")
+
+        with mock.patch.object(operator_digest, "agent_ids", return_value=["glim"]), \
+             mock.patch.object(operator_digest, "worker_sessions", return_value=([], 0)), \
+             mock.patch.object(operator_digest, "open_prs", return_value=([], [])), \
+             mock.patch.object(operator_digest, "project_repo_slugs", return_value=set()):
+            text = operator_digest.render("llm-collab", "CHAT-A")
+        self.assertIn("work waiting; no dispatchable session", text)
