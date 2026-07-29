@@ -256,6 +256,7 @@ def save_binding(payload: dict, prepared: tuple[dict, str] | None = None) -> Non
     )
     path.parent.mkdir(parents=True, exist_ok=True)
     candidate, content = prepared or prepare_binding_write(payload)
+    candidate = dict(candidate)
     write_regular_file_atomically(path, content)
     payload.clear()
     payload.update(candidate)

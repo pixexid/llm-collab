@@ -7112,7 +7112,7 @@ class SessionAutobridgeTest(unittest.TestCase):
                 native="pi-old", endpoint="endpoint_old", runtime_instance="rt-old",
                 cwd=work, home=home, repo_target="app",
             )
-            self._register_pi(
+            done = self._register_pi(
                 root, session="SESSION-NEW", project=project, chat=chat,
                 native="pi-new", endpoint="endpoint_new", runtime_instance="rt-new",
                 cwd=work, home=home, repo_target="app", supersedes="SESSION-OLD",
@@ -7125,6 +7125,10 @@ class SessionAutobridgeTest(unittest.TestCase):
             new = json.loads(self._session_json(root, "SESSION-NEW").read_text())
             self.assertEqual(2, new.get("binding_generation"))
             self.assertEqual("endpoint_new", new.get("endpoint_id"))
+            self.assertEqual(
+                new["binding_id"],
+                json.loads(done.stdout).get("binding", {}).get("binding_id"),
+            )
             old = json.loads(self._session_json(root, "SESSION-OLD").read_text())
             self.assertEqual("superseded", old.get("status"))
             self.assertEqual("SESSION-NEW", old.get("superseded_by"))
@@ -7235,6 +7239,8 @@ class SessionAutobridgeTest(unittest.TestCase):
             root / "State" / "session_autobridge" / "bindings" / "amiga" / "CHAT-R" / "glmpi.json"
         )
         binding = json.loads(binding_file.read_text())
+        source = self._write_pi_session_source(root, "pi-new-long", cwd=str(work))
+        endpoint = "endpoint_" + "a" * 119
         binding["padding"] = ""
         empty = json.dumps(binding, indent=2, sort_keys=True)
         binding["padding"] = "x" * (256 * 1024 - len(empty.encode("utf-8")) - 1)
@@ -7243,8 +7249,9 @@ class SessionAutobridgeTest(unittest.TestCase):
 
         done = self._register_pi(
             root, session="SESSION-NEW-LONG", project="amiga", chat="CHAT-R",
-            native="pi-new-long", endpoint="endpoint_new_long", runtime_instance="rt-new-long",
+            native="pi-new-long", endpoint=endpoint, runtime_instance="rt-new-long",
             cwd=work, home=home, repo_target="app", supersedes="SESSION-OLD", check=False,
+            session_source=source,
         )
         self.assertNotEqual(0, done.returncode)
         self.assertIn("binding exceeds", done.stderr)
