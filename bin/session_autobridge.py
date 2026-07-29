@@ -37,11 +37,14 @@ from _session_autobridge import (
     dispatch_session,
     load_binding,
     load_session,
+    binding_payload_from_session,
+    prepare_binding_write,
     prepare_session_write,
     provision_pi_canonical_binding,
     PiProvisioningRefused,
     read_pi_session_fingerprint,
     resolve_active_canonical_binding,
+    resolve_active_canonical_owner,
     runtime_home_from_source,
     save_session,
     UnreadableFile,
@@ -244,6 +247,40 @@ def canonical_runtime_home(value: str | None) -> str | None:
     return str(canonical_path(text))
 
 
+def plan_superseded_retirement(superseded_id: str, replacement: dict):
+    """Pure preflight for retiring a superseded predecessor: load, validate scope, and
+    build its terminal candidate with a prepared tuple — but write nothing.
+
+    Returns ``(terminal_record, prepared)`` to commit later, or ``None`` when there is
+    nothing to retire (absent or already-terminal). Raises ValueError on a cross-scope
+    retire. Splitting the write off lets a caller that also mutates another store (the
+    canonical rebind) run this refusal gate — including the capacity/inbox refusal that
+    stamping the terminal status can trigger — BEFORE that mutation.
+    """
+    try:
+        record = load_session(superseded_id)
+    except (FileNotFoundError, ValueError, UnreadableFile):
+        return None
+    if record.get("status") not in {"active", "parked"}:
+        return None
+    if any(
+        record.get(field) != replacement.get(field)
+        for field in ("agent_id", "project_id", "chat_id")
+    ):
+        raise ValueError(
+            "refusing to retire a superseded session in a different agent/project/chat scope"
+        )
+    record["status"] = "superseded"
+    record["superseded_by"] = str(replacement["session_id"])
+    return record, prepare_session_write(record)
+
+
+def commit_superseded_retirement(record: dict, prepared) -> None:
+    """Write the pre-validated terminal predecessor record, carrying its prepared tuple
+    so nothing is reopened or recomputed (no second refusal window)."""
+    save_session(record, prepared=prepared)
+
+
 def retire_superseded_session(superseded_id: str, replacement: dict) -> None:
     """Close a session that a new registration supersedes.
 
@@ -258,29 +295,21 @@ def retire_superseded_session(superseded_id: str, replacement: dict) -> None:
     to the terminal shape `deactivate --status superseded` produces, so
     dispatchability refuses it by `status` alone.
     """
-    try:
-        record = load_session(superseded_id)
-    except (FileNotFoundError, ValueError, UnreadableFile):
-        return
-    if record.get("status") not in {"active", "parked"}:
-        return
-    if any(
-        record.get(field) != replacement.get(field)
-        for field in ("agent_id", "project_id", "chat_id")
-    ):
-        raise ValueError(
-            "refusing to retire a superseded session in a different agent/project/chat scope"
-        )
-    record["status"] = "superseded"
-    record["superseded_by"] = str(replacement["session_id"])
-    save_session(record)
+    plan = plan_superseded_retirement(superseded_id, replacement)
+    if plan is not None:
+        commit_superseded_retirement(*plan)
 
 
-def _provision_pi_binding_or_refuse(args, runtime: dict, native_session_id) -> dict:
+def _provision_pi_binding_or_refuse(
+    args, runtime: dict, native_session_id, *, predecessor=None, actor_id=None
+) -> dict:
     """Mint the canonical Pi binding from native context, then return its fields.
 
     Absent native context, keep #380's fail-closed. Partial context or the wrong
     repo-target count is refused explicitly. Every path refuses before any write.
+
+    When `predecessor` is supplied the mint is a native-session replacement: the
+    successor is swapped in for the named active owner via rebind (#319).
     """
     endpoint_id = getattr(args, "endpoint_id", None)
     runtime_instance_id = getattr(args, "runtime_instance_id", None)
@@ -306,7 +335,7 @@ def _provision_pi_binding_or_refuse(args, runtime: dict, native_session_id) -> d
             "--repo-target naming the project repos key; no session was written."
         )
     try:
-        provision_pi_canonical_binding(
+        canonical = provision_pi_canonical_binding(
             args.project,
             args.chat,
             args.agent,
@@ -316,18 +345,70 @@ def _provision_pi_binding_or_refuse(args, runtime: dict, native_session_id) -> d
             cwd=cwd,
             runtime_home_path=runtime_home,
             repo_target=targets[0],
+            predecessor=predecessor,
+            actor_id=actor_id,
         )
     except PiProvisioningRefused as refusal:
         raise SystemExit(f"[error] {refusal}. No session was written.")
-    canonical = resolve_active_canonical_binding(
-        args.project, args.chat, args.agent, native_session_id
-    )
-    if canonical is None:
-        raise SystemExit(
-            "[error] canonical_binding_required: provisioning completed but no active "
-            "binding resolved; no session was written."
-        )
     return canonical
+
+
+def _authorize_pi_replacement_or_refuse(args, mismatch) -> dict:
+    """PURE authorization for a native-session replacement (#319): no writes.
+
+    Reached only when an active binding exists for a DIFFERENT native session than the
+    one registering. Authorized ONLY when `--supersedes-session` names a session that
+    is EXACTLY the current active owner: same agent/project/chat, and the same stored
+    binding id / generation / old native session. Returns the predecessor tuple
+    ({binding_id, generation}) to hand to rebind; otherwise raises a bounded SystemExit
+    and leaves the predecessor active and unchanged. Runs as a preflight BEFORE any
+    mutation or retirement plan, so a bad supersedes refuses with this specific reason.
+    """
+    if not args.supersedes_session:
+        raise SystemExit(
+            "[error] canonical_binding_native_session_mismatch: "
+            f"{mismatch}. Pass --supersedes-session naming the current owner to "
+            "replace it. No session was written."
+        )
+    owner = resolve_active_canonical_owner(args.project, args.chat, args.agent)
+    if owner is None:
+        raise SystemExit(
+            "[error] canonical_binding_native_session_mismatch: "
+            f"{mismatch}. No session was written."
+        )
+    try:
+        predecessor_record = load_session(str(args.supersedes_session))
+    except (FileNotFoundError, ValueError, UnreadableFile):
+        predecessor_record = None
+    predecessor_runtime = (predecessor_record or {}).get("runtime") or {}
+    if (
+        predecessor_record is None
+        or predecessor_record.get("agent_id") != args.agent
+        or predecessor_record.get("project_id") != args.project
+        or predecessor_record.get("chat_id") != args.chat
+        or predecessor_runtime.get("session_id") != owner["native_session_id"]
+        or predecessor_record.get("binding_id") != owner["binding_id"]
+        or predecessor_record.get("binding_generation") != owner["generation"]
+    ):
+        raise SystemExit(
+            "[error] canonical_replacement_predecessor_mismatch: "
+            "--supersedes-session does not name the current active canonical owner "
+            f"(binding {owner['binding_id']} gen {owner['generation']} native "
+            f"{owner['native_session_id']}); no session was written."
+        )
+    return {"binding_id": owner["binding_id"], "generation": owner["generation"]}
+
+
+def _replace_pi_binding_or_refuse(args, runtime: dict, native_session_id, predecessor) -> dict:
+    """Commit the authorized native-session replacement: reserve/consume the successor
+    pre-active and rebind it in for the verified predecessor tuple."""
+    return _provision_pi_binding_or_refuse(
+        args,
+        runtime,
+        native_session_id,
+        predecessor=predecessor,
+        actor_id=str(args.session),
+    )
 
 
 def register_session(args) -> dict:
@@ -431,56 +512,125 @@ def register_session(args) -> dict:
                 f"{fingerprint['cwd']!r} is not the registering checkout {claimed_cwd!r}; "
                 "no session was written."
             )
-        try:
-            canonical = resolve_active_canonical_binding(
-                args.project, args.chat, args.agent, native_session_id
-            )
-        except CanonicalBindingNativeMismatch as mismatch:
-            raise SystemExit(
-                "[error] canonical_binding_native_session_mismatch: "
-                f"{mismatch}. No session was written."
-            )
-        if canonical is None:
-            canonical = _provision_pi_binding_or_refuse(args, runtime, native_session_id)
-        payload.update(canonical)
+        # The fingerprint is pure data known now; carry it so the capacity preflight
+        # below sizes the final record. The canonical resolve/mint/replace is DEFERRED
+        # until after the pure preflights: it can mutate the ledger (a fresh mint, or a
+        # rebind that supersedes the current owner), and a capacity/binding refusal
+        # after that mutation would leave canonical swapped with no session written.
         payload["pi_fingerprint"] = fingerprint
-    # Validate everything that can refuse this registration BEFORE retiring the
-    # predecessor. A retire that ran first and was then followed by a preflight
-    # refusal would have destroyed a valid live session on behalf of a continuation
-    # that never completed. prepare_session_write (capacity) and
-    # existing_binding_snapshot_or_refuse (binding readability) are the two refusal
-    # gates; both are pure checks, so running them ahead of the retire opens no
-    # two-writer window.
-    prepared = prepare_session_write(payload)
-    # ONE read of the existing binding, before any write, and the resulting snapshot is carried
-    # forward. A preflight that validates and then lets the update REOPEN the path is a TOCTOU: a
-    # second read failing where the first succeeded still lands between save_session() and the
-    # binding write, which is the original partial-state bug wearing a check. This is the same
-    # carry-the-validated-snapshot rule this PR already applied on the read side.
-    existing_binding = existing_binding_snapshot_or_refuse(payload)
-    # Now that no refusal remains, retire the predecessor. Under the #324 rule an
-    # active session no longer expires on its lease, so a superseded-but-still-active
-    # record would stay dispatchable forever — two writers on one thread. Retire
-    # still precedes the new binding/session writes below, so a crash in between
-    # leaves the old record superseded and the new one absent (no active session,
-    # recoverable by re-register) rather than both active.
-    if args.supersedes_session and str(args.supersedes_session) != str(args.session):
-        retire_superseded_session(str(args.supersedes_session), payload)
-    # The BINDING is written first, then the session. Publishing the session first meant a binding
-    # write that blocked or failed left the session updated while the authoritative binding still
-    # pointed at the previous thread -- a live session bound to a stale thread, which resolves
-    # happily and is silently wrong.
+        pi_native_session_id = native_session_id
+    else:
+        pi_native_session_id = None
+    # Validate everything that can refuse this registration BEFORE any ledger mutation
+    # or retiring the predecessor. A retire or canonical swap that ran first and was
+    # then followed by a preflight refusal would have destroyed a valid live session /
+    # superseded a valid owner on behalf of a continuation that never completed.
+    # prepare_session_write (capacity) and existing_binding_snapshot_or_refuse (binding
+    # readability) are the two refusal gates; both are pure checks, so running them
+    # ahead opens no two-writer window. This is purely the refusal gate — save_session
+    # recomputes over the final payload once the real canonical fields land below.
     #
-    # What this order actually guarantees, stated precisely because my first version of this comment
-    # over-claimed: for a NEW session id, a failed session write leaves the binding pointing at a
-    # session file that does not exist, and the exact-binding resolver requires the session to
-    # match, so the pair refuses. For a RE-REGISTRATION where the runtime family and runtime thread
-    # id are unchanged, the pre-existing session record can still satisfy the resolver, so a failed
-    # session write is NOT guaranteed to fail closed -- it leaves the previous, still-coherent pair
-    # in place. That is a benign outcome rather than a guarantee of closure, and it is not the same
-    # claim. Two independent writes cannot be made atomic; the order only chooses which failure
-    # mode we get.
-    binding = update_binding_from_session(payload, existing=existing_binding)
+    # The canonical fields (binding_id/binding_generation/endpoint_id) are added only
+    # AFTER the mutation, so size the capacity check against their schema maxima now.
+    # Otherwise a near-limit record could pass here, perform the rebind, then overflow
+    # the final save on the added bytes — leaving the owner superseded with no session.
+    if pi_native_session_id is None:
+        # Ordinary (non-canonical-mutating) registration: unchanged. The retire is the
+        # only mutation, so its own refusal cannot leave cross-store partial state.
+        prepared = prepare_session_write(payload)
+        existing_binding = existing_binding_snapshot_or_refuse(payload)
+        if args.supersedes_session and str(args.supersedes_session) != str(args.session):
+            retire_superseded_session(str(args.supersedes_session), payload)
+        binding = update_binding_from_session(payload, existing=existing_binding)
+        save_session(payload, prepared=prepared)
+        if binding is not None:
+            payload["binding"] = binding
+        return payload
+    # Pi registration can MUTATE the ledger (mint, or a rebind that supersedes the
+    # current owner), so EVERY pure refusal must run and be CARRIED before it. Sizing
+    # the capacity preflight against the canonical fields' schema maxima (added only
+    # after the mutation) is not enough on its own: prepare_session_write compacts the
+    # agent inbox when oversized, and recomputing after the swap would re-read a
+    # possibly-changed inbox — the TOCTOU this file already fights. So compact ONCE
+    # here and carry the settled candidate forward; the post-swap serialize re-adds the
+    # real (never-larger) canonical fields and cannot re-enter the oversized branch.
+    # Classify the registration read-only FIRST (no writes): an exact-native match
+    # resolves the binding; a DIFFERENT active native is a replacement iff
+    # --supersedes-session names that exact owner — authorize it purely here so a bad
+    # supersedes refuses with canonical_replacement_predecessor_mismatch BEFORE the
+    # retirement plan's own scope check could raise a less specific error.
+    replacement_predecessor = None
+    try:
+        canonical = resolve_active_canonical_binding(
+            args.project, args.chat, args.agent, pi_native_session_id
+        )
+    except CanonicalBindingNativeMismatch as mismatch:
+        canonical = None
+        replacement_predecessor = _authorize_pi_replacement_or_refuse(args, mismatch)
+    preflight_candidate, _ = prepare_session_write(
+        {
+            **payload,
+            "binding_id": "x" * 128,
+            "binding_generation": 9223372036854775807,
+            "endpoint_id": "x" * 128,
+        }
+    )
+    for placeholder in ("binding_id", "binding_generation", "endpoint_id"):
+        preflight_candidate.pop(placeholder, None)
+    payload = preflight_candidate
+    existing_binding = existing_binding_snapshot_or_refuse(payload)
+    binding_candidate = binding_payload_from_session(
+        {
+            **payload,
+            "binding_id": "x" * 128,
+            "binding_generation": 9223372036854775807,
+            "endpoint_id": "x" * 128,
+        },
+        existing=existing_binding,
+    )
+    try:
+        prepared_binding_candidate, _ = prepare_binding_write(binding_candidate)
+    except BindingUnreadable as error:
+        raise SystemExit(
+            f"[error] {error}. Refusing to register before the canonical transition; "
+            "no session was written."
+        )
+    # Pre-validate the predecessor retirement as a pure refusal gate too: adding the
+    # terminal status can itself cross the cap / trip inbox compaction, and that save
+    # would otherwise land AFTER the swap. Plan (load + validate + prepare) now; commit
+    # the carried tuple after the swap. For a replacement the supersedes is already
+    # proven same-scope, so this only sizes the terminal record.
+    retirement = None
+    if args.supersedes_session and str(args.supersedes_session) != str(args.session):
+        retirement = plan_superseded_retirement(str(args.supersedes_session), payload)
+    # No pure refusal remains: NOW mint or swap. A fresh native session mints its
+    # binding (#378); an authorized replacement rebinds the successor in for the
+    # verified predecessor (#319); an exact-native re-registration already resolved
+    # read-only above.
+    if canonical is None:
+        if replacement_predecessor is not None:
+            canonical = _replace_pi_binding_or_refuse(
+                args, runtime, pi_native_session_id, replacement_predecessor
+            )
+        else:
+            canonical = _provision_pi_binding_or_refuse(args, runtime, pi_native_session_id)
+    payload.update(canonical)
+    for key in ("binding_id", "binding_generation", "endpoint_id"):
+        prepared_binding_candidate[key] = payload[key]
+    prepared_binding = (
+        prepared_binding_candidate,
+        json.dumps(prepared_binding_candidate, indent=2, sort_keys=True),
+    )
+    prepared_candidate = dict(payload)
+    prepared = (
+        prepared_candidate,
+        json.dumps(prepared_candidate, indent=2, sort_keys=True),
+    )
+    # Swap done. Retire the predecessor legacy record (carried prepared tuple, no
+    # reopen), then write the new binding, then the new session (carried prepared).
+    if retirement is not None:
+        commit_superseded_retirement(*retirement)
+    binding = update_binding_from_session(payload, prepared=prepared_binding)
     save_session(payload, prepared=prepared)
     if binding is not None:
         payload["binding"] = binding

@@ -6762,6 +6762,37 @@ class SessionAutobridgeTest(unittest.TestCase):
         )
         self.assertFalse(session_path.exists(), "no session may be published on refusal")
 
+    def test_pi_provision_returns_the_committed_binding_without_reopening_the_ledger(self):
+        args = SimpleNamespace(
+            project="amiga", chat="CHAT-PI", agent="glmpi",
+            endpoint_id="endpoint-pi", runtime_instance_id="pi-web",
+            cwd="/tmp/work", repo_targets=["app"],
+        )
+        canonical = {
+            "binding_id": "binding-new",
+            "binding_generation": 2,
+            "endpoint_id": "endpoint-pi",
+        }
+        with patch.object(
+            session_autobridge_cli,
+            "provision_pi_canonical_binding",
+            return_value=canonical,
+        ), patch.object(
+            session_autobridge_cli,
+            "resolve_active_canonical_binding",
+            side_effect=AssertionError("ledger reopened after commit"),
+        ):
+            self.assertEqual(
+                canonical,
+                session_autobridge_cli._provision_pi_binding_or_refuse(
+                    args,
+                    {"home": "/tmp/pi-home"},
+                    "pi-new",
+                    predecessor={"binding_id": "binding-old", "generation": 1},
+                    actor_id="SESSION-NEW",
+                ),
+            )
+
     def test_pi_registration_refuses_a_foreign_native_session(self):
         # GH-346 P1: the participant's binding is minted for one native session.
         # Registering a different --runtime-session-id must not inherit it (that
@@ -6889,23 +6920,27 @@ class SessionAutobridgeTest(unittest.TestCase):
         repo_target,
         agent="glmpi",
         session_source=None,
+        supersedes=None,
         check=True,
     ):
         if session_source is None:
             session_source = self._write_pi_session_source(root, native, cwd=str(cwd))
+        argv = [
+            sys.executable, str(SCRIPT_PATH), "register",
+            "--session", session, "--agent", agent,
+            "--project", project, "--chat", chat,
+            "--mode", "auto-read", "--wake-strategy", "runtime_trigger",
+            "--runtime-family", "pi", "--runtime-session-id", native,
+            "--runtime-session-source", str(session_source),
+            "--runtime-command", json.dumps([sys.executable, "-c", "pass"]),
+            "--endpoint-id", endpoint, "--runtime-instance-id", runtime_instance,
+            "--cwd", str(cwd), "--runtime-home", str(home),
+            "--repo-target", repo_target, "--json",
+        ]
+        if supersedes is not None:
+            argv += ["--supersedes-session", supersedes]
         done = subprocess.run(
-            [
-                sys.executable, str(SCRIPT_PATH), "register",
-                "--session", session, "--agent", agent,
-                "--project", project, "--chat", chat,
-                "--mode", "auto-read", "--wake-strategy", "runtime_trigger",
-                "--runtime-family", "pi", "--runtime-session-id", native,
-                "--runtime-session-source", str(session_source),
-                "--runtime-command", json.dumps([sys.executable, "-c", "pass"]),
-                "--endpoint-id", endpoint, "--runtime-instance-id", runtime_instance,
-                "--cwd", str(cwd), "--runtime-home", str(home),
-                "--repo-target", repo_target, "--json",
-            ],
+            argv,
             cwd=root, text=True, capture_output=True,
             env=self.subprocess_env(root), check=False,
         )
@@ -7040,6 +7075,254 @@ class SessionAutobridgeTest(unittest.TestCase):
                     "SELECT count(*) FROM conversation_bindings WHERE native_session_id = ?",
                     (native,),
                 ).fetchone()[0]
+
+    def _binding_rows(self, root, project, chat, agent="glmpi"):
+        """(native_session_id, generation, state) for a scope, ordered by generation."""
+        paths = LedgerPaths.derive(root / "project-state", "ws_alpha")
+        with patch.object(store_module, "_linked_sqlite_version_info", return_value=SAFE_VERSION):
+            with LedgerStore.open_reader(paths) as store:
+                return store._connection.execute(
+                    "SELECT native_session_id, generation, state FROM conversation_bindings "
+                    "WHERE scope_identity = ? AND conversation_id = ? AND participant_id = ? "
+                    "ORDER BY generation",
+                    (project, chat, "participant_" + agent),
+                ).fetchall()
+
+    def _make_pi_replacement_workspace(self):
+        root = self.make_workspace()
+        self.add_agent(
+            root,
+            {"id": "glmpi", "display_name": "Glim",
+             "activation": {"type": "cli_session", "watcher_enabled": True}},
+        )
+        self._seed_pi_registry_snapshot(root, ["amiga", "nuvyr"])
+        work = root / "work"; work.mkdir()
+        home = root / "pi-home"; home.mkdir()
+        return root, work, home
+
+    def test_pi_native_session_replacement_swaps_owner_via_rebind(self):
+        # #319: a brand-new Pi native session replaces the current owner of the SAME
+        # scope. --supersedes-session names the exact active owner; the rebind
+        # supersedes it and activates the new native at generation+1, and the old
+        # legacy session record follows to superseded. Amiga + non-Amiga.
+        for project, chat in (("amiga", "CHAT-RA"), ("nuvyr", "CHAT-RN")):
+            root, work, home = self._make_pi_replacement_workspace()
+            self._register_pi(
+                root, session="SESSION-OLD", project=project, chat=chat,
+                native="pi-old", endpoint="endpoint_old", runtime_instance="rt-old",
+                cwd=work, home=home, repo_target="app",
+            )
+            done = self._register_pi(
+                root, session="SESSION-NEW", project=project, chat=chat,
+                native="pi-new", endpoint="endpoint_new", runtime_instance="rt-new",
+                cwd=work, home=home, repo_target="app", supersedes="SESSION-OLD",
+            )
+            self.assertEqual(
+                [("pi-old", 1, "superseded"), ("pi-new", 2, "active")],
+                self._binding_rows(root, project, chat),
+                "rebind must supersede the old owner and activate the new native at gen+1",
+            )
+            new = json.loads(self._session_json(root, "SESSION-NEW").read_text())
+            self.assertEqual(2, new.get("binding_generation"))
+            self.assertEqual("endpoint_new", new.get("endpoint_id"))
+            self.assertEqual(
+                new["binding_id"],
+                json.loads(done.stdout).get("binding", {}).get("binding_id"),
+            )
+            old = json.loads(self._session_json(root, "SESSION-OLD").read_text())
+            self.assertEqual("superseded", old.get("status"))
+            self.assertEqual("SESSION-NEW", old.get("superseded_by"))
+
+    def test_pi_native_session_replacement_refusals_preserve_predecessor(self):
+        # #319: replacement is authorized ONLY by --supersedes-session naming the exact
+        # active owner. A bare mismatch (no supersedes) and a supersedes naming a
+        # non-owner both refuse with the predecessor left active and no new session.
+        root, work, home = self._make_pi_replacement_workspace()
+        self._register_pi(
+            root, session="SESSION-OLD", project="amiga", chat="CHAT-R",
+            native="pi-old", endpoint="endpoint_old", runtime_instance="rt-old",
+            cwd=work, home=home, repo_target="app",
+        )
+        self._register_pi(
+            root, session="SESSION-OTHER", project="nuvyr", chat="CHAT-O",
+            native="pi-other", endpoint="endpoint_other", runtime_instance="rt-other",
+            cwd=work, home=home, repo_target="app",
+        )
+        baseline = self._binding_rows(root, "amiga", "CHAT-R")
+        self.assertEqual([("pi-old", 1, "active")], baseline)
+
+        # (a) No --supersedes-session: the native fence refuses, predecessor untouched.
+        done = self._register_pi(
+            root, session="SESSION-NEW", project="amiga", chat="CHAT-R",
+            native="pi-new", endpoint="endpoint_new", runtime_instance="rt-new",
+            cwd=work, home=home, repo_target="app", check=False,
+        )
+        self.assertNotEqual(0, done.returncode)
+        self.assertIn("canonical_binding_native_session_mismatch", done.stderr)
+        self.assertNotIn("Traceback", done.stderr)
+        self.assertFalse(self._session_json(root, "SESSION-NEW").exists())
+        self.assertEqual(baseline, self._binding_rows(root, "amiga", "CHAT-R"))
+
+        # (b) --supersedes-session names a session that is NOT the current owner.
+        done = self._register_pi(
+            root, session="SESSION-NEW2", project="amiga", chat="CHAT-R",
+            native="pi-new2", endpoint="endpoint_new2", runtime_instance="rt-new2",
+            cwd=work, home=home, repo_target="app", supersedes="SESSION-OTHER", check=False,
+        )
+        self.assertNotEqual(0, done.returncode)
+        self.assertIn("canonical_replacement_predecessor_mismatch", done.stderr)
+        self.assertNotIn("Traceback", done.stderr)
+        self.assertFalse(self._session_json(root, "SESSION-NEW2").exists())
+        self.assertEqual(baseline, self._binding_rows(root, "amiga", "CHAT-R"))
+        # The predecessor legacy record must NOT be retired by a refused replacement.
+        old = json.loads(self._session_json(root, "SESSION-OLD").read_text())
+        self.assertNotEqual("superseded", old.get("status"))
+        self.assertIsNone(old.get("superseded_by"))
+
+        # (c) The registering session becomes the canonical transition actor. Refuse
+        # an actor the ledger cannot store before reserve/consume writes anything.
+        invalid_actor = "S" * 129
+        done = self._register_pi(
+            root, session=invalid_actor, project="amiga", chat="CHAT-R",
+            native="pi-new3", endpoint="endpoint_new3", runtime_instance="rt-new3",
+            cwd=work, home=home, repo_target="app", supersedes="SESSION-OLD", check=False,
+        )
+        self.assertNotEqual(0, done.returncode)
+        self.assertIn("canonical_replacement_actor_invalid", done.stderr)
+        self.assertFalse(self._session_json(root, invalid_actor).exists())
+        self.assertEqual(baseline, self._binding_rows(root, "amiga", "CHAT-R"))
+
+    def test_pi_replacement_pure_refusal_runs_before_the_canonical_swap(self):
+        # #319 ordering: every pure refusal (here: an unreadable existing binding)
+        # runs BEFORE the rebind. A refusal must leave the canonical predecessor active
+        # and the old legacy record un-retired, with no new session — never a swapped
+        # owner with no replacement written.
+        root, work, home = self._make_pi_replacement_workspace()
+        self._register_pi(
+            root, session="SESSION-OLD", project="amiga", chat="CHAT-R",
+            native="pi-old", endpoint="endpoint_old", runtime_instance="rt-old",
+            cwd=work, home=home, repo_target="app",
+        )
+        baseline = self._binding_rows(root, "amiga", "CHAT-R")
+        binding_file = (
+            root / "State" / "session_autobridge" / "bindings" / "amiga" / "CHAT-R" / "glmpi.json"
+        )
+        # Oversized (> MAX_BINDING_BYTES) makes the existing binding unreadable, which is
+        # a hard pre-swap refusal (a malformed one is treated as absent, not a refusal).
+        binding_file.write_text("x" * (256 * 1024 + 1))
+        done = self._register_pi(
+            root, session="SESSION-NEW", project="amiga", chat="CHAT-R",
+            native="pi-new", endpoint="endpoint_new", runtime_instance="rt-new",
+            cwd=work, home=home, repo_target="app", supersedes="SESSION-OLD", check=False,
+        )
+        self.assertNotEqual(0, done.returncode)
+        self.assertNotIn("Traceback", done.stderr)
+        self.assertFalse(self._session_json(root, "SESSION-NEW").exists())
+        self.assertEqual(
+            baseline, self._binding_rows(root, "amiga", "CHAT-R"),
+            "a pre-swap refusal must leave the canonical predecessor unchanged",
+        )
+        self.assertNotEqual(
+            "superseded",
+            json.loads(self._session_json(root, "SESSION-OLD").read_text()).get("status"),
+        )
+
+    def test_pi_replacement_refuses_binding_growth_before_the_canonical_swap(self):
+        root, work, home = self._make_pi_replacement_workspace()
+        self._register_pi(
+            root, session="SESSION-OLD", project="amiga", chat="CHAT-R",
+            native="pi-old", endpoint="endpoint_old", runtime_instance="rt-old",
+            cwd=work, home=home, repo_target="app",
+        )
+        baseline = self._binding_rows(root, "amiga", "CHAT-R")
+        binding_file = (
+            root / "State" / "session_autobridge" / "bindings" / "amiga" / "CHAT-R" / "glmpi.json"
+        )
+        binding = json.loads(binding_file.read_text())
+        source = self._write_pi_session_source(root, "pi-new-long", cwd=str(work))
+        endpoint = "endpoint_" + "a" * 119
+        binding["padding"] = ""
+        empty = json.dumps(binding, indent=2, sort_keys=True)
+        binding["padding"] = "x" * (256 * 1024 - len(empty.encode("utf-8")) - 1)
+        binding_file.write_text(json.dumps(binding, indent=2, sort_keys=True))
+        self.assertLessEqual(binding_file.stat().st_size, 256 * 1024)
+
+        done = self._register_pi(
+            root, session="SESSION-NEW-LONG", project="amiga", chat="CHAT-R",
+            native="pi-new-long", endpoint=endpoint, runtime_instance="rt-new-long",
+            cwd=work, home=home, repo_target="app", supersedes="SESSION-OLD", check=False,
+            session_source=source,
+        )
+        self.assertNotEqual(0, done.returncode)
+        self.assertIn("binding exceeds", done.stderr)
+        self.assertNotIn("Traceback", done.stderr)
+        self.assertEqual(baseline, self._binding_rows(root, "amiga", "CHAT-R"))
+        self.assertNotEqual(
+            "superseded",
+            json.loads(self._session_json(root, "SESSION-OLD").read_text()).get("status"),
+        )
+
+    def test_pi_replacement_does_not_prepare_again_after_the_swap(self):
+        args = SimpleNamespace(
+            session="SESSION-NEW", agent="glmpi", project="amiga", chat="CHAT-R",
+            repo_targets=["app"], mode="auto-read", status="active",
+            wake_strategy="runtime_trigger", lease_owner=None, ttl_seconds=3600,
+            allowed_actions=[], runtime_family="pi", runtime_session_id="pi-new",
+            runtime_session_source="/tmp/pi-new.jsonl", runtime_home="/tmp/pi-home",
+            runtime_command=None, runtime_timeout=30, endpoint_id="endpoint-new",
+            runtime_instance_id="pi-web", cwd="/tmp/work",
+            supersedes_session="SESSION-OLD",
+        )
+        settled = {
+            "session_id": "SESSION-NEW",
+            "agent_id": "glmpi",
+            "project_id": "amiga",
+            "chat_id": "CHAT-R",
+            "runtime": {"family": "pi", "session_id": "pi-new"},
+            "updated_utc": "2026-07-29T09:00:00+00:00",
+        }
+        with patch.object(
+            session_autobridge_cli, "get_agent", return_value={"activation": {}}
+        ), patch.object(
+            session_autobridge_cli,
+            "read_pi_session_fingerprint",
+            return_value={
+                "provider": "zai", "model": "glm-5.2", "thinking_level": "max",
+                "cwd": "/tmp/work",
+            },
+        ), patch.object(
+            session_autobridge_cli,
+            "resolve_active_canonical_binding",
+            side_effect=session_autobridge_cli.CanonicalBindingNativeMismatch(
+                canonical_native_session_id="pi-old",
+                requested_runtime_session_id="pi-new",
+            ),
+        ), patch.object(
+            session_autobridge_cli,
+            "_authorize_pi_replacement_or_refuse",
+            return_value={"binding_id": "binding-old", "generation": 1},
+        ), patch.object(
+            session_autobridge_cli,
+            "_replace_pi_binding_or_refuse",
+            return_value={
+                "binding_id": "binding-new", "binding_generation": 2,
+                "endpoint_id": "endpoint-new",
+            },
+        ), patch.object(
+            session_autobridge_cli,
+            "prepare_session_write",
+            side_effect=[(settled, json.dumps(settled)), AssertionError("prepared twice")],
+        ) as prepare, patch.object(
+            session_autobridge_cli, "existing_binding_snapshot_or_refuse", return_value={}
+        ), patch.object(
+            session_autobridge_cli, "plan_superseded_retirement", return_value=None
+        ), patch.object(
+            session_autobridge_cli, "update_binding_from_session", return_value=None
+        ), patch.object(session_autobridge_cli, "save_session") as save:
+            session_autobridge_cli.register_session(args)
+
+        prepare.assert_called_once()
+        self.assertEqual("binding-new", save.call_args.kwargs["prepared"][0]["binding_id"])
 
     def test_pi_register_requires_and_persists_complete_fingerprint(self):
         # #378 fingerprint: registration reads + pins the exact native source's

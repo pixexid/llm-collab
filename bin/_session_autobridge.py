@@ -237,15 +237,29 @@ def load_thread_pair(project_id: str, chat_id: str, agent_a: str, agent_b: str) 
     return json.loads(path.read_text())
 
 
-def save_binding(payload: dict) -> None:
+def prepare_binding_write(payload: dict) -> tuple[dict, str]:
+    candidate = dict(payload)
+    candidate["updated_utc"] = utc_iso()
+    content = json.dumps(candidate, indent=2, sort_keys=True)
+    if len(content.encode("utf-8")) > MAX_BINDING_BYTES:
+        raise BindingUnreadable(
+            f"binding exceeds {MAX_BINDING_BYTES} bytes; refusing to write an unreadable record"
+        )
+    return candidate, content
+
+
+def save_binding(payload: dict, prepared: tuple[dict, str] | None = None) -> None:
     path = autobridge_binding_path(
         str(payload["project_id"]),
         str(payload["chat_id"]),
         str(payload["agent_id"]),
     )
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload["updated_utc"] = utc_iso()
-    write_regular_file_atomically(path, json.dumps(payload, indent=2, sort_keys=True))
+    candidate, content = prepared or prepare_binding_write(payload)
+    candidate = dict(candidate)
+    write_regular_file_atomically(path, content)
+    payload.clear()
+    payload.update(candidate)
 
 
 def write_regular_file_atomically(path: Path, content: str) -> None:
@@ -544,6 +558,43 @@ def resolve_active_canonical_binding(
     }
 
 
+def resolve_active_canonical_owner(
+    project_id: str, chat_id: str, agent_id: str
+) -> dict[str, Any] | None:
+    """The current active canonical owner for a participant, native session included.
+
+    Reader-only sibling of resolve_active_canonical_binding, but without the native
+    fence: it returns the active binding whatever native session owns it, so the
+    replacement authorization check (#319) can prove that a `--supersedes-session`
+    predecessor is EXACTLY that owner before any rebind. None when nothing resolves.
+    """
+    workspace_id = config_get("workspace_id")
+    if not workspace_id:
+        return None
+    _repo_package_root()
+    ledger_module = importlib.import_module(".".join(("llm_collab", "ledger")))
+    try:
+        paths = ledger_module.LedgerPaths.derive(project_state_root(), str(workspace_id))
+        with ledger_module.LedgerStore.open_reader(paths) as store:
+            resolved = store.resolve_conversation_binding(
+                workspace_id=store.paths.workspace_id,
+                scope_kind="project",
+                scope_identity=str(project_id),
+                conversation_id=str(chat_id),
+                participant_id="participant_" + str(agent_id),
+            )
+    except Exception:
+        return None
+    if not resolved.get("resolved"):
+        return None
+    return {
+        "binding_id": resolved["binding_id"],
+        "generation": resolved["generation"],
+        "endpoint_id": resolved["endpoint_id"],
+        "native_session_id": resolved["native_session_id"],
+    }
+
+
 class PiProvisioningRefused(RuntimeError):
     """A Pi register could not provision its canonical binding.
 
@@ -662,7 +713,9 @@ def provision_pi_canonical_binding(
     cwd: str,
     runtime_home_path: str,
     repo_target: str,
-) -> None:
+    predecessor: dict[str, object] | None = None,
+    actor_id: str | None = None,
+) -> dict[str, object]:
     """Mint the canonical Pi binding via the lifecycle reserve/consume seam.
 
     Register calls this only when no active binding exists and the native
@@ -673,12 +726,25 @@ def provision_pi_canonical_binding(
     Ordering guarantees the ledger is untouched on any precondition refusal
     (autocommit connection: raw INSERTs commit immediately, so every validation
     precedes the first write).
+
+    Native-session replacement (#319): when `predecessor` names the current active
+    canonical owner ({binding_id, generation}), the successor is consumed pre-active
+    (`reserved`) and swapped in atomically via the existing rebind authority
+    (transition `rebind`, reason `native_session_replacement`). No prior deactivate:
+    the predecessor stays active and usable until the swap supersedes it, so any
+    reserve/consume refusal leaves it unchanged. `actor_id` identifies the
+    registering session path, never operator approval.
     """
     import re
     import sqlite3
     from datetime import timedelta
     from _helpers import now_utc, resolve_project_repo_path
 
+    if predecessor is not None and not actor_id:
+        raise PiProvisioningRefused(
+            "canonical_replacement_actor_required",
+            "native-session replacement requires a registering actor_id",
+        )
     workspace_id = config_get("workspace_id")
     if not workspace_id:
         raise PiProvisioningRefused("canonical_workspace_required", "workspace_id is unset")
@@ -691,9 +757,15 @@ def provision_pi_canonical_binding(
 
     _repo_package_root()
     ledger_module = importlib.import_module(".".join(("llm_collab", "ledger")))
+    store_module = importlib.import_module(".".join(("llm_collab", "ledger", "store")))
     lifecycle_module = importlib.import_module(".".join(("llm_collab", "session_lifecycle")))
     home_module = importlib.import_module(".".join(("llm_collab", "codex_runtime_home")))
     ref_module = importlib.import_module(".".join(("llm_collab", "codex_session_ref")))
+    if predecessor is not None:
+        try:
+            actor_id = store_module._conversation_binding_text(actor_id, "actor_id", 128)
+        except ValueError as error:
+            raise PiProvisioningRefused("canonical_replacement_actor_invalid", str(error))
 
     provider = lifecycle_module.PiLifecycleProvider()
     descriptor = provider.descriptor()
@@ -777,7 +849,7 @@ def provision_pi_canonical_binding(
                 correlation_id=correlation,
                 trusted_project_root=trusted,
             )
-            core.consume(
+            successor = core.consume(
                 store,
                 subject,
                 challenge,
@@ -785,13 +857,47 @@ def provision_pi_canonical_binding(
                 consumed_at_utc=created,
                 correlation_id=correlation,
                 trusted_project_root=trusted,
+                binding_state="active" if predecessor is None else "reserved",
             )
+            if predecessor is not None:
+                # The successor was minted `reserved` (excluded from the one-active
+                # index), so the predecessor is still the sole active owner here.
+                # rebind flips predecessor active->superseded and successor
+                # reserved->active atomically; there is no window with two active
+                # owners and none with none.
+                core.rebind(
+                    store,
+                    subject,
+                    predecessor,
+                    successor,
+                    transition_kind="rebind",
+                    actor_id=str(actor_id),
+                    reason="native_session_replacement",
+                    evidence=(
+                        "native_session_replacement"
+                        f" predecessor={predecessor['binding_id']}:{predecessor['generation']}"
+                        f" successor={successor['binding_id']}:{successor['generation']}"
+                        f" native={native_session_id}"
+                    ).encode("utf-8"),
+                    created_at_utc=created,
+                )
+            return {
+                "binding_id": successor["binding_id"],
+                "binding_generation": successor["generation"],
+                "endpoint_id": successor["endpoint_id"],
+            }
         except sqlite3.IntegrityError as error:
             # A concurrent register took this owner between the prevention check
             # and consume. Convert the raw index violation to a bounded refusal;
             # the prevention check keeps repeated (sequential) attempts from
             # writing a challenge at all, so they cannot accumulate.
             raise PiProvisioningRefused("canonical_native_session_already_bound", str(error))
+        except (store_module.CanonicalConflictError, lifecycle_module.SessionLifecycleError) as error:
+            # The rebind swap found the predecessor no longer transitionable or the
+            # successor not pre-active (e.g. a racing transition). Convert to a bounded
+            # refusal instead of leaking a traceback; the swap is atomic, so a refused
+            # transition leaves both bindings as they were.
+            raise PiProvisioningRefused("canonical_replacement_conflict", str(error))
 
 
 PI_SESSION_HEADER_VERSION = 3
@@ -920,11 +1026,16 @@ def binding_payload_from_session(
 def update_binding_from_session(
     session: dict,
     existing: dict[str, Any] | None = None,
+    prepared: tuple[dict, str] | None = None,
 ) -> dict[str, Any] | None:
-    payload = binding_payload_from_session(session, existing=existing)
+    payload = (
+        prepared[0]
+        if prepared is not None
+        else binding_payload_from_session(session, existing=existing)
+    )
     if payload is None:
         return None
-    save_binding(payload)
+    save_binding(payload, prepared=prepared)
     return payload
 
 
