@@ -686,7 +686,10 @@ def show_binding(args) -> dict:
 
 
 def discover_runtime(args) -> dict:
-    return discover_runtime_session(args.runtime_family, project_path=args.project_path)
+    try:
+        return discover_runtime_session(args.runtime_family, project_path=args.project_path)
+    except FileNotFoundError as error:
+        raise SystemExit(f"[error] {error}")
 
 
 def publish_current_session(args) -> dict:

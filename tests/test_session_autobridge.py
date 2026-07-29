@@ -60,6 +60,26 @@ def write_json(path: Path, payload: dict) -> None:
     write(path, json.dumps(payload, indent=2))
 
 
+def write_claude_session_jsonl(
+    path: Path, *, cwd: Path, session_id: str | None = None
+) -> None:
+    """Write one current-Claude per-session .jsonl record (the cwd-bearing format
+    current Claude Code writes under ~/.claude/projects/<slug>/). session_id
+    defaults to the filename stem; pass a different value to forge a mismatch."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "type": "user",
+                "sessionId": session_id if session_id is not None else path.stem,
+                "cwd": str(cwd),
+                "timestamp": "2026-07-29T00:00:00Z",
+            }
+        )
+        + "\n"
+    )
+
+
 def run_cli_with_eacces_on(root, target_path, module_name, argv):
     """Run a CLI in a child process with os.open raising EACCES for one path.
 
@@ -3200,28 +3220,15 @@ class SessionAutobridgeTest(unittest.TestCase):
         )
         self.assertIn("[inbox] No unread messages for codex.", human_result.stdout)
 
-    def test_discover_runtime_for_claude_project_index(self):
+    def test_discover_runtime_for_claude_project_session_jsonl(self):
         root = self.make_workspace()
         claude_home = root / ".claude"
         project_path = root / "fake-project"
         project_path.mkdir(parents=True, exist_ok=True)
         project_slug = str(project_path.resolve()).replace("/", "-")
-        sessions_index = claude_home / "projects" / project_slug / "sessions-index.json"
-        write_json(
-            sessions_index,
-            {
-                "version": 1,
-                "entries": [
-                    {
-                        "sessionId": "claude-session-456",
-                        "fullPath": str(claude_home / "projects" / project_slug / "claude-session-456.jsonl"),
-                        "fileMtime": 1771371735466,
-                        "created": "2026-04-22T20:00:00Z",
-                        "modified": "2026-04-22T21:00:00Z",
-                        "projectPath": str(project_path.resolve()),
-                    }
-                ],
-            },
+        write_claude_session_jsonl(
+            claude_home / "projects" / project_slug / "claude-session-456.jsonl",
+            cwd=project_path.resolve(),
         )
 
         discovered = self.run_cli_with_env(
@@ -3234,6 +3241,93 @@ class SessionAutobridgeTest(unittest.TestCase):
             str(project_path),
         )
         self.assertEqual("claude-session-456", discovered["session_id"])
+
+    def test_claude_discovery_does_not_fall_back_to_other_projects_legacy_index(self):
+        # Regression for the 2026-07-27 defect (#95): current Claude writes
+        # per-session .jsonl, not the legacy sessions-index.json, so an unscoped
+        # discover-runtime returned another project's stale index entry.
+        # Discovery must select the exact project's .jsonl or refuse -- never
+        # another project's session.
+        root = self.make_workspace()
+        claude_home = root / ".claude"
+        project_a = root / "project-a"
+        project_b = root / "project-b"
+        project_a.mkdir(parents=True, exist_ok=True)
+        project_b.mkdir(parents=True, exist_ok=True)
+        slug_a = str(project_a.resolve()).replace("/", "-")
+        write_claude_session_jsonl(
+            claude_home / "projects" / slug_a / "session-A.jsonl",
+            cwd=project_a.resolve(),
+        )
+        # Project B carries only a legacy sessions-index.json (the old
+        # cross-project fallback source).
+        slug_b = str(project_b.resolve()).replace("/", "-")
+        write_json(
+            claude_home / "projects" / slug_b / "sessions-index.json",
+            {
+                "version": 1,
+                "entries": [
+                    {
+                        "sessionId": "stale-session-B",
+                        "projectPath": str(project_b.resolve()),
+                        "fileMtime": 1771371735466,
+                        "modified": "2026-03-11T18:04:49Z",
+                    }
+                ],
+            },
+        )
+        # Scoped to A: selects A's .jsonl, never B's legacy entry.
+        discovered = self.run_cli_with_env(
+            root,
+            {"CLAUDE_HOME": str(claude_home)},
+            "discover-runtime",
+            "--runtime-family",
+            "claude_app",
+            "--project-path",
+            str(project_a),
+        )
+        self.assertEqual("session-A", discovered["session_id"])
+        # Unscoped: refuses rather than returning B's stale session.
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.run_cli_with_env(
+                root,
+                {"CLAUDE_HOME": str(claude_home)},
+                "discover-runtime",
+                "--runtime-family",
+                "claude_app",
+            )
+
+    def test_claude_discovery_fails_closed_on_zero_and_multiple_sessions(self):
+        root = self.make_workspace()
+        claude_home = root / ".claude"
+        project_path = root / "fake-project"
+        project_path.mkdir(parents=True, exist_ok=True)
+        project_slug = str(project_path.resolve()).replace("/", "-")
+        session_dir = claude_home / "projects" / project_slug
+        # Zero sessions -> refuse (no fallback to another project).
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.run_cli_with_env(
+                root,
+                {"CLAUDE_HOME": str(claude_home)},
+                "discover-runtime",
+                "--runtime-family",
+                "claude_app",
+                "--project-path",
+                str(project_path),
+            )
+        write_claude_session_jsonl(session_dir / "session-1.jsonl", cwd=project_path.resolve())
+        write_claude_session_jsonl(session_dir / "session-2.jsonl", cwd=project_path.resolve())
+        # Multiple sessions -> refuse (do not guess the newest).
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.run_cli_with_env(
+                root,
+                {"CLAUDE_HOME": str(claude_home)},
+                "discover-runtime",
+                "--runtime-family",
+                "claude_app",
+                "--project-path",
+                str(project_path),
+            )
 
     def test_discover_runtime_for_gemini_chat_file(self):
         root = self.make_workspace()
@@ -3256,6 +3350,210 @@ class SessionAutobridgeTest(unittest.TestCase):
             "gemini_cli",
         )
         self.assertEqual("gemini-session-789", discovered["session_id"])
+
+    def test_claude_discovery_proves_exact_project_by_cwd_not_colliding_slug(self):
+        # path.replace("/", "-") is NOT injective: <root>/s/a-b/c and
+        # <root>/s/a/b-c collapse to the same slug, so Claude writes both
+        # projects' sessions into one shared directory. The slug directory alone
+        # is not project proof; each candidate's canonical cwd must match.
+        root = self.make_workspace()
+        claude_home = root / ".claude"
+        project_one = root / "s" / "a-b" / "c"
+        project_two = root / "s" / "a" / "b-c"
+        project_one.mkdir(parents=True, exist_ok=True)
+        project_two.mkdir(parents=True, exist_ok=True)
+        slug_one = str(project_one.resolve()).replace("/", "-")
+        slug_two = str(project_two.resolve()).replace("/", "-")
+        self.assertEqual(slug_one, slug_two)  # documents the collision premise
+        shared_dir = claude_home / "projects" / slug_one
+        write_claude_session_jsonl(
+            shared_dir / "session-one.jsonl", cwd=project_one.resolve()
+        )
+        write_claude_session_jsonl(
+            shared_dir / "session-two.jsonl", cwd=project_two.resolve()
+        )
+        # Each project selects only its own session despite the shared slug dir.
+        one = self.run_cli_with_env(
+            root,
+            {"CLAUDE_HOME": str(claude_home)},
+            "discover-runtime",
+            "--runtime-family",
+            "claude_app",
+            "--project-path",
+            str(project_one),
+        )
+        self.assertEqual("session-one", one["session_id"])
+        two = self.run_cli_with_env(
+            root,
+            {"CLAUDE_HOME": str(claude_home)},
+            "discover-runtime",
+            "--runtime-family",
+            "claude_app",
+            "--project-path",
+            str(project_two),
+        )
+        self.assertEqual("session-two", two["session_id"])
+
+    def test_claude_discovery_fails_closed_on_filename_session_id_mismatch(self):
+        # cwd proves the project, but the artifact identity must be proved by the
+        # record sessionId equal to the filename -- a body/filename mismatch is a
+        # corruption signal and fails closed rather than selecting the artifact.
+        root = self.make_workspace()
+        claude_home = root / ".claude"
+        project_path = root / "fake-project"
+        project_path.mkdir(parents=True, exist_ok=True)
+        slug = str(project_path.resolve()).replace("/", "-")
+        session_dir = claude_home / "projects" / slug
+        write_claude_session_jsonl(
+            session_dir / "session-one.jsonl",
+            cwd=project_path.resolve(),
+            session_id="not-the-filename-stem",
+        )
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.run_cli_with_env(
+                root,
+                {"CLAUDE_HOME": str(claude_home)},
+                "discover-runtime",
+                "--runtime-family",
+                "claude_app",
+                "--project-path",
+                str(project_path),
+            )
+
+    def test_claude_discovery_directory_budget_counts_non_jsonl_entries(self):
+        # Enumeration is bounded at the scandir boundary: every directory entry
+        # counts, not just *.jsonl, so a directory padded with non-jsonl siblings
+        # fails closed instead of globbing down to a single candidate.
+        root = self.make_workspace()
+        claude_home = root / ".claude"
+        project_path = root / "fake-project"
+        project_path.mkdir(parents=True, exist_ok=True)
+        slug = str(project_path.resolve()).replace("/", "-")
+        session_dir = claude_home / "projects" / slug
+        session_dir.mkdir(parents=True, exist_ok=True)
+        write_claude_session_jsonl(session_dir / "session.jsonl", cwd=project_path.resolve())
+        for index in range(session_autobridge_lib.MAX_CLAUDE_CANDIDATES):
+            (session_dir / f"noise-{index}.txt").write_text("noise\n")
+        # 1 .jsonl + MAX non-jsonl = MAX+1 entries -> fail closed at scandir.
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.run_cli_with_env(
+                root,
+                {"CLAUDE_HOME": str(claude_home)},
+                "discover-runtime",
+                "--runtime-family",
+                "claude_app",
+                "--project-path",
+                str(project_path),
+            )
+
+    def test_claude_discovery_fails_closed_when_a_sibling_artifact_is_unreadable(self):
+        # P1: an unreadable candidate may be a second exact session, so discovery
+        # must fail closed -- never silently skip it and return the readable one.
+        root = self.make_workspace()
+        claude_home = root / ".claude"
+        project_path = root / "fake-project"
+        project_path.mkdir(parents=True, exist_ok=True)
+        slug = str(project_path.resolve()).replace("/", "-")
+        session_dir = claude_home / "projects" / slug
+        write_claude_session_jsonl(session_dir / "good.jsonl", cwd=project_path.resolve())
+        hidden = session_dir / "hidden.jsonl"
+        write_claude_session_jsonl(hidden, cwd=project_path.resolve())
+        os.chmod(hidden, 0o000)
+        self.addCleanup(os.chmod, hidden, 0o600)
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.run_cli_with_env(
+                root,
+                {"CLAUDE_HOME": str(claude_home)},
+                "discover-runtime",
+                "--runtime-family",
+                "claude_app",
+                "--project-path",
+                str(project_path),
+            )
+
+    def test_claude_discovery_requires_cwd_and_session_id_in_the_same_record(self):
+        # P1: cwd and sessionId must be asserted by the SAME record. Accumulating
+        # them independently across records would let a fabricated pair prove a
+        # synthetic identity.
+        root = self.make_workspace()
+        claude_home = root / ".claude"
+        project_path = root / "fake-project"
+        project_path.mkdir(parents=True, exist_ok=True)
+        slug = str(project_path.resolve()).replace("/", "-")
+        artifact = claude_home / "projects" / slug / "session-a.jsonl"
+        artifact.parent.mkdir(parents=True, exist_ok=True)
+        artifact.write_text(
+            json.dumps({"type": "user", "sessionId": "session-a"})
+            + "\n"
+            + json.dumps(
+                {
+                    "type": "attachment",
+                    "sessionId": "session-b",
+                    "cwd": str(project_path.resolve()),
+                }
+            )
+            + "\n"
+        )
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.run_cli_with_env(
+                root,
+                {"CLAUDE_HOME": str(claude_home)},
+                "discover-runtime",
+                "--runtime-family",
+                "claude_app",
+                "--project-path",
+                str(project_path),
+            )
+
+    def test_claude_discovery_rejects_relative_cwd_from_artifact(self):
+        # P1: project evidence must be an ABSOLUTE canonical cwd from the
+        # artifact; a relative cwd must never be resolved against the discovery
+        # process cwd.
+        root = self.make_workspace()
+        claude_home = root / ".claude"
+        project_path = root / "fake-project"
+        project_path.mkdir(parents=True, exist_ok=True)
+        slug = str(project_path.resolve()).replace("/", "-")
+        artifact = claude_home / "projects" / slug / "session.jsonl"
+        artifact.parent.mkdir(parents=True, exist_ok=True)
+        artifact.write_text(
+            json.dumps({"type": "attachment", "sessionId": "session", "cwd": "."})
+            + "\n"
+        )
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.run_cli_with_env(
+                root,
+                {"CLAUDE_HOME": str(claude_home)},
+                "discover-runtime",
+                "--runtime-family",
+                "claude_app",
+                "--project-path",
+                str(project_path),
+            )
+
+    def test_claude_discovery_fails_closed_on_a_non_regular_jsonl_sibling(self):
+        # A .jsonl FIFO/dir/broken-symlink must reach the reader and classify as
+        # unprovable (fail closed), not be silently dropped by an is_file()
+        # prefilter so a readable sibling looks unique.
+        root = self.make_workspace()
+        claude_home = root / ".claude"
+        project_path = root / "fake-project"
+        project_path.mkdir(parents=True, exist_ok=True)
+        slug = str(project_path.resolve()).replace("/", "-")
+        session_dir = claude_home / "projects" / slug
+        write_claude_session_jsonl(session_dir / "good.jsonl", cwd=project_path.resolve())
+        # A directory masquerading as a .jsonl artifact.
+        os.mkdir(session_dir / "evil.jsonl")
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.run_cli_with_env(
+                root,
+                {"CLAUDE_HOME": str(claude_home)},
+                "discover-runtime",
+                "--runtime-family",
+                "claude_app",
+                "--project-path",
+                str(project_path),
+            )
 
     def test_resolve_exact_dispatch_target_refuses_missing_and_stale_bindings(self):
         root = self.make_workspace()
