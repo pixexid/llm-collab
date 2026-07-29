@@ -13,7 +13,9 @@ WRAPPER = REPO_ROOT / "bin" / "axsend-ensure"
 
 
 class AxsendEnsureTest(unittest.TestCase):
-    def make_wrapper_root(self, ring_output: str) -> tuple[Path, Path]:
+    def make_wrapper_root(
+        self, ring_output: str, *, ring_exit: int = 0
+    ) -> tuple[Path, Path]:
         root = Path(tempfile.mkdtemp(prefix="llm-collab-axsend-ensure-"))
         self.addCleanup(shutil.rmtree, root)
         wrapper = root / "bin" / "axsend-ensure"
@@ -34,7 +36,7 @@ class AxsendEnsureTest(unittest.TestCase):
             f"printf '%s\\n' \"$*\" >> {str(log)!r}\n"
             "if [[ \"${1:-}\" == \"ring\" ]]; then\n"
             f"  printf '%s\\n' {ring_output!r}\n"
-            "  exit 0\n"
+            f"  exit {int(ring_exit)}\n"
             "fi\n"
             "printf '%s\\n' 'delivered: text appears as a sent message'\n"
         )
@@ -50,24 +52,23 @@ class AxsendEnsureTest(unittest.TestCase):
             check=False,
         )
 
-    def test_queued_ring_does_not_run_standalone_confirm(self) -> None:
-        # #given
+    def test_queued_unconfirmed_is_ambiguous_never_exit_zero(self) -> None:
+        # #given — faithful post-#406 axsend: a queued/unconfirmed ring prints the
+        # QUEUED line AND its AMBIGUOUS outcome, and exits 3 (not 0).
         wrapper, log = self.make_wrapper_root(
-            "QUEUED (UNCONFIRMED): recipient went busy with no visible turn"
+            "QUEUED (UNCONFIRMED): recipient went busy with no visible turn\n"
+            "AX_OUTCOME=AMBIGUOUS reason=queued_unconfirmed",
+            ring_exit=3,
         )
 
         # #when
         result = self.run_wrapper(wrapper)
 
-        # #then
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(
-            log.read_text().splitlines(),
-            [
-                "turns --app ZCode --text wake",
-                "ring --app ZCode --submit --verify --text wake",
-            ],
-        )
+        # #then — ambiguous is never exit-zero success, and the wrapper does not run
+        # a standalone confirm or resend; it surfaces the one AMBIGUOUS outcome.
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(result.returncode, 3, result.stderr)
+        self.assertIn("AX_OUTCOME=AMBIGUOUS reason=queued_unconfirmed", result.stdout)
         calls = log.read_text().splitlines()
         self.assertEqual(sum(call.startswith("ring ") for call in calls), 1)
         self.assertFalse(any(call.startswith("confirm ") for call in calls))
