@@ -45,6 +45,103 @@ class RuntimeAdapterStateTests(unittest.TestCase):
             self.assertTrue(released.release_event_seen)
             self.assertTrue(released.released)
 
+    def test_read_record_exposes_the_exact_stored_journal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "adapter-state.sqlite"
+            opened = _redacted(request_id="attempt-1", fault="ADAPTER_UNHEALTHY")
+            record_id = state.record_quarantine_opened(db_path, opened)
+            state.record_recovery_authorized(db_path, record_id, _redacted(request_id="attempt-1"))
+            # A second recovery_authorized for the same attempt is stored as a
+            # duplicate row that the fold dedupes (it must not double-advance);
+            # the journal must still carry it exactly as recorded.
+            state.record_recovery_authorized(db_path, record_id, _redacted(request_id="attempt-1"))
+
+            current = state.read_record(db_path, record_id)
+
+            with sqlite3.connect(db_path) as conn:
+                raw = conn.execute(
+                    """
+                    SELECT event_sequence, event_kind, append_time_utc
+                    FROM runtime_adapter_events
+                    WHERE record_id = ?
+                    ORDER BY event_sequence
+                    """,
+                    (record_id,),
+                ).fetchall()
+            self.assertEqual(len(raw), 3)
+            self.assertEqual(
+                current.journal,
+                tuple((int(seq), str(kind), str(stamp)) for seq, kind, stamp in raw),
+            )
+            self.assertEqual(
+                [kind for _, kind, _ in current.journal],
+                ["quarantine_opened", "recovery_authorized", "recovery_authorized"],
+            )
+            # The fold still sees one recovery (no double-advance from the duplicate):
+            # exactly two folded events, while the stored journal carries all three rows.
+            self.assertTrue(current.recovery_authorized)
+            self.assertEqual(current.event_count, 2)
+            self.assertEqual(len(current.journal), 3)
+            for sequence, kind, stamp in current.journal:
+                self.assertIsInstance(sequence, int)
+                self.assertIn(kind, state.EVENT_KINDS)
+                self.assertTrue(stamp)
+
+            # Nothing unrecorded is inferred or exposed: no delivery/attempt
+            # lineage ids, capability-set identity, failed-health, or authority
+            # evidence fields exist on the state or in the journal vocabulary.
+            forbidden = {
+                "delivery_id",
+                "attempt_id",
+                "original_request_id",
+                "capability_set_id",
+                "capability_set_revision",
+                "failed_health",
+                "authority",
+                "authorized_by",
+            }
+            self.assertFalse(forbidden & set(current.__dataclass_fields__))
+            self.assertTrue({kind for _, kind, _ in current.journal} <= state.EVENT_KINDS)
+
+    def test_journal_read_is_bounded_and_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "adapter-state.sqlite"
+            record_id = state.record_quarantine_opened(
+                db_path, _redacted(request_id="attempt-1", fault="ADAPTER_UNHEALTHY"))
+            payload_json, digest = _payload_and_digest(_redacted(request_id="health-1"))
+            with sqlite3.connect(db_path) as conn:
+                conn.executemany(
+                    """
+                    INSERT INTO runtime_adapter_events
+                        (record_id, event_kind, payload_json, payload_sha256)
+                    VALUES (?, 'valid_health', ?, ?)
+                    """,
+                    [(record_id, payload_json, digest)]
+                    * state.MAX_ADAPTER_STATE_EVENTS,
+                )
+
+            with self.assertRaises(state.AdapterStateIntegrityError):
+                state.read_record(db_path, record_id)
+
+    def test_journal_read_refuses_a_non_text_stored_timestamp(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "adapter-state.sqlite"
+            record_id = state.record_quarantine_opened(
+                db_path, _redacted(request_id="attempt-1", fault="ADAPTER_UNHEALTHY"))
+            payload_json, digest = _payload_and_digest(_redacted(request_id="health-1"))
+            with sqlite3.connect(db_path) as conn:
+                conn.execute(
+                    """
+                    INSERT INTO runtime_adapter_events
+                        (record_id, event_kind, payload_json, payload_sha256, append_time_utc)
+                    VALUES (?, 'valid_health', ?, ?, ?)
+                    """,
+                    (record_id, payload_json, digest, b"blob-timestamp"),
+                )
+
+            with self.assertRaises(state.AdapterStateIntegrityError):
+                state.read_record(db_path, record_id)
+
     def test_release_is_not_derived_from_preconditions_or_partial_health(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "adapter-state.sqlite"
