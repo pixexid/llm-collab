@@ -263,10 +263,18 @@ def _production_schema_guard(
     project = _exact_task_project(frontmatter, project_override)
     if project is None:
         return False, False, None, project_id
-    db_config = project.get("db")
-    configured = isinstance(db_config, dict) and "production_schema_guard" in db_config
+    db_config = project.get("db") if isinstance(project.get("db"), dict) else {}
+    configured = "production_schema_guard" in db_config
     raw_guard = db_config.get("production_schema_guard") if configured else None
-    return configured, raw_guard is True, raw_guard, project_id
+    # A project with a shared/production Supabase is schema-guarded by default: that
+    # shared project IS the acceptance DB, so production DDL there cannot be waved
+    # through as local-schema-only. GH-82: Amiga declared a shared ref but no guard
+    # key, so the guard was inert and a production migration shipped mis-classified.
+    # An explicit `production_schema_guard: false` still opts a project out; a
+    # configured-but-malformed value stays disabled and is reported separately.
+    has_shared_ref = bool(_normalize_text(db_config.get("shared_supabase_project_ref")))
+    enabled = raw_guard is True or (not configured and has_shared_ref)
+    return configured, enabled, raw_guard, project_id
 
 
 def _concrete_schema_paths(frontmatter: dict) -> list[str]:

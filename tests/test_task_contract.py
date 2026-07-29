@@ -423,6 +423,60 @@ class TaskContractProductionSchemaGuardTest(unittest.TestCase):
                 self.assertEqual(errors, [])
                 self.assertFalse(summary["production_schema_guard"]["enabled"])
 
+    def unguarded_shared_ref_project(self, project_id: str = "amiga") -> dict:
+        # Amiga's real shape (GH-82): a shared/production Supabase ref but NO
+        # explicit production_schema_guard key.
+        return {
+            "id": project_id,
+            "db": {
+                "shared_supabase_project_ref": f"{project_id}-project-ref",
+                "required_surfaces": [f"{project_id}_db.execute_sql", f"{project_id} db CLI"],
+            },
+        }
+
+    def gh_1453_local_only_task(self, **overrides) -> dict:
+        task = {
+            "project_id": "amiga",
+            "status": "review",
+            "related_paths": list(self.GH_1453_MIGRATIONS),
+            "db_impact": "local-schema-only",
+            "db_schema_change_detected": True,
+            "db_schema_change_detection": "manual_true",
+        }
+        task.update(overrides)
+        return task
+
+    def test_shared_ref_without_guard_key_auto_guards_and_rejects_gh_1453(self) -> None:
+        # GH-82 root cause: production DDL classified local-schema-only for a project
+        # that declares a shared Supabase but no explicit guard key must fail closed.
+        task = self.gh_1453_local_only_task()
+        with patch.object(
+            task_contract, "get_project",
+            return_value=self.unguarded_shared_ref_project("amiga"),
+        ):
+            errors, summary = task_contract.validate_db_contract(task, "", stage="review")
+        self.assertTrue(
+            summary["production_schema_guard"]["enabled"],
+            "a shared-Supabase project must auto-enable the guard",
+        )
+        self.assertTrue(
+            any("local-schema-only exception" in e for e in errors),
+            f"the invalid GH-1453 combination must be rejected: {errors}",
+        )
+
+    def test_shared_ref_local_only_passes_only_with_explicit_exception(self) -> None:
+        task = self.gh_1453_local_only_task(
+            db_local_schema_only_exception="dev-only-non-production",
+            db_local_schema_only_exception_approved_by="operator",
+            db_local_schema_only_exception_reason="Disposable local fixture only.",
+        )
+        with patch.object(
+            task_contract, "get_project",
+            return_value=self.unguarded_shared_ref_project("amiga"),
+        ):
+            errors, _ = task_contract.validate_db_contract(task, "", stage="review")
+        self.assertEqual([], errors, f"a genuine dev-only exception must pass: {errors}")
+
     def test_present_non_boolean_guard_fails_every_transition_stage(self) -> None:
         task = {
             "project_id": "nuvyr",
