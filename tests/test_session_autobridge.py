@@ -407,6 +407,18 @@ class SessionAutobridgeTest(unittest.TestCase):
             with self.assertRaises(UnicodeDecodeError):
                 session_autobridge_lib.iter_sessions()
 
+    def test_session_scan_refuses_an_identity_that_disagrees_with_its_filename(self):
+        root = self.make_workspace()
+        sessions = root / "State" / "session_autobridge" / "sessions"
+        write_json(
+            sessions / "SESSION-A.json",
+            {"session_id": "SESSION-B", "agent_id": "claude"},
+        )
+
+        with patch.object(session_autobridge_lib, "SESSIONS_DIR", sessions):
+            with self.assertRaisesRegex(ValueError, "identity does not match filename"):
+                session_autobridge_lib.iter_sessions()
+
     def test_registration_checks_capacity_before_publishing_a_binding(self):
         args = argparse.Namespace(
             session="SESSION-LARGE",
@@ -583,8 +595,11 @@ class SessionAutobridgeTest(unittest.TestCase):
         ) // 2
         trigger = Mock(return_value={"returncode": 0})
         materialize = Mock()
+        claim = Mock(return_value=(True, None))
         with self._dispatch_patch_context(session, [message]), patch.object(
             session_autobridge_lib, "execute_runtime_trigger", trigger
+        ), patch.object(
+            session_autobridge_lib, "claim_message_activation", claim
         ), patch.object(
             session_autobridge_lib,
             "materialize_selected_runtime_packet",
@@ -599,12 +614,17 @@ class SessionAutobridgeTest(unittest.TestCase):
         self.assertEqual("session_capacity_refused", result["actions"][0]["reason"])
         materialize.assert_not_called()
         trigger.assert_not_called()
+        claim.assert_not_called()
 
     def test_inbox_persistence_uses_the_durable_writer(self):
         with patch.object(helpers_lib, "write_file_durably") as durable:
             helpers_lib.save_agent_inbox("codex", {"agent": "codex", "unread": [], "read": []})
 
-        durable.assert_called_once()
+        self.assertEqual(2, durable.call_count)
+        pending = json.loads(durable.call_args_list[0].args[1])
+        confirmed = json.loads(durable.call_args_list[1].args[1])
+        self.assertIs(pending["_durability_pending"], True)
+        self.assertNotIn("_durability_pending", confirmed)
 
     def test_inbox_persistence_refuses_an_unconfirmed_directory_sync(self):
         root = self.make_workspace()
@@ -621,6 +641,41 @@ class SessionAutobridgeTest(unittest.TestCase):
                     "codex",
                     {"agent": "codex", "unread": [], "read": []},
                 )
+        self.assertIs(json.loads(inbox_path.read_text())["_durability_pending"], True)
+
+        session = {
+            "session_id": "SESSION-INBOX-DURABILITY",
+            "agent_id": "codex",
+            "processed_messages": ["Chats/durable/read.md"],
+        }
+        with patch.object(
+            session_autobridge_lib, "agent_inbox_path", return_value=inbox_path
+        ), patch.object(
+            session_autobridge_lib, "MAX_SESSION_BYTES", 150
+        ):
+            with self.assertRaisesRegex(
+                session_autobridge_lib.UnreadableFile,
+                "durability is unconfirmed",
+            ):
+                session_autobridge_lib.prepare_session_write(session)
+
+        with patch.object(helpers_lib, "agent_inbox_path", return_value=inbox_path):
+            helpers_lib.save_agent_inbox(
+                "codex",
+                {
+                    "agent": "codex",
+                    "unread": [],
+                    "read": ["Chats/durable/read.md"],
+                },
+            )
+        self.assertNotIn("_durability_pending", json.loads(inbox_path.read_text()))
+        with patch.object(
+            session_autobridge_lib, "agent_inbox_path", return_value=inbox_path
+        ), patch.object(
+            session_autobridge_lib, "MAX_SESSION_BYTES", 150
+        ):
+            candidate, _ = session_autobridge_lib.prepare_session_write(session)
+        self.assertEqual([], candidate["processed_messages"])
 
     def test_watcher_and_digest_use_the_bounded_session_iterator(self):
         sessions = [
@@ -1304,7 +1359,11 @@ class SessionAutobridgeTest(unittest.TestCase):
             patch.object(session_autobridge_lib, "processed_messages", return_value=set()),
             patch.object(session_autobridge_lib, "message_targets_session", return_value=(True, "ok")),
             patch.object(session_autobridge_lib, "append_event", side_effect=lambda _sid, event: events.append(event)),
-            patch.object(session_autobridge_lib, "resolve_effective_action") as resolve_action,
+            patch.object(
+                session_autobridge_lib,
+                "resolve_effective_action",
+                return_value=("runtime_trigger", "runtime_session_adapter_available"),
+            ) as resolve_action,
             patch.object(session_autobridge_lib, "mark_message_processed") as mark_processed,
         ):
             result = session_autobridge_lib.dispatch_session("SESSION-ACT")
@@ -1356,14 +1415,18 @@ class SessionAutobridgeTest(unittest.TestCase):
                 ),
             ),
             patch.object(session_autobridge_lib, "append_event", side_effect=lambda _sid, event: events.append(event)),
-            patch.object(session_autobridge_lib, "resolve_effective_action") as resolve_action,
+            patch.object(
+                session_autobridge_lib,
+                "resolve_effective_action",
+                return_value=("runtime_trigger", "runtime_session_adapter_available"),
+            ) as resolve_action,
             patch.object(session_autobridge_lib, "mark_message_processed") as mark_processed,
         ):
             result = session_autobridge_lib.dispatch_session("SESSION-ACT")
 
         self.assertEqual([], result["actions"])
         self.assertEqual("same_session_different_claimant", events[-1]["reason"])
-        resolve_action.assert_not_called()
+        resolve_action.assert_called_once_with(session, message)
         mark_processed.assert_not_called()
 
     def test_loop_protection_skips_before_activation_claim_and_takeover(self):

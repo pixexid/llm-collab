@@ -142,6 +142,8 @@ def iter_sessions(agent_id: str | None = None) -> list[dict]:
             continue
         if not isinstance(session, dict):
             raise ValueError(f"Malformed session: {path.stem}")
+        if str(session.get("session_id") or "") != path.stem:
+            raise ValueError(f"Session identity does not match filename: {path.stem}")
         if agent_id is not None and session.get("agent_id") != agent_id:
             continue
         sessions.append(session)
@@ -362,6 +364,8 @@ def prepare_session_write(payload: dict) -> tuple[dict, str]:
             MAX_SESSION_INBOX_BYTES,
         )
         inbox = json.loads(inbox_raw.decode("utf-8"))
+        if isinstance(inbox, dict) and inbox.get("_durability_pending") is True:
+            raise UnreadableFile("agent inbox durability is unconfirmed")
         read = inbox.get("read") if isinstance(inbox, dict) else None
         unread = inbox.get("unread") if isinstance(inbox, dict) else None
         if (
@@ -2968,8 +2972,23 @@ def dispatch_session(
         actions.append(event)
     materialization_slot_available = True
     for message in matched:
+        activation_kind, activation_detail = classify_activation(
+            message.get("frontmatter", {}),
+            target_agent=str(session["agent_id"]),
+        )
+        if activation_kind == "malformed":
+            append_event(
+                session_id,
+                {
+                    "event": "activation_refused",
+                    "message_path": message["path"],
+                    "reason": "malformed_activation",
+                    "detail": activation_detail,
+                },
+            )
+            continue
         try:
-            reserve_message_result(session, message, include_canonical=False)
+            reserve_message_result(session, message, include_canonical=True)
         except (
             FileNotFoundError,
             UnreadableFile,
@@ -2991,25 +3010,6 @@ def dispatch_session(
         if activation_event is not None:
             append_event(session_id, activation_event)
         if not activation_allowed:
-            continue
-        try:
-            reserve_message_result(session, message, include_canonical=True)
-        except (
-            FileNotFoundError,
-            UnreadableFile,
-            UnicodeDecodeError,
-            json.JSONDecodeError,
-            KeyError,
-            ValueError,
-        ) as error:
-            event = {
-                "event": "message_skipped",
-                "message_path": message["path"],
-                "reason": "session_capacity_refused",
-                "detail": str(error),
-            }
-            append_event(session_id, event)
-            actions.append(event)
             continue
         action, action_reason = resolve_effective_action(session, message)
         event: dict[str, Any] = {

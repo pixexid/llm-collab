@@ -497,6 +497,8 @@ def load_agent_inbox(agent_id: str) -> dict:
 def save_agent_inbox(agent_id: str, data: dict) -> None:
     path = agent_inbox_path(agent_id)
     data["updated_utc"] = utc_iso()
+    pending = {**data, "_durability_pending": True}
+    write_file_durably(path, json.dumps(pending, indent=2))
     write_file_durably(path, json.dumps(data, indent=2))
 
 
