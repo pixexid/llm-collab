@@ -873,10 +873,14 @@ class LifecycleTest(unittest.TestCase):
                 forbidden_calls.append(node.attr)
         self.assertEqual(forbidden_calls, [])
 
+        # Pi registration (#378) drives reserve/consume to mint the canonical
+        # binding, so this exact file references the lifecycle. Any OTHER runtime
+        # path importing it is still an offender.
+        allowed = {Path("bin/_session_autobridge.py")}
         offenders = []
         for checked in (root / "bin", root / "scripts", root / "llm_collab"):
             for path in checked.rglob("*.py"):
-                if path == lifecycle:
+                if path == lifecycle or path.relative_to(root) in allowed:
                     continue
                 text = path.read_text(encoding="utf-8")
                 if "session_lifecycle" in text:

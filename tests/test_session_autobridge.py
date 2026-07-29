@@ -6807,6 +6807,183 @@ class SessionAutobridgeTest(unittest.TestCase):
         )
         self.assertFalse(session_path.exists(), "no session may be published on mismatch")
 
+    def _seed_pi_registry_snapshot(self, root, projects):
+        """Seed ONLY the daemon-owned registry snapshot (with the canonical-write
+        gate) for `projects`. #378 register mints the provider/participant/binding;
+        this never hand-writes them."""
+        paths = LedgerPaths.derive(root / "project-state", "ws_alpha")
+        gate = "canonical" + "_" + "writes"
+        with patch.object(store_module, "_linked_sqlite_version_info", return_value=SAFE_VERSION):
+            writer = LedgerStore.open_writer(paths)
+        with writer as store:
+            store.record_registry_snapshot(
+                workspace_id="ws_alpha",
+                registry_revision="sha256:" + "a" * 64,
+                registry_source_sha256="a" * 64,
+                captured_at_utc="2026-04-22T00:00:00+00:00",
+                workspace_snapshot_json=json.dumps(
+                    {"workspace_id": "ws_alpha", "projects": list(projects)}
+                ),
+                project_snapshots={
+                    p: json.dumps({"project_id": p, gate: True}) for p in projects
+                },
+                source_snapshots={p: {} for p in projects},
+            )
+
+    def _register_pi(
+        self,
+        root,
+        *,
+        session,
+        project,
+        chat,
+        native,
+        endpoint,
+        runtime_instance,
+        cwd,
+        home,
+        repo_target,
+        agent="glmpi",
+        check=True,
+    ):
+        done = subprocess.run(
+            [
+                sys.executable, str(SCRIPT_PATH), "register",
+                "--session", session, "--agent", agent,
+                "--project", project, "--chat", chat,
+                "--mode", "auto-read", "--wake-strategy", "runtime_trigger",
+                "--runtime-family", "pi", "--runtime-session-id", native,
+                "--runtime-command", json.dumps([sys.executable, "-c", "pass"]),
+                "--endpoint-id", endpoint, "--runtime-instance-id", runtime_instance,
+                "--cwd", str(cwd), "--runtime-home", str(home),
+                "--repo-target", repo_target, "--json",
+            ],
+            cwd=root, text=True, capture_output=True,
+            env=self.subprocess_env(root), check=False,
+        )
+        if check:
+            self.assertEqual(0, done.returncode, done.stdout + done.stderr)
+        return done
+
+    def _session_json(self, root, session):
+        return (
+            root / "State" / "session_autobridge" / "sessions" / f"{session}.json"
+        )
+
+    def test_pi_register_provisions_two_scopes_for_one_agent(self):
+        # #378: one logical agent registers two different project/chat scopes with
+        # two fresh native Pi sessions; each mints its own canonical binding through
+        # reserve/consume, no hand-written binding.
+        root = self.make_workspace()
+        self.add_agent(
+            root,
+            {"id": "glmpi", "display_name": "Glim",
+             "activation": {"type": "cli_session", "watcher_enabled": True}},
+        )
+        self._seed_pi_registry_snapshot(root, ["amiga", "nuvyr"])
+        work = root / "work"; work.mkdir()
+        home = root / "pi-home"; home.mkdir()
+        self._register_pi(
+            root, session="SESSION-PI-A", project="amiga", chat="CHAT-A",
+            native="pi-native-a", endpoint="endpoint_native_a", runtime_instance="runtime-a",
+            cwd=work, home=home, repo_target="app",
+        )
+        self._register_pi(
+            root, session="SESSION-PI-B", project="nuvyr", chat="CHAT-B",
+            native="pi-native-b", endpoint="endpoint_native_b", runtime_instance="runtime-b",
+            cwd=work, home=home, repo_target="app",
+        )
+        a = json.loads(self._session_json(root, "SESSION-PI-A").read_text())
+        b = json.loads(self._session_json(root, "SESSION-PI-B").read_text())
+        self.assertEqual("endpoint_native_a", a.get("endpoint_id"))
+        self.assertEqual("endpoint_native_b", b.get("endpoint_id"))
+        for s in (a, b):
+            self.assertTrue(s.get("binding_id"), s)
+            self.assertEqual(1, s.get("binding_generation"))
+        self.assertNotEqual(
+            a["binding_id"], b["binding_id"],
+            "each native scope must mint a distinct canonical binding",
+        )
+
+    def test_pi_register_fails_before_write_on_bad_provisioning(self):
+        root = self.make_workspace()
+        self.add_agent(
+            root,
+            {"id": "glmpi", "display_name": "Glim",
+             "activation": {"type": "cli_session", "watcher_enabled": True}},
+        )
+        work = root / "work"; work.mkdir()
+        home = root / "pi-home"; home.mkdir()
+        # No registry snapshot: fail before any write.
+        done = self._register_pi(
+            root, session="SESSION-PI-NS", project="amiga", chat="CHAT-NS",
+            native="pi-native-a", endpoint="endpoint_native_a", runtime_instance="runtime-a",
+            cwd=work, home=home, repo_target="app", check=False,
+        )
+        self.assertNotEqual(0, done.returncode)
+        self.assertIn("canonical_project_snapshot_required", done.stderr)
+        self.assertFalse(self._session_json(root, "SESSION-PI-NS").exists())
+        # With a snapshot, a foreign native session for an already-bound scope refuses.
+        self._seed_pi_registry_snapshot(root, ["amiga", "nuvyr"])
+        self._register_pi(
+            root, session="SESSION-PI-A", project="amiga", chat="CHAT-A",
+            native="pi-native-a", endpoint="endpoint_native_a", runtime_instance="runtime-a",
+            cwd=work, home=home, repo_target="app",
+        )
+        done = self._register_pi(
+            root, session="SESSION-PI-A2", project="amiga", chat="CHAT-A",
+            native="pi-native-b", endpoint="endpoint_native_b", runtime_instance="runtime-b",
+            cwd=work, home=home, repo_target="app", check=False,
+        )
+        self.assertNotEqual(0, done.returncode)
+        self.assertIn("canonical_binding_native_session_mismatch", done.stderr)
+        self.assertFalse(self._session_json(root, "SESSION-PI-A2").exists())
+
+    def test_pi_register_refuses_duplicate_native_owner_across_scopes(self):
+        # #381 P1: a native session owns at most one mutation-capable binding. A
+        # second scope with the SAME endpoint/native/runtime/home must refuse
+        # cleanly — stable nonzero reason, no traceback, no legacy session, no
+        # second active binding.
+        root = self.make_workspace()
+        for aid in ("glmpi", "relay"):
+            self.add_agent(
+                root,
+                {"id": aid, "display_name": aid,
+                 "activation": {"type": "cli_session", "watcher_enabled": True}},
+            )
+        self._seed_pi_registry_snapshot(root, ["amiga", "nuvyr"])
+        work = root / "work"; work.mkdir()
+        home = root / "pi-home"; home.mkdir()
+        ident = dict(
+            native="pi-native-shared", endpoint="endpoint_native_shared",
+            runtime_instance="runtime-shared", cwd=work, home=home, repo_target="app",
+        )
+        self._register_pi(
+            root, session="SESSION-PI-A", agent="glmpi", project="amiga",
+            chat="CHAT-A", **ident,
+        )
+        done = self._register_pi(
+            root, session="SESSION-PI-B", agent="relay", project="nuvyr",
+            chat="CHAT-B", check=False, **ident,
+        )
+        self.assertNotEqual(0, done.returncode)
+        self.assertIn("canonical_native_session_already_bound", done.stderr)
+        self.assertNotIn("Traceback", done.stderr)
+        self.assertFalse(self._session_json(root, "SESSION-PI-B").exists())
+        paths = LedgerPaths.derive(root / "project-state", "ws_alpha")
+        with patch.object(store_module, "_linked_sqlite_version_info", return_value=SAFE_VERSION):
+            with LedgerStore.open_reader(paths) as store:
+                active = store._connection.execute(
+                    "SELECT count(*) FROM conversation_bindings WHERE native_session_id = ? "
+                    "AND mutation_capable = 1 AND state IN ('active', 'draining')",
+                    ("pi-native-shared",),
+                ).fetchone()[0]
+                pending = store._connection.execute(
+                    "SELECT count(*) FROM session_binding_challenges WHERE challenge_state = 'pending'"
+                ).fetchone()[0]
+        self.assertEqual(1, active, "the duplicate must not create a second active binding")
+        self.assertEqual(0, pending, "the refused duplicate must not leave a pending challenge")
+
     def test_pi_runtime_refuses_without_an_exact_bound_attempt(self):
         session = {
             "session_id": "SESSION-PI-UNBOUND",
