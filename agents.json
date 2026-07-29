@@ -63,9 +63,7 @@
       "role": "legacy_disabled_implementation",
       "activation": {
         "type": "human_relay",
-        "watcher_enabled": false,
-        "base_model": "glm",
-        "identity_note": "You are zcode. Read only messages addressed to 'zcode'. zcode is disabled legacy routing and must not receive new implementation lanes unless the operator explicitly re-enables zcode for one specific task. If re-enabled, use a fresh zcode chat/task/session binding and continue an existing zcode session only for the same task context, blocker repair, or review-fix loop."
+        "watcher_enabled": false
       }
     },
     {
@@ -90,7 +88,6 @@
       "id": "kimi",
       "display_name": "Kimi",
       "role": "implementation",
-      "notes": "K3 model (Pi cli_session watcher).",
       "activation": {
         "type": "cli_session",
         "watcher_enabled": true
