@@ -6622,6 +6622,23 @@ class SessionAutobridgeTest(unittest.TestCase):
         self.assertEqual(resolved["binding_id"], session_payload.get("binding_id"))
         self.assertEqual(resolved["generation"], session_payload.get("binding_generation"))
         self.assertEqual(resolved["endpoint_id"], session_payload.get("endpoint_id"))
+        binding_payload = json.loads(
+            (
+                root
+                / "State"
+                / "session_autobridge"
+                / "bindings"
+                / "amiga"
+                / "CHAT-PI-BIND"
+                / "glmpi.json"
+            ).read_text()
+        )
+        self.assertEqual(
+            session_payload["repo_targets"], binding_payload.get("repo_targets")
+        )
+        self.assertEqual(
+            session_payload["pi_fingerprint"], binding_payload.get("pi_fingerprint")
+        )
 
         deliver = subprocess.run(
             [
