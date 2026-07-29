@@ -38,6 +38,13 @@ import watch_inbox as watch_inbox_lib
 from _helpers import parse_frontmatter
 from llm_collab.ledger import LedgerPaths, LedgerStore
 import llm_collab.ledger.store as store_module
+from llm_collab.session_lifecycle import (
+    FakeLifecycleProvider,
+    LifecycleSubject,
+    SessionLifecycleCore,
+    TrustedProjectRoot,
+)
+from llm_collab.codex_runtime_home import bind_runtime_home
 
 
 SAFE_VERSION = (3, 51, 3)
@@ -6420,6 +6427,385 @@ class SessionAutobridgeTest(unittest.TestCase):
                         """
                     ).fetchone(),
                 )
+
+    def _mint_pi_binding_through_lifecycle(
+        self,
+        root,
+        *,
+        chat_id,
+        project,
+        agent_id,
+        endpoint_id,
+        native_session_id,
+        runtime_instance_id,
+    ):
+        """One active canonical Pi binding via the public lifecycle seam.
+
+        reserve -> consume MINTS the conversation_bindings row (binding_id and
+        generation come from the authority), so the test never hand-writes the
+        binding identity. Participant, provider registry, and the canonical-write
+        gate are the ordinary pre-provisioned prerequisites reserve() demands.
+        """
+        created = "2026-04-22T00:00:00+00:00"
+        expires = "2026-04-22T00:00:30+00:00"
+        consumed = "2026-04-22T00:00:10+00:00"
+        paths = LedgerPaths.derive(root / "project-state", "ws_alpha")
+        subject = LifecycleSubject(
+            workspace_id="ws_alpha",
+            scope_kind="project",
+            scope_identity=project,
+            conversation_id=chat_id,
+            participant_id="participant_" + agent_id,
+            agent_id="agent_" + agent_id,
+            endpoint_id=endpoint_id,
+            native_session_id=native_session_id,
+            runtime_instance_id=runtime_instance_id,
+        )
+        provider = FakeLifecycleProvider()
+        core = SessionLifecycleCore(provider, token_factory=lambda: "token-pi")
+        endpoint_home = root / "pi-endpoint-home"
+        endpoint_home.mkdir(exist_ok=True)
+        runtime_home = bind_runtime_home(endpoint_home)
+        repo = root / "pi-repo"
+        (repo / "work").mkdir(parents=True, exist_ok=True)
+        trusted = TrustedProjectRoot(project, "repo_app", str(repo), str(repo / "work"))
+        with patch.object(store_module, "_linked_sqlite_version_info", return_value=SAFE_VERSION):
+            writer = LedgerStore.open_writer(paths)
+        with writer as store:
+            store.record_registry_snapshot(
+                workspace_id="ws_alpha",
+                registry_revision="sha256:" + "a" * 64,
+                registry_source_sha256="a" * 64,
+                captured_at_utc=created,
+                workspace_snapshot_json=json.dumps(
+                    {"workspace_id": "ws_alpha", "projects": [project]}
+                ),
+                project_snapshots={
+                    project: json.dumps(
+                        {"project_id": project, "canonical" + "_" + "writes": True}
+                    )
+                },
+                source_snapshots={project: {}},
+            )
+            descriptor = provider.descriptor()
+            store._connection.execute(
+                """
+                INSERT OR IGNORE INTO lifecycle_provider_registry
+                (
+                    workspace_id, provider_id, provider_revision, trust_class,
+                    supported_operations_json, challenge_algorithm,
+                    challenge_ttl_seconds, created_at_utc
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "ws_alpha",
+                    descriptor["provider_id"],
+                    descriptor["provider_revision"],
+                    descriptor["trust_class"],
+                    descriptor["supported_operations_json"],
+                    descriptor["challenge_algorithm"],
+                    descriptor["challenge_ttl_seconds"],
+                    created,
+                ),
+            )
+            store._connection.execute(
+                """
+                INSERT OR IGNORE INTO conversation_participants
+                (
+                    workspace_id, scope_kind, scope_identity, conversation_id,
+                    participant_id, agent_id, created_at_utc
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "ws_alpha",
+                    "project",
+                    project,
+                    chat_id,
+                    "participant_" + agent_id,
+                    "agent_" + agent_id,
+                    created,
+                ),
+            )
+            challenge = core.reserve(
+                store,
+                subject,
+                runtime_home=runtime_home,
+                created_at_utc=created,
+                expires_at_utc=expires,
+                correlation_id="corr_reserve_pi",
+                trusted_project_root=trusted,
+            )
+            resolved = core.consume(
+                store,
+                subject,
+                challenge,
+                runtime_home=runtime_home,
+                consumed_at_utc=consumed,
+                correlation_id="corr_consume_pi",
+                trusted_project_root=trusted,
+            )
+        self.assertTrue(resolved["resolved"], resolved)
+        return resolved
+
+    def test_registration_stamps_canonical_binding_and_pi_dispatches(self):
+        # GH-346: normal register -> deliver -> dispatch reaches pi_inbox_wake with
+        # no hand-edited session/binding/frontmatter. register resolves the active
+        # canonical binding and stamps it; the whole chain consumes that stamp.
+        root = self.make_workspace()
+        self.add_agent(
+            root,
+            {
+                "id": "glmpi",
+                "display_name": "Glim",
+                "activation": {"type": "cli_session", "watcher_enabled": True},
+            },
+        )
+        self.add_agent(root, {"id": "codex", "display_name": "Codex"})
+        self.create_chat(
+            root,
+            chat_dir_name="2026-07-29_pi-bind__CHAT-PI-BIND",
+            chat_id="CHAT-PI-BIND",
+            project_id="amiga",
+        )
+        resolved = self._mint_pi_binding_through_lifecycle(
+            root,
+            chat_id="CHAT-PI-BIND",
+            project="amiga",
+            agent_id="glmpi",
+            endpoint_id="endpoint_pi_glim",
+            native_session_id="pi-glim-1",
+            runtime_instance_id="runtime_pi_glim",
+        )
+        self.run_cli(
+            root,
+            "register",
+            "--session",
+            "SESSION-PI-GLIM",
+            "--agent",
+            "glmpi",
+            "--project",
+            "amiga",
+            "--chat",
+            "CHAT-PI-BIND",
+            "--mode",
+            "auto-read",
+            "--wake-strategy",
+            "runtime_trigger",
+            "--runtime-family",
+            "pi",
+            "--runtime-session-id",
+            "pi-glim-1",
+            "--runtime-command",
+            json.dumps([sys.executable, "-c", "pass"]),
+            "--repo-target",
+            "llm-collab",
+        )
+        session_path = (
+            root / "State" / "session_autobridge" / "sessions" / "SESSION-PI-GLIM.json"
+        )
+        session_payload = json.loads(session_path.read_text())
+        self.assertEqual(resolved["binding_id"], session_payload.get("binding_id"))
+        self.assertEqual(resolved["generation"], session_payload.get("binding_generation"))
+        self.assertEqual(resolved["endpoint_id"], session_payload.get("endpoint_id"))
+
+        deliver = subprocess.run(
+            [
+                sys.executable,
+                str(DELIVER_SCRIPT),
+                "--chat",
+                "CHAT-PI-BIND",
+                "--from",
+                "codex",
+                "--to",
+                "glmpi",
+                "--project",
+                "amiga",
+                "--title",
+                "Pi canonical wake",
+                "--sender-session-id",
+                "codex-pi-send",
+                "--repo-targets",
+                "llm-collab",
+                "--body-file",
+                "-",
+            ],
+            cwd=root,
+            text=True,
+            input="canonical pi packet",
+            capture_output=True,
+            check=False,
+            env=self.subprocess_env(root),
+        )
+        self.assertEqual(deliver.returncode, 0, deliver.stdout + deliver.stderr)
+        packets = sorted(root.glob("Chats/**/*_to-glmpi_*.md"))
+        self.assertTrue(packets, "deliver.py wrote no packet")
+        frontmatter, _ = parse_frontmatter(packets[-1].read_text())
+        self.assertEqual(resolved["binding_id"], frontmatter.get("target_binding_id"))
+        self.assertEqual(
+            resolved["generation"], frontmatter.get("target_binding_generation")
+        )
+
+        subprocess.run(
+            [
+                sys.executable,
+                str(WATCH_INBOX_SCRIPT),
+                "--me",
+                "glmpi",
+                "--max-polls",
+                "1",
+                "--json",
+            ],
+            cwd=root,
+            text=True,
+            capture_output=True,
+            env=self.subprocess_env(root),
+            check=True,
+        )
+        event_path = (
+            root / "State" / "session_autobridge" / "events" / "SESSION-PI-GLIM.jsonl"
+        )
+        events = [
+            json.loads(line)
+            for line in event_path.read_text().splitlines()
+            if line.strip()
+        ]
+        packet_rel = packets[-1].relative_to(root).as_posix()
+        self.assertTrue(
+            any(
+                event.get("event") == "pi_inbox_wake"
+                and event.get("message_path") == packet_rel
+                for event in events
+            ),
+            events,
+        )
+        self.assertFalse(
+            any(
+                event.get("reason") == session_autobridge_lib.EXACT_BINDING_REQUIRED_REASON
+                for event in events
+            ),
+            events,
+        )
+
+    def test_pi_registration_fails_closed_without_a_canonical_binding(self):
+        # GH-346: without a provisioned canonical binding, register must refuse
+        # (canonical_binding_required) rather than publish a Pi session every
+        # later packet would reject. GH-346 copies the binding; it never mints it.
+        root = self.make_workspace()
+        self.add_agent(
+            root,
+            {
+                "id": "glmpi",
+                "display_name": "Glim",
+                "activation": {"type": "cli_session", "watcher_enabled": True},
+            },
+        )
+        done = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPT_PATH),
+                "register",
+                "--session",
+                "SESSION-PI-UNPROVISIONED",
+                "--agent",
+                "glmpi",
+                "--project",
+                "amiga",
+                "--chat",
+                "CHAT-PI-NOBIND",
+                "--mode",
+                "auto-read",
+                "--wake-strategy",
+                "runtime_trigger",
+                "--runtime-family",
+                "pi",
+                "--runtime-session-id",
+                "pi-glim-unprov",
+                "--runtime-command",
+                json.dumps([sys.executable, "-c", "pass"]),
+                "--json",
+            ],
+            cwd=root,
+            text=True,
+            capture_output=True,
+            env=self.subprocess_env(root),
+            check=False,
+        )
+        self.assertNotEqual(0, done.returncode)
+        self.assertIn("canonical_binding_required", done.stderr)
+        session_path = (
+            root
+            / "State"
+            / "session_autobridge"
+            / "sessions"
+            / "SESSION-PI-UNPROVISIONED.json"
+        )
+        self.assertFalse(session_path.exists(), "no session may be published on refusal")
+
+    def test_pi_registration_refuses_a_foreign_native_session(self):
+        # GH-346 P1: the participant's binding is minted for one native session.
+        # Registering a different --runtime-session-id must not inherit it (that
+        # would wake the wrong native session behind a passing fence).
+        root = self.make_workspace()
+        self.add_agent(
+            root,
+            {
+                "id": "glmpi",
+                "display_name": "Glim",
+                "activation": {"type": "cli_session", "watcher_enabled": True},
+            },
+        )
+        self._mint_pi_binding_through_lifecycle(
+            root,
+            chat_id="CHAT-PI-BIND",
+            project="amiga",
+            agent_id="glmpi",
+            endpoint_id="endpoint_pi_glim",
+            native_session_id="pi-glim-1",
+            runtime_instance_id="runtime_pi_glim",
+        )
+        done = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPT_PATH),
+                "register",
+                "--session",
+                "SESSION-PI-FOREIGN",
+                "--agent",
+                "glmpi",
+                "--project",
+                "amiga",
+                "--chat",
+                "CHAT-PI-BIND",
+                "--mode",
+                "auto-read",
+                "--wake-strategy",
+                "runtime_trigger",
+                "--runtime-family",
+                "pi",
+                "--runtime-session-id",
+                "pi-glim-2",
+                "--runtime-command",
+                json.dumps([sys.executable, "-c", "pass"]),
+                "--json",
+            ],
+            cwd=root,
+            text=True,
+            capture_output=True,
+            env=self.subprocess_env(root),
+            check=False,
+        )
+        self.assertNotEqual(0, done.returncode)
+        self.assertIn("canonical_binding_native_session_mismatch", done.stderr)
+        session_path = (
+            root
+            / "State"
+            / "session_autobridge"
+            / "sessions"
+            / "SESSION-PI-FOREIGN.json"
+        )
+        self.assertFalse(session_path.exists(), "no session may be published on mismatch")
 
     def test_pi_runtime_refuses_without_an_exact_bound_attempt(self):
         session = {

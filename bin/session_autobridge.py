@@ -27,6 +27,7 @@ sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent))
 from _helpers import canonical_path, ensure_project, get_agent, now_utc, utc_iso
 from _session_autobridge import (
     BindingUnreadable,
+    CanonicalBindingNativeMismatch,
     HEURISTIC_RUNTIME_DISCOVERY_FAMILIES,
     HEURISTIC_RUNTIME_DISCOVERY_REFUSED_REASON,
     SESSION_MODES,
@@ -37,6 +38,7 @@ from _session_autobridge import (
     load_binding,
     load_session,
     prepare_session_write,
+    resolve_active_canonical_binding,
     runtime_home_from_source,
     save_session,
     UnreadableFile,
@@ -321,6 +323,29 @@ def register_session(args) -> dict:
     repo_targets = getattr(args, "repo_targets", None)
     if repo_targets is not None:
         payload["repo_targets"] = repo_targets
+    # Pi dispatch requires the canonical binding to exist already (the collabd
+    # lifecycle provisions it; GH-346 copies it, it does not mint it). Fail closed
+    # before any write rather than publish a session/binding pair that every later
+    # packet would refuse with exact_binding_required — the cross-project startup
+    # defect. Only pi pays the ledger read; widen the family set when codex/claude
+    # adopt canonical materialization.
+    if runtime and runtime.get("family") == "pi":
+        try:
+            canonical = resolve_active_canonical_binding(
+                args.project, args.chat, args.agent, runtime.get("session_id")
+            )
+        except CanonicalBindingNativeMismatch as mismatch:
+            raise SystemExit(
+                "[error] canonical_binding_native_session_mismatch: "
+                f"{mismatch}. No session was written."
+            )
+        if canonical is None:
+            raise SystemExit(
+                "[error] canonical_binding_required: no active canonical binding for "
+                f"{args.agent} in {args.project}/{args.chat}. Provision it through the "
+                "session lifecycle before registering this Pi session; no session was written."
+            )
+        payload.update(canonical)
     # Validate everything that can refuse this registration BEFORE retiring the
     # predecessor. A retire that ran first and was then followed by a preflight
     # refusal would have destroyed a valid live session on behalf of a continuation
