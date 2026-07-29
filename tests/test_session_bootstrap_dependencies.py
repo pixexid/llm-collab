@@ -69,9 +69,8 @@ class RequirementsParsingTest(unittest.TestCase):
             _pins, failures = session_bootstrap.parse_requirements()
         self.assertTrue(failures, "an unreadable file must surface, not vanish")
 
-    def test_a_read_failure_carries_its_files_criticality(self) -> None:
-        """Finding 3: an unreadable degradable file must not be shouted as
-        test-critical, and an unreadable dev file must be."""
+    def test_a_degradable_read_failure_carries_false_criticality(self) -> None:
+        """Finding 3, the false branch: an unreadable runtime file is degradable."""
         self.write("requirements-dev.txt", "validator==1\n")
         self.write("requirements-runtime.txt", "fileevents==1\n")
 
@@ -85,6 +84,24 @@ class RequirementsParsingTest(unittest.TestCase):
             _pins, failures = session_bootstrap.parse_requirements()
         self.assertEqual(1, len(failures))
         self.assertFalse(failures[0]["test_critical"])
+
+    def test_a_test_critical_read_failure_carries_true_criticality(self) -> None:
+        """Finding 3, the true branch the prior coverage missed: an unreadable dev
+        file must record test_critical=True, or a code path that dropped it would
+        stay green. This is the discriminating half of the false case above."""
+        self.write("requirements-dev.txt", "validator==1\n")
+        self.write("requirements-runtime.txt", "fileevents==1\n")
+
+        def only_dev_fails(path, remaining):
+            if path.name == "requirements-dev.txt":
+                raise session_bootstrap.RequirementsUnreadable("dev EIO")
+            return "fileevents==1\n"
+
+        with patch.object(session_bootstrap, "_read_requirements_bounded",
+                          side_effect=only_dev_fails):
+            _pins, failures = session_bootstrap.parse_requirements()
+        self.assertEqual(1, len(failures))
+        self.assertTrue(failures[0]["test_critical"])
 
     def test_the_read_asks_for_a_bounded_number_of_bytes(self) -> None:
         """Finding 1, the mechanism not just the outcome: the read must request at
@@ -166,6 +183,39 @@ class DependencyReportTest(unittest.TestCase):
         UNKNOWN. Proceeding as complete is the silent pass this gate stops."""
         r = self.report([self.CRIT], installed=None)
         self.assertTrue(r["interpreter_unprobeable"])
+
+
+class InstalledVersionsProbesTheTestInterpreterTest(unittest.TestCase):
+    """Finding 4, the discriminating case: the other tests mock _installed_versions,
+    so reverting dependency_report to query sys.executable would stay green. This
+    exercises the real function and captures the subprocess to prove it runs
+    python3.11, not whichever interpreter launched bootstrap."""
+
+    def test_the_subprocess_runs_the_test_interpreter_not_this_process(self) -> None:
+        import subprocess as sp
+
+        captured = {}
+
+        def fake_run(argv, **kwargs):
+            captured["argv"] = argv
+            return sp.CompletedProcess(argv, 0, stdout='{"validator": "4.26.0"}', stderr="")
+
+        with patch.object(session_bootstrap.subprocess, "run", side_effect=fake_run):
+            result = session_bootstrap._installed_versions(["validator"])
+
+        self.assertEqual({"validator": "4.26.0"}, result)
+        self.assertEqual(session_bootstrap.TEST_INTERPRETER, captured["argv"][0])
+        self.assertNotEqual(sys.executable, captured["argv"][0],
+                            "must not probe the process that launched bootstrap")
+
+    def test_an_unrunnable_interpreter_returns_none(self) -> None:
+        with patch.object(session_bootstrap.subprocess, "run", side_effect=OSError("no python3.11")):
+            self.assertIsNone(session_bootstrap._installed_versions(["validator"]))
+
+    def test_no_pins_needs_no_subprocess(self) -> None:
+        with patch.object(session_bootstrap.subprocess, "run",
+                          side_effect=AssertionError("must not spawn for an empty pin set")):
+            self.assertEqual({}, session_bootstrap._installed_versions([]))
 
 
 class AnnouncementTest(unittest.TestCase):
