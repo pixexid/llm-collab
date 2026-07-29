@@ -5039,6 +5039,7 @@ class CanonicalMessageTest(_CanonicalMessageTestBase):
                 )
                 self.assertEqual(original["message_id"], again["message_id"])
                 self.assertFalse(again["message_created"])
+                self.assertFalse(again["canonical_write_started"])
                 packet_path.write_text(packet(priority="high"), encoding="utf-8")
                 edited = materialize_selected_legacy_packet(
                     store,

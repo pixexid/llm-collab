@@ -1231,7 +1231,7 @@ class SessionAutobridgeTest(unittest.TestCase):
                 "resolved": True,
                 "materialized": True,
                 "created": False,
-                "canonical_write_started": True,
+                "canonical_write_started": False,
             },
         ), patch.object(
             session_autobridge_lib,
@@ -1243,6 +1243,50 @@ class SessionAutobridgeTest(unittest.TestCase):
         runtime_trigger.assert_not_called()
         self.assertEqual("pull_pending", result["actions"][0]["reason"])
         self.assertNotIn("runtime_result", result["actions"][0])
+
+    def test_existing_canonical_attempt_does_not_starve_a_new_packet(self):
+        session = {
+            "session_id": "SESSION-AMBIGUOUS",
+            "agent_id": "gemini",
+            "mode": "auto-read",
+            "wake_strategy": "runtime_trigger",
+            "binding_id": "binding-ambiguous",
+            "binding_generation": 1,
+            "runtime": {"session_id": "runtime-ambiguous"},
+        }
+        messages = [
+            {"path": "Chats/ambiguous/old.md", "frontmatter": {}},
+            {"path": "Chats/ambiguous/new.md", "frontmatter": {}},
+        ]
+        runtime_trigger = Mock(return_value={"returncode": 0})
+        with self._dispatch_patch_context(session, messages), patch.object(
+            session_autobridge_lib,
+            "materialize_selected_runtime_packet",
+            side_effect=[
+                {
+                    "resolved": True,
+                    "materialized": True,
+                    "created": False,
+                    "canonical_write_started": False,
+                },
+                {
+                    "resolved": True,
+                    "materialized": True,
+                    "created": True,
+                    "canonical_write_started": True,
+                },
+            ],
+        ) as materialize, patch.object(
+            session_autobridge_lib,
+            "execute_runtime_trigger",
+            new=runtime_trigger,
+        ):
+            result = session_autobridge_lib.dispatch_session("SESSION-AMBIGUOUS")
+
+        self.assertEqual(2, materialize.call_count)
+        runtime_trigger.assert_called_once_with(session, messages[1])
+        self.assertEqual("pull_pending", result["actions"][0]["reason"])
+        self.assertIn("runtime_result", result["actions"][1])
 
     def test_processed_bound_packet_does_not_retrigger_runtime_before_legacy_mark_read(self):
         session = {

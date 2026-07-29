@@ -188,6 +188,9 @@ def materialize_selected_legacy_packet(
         expected_binding_id=target_binding_id,
         expected_generation=target_generation,
     )
+    canonical_write_started = bool(
+        message_created or delivery_created or attempt.get("created")
+    )
     return {
         **attempt,
         "message_id": message_id,
@@ -197,7 +200,7 @@ def materialize_selected_legacy_packet(
         "materialized": True,
         "packet_sha256": packet_sha256,
         "packet_relpath": relpath,
-        "canonical_write_started": True,
+        "canonical_write_started": canonical_write_started,
     }
 
 
