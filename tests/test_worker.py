@@ -21,6 +21,7 @@ import _helpers  # noqa: E402
 import worker as worker_cli  # noqa: E402
 
 import llm_collab.ledger.store as store_module  # noqa: E402
+import llm_collab.worker as worker_module  # noqa: E402
 from llm_collab.codex_runtime_home import bind_runtime_home  # noqa: E402
 from llm_collab.ledger import LedgerPaths, LedgerStore  # noqa: E402
 from llm_collab.session_lifecycle import (  # noqa: E402
@@ -229,6 +230,134 @@ class WorkerCliTest(unittest.TestCase):
         code, _, err = self.run_cli(["show", "worker_" + "0" * 32, "--project", "amiga"])
         self.assertEqual(code, 1)
         self.assertIn("no worker", err)
+
+    def _binding_row(self, project: str, chat: str) -> dict[str, object] | None:
+        with LedgerStore.open_reader(self.paths) as store:
+            row = store._connection.execute(
+                """
+                SELECT binding_id, generation, state, session_ref_id
+                FROM conversation_bindings
+                WHERE workspace_id = ? AND scope_identity = ?
+                  AND conversation_id = ? AND participant_id = 'participant_codex'
+                """,
+                (WORKSPACE, project, chat),
+            ).fetchone()
+        if row is None:
+            return None
+        return dict(zip(("binding_id", "generation", "state", "session_ref_id"), row))
+
+    def test_cli_retire_releases_ownership_and_preserves_lineage(self) -> None:
+        with LedgerStore.open_writer(self.paths) as store:
+            worker_id = self.add_worker(
+                store, project="amiga", chat="CHAT-RETIRE1", native="native_one"
+            )
+        before = self._binding_row("amiga", "CHAT-RETIRE1")
+        self.assertEqual(before["state"], "active")
+
+        code, out, _ = self.run_cli(["retire", worker_id, "--project", "amiga"])
+        self.assertEqual(code, 0)
+        self.assertIn("state: retired", out)
+        self.assertIn(f"worker_id: {worker_id}", out)
+        self.assertIn(f"binding_id: {before['binding_id']}", out)
+        self.assertIn(f"generation: {before['generation']}", out)
+        self.assertIn(f"session_ref_id: {before['session_ref_id']}", out)
+
+        after = self._binding_row("amiga", "CHAT-RETIRE1")
+        self.assertEqual(after["binding_id"], before["binding_id"])
+        self.assertEqual(after["generation"], before["generation"])
+        self.assertEqual(after["session_ref_id"], before["session_ref_id"])
+        self.assertEqual(after["state"], "retired")
+
+        code, out, _ = self.run_cli(["show", worker_id, "--project", "amiga"])
+        self.assertEqual(code, 0)
+        self.assertIn("resolved: False", out)
+        self.assertIn("reason: pull_pending", out)
+
+    def _simulate_rebind(self, store: LedgerStore, *, project: str, chat: str) -> None:
+        conn = store._connection
+        cols = [row[1] for row in conn.execute("PRAGMA table_info(conversation_bindings)")]
+        record = dict(
+            zip(
+                cols,
+                conn.execute(
+                    f"SELECT {','.join(cols)} FROM conversation_bindings "
+                    "WHERE workspace_id = ? AND scope_identity = ? AND conversation_id = ? "
+                    "AND participant_id = 'participant_codex' AND generation = 1",
+                    (WORKSPACE, project, chat),
+                ).fetchone(),
+            )
+        )
+        conn.execute(
+            "UPDATE conversation_bindings SET state = 'superseded' "
+            "WHERE workspace_id = ? AND binding_id = ?",
+            (WORKSPACE, record["binding_id"]),
+        )
+        record.update(binding_id=record["binding_id"] + "_g2", generation=2, state="active")
+        conn.execute(
+            f"INSERT INTO conversation_bindings ({','.join(cols)}) "
+            f"VALUES ({','.join('?' * len(cols))})",
+            [record[c] for c in cols],
+        )
+
+    def test_retire_refuses_when_a_rebind_wins_the_race(self) -> None:
+        with LedgerStore.open_writer(self.paths) as store:
+            worker_id = self.add_worker(
+                store, project="amiga", chat="CHAT-RACE01", native="native_one"
+            )
+
+        original_inspect = worker_module._INSPECTION.inspect
+        raced = []
+
+        def racing_inspect(store, subject, **kwargs):
+            resolved = original_inspect(store, subject, **kwargs)
+            # Fire exactly one rebind, on retire_worker's own pre-retire inspect,
+            # so a stale success surfaces as a false success rather than a second
+            # rebind (core.retire also calls this same inspect afterwards).
+            if not raced and resolved.get("state") == "active":
+                raced.append(True)
+                self._simulate_rebind(store, project="amiga", chat="CHAT-RACE01")
+            return resolved
+
+        with LedgerStore.open_writer(self.paths) as store:
+            with mock.patch.object(
+                worker_module._INSPECTION, "inspect", side_effect=racing_inspect
+            ):
+                with self.assertRaises(WorkerLookupError) as caught:
+                    worker_module.retire_worker(
+                        store,
+                        workspace_id=WORKSPACE,
+                        project_id="amiga",
+                        worker_id=worker_id,
+                    )
+        self.assertIn("stale generation", str(caught.exception))
+
+        with LedgerStore.open_reader(self.paths) as store:
+            rows = {
+                gen: state
+                for gen, state in store._connection.execute(
+                    "SELECT generation, state FROM conversation_bindings "
+                    "WHERE workspace_id = ? AND scope_identity = 'amiga' "
+                    "AND conversation_id = 'CHAT-RACE01'",
+                    (WORKSPACE,),
+                )
+            }
+        self.assertEqual(rows[1], "superseded")
+        self.assertEqual(rows[2], "active")
+
+    def test_cli_retire_refuses_unknown_and_non_active(self) -> None:
+        code, _, err = self.run_cli(["retire", "worker_" + "0" * 32, "--project", "amiga"])
+        self.assertEqual(code, 1)
+        self.assertIn("no worker", err)
+
+        with LedgerStore.open_writer(self.paths) as store:
+            worker_id = self.add_worker(
+                store, project="amiga", chat="CHAT-RETIRE2", native="native_two"
+            )
+        self.assertEqual(self.run_cli(["retire", worker_id, "--project", "amiga"])[0], 0)
+
+        code, _, err = self.run_cli(["retire", worker_id, "--project", "amiga"])
+        self.assertEqual(code, 1)
+        self.assertIn("not an active mutation-capable binding", err)
 
     def test_same_agent_workers_are_cross_project_isolated(self) -> None:
         with LedgerStore.open_writer(self.paths) as store:

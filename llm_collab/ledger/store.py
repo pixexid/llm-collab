@@ -6671,7 +6671,12 @@ class LedgerStore:
         generation: int,
         state: str,
     ) -> None:
-        """Update one exact binding state."""
+        """Transition one exact binding state away from the active mutation owner.
+
+        The UPDATE matches only while the row is still ``state='active'`` and
+        ``mutation_capable=1``, so a transition that lost the race to a rebind
+        (its generation now superseded) matches zero rows and raises
+        ``CanonicalConflictError`` rather than silently retiring a stale row."""
 
         self._ensure_thread()
         if self._read_only:
@@ -6699,6 +6704,7 @@ class LedgerStore:
                 WHERE workspace_id = ? AND scope_kind = ? AND scope_identity = ?
                   AND conversation_id = ? AND participant_id = ?
                   AND binding_id = ? AND generation = ?
+                  AND state = 'active' AND mutation_capable = 1
                 """,
                 (
                     state,
