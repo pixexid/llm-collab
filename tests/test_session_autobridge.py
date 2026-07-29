@@ -3904,6 +3904,54 @@ class SessionAutobridgeTest(unittest.TestCase):
             self.run_cli(root, *register)
         return root, chat_dir
 
+    # --- addressing survives undispatchability (GH-324) ------------------------------------
+    #
+    # An undispatchable session must still be ADDRESSABLE. #340 made deliver.py fall back to the
+    # inactive pair so the packet keeps its exact target while the wake is withheld; nothing
+    # pinned it, and losing it is not a late packet but a permanently unroutable one — re-
+    # registering the session afterwards cannot rescue a packet already written with a null
+    # target. On 2026-07-28 that shape cost three packets, from a checkout predating #340.
+
+    def expire_session_lease(self, root, *, status="parked"):
+        """Force the registered session past its TTL, as a real long-lived lane does."""
+        sessions_dir = root / "State" / "session_autobridge" / "sessions"
+        record_path = sorted(sessions_dir.glob("*.json"))[0]
+        record = json.loads(record_path.read_text())
+        record["status"] = status
+        record["lease_expires_utc"] = "2020-01-01T00:00:00+00:00"
+        record_path.write_text(json.dumps(record, indent=2, sort_keys=True))
+        return record
+
+    def test_an_undispatchable_session_still_gets_its_exact_address(self):
+        """The wake may be withheld; the address may not be dropped."""
+        root, chat_dir = self.scoped_subscriber_workspace(
+            subscriber_repo_targets=["llm-collab"])
+        record = self.expire_session_lease(root)
+        expected = record["runtime"]["session_id"]
+
+        payload, _stderr = self.deliver_with_scope(root, "CHAT-SCOPE1", repo_targets="llm-collab")
+
+        self.assertFalse(payload["autobridge_ready"], "an expired parked claim must not wake")
+        self.assertEqual(expected, payload["resolved_target_session_id"])
+        packet = sorted(chat_dir.glob("*_to-claude_*.md"))[-1]
+        frontmatter, _ = parse_frontmatter(packet.read_text())
+        self.assertEqual(
+            expected, frontmatter["target_session_id"],
+            "a packet written without its address can never be routed by any later fix")
+
+    def test_an_active_session_past_its_ttl_both_addresses_and_wakes(self):
+        """The other half of GH-324: an active session's validity follows its native
+        task, so the TTL alone must not withhold the wake either."""
+        root, _chat_dir = self.scoped_subscriber_workspace(
+            subscriber_repo_targets=["llm-collab"])
+        record = self.expire_session_lease(root, status="active")
+
+        payload, _stderr = self.deliver_with_scope(root, "CHAT-SCOPE1", repo_targets="llm-collab")
+
+        self.assertEqual(record["runtime"]["session_id"], payload["resolved_target_session_id"])
+        self.assertTrue(payload["autobridge_ready"],
+                        "a live session was refused on a clock, which is the GH-324 defect")
+
     # --- deliver.py must apply the SAME routing contract the watcher will apply -------------
     #
     # 27 packets were written, reported autobridge_ready: true, and never dispatched, because

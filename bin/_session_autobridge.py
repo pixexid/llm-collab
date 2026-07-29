@@ -717,7 +717,17 @@ def session_is_dispatchable(session: dict) -> tuple[bool, str]:
     status = session.get("status")
     if status not in {"active", "parked"}:
         return False, f"status={status}"
-    if session_is_expired(session):
+    # An `active` session's validity follows its native task: it ends when that
+    # task ends or an explicit continuation supersedes it, never on a clock. A
+    # TTL is not evidence that a live session died, and treating it as evidence
+    # is not a late wake but a silent one — on 2026-07-28 a session registered
+    # at 19:12 went undispatchable at 20:12:01 while it was working, kept
+    # reporting `status: active`, and nothing surfaced the wake path being dead
+    # for three hours.
+    #
+    # `parked` keeps the clock. A parked claim is not held by a live task, so a
+    # TTL is what makes an abandoned one reclaimable.
+    if status != "active" and session_is_expired(session):
         return False, "lease_expired"
     return True, "ok"
 
