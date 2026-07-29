@@ -1328,7 +1328,12 @@ def discover_claude_runtime_session(project_path: str | None = None) -> dict[str
                         f"too many entries in the Claude project directory for "
                         f"{project_path}; use register --runtime-session-id"
                     )
-                if entry.name.endswith(".jsonl") and entry.is_file():
+                # Append every .jsonl pathname WITHOUT an is_file() prefilter: a
+                # .jsonl FIFO/dir/broken-symlink must reach the reader, which
+                # classifies non-regular/unreadable as unprovable (fail closed),
+                # rather than being silently omitted so a readable sibling looks
+                # unique.
+                if entry.name.endswith(".jsonl"):
                     candidates.append(Path(entry.path))
     candidates.sort()
     matches: list[Path] = []

@@ -3531,6 +3531,30 @@ class SessionAutobridgeTest(unittest.TestCase):
                 str(project_path),
             )
 
+    def test_claude_discovery_fails_closed_on_a_non_regular_jsonl_sibling(self):
+        # A .jsonl FIFO/dir/broken-symlink must reach the reader and classify as
+        # unprovable (fail closed), not be silently dropped by an is_file()
+        # prefilter so a readable sibling looks unique.
+        root = self.make_workspace()
+        claude_home = root / ".claude"
+        project_path = root / "fake-project"
+        project_path.mkdir(parents=True, exist_ok=True)
+        slug = str(project_path.resolve()).replace("/", "-")
+        session_dir = claude_home / "projects" / slug
+        write_claude_session_jsonl(session_dir / "good.jsonl", cwd=project_path.resolve())
+        # A directory masquerading as a .jsonl artifact.
+        os.mkdir(session_dir / "evil.jsonl")
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.run_cli_with_env(
+                root,
+                {"CLAUDE_HOME": str(claude_home)},
+                "discover-runtime",
+                "--runtime-family",
+                "claude_app",
+                "--project-path",
+                str(project_path),
+            )
+
     def test_resolve_exact_dispatch_target_refuses_missing_and_stale_bindings(self):
         root = self.make_workspace()
         self.add_agent(
