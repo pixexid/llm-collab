@@ -52,6 +52,7 @@ from _session_autobridge import (
     BindingUnreadable,
     HEURISTIC_RUNTIME_DISCOVERY_FAMILIES,
     HEURISTIC_RUNTIME_DISCOVERY_REFUSED_REASON,
+    ReadBudget as ExactReadBudget,
     UnreadableFile,
     active_read_budget,
     autobridge_session_path,
@@ -69,23 +70,6 @@ from session_autobridge import register_session
 
 MAX_EXACT_SESSION_ENTRIES = 5_000
 MAX_EXACT_SESSION_BYTES = 16 * 1024 * 1024
-
-
-class ExactReadBudget:
-    def __init__(self, limit: int) -> None:
-        self.limit = limit
-        self.spent = 0
-
-    @property
-    def remaining(self) -> int:
-        return self.limit - self.spent
-
-    def charge(self, count: int, path: Path) -> None:
-        self.spent += count
-        if self.spent > self.limit:
-            raise UnreadableFile(
-                f"exact-session read exceeds {self.limit} bytes at {path}"
-            )
 
 
 def exact_registry_contains(

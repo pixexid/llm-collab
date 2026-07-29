@@ -738,6 +738,139 @@ class SessionAutobridgeTest(unittest.TestCase):
         self.assertEqual(0, stale)
         digest_iter.assert_called_once_with()
 
+    def test_dispatch_inbox_counts_entries_before_project_filtering(self):
+        root = self.make_workspace()
+        self.add_agent(
+            root,
+            {
+                "id": "gemini",
+                "display_name": "Gemini",
+                "activation": {"type": "cli_session"},
+            },
+        )
+        for index in range(3):
+            self.add_message(
+                root,
+                agent_id="gemini",
+                chat_id="CHAT-FOREIGN",
+                project_id="nuvyr",
+                title=f"foreign {index}",
+                packet_slug=str(index),
+            )
+        session = {
+            "session_id": "SESSION-BOUND",
+            "agent_id": "gemini",
+            "project_id": "amiga",
+        }
+        with patch.object(
+            session_autobridge_lib, "ROOT", root
+        ), patch.object(
+            session_autobridge_lib,
+            "agent_inbox_path",
+            return_value=root / "agents" / "gemini" / "inbox.json",
+        ), patch.object(
+            session_autobridge_lib, "MAX_DISPATCH_INBOX_ENTRIES", 2
+        ):
+            with self.assertRaisesRegex(ValueError, "exceeds 2 unread entries"):
+                session_autobridge_lib.matching_unread_messages(session)
+
+    def test_dispatch_inbox_has_one_cumulative_byte_budget(self):
+        root = self.make_workspace()
+        self.add_agent(
+            root,
+            {
+                "id": "gemini",
+                "display_name": "Gemini",
+                "activation": {"type": "cli_session"},
+            },
+        )
+        paths = [
+            self.add_message(
+                root,
+                agent_id="gemini",
+                chat_id="CHAT-BOUND",
+                project_id="amiga",
+                title=f"packet {index}",
+                packet_slug=str(index),
+            )
+            for index in range(2)
+        ]
+        inbox_path = root / "agents" / "gemini" / "inbox.json"
+        total = inbox_path.stat().st_size + sum((root / path).stat().st_size for path in paths)
+        session = {
+            "session_id": "SESSION-BOUND",
+            "agent_id": "gemini",
+            "project_id": "amiga",
+            "chat_id": "CHAT-BOUND",
+        }
+        with patch.object(
+            session_autobridge_lib, "ROOT", root
+        ), patch.object(
+            session_autobridge_lib, "agent_inbox_path", return_value=inbox_path
+        ), patch.object(
+            session_autobridge_lib, "MAX_DISPATCH_INBOX_BYTES", total - 1
+        ):
+            with self.assertRaisesRegex(
+                session_autobridge_lib.UnreadableFile,
+                "exceeds the .* byte limit",
+            ):
+                session_autobridge_lib.matching_unread_messages(session)
+
+    def test_dispatch_inbox_refuses_missing_malformed_and_oversized_packets(self):
+        root = self.make_workspace()
+        self.add_agent(
+            root,
+            {
+                "id": "gemini",
+                "display_name": "Gemini",
+                "activation": {"type": "cli_session"},
+            },
+        )
+        inbox_path = root / "agents" / "gemini" / "inbox.json"
+        packet_path = root / "Chats" / "broken.md"
+        session = {"session_id": "SESSION-BOUND", "agent_id": "gemini"}
+        common = (
+            patch.object(session_autobridge_lib, "ROOT", root),
+            patch.object(
+                session_autobridge_lib, "agent_inbox_path", return_value=inbox_path
+            ),
+        )
+
+        write_json(
+            inbox_path,
+            {"agent": "gemini", "unread": ["Chats/missing.md"], "read": []},
+        )
+        with common[0], common[1]:
+            with self.assertRaisesRegex(ValueError, "missing unread packet"):
+                session_autobridge_lib.matching_unread_messages(session)
+
+        write(packet_path, "not a packet")
+        write_json(
+            inbox_path,
+            {"agent": "gemini", "unread": ["Chats/broken.md"], "read": []},
+        )
+        with patch.object(
+            session_autobridge_lib, "ROOT", root
+        ), patch.object(
+            session_autobridge_lib, "agent_inbox_path", return_value=inbox_path
+        ):
+            with self.assertRaisesRegex(ValueError, "malformed unread packet"):
+                session_autobridge_lib.matching_unread_messages(session)
+
+        write(packet_path, "---\nproject_id: amiga\n---\n" + "x" * 256)
+        with patch.object(
+            session_autobridge_lib, "ROOT", root
+        ), patch.object(
+            session_autobridge_lib, "agent_inbox_path", return_value=inbox_path
+        ), patch.object(
+            session_autobridge_lib, "MAX_DISPATCH_PACKET_BYTES", 64
+        ):
+            with self.assertRaisesRegex(
+                session_autobridge_lib.UnreadableFile,
+                "exceeds the 64 byte limit",
+            ):
+                session_autobridge_lib.matching_unread_messages(session)
+
     def add_message(
         self,
         root: Path,
@@ -6812,7 +6945,7 @@ class SessionAutobridgeTest(unittest.TestCase):
         with patch.object(
             session_autobridge_lib, "load_session", return_value=session
         ), patch.object(
-            session_autobridge_lib, "get_unread_messages", return_value=[message]
+            session_autobridge_lib, "bounded_unread_messages", return_value=[message]
         ), patch.object(session_autobridge_lib, "append_event") as append_event:
             result = session_autobridge_lib.dispatch_session("SESSION-REFUSAL")
 

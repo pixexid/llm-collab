@@ -37,8 +37,8 @@ from _helpers import (
     build_handoff_prompt,
     config_get,
     get_agent,
-    get_unread_messages,
     now_utc,
+    parse_frontmatter,
     project_state_root,
     utc_iso,
     write_file,
@@ -60,6 +60,9 @@ MAX_SESSION_BYTES = 256 * 1024
 MAX_SESSION_INBOX_BYTES = 16 * 1024 * 1024
 MAX_SCANNED_SESSIONS = 5_000
 MAX_SESSION_SCAN_BYTES = 16 * 1024 * 1024
+MAX_DISPATCH_INBOX_ENTRIES = 5_000
+MAX_DISPATCH_INBOX_BYTES = 16 * 1024 * 1024
+MAX_DISPATCH_PACKET_BYTES = 256 * 1024
 
 
 def parse_iso8601(value: str | None) -> datetime | None:
@@ -1030,7 +1033,7 @@ def matching_unread_messages(
     invocation_repo_targets: Any = None,
     repo_scope_refusals: list[dict] | None = None,
 ) -> list[dict]:
-    messages = get_unread_messages(str(session["agent_id"]))
+    messages = bounded_unread_messages(str(session["agent_id"]))
     project_id = session.get("project_id")
     chat_id = session.get("chat_id")
     if project_id:
@@ -1056,6 +1059,59 @@ def matching_unread_messages(
         if target_match:
             matched_messages.append(message)
     return matched_messages
+
+
+def bounded_unread_messages(agent_id: str) -> list[dict]:
+    budget = ReadBudget(MAX_DISPATCH_INBOX_BYTES, "dispatch inbox")
+    with active_read_budget(budget):
+        raw = read_regular_file_bounded(
+            agent_inbox_path(agent_id),
+            budget.remaining,
+        )
+        inbox = json.loads(raw.decode("utf-8"))
+        unread = inbox.get("unread") if isinstance(inbox, dict) else None
+        if not isinstance(unread, list) or any(
+            not isinstance(path, str)
+            or not path
+            or path != path.strip()
+            or "\x00" in path
+            or Path(path).is_absolute()
+            or ".." in Path(path).parts
+            for path in unread
+        ):
+            raise ValueError("agent inbox must contain an unread path list")
+        if len(unread) > MAX_DISPATCH_INBOX_ENTRIES:
+            raise ValueError(
+                f"agent inbox exceeds {MAX_DISPATCH_INBOX_ENTRIES} unread entries"
+            )
+        messages = []
+        for relative_path in unread:
+            try:
+                message_raw = read_regular_file_bounded(
+                    ROOT / relative_path,
+                    min(MAX_DISPATCH_PACKET_BYTES, budget.remaining),
+                )
+            except FileNotFoundError as error:
+                raise ValueError(
+                    f"missing unread packet: {relative_path}"
+                ) from error
+            message_text = message_raw.decode("utf-8")
+            closing = message_text.find("\n---", 4)
+            if (
+                not message_text.startswith("---\n")
+                or closing < 0
+                or message_text[closing + 4 : closing + 5] not in {"", "\n"}
+            ):
+                raise ValueError(f"malformed unread packet: {relative_path}")
+            frontmatter, body = parse_frontmatter(message_text)
+            messages.append(
+                {
+                    "path": relative_path,
+                    "frontmatter": frontmatter,
+                    "body": body,
+                }
+            )
+    return messages
 
 
 def processed_messages(session: dict) -> set[str]:
@@ -2037,6 +2093,24 @@ class UnreadableFile(RuntimeError):
 # cleared by the caller around one lookup; None means no cumulative accounting, which is the
 # historical behaviour for every other caller.
 _ACTIVE_READ_BUDGET: list = []
+
+
+class ReadBudget:
+    def __init__(self, limit: int, label: str = "exact-session read") -> None:
+        self.limit = limit
+        self.label = label
+        self.spent = 0
+
+    @property
+    def remaining(self) -> int:
+        return self.limit - self.spent
+
+    def charge(self, count: int, path: Path) -> None:
+        self.spent += count
+        if self.spent > self.limit:
+            raise UnreadableFile(
+                f"{self.label} exceeds {self.limit} bytes at {path}"
+            )
 
 
 class active_read_budget:
