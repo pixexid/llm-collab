@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 
 from llm_collab.ledger import LedgerStore, validate_project_id
+from llm_collab.ledger.store import CanonicalConflictError
 from llm_collab.session_lifecycle import (
     FakeLifecycleProvider,
     LifecycleSubject,
@@ -200,6 +201,15 @@ def retire_worker(
         "generation": resolved["generation"],
         "session_ref_id": resolved["session_ref_id"],
     }
-    _INSPECTION.retire(store, subject, resolved)
+    try:
+        _INSPECTION.retire(store, subject, resolved)
+    except CanonicalConflictError as exc:
+        # A rebind won the race after our inspect: the generation we read is no
+        # longer the active owner, so the state write matched zero rows. Refuse
+        # rather than report a stale success.
+        raise WorkerLookupError(
+            f"worker {worker_id} was rebound during retire; the active binding "
+            "moved to a newer generation — refusing to retire a stale generation"
+        ) from exc
     retired["state"] = "retired"
     return retired
