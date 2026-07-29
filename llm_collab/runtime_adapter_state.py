@@ -11,7 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -60,6 +60,11 @@ class AdapterStateStoreError(RuntimeError):
     """Raised when a requested adapter-state store is absent or uninitialized."""
 
 
+# Bounded-work fail-closed cap on one record's stored journal; matches the
+# repository's existing MAX_PENDING_EVENTS magnitude (bin/codex_stream.py).
+MAX_ADAPTER_STATE_EVENTS = 4096
+
+
 @dataclass(frozen=True)
 class AdapterRecordState:
     record_id: str
@@ -72,6 +77,10 @@ class AdapterRecordState:
     release_event_seen: bool
     released: bool
     event_count: int
+    # The exact stored event journal — (event_sequence, event_kind,
+    # append_time_utc) for every row, including duplicates the fold dedupes —
+    # exposed as recorded (GH-214). Never reconstructed or inferred.
+    journal: tuple[tuple[int, str, str], ...] = ()
 
 
 def initialize_store(db_path: str | Path) -> None:
@@ -121,14 +130,43 @@ def read_record(db_path: str | Path, record_id: str) -> AdapterRecordState:
         _require_schema(conn)
         rows = conn.execute(
             """
-            SELECT event_sequence, event_kind, payload_json, payload_sha256
+            SELECT event_sequence, event_kind, payload_json, payload_sha256, append_time_utc
             FROM runtime_adapter_events
             WHERE record_id = ?
             ORDER BY event_sequence
+            LIMIT ?
             """,
-            (record_id,),
+            (record_id, MAX_ADAPTER_STATE_EVENTS + 1),
         ).fetchall()
-    return _fold(record_id, rows)
+    if len(rows) > MAX_ADAPTER_STATE_EVENTS:
+        raise AdapterStateIntegrityError(
+            f"adapter-state record exceeds {MAX_ADAPTER_STATE_EVENTS} stored events; "
+            "refusing an unbounded journal read"
+        )
+    journal = tuple(
+        (
+            _stored_int(event_sequence, "event_sequence"),
+            _stored_text(event_kind, "event_kind"),
+            _stored_text(append_time_utc, "append_time_utc"),
+        )
+        for event_sequence, event_kind, _payload_json, _payload_sha256, append_time_utc
+        in rows
+    )
+    return replace(_fold(record_id, [row[:4] for row in rows]), journal=journal)
+
+
+def _stored_text(value: object, name: str) -> str:
+    """Require a stored TEXT value; SQLite may hand back a BLOB from a
+    TEXT-affinity column, and str() would fabricate a b'...' literal."""
+    if not isinstance(value, str):
+        raise AdapterStateIntegrityError(f"adapter-state {name} is not stored text")
+    return value
+
+
+def _stored_int(value: object, name: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise AdapterStateIntegrityError(f"adapter-state {name} is not a stored integer")
+    return value
 
 
 def _append_event(
