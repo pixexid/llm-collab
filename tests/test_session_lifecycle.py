@@ -13,7 +13,9 @@ from llm_collab.codex_runtime_home import bind_runtime_home
 from llm_collab.ledger import LedgerPaths, LedgerStore
 import llm_collab.ledger.store as store_module
 from llm_collab.ledger.store import CanonicalConflictError
+from llm_collab.codex_app_server_live_probe import CodexAppServerExactThreadResult
 from llm_collab.session_lifecycle import (
+    CodexLifecycleProvider,
     FakeLifecycleProvider,
     LifecycleSubject,
     SessionLifecycleCore,
@@ -219,6 +221,95 @@ class LifecycleTest(unittest.TestCase):
             correlation_id="corr_consume",
             trusted_project_root=self.trusted_root,
         )
+
+    def test_codex_lifecycle_provider_attests_after_an_exact_thread_match(self) -> None:
+        native = "native_session_one"
+        received = []
+
+        def probe(thread_id):
+            received.append(thread_id)
+            return CodexAppServerExactThreadResult(thread_id=native, methods=("initialize", "thread/read"))
+
+        provider = CodexLifecycleProvider(exact_thread_probe=probe)
+        ref = provider.attest(
+            subject(native_session_id=native),
+            runtime_home=self.runtime_home,
+            observed_at_utc=NOW,
+            correlation_id="corr-1",
+            trusted_project_root=self.trusted_root,
+        )
+        # The probe is called exactly once, with the subject's native session id.
+        self.assertEqual([native], received)
+        self.assertEqual(native, ref["native_session_id"])
+        self.assertIsInstance(ref["session_ref_id"], str)
+
+    def test_codex_lifecycle_provider_fails_closed_on_a_thread_id_mismatch(self) -> None:
+        provider = CodexLifecycleProvider(
+            exact_thread_probe=lambda _tid: CodexAppServerExactThreadResult(
+                thread_id="a-different-thread", methods=("initialize", "thread/read")
+            )
+        )
+        with self.assertRaises(SessionLifecycleError):
+            provider.attest(
+                subject(native_session_id="native_session_one"),
+                runtime_home=self.runtime_home,
+                observed_at_utc=NOW,
+                correlation_id="corr-1",
+                trusted_project_root=self.trusted_root,
+            )
+
+    def test_codex_lifecycle_provider_propagates_a_probe_failure(self) -> None:
+        from llm_collab.codex_app_server_live_probe import CodexAppServerLiveProbeError
+
+        def failing_probe(_thread_id):
+            raise CodexAppServerLiveProbeError("thread/read failed")
+
+        provider = CodexLifecycleProvider(exact_thread_probe=failing_probe)
+        # A probe failure fails closed and retains its real type/cause (not normalized).
+        with self.assertRaises(CodexAppServerLiveProbeError):
+            provider.attest(
+                subject(native_session_id="native_session_one"),
+                runtime_home=self.runtime_home,
+                observed_at_utc=NOW,
+                correlation_id="corr-1",
+                trusted_project_root=self.trusted_root,
+            )
+
+    def test_codex_lifecycle_provider_is_identity_only_with_no_start_or_open_ui(self) -> None:
+        provider = CodexLifecycleProvider(
+            exact_thread_probe=lambda _tid: CodexAppServerExactThreadResult(
+                thread_id="x", methods=("initialize", "thread/read")
+            )
+        )
+        # Identity-only: advertises only reserve/attach, and open_ui fails closed.
+        self.assertEqual('["reserve","attach"]', provider.supported_operations_json)
+        with self.assertRaises(SessionLifecycleError):
+            provider.open_ui(subject())
+
+    def test_codex_provider_probe_failure_leaves_the_ledger_unchanged(self) -> None:
+        # reserve() calls provider.attest FIRST; a probe mismatch must raise before
+        # any ledger mutation. Snapshot lifecycle row counts; they must be unchanged.
+        failing_provider = CodexLifecycleProvider(
+            exact_thread_probe=lambda _tid: CodexAppServerExactThreadResult(
+                thread_id="not-the-subject-native-id", methods=("initialize", "thread/read")
+            )
+        )
+        active_subject = subject()
+        with LedgerStore.open_writer(self.paths) as store:
+            self.provision(store, active_subject, failing_provider)
+            core = SessionLifecycleCore(failing_provider, token_factory=lambda: "token-zeta")
+            before = row_counts(store)
+            with self.assertRaises(SessionLifecycleError):
+                core.reserve(
+                    store,
+                    active_subject,
+                    runtime_home=self.runtime_home,
+                    created_at_utc=NOW,
+                    expires_at_utc=AT_EXPIRY,
+                    correlation_id="corr_reserve",
+                    trusted_project_root=self.trusted_root,
+                )
+            self.assertEqual(before, row_counts(store))
 
     def test_reserve_consume_resolves_and_replay_fails(self) -> None:
         active_subject = subject()
