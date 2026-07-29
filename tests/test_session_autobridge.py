@@ -6283,6 +6283,8 @@ class SessionAutobridgeTest(unittest.TestCase):
             native_session_id="pi-glim-1",
         )
         doorbell = root / "State" / "pi" / "glmpi.pointer"
+        pi_cwd = root / "pi-cwd"; pi_cwd.mkdir()
+        pi_source = self._write_pi_session_source(root, "pi-glim-1", cwd=str(pi_cwd))
         self.run_cli(
             root,
             "register",
@@ -6302,6 +6304,10 @@ class SessionAutobridgeTest(unittest.TestCase):
             "pi",
             "--runtime-session-id",
             "pi-glim-1",
+            "--runtime-session-source",
+            str(pi_source),
+            "--cwd",
+            str(pi_cwd),
             "--runtime-command",
             json.dumps([sys.executable, "-c", "pass"]),
         )
@@ -6578,6 +6584,8 @@ class SessionAutobridgeTest(unittest.TestCase):
             native_session_id="pi-glim-1",
             runtime_instance_id="runtime_pi_glim",
         )
+        pi_cwd = root / "pi-cwd"; pi_cwd.mkdir()
+        pi_source = self._write_pi_session_source(root, "pi-glim-1", cwd=str(pi_cwd))
         self.run_cli(
             root,
             "register",
@@ -6597,6 +6605,10 @@ class SessionAutobridgeTest(unittest.TestCase):
             "pi",
             "--runtime-session-id",
             "pi-glim-1",
+            "--runtime-session-source",
+            str(pi_source),
+            "--cwd",
+            str(pi_cwd),
             "--runtime-command",
             json.dumps([sys.executable, "-c", "pass"]),
             "--repo-target",
@@ -6689,9 +6701,10 @@ class SessionAutobridgeTest(unittest.TestCase):
         )
 
     def test_pi_registration_fails_closed_without_a_canonical_binding(self):
-        # GH-346: without a provisioned canonical binding, register must refuse
-        # (canonical_binding_required) rather than publish a Pi session every
-        # later packet would reject. GH-346 copies the binding; it never mints it.
+        # GH-346/#378: with a valid fingerprint source but no resolvable binding and
+        # incomplete provisioning inputs, register must refuse rather than publish a
+        # Pi session every later packet would reject. (The bare no-native-context path
+        # is now unreachable because a fingerprinted pi register always carries --cwd.)
         root = self.make_workspace()
         self.add_agent(
             root,
@@ -6701,6 +6714,8 @@ class SessionAutobridgeTest(unittest.TestCase):
                 "activation": {"type": "cli_session", "watcher_enabled": True},
             },
         )
+        pi_cwd = root / "pi-cwd"; pi_cwd.mkdir()
+        pi_source = self._write_pi_session_source(root, "pi-glim-unprov", cwd=str(pi_cwd))
         done = subprocess.run(
             [
                 sys.executable,
@@ -6722,6 +6737,10 @@ class SessionAutobridgeTest(unittest.TestCase):
                 "pi",
                 "--runtime-session-id",
                 "pi-glim-unprov",
+                "--runtime-session-source",
+                str(pi_source),
+                "--cwd",
+                str(pi_cwd),
                 "--runtime-command",
                 json.dumps([sys.executable, "-c", "pass"]),
                 "--json",
@@ -6733,7 +6752,7 @@ class SessionAutobridgeTest(unittest.TestCase):
             check=False,
         )
         self.assertNotEqual(0, done.returncode)
-        self.assertIn("canonical_binding_required", done.stderr)
+        self.assertIn("canonical_provisioning_incomplete", done.stderr)
         session_path = (
             root
             / "State"
@@ -6765,6 +6784,8 @@ class SessionAutobridgeTest(unittest.TestCase):
             native_session_id="pi-glim-1",
             runtime_instance_id="runtime_pi_glim",
         )
+        pi_cwd = root / "pi-cwd"; pi_cwd.mkdir()
+        pi_source = self._write_pi_session_source(root, "pi-glim-2", cwd=str(pi_cwd))
         done = subprocess.run(
             [
                 sys.executable,
@@ -6786,6 +6807,10 @@ class SessionAutobridgeTest(unittest.TestCase):
                 "pi",
                 "--runtime-session-id",
                 "pi-glim-2",
+                "--runtime-session-source",
+                str(pi_source),
+                "--cwd",
+                str(pi_cwd),
                 "--runtime-command",
                 json.dumps([sys.executable, "-c", "pass"]),
                 "--json",
@@ -6830,6 +6855,25 @@ class SessionAutobridgeTest(unittest.TestCase):
                 source_snapshots={p: {} for p in projects},
             )
 
+    def _write_pi_session_source(
+        self, root, native, *, cwd="/pi/cwd", provider="pi-provider",
+        model_id="m1", thinking_level="high", header_version=3, extra_lines=(),
+    ) -> Path:
+        """A minimal valid native Pi session .jsonl (header + model_change +
+        thinking_level_change), for the fingerprint pin/compare seam."""
+        lines = [
+            {"type": "session", "version": header_version, "id": native,
+             "timestamp": "2026-07-29T00:00:00.000Z", "cwd": cwd},
+            {"type": "model_change", "id": "mc1", "parentId": None,
+             "timestamp": "2026-07-29T00:00:00.001Z", "provider": provider, "modelId": model_id},
+            {"type": "thinking_level_change", "id": "tl1", "parentId": "mc1",
+             "timestamp": "2026-07-29T00:00:00.002Z", "thinkingLevel": thinking_level},
+            *extra_lines,
+        ]
+        path = root / f"pi-source-{native}.jsonl"
+        path.write_text("\n".join(json.dumps(line) for line in lines) + "\n")
+        return path
+
     def _register_pi(
         self,
         root,
@@ -6844,8 +6888,11 @@ class SessionAutobridgeTest(unittest.TestCase):
         home,
         repo_target,
         agent="glmpi",
+        session_source=None,
         check=True,
     ):
+        if session_source is None:
+            session_source = self._write_pi_session_source(root, native, cwd=str(cwd))
         done = subprocess.run(
             [
                 sys.executable, str(SCRIPT_PATH), "register",
@@ -6853,6 +6900,7 @@ class SessionAutobridgeTest(unittest.TestCase):
                 "--project", project, "--chat", chat,
                 "--mode", "auto-read", "--wake-strategy", "runtime_trigger",
                 "--runtime-family", "pi", "--runtime-session-id", native,
+                "--runtime-session-source", str(session_source),
                 "--runtime-command", json.dumps([sys.executable, "-c", "pass"]),
                 "--endpoint-id", endpoint, "--runtime-instance-id", runtime_instance,
                 "--cwd", str(cwd), "--runtime-home", str(home),
@@ -6983,6 +7031,161 @@ class SessionAutobridgeTest(unittest.TestCase):
                 ).fetchone()[0]
         self.assertEqual(1, active, "the duplicate must not create a second active binding")
         self.assertEqual(0, pending, "the refused duplicate must not leave a pending challenge")
+
+    def _active_binding_count(self, root, native):
+        paths = LedgerPaths.derive(root / "project-state", "ws_alpha")
+        with patch.object(store_module, "_linked_sqlite_version_info", return_value=SAFE_VERSION):
+            with LedgerStore.open_reader(paths) as store:
+                return store._connection.execute(
+                    "SELECT count(*) FROM conversation_bindings WHERE native_session_id = ?",
+                    (native,),
+                ).fetchone()[0]
+
+    def test_pi_register_requires_and_persists_complete_fingerprint(self):
+        # #378 fingerprint: registration reads + pins the exact native source's
+        # provider/model/thinking/cwd BEFORE any canonical write. A missing/incomplete
+        # source or a cwd that is not the registering checkout refuses with NO session
+        # and NO canonical binding (fail before publishing authority). Amiga + non-Amiga.
+        for project, chat, native in (
+            ("amiga", "CHAT-FP-A", "pi-fp-a"),
+            ("nuvyr", "CHAT-FP-N", "pi-fp-n"),
+        ):
+            root = self.make_workspace()
+            self.add_agent(
+                root,
+                {"id": "glmpi", "display_name": "Glim",
+                 "activation": {"type": "cli_session", "watcher_enabled": True}},
+            )
+            self._seed_pi_registry_snapshot(root, [project])
+            work = root / "work"; work.mkdir()
+            home = root / "pi-home"; home.mkdir()
+            with self.subTest(project=project, case="missing-source"):
+                miss = self._register_pi(
+                    root, session="SESSION-FP-MISS", project=project, chat=chat,
+                    native=native, endpoint="endpoint_native", runtime_instance="rt-fp",
+                    cwd=work, home=home, repo_target="app",
+                    session_source=str(root / "does-not-exist.jsonl"), check=False,
+                )
+                self.assertNotEqual(0, miss.returncode)
+                self.assertIn("canonical_pi_fingerprint_required", miss.stderr)
+                self.assertFalse(self._session_json(root, "SESSION-FP-MISS").exists())
+                self.assertEqual(
+                    0, self._active_binding_count(root, native),
+                    "a fingerprint refusal must not leave a canonical binding",
+                )
+            with self.subTest(project=project, case="cwd-mismatch"):
+                other = self._write_pi_session_source(
+                    root, native, cwd="/some/other/checkout", provider="p", model_id="m",
+                    thinking_level="high",
+                )
+                bad = self._register_pi(
+                    root, session="SESSION-FP-CWD", project=project, chat=chat,
+                    native=native, endpoint="endpoint_native", runtime_instance="rt-fp",
+                    cwd=work, home=home, repo_target="app", session_source=str(other),
+                    check=False,
+                )
+                self.assertNotEqual(0, bad.returncode)
+                self.assertIn("canonical_pi_cwd_mismatch", bad.stderr)
+                self.assertFalse(self._session_json(root, "SESSION-FP-CWD").exists())
+                self.assertEqual(
+                    0, self._active_binding_count(root, native),
+                    "a cwd-mismatch refusal must not leave a canonical binding",
+                )
+            with self.subTest(project=project, case="valid-source"):
+                source = self._write_pi_session_source(
+                    root, native, cwd=str(work), provider="pinned-prov",
+                    model_id="pinned-model", thinking_level="high",
+                )
+                self._register_pi(
+                    root, session="SESSION-FP-OK", project=project, chat=chat,
+                    native=native, endpoint="endpoint_native", runtime_instance="rt-fp",
+                    cwd=work, home=home, repo_target="app", session_source=str(source),
+                )
+                record = json.loads(self._session_json(root, "SESSION-FP-OK").read_text())
+                self.assertEqual(
+                    {"cwd": str(work), "provider": "pinned-prov",
+                     "model_id": "pinned-model", "thinking_level": "high"},
+                    record.get("pi_fingerprint"),
+                )
+                self.assertEqual(1, self._active_binding_count(root, native))
+
+    def test_pi_dispatch_drift_or_missing_source_emits_no_wake_and_preserves_unread(self):
+        # #378 drift guard: after registering with a matching source, a drifted or
+        # missing native source emits NO pi_inbox_wake and leaves the packet unread
+        # (not marked processed). Amiga + non-Amiga.
+        for project, chat, native in (
+            ("amiga", "CHAT-DRIFT-A", "pi-drift-a"),
+            ("nuvyr", "CHAT-DRIFT-N", "pi-drift-n"),
+        ):
+            root = self.make_workspace()
+            for aid in ("glmpi", "codex"):
+                self.add_agent(
+                    root,
+                    {"id": aid, "display_name": aid,
+                     "activation": {"type": "cli_session", "watcher_enabled": True}},
+                )
+            self._seed_pi_registry_snapshot(root, [project])
+            self.create_chat(root, chat_dir_name=f"{chat}-dir", chat_id=chat, project_id=project)
+            work = root / "work"; work.mkdir()
+            home = root / "pi-home"; home.mkdir()
+            source = self._write_pi_session_source(
+                root, native, cwd=str(work), provider="p0", model_id="m0", thinking_level="high",
+            )
+            self._register_pi(
+                root, session="SESSION-DRIFT", project=project, chat=chat, native=native,
+                endpoint="endpoint_drift", runtime_instance="rt-drift", cwd=work, home=home,
+                repo_target="app", session_source=str(source),
+            )
+            deliver = subprocess.run(
+                [
+                    sys.executable, str(DELIVER_SCRIPT), "--chat", chat, "--from", "codex",
+                    "--to", "glmpi", "--project", project, "--title", "drift probe",
+                    "--sender-session-id", "codex-drift", "--repo-targets", "app",
+                    "--body-file", "-",
+                ],
+                cwd=root, text=True, input="drift probe", capture_output=True,
+                check=False, env=self.subprocess_env(root),
+            )
+            self.assertEqual(0, deliver.returncode, deliver.stdout + deliver.stderr)
+            event_path = root / "State" / "session_autobridge" / "events" / "SESSION-DRIFT.jsonl"
+
+            def poll_and_events():
+                subprocess.run(
+                    [sys.executable, str(WATCH_INBOX_SCRIPT), "--me", "glmpi",
+                     "--max-polls", "1", "--json"],
+                    cwd=root, text=True, capture_output=True,
+                    env=self.subprocess_env(root), check=True,
+                )
+                if not event_path.exists():
+                    return []
+                return [json.loads(l) for l in event_path.read_text().splitlines() if l.strip()]
+
+            # Drift: rewrite the exact source with a different thinking level.
+            self._write_pi_session_source(
+                root, native, cwd=str(work), provider="p0", model_id="m0", thinking_level="low",
+            )
+            events = poll_and_events()
+            self.assertFalse(
+                any(e.get("event") == "pi_inbox_wake" for e in events),
+                f"[{project}] drift must emit no pi_inbox_wake: {events}",
+            )
+            inbox = json.loads((root / "agents" / "glmpi" / "inbox.json").read_text())
+            self.assertTrue(inbox["unread"], f"[{project}] drifted packet must stay unread")
+            session_record = json.loads(
+                self._session_json(root, "SESSION-DRIFT").read_text()
+            )
+            self.assertEqual(
+                [], session_record.get("processed_messages", []),
+                f"[{project}] drift must not mark the packet processed",
+            )
+
+            # Missing source: same fail-closed behavior.
+            source.unlink()
+            events = poll_and_events()
+            self.assertFalse(
+                any(e.get("event") == "pi_inbox_wake" for e in events),
+                f"[{project}] missing source must emit no pi_inbox_wake: {events}",
+            )
 
     def test_pi_runtime_refuses_without_an_exact_bound_attempt(self):
         session = {

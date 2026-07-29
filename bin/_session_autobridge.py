@@ -794,6 +794,78 @@ def provision_pi_canonical_binding(
             raise PiProvisioningRefused("canonical_native_session_already_bound", str(error))
 
 
+PI_SESSION_HEADER_VERSION = 3
+
+
+def read_pi_session_fingerprint(
+    source_path, expected_native_session_id
+) -> dict[str, str] | None:
+    """The current provider/model/thinking/cwd fingerprint of a native Pi session,
+    or None (fail closed).
+
+    Reads the EXACT registered session source — Pi's own append-only .jsonl history —
+    and folds it: cwd from the single `session` header, provider + modelId from the
+    latest `model_change`, thinkingLevel from the latest `thinking_level_change`.
+    Returns None — meaning no wake, never a false wake — on anything that is not a
+    clean, complete, identity-matched fingerprint: an empty/unset source, an
+    unreadable or oversized file, a bad header version, malformed/partial JSONL, a
+    second (spliced) header, a header id that is not the registered native session,
+    or any missing field.
+    """
+    if not source_path:
+        return None
+    # ponytail: bounded full scan (fold to the latest change events). If a live Pi
+    # session grows past MAX_SESSION_SCAN_BYTES, fail closed here (no false wake) and
+    # switch to a tail read of the last N KiB.
+    try:
+        raw = read_regular_file_bounded(Path(str(source_path)), MAX_SESSION_SCAN_BYTES)
+    except (UnreadableFile, OSError, ValueError):
+        return None
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+    cwd = provider = model_id = thinking_level = None
+    header_seen = False
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(record, dict):
+            return None
+        record_type = record.get("type")
+        if record_type == "session":
+            if header_seen:
+                return None
+            header_seen = True
+            if record.get("version") != PI_SESSION_HEADER_VERSION:
+                return None
+            if str(record.get("id")) != str(expected_native_session_id):
+                return None
+            cwd = record.get("cwd")
+        elif record_type == "model_change":
+            provider = record.get("provider")
+            model_id = record.get("modelId")
+        elif record_type == "thinking_level_change":
+            thinking_level = record.get("thinkingLevel")
+    if not header_seen:
+        return None
+    fingerprint = {
+        "cwd": cwd,
+        "provider": provider,
+        "model_id": model_id,
+        "thinking_level": thinking_level,
+    }
+    if any(not isinstance(value, str) or not value for value in fingerprint.values()):
+        return None
+    return fingerprint
+
+
 def binding_payload_from_session(
     session: dict,
     existing: dict[str, Any] | None = None,
@@ -2711,6 +2783,21 @@ def execute_runtime_trigger(session: dict, message: dict) -> dict[str, Any]:
     runtime_family = str(runtime.get("family", ""))
     runtime_home = runtime.get("home") or runtime_home_from_source(runtime_family, runtime.get("session_source"))
     if runtime_family == "pi":
+        # Pre-wake drift guard: the current native session must still match the
+        # provider/model/thinking/cwd fingerprint pinned at registration. A mismatch
+        # or any unreadable/incomplete evidence emits NO wake and returns a
+        # non-success, so the watcher does not mark the packet processed — it stays
+        # durable/unread for pull and later re-evaluation. Fail closed before any
+        # append; a wrong parse must never produce a false wake.
+        pinned = session.get("pi_fingerprint")
+        current = read_pi_session_fingerprint(runtime.get("session_source"), runtime.get("session_id"))
+        if not isinstance(pinned, dict) or current is None or current != pinned:
+            return {
+                "status": "pi_fingerprint_drift",
+                "runtime_family": "pi",
+                "returncode": 1,
+                "delivery_accepted": False,
+            }
         # A Pi session is woken by one durable, synced event on its own exact-session
         # event log — not by a mutable pointer file (the deleted pi_doorbell.py), which
         # a second delivery overwrote before the monitor read it. The event is only a
