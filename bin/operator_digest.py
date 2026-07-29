@@ -32,8 +32,10 @@ from datetime import datetime, timezone
 from _helpers import (
     ROOT,
     agent_ids,
+    config_get,
     mark_messages_read,
     parse_frontmatter,
+    project_state_root,
     resolve_project_repo_path,
 )
 
@@ -538,6 +540,81 @@ def unread_counts(
     return rows
 
 
+def canonical_worker_rows(
+    project_id: str | None,
+    chat_id: str | None,
+) -> tuple[list[dict], str | None]:
+    """Canonical worker binding state joined with unread outstanding (#304).
+
+    Read-only over the existing ledger via llm_collab.worker.list_workers; the
+    unread count is the digest's own exact accounting for that worker's agent in
+    that worker's own project+chat. Returns (rows, note): rows may be empty and
+    note is set when the projection is unavailable, so a detached checkout still
+    renders. No busy/idle, goal, or dispatchability is claimed.
+    """
+    try:
+        workspace_id = config_get("workspace_id")
+        if not workspace_id:
+            return [], "no workspace_id in collab.config.json"
+        from llm_collab.ledger import LedgerPaths, LedgerStore
+        from llm_collab.worker import list_workers
+
+        paths = LedgerPaths.derive(project_state_root(), str(workspace_id))
+        projects = [project_id] if project_id else [p["id"] for p in load_projects()]
+        with LedgerStore.open_reader(paths) as store:
+            workers = [
+                worker
+                for pid in projects
+                for worker in list_workers(
+                    store, workspace_id=str(workspace_id), project_id=pid
+                )
+            ]
+        from _session_autobridge import (
+            iter_sessions,
+            matching_unread_messages,
+            resolve_exact_dispatch_pair,
+        )
+
+        sessions = iter_sessions()
+        rows = []
+        for worker in workers:
+            if chat_id is not None and worker["conversation_id"] != chat_id:
+                continue
+            agent = str(worker["agent_id"]).removeprefix("agent_")
+            # Exact-worker unread only: resolve the exact dispatch pair (or the
+            # validated expired pair) and require it to agree with the canonical
+            # binding before counting exact-session-targeted unread. Anything less
+            # provable renders "-", never 0 — a sibling/expired session's packet is
+            # not this worker's outstanding work.
+            unread: object = "-"
+            pair, _reason, expired_pair = resolve_exact_dispatch_pair(
+                str(worker["scope_identity"]),
+                str(worker["conversation_id"]),
+                agent,
+                sessions=sessions,
+            )
+            chosen = pair if pair is not None else expired_pair
+            if chosen is not None and worker["resolved"]:
+                session, binding = chosen
+                runtime = session.get("runtime") or {}
+                if (
+                    str(binding.get("binding_id") or "") == str(worker["binding_id"])
+                    and binding.get("binding_generation") == worker["generation"]
+                    and str(runtime.get("session_id") or "")
+                    == str(worker["native_session_id"])
+                ):
+                    unread = len(matching_unread_messages(session))
+            rows.append({**worker, "inbox_agent": agent, "unread_outstanding": unread})
+        return rows, None
+    except (Exception, SystemExit) as exc:
+        # SystemExit included: config_get exits the process when collab.config.json
+        # is absent — correct for a CLI, wrong for a read-only report (same seam as
+        # resolved_repo_path above). Any exact-join authority failure (unreadable
+        # binding, malformed inbox, bounded-read refusal) lands here too: no
+        # partial worker rows that would look complete.
+        return [], f"canonical worker projection unavailable ({type(exc).__name__})"
+
+
 def render(project_id: str | None = None, chat_id: str | None = None) -> str:
     lines: list[str] = []
     add = lines.append
@@ -598,6 +675,25 @@ def render(project_id: str | None = None, chat_id: str | None = None) -> str:
         add(">")
         for native, chats in clashes.items():
             add(f"> - `{native}` ← {', '.join(chats)}")
+        add("")
+
+    workers, worker_note = canonical_worker_rows(project_id, chat_id)
+    if workers:
+        add("Canonical workers — binding state from the canonical ledger joined with "
+            "unread targeted at that exact session ('-' when no exact dispatch pair is "
+            "provable). Busy/idle is not claimed.")
+        add("")
+        add("| worker | agent | project / chat | binding | gen | unread outstanding |")
+        add("|---|---|---|---|---|---|")
+        for w in workers:
+            binding = str(w["state"] or w["reason"])
+            generation = w["generation"] if w["resolved"] else "-"
+            add(f"| `{str(w['worker_id'])[:18]}` | {w['inbox_agent']} | "
+                f"{w['scope_identity']} / {w['conversation_id']} | {binding} | "
+                f"{generation} | {w['unread_outstanding']} |")
+        add("")
+    elif worker_note:
+        add(f"Canonical worker projection: {worker_note}.")
         add("")
 
     prs, unreachable_repos = open_prs(project_id)

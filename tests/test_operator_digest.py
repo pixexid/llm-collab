@@ -635,3 +635,235 @@ class ScopedDigestTest(unittest.TestCase):
              mock.patch.object(operator_digest, "project_repo_slugs", return_value=set()):
             text = operator_digest.render("llm-collab", "CHAT-A")
         self.assertIn("work waiting; no dispatchable session", text)
+
+
+class CanonicalWorkerJoinTest(unittest.TestCase):
+    """#304: digest joins canonical worker binding state with unread outstanding."""
+
+    WORKSPACE = "ws_alpha"
+    NOW = "2026-07-29T00:00:00+00:00"
+    EXPIRY = "2026-07-29T00:01:00+00:00"
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory(dir="/tmp")
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+        (self.root / "agents" / "operator").mkdir(parents=True)
+        (self.root / "agents" / "operator" / "inbox.json").write_text(
+            json.dumps({"unread": [], "read": []}), encoding="utf-8")
+        for target, value in (("ROOT", self.root),):
+            patcher = mock.patch.object(operator_digest, target, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        codex_home = self.root / "codex-home"
+        codex_home.mkdir()
+        repo = self.root / "repo"
+        repo.mkdir()
+        self.cwd = repo / "work"
+        self.cwd.mkdir()
+        self.repo = repo
+        from llm_collab.codex_runtime_home import bind_runtime_home
+        self.runtime_home = bind_runtime_home(codex_home)
+        from llm_collab.ledger import LedgerPaths
+        self.paths = LedgerPaths.derive(self.root / "state", self.WORKSPACE)
+        import llm_collab.ledger.store as store_module
+        patcher = mock.patch.object(
+            store_module, "_linked_sqlite_version_info", return_value=(3, 51, 3))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def add_worker(self, *, project: str, chat: str, native: str) -> str:
+        from llm_collab.ledger import LedgerStore
+        from llm_collab.session_lifecycle import (
+            FakeLifecycleProvider,
+            LifecycleSubject,
+            SessionLifecycleCore,
+            TrustedProjectRoot,
+        )
+        from llm_collab.worker import derive_worker_id
+
+        core = SessionLifecycleCore(
+            FakeLifecycleProvider(), token_factory=lambda: "token-alpha")
+        subject = LifecycleSubject(
+            workspace_id=self.WORKSPACE,
+            scope_kind="project",
+            scope_identity=project,
+            conversation_id=chat,
+            participant_id="participant_kimi",
+            agent_id="agent_kimi",
+            endpoint_id="endpoint_codex",
+            native_session_id=native,
+            runtime_instance_id="runtime_one",
+        )
+        with LedgerStore.open_writer(self.paths) as store:
+            store._connection.execute(
+                """
+                INSERT INTO conversation_participants
+                (workspace_id, scope_kind, scope_identity, conversation_id, participant_id, agent_id, created_at_utc)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (subject.workspace_id, subject.scope_kind, subject.scope_identity,
+                 subject.conversation_id, subject.participant_id, subject.agent_id,
+                 self.NOW),
+            )
+            descriptor = core.provider.descriptor()
+            store._connection.execute(
+                """
+                INSERT OR IGNORE INTO lifecycle_provider_registry
+                (workspace_id, provider_id, provider_revision, trust_class,
+                 supported_operations_json, challenge_algorithm, challenge_ttl_seconds, created_at_utc)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (subject.workspace_id, descriptor["provider_id"],
+                 descriptor["provider_revision"], descriptor["trust_class"],
+                 descriptor["supported_operations_json"],
+                 descriptor["challenge_algorithm"], descriptor["challenge_ttl_seconds"],
+                 self.NOW),
+            )
+            trusted_root = TrustedProjectRoot(
+                project, "repo_app", str(self.repo), str(self.cwd))
+            challenge = core.reserve(
+                store, subject, runtime_home=self.runtime_home,
+                created_at_utc=self.NOW, expires_at_utc=self.EXPIRY,
+                correlation_id="corr_reserve", trusted_project_root=trusted_root)
+            resolved = core.consume(
+                store, subject, challenge, runtime_home=self.runtime_home,
+                consumed_at_utc=self.NOW, correlation_id="corr_consume",
+                trusted_project_root=trusted_root)
+            self.assertTrue(resolved["resolved"])
+            self.binding_id = str(resolved["binding_id"])
+        return derive_worker_id(
+            workspace_id=self.WORKSPACE, scope_kind="project",
+            scope_identity=project, conversation_id=chat,
+            participant_id="participant_kimi")
+
+    def packet(self, name: str, *, project: str, chat: str) -> str:
+        relpath = f"Chats/{name}.md"
+        path = self.root / relpath
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            "---\n"
+            f"chat_id: {chat}\n"
+            "from: codex\n"
+            "sender_agent_id: codex\n"
+            f"title: {name}\n"
+            f"project_id: {project}\n"
+            'repo_targets: ["llm-collab"]\n'
+            "---\n\nbody\n",
+            encoding="utf-8",
+        )
+        return relpath
+
+    def render(self, project_id=None, chat_id=None) -> str:
+        with mock.patch.object(
+                operator_digest, "config_get", return_value=self.WORKSPACE), \
+             mock.patch.object(
+                operator_digest, "project_state_root",
+                return_value=self.root / "state"), \
+             mock.patch.object(operator_digest, "worker_sessions",
+                               return_value=([], 0)), \
+             mock.patch.object(operator_digest, "open_prs",
+                               return_value=([], [])), \
+             mock.patch.object(operator_digest, "project_repo_slugs",
+                               return_value=set()), \
+             mock.patch.object(operator_digest, "load_projects",
+                               return_value=[{"id": "amiga"}, {"id": "nuvyr"}]):
+            return operator_digest.render(project_id, chat_id)
+
+    def test_join_counts_only_exact_session_unread(self) -> None:
+        import _session_autobridge as autobridge
+
+        worker_id = self.add_worker(project="amiga", chat="CHAT-WORKER1", native="native_session_one")
+        binding_id = self.binding_id
+        self.add_worker(project="amiga", chat="CHAT-OTHER9", native="native_session_two")
+
+        bindings_dir = self.root / "State" / "session_autobridge" / "bindings"
+        binding_path = bindings_dir / "amiga" / "CHAT-WORKER1" / "kimi.json"
+        binding_path.parent.mkdir(parents=True)
+        binding_path.write_text(json.dumps({
+            "agent_id": "kimi",
+            "project_id": "amiga",
+            "chat_id": "CHAT-WORKER1",
+            "session_id": "SESSION-PI-KIMI-WORKER1",
+            "runtime_session_id": "native_session_one",
+            "runtime_family": "pi",
+            "runtime_home": str(self.root / "codex-home"),
+            "binding_id": binding_id,
+            "binding_generation": 1,
+            "endpoint_id": "endpoint_codex",
+            "repo_targets": ["app"],
+            "status": "active",
+        }), encoding="utf-8")
+        session_record = {
+            "agent_id": "kimi",
+            "project_id": "amiga",
+            "chat_id": "CHAT-WORKER1",
+            "session_id": "SESSION-PI-KIMI-WORKER1",
+            "status": "active",
+            "mode": "auto-read",
+            "wake_strategy": "runtime_trigger",
+            "repo_targets": ["app"],
+            "binding_id": binding_id,
+            "binding_generation": 1,
+            "runtime": {
+                "family": "pi",
+                "session_id": "native_session_one",
+                "home": str(self.root / "codex-home"),
+            },
+        }
+
+        def packet(name, **fm):
+            relpath = f"Chats/{name}.md"
+            path = self.root / relpath
+            path.parent.mkdir(parents=True, exist_ok=True)
+            lines = ["---", "chat_id: CHAT-WORKER1", "from: codex",
+                     "sender_agent_id: codex", f"title: {name}",
+                     "project_id: amiga", 'repo_targets: ["app"]']
+            lines += [f"{key}: {value}" for key, value in fm.items()]
+            path.write_text("\n".join(lines) + "\n---\n\nbody\n", encoding="utf-8")
+            return relpath
+
+        exact = packet("exact", target_session_id="SESSION-PI-KIMI-WORKER1",
+                       target_binding_id=binding_id, target_binding_generation=1)
+        sibling = packet("sibling", target_session_id="SESSION-PI-KIMI-SIBLING9",
+                         target_binding_id=binding_id, target_binding_generation=1)
+        agent_scoped = packet("agent-scoped")
+        (self.root / "agents" / "kimi").mkdir(parents=True)
+        (self.root / "agents" / "kimi" / "inbox.json").write_text(
+            json.dumps({"unread": [exact, sibling, agent_scoped], "read": []}),
+            encoding="utf-8")
+
+        with mock.patch.object(autobridge, "ROOT", self.root), \
+             mock.patch.object(autobridge, "BINDINGS_DIR", bindings_dir), \
+             mock.patch.object(autobridge, "iter_sessions", return_value=[session_record]), \
+             mock.patch.object(autobridge, "agent_inbox_path",
+                               lambda agent: self.root / "agents" / agent / "inbox.json"):
+            text = self.render("amiga")
+
+        # Only the packet targeted at this exact session/binding counts; the
+        # sibling-targeted and agent-scoped packets do not.
+        self.assertIn(f"| `{worker_id[:18]}` | kimi | amiga / CHAT-WORKER1 | active | 1 | 1 |", text)
+        # No exact dispatch pair is provable for the second worker: unknown, not 0.
+        self.assertIn("amiga / CHAT-OTHER9 | active | 1 | - |", text)
+
+    def test_exact_join_failure_renders_note_not_partial_rows(self) -> None:
+        import _session_autobridge as autobridge
+
+        self.add_worker(project="amiga", chat="CHAT-WORKER1", native="native_session_one")
+        with mock.patch.object(autobridge, "iter_sessions", return_value=[]), \
+             mock.patch.object(autobridge, "resolve_exact_dispatch_pair",
+                               side_effect=ValueError("binding unreadable")):
+            text = self.render("amiga")
+        self.assertIn("Canonical worker projection: canonical worker projection unavailable", text)
+        self.assertNotIn("CHAT-WORKER1 |", text)
+
+    def test_detached_checkout_renders_a_note_instead_of_crashing(self) -> None:
+        with mock.patch.object(operator_digest, "config_get", return_value=None), \
+             mock.patch.object(operator_digest, "worker_sessions",
+                               return_value=([], 0)), \
+             mock.patch.object(operator_digest, "open_prs",
+                               return_value=([], [])), \
+             mock.patch.object(operator_digest, "project_repo_slugs",
+                               return_value=set()):
+            text = operator_digest.render("amiga")
+        self.assertIn("Canonical worker projection: no workspace_id", text)
