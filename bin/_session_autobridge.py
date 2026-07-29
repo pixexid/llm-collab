@@ -237,15 +237,28 @@ def load_thread_pair(project_id: str, chat_id: str, agent_a: str, agent_b: str) 
     return json.loads(path.read_text())
 
 
-def save_binding(payload: dict) -> None:
+def prepare_binding_write(payload: dict) -> tuple[dict, str]:
+    candidate = dict(payload)
+    candidate["updated_utc"] = utc_iso()
+    content = json.dumps(candidate, indent=2, sort_keys=True)
+    if len(content.encode("utf-8")) > MAX_BINDING_BYTES:
+        raise BindingUnreadable(
+            f"binding exceeds {MAX_BINDING_BYTES} bytes; refusing to write an unreadable record"
+        )
+    return candidate, content
+
+
+def save_binding(payload: dict, prepared: tuple[dict, str] | None = None) -> None:
     path = autobridge_binding_path(
         str(payload["project_id"]),
         str(payload["chat_id"]),
         str(payload["agent_id"]),
     )
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload["updated_utc"] = utc_iso()
-    write_regular_file_atomically(path, json.dumps(payload, indent=2, sort_keys=True))
+    candidate, content = prepared or prepare_binding_write(payload)
+    write_regular_file_atomically(path, content)
+    payload.clear()
+    payload.update(candidate)
 
 
 def write_regular_file_atomically(path: Path, content: str) -> None:
@@ -1012,11 +1025,16 @@ def binding_payload_from_session(
 def update_binding_from_session(
     session: dict,
     existing: dict[str, Any] | None = None,
+    prepared: tuple[dict, str] | None = None,
 ) -> dict[str, Any] | None:
-    payload = binding_payload_from_session(session, existing=existing)
+    payload = (
+        prepared[0]
+        if prepared is not None
+        else binding_payload_from_session(session, existing=existing)
+    )
     if payload is None:
         return None
-    save_binding(payload)
+    save_binding(payload, prepared=prepared)
     return payload
 
 

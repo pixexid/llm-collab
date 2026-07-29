@@ -37,6 +37,8 @@ from _session_autobridge import (
     dispatch_session,
     load_binding,
     load_session,
+    binding_payload_from_session,
+    prepare_binding_write,
     prepare_session_write,
     provision_pi_canonical_binding,
     PiProvisioningRefused,
@@ -577,6 +579,22 @@ def register_session(args) -> dict:
         preflight_candidate.pop(placeholder, None)
     payload = preflight_candidate
     existing_binding = existing_binding_snapshot_or_refuse(payload)
+    binding_candidate = binding_payload_from_session(
+        {
+            **payload,
+            "binding_id": "x" * 128,
+            "binding_generation": 9223372036854775807,
+            "endpoint_id": "x" * 128,
+        },
+        existing=existing_binding,
+    )
+    try:
+        prepared_binding_candidate, _ = prepare_binding_write(binding_candidate)
+    except BindingUnreadable as error:
+        raise SystemExit(
+            f"[error] {error}. Refusing to register before the canonical transition; "
+            "no session was written."
+        )
     # Pre-validate the predecessor retirement as a pure refusal gate too: adding the
     # terminal status can itself cross the cap / trip inbox compaction, and that save
     # would otherwise land AFTER the swap. Plan (load + validate + prepare) now; commit
@@ -597,6 +615,12 @@ def register_session(args) -> dict:
         else:
             canonical = _provision_pi_binding_or_refuse(args, runtime, pi_native_session_id)
     payload.update(canonical)
+    for key in ("binding_id", "binding_generation", "endpoint_id"):
+        prepared_binding_candidate[key] = payload[key]
+    prepared_binding = (
+        prepared_binding_candidate,
+        json.dumps(prepared_binding_candidate, indent=2, sort_keys=True),
+    )
     prepared_candidate = dict(payload)
     prepared = (
         prepared_candidate,
@@ -606,7 +630,7 @@ def register_session(args) -> dict:
     # reopen), then write the new binding, then the new session (carried prepared).
     if retirement is not None:
         commit_superseded_retirement(*retirement)
-    binding = update_binding_from_session(payload, existing=existing_binding)
+    binding = update_binding_from_session(payload, prepared=prepared_binding)
     save_session(payload, prepared=prepared)
     if binding is not None:
         payload["binding"] = binding

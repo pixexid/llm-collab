@@ -7223,6 +7223,38 @@ class SessionAutobridgeTest(unittest.TestCase):
             json.loads(self._session_json(root, "SESSION-OLD").read_text()).get("status"),
         )
 
+    def test_pi_replacement_refuses_binding_growth_before_the_canonical_swap(self):
+        root, work, home = self._make_pi_replacement_workspace()
+        self._register_pi(
+            root, session="SESSION-OLD", project="amiga", chat="CHAT-R",
+            native="pi-old", endpoint="endpoint_old", runtime_instance="rt-old",
+            cwd=work, home=home, repo_target="app",
+        )
+        baseline = self._binding_rows(root, "amiga", "CHAT-R")
+        binding_file = (
+            root / "State" / "session_autobridge" / "bindings" / "amiga" / "CHAT-R" / "glmpi.json"
+        )
+        binding = json.loads(binding_file.read_text())
+        binding["padding"] = ""
+        empty = json.dumps(binding, indent=2, sort_keys=True)
+        binding["padding"] = "x" * (256 * 1024 - len(empty.encode("utf-8")) - 1)
+        binding_file.write_text(json.dumps(binding, indent=2, sort_keys=True))
+        self.assertLessEqual(binding_file.stat().st_size, 256 * 1024)
+
+        done = self._register_pi(
+            root, session="SESSION-NEW-LONG", project="amiga", chat="CHAT-R",
+            native="pi-new-long", endpoint="endpoint_new_long", runtime_instance="rt-new-long",
+            cwd=work, home=home, repo_target="app", supersedes="SESSION-OLD", check=False,
+        )
+        self.assertNotEqual(0, done.returncode)
+        self.assertIn("binding exceeds", done.stderr)
+        self.assertNotIn("Traceback", done.stderr)
+        self.assertEqual(baseline, self._binding_rows(root, "amiga", "CHAT-R"))
+        self.assertNotEqual(
+            "superseded",
+            json.loads(self._session_json(root, "SESSION-OLD").read_text()).get("status"),
+        )
+
     def test_pi_replacement_does_not_prepare_again_after_the_swap(self):
         args = SimpleNamespace(
             session="SESSION-NEW", agent="glmpi", project="amiga", chat="CHAT-R",
