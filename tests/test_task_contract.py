@@ -477,6 +477,50 @@ class TaskContractProductionSchemaGuardTest(unittest.TestCase):
             errors, _ = task_contract.validate_db_contract(task, "", stage="review")
         self.assertEqual([], errors, f"a genuine dev-only exception must pass: {errors}")
 
+    def test_gh82_done_gate_blocks_shared_ref_schema_change_without_apply_evidence(self) -> None:
+        # GH-82 remaining acceptance: on an AUTO-guarded shared-Supabase project (no
+        # explicit guard key — Amiga's shape), a production-impacting schema-change
+        # task cannot transition to done without the shared apply/assertion evidence.
+        # This ties the #385 auto-guard to the existing shared-supabase-required
+        # done-transition requirements; no new validator is needed.
+        project = self.unguarded_shared_ref_project("amiga")
+        base = {
+            "project_id": "amiga",
+            "status": "done",
+            "related_paths": list(self.GH_1453_MIGRATIONS),
+            "db_impact": "shared-supabase-required",
+            "db_schema_change_detected": True,
+            "db_project_ref": "amiga-project-ref",
+            "db_required_surfaces": ["amiga_db.execute_sql", "amiga db CLI"],
+        }
+        with patch.object(task_contract, "get_project", return_value=project):
+            missing_errors, summary = task_contract.validate_db_contract(
+                base, "", stage="done", transition=True,
+            )
+        self.assertTrue(
+            summary["production_schema_guard"]["enabled"],
+            "the shared-Supabase project must be auto-guarded",
+        )
+        for field in ("db_migration_files", "db_apply_result", "db_schema_assertion", "db_runtime_validation"):
+            self.assertTrue(
+                any(field in error for error in missing_errors),
+                f"done transition must refuse missing `{field}`: {missing_errors}",
+            )
+
+        complete = {
+            **base,
+            "db_migration_files": list(self.GH_1453_MIGRATIONS),
+            "db_apply_result": "pass: applied to shared Supabase",
+            "db_schema_assertion": "pass: execute_sql confirmed shape",
+            "db_advisors_result": "pass: no blocking advisors",
+            "db_runtime_validation": "pass: affected runtime exercised",
+        }
+        with patch.object(task_contract, "get_project", return_value=project):
+            complete_errors, _ = task_contract.validate_db_contract(
+                complete, "", stage="done", transition=True,
+            )
+        self.assertEqual([], complete_errors, f"complete shared evidence must pass done: {complete_errors}")
+
     def test_present_non_boolean_guard_fails_every_transition_stage(self) -> None:
         task = {
             "project_id": "nuvyr",
