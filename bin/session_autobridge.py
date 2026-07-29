@@ -40,6 +40,7 @@ from _session_autobridge import (
     prepare_session_write,
     provision_pi_canonical_binding,
     PiProvisioningRefused,
+    read_pi_session_fingerprint,
     resolve_active_canonical_binding,
     runtime_home_from_source,
     save_session,
@@ -403,6 +404,33 @@ def register_session(args) -> dict:
     # refuse. Every refusal is before any write. Only pi pays the ledger read.
     if runtime and runtime.get("family") == "pi":
         native_session_id = runtime.get("session_id")
+        # Read + validate the fingerprint from the EXACT registered native session
+        # source BEFORE any canonical write. A missing/malformed/incomplete source, or
+        # a source whose own cwd is not the checkout this registration binds, must
+        # refuse before provisioning mints any lifecycle/binding row — otherwise a
+        # fingerprint refusal would leave canonical partial state. The parsed dict is
+        # reused as the pin, and dispatch re-reads + compares it before every wake.
+        fingerprint = read_pi_session_fingerprint(
+            runtime.get("session_source"), native_session_id
+        )
+        if fingerprint is None:
+            raise SystemExit(
+                "[error] canonical_pi_fingerprint_required: could not read a complete "
+                "provider/model/thinking/cwd fingerprint from the exact native session "
+                "source; no session was written."
+            )
+        # The source's own cwd must be the exact checkout the binding attests to
+        # (same canonical realpath as --cwd); otherwise the binding proves checkout A
+        # while the session runs in B and the pinned fingerprint (B) passes forever.
+        claimed_cwd = getattr(args, "cwd", None)
+        if not claimed_cwd or os.path.realpath(fingerprint["cwd"]) != os.path.realpath(
+            claimed_cwd
+        ):
+            raise SystemExit(
+                "[error] canonical_pi_cwd_mismatch: the native session source cwd "
+                f"{fingerprint['cwd']!r} is not the registering checkout {claimed_cwd!r}; "
+                "no session was written."
+            )
         try:
             canonical = resolve_active_canonical_binding(
                 args.project, args.chat, args.agent, native_session_id
@@ -415,6 +443,7 @@ def register_session(args) -> dict:
         if canonical is None:
             canonical = _provision_pi_binding_or_refuse(args, runtime, native_session_id)
         payload.update(canonical)
+        payload["pi_fingerprint"] = fingerprint
     # Validate everything that can refuse this registration BEFORE retiring the
     # predecessor. A retire that ran first and was then followed by a preflight
     # refusal would have destroyed a valid live session on behalf of a continuation
