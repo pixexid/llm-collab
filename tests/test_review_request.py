@@ -142,6 +142,10 @@ class RequestHistoryTest(unittest.TestCase):
         bodies = [
             f"@codex review for lenses at exact head `{SHA}`.",
             f"@codex review for lenses at exact head `{OTHER_SHA}`.",
+            (
+                f"@codex review for lenses at exact head `{OTHER_SHA}`. "
+                f"Settled on `{SHA}`."
+            ),
             "unrelated comment",
             f"quoted text\n@codex review not at line start {SHA}",
         ]
@@ -462,6 +466,15 @@ class DeltaScopeMainTest(unittest.TestCase):
         body = post.call_args.args[-1]
         self.assertIn("full diff", body)
         self.assertIn("private repository", body)
+
+    def test_first_request_rejects_settled_families(self):
+        patches = self.patches(comments=["unrelated comment"])
+        with patches[0], patches[1], patches[2], patches[3], patches[4] as post:
+            with self.assertRaisesRegex(SystemExit, "requires a prior requested head"):
+                review_request.main(
+                    [*INITIAL_ARGS, "--settled", "budget family"]
+                )
+        post.assert_not_called()
 
     def test_unparseable_prior_falls_back_to_full_audit(self):
         patches = self.patches(comments=["@codex review for lenses with no head"])
