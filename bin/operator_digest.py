@@ -245,6 +245,13 @@ def packet_title(relpath: str) -> str:
     return body.removesuffix(".md").replace("-", " ")
 
 
+def markdown_cell(value: object, *, missing: str = "unknown") -> str:
+    text = str(value).strip() if value is not None else ""
+    if not text:
+        return missing
+    return text.replace("|", r"\|").replace("\r", " ").replace("\n", " ")
+
+
 def sender_of(relpath: str) -> str:
     parts = Path(relpath).name.split("_")
     for part in parts:
@@ -632,10 +639,18 @@ def render(project_id: str | None = None, chat_id: str | None = None) -> str:
     if not decisions:
         add("Nothing addressed to you is awaiting a decision.")
     else:
-        add("| age | what | status |")
-        add("|---|---|---|")
+        add("| age | project | chat | asking agent | task | what | status |")
+        add("|---|---|---|---|---|---|---|")
         for stamp, title, relpath in decisions[:12]:
-            add(f"| {age_of(stamp)} | {title} | {decision_status(relpath)} |")
+            frontmatter = packet_frontmatter(relpath)
+            add(
+                f"| {age_of(stamp)} | "
+                f"{markdown_cell(frontmatter.get('project_id'))} | "
+                f"{markdown_cell(frontmatter.get('chat_id'))} | "
+                f"{markdown_cell(frontmatter.get('sender_agent_id') or frontmatter.get('from'))} | "
+                f"{markdown_cell(frontmatter.get('related_task'), missing='none')} | "
+                f"{markdown_cell(title)} | {decision_status(relpath)} |"
+            )
         add("")
         add("Only *likely moot* means every referenced task and PR is settled; verify "
             "before dropping it. Everything else is awaiting you, including rows whose "
