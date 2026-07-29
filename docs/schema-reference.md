@@ -165,7 +165,7 @@ Project registry. Created by `scripts/init.py`. Gitignored.
 | `claude_desktop_bridge` | bool | Retained for compatibility; selects nothing. Claude is woken by its durable packet and the app's own background inbox watcher, never AX or Computer Use. |
 | `ui_ux.direct_app_only` | bool | Optional, default-off direct-app gate. When `true`, every non-`done` task must avoid design/sandbox/spec/handoff/parity, bare-template, and template-design-only lane types, repository-root `design/**` targets, and dependency materialization of newly authored `design/**` artifacts. Explicit implementation lanes such as `template-implementation`, `src/design/**`, and read-only `required_design_docs` remain valid. Absolute related/dependency paths require a complete resolvable project `repos` mapping so repository-root scope can be evaluated. A present non-boolean value is a configuration error. |
 | `ui_ux.required_design_docs` | string[] | Optional project-specific design sources prepended to every UI/UX task contract. Non-Amiga projects must configure these or provide explicit task-level design docs. |
-| `db.production_schema_guard` | bool | Optional strict boolean, default `false`. When `true` for the task's exact project, assignment/review/PR/done validation rejects schema-changing tasks classified as `none`, restricts `local-schema-only` to the exact operator-approved dev-only exception, and treats concrete `db/migrations/**` or `db/schema.sql` paths as schema changes even after `manual_false`. A present non-boolean fails closed; projects never inherit another project's value. |
+| `db.production_schema_guard` | bool | Optional strict boolean. Auto-enabled when the project declares `db.shared_supabase_project_ref` (the shared project is the acceptance DB); set `true` to force it on, or `false` to opt a shared-Supabase project out. When enabled for the task's exact project, assignment/review/PR/done validation rejects schema-changing tasks classified as `none`, restricts `local-schema-only` to the exact operator-approved dev-only exception, and treats concrete `db/migrations/**` or `db/schema.sql` paths as schema changes even after `manual_false`. A present non-boolean fails closed; projects never inherit another project's value. |
 | `db.shared_supabase_project_ref` | string | Optional shared Supabase project ref required by database-impact task contracts. Non-Amiga projects do not inherit Amiga's ref. |
 | `db.required_surfaces` | string[] | Optional project-specific CLI or MCP surfaces required by shared-database task contracts. |
 | `github.enabled` | bool | Whether GitHub integration is active |
@@ -538,11 +538,15 @@ queue order, blockers, and task contract.
 
 ### Production schema classification guard
 
-Projects that ship database schema to a shared or production environment may
-opt in with strict boolean `db.production_schema_guard: true`. Missing or
-`false` preserves existing behavior. A configured non-boolean refuses
+A project that declares a shared/production Supabase (`db.shared_supabase_project_ref`)
+is guarded by default: that shared project is the acceptance database, so its
+production DDL cannot be waved through as `local-schema-only`. Set strict boolean
+`db.production_schema_guard: true` to force the guard on for any project, or
+`false` to opt a shared-Supabase project out (a disposable/dev-only project with
+no shared ref stays unguarded either way). A configured non-boolean refuses
 assignment, review, PR, and new done transitions and names the exact project
-registry key to repair.
+registry key to repair. (GH-82: Amiga declared a shared ref but no guard key, so
+the guard was inert and a production migration shipped mis-classified.)
 
 When enabled, a detected schema change cannot use `db_impact: none`.
 `local-schema-only` is narrowly reserved for disposable development/test schema
