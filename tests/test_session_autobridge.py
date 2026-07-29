@@ -6,6 +6,7 @@ import os
 import base64
 import hashlib
 import shlex
+import shutil
 import socket
 import subprocess
 import sys
@@ -6952,6 +6953,144 @@ class SessionAutobridgeTest(unittest.TestCase):
         return (
             root / "State" / "session_autobridge" / "sessions" / f"{session}.json"
         )
+
+    def test_pi_lifecycle_deactivates_only_the_exact_native_session(self):
+        root = self.make_workspace()
+        sessions = root / "State" / "session_autobridge" / "sessions"
+        write_json(
+            sessions / "SESSION-PI-A.json",
+            {
+                "session_id": "SESSION-PI-A",
+                "agent_id": "glmpi",
+                "status": "active",
+                "runtime": {"family": "pi", "session_id": "native-a"},
+            },
+        )
+        write_json(
+            sessions / "SESSION-PI-B.json",
+            {
+                "session_id": "SESSION-PI-B",
+                "agent_id": "relay",
+                "status": "active",
+                "runtime": {"family": "pi", "session_id": "native-b"},
+            },
+        )
+
+        result = self.run_cli(
+            root, "deactivate-pi", "--native-session-id", "native-a"
+        )
+
+        self.assertEqual(["SESSION-PI-A"], result["deactivated_sessions"])
+        self.assertEqual(
+            "stopped", json.loads((sessions / "SESSION-PI-A.json").read_text())["status"]
+        )
+        self.assertEqual(
+            "active", json.loads((sessions / "SESSION-PI-B.json").read_text())["status"]
+        )
+        self.assertEqual(
+            [],
+            self.run_cli(
+                root, "deactivate-pi", "--native-session-id", "native-a"
+            )["deactivated_sessions"],
+        )
+
+        stale = {
+            "session_id": "SESSION-PI-A",
+            "agent_id": "glmpi",
+            "status": "active",
+            "runtime": {"family": "pi", "session_id": "native-a"},
+            "processed_messages": ["late"],
+        }
+        with patch.object(
+            session_autobridge_lib, "SESSIONS_DIR", sessions
+        ), patch.object(
+            session_autobridge_lib,
+            "SESSION_WRITE_LOCK",
+            root / "State" / "session_autobridge" / ".session-write.lock",
+        ), self.assertRaisesRegex(
+            ValueError, "refusing to resurrect stopped session"
+        ):
+            session_autobridge_lib.save_session(stale)
+        self.assertEqual(
+            "stopped", json.loads((sessions / "SESSION-PI-A.json").read_text())["status"]
+        )
+        with patch.object(
+            session_autobridge_lib, "SESSIONS_DIR", sessions
+        ), patch.object(
+            session_autobridge_lib,
+            "SESSION_WRITE_LOCK",
+            root / "State" / "session_autobridge" / ".session-write.lock",
+        ):
+            session_autobridge_lib.save_session(stale, allow_reactivation=True)
+        self.assertEqual(
+            "active", json.loads((sessions / "SESSION-PI-A.json").read_text())["status"]
+        )
+
+    def test_pi_lifecycle_extension_deactivates_from_symlink(self):
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("Node is required to execute the Pi extension")
+        if subprocess.run(
+            [node, "--experimental-strip-types", "--input-type=module", "-e", ""],
+            text=True,
+            capture_output=True,
+        ).returncode:
+            self.skipTest("Node must support TypeScript type stripping")
+        extension = REPO_ROOT / "pi-extensions" / "llm-collab-lifecycle.ts"
+        installed = Path(tempfile.mkdtemp(prefix="pi-extension-", dir="/tmp")) / extension.name
+        installed.symlink_to(extension)
+        program = """
+            import { pathToFileURL } from "node:url";
+            const handlers = {};
+            const calls = [];
+            const pi = {
+              on(name, handler) { handlers[name] = handler; },
+              async exec(command, args, options) {
+                calls.push({command, args, options});
+                return {code: 0, stdout: "", stderr: ""};
+              },
+            };
+            const extension = await import(pathToFileURL(process.argv[1]).href);
+            extension.default(pi);
+            const ctx = {sessionManager: {getSessionId: () => "native-exact"}};
+            await handlers.session_start({}, ctx);
+            await handlers.session_before_switch({}, ctx);
+            await handlers.session_before_fork({}, ctx);
+            await handlers.session_shutdown({}, ctx);
+            process.stdout.write(JSON.stringify({
+              calls,
+              cli: extension.resolveCli(pathToFileURL(process.argv[2]).href),
+            }));
+        """
+        result = subprocess.run(
+            [
+                node,
+                "--experimental-strip-types",
+                "--input-type=module",
+                "-e",
+                program,
+                str(extension),
+                str(installed),
+            ],
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        output = json.loads(result.stdout)
+        self.assertEqual(str(REPO_ROOT / "bin" / "llm-collab"), output["cli"])
+        calls = output["calls"]
+        self.assertEqual(4, len(calls))
+        for call in calls:
+            self.assertEqual(str(REPO_ROOT / "bin" / "llm-collab"), call["command"])
+            self.assertEqual(
+                [
+                    "session_autobridge.py",
+                    "deactivate-pi",
+                    "--native-session-id",
+                    "native-exact",
+                ],
+                call["args"],
+            )
 
     def test_pi_register_provisions_two_scopes_for_one_agent(self):
         # #378: one logical agent registers two different project/chat scopes with

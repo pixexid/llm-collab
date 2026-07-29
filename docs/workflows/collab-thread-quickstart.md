@@ -159,6 +159,22 @@ Before starting the monitor, run its exact `inbox.py --acknowledge` command once
 `tail -n 0` deliberately ignores old log lines, so this first drain picks up
 packets queued while the monitor was down.
 
+Install the lifecycle extension once by symlinking it from the installed runtime:
+
+```bash
+ln -sfn \
+  '<absolute-workspace>/pi-extensions/llm-collab-lifecycle.ts' \
+  ~/.pi/agent/extensions/llm-collab-lifecycle.ts
+```
+
+Reload Pi after installing it. The extension routes Pi's existing
+`session_start`, `session_before_switch`, `session_before_fork`, and
+`session_shutdown` events into the existing exact-session deactivation command.
+Switch, fork, reload, quit, and a clean restart therefore stop the old session's
+automatic wake; only explicit registration of the current native session restores
+it. An unclean process crash cannot emit a lifecycle event; its durable unread work
+stays available for pull/recovery rather than being rerouted automatically.
+
 Setup is complete only after disposable probes prove:
 
 1. an exact packet wakes this Pi session while idle and is acknowledged;
