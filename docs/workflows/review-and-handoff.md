@@ -20,13 +20,16 @@ For worker-owned isolated-worktree implementation lanes, handoff replies must al
 
 For UI/UX lanes, handoff replies and the linked task contract must also include:
 - `design_docs_read`
-- `design_skills_used`
-- `impeccable_commands_used`
-- `impeccable_detect_result`
+- `design_skills_used` matching the exact project's required design skills
 - `browser_validation_desktop`
 - `browser_validation_mobile`
 - `operator_visual_feedback_requested`
 - `design_doc_update_decision`
+
+When the exact project's required design skills include `impeccable`, also include
+`impeccable_commands_used` and `impeccable_detect_result`. These
+Impeccable-specific fields are not required for projects that do not select that
+skill.
 
 For UI/UX implementation lanes, handoff replies must also include a `Design-thinking pass`
 section and the linked task contract must record at least 3 `design_thinking_pass_items`.

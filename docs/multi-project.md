@@ -118,7 +118,8 @@ Edit `projects.json` (or regenerate with `python scripts/init.py`):
       "default_branch_base": "main",
       "preflight_command": ["pnpm", "preflight", "--json"],
       "ui_ux": {
-        "required_design_docs": ["/absolute/path/to/my-app/DESIGN.md"]
+        "required_design_docs": ["/absolute/path/to/my-app/DESIGN.md"],
+        "required_design_skills": ["impeccable"]
       },
       "db": {
         "production_schema_guard": false,
@@ -154,9 +155,14 @@ Edit `projects.json` (or regenerate with `python scripts/init.py`):
 Repo paths are relative to `projects_root` (from `collab.config.json`). Project runtime state, such as queues and local runbooks, is separate and resolves from `project_state_root`.
 
 For UI/UX projects, set `ui_ux.required_design_docs` to the project's own
-canonical design sources. The task-contract helper prepends those documents to
-UI/UX tasks and removes the Amiga default from non-Amiga projects. Additional
-task-specific design sources remain allowed.
+canonical design sources. Set `ui_ux.required_design_skills` when the project
+requires a particular design-skill family; the task-contract helper uses that
+exact list. If the field is absent, only the exact `amiga` project retains the
+legacy `[impeccable]` fallback; non-Amiga projects inherit no design skill.
+Impeccable-specific booleans, commands, and evidence are required only when
+`impeccable` appears in that exact list. The helper prepends configured documents to UI/UX tasks and removes the Amiga
+design-doc default from non-Amiga projects. Additional task-specific design
+sources remain allowed.
 
 Set `db.shared_supabase_project_ref` and `db.required_surfaces` only for projects
 that use the shared-Supabase task contract. Non-Amiga projects never inherit
