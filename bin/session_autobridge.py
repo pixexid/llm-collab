@@ -333,7 +333,7 @@ def _provision_pi_binding_or_refuse(
             "--repo-target naming the project repos key; no session was written."
         )
     try:
-        provision_pi_canonical_binding(
+        canonical = provision_pi_canonical_binding(
             args.project,
             args.chat,
             args.agent,
@@ -348,14 +348,6 @@ def _provision_pi_binding_or_refuse(
         )
     except PiProvisioningRefused as refusal:
         raise SystemExit(f"[error] {refusal}. No session was written.")
-    canonical = resolve_active_canonical_binding(
-        args.project, args.chat, args.agent, native_session_id
-    )
-    if canonical is None:
-        raise SystemExit(
-            "[error] canonical_binding_required: provisioning completed but no active "
-            "binding resolved; no session was written."
-        )
     return canonical
 
 

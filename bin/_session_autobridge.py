@@ -701,7 +701,7 @@ def provision_pi_canonical_binding(
     repo_target: str,
     predecessor: dict[str, object] | None = None,
     actor_id: str | None = None,
-) -> None:
+) -> dict[str, object]:
     """Mint the canonical Pi binding via the lifecycle reserve/consume seam.
 
     Register calls this only when no active binding exists and the native
@@ -747,6 +747,11 @@ def provision_pi_canonical_binding(
     lifecycle_module = importlib.import_module(".".join(("llm_collab", "session_lifecycle")))
     home_module = importlib.import_module(".".join(("llm_collab", "codex_runtime_home")))
     ref_module = importlib.import_module(".".join(("llm_collab", "codex_session_ref")))
+    if predecessor is not None:
+        try:
+            actor_id = store_module._conversation_binding_text(actor_id, "actor_id", 128)
+        except ValueError as error:
+            raise PiProvisioningRefused("canonical_replacement_actor_invalid", str(error))
 
     provider = lifecycle_module.PiLifecycleProvider()
     descriptor = provider.descriptor()
@@ -862,6 +867,11 @@ def provision_pi_canonical_binding(
                     ).encode("utf-8"),
                     created_at_utc=created,
                 )
+            return {
+                "binding_id": successor["binding_id"],
+                "binding_generation": successor["generation"],
+                "endpoint_id": successor["endpoint_id"],
+            }
         except sqlite3.IntegrityError as error:
             # A concurrent register took this owner between the prevention check
             # and consume. Convert the raw index violation to a bounded refusal;

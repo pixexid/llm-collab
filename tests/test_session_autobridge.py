@@ -6762,6 +6762,37 @@ class SessionAutobridgeTest(unittest.TestCase):
         )
         self.assertFalse(session_path.exists(), "no session may be published on refusal")
 
+    def test_pi_provision_returns_the_committed_binding_without_reopening_the_ledger(self):
+        args = SimpleNamespace(
+            project="amiga", chat="CHAT-PI", agent="glmpi",
+            endpoint_id="endpoint-pi", runtime_instance_id="pi-web",
+            cwd="/tmp/work", repo_targets=["app"],
+        )
+        canonical = {
+            "binding_id": "binding-new",
+            "binding_generation": 2,
+            "endpoint_id": "endpoint-pi",
+        }
+        with patch.object(
+            session_autobridge_cli,
+            "provision_pi_canonical_binding",
+            return_value=canonical,
+        ), patch.object(
+            session_autobridge_cli,
+            "resolve_active_canonical_binding",
+            side_effect=AssertionError("ledger reopened after commit"),
+        ):
+            self.assertEqual(
+                canonical,
+                session_autobridge_cli._provision_pi_binding_or_refuse(
+                    args,
+                    {"home": "/tmp/pi-home"},
+                    "pi-new",
+                    predecessor={"binding_id": "binding-old", "generation": 1},
+                    actor_id="SESSION-NEW",
+                ),
+            )
+
     def test_pi_registration_refuses_a_foreign_native_session(self):
         # GH-346 P1: the participant's binding is minted for one native session.
         # Registering a different --runtime-session-id must not inherit it (that
@@ -7143,6 +7174,19 @@ class SessionAutobridgeTest(unittest.TestCase):
         old = json.loads(self._session_json(root, "SESSION-OLD").read_text())
         self.assertNotEqual("superseded", old.get("status"))
         self.assertIsNone(old.get("superseded_by"))
+
+        # (c) The registering session becomes the canonical transition actor. Refuse
+        # an actor the ledger cannot store before reserve/consume writes anything.
+        invalid_actor = "S" * 129
+        done = self._register_pi(
+            root, session=invalid_actor, project="amiga", chat="CHAT-R",
+            native="pi-new3", endpoint="endpoint_new3", runtime_instance="rt-new3",
+            cwd=work, home=home, repo_target="app", supersedes="SESSION-OLD", check=False,
+        )
+        self.assertNotEqual(0, done.returncode)
+        self.assertIn("canonical_replacement_actor_invalid", done.stderr)
+        self.assertFalse(self._session_json(root, invalid_actor).exists())
+        self.assertEqual(baseline, self._binding_rows(root, "amiga", "CHAT-R"))
 
     def test_pi_replacement_pure_refusal_runs_before_the_canonical_swap(self):
         # #319 ordering: every pure refusal (here: an unreadable existing binding)
