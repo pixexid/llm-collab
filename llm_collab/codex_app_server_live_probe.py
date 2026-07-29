@@ -4,6 +4,10 @@ The live probe is intentionally narrow: one caller-supplied WebSocket endpoint,
 one MCP initialize exchange, one initialized notification, one model/list read,
 then disconnect. It does not discover, launch, steer, or store Codex runtime
 state.
+
+``probe_exact_thread`` extends that with one native ``thread/read`` so a caller can
+prove one exact native thread is addressable on a supplied endpoint; it still
+starts no turn and stores nothing.
 """
 
 from __future__ import annotations
@@ -15,6 +19,7 @@ import json
 import os
 import socket
 import ssl
+import time
 from typing import Any, Mapping
 import urllib.parse
 
@@ -23,6 +28,17 @@ from llm_collab.codex_app_server_probe import CLIENT_CAPABILITIES, CLIENT_INFO, 
 
 READ_ONLY_REQUEST_METHODS = ("initialize", "model/list")
 READ_ONLY_NOTIFICATION_METHODS = ("initialized",)
+# The sole thread-touching request: a native thread/read with exactly threadId
+# and includeTurns false (no resume, no mutation, no turn fanout).
+THREAD_READ_METHOD = "thread/read"
+# Bounds for the bounded notification-aware exchange. MAX_EXCHANGE_BYTES is the
+# CUMULATIVE byte budget for one whole exchange (notifications + pings + the
+# matched response); _recv_frame refuses a declared payload length above the
+# remaining budget before reading/allocating it, so a peer cannot exhaust memory
+# with many individually-small frames. Values mirror the App Server event caps
+# in bin/codex_stream.py (MAX_PENDING_EVENT_BYTES / MAX_PENDING_EVENTS).
+MAX_EXCHANGE_BYTES = 8 * 1024 * 1024
+MAX_EXCHANGE_NOTIFICATIONS = 4096
 EXPECTED_SERVER = "codex-app-server"
 EXPECTED_SERVER_CAPABILITIES = frozenset(("tools",))
 WEBSOCKET_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -38,6 +54,17 @@ class CodexAppServerLiveProbeResult:
     server_name: str
     capabilities: frozenset[str]
     default_model: str | None
+    methods: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class CodexAppServerExactThreadResult:
+    """Minimal proof that one exact native thread is addressable on the supplied
+    endpoint: only the proven thread id and the methods actually issued. The
+    native initialize response carries no protocolVersion/serverInfo, so this
+    result reports neither. Runtime-home binding is the caller's authority."""
+
+    thread_id: str
     methods: tuple[str, ...]
 
 
@@ -109,16 +136,91 @@ def _probe_transport(
     )
 
 
-def _request(transport: Any, request_number: int, method: str, params: Mapping[str, Any]) -> Mapping[str, Any]:
-    if method not in READ_ONLY_REQUEST_METHODS:
-        raise CodexAppServerLiveProbeError("method is outside read-only probe set")
+def probe_exact_thread(
+    thread_id: str,
+    *,
+    endpoint_url: str | None = None,
+    transport: Any | None = None,
+    timeout_seconds: float = 5,
+    token: str | None = None,
+) -> CodexAppServerExactThreadResult:
+    """Read-only exact-thread probe: a minimal initialize (request + initialized
+    notification, no field validation) then a native thread/read with exactly
+    threadId (starts no model turn). Proves one exact native thread is
+    addressable on the supplied endpoint by requiring result.thread.id to equal
+    the requested id. Fails closed on a malformed id, JSON-RPC error, timeout,
+    envelope drift, or a mismatched returned id. Runtime-home binding is the
+    caller's authority; the result reports no identity fields the server does
+    not return."""
+    _require_thread_id(thread_id)
+    if (endpoint_url is None) == (transport is None):
+        raise CodexAppServerLiveProbeError("supply exactly one endpoint_url or transport")
+    if transport is not None:
+        return _probe_exact_thread_transport(transport, thread_id)
+    with _WebSocketJsonRpcTransport(
+        endpoint_url, timeout_seconds=timeout_seconds, token=token
+    ) as live_transport:
+        return _probe_exact_thread_transport(live_transport, thread_id)
+
+
+def _probe_exact_thread_transport(
+    transport: Any, thread_id: str
+) -> CodexAppServerExactThreadResult:
+    # Minimal initialize: issue the request + initialized notification the server
+    # needs before thread/read. The native initialize response carries no
+    # protocolVersion/serverInfo/capabilities, so none are validated or reported
+    # here (the existing probe_live validator is left untouched for its own
+    # older observable contract).
+    _request(
+        transport,
+        1,
+        "initialize",
+        {
+            "protocolVersion": PROTOCOL_VERSION,
+            "clientInfo": CLIENT_INFO,
+            "capabilities": CLIENT_CAPABILITIES,
+        },
+        require_jsonrpc=False,
+    )
+    _notify(transport, "initialized")
+    result = _request(
+        transport, 2, THREAD_READ_METHOD, {"threadId": thread_id, "includeTurns": False},
+        require_jsonrpc=False,
+    )
+    thread = _required_mapping(result, "thread")
+    if _required_string(thread, "id") != thread_id:
+        raise CodexAppServerLiveProbeError("thread/read returned a different thread id")
+    return CodexAppServerExactThreadResult(
+        thread_id=thread_id,
+        methods=("initialize", THREAD_READ_METHOD),
+    )
+
+
+def _require_thread_id(thread_id: object) -> None:
+    # Native thread ids are server-owned opaque strings; only non-empty string
+    # shape is checked here. thread/read plus the returned-id equality check
+    # adjudicate whether the id is real.
+    if not isinstance(thread_id, str) or not thread_id.strip():
+        raise CodexAppServerLiveProbeError("thread_id is required")
+
+
+def _request(
+    transport: Any,
+    request_number: int,
+    method: str,
+    params: Mapping[str, Any],
+    *,
+    require_jsonrpc: bool = True,
+) -> Mapping[str, Any]:
+    if method not in READ_ONLY_REQUEST_METHODS and method != THREAD_READ_METHOD:
+        raise CodexAppServerLiveProbeError("method is outside the allowed probe set")
     try:
         response = transport.exchange(
             {"jsonrpc": JSONRPC_VERSION, "id": f"llm-collab-{request_number}", "method": method, "params": dict(params)}
         )
     except Exception as error:
         raise CodexAppServerLiveProbeError(f"{method} failed") from error
-    envelope = _envelope(response)
+    envelope = _envelope(response, require_jsonrpc=require_jsonrpc)
     expected_id = f"llm-collab-{request_number}"
     if envelope.get("id") != expected_id:
         raise CodexAppServerLiveProbeError("response id mismatch")
@@ -136,7 +238,7 @@ def _notify(transport: Any, method: str) -> None:
         raise CodexAppServerLiveProbeError(f"{method} failed") from error
 
 
-def _envelope(raw: Any) -> Mapping[str, Any]:
+def _envelope(raw: Any, *, require_jsonrpc: bool = True) -> Mapping[str, Any]:
     if isinstance(raw, (str, bytes, bytearray)):
         try:
             raw = json.loads(raw, object_pairs_hook=_no_duplicates)
@@ -149,7 +251,12 @@ def _envelope(raw: Any) -> Mapping[str, Any]:
     unknown = set(raw) - {"jsonrpc", "id", "result", "error"}
     if unknown:
         raise CodexAppServerLiveProbeError(f"unknown response member {sorted(unknown)[0]}")
-    if raw.get("jsonrpc") != JSONRPC_VERSION:
+    # probe_live keeps the strict contract (jsonrpc present and 2.0); only the
+    # native exact-thread path is jsonrpc-optional (absent allowed; present must be 2.0).
+    if require_jsonrpc:
+        if raw.get("jsonrpc") != JSONRPC_VERSION:
+            raise CodexAppServerLiveProbeError("invalid jsonrpc version")
+    elif "jsonrpc" in raw and raw["jsonrpc"] != JSONRPC_VERSION:
         raise CodexAppServerLiveProbeError("invalid jsonrpc version")
     if ("result" in raw) == ("error" in raw):
         raise CodexAppServerLiveProbeError("response must contain exactly one of result or error")
@@ -228,20 +335,65 @@ class _WebSocketJsonRpcTransport:
 
     def close(self) -> None:
         sock = self._socket
-        self._socket = None
-        self._closed = True
         if sock is None:
+            self._closed = True
             return
         try:
             self._send_frame(b"", opcode=0x8, sock=sock)
         except OSError:
             pass
         finally:
+            self._socket = None
+            self._closed = True
             sock.close()
 
     def exchange(self, frame: Mapping[str, Any]) -> Mapping[str, Any]:
-        self._send_json(frame)
-        return self._recv_json()
+        """Send one request and wait for its exact id.
+
+        Notifications (a JSON object with a string ``method`` and no ``id``) may
+        precede the response and are skipped, bounded by MAX_EXCHANGE_NOTIFICATIONS.
+        A server request (``method`` plus ``id``), a malformed frame, a non-matching
+        response id, or deadline / cumulative-byte-budget / notification-count
+        exceedance all fail closed. The whole exchange shares one absolute timeout
+        (set on the transport) and one cumulative byte budget; notifications do
+        not reset either. The raw matching response is returned; the caller applies
+        the strict response envelope exactly once.
+        """
+        deadline = time.monotonic() + self.timeout_seconds
+        self._send_json(frame, deadline=deadline)
+        expected_id = frame.get("id")
+        remaining_bytes = MAX_EXCHANGE_BYTES
+        skipped = 0
+        while True:
+            opcode, payload, consumed = self._recv_frame(remaining_bytes, deadline)
+            remaining_bytes -= consumed
+            if opcode == 0x8:
+                raise CodexAppServerLiveProbeError("websocket closed")
+            if opcode == 0x9:
+                self._send_frame(payload, opcode=0xA)
+                continue
+            if opcode != 0x1:
+                raise CodexAppServerLiveProbeError("unexpected websocket frame")
+            try:
+                message = json.loads(payload.decode("utf-8"), object_pairs_hook=_no_duplicates)
+            except _DuplicateMember as error:
+                raise CodexAppServerLiveProbeError(f"duplicate frame member {error}")
+            except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                raise CodexAppServerLiveProbeError("invalid JSON frame") from error
+            if not isinstance(message, dict):
+                raise CodexAppServerLiveProbeError("frame is not a JSON object")
+            has_method = isinstance(message.get("method"), str)
+            has_id = "id" in message
+            if has_method and not has_id:
+                skipped += 1
+                if skipped > MAX_EXCHANGE_NOTIFICATIONS:
+                    raise CodexAppServerLiveProbeError("too many notifications before response")
+                continue
+            if has_method and has_id:
+                raise CodexAppServerLiveProbeError("server request during exchange")
+            if message.get("id") != expected_id:
+                raise CodexAppServerLiveProbeError("response id mismatch")
+            return message
 
     def notify(self, frame: Mapping[str, Any]) -> None:
         self._send_json(frame)
@@ -280,14 +432,21 @@ class _WebSocketJsonRpcTransport:
         if expected_accept not in header_text:
             raise CodexAppServerLiveProbeError("invalid websocket accept header")
 
-    def _send_json(self, payload: Mapping[str, Any]) -> None:
+    def _send_json(self, payload: Mapping[str, Any], *, deadline: float | None = None) -> None:
         encoded = json.dumps(dict(payload), sort_keys=True, separators=(",", ":")).encode("utf-8")
-        self._send_frame(encoded)
+        self._send_frame(encoded, deadline=deadline)
 
-    def _send_frame(self, payload: bytes, opcode: int = 0x1, *, sock: socket.socket | None = None) -> None:
+    def _send_frame(self, payload: bytes, opcode: int = 0x1, *, sock: socket.socket | None = None, deadline: float | None = None) -> None:
         active = sock or self._socket
         if active is None or self._closed:
             raise CodexAppServerLiveProbeError("websocket is not connected")
+        if deadline is not None:
+            # Bound the send by the same absolute exchange deadline so socket
+            # backpressure cannot run past it.
+            remaining_time = deadline - time.monotonic()
+            if remaining_time <= 0:
+                raise CodexAppServerLiveProbeError("exchange timed out")
+            active.settimeout(remaining_time)
         length = len(payload)
         header = bytearray([0x80 | opcode])
         if length < 126:
@@ -301,43 +460,40 @@ class _WebSocketJsonRpcTransport:
         masked = bytes(byte ^ mask[index % 4] for index, byte in enumerate(payload))
         active.sendall(bytes(header) + mask + masked)
 
-    def _recv_json(self) -> Mapping[str, Any]:
-        while True:
-            opcode, payload = self._recv_frame()
-            if opcode == 0x8:
-                raise CodexAppServerLiveProbeError("websocket closed")
-            if opcode == 0x9:
-                self._send_frame(payload, opcode=0xA)
-                continue
-            if opcode != 0x1:
-                raise CodexAppServerLiveProbeError("unexpected websocket frame")
-            try:
-                return _envelope(payload.decode("utf-8"))
-            except UnicodeDecodeError as error:
-                raise CodexAppServerLiveProbeError("invalid JSON response") from error
-
-    def _recv_frame(self) -> tuple[int, bytes]:
-        first, second = self._read_exact(2)
+    def _recv_frame(self, remaining_bytes: int, deadline: float) -> tuple[int, bytes, int]:
+        first, second = self._read_exact(2, deadline)
         opcode = first & 0x0F
         masked = bool(second & 0x80)
         length = second & 0x7F
         if length == 126:
-            length = int.from_bytes(self._read_exact(2), "big")
+            length = int.from_bytes(self._read_exact(2, deadline), "big")
         elif length == 127:
-            length = int.from_bytes(self._read_exact(8), "big")
-        mask = self._read_exact(4) if masked else b""
-        payload = self._read_exact(length) if length else b""
+            length = int.from_bytes(self._read_exact(8, deadline), "big")
+        # Refuse a declared payload above the remaining CUMULATIVE budget before
+        # reading or allocating it, so many individually-small frames cannot
+        # exhaust memory.
+        if length > remaining_bytes:
+            raise CodexAppServerLiveProbeError("exchange byte budget exceeded")
+        mask = self._read_exact(4, deadline) if masked else b""
+        payload = self._read_exact(length, deadline) if length else b""
         if masked:
             payload = bytes(byte ^ mask[index % 4] for index, byte in enumerate(payload))
-        return opcode, payload
+        return opcode, payload, length
 
-    def _read_exact(self, count: int) -> bytes:
+    def _read_exact(self, count: int, deadline: float) -> bytes:
         active = self._socket
         if active is None:
             raise CodexAppServerLiveProbeError("websocket is not connected")
         chunks: list[bytes] = []
         remaining = count
         while remaining:
+            # One absolute deadline for the whole exchange: recompute and re-clamp
+            # before EVERY recv so a peer dripping one byte at a time cannot run
+            # past it (no successful recv resets the deadline).
+            remaining_time = deadline - time.monotonic()
+            if remaining_time <= 0:
+                raise CodexAppServerLiveProbeError("exchange timed out")
+            active.settimeout(remaining_time)
             chunk = active.recv(remaining)
             if not chunk:
                 raise CodexAppServerLiveProbeError("websocket closed")
