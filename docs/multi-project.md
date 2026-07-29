@@ -32,7 +32,7 @@ This inventory records the enrollment owner and audit outcome; zero rules is val
 | Repository | Owner | Incident-derived rules | Where they live |
 |---|---|---|---|
 | `llm-collab` | codex | 3 | root `AGENTS.md` → `## Code Review Rules` |
-| `amiga` | codex | 2 — paid/provider idempotency and replace-lock authority; public Supabase RPC role execution | `amiga` `AGENTS.md` → `### Code Review Rules`, **not on `main` yet**: branch `claude/gh310-manual-review-policy` |
+| `amiga` | codex | 2 — paid/provider idempotency and replace-lock authority; public Supabase RPC role execution | `amiga` `AGENTS.md` → `### Code Review Rules` (merged in `pixexid/amiga#1584`) |
 | `amiga_house_cleaning_company_docs` | codex | 0 — content repository, no executable surface | n/a |
 | `nuvyr_app` | kimi | 0 — no adjudicated incident yet | n/a |
 
