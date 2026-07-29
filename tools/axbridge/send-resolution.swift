@@ -300,3 +300,28 @@ func routineRingDecision(profile: ComposerProfile, attended: Bool, axValue: Stri
     if !composerValueIsEffectivelyEmpty(profile, v) { return .refuseNonEmptyDraft }
     return .proceed
 }
+
+// Closed machine-readable AX doorbell outcome vocabulary (GH-98). Exactly one
+// AX_OUTCOME line on stdout per delivery-relevant exit from ring/confirm;
+// human prose stays on stderr and exit codes are unchanged. Method and reason
+// are single tokens so the line is trivially parseable.
+enum AxOutcome: Equatable {
+    case verified(method: String)
+    case ambiguous(reason: String)
+    case notDelivered(reason: String)
+}
+
+func axOutcomeToken(_ value: String) -> String {
+    value.replacingOccurrences(of: " ", with: "_")
+}
+
+func axOutcomeLine(_ outcome: AxOutcome) -> String {
+    switch outcome {
+    case .verified(let method):
+        return "AX_OUTCOME=VERIFIED method=\(axOutcomeToken(method))"
+    case .ambiguous(let reason):
+        return "AX_OUTCOME=AMBIGUOUS reason=\(axOutcomeToken(reason))"
+    case .notDelivered(let reason):
+        return "AX_OUTCOME=NOT_DELIVERED reason=\(axOutcomeToken(reason))"
+    }
+}

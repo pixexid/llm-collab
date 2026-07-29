@@ -16,6 +16,17 @@ for command in ring type; do
   set -e
   [[ $status -eq 11 ]]
   [[ "$refusal" == *"Claude receives durable mailbox packets"* ]]
+  [[ "$refusal" == *"AX_OUTCOME=NOT_DELIVERED reason=claude_durable_only"* ]]
+done
+# GH-98: a malformed ring/type (missing --text) stays a usage error with NO
+# delivery outcome line — claude_durable_only requires a well-formed attempt.
+for command in ring type; do
+  set +e
+  usage="$("$cli" "$command" --app Claude 2>&1)"
+  status=$?
+  set -e
+  [[ $status -eq 64 ]]
+  [[ "$usage" != *"AX_OUTCOME"* ]]
 done
 echo
 bash "$here/wrapper-test.sh"

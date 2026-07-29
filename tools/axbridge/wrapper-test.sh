@@ -24,9 +24,10 @@ echo "$@" >> "$AXSEND_STUB_LOG"
 case "$1" in
   ring)
     case "${RING_EXIT:-0}" in
-      7) echo "WARN: NOT DELIVERED (stub)";;
-      9) echo "identity lost (stub)";;
-      0) echo "VERIFIED: stub ring (non-queued)";;
+      7) echo "WARN: NOT DELIVERED (stub)"; echo "AX_OUTCOME=NOT_DELIVERED reason=submit_not_landed";;
+      9) echo "identity lost (stub)"; echo "AX_OUTCOME=AMBIGUOUS reason=identity_lost";;
+      3) echo "ambiguous (stub)"; echo "AX_OUTCOME=AMBIGUOUS reason=queued_unconfirmed";;
+      0) echo "VERIFIED: stub ring (non-queued)"; echo "AX_OUTCOME=VERIFIED method=stub_ring";;
     esac
     exit "${RING_EXIT:-0}";;
   turns)
@@ -37,7 +38,7 @@ case "$1" in
     if [ "$n" -eq 1 ]; then echo "${TURNS_BASELINE:-0}"; exit "${TURNS_BASELINE_EXIT:-0}"; fi
     echo "${TURNS_AFTER:-0}"; exit "${TURNS_AFTER_EXIT:-0}";;
   confirm)
-    if [ "${CONFIRM_EXIT:-0}" -eq 0 ]; then echo "delivered: stub"; else echo "not delivered: stub"; fi
+    if [ "${CONFIRM_EXIT:-0}" -eq 0 ]; then echo "delivered: stub"; echo "AX_OUTCOME=VERIFIED method=conversation_turn"; else echo "not delivered: stub"; echo "AX_OUTCOME=NOT_DELIVERED reason=text_not_landed"; fi
     exit "${CONFIRM_EXIT:-0}";;
 esac
 exit 0
@@ -73,6 +74,34 @@ run 7 0 1 ring --app ZCode --text tok --submit
 assert "ring 7 + new turn (0->1) -> wrapper exit 0 (freshness promote)" '(( rc == 0 ))'
 assert "freshness promote sends exactly one ring (no resend)" '[[ "$(count ring)" == "1" ]]'
 
+# GH-98: freshness promotion replaces the provisional NOT_DELIVERED with one
+# final VERIFIED outcome line — a promoted success never exposes the stale failure.
+: > "$log"; : > "$tcount"
+set +e
+promote_out=$(RING_EXIT=7 TURNS_BASELINE=0 TURNS_AFTER=1 "$tmp/bin/axsend-ensure" ring --app ZCode --text tok --submit 2>&1)
+rc=$?
+set -e
+assert "freshness promote emits final AX_OUTCOME=VERIFIED" '(( rc == 0 )) && [[ "$promote_out" == *"AX_OUTCOME=VERIFIED method=freshness_promotion"* ]]'
+assert "freshness promote emits exactly ONE outcome, NOT_DELIVERED absent" '[[ "$(grep -c "^AX_OUTCOME=" <<<"$promote_out")" == "1" ]] && [[ "$promote_out" != *"NOT_DELIVERED"* ]]'
+
+# GH-98: an unpromoted exit 7 emits exactly one outcome — the retained
+# NOT_DELIVERED, re-emitted once by the wrapper (never duplicated, never zero).
+: > "$log"; : > "$tcount"
+set +e
+fail_out=$(RING_EXIT=7 TURNS_BASELINE=1 TURNS_AFTER=1 "$tmp/bin/axsend-ensure" ring --app ZCode --text tok --submit 2>&1)
+rc=$?
+set -e
+assert "unpromoted exit 7 emits exactly one retained NOT_DELIVERED" '(( rc == 7 )) && [[ "$(grep -c "^AX_OUTCOME=" <<<"$fail_out")" == "1" ]] && [[ "$fail_out" == *"AX_OUTCOME=NOT_DELIVERED reason=submit_not_landed"* ]]'
+
+# GH-98: a successful submit ring emits exactly one final outcome — from the
+# follow-up confirm, with the ring's own provisional line suppressed.
+: > "$log"; : > "$tcount"
+set +e
+ok_out=$(RING_EXIT=0 "$tmp/bin/axsend-ensure" ring --app ZCode --text tok --submit 2>&1)
+rc=$?
+set -e
+assert "successful submit ring emits exactly one outcome (from confirm)" '(( rc == 0 )) && [[ "$(grep -c "^AX_OUTCOME=" <<<"$ok_out")" == "1" ]] && [[ "$ok_out" == *"AX_OUTCOME=VERIFIED method=conversation_turn"* ]]'
+
 # R7 CORE: a STALE identical prior turn (baseline 1) with a FAILED new ring (count
 # stays 1) must NOT promote — the old fix would falsely promote from mere existence.
 run 7 1 1 ring --app ZCode --text tok --submit
@@ -83,6 +112,13 @@ assert "ring 7 + stale identical turn (1->1, no increase) -> stays nonzero" '(( 
 # with a turn-count that looks fresh, exit 9 stays 9.
 run 9 0 1 ring --app ZCode --text tok --submit
 assert "ring exit 9 (identity lost) -> stays 9, never auto-promoted" '(( rc == 9 ))'
+
+# GH-98: ambiguous is not exit-zero success — ring exit 3 (incl. the former
+# queued_unconfirmed zero) propagates as 3 and is never promoted or confirmed
+# away; ambiguous stays pull/manual.
+run 3 0 1 ring --app ZCode --text tok --submit
+assert "ring exit 3 (ambiguous) propagates, never zero" '(( rc == 3 ))'
+assert "ring exit 3 runs no follow-up confirm" '[[ "$(count confirm)" == "0" ]]'
 
 # R8 CORE: an untrustworthy baseline — `axsend turns` prints "0" but EXITS NONZERO
 # (resolution failure) — must NOT be taken as a real baseline of 0. Otherwise a
