@@ -636,6 +636,31 @@ class ScopedDigestTest(unittest.TestCase):
             text = operator_digest.render("llm-collab", "CHAT-A")
         self.assertIn("work waiting; no dispatchable session", text)
 
+    def test_decision_rows_render_exact_packet_context_and_missing_task(self) -> None:
+        keep = self.packet("decision", project="llm-collab", chat="CHAT-A", sender="claude")
+        other = self.packet("other-decision", project="amiga", chat="CHAT-B", sender="codex")
+        keep_path = self.root / keep
+        keep_path.write_text(
+            keep_path.read_text(encoding="utf-8").replace(
+                'repo_targets: ["llm-collab"]',
+                'repo_targets: ["llm-collab"]\nrelated_task: TASK-ABC123',
+            ),
+            encoding="utf-8",
+        )
+        (self.root / "agents" / "operator" / "inbox.json").write_text(
+            json.dumps({"unread": [keep, other], "read": []}), encoding="utf-8")
+
+        with mock.patch.object(operator_digest, "agent_ids", return_value=["operator"]), \
+             mock.patch.object(operator_digest, "worker_sessions", return_value=([], 0)), \
+             mock.patch.object(operator_digest, "open_prs", return_value=([], [])), \
+             mock.patch.object(operator_digest, "project_repo_slugs", return_value=set()):
+            text = operator_digest.render()
+
+        self.assertIn("| project | chat | asking agent | task |", text)
+        self.assertIn("| llm-collab | CHAT-A | claude | TASK-ABC123 | decision |", text)
+        self.assertIn("| amiga | CHAT-B | codex | none | other decision |", text)
+        self.assertNotIn("| llm-collab | CHAT-B |", text)
+
 
 class CanonicalWorkerJoinTest(unittest.TestCase):
     """#304: digest joins canonical worker binding state with unread outstanding."""
