@@ -1028,6 +1028,9 @@ def binding_payload_from_session(
     for key in ("binding_id", "binding_generation", "endpoint_id"):
         if session.get(key) is not None:
             payload[key] = session[key]
+    for key in ("repo_targets", "pi_fingerprint"):
+        if session.get(key) is not None:
+            payload[key] = session[key]
     return payload
 
 
