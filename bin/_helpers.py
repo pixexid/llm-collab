@@ -977,6 +977,14 @@ def target_task_path(title: str, tid: str, status: str) -> Path:
 # Handoff prompt generator
 # ---------------------------------------------------------------------------
 
+def collab_join_skill_path() -> Path:
+    return ROOT / "skills" / "llm-collab-join" / "SKILL.md"
+
+
+def collab_bootstrap_command(agent_id: str) -> str:
+    return f"{ROOT}/bin/llm-collab session_bootstrap.py --agent {agent_id}"
+
+
 def build_handoff_prompt(
     agent: dict,
     *,
@@ -991,8 +999,8 @@ def build_handoff_prompt(
         "identity_note",
         f"You are {display_name} ({agent_id}). Read only messages addressed to '{agent_id}'.",
     )
-    runner = f"{ROOT}/bin/llm-collab"
-    bootstrap_cmd = f"{runner} session_bootstrap.py --agent {agent['id']}"
+    bootstrap_cmd = collab_bootstrap_command(agent_id)
+    join_skill = collab_join_skill_path()
     memory_path = f"{ROOT}/agents/{agent_id}/memory.md"
     if first_time:
         lines = [
@@ -1005,15 +1013,15 @@ def build_handoff_prompt(
             f"4) Read docs: {ROOT}/docs/getting-started.md",
             f"5) Read docs: {ROOT}/docs/identity-system.md",
             f"6) Read docs: {ROOT}/docs/workflows/README.md",
-            "7) Update memory files now:",
+            "7) Update memory files now as thin pointers:",
             "   - Your main/global memory file for this model account.",
             "   - The repo/project memory file used when working on this project.",
             f"   - Local collab memory file: {memory_path}",
             "",
-            "Memory updates must include:",
+            "Memory updates must point at:",
+            f"- Join skill: {join_skill}",
             f"- Bootstrap: {bootstrap_cmd}",
-            f"- Inbox: {runner} inbox.py --me {agent_id}",
-            f"- Deliver: {runner} deliver.py --chat last --from {agent_id} --to <agent> --project <project_id> --title \"...\"",
+            "- Rule: keep memory files as pointers; do not restate collab command families.",
             "- Rule: always bootstrap and check inbox at session start.",
             "- Rule: project-scoped is the default; never reuse another project's paths, DB refs, tools, or policy.",
             "",

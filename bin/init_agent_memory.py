@@ -24,19 +24,16 @@ from _python_runtime import require_python
 require_python()
 
 import argparse
-import json
+import re
 
 sys.path.insert(0, str(Path(__file__).parent))
 from _helpers import (
     ROOT,
     agent_ids,
-    agent_identity_path,
-    agent_memory_path,
+    collab_bootstrap_command,
+    collab_join_skill_path,
     config_get,
     get_agent,
-    load_projects,
-    project_ids,
-    utc_iso,
     write_file,
 )
 
@@ -52,45 +49,40 @@ def parse_args():
     return p.parse_args()
 
 
-def build_snippet(agent_id: str) -> str:
+def build_snippet(agent_id: str, *, skill_capable: bool) -> str:
     agent = get_agent(agent_id)
     workspace_name = config_get("workspace_name", "llm-collab")
-    projects = load_projects()
-    project_list = ", ".join(p["id"] for p in projects) if projects else "(none configured)"
-    all_agents = agent_ids()
-    other_agents = [a for a in all_agents if a != agent_id]
+    join_skill = collab_join_skill_path()
+    bootstrap_cmd = collab_bootstrap_command(agent_id)
 
     lines = [
         "## Collaboration Workspace",
         "",
-        f"You participate in a file-based multi-agent collaboration workspace.",
         f"Workspace: `{ROOT}`",
         f"Workspace name: `{workspace_name}`",
-        "",
         f"**Your identity**: `{agent_id}` ({agent.get('display_name', agent_id)})",
-        f"**Your inbox**: `{ROOT}/agents/{agent_id}/inbox.json`",
-        f"**Your memory**: `{ROOT}/agents/{agent_id}/memory.md`",
-        f"**Your identity file**: `{ROOT}/agents/{agent_id}/identity.md`",
         "",
-        "**Quick commands:**",
-        f"- Bootstrap session: `{ROOT}/bin/llm-collab session_bootstrap.py --agent {agent_id}`",
-        f"- Read inbox: `{ROOT}/bin/llm-collab inbox.py --me {agent_id}`",
-        f"- Send message: `{ROOT}/bin/llm-collab deliver.py --chat last --from {agent_id} --to <agent> --project <project_id> --title \"...\"`",
-        f"- Create task: `{ROOT}/bin/llm-collab new_task.py --title \"...\" --created-by {agent_id} --project <project_id>`",
-        f"- Task board: `{ROOT}/bin/llm-collab task_board.py`",
-        "",
-        f"**Active projects**: {project_list}",
-        f"**Other agents**: {', '.join(other_agents) if other_agents else '(none)'}",
-        "",
-        "**Project boundary:**",
-        "- Project-scoped is the default; universal behavior is the exception.",
-        "- Use one registered project ID for every chat, message, task, queue, and report.",
-        "- Never reuse another project's paths, design docs, database refs, tools, or policy.",
-        "- Read the target repository instructions and the workspace AGENTS.md before acting.",
-        "",
-        "Always bootstrap your session at the start of each conversation.",
-        "Always check your inbox before starting new work.",
     ]
+    if skill_capable:
+        lines.extend(
+            [
+                f"Primary entry skill: `{join_skill}`",
+                f"Read and follow that skill. It points to `{ROOT}/AGENTS.md` and the required workflow docs.",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                f"Primary join-skill pointer: `{join_skill}`",
+                "This runtime may not support installable skills, so keep this file as a thin pointer to that skill.",
+            ]
+        )
+    lines.extend(
+        [
+            f"Bootstrap every session: `{bootstrap_cmd}`",
+            "Keep this memory file as a pointer; do not restate collab command families here.",
+        ]
+    )
     return "\n".join(lines)
 
 
@@ -99,7 +91,7 @@ def write_claude_code(agent_id: str, snippet: str, write: bool) -> None:
     memory_dir = Path.home() / ".claude" / "projects" / workspace_slug / "memory"
     out_path = memory_dir / f"collab-{agent_id}.md"
 
-    fm_header = f"---\nname: llm-collab identity ({agent_id})\ndescription: Collab workspace identity and commands for {agent_id}\ntype: user\n---\n\n"
+    fm_header = f"---\nname: llm-collab join pointer ({agent_id})\ndescription: Pointer to the in-repo join skill and bootstrap command for {agent_id}\ntype: user\n---\n\n"
     full_content = fm_header + snippet
 
     if write:
@@ -112,23 +104,42 @@ def write_claude_code(agent_id: str, snippet: str, write: bool) -> None:
         print(full_content)
 
 
+def _render_claude_md_section(snippet: str) -> str:
+    return f"## Collaboration System\n\n{snippet}\n\n"
+
+
+def _replace_level2_section(content: str, heading: str, replacement: str) -> tuple[str, bool]:
+    heading_pattern = re.compile(rf"(?m)^{re.escape(heading)}\s*$")
+    match = heading_pattern.search(content)
+    if match is None:
+        return content, False
+    next_heading = re.compile(r"(?m)^## ")
+    following = next_heading.search(content, match.end())
+    end = following.start() if following is not None else len(content)
+    return content[:match.start()] + replacement + content[end:], True
+
+
 def write_claude_md(agent_id: str, snippet: str, project_path: str | None, write: bool) -> None:
-    section = f"\n\n## Collaboration System\n\n{snippet}\n"
+    section = _render_claude_md_section(snippet)
     if project_path:
         claude_md = Path(project_path) / "CLAUDE.md"
         if write:
             if claude_md.exists():
                 existing = claude_md.read_text()
-                if "## Collaboration System" not in existing:
-                    claude_md.write_text(existing + section)
-                    print(f"[appended] {claude_md}")
-                else:
-                    print(f"[skip] CLAUDE.md already has Collaboration System section.")
+                updated, replaced = _replace_level2_section(
+                    existing,
+                    "## Collaboration System",
+                    section,
+                )
+                if not replaced:
+                    updated = existing + f"\n\n{section}"
+                claude_md.write_text(updated)
+                print(f"[written] {claude_md}")
             else:
                 write_file(claude_md, section.strip())
                 print(f"[written] {claude_md}")
         else:
-            print(f"\n# Append to: {claude_md}\n")
+            print(f"\n# Replace or append in: {claude_md}\n")
             print(section)
     else:
         print("\n# Add this section to your project CLAUDE.md:")
@@ -142,21 +153,19 @@ def main():
         print(f"[error] Unknown agent: {args.agent!r}", file=sys.stderr)
         sys.exit(1)
 
-    snippet = build_snippet(args.agent)
-
     if args.target == "generic":
-        print(snippet)
+        print(build_snippet(args.agent, skill_capable=False))
 
     elif args.target == "claude-code":
-        write_claude_code(args.agent, snippet, args.write)
+        write_claude_code(args.agent, build_snippet(args.agent, skill_capable=True), args.write)
 
     elif args.target == "codex":
         print("\n# Codex memory snippet")
-        print("# Copy this into your Codex memory file for the workspace.\n")
-        print(snippet)
+        print("# Copy this thin pointer into your Codex memory file for the workspace.\n")
+        print(build_snippet(args.agent, skill_capable=True))
 
     elif args.target == "claude-md":
-        write_claude_md(args.agent, snippet, args.project_path, args.write)
+        write_claude_md(args.agent, build_snippet(args.agent, skill_capable=False), args.project_path, args.write)
 
 
 if __name__ == "__main__":
