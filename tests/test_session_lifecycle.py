@@ -9,11 +9,17 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
+from llm_collab.codex_app_server_probe import (
+    PROTOCOL_VERSION,
+    AppServerProbeError,
+    AppServerProbeResult,
+)
 from llm_collab.codex_runtime_home import bind_runtime_home
 from llm_collab.ledger import LedgerPaths, LedgerStore
 import llm_collab.ledger.store as store_module
 from llm_collab.ledger.store import CanonicalConflictError
 from llm_collab.session_lifecycle import (
+    CodexLifecycleProvider,
     FakeLifecycleProvider,
     LifecycleSubject,
     SessionLifecycleCore,
@@ -108,6 +114,34 @@ def row_counts(store: LedgerStore) -> dict[str, int]:
         table: store._connection.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
         for table in LIFECYCLE_ROW_COUNT_TABLES
     }
+
+
+class FakeCodexTransport:
+    def __init__(self, *, version=PROTOCOL_VERSION, server_name="codex-app-server") -> None:
+        self.version = version
+        self.server_name = server_name
+
+    def exchange(self, frame):
+        if frame["method"] == "initialize":
+            return {
+                "jsonrpc": "2.0",
+                "id": frame["id"],
+                "result": {
+                    "protocolVersion": self.version,
+                    "serverInfo": {"name": self.server_name},
+                    "capabilities": {"tools": {"listChanged": True}},
+                },
+            }
+        if frame["method"] == "model/list":
+            return {
+                "jsonrpc": "2.0",
+                "id": frame["id"],
+                "result": {"data": [{"id": "gpt-test", "isDefault": True}]},
+            }
+        raise AssertionError(f"unexpected method {frame['method']}")
+
+    def notify(self, frame) -> None:
+        pass
 
 
 def subject(**changes: str) -> LifecycleSubject:
@@ -436,6 +470,88 @@ class LifecycleTest(unittest.TestCase):
                 trusted_project_root=self.trusted_root,
             )
             self.assertTrue(resolved["resolved"])
+
+    def codex_provider(self) -> CodexLifecycleProvider:
+        return CodexLifecycleProvider(
+            probe=AppServerProbeResult(
+                protocol_version=PROTOCOL_VERSION,
+                server_name="codex-app-server",
+                capabilities=frozenset(("tools",)),
+                default_model="gpt-test",
+                methods=("initialize", "model/list"),
+            )
+        )
+
+    def test_codex_provider_reserve_consume_resolves_exact_binding(self) -> None:
+        active_subject = subject()
+        provider = self.codex_provider()
+        core = SessionLifecycleCore(provider, token_factory=lambda: "token-alpha")
+        with LedgerStore.open_writer(self.paths) as store:
+            self.provision(store, active_subject, provider)
+            challenge = core.reserve(
+                store,
+                active_subject,
+                runtime_home=self.runtime_home,
+                created_at_utc=NOW,
+                expires_at_utc=AT_EXPIRY,
+                correlation_id="corr_codex_reserve",
+                trusted_project_root=self.trusted_root,
+            )
+            resolved = core.consume(
+                store,
+                active_subject,
+                challenge,
+                runtime_home=self.runtime_home,
+                consumed_at_utc=BEFORE_EXPIRY,
+                correlation_id="corr_codex_consume",
+                trusted_project_root=self.trusted_root,
+            )
+            self.assertTrue(resolved["resolved"])
+            self.assertEqual(resolved["provider_id"], "provider_codex")
+            self.assertEqual(resolved["native_session_id"], "native_session_one")
+            self.assertEqual(resolved["generation"], 1)
+
+    def test_codex_provider_rejects_a_wrong_project_root(self) -> None:
+        active_subject = subject()
+        provider = self.codex_provider()
+        core = SessionLifecycleCore(provider, token_factory=lambda: "token-alpha")
+        with LedgerStore.open_writer(self.paths) as store:
+            self.provision(store, active_subject, provider)
+            with self.assertRaises(SessionLifecycleError):
+                core.reserve(
+                    store,
+                    active_subject,
+                    runtime_home=self.runtime_home,
+                    created_at_utc=NOW,
+                    expires_at_utc=AT_EXPIRY,
+                    correlation_id="corr_codex_wrong_project",
+                    trusted_project_root=TrustedProjectRoot(
+                        OTHER_PROJECT, "repo_app", str(self.repo), str(self.cwd)
+                    ),
+                )
+
+    def test_codex_provider_from_transport_fails_closed_on_drift(self) -> None:
+        with self.assertRaises(AppServerProbeError):
+            CodexLifecycleProvider.from_transport(
+                FakeCodexTransport(version="1999-01-01"),
+                expected_server_name="codex-app-server",
+                expected_server_capabilities=frozenset(("tools",)),
+            )
+        with self.assertRaises(AppServerProbeError):
+            CodexLifecycleProvider.from_transport(
+                FakeCodexTransport(server_name="other-server"),
+                expected_server_name="codex-app-server",
+                expected_server_capabilities=frozenset(("tools",)),
+            )
+        provider = CodexLifecycleProvider.from_transport(
+            FakeCodexTransport(),
+            expected_server_name="codex-app-server",
+            expected_server_capabilities=frozenset(("tools",)),
+        )
+        authority = provider.authority()
+        self.assertEqual(authority.authority_kind, "trusted_adapter")
+        self.assertEqual(authority.identity, "codex-app-server")
+        self.assertEqual(authority.implementation_revision, f"mcp-{PROTOCOL_VERSION}")
 
     def test_same_native_session_cannot_become_two_project_owners(self) -> None:
         active_subject = subject()

@@ -7,6 +7,10 @@ import hashlib
 import secrets
 from typing import Callable, Mapping
 
+from llm_collab.codex_app_server_probe import (
+    AppServerProbeResult,
+    probe_app_server,
+)
 from llm_collab.codex_runtime_home import RuntimeHomeIdentity
 from llm_collab.codex_session_ref import (
     RepositoryBinding,
@@ -160,6 +164,88 @@ class PiLifecycleProvider:
             authority_kind="native_runtime",
             identity=self.authority_identity,
             implementation_revision=self.provider_revision,
+            capability_profile_id=self.capability_profile_id,
+            capability_profile_revision=self.capability_profile_revision,
+        )
+
+    def descriptor(self) -> Mapping[str, object]:
+        return {
+            "provider_id": self.provider_id,
+            "provider_revision": self.provider_revision,
+            "trust_class": self.trust_class,
+            "supported_operations_json": self.supported_operations_json,
+            "challenge_algorithm": self.challenge_algorithm,
+            "challenge_ttl_seconds": self.challenge_ttl_seconds,
+        }
+
+    def attest(
+        self,
+        subject: LifecycleSubject,
+        *,
+        runtime_home: RuntimeHomeIdentity,
+        observed_at_utc: str,
+        correlation_id: str,
+        trusted_project_root: TrustedProjectRoot | None = None,
+    ) -> Mapping[str, object]:
+        repository = _repository_binding(subject, trusted_project_root)
+        return build_session_ref(
+            workspace_id=subject.workspace_id,
+            scope=subject.scope(),
+            endpoint_id=subject.endpoint_id,
+            native_session_id=subject.native_session_id,
+            runtime_home=runtime_home,
+            authority=self.authority(),
+            observed_at_utc=observed_at_utc,
+            correlation_id=correlation_id,
+            repository_binding=repository,
+        )
+
+
+@dataclass(frozen=True)
+class CodexLifecycleProvider:
+    """Codex lifecycle provider attesting only from exact probe evidence (#93).
+
+    Built from one verified AppServerProbeResult: protocol, server-identity, or
+    capability drift fails closed inside probe_app_server, so no provider exists
+    for a drifted server. attest() builds SessionRefV1 only from exact
+    (project, runtime-home, native-thread) evidence, never from session
+    discovery. thread start/resume/fork and open_ui are deliberately absent in
+    this slice; turn delivery stays with #94.
+    """
+
+    probe: AppServerProbeResult
+    provider_id: str = "provider_codex"
+    provider_revision: str = "revision_1"
+    capability_profile_id: str = "native_session_binding"
+    capability_profile_revision: str = "revision_1"
+    trust_class: str = "managed"
+    supported_operations_json: str = (
+        '["reserve","attach","inspect","heartbeat","retire"]'
+    )
+    challenge_algorithm: str = "sha256"
+    challenge_ttl_seconds: int = 60
+
+    @classmethod
+    def from_transport(
+        cls,
+        transport: object,
+        *,
+        expected_server_name: str,
+        expected_server_capabilities: frozenset[str],
+    ) -> "CodexLifecycleProvider":
+        return cls(
+            probe=probe_app_server(
+                transport,
+                expected_server_name=expected_server_name,
+                expected_server_capabilities=expected_server_capabilities,
+            )
+        )
+
+    def authority(self) -> SessionAuthority:
+        return SessionAuthority(
+            authority_kind="trusted_adapter",
+            identity=self.probe.server_name,
+            implementation_revision=f"mcp-{self.probe.protocol_version}",
             capability_profile_id=self.capability_profile_id,
             capability_profile_revision=self.capability_profile_revision,
         )
