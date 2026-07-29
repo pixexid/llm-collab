@@ -12,7 +12,9 @@ from llm_collab.runtime_adapter_redaction import (
     REDACTION_FAILURE,
     RedactedDocument,
     RedactionFailure,
+    ShowOnlyDiagnostics,
     redact_document,
+    show_only_diagnostics,
 )
 from llm_collab.runtime_adapter_conformance import METHODS
 from llm_collab.runtime_adapter_supervisor import MAX_STDERR_BYTES_PER_CONNECTION
@@ -228,6 +230,77 @@ class RuntimeAdapterRedactionTests(unittest.TestCase):
         self.assertNotIn("detail", diagnostic)
         self.assertNotIn("reason", diagnostic)
         self.assertEqual(diagnostic["code"], -9)
+
+    def test_show_only_diagnostics_carry_dropped_free_text_for_display(self):
+        # #215: the same free text redact_document DROPS is the show-only destination.
+        document = {
+            "fault": "ADAPTER_UNHEALTHY",
+            "diagnostic": {
+                "detail": "Authorization: Bearer secret-token",
+                "reason": "Cookie: session=secret",
+                "code": -9,
+            },
+        }
+        show = show_only_diagnostics(document)
+        self.assertIsInstance(show, ShowOnlyDiagnostics)
+        self.assertEqual(
+            {"detail": "Authorization: Bearer secret-token", "reason": "Cookie: session=secret"},
+            show.as_display_dict(),
+        )
+        # The persistable evidence for the same input carries neither field.
+        persisted = redact_document(document).as_dict()["diagnostic"]
+        self.assertNotIn("detail", persisted)
+        self.assertNotIn("reason", persisted)
+
+    def test_show_only_diagnostics_cannot_be_persisted(self):
+        # #215: show-only values must be unrepresentable as durable evidence.
+        show = show_only_diagnostics({"diagnostic": {"detail": "secret"}})
+        self.assertIsInstance(show, ShowOnlyDiagnostics)
+        # It is not a Mapping, so redact_document fails closed instead of wrapping it.
+        failed = redact_document(show)
+        self.assertIsInstance(failed, RedactionFailure)
+        self.assertEqual("non_mapping_root", failed.reason)
+        # And the adapter-state write boundary rejects it (isinstance backstop).
+        from llm_collab import runtime_adapter_state
+
+        with self.assertRaises(TypeError):
+            runtime_adapter_state._payload(show)
+
+    def test_show_only_diagnostics_are_constructor_gated_and_none_when_empty(self):
+        with self.assertRaises(TypeError):
+            ShowOnlyDiagnostics({"detail": "secret"})
+        self.assertIsNone(show_only_diagnostics({"fault": "ADAPTER_UNHEALTHY"}))
+        self.assertIsNone(show_only_diagnostics({"diagnostic": {"code": -9}}))
+        self.assertIsNone(show_only_diagnostics("not-a-mapping"))
+        # A NUL/surrogate-bearing value is skipped, not carried unsanitized.
+        self.assertIsNone(show_only_diagnostics({"diagnostic": {"detail": "a\x00b"}}))
+
+    def test_persistable_evidence_still_reaches_a_state_consumer(self):
+        # #215: adding the show-only destination must not break the persist path.
+        import tempfile
+
+        redacted = redact_document(
+            {
+                "adapter_id": "adapter.alpha",
+                "adapter_revision": "rev1",
+                "manifest_id": "manifest.alpha",
+                "manifest_revision": "mrev1",
+                "profile_id": "profile.alpha",
+                "endpoint_id": "endpoint.alpha",
+                "workspace_id": "ws_alpha",
+                "scope_identity": "workspace:ws_alpha|project:amiga",
+                "project_id": "amiga",
+                "request_id": "attempt-1",
+                "fault": "ADAPTER_QUARANTINED",
+            }
+        )
+        self.assertIsInstance(redacted, RedactedDocument)
+        from llm_collab import runtime_adapter_state
+
+        with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
+            db_path = Path(tmp) / "adapter-state.sqlite3"
+            record_id = runtime_adapter_state.record_quarantine_opened(db_path, redacted)
+            self.assertTrue(record_id)
 
     def test_identifier_hash_is_stable_across_processes(self):
         identifier = "NativeSessionId-0123456789abcdef-0123456789abcdef"

@@ -20,6 +20,7 @@ MAX_REDACTION_DEPTH = 8
 REDACTION_REASON_GENERIC = "redaction_failed"
 
 _CONSTRUCTOR_TOKEN = object()
+_SHOW_ONLY_CONSTRUCTOR_TOKEN = object()
 _DROP = object()
 _SAFE_TOP_LEVEL_FIELDS = frozenset(
     (
@@ -43,6 +44,12 @@ _SAFE_TOP_LEVEL_FIELDS = frozenset(
     )
 )
 _SAFE_DIAGNOSTIC_FIELDS = frozenset(("code", "context", "detail", "fault", "reason"))
+# Destination classification (#215): the diagnostic free-text fields redact_document
+# DROPS from the persistable RedactedDocument (they may carry secrets, so they must
+# never become durable evidence) are exactly the values that may still be shown
+# transiently to an authorized operator. This closed set is the show-only destination;
+# everything else is either persistable evidence or dropped entirely.
+_SHOW_ONLY_DIAGNOSTIC_FIELDS = frozenset(("detail", "reason"))
 _HASHED_IDENTIFIER_FIELDS = frozenset(("native_session_id", "session_ref_id"))
 _REDACTED_TEXT_FIELDS = frozenset(("detail", "reason"))
 _FAULT_VALUES = frozenset(
@@ -187,6 +194,71 @@ def redact_document(document: Mapping[str, Any]) -> RedactedDocument | Redaction
     if not redacted:
         return RedactionFailure("no_allowlisted_fields")
     return RedactedDocument(redacted, _constructor_token=_CONSTRUCTOR_TOKEN)
+
+
+class ShowOnlyDiagnostics:
+    """Frozen read-time diagnostic surface with NO persist path (#215).
+
+    Deliberately a DISTINCT type from RedactedDocument and NOT a Mapping: redact_document
+    rejects non-mappings and adapter-state writes accept only RedactedDocument, so a
+    ShowOnlyDiagnostics can never be redacted into, or recorded as, durable evidence. That
+    makes "show-only data reaching persistence" unrepresentable at the type boundary rather
+    than by a runtime check. Constructible only by show_only_diagnostics.
+    """
+
+    __slots__ = ("_fields",)
+
+    def __init__(
+        self,
+        fields: Mapping[str, Any],
+        *,
+        _constructor_token: object | None = None,
+    ) -> None:
+        if _constructor_token is not _SHOW_ONLY_CONSTRUCTOR_TOKEN:
+            raise TypeError(
+                "ShowOnlyDiagnostics values must be produced by show_only_diagnostics"
+            )
+        object.__setattr__(self, "_fields", _freeze_mapping(fields))
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if name == "_fields" and hasattr(self, "_fields"):
+            raise TypeError("ShowOnlyDiagnostics is immutable")
+        object.__setattr__(self, name, value)
+
+    @property
+    def fields(self) -> Mapping[str, Any]:
+        return self._fields
+
+    def as_display_dict(self) -> dict[str, Any]:
+        return _thaw(self._fields)
+
+
+def show_only_diagnostics(document: Mapping[str, Any]) -> ShowOnlyDiagnostics | None:
+    """The show-only diagnostic free text for transient operator display, or None.
+
+    Carries exactly the diagnostic fields redact_document drops from the persistable
+    RedactedDocument (the raw human-readable text, only NUL/surrogate-sanitized so it is
+    a valid string). This is the separate read-time destination: it reuses the module's
+    existing string-safety helper, adds no second redaction engine, and returns a type
+    with no path into persistence.
+    """
+    if not isinstance(document, Mapping):
+        return None
+    diagnostic = document.get("diagnostic")
+    if not isinstance(diagnostic, Mapping):
+        return None
+    fields: dict[str, str] = {}
+    for key in _SHOW_ONLY_DIAGNOSTIC_FIELDS:
+        raw = diagnostic.get(key)
+        if not isinstance(raw, str):
+            continue
+        try:
+            fields[key] = _redact_string(raw)
+        except RedactionError:
+            continue
+    if not fields:
+        return None
+    return ShowOnlyDiagnostics(fields, _constructor_token=_SHOW_ONLY_CONSTRUCTOR_TOKEN)
 
 
 class RedactionError(ValueError):
