@@ -127,14 +127,13 @@ Registration is not complete until `show` and `show-binding` agree on all of:
 - native runtime session ID;
 - canonical binding ID and generation;
 - endpoint ID;
-- pinned provider, model, and thinking level read from that Pi session;
 - project, chat, agent, and repository.
 
 Missing canonical fields are a failed setup, not a pull-only success. Do not
-install a monitor or claim automatic wake until the binding is complete.
-Before emitting `pi_inbox_wake`, dispatch must compare the current Pi session
-file with that pinned fingerprint. Drift leaves the packet unread and emits no
-wake; checking after the monitor has already started a turn is too late.
+install a monitor or claim automatic wake until the binding is complete. Pinned
+provider, model, and thinking-level capture plus a pre-wake drift check are
+required before this setup can claim fingerprint enforcement; the current
+runtime does not enforce them yet.
 
 The exact-session event log contains diagnostics as well as wake events, so a
 plain `/monitor-watch` on the file is wrong: refusals and lease diagnostics
@@ -155,6 +154,10 @@ session log and filters before waking the model. The durable packet and unread
 inbox remain the only work authority; the monitor line is only a prompt to
 look. Duplicate or coalesced wake lines are harmless because the inbox command
 drains the exact unread set and acknowledges exactly what it printed.
+
+Before starting the monitor, run its exact `inbox.py --acknowledge` command once.
+`tail -n 0` deliberately ignores old log lines, so this first drain picks up
+packets queued while the monitor was down.
 
 Setup is complete only after disposable probes prove:
 
