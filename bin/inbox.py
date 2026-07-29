@@ -556,6 +556,18 @@ def gate_activation_message(args, msg: dict, *, consume: bool) -> dict | None:
     try:
         existing_lease = load_lease(identity)
         existing = owner_summary(existing_lease) if existing_lease else None
+    except LeaseRefused as exc:
+        # Resolving the lease directory fails closed on an invalid/unregistered project
+        # scope (and the legacy/bounded guards). That is TERMINAL: it must not fall through
+        # to reader-session creation or the claim's poller cleanup, which would mutate on
+        # behalf of a scope that can never be granted. A genuinely unreadable existing
+        # lease is a different error class and is still tolerated below.
+        return {
+            "authorized": False,
+            "reason": exc.reason,
+            "identity": identity,
+            "owner": exc.owner,
+        }
     except Exception as exc:
         existing = {"error": exc.__class__.__name__}
     if not consume:

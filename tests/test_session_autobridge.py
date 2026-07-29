@@ -1661,7 +1661,7 @@ class SessionAutobridgeTest(unittest.TestCase):
     def test_loop_protection_skips_before_activation_claim_and_takeover(self):
         root = self.make_workspace()
         sessions_dir = root / "State" / "session_autobridge" / "sessions"
-        leases_dir = root / "State" / "session_autobridge" / "activation_leases"
+        leases_dir = root / "projects" / "amiga" / "activation_leases"
         worktree = root / "skip-lane"
         worktree.mkdir()
         owner = {
@@ -1712,12 +1712,12 @@ class SessionAutobridgeTest(unittest.TestCase):
 
         with (
             patch.object(session_autobridge_lib, "SESSIONS_DIR", sessions_dir),
-            patch.object(activation_lease_lib, "ACTIVATION_LEASES_DIR", leases_dir),
             patch.object(
                 activation_lease_lib,
-                "ACTIVATION_GRANT_LOCK",
-                leases_dir / ".claim-grant.lock",
+                "project_state_dir",
+                lambda _project, _root=root: _root / "State" / "session_autobridge" / "per-project" / _project,
             ),
+            patch.object(activation_lease_lib, "get_project", lambda pid: {"id": pid}),
             patch.object(activation_cleanup_lib, "audit_activation_pollers", return_value=[]),
             patch.object(session_autobridge_lib, "load_session", return_value=session),
             patch.object(session_autobridge_lib, "session_is_dispatchable", return_value=(True, "ok")),
@@ -2616,7 +2616,7 @@ class SessionAutobridgeTest(unittest.TestCase):
 
     def test_claude_activation_stays_claimable_despite_a_mismatched_runtime_family(self):
         root = self.make_workspace()
-        leases_dir = root / "State" / "session_autobridge" / "activation_leases"
+        leases_dir = root / "projects" / "amiga" / "activation_leases"
         worktree = root / "claude-lane"
         worktree.mkdir()
         session = {
@@ -2667,12 +2667,12 @@ class SessionAutobridgeTest(unittest.TestCase):
 
         with (
             patch.object(session_autobridge_lib, "SESSIONS_DIR", sessions_dir),
-            patch.object(activation_lease_lib, "ACTIVATION_LEASES_DIR", leases_dir),
             patch.object(
                 activation_lease_lib,
-                "ACTIVATION_GRANT_LOCK",
-                leases_dir / ".claim-grant.lock",
+                "project_state_dir",
+                lambda _project, _root=root: _root / "State" / "session_autobridge" / "per-project" / _project,
             ),
+            patch.object(activation_lease_lib, "get_project", lambda pid: {"id": pid}),
             patch.object(activation_cleanup_lib, "audit_activation_pollers", return_value=[]),
         ):
             allowed, event = session_autobridge_lib.claim_message_activation(session, message)

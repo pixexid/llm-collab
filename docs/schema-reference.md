@@ -277,15 +277,36 @@ existing activation-shaped packets for explicit claim or manual adjudication.
 ### Activation lease records
 
 Activation lease authority stores one JSON record per exact activation identity
-under `State/session_autobridge/activation_leases/{lease_key}.json`, with a
-stable never-unlinked sibling `.lock` file used for `flock(LOCK_EX|LOCK_NB)`
-per-identity claim contention and a stable never-unlinked global
-`.claim-grant.lock` file also acquired with `flock(LOCK_EX|LOCK_NB)` to
-serialize the authority-granting instant across distinct identity keys. Lock
+under the registered project's runtime state at
+`{project_state_root}/{project_id}/activation_leases/{lease_key}.json` (GH-160),
+resolved from the identity's `project` before any read, write, enumeration, or
+lock acquisition; the project must be a single safe path segment or the claim
+fails closed with `invalid_project_scope`. Each record has a stable
+never-unlinked sibling `.lock` file used for `flock(LOCK_EX|LOCK_NB)` per-identity
+claim contention and a stable never-unlinked per-project `.claim-grant.lock` file
+(in the same project directory) also acquired with `flock(LOCK_EX|LOCK_NB)` to
+serialize the authority-granting instant across that project's distinct identity
+keys — projects no longer contend on one workspace-global grant lock. Lock
 contention returns bounded `claim_in_progress`; non-contention lock errors
-re-raise. The global grant lock covers worktree realpath resolution, active
-lease alias scan, and lease write so symlink aliases cannot race into two
-active records. The record is written only by
+re-raise. The per-project grant lock covers worktree realpath resolution, active
+lease alias scan (scoped to that project's directory, so alias detection cannot
+cross projects), and lease write so symlink aliases cannot race into two active
+records.
+
+Legacy cutover (fail-closed): the per-project path is the sole authority; the code
+never reads, moves, or migrates the pre-GH-160 workspace-global
+`State/session_autobridge/activation_leases/` root. While that root still holds any
+`*.json` record, every lease operation — read, write, enumeration, or lock — fails
+closed with `legacy_lease_migration_required` (a refusal, so `lease-assert` stays
+read-only and no path mutates the legacy records). The explicit one-owner cutover is
+an operator step performed once, with no other activation-lease writer running:
+review the legacy records for any still-authoritative lease, then archive or relocate
+the root (a preserved move, not a destructive delete) so the history survives audit.
+The per-project authority resumes once the root no longer holds `*.json` records.
+Every project directory is resolved from a validated registered `project_id`; an
+unregistered project fails closed with `unregistered_project_scope`. There is no
+in-code migration, no dual-live authority, and no silent overwrite of a per-project
+record. The record is written only by
 `session_autobridge.py lease-claim`/`lease-release`; `lease-assert` is
 read-only.
 
