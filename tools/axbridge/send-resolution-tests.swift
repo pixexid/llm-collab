@@ -333,6 +333,16 @@ check(routineRingDecision(profile: .zcode, attended: true, axValue: nil) == .pro
 check(routineRingDecision(profile: .claude, attended: true, axValue: "draft") == .proceed,
       "1547: attended mode proceeds past a readable draft (supervised)")
 
+// GH-98 closed outcome vocabulary: one machine-readable line per exit.
+check(axOutcomeLine(.verified(method: "cmd-return")) == "AX_OUTCOME=VERIFIED method=cmd-return",
+      "98: outcome line verified")
+check(axOutcomeLine(.ambiguous(reason: "identity_lost")) == "AX_OUTCOME=AMBIGUOUS reason=identity_lost",
+      "98: outcome line ambiguous")
+check(axOutcomeLine(.notDelivered(reason: "opaque_profile")) == "AX_OUTCOME=NOT_DELIVERED reason=opaque_profile",
+      "98: outcome line not delivered")
+check(axOutcomeLine(.verified(method: "confirmed on re-check")) == "AX_OUTCOME=VERIFIED method=confirmed_on_re-check",
+      "98: outcome method/reason tokens carry no spaces")
+
 if failures == 0 { print("\nALL PASS (send-resolution)"); exit(0) }
 else { print("\n\(failures) FAILURE(S)"); exit(1) }
 }

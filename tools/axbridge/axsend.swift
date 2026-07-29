@@ -699,6 +699,7 @@ func cmdRing(app: String, text: String, submit: Bool, windowIndex: Int?, dryRun:
     }
     guard let (el, pid) = appElement(named: app) else {
         FileHandle.standardError.write("\(appLookupFailureMessage(app))\n".data(using: .utf8)!)
+        print(axOutcomeLine(.notDelivered(reason: "app_unavailable")))
         return 1
     }
     // Stable conversation-window selection via the SHARED resolver. `windowIndex`
@@ -713,9 +714,11 @@ func cmdRing(app: String, text: String, submit: Bool, windowIndex: Int?, dryRun:
     switch pick {
     case .ambiguous:
         FileHandle.standardError.write("ambiguous: multiple native chat windows — pass --window-index to select one\n".data(using: .utf8)!)
+        print(axOutcomeLine(.ambiguous(reason: "multiple_native_windows")))
         return 3
     case .none:
         FileHandle.standardError.write("no native chat composer found for \(app) (auto mode requires a proven chat window)\n".data(using: .utf8)!)
+        print(axOutcomeLine(.notDelivered(reason: "no_native_composer")))
         return 3
     case .invalidIndex:
         FileHandle.standardError.write("invalid --window-index for \(app): out of range (\(wins.count) window(s))\n".data(using: .utf8)!)
@@ -725,6 +728,7 @@ func cmdRing(app: String, text: String, submit: Bool, windowIndex: Int?, dryRun:
     }
     guard let composer = windowComposer(win, profile) else {
         FileHandle.standardError.write("no native composer in the selected window for \(app) (generic/URL/web fields are not accepted)\n".data(using: .utf8)!)
+        print(axOutcomeLine(.notDelivered(reason: "no_native_composer")))
         return 3
     }
     // GH-1547 composer-safety gate: decide BEFORE any mutation (no clear,
@@ -739,19 +743,23 @@ func cmdRing(app: String, text: String, submit: Bool, windowIndex: Int?, dryRun:
         }
     case .refuseOpaqueProfile:
         FileHandle.standardError.write("REFUSED (no mutation): \(app) composer is AXValue-opaque — emptiness cannot be proven, so a routine ring may not touch it. Keep the durable mailbox packet authoritative and request Codex-attended recovery; --attended is valid only inside that supervised recovery.\n".data(using: .utf8)!)
+        print(axOutcomeLine(.notDelivered(reason: "opaque_profile")))
         return 11
     case .refuseUnreadableValue:
         FileHandle.standardError.write("REFUSED (no mutation): could not read \(app) composer AXValue — emptiness is unprovable right now. Re-probe with `axsend tree --app \(app) --editable-only`; if the value stays unreadable, request Codex-attended recovery. Do not retype.\n".data(using: .utf8)!)
+        print(axOutcomeLine(.notDelivered(reason: "unreadable_value")))
         return 11
     case .refuseNonEmptyDraft:
         let n = currentValue?.count ?? 0
         FileHandle.standardError.write("REFUSED (no mutation): \(app) composer holds a draft (\(n) chars) — not clobbering it. Wait for the draft to clear or request Codex-attended recovery to inspect/clear it.\n".data(using: .utf8)!)
+        print(axOutcomeLine(.notDelivered(reason: "non_empty_draft")))
         return 11
     }
     // AXValue if the field accepts it, else key-event typing (Electron editors
     // like ZCode/Antigravity reject AXValue and need real keystrokes).
     if !setComposerText(composer, pid: pid, text) {
         FileHandle.standardError.write("could not put text in composer (AXValue rejected and key-typing failed)\n".data(using: .utf8)!)
+        print(axOutcomeLine(.notDelivered(reason: "composer_set_failed")))
         return 4
     }
     print("composer set (role=\(role(composer)))")
@@ -955,6 +963,7 @@ func cmdRing(app: String, text: String, submit: Bool, windowIndex: Int?, dryRun:
             // reporting "QUEUED behind its current run" was wrong feedback (the bug
             // the operator caught 2026-06-22).
             print("VERIFIED: submitted via \(method) — delivered as a conversation turn.")
+            print(axOutcomeLine(.verified(method: method)))
             return 0
         }
         if queued {
@@ -966,7 +975,11 @@ func cmdRing(app: String, text: String, submit: Bool, windowIndex: Int?, dryRun:
             // success; the mailbox packet is the real record. Verify with `axsend
             // confirm`, and do NOT blindly resend (risks a duplicate or new thread).
             print("QUEUED (UNCONFIRMED): recipient went busy with no visible turn — likely queued behind its run, but axsend cannot confirm it landed in THIS thread vs a new one. Verify with `axsend confirm`; do not resend.")
-            return 0
+            print(axOutcomeLine(.ambiguous(reason: "queued_unconfirmed")))
+            // GH-98: ambiguous is not exit-zero success — propagate the existing
+            // ambiguous exit so callers keying on status see unresolved, and the
+            // wrapper leaves it to pull/manual (migration gate).
+            return 3
         }
         // PR78 R7/R8: distinguish identity loss (the conversation window can no
         // longer be re-resolved by identity) from an honest not-landed-but-maybe-
@@ -978,9 +991,11 @@ func cmdRing(app: String, text: String, submit: Bool, windowIndex: Int?, dryRun:
         // must not auto-re-ring.
         if freshConvWindow() == nil {
             FileHandle.standardError.write("identity lost re-resolving \(app) after submit — window unresolvable; exit 9 (ambiguous, never auto-promoted; mailbox authoritative)\n".data(using: .utf8)!)
+            print(axOutcomeLine(.ambiguous(reason: "identity_lost")))
             return 9
         }
         FileHandle.standardError.write("WARN: NOT DELIVERED after \(maxAttempts) attempts (button-press, composer-confirm, cmd-return, key-return each, draft cleared between) and recipient is idle — likely on a non-chat screen. Re-ring; check with `axsend confirm`.\n".data(using: .utf8)!)
+        print(axOutcomeLine(.notDelivered(reason: "submit_not_landed")))
         return 7
     }
     return 0
@@ -1029,12 +1044,29 @@ func cmdConfirm(app: String, text: String, windowIndex: Int?) -> Int32 {
         FileHandle.standardError.write("AX not trusted; run `axsend check`.\n".data(using: .utf8)!); return 2
     }
     guard let (el, _) = appElement(named: app) else {
-        FileHandle.standardError.write("\(appLookupFailureMessage(app))\n".data(using: .utf8)!); return 1
+        FileHandle.standardError.write("\(appLookupFailureMessage(app))\n".data(using: .utf8)!)
+        print(axOutcomeLine(.notDelivered(reason: "app_unavailable")))
+        return 1
     }
-    // Same shared resolver as ring: confirm inspects the native chat window the
-    // ring targeted, not an auxiliary Browser/preview window (PR78 review).
-    guard let win = resolveConversationWindow(el, preferIndex: windowIndex, profile: profileFor(app)) else {
-        FileHandle.standardError.write("no proven chat window/composer for \(app)\n".data(using: .utf8)!); return 1
+    // Same shared pick-aware resolver as ring (GH-98): confirm inspects the
+    // native chat window the ring targeted, ambiguity is reported as AMBIGUOUS
+    // rather than collapsing into NOT_DELIVERED (PR78 review).
+    let (pick, wins) = resolveConversationPick(el, preferIndex: windowIndex, profile: profileFor(app))
+    let win: AXUIElement
+    switch pick {
+    case .ambiguous:
+        FileHandle.standardError.write("ambiguous: multiple native chat windows — pass --window-index to select one\n".data(using: .utf8)!)
+        print(axOutcomeLine(.ambiguous(reason: "multiple_native_windows")))
+        return 3
+    case .none:
+        FileHandle.standardError.write("no proven chat window/composer for \(app)\n".data(using: .utf8)!)
+        print(axOutcomeLine(.notDelivered(reason: "no_native_composer")))
+        return 1
+    case .invalidIndex:
+        FileHandle.standardError.write("invalid --window-index for \(app): out of range (\(wins.count) window(s))\n".data(using: .utf8)!)
+        return 64
+    case let .index(i):
+        win = wins[i]
     }
     let needle = String(text.prefix(40))
     guard !needle.isEmpty else { print("nothing to confirm (empty text)"); return 0 }
@@ -1050,9 +1082,11 @@ func cmdConfirm(app: String, text: String, windowIndex: Int?) -> Int32 {
     let proc = isProcessing(win)
     if messageLanded(win, sentText: text, profileFor(app)) {
         print("delivered: text appears as a sent message\(proc ? "; recipient is processing" : "")")
+        print(axOutcomeLine(.verified(method: "conversation_turn")))
         return 0
     }
     FileHandle.standardError.write("not delivered: text is not a sent message (it's a draft or was never typed). Recovery is conditional (GH-1547): re-ring ONLY when the target composer is proven readable and empty — a routine ring refuses (exit 11) on an opaque profile, an unreadable AXValue, or a remaining draft, so for those states hold and request Codex-attended recovery instead. Confirm again after any recovery.\n".data(using: .utf8)!)
+    print(axOutcomeLine(.notDelivered(reason: "text_not_landed")))
     return 7
 }
 
@@ -1076,11 +1110,13 @@ guard args.count >= 2 else {
 }
 if ["ring", "type"].contains(args[1]),
    let app = argValue("--app"),
+   argValue("--text") != nil,
    profileFor(app) == .claude {
     FileHandle.standardError.write(
         "REFUSED (no mutation): Claude receives durable mailbox packets through its own background watcher; AX may not mutate its composer.\n"
             .data(using: .utf8)!
     )
+    print(axOutcomeLine(.notDelivered(reason: "claude_durable_only")))
     exit(11)
 }
 // --window-index is optional: absent = nil (auto-select the native chat window);
