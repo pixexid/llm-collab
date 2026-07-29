@@ -271,6 +271,7 @@ class SessionLifecycleCore:
         consumed_at_utc: str,
         correlation_id: str,
         trusted_project_root: TrustedProjectRoot | None = None,
+        binding_state: str = "active",
     ) -> dict[str, object]:
         _require_project_subject(subject)
         session_ref = self.provider.attest(
@@ -304,6 +305,7 @@ class SessionLifecycleCore:
             native_session_id=subject.native_session_id,
             runtime_instance_id=subject.runtime_instance_id,
             consumed_at_utc=consumed_at_utc,
+            binding_state=binding_state,
         )
 
     def inspect(

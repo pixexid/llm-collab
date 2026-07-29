@@ -142,6 +142,8 @@ class LifecycleTest(unittest.TestCase):
         self.runtime_home = bind_runtime_home(self.codex_home)
         self.trusted_root = TrustedProjectRoot(PROJECT, "repo_app", str(self.repo), str(self.cwd))
         self.paths = LedgerPaths.derive(root / "state", WORKSPACE)
+        self.paths2 = LedgerPaths.derive(root / "state2", WORKSPACE)
+        self.paths3 = LedgerPaths.derive(root / "state3", WORKSPACE)
         self.core = SessionLifecycleCore(
             FakeLifecycleProvider(), token_factory=lambda: "token-alpha"
         )
@@ -840,6 +842,53 @@ class LifecycleTest(unittest.TestCase):
                 ).fetchall(),
                 [("operator", "operator_rebind", 0)],
             )
+
+    def test_consume_binding_state_defaults_active_and_honors_reserved(self) -> None:
+        # #319 seam: the challenge-consume authority mints either the `active` binding
+        # (the default, unchanged) or a pre-active `reserved` successor. A reserved
+        # binding is NOT the resolvable active owner — that is exactly what lets it be
+        # minted at generation+1 alongside the still-active predecessor and then swapped
+        # in by rebind. An unknown state is rejected before any write.
+        with LedgerStore.open_writer(self.paths) as store:
+            default_subject = subject()
+            default_binding = self.consume(
+                store, default_subject, self.reserve(store, default_subject)
+            )
+            self.assertEqual("active", self._binding_state(store, default_binding["binding_id"]))
+
+        with LedgerStore.open_writer(self.paths2) as store:
+            reserved_subject = subject()
+            reserved = self.core.consume(
+                store, reserved_subject, self.reserve(store, reserved_subject),
+                runtime_home=self.runtime_home, consumed_at_utc=BEFORE_EXPIRY,
+                correlation_id="corr_consume", trusted_project_root=self.trusted_root,
+                binding_state="reserved",
+            )
+            self.assertEqual("reserved", reserved["state"])
+            self.assertEqual("reserved", self._binding_state(store, reserved["binding_id"]))
+            self.assertFalse(
+                store.resolve_conversation_binding(
+                    workspace_id=WORKSPACE, scope_kind="project", scope_identity=PROJECT,
+                    conversation_id=reserved_subject.conversation_id,
+                    participant_id=reserved_subject.participant_id,
+                ).get("resolved"),
+                "a reserved successor must not resolve as the active owner",
+            )
+
+        with LedgerStore.open_writer(self.paths3) as store:
+            bad_subject = subject()
+            challenge = self.reserve(store, bad_subject)
+            with self.assertRaises(ValueError):
+                self.core.consume(
+                    store, bad_subject, challenge, runtime_home=self.runtime_home,
+                    consumed_at_utc=BEFORE_EXPIRY, correlation_id="corr_consume",
+                    trusted_project_root=self.trusted_root, binding_state="draining",
+                )
+
+    def _binding_state(self, store, binding_id):
+        return store._connection.execute(
+            "SELECT state FROM conversation_bindings WHERE binding_id = ?", (binding_id,)
+        ).fetchone()[0]
 
     def test_no_process_socket_ax_wallclock_or_runtime_consumers(self) -> None:
         root = Path(__file__).parents[1]

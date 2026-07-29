@@ -6461,9 +6461,19 @@ class LedgerStore:
         native_session_id: str,
         runtime_instance_id: str,
         consumed_at_utc: str,
+        binding_state: str = "active",
     ) -> dict[str, object]:
-        """Atomically consume one pending challenge and create its active binding."""
+        """Atomically consume one pending challenge and create its binding.
 
+        `binding_state` is `active` by default (the ordinary registration). Passing
+        `reserved` mints a pre-active successor for a native-session replacement: the
+        row is created but not routable until `record_conversation_binding_transition`
+        atomically swaps it active and supersedes the predecessor. Only these two
+        states may be minted here.
+        """
+
+        if binding_state not in {"active", "reserved"}:
+            raise ValueError("binding_state must be 'active' or 'reserved'")
         self._ensure_thread()
         if self._read_only:
             raise PermissionError("query-only readers cannot consume session challenges")
@@ -6599,7 +6609,7 @@ class LedgerStore:
                     provider_revision, endpoint_id, session_ref_id, owner_key, native_session_id,
                     runtime_instance_id, registered_at_utc
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, 'active', 1, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     workspace_id,
@@ -6609,6 +6619,7 @@ class LedgerStore:
                     participant_id,
                     binding_id,
                     generation,
+                    binding_state,
                     provider_id,
                     provider_revision,
                     endpoint_id,
@@ -6626,6 +6637,18 @@ class LedgerStore:
             finally:
                 pass
             raise
+        if binding_state != "active":
+            # A pre-active (reserved) successor is not the resolvable ACTIVE binding for
+            # the scope — the predecessor still is — so return the minted identity
+            # directly. This is the successor tuple the caller hands to rebind.
+            return {
+                "resolved": True,
+                "binding_id": binding_id,
+                "generation": generation,
+                "state": binding_state,
+                "endpoint_id": endpoint_id,
+                "native_session_id": native_session_id,
+            }
         return self.resolve_conversation_binding(
             workspace_id=workspace_id,
             scope_kind=scope_kind,
