@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
 import importlib
 import os
@@ -402,6 +404,26 @@ def prepare_session_write(payload: dict) -> tuple[dict, str]:
     return candidate, content
 
 
+SESSION_WRITE_LOCK = AUTOBRIDGE_ROOT / ".session-write.lock"
+
+
+@contextlib.contextmanager
+def _session_write_lock():
+    """Serialize the superseded-check and the write against other session writes.
+
+    ponytail: one process-wide blocking flock; per-session locks only if session
+    write throughput ever matters (it is a handful of writes per dispatch here).
+    """
+    SESSION_WRITE_LOCK.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(SESSION_WRITE_LOCK, os.O_CREAT | os.O_RDWR)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
 def save_session(
     payload: dict,
     prepared: tuple[dict, str] | None = None,
@@ -410,7 +432,25 @@ def save_session(
     path = autobridge_session_path(session_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     candidate, content = prepared or prepare_session_write(payload)
-    write_regular_file_atomically(path, content)
+    # A superseded record is terminal. A dispatch that loaded the session before it
+    # was retired still holds a live in-memory copy, and its processed-state save
+    # would otherwise write that copy back — resurrecting the predecessor as active.
+    # The check and the write must be one critical section: a bare check-then-write
+    # lets a retirement land between them, so the guard sees `active`, allows, and
+    # the stale write clobbers the superseded record. Holding the lock across both
+    # forces every session write to serialize, so whichever order runs, the
+    # superseded state wins or the guard fires.
+    with _session_write_lock():
+        if str(candidate.get("status")) != "superseded":
+            try:
+                on_disk = load_session(session_id)
+            except (FileNotFoundError, ValueError, UnreadableFile):
+                on_disk = None
+            if on_disk is not None and on_disk.get("status") == "superseded":
+                raise ValueError(
+                    f"refusing to resurrect superseded session {session_id}"
+                )
+        write_regular_file_atomically(path, content)
     payload.clear()
     payload.update(candidate)
 
@@ -720,7 +760,17 @@ def session_is_dispatchable(session: dict) -> tuple[bool, str]:
     status = session.get("status")
     if status not in {"active", "parked"}:
         return False, f"status={status}"
-    if session_is_expired(session):
+    # An `active` session's validity follows its native task: it ends when that
+    # task ends or an explicit continuation supersedes it, never on a clock. A
+    # TTL is not evidence that a live session died, and treating it as evidence
+    # is not a late wake but a silent one — on 2026-07-28 a session registered
+    # at 19:12 went undispatchable at 20:12:01 while it was working, kept
+    # reporting `status: active`, and nothing surfaced the wake path being dead
+    # for three hours.
+    #
+    # `parked` keeps the clock. A parked claim is not held by a live task, so a
+    # TTL is what makes an abandoned one reclaimable.
+    if status != "active" and session_is_expired(session):
         return False, "lease_expired"
     return True, "ok"
 

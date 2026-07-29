@@ -28,6 +28,7 @@ PI_DOORBELL_SCRIPT = REPO_ROOT / "bin" / "pi_doorbell.py"
 sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(REPO_ROOT / "bin"))
 
+from types import SimpleNamespace
 import _session_autobridge as session_autobridge_lib
 import _helpers as helpers_lib
 import _activation_cleanup as activation_cleanup_lib
@@ -4037,6 +4038,54 @@ class SessionAutobridgeTest(unittest.TestCase):
             self.run_cli(root, *register)
         return root, chat_dir
 
+    # --- addressing survives undispatchability (GH-324) ------------------------------------
+    #
+    # An undispatchable session must still be ADDRESSABLE. #340 made deliver.py fall back to the
+    # inactive pair so the packet keeps its exact target while the wake is withheld; nothing
+    # pinned it, and losing it is not a late packet but a permanently unroutable one — re-
+    # registering the session afterwards cannot rescue a packet already written with a null
+    # target. On 2026-07-28 that shape cost three packets, from a checkout predating #340.
+
+    def expire_session_lease(self, root, *, status="parked"):
+        """Force the registered session past its TTL, as a real long-lived lane does."""
+        sessions_dir = root / "State" / "session_autobridge" / "sessions"
+        record_path = sorted(sessions_dir.glob("*.json"))[0]
+        record = json.loads(record_path.read_text())
+        record["status"] = status
+        record["lease_expires_utc"] = "2020-01-01T00:00:00+00:00"
+        record_path.write_text(json.dumps(record, indent=2, sort_keys=True))
+        return record
+
+    def test_an_undispatchable_session_still_gets_its_exact_address(self):
+        """The wake may be withheld; the address may not be dropped."""
+        root, chat_dir = self.scoped_subscriber_workspace(
+            subscriber_repo_targets=["llm-collab"])
+        record = self.expire_session_lease(root)
+        expected = record["runtime"]["session_id"]
+
+        payload, _stderr = self.deliver_with_scope(root, "CHAT-SCOPE1", repo_targets="llm-collab")
+
+        self.assertFalse(payload["autobridge_ready"], "an expired parked claim must not wake")
+        self.assertEqual(expected, payload["resolved_target_session_id"])
+        packet = sorted(chat_dir.glob("*_to-claude_*.md"))[-1]
+        frontmatter, _ = parse_frontmatter(packet.read_text())
+        self.assertEqual(
+            expected, frontmatter["target_session_id"],
+            "a packet written without its address can never be routed by any later fix")
+
+    def test_an_active_session_past_its_ttl_both_addresses_and_wakes(self):
+        """The other half of GH-324: an active session's validity follows its native
+        task, so the TTL alone must not withhold the wake either."""
+        root, _chat_dir = self.scoped_subscriber_workspace(
+            subscriber_repo_targets=["llm-collab"])
+        record = self.expire_session_lease(root, status="active")
+
+        payload, _stderr = self.deliver_with_scope(root, "CHAT-SCOPE1", repo_targets="llm-collab")
+
+        self.assertEqual(record["runtime"]["session_id"], payload["resolved_target_session_id"])
+        self.assertTrue(payload["autobridge_ready"],
+                        "a live session was refused on a clock, which is the GH-324 defect")
+
     # --- deliver.py must apply the SAME routing contract the watcher will apply -------------
     #
     # 27 packets were written, reported autobridge_ready: true, and never dispatched, because
@@ -7304,6 +7353,70 @@ class SessionAutobridgeTest(unittest.TestCase):
                 "exact_session_repo_scope_refused",
             ):
                 watch_inbox_lib.exact_session_messages(args)
+
+    def test_registration_retires_the_session_it_supersedes(self):
+        """GH-373: end to end through the CLI, not the helper in isolation. Under
+        the #324 rule an active session no longer expires, so registering a
+        continuation must retire the record it supersedes, or the old session
+        stays dispatchable — two writers on one thread. Proves the wiring, so
+        removing the retire call from register_session fails here.
+        """
+        root = self.make_workspace()
+        for agent in ("codex", "claude"):
+            self.add_agent(root, {"id": agent, "display_name": agent.title(),
+                                  "activation": {"type": "cli_session", "watcher_enabled": True}})
+        self.create_chat(root, chat_dir_name="2026-07-29_sup__CHAT-SUP",
+                         chat_id="CHAT-SUP", project_id="amiga")
+        sessions = root / "State" / "session_autobridge" / "sessions"
+        self.run_cli(
+            root, "register", "--session", "SESSION-OLD", "--agent", "claude",
+            "--project", "amiga", "--chat", "CHAT-SUP", "--mode", "notify",
+            "--status", "active",
+            "--runtime-family", "claude_app", "--runtime-session-id", "THREAD-OLD",
+            "--runtime-session-source", "first_read",
+        )
+        old = json.loads((sessions / "SESSION-OLD.json").read_text())
+        self.assertIn(old["status"], {"active", "parked"})  # live before supersession
+
+        self.run_cli(
+            root, "register", "--session", "SESSION-NEW", "--agent", "claude",
+            "--project", "amiga", "--chat", "CHAT-SUP", "--mode", "notify",
+            "--runtime-family", "claude_app", "--runtime-session-id", "THREAD-NEW",
+            "--runtime-session-source", "first_read",
+            "--supersedes-session", "SESSION-OLD",
+        )
+        retired = json.loads((sessions / "SESSION-OLD.json").read_text())
+        self.assertEqual("superseded", retired["status"])
+        self.assertEqual("SESSION-NEW", retired["superseded_by"])
+        new = json.loads((sessions / "SESSION-NEW.json").read_text())
+        self.assertIn(new["status"], {"active", "parked"})  # the replacement is live, not retired
+
+    def test_a_refused_continuation_does_not_retire_the_predecessor(self):
+        """GH-373 finding 2: every refusal preflight runs BEFORE the retire, so a
+        continuation that cannot complete never destroys the valid predecessor.
+        Proved by ordering — the binding preflight raises and retire must not have
+        been reached.
+        """
+        agent = {"id": "claude", "activation": {"type": "cli_session"}}
+        args = SimpleNamespace(
+            session="SESSION-NEW", agent="claude", project="amiga", chat="CHAT-X",
+            mode="notify", status="active", wake_strategy="none", allowed_actions=[],
+            lease_owner=None, ttl_seconds=3600, runtime_family="claude_app",
+            runtime_session_id="THREAD-NEW", runtime_session_source="first_read",
+            runtime_home=None, supersedes_session="SESSION-OLD", runtime_command=None,
+            runtime_timeout=None, repo_targets=None,
+        )
+        with patch.object(session_autobridge_cli, "get_agent",
+                          return_value=agent), \
+             patch.object(session_autobridge_cli, "load_session", return_value={}), \
+             patch.object(session_autobridge_cli, "prepare_session_write",
+                          return_value=({"session_id": "SESSION-NEW"}, "{}")), \
+             patch.object(session_autobridge_cli, "existing_binding_snapshot_or_refuse",
+                          side_effect=RuntimeError("binding unreadable")), \
+             patch.object(session_autobridge_cli, "retire_superseded_session") as retire:
+            with self.assertRaises(RuntimeError):
+                session_autobridge_cli.register_session(args)
+        retire.assert_not_called()
 
     def test_register_persists_explicit_repo_subscription(self):
         root = self.make_workspace()

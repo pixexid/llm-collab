@@ -39,6 +39,7 @@ from _session_autobridge import (
     prepare_session_write,
     runtime_home_from_source,
     save_session,
+    UnreadableFile,
     update_binding_from_session,
 )
 from _activation_lease import (
@@ -221,6 +222,38 @@ def canonical_runtime_home(value: str | None) -> str | None:
     return str(canonical_path(text))
 
 
+def retire_superseded_session(superseded_id: str, replacement: dict) -> None:
+    """Close a session that a new registration supersedes.
+
+    The predecessor must be the SAME agent, project and chat as the replacement.
+    `--supersedes-session` names an id, and retiring whatever it names would let a
+    mistaken or hostile continuation destroy an unrelated live session — another
+    agent's, or another chat's. A continuation retires only its own predecessor.
+
+    Idempotent and tolerant otherwise: an absent or already-terminal record is
+    nothing to do — the point is only that no `active`/`parked` record for the old
+    session outlives its replacement. A still-live, same-scope record is rewritten
+    to the terminal shape `deactivate --status superseded` produces, so
+    dispatchability refuses it by `status` alone.
+    """
+    try:
+        record = load_session(superseded_id)
+    except (FileNotFoundError, ValueError, UnreadableFile):
+        return
+    if record.get("status") not in {"active", "parked"}:
+        return
+    if any(
+        record.get(field) != replacement.get(field)
+        for field in ("agent_id", "project_id", "chat_id")
+    ):
+        raise ValueError(
+            "refusing to retire a superseded session in a different agent/project/chat scope"
+        )
+    record["status"] = "superseded"
+    record["superseded_by"] = str(replacement["session_id"])
+    save_session(record)
+
+
 def register_session(args) -> dict:
     agent = get_agent(args.agent)
     now = now_utc()
@@ -288,6 +321,13 @@ def register_session(args) -> dict:
     repo_targets = getattr(args, "repo_targets", None)
     if repo_targets is not None:
         payload["repo_targets"] = repo_targets
+    # Validate everything that can refuse this registration BEFORE retiring the
+    # predecessor. A retire that ran first and was then followed by a preflight
+    # refusal would have destroyed a valid live session on behalf of a continuation
+    # that never completed. prepare_session_write (capacity) and
+    # existing_binding_snapshot_or_refuse (binding readability) are the two refusal
+    # gates; both are pure checks, so running them ahead of the retire opens no
+    # two-writer window.
     prepared = prepare_session_write(payload)
     # ONE read of the existing binding, before any write, and the resulting snapshot is carried
     # forward. A preflight that validates and then lets the update REOPEN the path is a TOCTOU: a
@@ -295,6 +335,14 @@ def register_session(args) -> dict:
     # binding write, which is the original partial-state bug wearing a check. This is the same
     # carry-the-validated-snapshot rule this PR already applied on the read side.
     existing_binding = existing_binding_snapshot_or_refuse(payload)
+    # Now that no refusal remains, retire the predecessor. Under the #324 rule an
+    # active session no longer expires on its lease, so a superseded-but-still-active
+    # record would stay dispatchable forever — two writers on one thread. Retire
+    # still precedes the new binding/session writes below, so a crash in between
+    # leaves the old record superseded and the new one absent (no active session,
+    # recoverable by re-register) rather than both active.
+    if args.supersedes_session and str(args.supersedes_session) != str(args.session):
+        retire_superseded_session(str(args.supersedes_session), payload)
     # The BINDING is written first, then the session. Publishing the session first meant a binding
     # write that blocked or failed left the session updated while the authoritative binding still
     # pointed at the previous thread -- a live session bound to a stale thread, which resolves

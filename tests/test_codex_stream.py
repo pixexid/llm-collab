@@ -183,8 +183,30 @@ class ResolveThreadTest(unittest.TestCase):
                 self.args(agent="codex", project="amiga", chat="CHAT-A"))
         self.assertIn("not an exact live binding", str(caught.exception))
 
-    def test_an_expired_lease_is_refused(self) -> None:
-        self.bind(lease="2020-01-01T00:00:00Z")
+    def test_an_active_sessions_expired_lease_no_longer_refuses(self) -> None:
+        """GH-324: an active session's validity follows its native task, not a
+        clock. This case used to assert refusal; the ruling overturned that. A
+        live session whose TTL lapsed is exactly the shape that lost three
+        hours of packets by going silently undispatchable while `status` stayed
+        `active`.
+        """
+        self.bind(session_status="active", lease="2020-01-01T00:00:00Z")
+        thread, _provenance, _home = codex_stream.resolve_thread(
+            self.args(agent="codex", project="amiga", chat="CHAT-A"))
+        self.assertEqual("t1", thread)
+
+    def test_a_parked_sessions_expired_lease_is_still_refused(self) -> None:
+        """`parked` keeps the clock: a parked claim is not held by a live task,
+        so the TTL is what makes an abandoned one reclaimable."""
+        self.bind(session_status="parked", lease="2020-01-01T00:00:00Z")
+        with self.assertRaises(SystemExit):
+            codex_stream.resolve_thread(
+                self.args(agent="codex", project="amiga", chat="CHAT-A"))
+
+    def test_a_stopped_session_is_refused_despite_a_live_lease(self) -> None:
+        """Explicit end stays terminal regardless of the clock — the other way,
+        besides supersession, that the ruling says a session ends."""
+        self.bind(session_status="stopped", lease="2099-01-01T00:00:00Z")
         with self.assertRaises(SystemExit):
             codex_stream.resolve_thread(
                 self.args(agent="codex", project="amiga", chat="CHAT-A"))
