@@ -157,7 +157,7 @@ class ActivationLeaseTest(unittest.TestCase):
         return self.run_cli(root, "lease-claim", *self.identity_args(worktree), "--session", session, *extra)
 
     def lease_records(self, root: Path) -> list[dict]:
-        lease_dir = root / "State" / "session_autobridge" / "activation_leases"
+        lease_dir = root / "projects" / "amiga" / "activation_leases"
         return [
             json.loads(path.read_text())
             for path in sorted(lease_dir.glob("*.json"))
@@ -209,14 +209,10 @@ class ActivationLeaseTest(unittest.TestCase):
             ),
             patch.object(
                 lease_lib,
-                "ACTIVATION_LEASES_DIR",
-                root / "State" / "session_autobridge" / "activation_leases",
+                "project_state_dir",
+                lambda _project, _root=root: _root / "State" / "session_autobridge" / "per-project" / _project,
             ),
-            patch.object(
-                lease_lib,
-                "ACTIVATION_GRANT_LOCK",
-                root / "State" / "session_autobridge" / "activation_leases" / ".claim-grant.lock",
-            ),
+            patch.object(lease_lib, "get_project", lambda pid: {"id": pid}),
             patch.object(lease_lib, "process_alive", side_effect=lambda pid: alive.get(pid)),
         ):
             first = lease_lib.claim_lease(
@@ -237,6 +233,233 @@ class ActivationLeaseTest(unittest.TestCase):
 
         self.assertEqual(1, first["fence_token"])
         self.assertEqual("same_session_different_claimant", ctx.exception.reason)
+
+    def test_leases_isolate_per_project_and_enumeration_does_not_cross(self):
+        # GH-160: two registered projects claim concurrently with the SAME worktree.
+        # Records land in separate per-project directories and alias enumeration for one
+        # project never sees the other's lease.
+        root = self.make_workspace()
+        projects_file = root / "projects.json"
+        projects = json.loads(projects_file.read_text())
+        projects["projects"].append({"id": "nuvyr", "display_name": "Nuvyr", "repos": {"app": "."}})
+        write_json(projects_file, projects)
+        self.register_session(root, "SESSION-A", project="amiga", chat="CHAT-A", runtime_id="rt-a")
+        self.register_session(root, "SESSION-B", project="nuvyr", chat="CHAT-B", runtime_id="rt-b")
+        common = {
+            "task": "TASK-TEST01",
+            "worktree": str(self.worktree),
+            "branch": "codex/gh-1571-test",
+            "target_agent": "claude",
+        }
+        ident_a = lease_lib.lease_identity({"project": "amiga", "chat": "CHAT-A", **common})
+        ident_b = lease_lib.lease_identity({"project": "nuvyr", "chat": "CHAT-B", **common})
+        alive = {111: True, 222: True}
+        with (
+            patch.object(
+                session_autobridge_lib,
+                "SESSIONS_DIR",
+                root / "State" / "session_autobridge" / "sessions",
+            ),
+            patch.object(
+                lease_lib,
+                "project_state_dir",
+                lambda _project, _root=root: _root / "State" / "session_autobridge" / "per-project" / _project,
+            ),
+            patch.object(lease_lib, "get_project", lambda pid: {"id": pid}),
+            patch.object(
+                lease_lib, "get_project",
+                lambda pid: {"id": pid} if pid in {"amiga", "nuvyr"} else None,
+            ),
+            patch.object(lease_lib, "process_alive", side_effect=lambda pid: alive.get(pid)),
+        ):
+            lease_lib.claim_lease(
+                ident_a, owner_session_id="SESSION-A", owner_pid=111,
+                claimant_runtime_id="rt-a", takeover=True,
+            )
+            lease_lib.claim_lease(
+                ident_b, owner_session_id="SESSION-B", owner_pid=222,
+                claimant_runtime_id="rt-b", takeover=True,
+            )
+            dir_a = lease_lib.lease_path(ident_a).parent
+            dir_b = lease_lib.lease_path(ident_b).parent
+            self.assertNotEqual(dir_a, dir_b)
+            self.assertEqual("amiga", dir_a.parent.name)
+            self.assertEqual("nuvyr", dir_b.parent.name)
+            a_keys = {lease["lease_key"] for lease in lease_lib.iter_leases(ident_a)}
+            self.assertIn(lease_lib.lease_key(ident_a), a_keys)
+            self.assertNotIn(lease_lib.lease_key(ident_b), a_keys)
+
+    def test_read_fails_closed_and_does_not_mutate_when_legacy_present(self):
+        # GH-160 cutover: while legacy workspace-global records exist, every operation
+        # fails closed. A read (lease-assert path) refuses AND mutates nothing — no move,
+        # no overwrite, no lock deletion — so the cutover stays operator-owned.
+        root = self.make_workspace()
+        legacy = root / "legacy-shared-root"
+        legacy.mkdir(parents=True)
+        legacy_record = legacy / "deadbeef00000000.json"
+        legacy_record.write_text('{"identity": {"project": "amiga"}, "status": "active"}')
+        legacy_lock = legacy / ".claim-grant.lock"
+        legacy_lock.write_text("")
+        record_bytes = legacy_record.read_bytes()
+        identity = lease_lib.lease_identity(
+            {
+                "project": "amiga",
+                "chat": "CHAT-TEST0001",
+                "task": "TASK-TEST01",
+                "worktree": str(self.worktree),
+                "branch": "codex/gh-1571-test",
+                "target_agent": "claude",
+            }
+        )
+        per_project_dir = root / "State" / "session_autobridge" / "per-project" / "amiga" / "activation_leases"
+        with (
+            patch.object(
+                lease_lib,
+                "project_state_dir",
+                lambda _project, _root=root: _root / "State" / "session_autobridge" / "per-project" / _project,
+            ),
+            patch.object(lease_lib, "get_project", lambda pid: {"id": pid}),
+            patch.object(
+                lease_lib, "get_project",
+                lambda pid: {"id": pid} if pid == "amiga" else None,
+            ),
+            patch.object(lease_lib, "LEGACY_ACTIVATION_LEASES_DIR", legacy),
+        ):
+            with self.assertRaises(lease_lib.LeaseRefused) as ctx:
+                lease_lib.load_authority_lease(identity)
+            self.assertEqual("legacy_lease_migration_required", ctx.exception.reason)
+            # A read must not have moved, rewritten, or created anything.
+            self.assertTrue(legacy_record.exists())
+            self.assertEqual(record_bytes, legacy_record.read_bytes())
+            self.assertTrue(legacy_lock.exists())
+            self.assertFalse(per_project_dir.exists())
+            # Once the operator clears the legacy root, operations proceed (no lease -> None).
+            legacy_record.unlink()
+            self.assertIsNone(lease_lib.load_authority_lease(identity))
+
+    def test_unregistered_project_is_refused_before_its_directory_exists(self):
+        # GH-160: path safety is not registration. A safe-but-unregistered project must
+        # fail closed on every read/enumeration/path resolution, before any per-project
+        # directory is created.
+        root = self.make_workspace()
+        identity = lease_lib.lease_identity(
+            {
+                "project": "ghost-unregistered",
+                "chat": "CHAT-TEST0001",
+                "task": "TASK-TEST01",
+                "worktree": str(self.worktree),
+                "branch": "codex/gh-1571-test",
+                "target_agent": "claude",
+            }
+        )
+        per_project_parent = root / "State" / "session_autobridge" / "per-project"
+        # A legacy record present must NOT mask the registration refusal: registration is
+        # validated before the legacy guard ever reads the legacy authority.
+        legacy = root / "legacy-shared-root"
+        legacy.mkdir(parents=True)
+        (legacy / "deadbeef00000000.json").write_text('{"identity": {"project": "amiga"}}')
+        with (
+            patch.object(
+                lease_lib,
+                "project_state_dir",
+                lambda _project, _root=root: _root / "State" / "session_autobridge" / "per-project" / _project,
+            ),
+            patch.object(lease_lib, "get_project", lambda pid: {"id": pid}),
+            patch.object(
+                lease_lib, "get_project",
+                lambda pid: {"id": pid} if pid == "amiga" else None,
+            ),
+            patch.object(lease_lib, "LEGACY_ACTIVATION_LEASES_DIR", legacy),
+        ):
+            for operation in (
+                lambda: lease_lib.lease_path(identity),
+                lambda: lease_lib.load_authority_lease(identity),
+                lambda: lease_lib.iter_leases(identity),
+            ):
+                with self.assertRaises(lease_lib.LeaseRefused) as ctx:
+                    operation()
+                self.assertEqual("unregistered_project_scope", ctx.exception.reason)
+        self.assertFalse(per_project_parent.exists())
+
+    def test_lease_directory_scan_is_bounded_at_the_entry_limit(self):
+        # GH-160 bounded-work: the shared scanner counts EVERY entry (json or not) and
+        # fails closed past the limit before returning a partial result.
+        directory = Path(tempfile.mkdtemp(prefix="llm-collab-lease-scan-", dir="/tmp"))
+        with patch.object(lease_lib, "MAX_LEASE_DIRECTORY_ENTRIES", 3):
+            (directory / "a.json").write_text("{}")
+            (directory / "b.json").write_text("{}")
+            (directory / "notes.txt").write_text("x")  # non-json still counts
+            # exactly the limit succeeds and returns only the json records
+            self.assertEqual(
+                {"a.json", "b.json"},
+                {path.name for path in lease_lib._scan_lease_records(directory)},
+            )
+            # one more entry (even non-json) pushes past the limit -> fail closed
+            (directory / "extra.log").write_text("x")
+            with self.assertRaises(lease_lib.LeaseRefused) as ctx:
+                lease_lib._scan_lease_records(directory)
+            self.assertEqual("lease_directory_too_large", ctx.exception.reason)
+
+    def test_scan_budget_is_cumulative_across_one_operation(self):
+        # GH-160 bounded-work: a single operation carries ONE budget across every scan
+        # (legacy + project + repeated lease_dir checks), not a fresh budget per scan.
+        first = Path(tempfile.mkdtemp(prefix="llm-collab-lease-a-", dir="/tmp"))
+        second = Path(tempfile.mkdtemp(prefix="llm-collab-lease-b-", dir="/tmp"))
+        for directory in (first, second):
+            (directory / "a.json").write_text("{}")
+            (directory / "b.json").write_text("{}")
+        with patch.object(lease_lib, "MAX_LEASE_DIRECTORY_ENTRIES", 3):
+            # Outside an operation each scan gets its own budget -> both succeed.
+            lease_lib._scan_lease_records(first)
+            lease_lib._scan_lease_records(second)
+            # Within one operation the budget is shared: 2 + 2 > 3 fails closed.
+            with lease_lib._operation_scan_budget():
+                lease_lib._scan_lease_records(first)
+                with self.assertRaises(lease_lib.LeaseRefused) as ctx:
+                    lease_lib._scan_lease_records(second)
+                self.assertEqual("lease_directory_too_large", ctx.exception.reason)
+
+    def test_with_lease_fence_shares_one_budget_across_lock_and_validation(self):
+        # GH-160 bounded-work at the mutation boundary: the pre-lock _ClaimLock scan and
+        # the nested validation must draw from ONE operation budget. Two legacy scans of
+        # 2 entries each (no *.json, so no legacy refusal) exceed a cap of 3 only when the
+        # budget is shared — which requires @_bounded_operation on with_lease_fence.
+        root = self.make_workspace()
+        identity = lease_lib.lease_identity(
+            {
+                "project": "amiga",
+                "chat": "CHAT-TEST0001",
+                "task": "TASK-TEST01",
+                "worktree": str(self.worktree),
+                "branch": "codex/gh-1571-test",
+                "target_agent": "claude",
+            }
+        )
+        legacy = root / "legacy-shared-root"
+        legacy.mkdir(parents=True)
+        (legacy / "one.log").write_text("x")
+        (legacy / "two.log").write_text("x")
+        with (
+            patch.object(
+                lease_lib,
+                "project_state_dir",
+                lambda _project, _root=root: _root / "State" / "session_autobridge" / "per-project" / _project,
+            ),
+            patch.object(
+                lease_lib, "get_project",
+                lambda pid: {"id": pid} if pid == "amiga" else None,
+            ),
+            patch.object(lease_lib, "LEGACY_ACTIVATION_LEASES_DIR", legacy),
+            patch.object(lease_lib, "MAX_LEASE_DIRECTORY_ENTRIES", 3),
+        ):
+            with self.assertRaises(lease_lib.LeaseRefused) as ctx:
+                lease_lib.with_lease_fence(
+                    identity,
+                    owner_session_id="SESSION-X",
+                    fence_token=1,
+                    mutation=lambda: "unreached",
+                )
+            self.assertEqual("lease_directory_too_large", ctx.exception.reason)
 
     def test_dead_dispatcher_process_allows_successor_generation_newer_fence(self):
         root = self.make_workspace()
@@ -261,14 +484,10 @@ class ActivationLeaseTest(unittest.TestCase):
             ),
             patch.object(
                 lease_lib,
-                "ACTIVATION_LEASES_DIR",
-                root / "State" / "session_autobridge" / "activation_leases",
+                "project_state_dir",
+                lambda _project, _root=root: _root / "State" / "session_autobridge" / "per-project" / _project,
             ),
-            patch.object(
-                lease_lib,
-                "ACTIVATION_GRANT_LOCK",
-                root / "State" / "session_autobridge" / "activation_leases" / ".claim-grant.lock",
-            ),
+            patch.object(lease_lib, "get_project", lambda pid: {"id": pid}),
             patch.object(lease_lib, "process_alive", side_effect=lambda pid: alive.get(pid)),
         ):
             first = lease_lib.claim_lease(
@@ -316,14 +535,10 @@ class ActivationLeaseTest(unittest.TestCase):
             ),
             patch.object(
                 lease_lib,
-                "ACTIVATION_LEASES_DIR",
-                root / "State" / "session_autobridge" / "activation_leases",
+                "project_state_dir",
+                lambda _project, _root=root: _root / "State" / "session_autobridge" / "per-project" / _project,
             ),
-            patch.object(
-                lease_lib,
-                "ACTIVATION_GRANT_LOCK",
-                root / "State" / "session_autobridge" / "activation_leases" / ".claim-grant.lock",
-            ),
+            patch.object(lease_lib, "get_project", lambda pid: {"id": pid}),
             patch.object(lease_lib, "process_alive", side_effect=lambda pid: alive.get(pid)),
         ):
             claimed = lease_lib.claim_lease(
@@ -385,14 +600,10 @@ class ActivationLeaseTest(unittest.TestCase):
             ),
             patch.object(
                 lease_lib,
-                "ACTIVATION_LEASES_DIR",
-                root / "State" / "session_autobridge" / "activation_leases",
+                "project_state_dir",
+                lambda _project, _root=root: _root / "State" / "session_autobridge" / "per-project" / _project,
             ),
-            patch.object(
-                lease_lib,
-                "ACTIVATION_GRANT_LOCK",
-                root / "State" / "session_autobridge" / "activation_leases" / ".claim-grant.lock",
-            ),
+            patch.object(lease_lib, "get_project", lambda pid: {"id": pid}),
             patch.object(lease_lib, "process_alive", side_effect=lambda pid: alive.get(pid)),
         ):
             old = lease_lib.claim_lease(
@@ -581,14 +792,10 @@ class ActivationLeaseTest(unittest.TestCase):
                 ),
                 patch.object(
                     lease_lib,
-                    "ACTIVATION_LEASES_DIR",
-                    root / "State" / "session_autobridge" / "activation_leases",
+                    "project_state_dir",
+                    lambda _project, _root=root: _root / "State" / "session_autobridge" / "per-project" / _project,
                 ),
-                patch.object(
-                    lease_lib,
-                    "ACTIVATION_GRANT_LOCK",
-                    root / "State" / "session_autobridge" / "activation_leases" / ".claim-grant.lock",
-                ),
+                patch.object(lease_lib, "get_project", lambda pid: {"id": pid}),
                 patch.object(lease_lib, "process_alive", side_effect=lambda pid: alive.get(pid)),
             ):
                 return lease_lib.claim_lease(
@@ -632,7 +839,7 @@ class ActivationLeaseTest(unittest.TestCase):
         self.register_session(root, "SESSION-B", runtime_id="runtime-b")
         first, code = self.claim(root, "SESSION-A", "--claimant-runtime-id", "runtime-a")
         self.assertEqual(0, code, first)
-        lease_dir = root / "State" / "session_autobridge" / "activation_leases"
+        lease_dir = root / "projects" / "amiga" / "activation_leases"
         before = {path.name: path.read_text() for path in lease_dir.glob("*.json")}
 
         refused, code = self.claim(root, "SESSION-B", "--claimant-runtime-id", "runtime-b")
@@ -648,7 +855,7 @@ class ActivationLeaseTest(unittest.TestCase):
         self.register_session(root, "SESSION-B", runtime_id="runtime-shared")
         first, code = self.claim(root, "SESSION-A", "--claimant-runtime-id", "runtime-shared")
         self.assertEqual(0, code, first)
-        lease_dir = root / "State" / "session_autobridge" / "activation_leases"
+        lease_dir = root / "projects" / "amiga" / "activation_leases"
         before = {path.name: path.read_text() for path in lease_dir.glob("*.json")}
 
         refused, code = self.claim(root, "SESSION-B", "--claimant-runtime-id", "runtime-shared")
@@ -755,7 +962,7 @@ class ActivationLeaseTest(unittest.TestCase):
                 )
                 self.assertEqual(0, code, claimed)
                 self.update_session_status(root, "SESSION-A", status)
-                lease_dir = root / "State" / "session_autobridge" / "activation_leases"
+                lease_dir = root / "projects" / "amiga" / "activation_leases"
                 before = {path.name: path.read_text() for path in lease_dir.glob("*.json")}
 
                 refused, code = self.claim(root, "SESSION-B", "--claimant-runtime-id", "runtime-b")
@@ -776,7 +983,7 @@ class ActivationLeaseTest(unittest.TestCase):
         claimed, code = self.claim(root, "SESSION-A", "--claimant-runtime-id", "runtime-a")
         self.assertEqual(0, code, claimed)
         fence = str(claimed["lease"]["fence_token"])
-        lease_dir = root / "State" / "session_autobridge" / "activation_leases"
+        lease_dir = root / "projects" / "amiga" / "activation_leases"
 
         self.expire_session_lease(root, "SESSION-A")
         before = {path.name: path.read_text() for path in lease_dir.glob("*.json")}
@@ -1013,6 +1220,18 @@ class ActivationLeaseTest(unittest.TestCase):
         self.assertIsNone(shown["lease"])
         self.assertEqual("amiga", shown["identity"]["project"])
 
+    def test_lease_show_returns_structured_refusal_when_legacy_present(self):
+        # GH-160: the fail-closed legacy guard must reach lease-show as a structured
+        # refusal (reason + exit 75), like the other lease verbs — never a traceback.
+        root = self.make_workspace()
+        legacy = root / "State" / "session_autobridge" / "activation_leases"
+        legacy.mkdir(parents=True)
+        (legacy / "deadbeef00000000.json").write_text('{"identity": {"project": "amiga"}}')
+        shown, code = self.run_cli(root, "lease-show", *self.identity_args())
+        self.assertEqual(75, code, shown)
+        self.assertEqual("legacy_lease_migration_required", shown["reason"])
+        self.assertFalse(shown["shown"])
+
     def test_alias_collapse_refuses_symlink_claim_under_lock(self):
         root = self.make_workspace()
         self.register_session(root, "SESSION-A", runtime_id="runtime-a")
@@ -1151,7 +1370,7 @@ class ActivationLeaseTest(unittest.TestCase):
                 "target_agent": "claude",
             }
         )
-        lease_dir = root / "State" / "session_autobridge" / "activation_leases"
+        lease_dir = root / "projects" / "amiga" / "activation_leases"
         stale = {
             "identity": identity,
             "lease_key": lease_lib.lease_key(identity),
@@ -1173,7 +1392,7 @@ class ActivationLeaseTest(unittest.TestCase):
     def test_corrupt_alias_lease_json_fails_closed_without_mutation(self):
         root = self.make_workspace()
         self.register_session(root, "SESSION-B", runtime_id="runtime-b")
-        lease_dir = root / "State" / "session_autobridge" / "activation_leases"
+        lease_dir = root / "projects" / "amiga" / "activation_leases"
         corrupt = lease_dir / "bad-alias-candidate.json"
         write(corrupt, "{not-json")
         before = {path.name: path.read_text() for path in lease_dir.glob("*.json")}
@@ -1236,7 +1455,7 @@ class ActivationLeaseTest(unittest.TestCase):
                     del stale[field]
                 else:
                     stale[field] = value
-                lease_dir = root / "State" / "session_autobridge" / "activation_leases"
+                lease_dir = root / "projects" / "amiga" / "activation_leases"
                 lease_file = lease_dir / f"{lease_lib.lease_key(identity)}.json"
                 write_json(lease_file, stale)
                 before = {path.name: path.read_text() for path in lease_dir.glob("*.json")}
@@ -1275,7 +1494,7 @@ class ActivationLeaseTest(unittest.TestCase):
             "runtime-a",
         )
         self.assertEqual(0, code, released)
-        lease_file = next((root / "State" / "session_autobridge" / "activation_leases").glob("*.json"))
+        lease_file = next((root / "projects" / "amiga" / "activation_leases").glob("*.json"))
         payload = json.loads(lease_file.read_text())
         payload["lease_expires_utc"] = "not-a-timestamp"
         write_json(lease_file, payload)
@@ -1332,7 +1551,7 @@ class ActivationLeaseTest(unittest.TestCase):
                         "worktree_realpath": str(self.worktree.resolve()),
                     }
                     mutate(stale, lease_lib.lease_key(claimant_identity))
-                    lease_dir = root / "State" / "session_autobridge" / "activation_leases"
+                    lease_dir = root / "projects" / "amiga" / "activation_leases"
                     lease_file = lease_dir / f"{identity_key}.json"
                     write_json(lease_file, stale)
                     before = {path.name: path.read_text() for path in lease_dir.glob("*.json")}
@@ -1393,7 +1612,7 @@ class ActivationLeaseTest(unittest.TestCase):
                     "previous_owner_session_id": None,
                     "worktree_realpath": str(self.worktree.resolve()),
                 }
-                lease_dir = root / "State" / "session_autobridge" / "activation_leases"
+                lease_dir = root / "projects" / "amiga" / "activation_leases"
                 lease_file = lease_dir / f"{lease_lib.lease_key(owner_identity)}.json"
                 write_json(lease_file, stale)
                 before = {path.name: path.read_text() for path in lease_dir.glob("*.json")}
@@ -1430,7 +1649,7 @@ class ActivationLeaseTest(unittest.TestCase):
             self.assertEqual(0, code, claimed)
         finally:
             sleeper.wait(timeout=5)
-        lease_dir = root / "State" / "session_autobridge" / "activation_leases"
+        lease_dir = root / "projects" / "amiga" / "activation_leases"
         before = {path.name: path.read_text() for path in lease_dir.glob("*.json")}
         for command in ("lease-assert", "lease-release"):
             refused, code = self.run_cli(
@@ -1484,7 +1703,7 @@ class ActivationLeaseTest(unittest.TestCase):
                     self.register_session(root, "SESSION-A", runtime_id="runtime-a")
                     claimed, code = self.claim(root, "SESSION-A", "--claimant-runtime-id", "runtime-a")
                     self.assertEqual(0, code, claimed)
-                    lease_dir = root / "State" / "session_autobridge" / "activation_leases"
+                    lease_dir = root / "projects" / "amiga" / "activation_leases"
                     lease_file = next(lease_dir.glob("*.json"))
                     payload = json.loads(lease_file.read_text())
                     if reason == "missing":
@@ -1520,7 +1739,7 @@ class ActivationLeaseTest(unittest.TestCase):
                 self.register_session(root, "SESSION-A", runtime_id="runtime-a")
                 claimed, code = self.claim(root, "SESSION-A", "--claimant-runtime-id", "runtime-a")
                 self.assertEqual(0, code, claimed)
-                lease_dir = root / "State" / "session_autobridge" / "activation_leases"
+                lease_dir = root / "projects" / "amiga" / "activation_leases"
                 lease_file = next(lease_dir.glob("*.json"))
                 payload = json.loads(lease_file.read_text())
                 payload["identity"]["chat"] = "CHAT-OTHER"
@@ -1555,7 +1774,7 @@ class ActivationLeaseTest(unittest.TestCase):
         claimed, code = self.claim(root, "SESSION-A", "--claimant-runtime-id", "runtime-a")
         self.assertEqual(0, code, claimed)
         self.expire_session_lease(root, "SESSION-A")
-        lease_dir = root / "State" / "session_autobridge" / "activation_leases"
+        lease_dir = root / "projects" / "amiga" / "activation_leases"
         before = {path.name: path.read_text() for path in lease_dir.glob("*.json")}
 
         for extra in ((), ("--takeover",)):
@@ -1707,8 +1926,8 @@ class ActivationLeaseTest(unittest.TestCase):
         }
         write_json(
             root
-            / "State"
-            / "session_autobridge"
+            / "projects"
+            / "amiga"
             / "activation_leases"
             / f"{stale['lease_key']}.json",
             stale,
@@ -1741,7 +1960,7 @@ class ActivationLeaseTest(unittest.TestCase):
         claimed, code = self.claim(root, "SESSION-A", "--claimant-runtime-id", "runtime-a")
         self.assertEqual(0, code, claimed)
         fence = str(claimed["lease"]["fence_token"])
-        lease_dir = root / "State" / "session_autobridge" / "activation_leases"
+        lease_dir = root / "projects" / "amiga" / "activation_leases"
 
         refused, code = self.run_cli(root, "lease-release", *self.identity_args(), "--session", "SESSION-B", "--fence-token", fence)
         self.assertEqual(75, code)
@@ -1796,33 +2015,41 @@ class ActivationLeaseTest(unittest.TestCase):
                 "target_agent": "claude",
             }
         )
-        lock_path = lease_lib.lease_path(identity).with_suffix(".lock")
-        lock_path.parent.mkdir(parents=True, exist_ok=True)
-        with lock_path.open("w") as handle:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            with self.assertRaises(lease_lib.LeaseRefused) as ctx:
-                with lease_lib._ClaimLock(identity):
-                    pass
-            self.assertEqual("claim_in_progress", ctx.exception.reason)
+        with (
+            patch.object(
+                lease_lib,
+                "project_state_dir",
+                lambda _project, _root=root: _root / "State" / "session_autobridge" / "per-project" / _project,
+            ),
+            patch.object(lease_lib, "get_project", lambda pid: {"id": pid}),
+        ):
+            lock_path = lease_lib.lease_path(identity).with_suffix(".lock")
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+            with lock_path.open("w") as handle:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                with self.assertRaises(lease_lib.LeaseRefused) as ctx:
+                    with lease_lib._ClaimLock(identity):
+                        pass
+                self.assertEqual("claim_in_progress", ctx.exception.reason)
 
-        with patch("fcntl.flock", side_effect=OSError(errno.EIO, "io")):
-            with self.assertRaises(OSError):
-                with lease_lib._ClaimLock(identity):
-                    pass
+            with patch("fcntl.flock", side_effect=OSError(errno.EIO, "io")):
+                with self.assertRaises(OSError):
+                    with lease_lib._ClaimLock(identity):
+                        pass
 
-        grant_lock_path = lease_lib.ACTIVATION_GRANT_LOCK
-        grant_lock_path.parent.mkdir(parents=True, exist_ok=True)
-        with grant_lock_path.open("w") as handle:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            with self.assertRaises(lease_lib.LeaseRefused) as ctx:
-                with lease_lib._claim_grant_lock():
-                    pass
-            self.assertEqual("claim_in_progress", ctx.exception.reason)
+            grant_lock_path = lease_lib.lease_dir(identity) / lease_lib._GRANT_LOCK_NAME
+            grant_lock_path.parent.mkdir(parents=True, exist_ok=True)
+            with grant_lock_path.open("w") as handle:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                with self.assertRaises(lease_lib.LeaseRefused) as ctx:
+                    with lease_lib._claim_grant_lock(identity):
+                        pass
+                self.assertEqual("claim_in_progress", ctx.exception.reason)
 
-        with patch("fcntl.flock", side_effect=OSError(errno.EIO, "io")):
-            with self.assertRaises(OSError):
-                with lease_lib._claim_grant_lock():
-                    pass
+            with patch("fcntl.flock", side_effect=OSError(errno.EIO, "io")):
+                with self.assertRaises(OSError):
+                    with lease_lib._claim_grant_lock(identity):
+                        pass
 
     def test_global_claim_grant_lock_contention_returns_bounded_refusal(self):
         root = self.make_workspace()
@@ -1833,7 +2060,7 @@ class ActivationLeaseTest(unittest.TestCase):
                 "import fcntl, os, sys, time",
                 "from pathlib import Path",
                 "root, ready = sys.argv[1:3]",
-                "path = Path(root) / 'State' / 'session_autobridge' / 'activation_leases' / '.claim-grant.lock'",
+                "path = Path(root) / 'projects' / 'amiga' / 'activation_leases' / '.claim-grant.lock'",
                 "path.parent.mkdir(parents=True, exist_ok=True)",
                 "fd = os.open(path, os.O_CREAT | os.O_RDWR)",
                 "fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)",

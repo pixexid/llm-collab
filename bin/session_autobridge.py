@@ -796,7 +796,12 @@ def lease_claim_command(args) -> tuple[dict, int]:
 def lease_show_command(args) -> tuple[dict, int]:
     _require_registered_lease_project(args)
     identity = lease_identity(args)
-    lease = load_lease(identity)
+    try:
+        lease = load_lease(identity)
+    except LeaseRefused as refusal:
+        # The fail-closed legacy/bounded guards escape load_lease as LeaseRefused; return
+        # the same structured refusal/exit status as the other lease verbs, not a traceback.
+        return (_refusal_payload("shown", identity, refusal), 75)
     if lease is None:
         return ({"identity": identity, "lease": None}, 0)
     return ({"identity": identity, "lease": lease, "owner": owner_summary(lease)}, 0)

@@ -7,20 +7,142 @@ PM2 state.
 
 from __future__ import annotations
 
+import contextvars
 import errno
 import fcntl
+import functools
 import json
 import os
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, TypeVar
 
 from _activation_identity import IDENTITY_FIELDS, lease_identity, lease_key
-from _helpers import utc_iso, write_file
+from _helpers import get_project, project_state_dir, utc_iso, write_file
 from _session_autobridge import AUTOBRIDGE_ROOT, load_session, parse_iso8601
 
-ACTIVATION_LEASES_DIR = AUTOBRIDGE_ROOT / "activation_leases"
-ACTIVATION_GRANT_LOCK = ACTIVATION_LEASES_DIR / ".claim-grant.lock"
+# Legacy workspace-global lease root (pre-#160). New leases live per project under
+# project_state_dir(project)/activation_leases; the code never reads, moves, or deletes
+# this root — while it holds records the authority fails closed (_refuse_if_legacy_present).
+LEGACY_ACTIVATION_LEASES_DIR = AUTOBRIDGE_ROOT / "activation_leases"
+_LEASE_SUBDIR = "activation_leases"
+_GRANT_LOCK_NAME = ".claim-grant.lock"
+
+
+def _project_scope(identity_or_project: object) -> str:
+    project = (
+        identity_or_project.get("project")
+        if isinstance(identity_or_project, dict)
+        else identity_or_project
+    )
+    # The project becomes a path component under project_state_root, so it must be a
+    # single safe segment AND a registered project (#160 requires a validated registered
+    # project before any read, write, enumeration, or lock — path safety alone would let
+    # a direct read/release/assert caller create authority under an unregistered project).
+    if (
+        not isinstance(project, str)
+        or not project
+        or project in (".", "..")
+        or "/" in project
+        or "\\" in project
+        or "\x00" in project
+    ):
+        raise LeaseRefused("invalid_project_scope", {"project": project})
+    if get_project(project) is None:
+        raise LeaseRefused("unregistered_project_scope", {"project": project})
+    return project
+
+
+def lease_dir(identity_or_project: object) -> Path:
+    # Single chokepoint for every read, write, enumeration, and lock. Validate the
+    # registered project FIRST — an unregistered caller must be refused before the legacy
+    # guard ever reads/enumerates the legacy authority — THEN run the fail-closed legacy
+    # guard, THEN resolve the per-project directory.
+    project = _project_scope(identity_or_project)
+    _refuse_if_legacy_present()
+    return project_state_dir(project) / _LEASE_SUBDIR
+
+
+MAX_LEASE_DIRECTORY_ENTRIES = 4096
+
+# One cumulative enumeration budget per lease operation. A single operation resolves the
+# lease dir many times (legacy guard + grant lock + claim lock + alias scan + write), so a
+# per-scan budget would let it scan MAX * N entries. The budget is set once at the operation
+# boundary and every scan in that operation draws from it.
+_scan_budget: contextvars.ContextVar[list[int] | None] = contextvars.ContextVar(
+    "activation_lease_scan_budget", default=None
+)
+
+
+@contextmanager
+def _operation_scan_budget():
+    """Establish (or share) the one cumulative scan budget for this lease operation."""
+    if _scan_budget.get() is not None:
+        yield  # already inside an operation budget; nested calls share it
+        return
+    token = _scan_budget.set([MAX_LEASE_DIRECTORY_ENTRIES])
+    try:
+        yield
+    finally:
+        _scan_budget.reset(token)
+
+
+def _bounded_operation(func: Callable) -> Callable:
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        with _operation_scan_budget():
+            return func(*args, **kwargs)
+
+    return wrapper
+
+
+def _scan_lease_records(directory: Path) -> list[Path]:
+    """Bounded scan of a lease directory: the sorted ``*.json`` record paths, or fail
+    closed when the operation's cumulative entry budget is exhausted. Every entry is
+    counted (json or not) and the cap is enforced mid-scan, so an oversized directory
+    refuses before a partial result is ever returned (the repository's bounded-work
+    rule). Outside a lease operation a single-scan budget applies. Absent dir -> empty.
+    """
+    budget = _scan_budget.get()
+    if budget is None:
+        budget = [MAX_LEASE_DIRECTORY_ENTRIES]
+    records: list[Path] = []
+    try:
+        scanner = os.scandir(directory)
+    except FileNotFoundError:
+        return []
+    with scanner:
+        for entry in scanner:
+            budget[0] -= 1
+            if budget[0] < 0:
+                raise LeaseRefused(
+                    "lease_directory_too_large",
+                    {"directory": str(directory), "limit": MAX_LEASE_DIRECTORY_ENTRIES},
+                )
+            if entry.name.endswith(".json"):
+                records.append(Path(entry.path))
+    records.sort()
+    return records
+
+
+def _refuse_if_legacy_present() -> None:
+    """Fail closed while pre-GH-160 workspace-global records still exist (#160 cutover).
+
+    The per-project path is the sole authority. This module never reads, moves, or
+    deletes the legacy root — it only refuses, so a read path (e.g. lease-assert) stays
+    read-only and mutates nothing. The explicit one-owner cutover is an operator step:
+    with no other activation-lease writer running, review the legacy records for any
+    still-authoritative lease and archive or relocate the root (not a destructive
+    delete) before the per-project authority resumes.
+    """
+    if _scan_lease_records(LEGACY_ACTIVATION_LEASES_DIR):
+        raise LeaseRefused(
+            "legacy_lease_migration_required",
+            {"legacy_root": str(LEGACY_ACTIVATION_LEASES_DIR)},
+        )
+
+
 LIVE_SESSION_STATUSES = {"active", "parked"}
 CONTENTION_ERRNOS = {errno.EAGAIN, errno.EWOULDBLOCK, errno.EACCES}
 T = TypeVar("T")
@@ -47,9 +169,10 @@ def _expires_at(ttl_seconds: int) -> str:
 
 
 def lease_path(identity: dict[str, str]) -> Path:
-    return ACTIVATION_LEASES_DIR / f"{lease_key(identity)}.json"
+    return lease_dir(identity) / f"{lease_key(identity)}.json"
 
 
+@_bounded_operation
 def load_lease(identity: dict[str, str]) -> dict[str, Any] | None:
     path = lease_path(identity)
     if not path.exists():
@@ -141,6 +264,7 @@ def _validate_loaded_lease_state(identity: dict[str, str], payload: Any) -> None
             raise _malformed_lease_state(path, f"identity.{field}", "mismatch")
 
 
+@_bounded_operation
 def load_authority_lease(identity: dict[str, str]) -> dict[str, Any] | None:
     path = lease_path(identity)
     if not path.exists():
@@ -156,6 +280,7 @@ def load_authority_lease(identity: dict[str, str]) -> dict[str, Any] | None:
     return payload
 
 
+@_bounded_operation
 def validate_lease_and_claimant(
     identity: dict[str, str],
     *,
@@ -191,11 +316,13 @@ def validate_lease_and_claimant(
     return lease
 
 
-def iter_leases() -> list[dict[str, Any]]:
-    if not ACTIVATION_LEASES_DIR.exists():
-        return []
+@_bounded_operation
+def iter_leases(identity_or_project: object) -> list[dict[str, Any]]:
+    """Every lease for ONE project. Enumeration is scoped to that project's directory
+    so alias detection can never cross projects."""
+    directory = lease_dir(identity_or_project)
     leases: list[dict[str, Any]] = []
-    for path in sorted(ACTIVATION_LEASES_DIR.glob("*.json")):
+    for path in _scan_lease_records(directory):
         try:
             payload = json.loads(path.read_text())
         except json.JSONDecodeError as exc:
@@ -208,6 +335,7 @@ def iter_leases() -> list[dict[str, Any]]:
     return leases
 
 
+@_bounded_operation
 def save_lease(payload: dict[str, Any]) -> None:
     path = lease_path(payload["identity"])
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -277,8 +405,10 @@ class _BlockingLock:
             self.fd = None
 
 
-def _claim_grant_lock() -> _BlockingLock:
-    return _BlockingLock(ACTIVATION_GRANT_LOCK)
+def _claim_grant_lock(identity_or_project: object) -> _BlockingLock:
+    directory = lease_dir(identity_or_project)
+    directory.mkdir(parents=True, exist_ok=True)
+    return _BlockingLock(directory / _GRANT_LOCK_NAME)
 
 
 RUNTIME_ID_ENV_VARS = (
@@ -506,7 +636,7 @@ def _claim_realpath(identity: dict[str, str]) -> str:
 
 def _active_alias_collision(identity: dict[str, str], worktree_realpath: str) -> dict[str, Any] | None:
     this_key = lease_key(identity)
-    for existing in iter_leases():
+    for existing in iter_leases(identity):
         if existing.get("lease_key") == this_key:
             continue
         if existing.get("status") != "active":
@@ -519,6 +649,7 @@ def _active_alias_collision(identity: dict[str, str], worktree_realpath: str) ->
     return None
 
 
+@_bounded_operation
 def claim_lease(
     identity: dict[str, str],
     *,
@@ -538,7 +669,7 @@ def claim_lease(
         claimant_runtime_id=claimant_runtime_id, owner_pid=owner_pid
     )
 
-    with _claim_grant_lock(), _ClaimLock(identity):
+    with _claim_grant_lock(identity), _ClaimLock(identity):
         worktree_realpath = _claim_realpath(identity)
         collision = _active_alias_collision(identity, worktree_realpath)
         if collision is not None:
@@ -626,6 +757,7 @@ def assert_lease(
     return lease
 
 
+@_bounded_operation
 def with_lease_fence(
     identity: dict[str, str],
     *,
@@ -635,7 +767,13 @@ def with_lease_fence(
     owner_pid: int | None = None,
     claimant_runtime_id: str | None = None,
 ) -> T:
-    """Hold the per-identity lease lock through one protected mutation."""
+    """Hold the per-identity lease lock through one protected mutation.
+
+    The @_bounded_operation is essential here, not just at the nested validation: the
+    pre-lock _ClaimLock resolves lease_dir (a legacy scan) before validate_lease_and_claimant
+    would start its own budget, so without a shared operation budget one protected mutation
+    could consume two separate full scan budgets.
+    """
     with _ClaimLock(identity):
         lease = validate_lease_and_claimant(
             identity,
@@ -649,6 +787,7 @@ def with_lease_fence(
         return mutation()
 
 
+@_bounded_operation
 def release_lease(
     identity: dict[str, str],
     *,

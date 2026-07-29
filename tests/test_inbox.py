@@ -1326,6 +1326,43 @@ class InboxMarkAllReadTest(unittest.TestCase):
         )
         self.assertEqual([path], self.load_inbox()["unread"])
 
+    def test_unregistered_activation_scope_is_terminal_before_reader_session(self):
+        # GH-160: an invalid/unregistered project scope must be terminal at the gate,
+        # before ensure_reader_session() or the claim's poller cleanup can mutate.
+        import _activation_lease as lease_lib
+        import _session_autobridge as sa_lib
+
+        sessions_dir = self.root / "State" / "session_autobridge" / "sessions"
+        msg = {
+            "frontmatter": {
+                "activation": True,
+                "to": "codex",
+                "project_id": "ghost-unregistered",
+                "chat_id": "CHAT-X",
+                "related_task": "TASK-1",
+                "worktree": str(self.worktree),
+                "branch": "codex/gh-1571-test",
+            },
+            "path": "Chats/x/packet.md",
+        }
+        args = SimpleNamespace(me="codex", session="SESSION-READER")
+        with (
+            patch.object(
+                lease_lib, "get_project",
+                lambda pid: {"id": pid} if pid in {"amiga", "nuvyr"} else None,
+            ),
+            patch.object(
+                lease_lib, "project_state_dir",
+                lambda _p, _r=self.root: _r / "State" / "session_autobridge" / "per-project" / _p,
+            ),
+            patch.object(sa_lib, "SESSIONS_DIR", sessions_dir),
+        ):
+            result = inbox_lib.gate_activation_message(args, msg, consume=True)
+        self.assertFalse(result["authorized"])
+        self.assertEqual("unregistered_project_scope", result["reason"])
+        # Terminal before reader-session creation: nothing was written.
+        self.assertFalse(sessions_dir.exists() and any(sessions_dir.glob("*.json")))
+
     def test_released_activation_packet_reclaims_with_newer_fence(self) -> None:
         path = self.add_message("RECLAIM", project_line="amiga", activation=True)
         first = self.run_inbox(
