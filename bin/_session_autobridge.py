@@ -177,6 +177,26 @@ class BindingUnreadable(RuntimeError):
     """
 
 
+class CanonicalBindingNativeMismatch(RuntimeError):
+    """An active canonical binding exists for the participant, but it is bound to a
+    different native session than the one registering.
+
+    Distinct from "no binding" (canonical_binding_required): here a binding IS
+    present, so stamping it onto the registering runtime session would wake the
+    wrong native session behind a fence that then reads as proven. Register must
+    fail closed with its own reason.
+    """
+
+    def __init__(self, *, canonical_native_session_id, requested_runtime_session_id):
+        self.canonical_native_session_id = canonical_native_session_id
+        self.requested_runtime_session_id = requested_runtime_session_id
+        super().__init__(
+            f"canonical binding is bound to native session "
+            f"{canonical_native_session_id!r}, not the registering runtime session "
+            f"{requested_runtime_session_id!r}"
+        )
+
+
 def load_binding(project_id: str, chat_id: str, agent_id: str) -> dict:
     path = autobridge_binding_path(project_id, chat_id, agent_id)
     if not path.exists():
@@ -474,6 +494,56 @@ def reserve_message_result(
     return prepare_session_write(candidate)
 
 
+def resolve_active_canonical_binding(
+    project_id: str, chat_id: str, agent_id: str, runtime_session_id: str
+) -> dict[str, Any] | None:
+    """The current canonical binding fields for a participant's EXACT native session.
+
+    Reader-only: the caller copies binding_id/binding_generation/endpoint_id from
+    the ledger's active conversation_bindings row so the session, its file
+    binding, and the delivered packet all assert the SAME canonical identity the
+    materialization fence checks. The collabd layer owns assignment and the
+    generation fence; this never writes.
+
+    The active binding is resolved by participant, but a participant's binding is
+    minted for one native session. Returning it for a different registering
+    runtime session would stamp a fence a stale/wrong Pi thread then passes,
+    waking the wrong native session. So None when there is no resolvable active
+    binding, and CanonicalBindingNativeMismatch when one exists but is bound to a
+    native session other than `runtime_session_id`; only an exact native match
+    returns the canonical fields.
+    """
+    workspace_id = config_get("workspace_id")
+    if not workspace_id:
+        return None
+    _repo_package_root()
+    ledger_module = importlib.import_module(".".join(("llm_collab", "ledger")))
+    try:
+        paths = ledger_module.LedgerPaths.derive(project_state_root(), str(workspace_id))
+        with ledger_module.LedgerStore.open_reader(paths) as store:
+            resolved = store.resolve_conversation_binding(
+                workspace_id=store.paths.workspace_id,
+                scope_kind="project",
+                scope_identity=str(project_id),
+                conversation_id=str(chat_id),
+                participant_id="participant_" + str(agent_id),
+            )
+    except Exception:
+        return None
+    if not resolved.get("resolved"):
+        return None
+    if resolved.get("native_session_id") != runtime_session_id:
+        raise CanonicalBindingNativeMismatch(
+            canonical_native_session_id=resolved.get("native_session_id"),
+            requested_runtime_session_id=runtime_session_id,
+        )
+    return {
+        "binding_id": resolved["binding_id"],
+        "binding_generation": resolved["generation"],
+        "endpoint_id": resolved["endpoint_id"],
+    }
+
+
 def binding_payload_from_session(
     session: dict,
     existing: dict[str, Any] | None = None,
@@ -501,7 +571,7 @@ def binding_payload_from_session(
         except FileNotFoundError:
             existing = {}
 
-    return {
+    payload = {
         **existing,
         "project_id": project_id,
         "chat_id": chat_id,
@@ -516,6 +586,13 @@ def binding_payload_from_session(
         "last_seen_at_utc": utc_iso(),
         "supersedes_session_id": session.get("supersedes_session_id"),
     }
+    # Carry the canonical identity onto the file binding so deliver.py reads a
+    # target_binding_id from it and inbox.py's exact-read fence matches. Absent
+    # on the session (unbound, or a non-pi family), these simply stay off.
+    for key in ("binding_id", "binding_generation", "endpoint_id"):
+        if session.get(key) is not None:
+            payload[key] = session[key]
+    return payload
 
 
 def update_binding_from_session(

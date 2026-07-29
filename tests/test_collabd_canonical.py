@@ -67,6 +67,11 @@ def resolver_consumer_offenders(root: Path) -> list[str]:
         Path("llm_collab/canonical/delivery.py"),
         Path("llm_collab/canonical/legacy_packet_materialization.py"),
         Path("llm_collab/session_lifecycle.py"),
+        # Pi registration (#346) reads the active binding to stamp the session, its
+        # file binding, and the delivered packet with one canonical identity. This
+        # exact file is the only runtime consumer; any other runtime path resolving
+        # bindings is still an offender.
+        Path("bin/_session_autobridge.py"),
     }
     offenders = []
     for checked_root in (root / "bin", root / "scripts", root / "llm_collab"):
