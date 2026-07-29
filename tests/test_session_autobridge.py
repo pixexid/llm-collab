@@ -7016,6 +7016,8 @@ class SessionAutobridgeTest(unittest.TestCase):
             extension.default(pi);
             const ctx = {sessionManager: {getSessionId: () => "native-exact"}};
             await handlers.session_start({}, ctx);
+            await handlers.session_before_switch({}, ctx);
+            await handlers.session_before_fork({}, ctx);
             await handlers.session_shutdown({}, ctx);
             process.stdout.write(JSON.stringify(calls));
         """
@@ -7026,7 +7028,7 @@ class SessionAutobridgeTest(unittest.TestCase):
             check=True,
         )
         calls = json.loads(result.stdout)
-        self.assertEqual(2, len(calls))
+        self.assertEqual(4, len(calls))
         for call in calls:
             self.assertEqual(str(REPO_ROOT / "bin" / "llm-collab"), call["command"])
             self.assertEqual(

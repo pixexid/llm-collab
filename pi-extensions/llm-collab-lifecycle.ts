@@ -20,5 +20,7 @@ export default function (pi) {
 		nativeSessionId = ctx.sessionManager.getSessionId();
 		await deactivate();
 	});
+	pi.on("session_before_switch", deactivate);
+	pi.on("session_before_fork", deactivate);
 	pi.on("session_shutdown", deactivate);
 }
