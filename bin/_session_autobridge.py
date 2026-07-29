@@ -407,6 +407,22 @@ def save_session(
     path = autobridge_session_path(session_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     candidate, content = prepared or prepare_session_write(payload)
+    # A superseded record is terminal. A dispatch that loaded the session before it
+    # was retired still holds a live in-memory copy, and its processed-state save
+    # would otherwise write that copy back — resurrecting the predecessor as active
+    # after supersession, which is the two-writer window from the other side. Refuse
+    # to move an on-disk `superseded` record to any non-terminal status. Writing the
+    # retirement itself (candidate status == superseded) is unaffected, and a genuine
+    # new/re-registration never has an on-disk superseded record for its id.
+    if str(candidate.get("status")) != "superseded":
+        try:
+            on_disk = load_session(session_id)
+        except (FileNotFoundError, ValueError, UnreadableFile):
+            on_disk = None
+        if on_disk is not None and on_disk.get("status") == "superseded":
+            raise ValueError(
+                f"refusing to resurrect superseded session {session_id}"
+            )
     write_regular_file_atomically(path, content)
     payload.clear()
     payload.update(candidate)

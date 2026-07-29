@@ -15,6 +15,7 @@ reclaimable.
 
 from __future__ import annotations
 
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -89,3 +90,86 @@ class EndedSessionsStillFailClosedTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SupersessionRetiresTheOldSessionTest(unittest.TestCase):
+    """The consequence the connector caught on #373: once an active session no
+    longer expires on its lease, an explicit continuation must actively retire the
+    session it supersedes, or the old one stays dispatchable forever — two writers
+    on one thread. Retiring is the registration boundary's job.
+    """
+
+    def setUp(self) -> None:
+        import tempfile
+        import session_autobridge as reg
+        import _session_autobridge as sa
+        self.reg = reg
+        self.sa = sa
+        self.temp = tempfile.TemporaryDirectory(prefix="llm-collab-supersede-")
+        self.addCleanup(self.temp.cleanup)
+        self.dir = Path(self.temp.name)
+        self._saved = sa.SESSIONS_DIR
+        sa.SESSIONS_DIR = self.dir
+        reg.SESSIONS_DIR = self.dir
+        self.addCleanup(lambda: setattr(sa, "SESSIONS_DIR", self._saved))
+
+    def write(self, session_id: str, status: str, lease: str = PAST,
+              agent="claude", project="p", chat="c") -> None:
+        (self.dir / f"{session_id}.json").write_text(json.dumps({
+            "session_id": session_id, "agent_id": agent, "project_id": project,
+            "chat_id": chat, "status": status, "lease_expires_utc": lease,
+            "runtime": {"family": "claude_app", "session_id": "t", "home": "/h"},
+        }))
+
+    def replacement(self, session_id="SESSION-NEW", agent="claude", project="p", chat="c") -> dict:
+        return {"session_id": session_id, "agent_id": agent, "project_id": project, "chat_id": chat}
+
+    def test_a_superseded_active_session_becomes_undispatchable(self) -> None:
+        self.write("SESSION-OLD", "active", lease=PAST)
+        self.assertEqual((True, "ok"),
+                         self.sa.session_is_dispatchable(self.sa.load_session("SESSION-OLD")))
+        self.reg.retire_superseded_session("SESSION-OLD", self.replacement())
+        retired = self.sa.load_session("SESSION-OLD")
+        self.assertEqual("superseded", retired["status"])
+        self.assertEqual("SESSION-NEW", retired["superseded_by"])
+        self.assertFalse(self.sa.session_is_dispatchable(retired)[0])
+
+    def test_retiring_an_absent_session_is_a_no_op(self) -> None:
+        # A stale supersedes id must not raise; there is simply nothing to retire.
+        self.reg.retire_superseded_session("SESSION-GONE", self.replacement())
+
+    def test_an_already_terminal_session_is_left_untouched(self) -> None:
+        # Do not clobber a record already stopped/superseded by someone else.
+        self.write("SESSION-DONE", "stopped", lease=FUTURE)
+        self.reg.retire_superseded_session("SESSION-DONE", self.replacement())
+        self.assertEqual("stopped", self.sa.load_session("SESSION-DONE")["status"])
+
+    def test_a_predecessor_in_a_different_scope_is_refused_not_retired(self) -> None:
+        """#373 finding 1: --supersedes-session names an id; retiring whatever it
+        names would let a mistaken continuation destroy another agent's or chat's
+        live session. Only a same-scope predecessor is retired."""
+        self.write("SESSION-OTHER", "active", agent="zcode")  # different agent
+        with self.assertRaises(ValueError):
+            self.reg.retire_superseded_session(
+                "SESSION-OTHER", self.replacement(agent="claude"))
+        self.assertEqual("active", self.sa.load_session("SESSION-OTHER")["status"],
+                         "a cross-scope predecessor must be left untouched")
+
+    def test_save_refuses_to_resurrect_a_superseded_session(self) -> None:
+        """#373 finding 3: a dispatch that loaded the session before retirement
+        still holds an active copy; its save must not rewrite the superseded record
+        back to active."""
+        self.write("SESSION-Z", "superseded")
+        stale = {"session_id": "SESSION-Z", "agent_id": "claude", "project_id": "p",
+                 "chat_id": "c", "status": "active",
+                 "runtime": {"family": "claude_app", "session_id": "t", "home": "/h"}}
+        with self.assertRaises(ValueError):
+            self.sa.save_session(stale)
+        self.assertEqual("superseded", self.sa.load_session("SESSION-Z")["status"])
+
+    def test_writing_the_retirement_itself_is_allowed(self) -> None:
+        """The guard must not block the retire write — candidate status superseded
+        over an on-disk active record is exactly what retirement does."""
+        self.write("SESSION-Y", "active")
+        self.reg.retire_superseded_session("SESSION-Y", self.replacement())
+        self.assertEqual("superseded", self.sa.load_session("SESSION-Y")["status"])
