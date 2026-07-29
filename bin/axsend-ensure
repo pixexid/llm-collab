@@ -118,11 +118,10 @@ if (( status != 0 )); then
 fi
 
 if (( is_submit_ring == 1 )); then
-  if grep -Fq "QUEUED (UNCONFIRMED):" "$output_file"; then
-    [[ -n "$retained" ]] && echo "$retained"
-    exit 0
-  fi
-  # A successful submit ring gets its ONE final outcome from this confirm (GH-98).
+  # A status-0 submit ring is VERIFIED (axsend.swift returns 0 only on a delivered
+  # turn); a queued/unconfirmed ring returns ambiguous (3) since #406 and is handled
+  # above under `status != 0`. So there is no exit-0 QUEUED case to special-case here:
+  # a successful submit ring gets its ONE final outcome from this confirm (GH-98).
   subcmd_args confirm
   "$root/tools/axbridge/axsend" "${cmd_args[@]}"
 else
