@@ -38,6 +38,8 @@ from _session_autobridge import (
     load_binding,
     load_session,
     prepare_session_write,
+    provision_pi_canonical_binding,
+    PiProvisioningRefused,
     resolve_active_canonical_binding,
     runtime_home_from_source,
     save_session,
@@ -88,6 +90,23 @@ def parse_args():
             "transport. Canonicalised on write; must match the value the runtime was "
             "launched with, since discovery matches CODEX_HOME literally."
         ),
+    )
+    register.add_argument(
+        "--endpoint-id",
+        default=None,
+        help="Native-extension-supplied endpoint identity (Pi provisioning). Frozen "
+        "by reserve/consume; the bridge derives no second identity.",
+    )
+    register.add_argument(
+        "--runtime-instance-id",
+        default=None,
+        help="Native-extension-supplied runtime instance identity (Pi provisioning).",
+    )
+    register.add_argument(
+        "--cwd",
+        default=None,
+        help="Working directory of the native Pi session (its ctx.cwd). Must be a real "
+        "directory beneath the project's repository root.",
     )
     register.add_argument("--supersedes-session", default=None, help="Older llm-collab session replaced by this registration")
     register.add_argument(
@@ -256,6 +275,60 @@ def retire_superseded_session(superseded_id: str, replacement: dict) -> None:
     save_session(record)
 
 
+def _provision_pi_binding_or_refuse(args, runtime: dict, native_session_id) -> dict:
+    """Mint the canonical Pi binding from native context, then return its fields.
+
+    Absent native context, keep #380's fail-closed. Partial context or the wrong
+    repo-target count is refused explicitly. Every path refuses before any write.
+    """
+    endpoint_id = getattr(args, "endpoint_id", None)
+    runtime_instance_id = getattr(args, "runtime_instance_id", None)
+    cwd = getattr(args, "cwd", None)
+    runtime_home = runtime.get("home")
+    targets = getattr(args, "repo_targets", None) or []
+    supplied = [endpoint_id, runtime_instance_id, cwd, runtime_home]
+    if not any(supplied):
+        raise SystemExit(
+            "[error] canonical_binding_required: no active canonical binding for "
+            f"{args.agent} in {args.project}/{args.chat}, and no native Pi context to "
+            "provision one. Supply --endpoint-id/--runtime-instance-id/--cwd/--runtime-home; "
+            "no session was written."
+        )
+    if not all(supplied):
+        raise SystemExit(
+            "[error] canonical_provisioning_incomplete: Pi provisioning needs all of "
+            "--endpoint-id, --runtime-instance-id, --cwd, --runtime-home; no session was written."
+        )
+    if len(targets) != 1:
+        raise SystemExit(
+            "[error] canonical_provisioning_requires_one_repo_target: pass exactly one "
+            "--repo-target naming the project repos key; no session was written."
+        )
+    try:
+        provision_pi_canonical_binding(
+            args.project,
+            args.chat,
+            args.agent,
+            native_session_id=native_session_id,
+            endpoint_id=endpoint_id,
+            runtime_instance_id=runtime_instance_id,
+            cwd=cwd,
+            runtime_home_path=runtime_home,
+            repo_target=targets[0],
+        )
+    except PiProvisioningRefused as refusal:
+        raise SystemExit(f"[error] {refusal}. No session was written.")
+    canonical = resolve_active_canonical_binding(
+        args.project, args.chat, args.agent, native_session_id
+    )
+    if canonical is None:
+        raise SystemExit(
+            "[error] canonical_binding_required: provisioning completed but no active "
+            "binding resolved; no session was written."
+        )
+    return canonical
+
+
 def register_session(args) -> dict:
     agent = get_agent(args.agent)
     now = now_utc()
@@ -323,16 +396,16 @@ def register_session(args) -> dict:
     repo_targets = getattr(args, "repo_targets", None)
     if repo_targets is not None:
         payload["repo_targets"] = repo_targets
-    # Pi dispatch requires the canonical binding to exist already (the collabd
-    # lifecycle provisions it; GH-346 copies it, it does not mint it). Fail closed
-    # before any write rather than publish a session/binding pair that every later
-    # packet would refuse with exact_binding_required — the cross-project startup
-    # defect. Only pi pays the ledger read; widen the family set when codex/claude
-    # adopt canonical materialization.
+    # Pi dispatch requires the canonical binding to exist. If the native extension
+    # supplied its identity (endpoint / native session / runtime instance / home /
+    # one repo-target), register mints it once through reserve/consume (#378);
+    # otherwise it fails closed rather than publish a pair every later packet would
+    # refuse. Every refusal is before any write. Only pi pays the ledger read.
     if runtime and runtime.get("family") == "pi":
+        native_session_id = runtime.get("session_id")
         try:
             canonical = resolve_active_canonical_binding(
-                args.project, args.chat, args.agent, runtime.get("session_id")
+                args.project, args.chat, args.agent, native_session_id
             )
         except CanonicalBindingNativeMismatch as mismatch:
             raise SystemExit(
@@ -340,11 +413,7 @@ def register_session(args) -> dict:
                 f"{mismatch}. No session was written."
             )
         if canonical is None:
-            raise SystemExit(
-                "[error] canonical_binding_required: no active canonical binding for "
-                f"{args.agent} in {args.project}/{args.chat}. Provision it through the "
-                "session lifecycle before registering this Pi session; no session was written."
-            )
+            canonical = _provision_pi_binding_or_refuse(args, runtime, native_session_id)
         payload.update(canonical)
     # Validate everything that can refuse this registration BEFORE retiring the
     # predecessor. A retire that ran first and was then followed by a preflight

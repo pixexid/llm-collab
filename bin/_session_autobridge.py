@@ -544,6 +544,256 @@ def resolve_active_canonical_binding(
     }
 
 
+class PiProvisioningRefused(RuntimeError):
+    """A Pi register could not provision its canonical binding.
+
+    Carries a stable `reason` token the CLI surfaces. Every precondition that can
+    refuse (unresolved repo, unbindable runtime home, cwd not under the repo root,
+    project absent from the latest registry snapshot) is checked BEFORE the first
+    ledger write, so a refusal leaves the ledger untouched.
+    """
+
+    def __init__(self, reason: str, detail: str = "") -> None:
+        self.reason = reason
+        self.detail = detail
+        super().__init__(f"{reason}: {detail}" if detail else reason)
+
+
+def _require_registry_project(store, workspace_id: str, project_id: str) -> str:
+    """The latest registry revision that lists this project, or refuse.
+
+    The daemon registry import owns the snapshot; provisioning never mints it.
+    Read-only, so it runs before any provisioning write.
+    """
+    row = store._connection.execute(
+        "SELECT registry_revision FROM workspace_registry_snapshots "
+        "WHERE workspace_id = ? ORDER BY captured_at_utc DESC, registry_revision DESC LIMIT 1",
+        (workspace_id,),
+    ).fetchone()
+    if row is None:
+        raise PiProvisioningRefused(
+            "canonical_project_snapshot_required", "no workspace registry snapshot"
+        )
+    revision = str(row[0])
+    if store.get_project_snapshot(
+        workspace_id=workspace_id, project_id=project_id, registry_revision=revision
+    ) is None:
+        raise PiProvisioningRefused(
+            "canonical_project_snapshot_required",
+            f"project {project_id} is absent from the latest registry revision",
+        )
+    return revision
+
+
+def _refuse_if_native_owned_elsewhere(
+    store,
+    *,
+    workspace_id: str,
+    provider_id: str,
+    endpoint_id: str,
+    owner_key: str,
+    native_session_id: str,
+    runtime_instance_id: str,
+) -> None:
+    """Refuse if this native session already owns a mutation-capable binding.
+
+    Reuses the exact owner columns of
+    conversation_bindings_one_mutation_owner_per_native_session (matching its
+    COALESCE(owner_key, session_ref_id)), so a duplicate is refused before reserve
+    writes a challenge — no second ownership rule, no accumulated challenge.
+    """
+    row = store._connection.execute(
+        "SELECT scope_identity, conversation_id, participant_id FROM conversation_bindings "
+        "WHERE workspace_id = ? AND provider_id = ? AND endpoint_id = ? "
+        "AND COALESCE(owner_key, session_ref_id) = ? AND native_session_id = ? "
+        "AND runtime_instance_id = ? AND mutation_capable = 1 "
+        "AND state IN ('active', 'draining') LIMIT 1",
+        (workspace_id, provider_id, endpoint_id, owner_key, native_session_id, runtime_instance_id),
+    ).fetchone()
+    if row is not None:
+        raise PiProvisioningRefused(
+            "canonical_native_session_already_bound",
+            f"native session already owns an active binding in {row[0]}/{row[1]}/{row[2]}",
+        )
+
+
+def _ensure_lifecycle_prerequisites(store, subject, descriptor, created_at_utc: str) -> None:
+    """Provision ONLY the two rows reserve() demands. Idempotent (INSERT OR IGNORE)."""
+    store._connection.execute(
+        "INSERT OR IGNORE INTO lifecycle_provider_registry "
+        "(workspace_id, provider_id, provider_revision, trust_class, "
+        "supported_operations_json, challenge_algorithm, challenge_ttl_seconds, created_at_utc) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            subject.workspace_id,
+            descriptor["provider_id"],
+            descriptor["provider_revision"],
+            descriptor["trust_class"],
+            descriptor["supported_operations_json"],
+            descriptor["challenge_algorithm"],
+            descriptor["challenge_ttl_seconds"],
+            created_at_utc,
+        ),
+    )
+    store._connection.execute(
+        "INSERT OR IGNORE INTO conversation_participants "
+        "(workspace_id, scope_kind, scope_identity, conversation_id, participant_id, agent_id, created_at_utc) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (
+            subject.workspace_id,
+            subject.scope_kind,
+            subject.scope_identity,
+            subject.conversation_id,
+            subject.participant_id,
+            subject.agent_id,
+            created_at_utc,
+        ),
+    )
+
+
+def provision_pi_canonical_binding(
+    project_id: str,
+    chat_id: str,
+    agent_id: str,
+    *,
+    native_session_id: str,
+    endpoint_id: str,
+    runtime_instance_id: str,
+    cwd: str,
+    runtime_home_path: str,
+    repo_target: str,
+) -> None:
+    """Mint the canonical Pi binding via the lifecycle reserve/consume seam.
+
+    Register calls this only when no active binding exists and the native
+    extension supplied its identity. Identity (endpoint, native session, runtime
+    instance) is native-supplied and frozen by reserve/consume; no second identity
+    is derived here. Only the two missing lifecycle prerequisites are provisioned;
+    the registry snapshot is the daemon import's authority and must already exist.
+    Ordering guarantees the ledger is untouched on any precondition refusal
+    (autocommit connection: raw INSERTs commit immediately, so every validation
+    precedes the first write).
+    """
+    import re
+    import sqlite3
+    from datetime import timedelta
+    from _helpers import now_utc, resolve_project_repo_path
+
+    workspace_id = config_get("workspace_id")
+    if not workspace_id:
+        raise PiProvisioningRefused("canonical_workspace_required", "workspace_id is unset")
+    repo_root = resolve_project_repo_path(str(project_id), str(repo_target))
+    if repo_root is None:
+        raise PiProvisioningRefused(
+            "canonical_repo_root_unresolved",
+            f"repo-target {repo_target!r} is not a repos key of project {project_id!r}",
+        )
+
+    _repo_package_root()
+    ledger_module = importlib.import_module(".".join(("llm_collab", "ledger")))
+    lifecycle_module = importlib.import_module(".".join(("llm_collab", "session_lifecycle")))
+    home_module = importlib.import_module(".".join(("llm_collab", "codex_runtime_home")))
+    ref_module = importlib.import_module(".".join(("llm_collab", "codex_session_ref")))
+
+    provider = lifecycle_module.PiLifecycleProvider()
+    descriptor = provider.descriptor()
+    try:
+        runtime_home = home_module.bind_runtime_home(runtime_home_path)
+    except home_module.RuntimeHomeError as error:
+        raise PiProvisioningRefused("canonical_runtime_home_unbound", str(error))
+
+    subject = lifecycle_module.LifecycleSubject(
+        workspace_id=str(workspace_id),
+        scope_kind="project",
+        scope_identity=str(project_id),
+        conversation_id=str(chat_id),
+        participant_id="participant_" + str(agent_id),
+        agent_id="agent_" + str(agent_id),
+        endpoint_id=str(endpoint_id),
+        native_session_id=str(native_session_id),
+        runtime_instance_id=str(runtime_instance_id),
+    )
+    trusted = lifecycle_module.TrustedProjectRoot(
+        str(project_id), str(repo_target), str(repo_root), str(cwd)
+    )
+    core = lifecycle_module.SessionLifecycleCore(provider)
+
+    now_dt = now_utc()
+    created = now_dt.isoformat(timespec="seconds")
+    expires = (
+        now_dt + timedelta(seconds=int(descriptor["challenge_ttl_seconds"]))
+    ).isoformat(timespec="seconds")
+    # correlation_id must match the schema token grammar ([A-Za-z][A-Za-z0-9._-]{0,127}),
+    # but a native session id is free-form, so fold anything else to '-'.
+    safe_native = re.sub(r"[^A-Za-z0-9._-]", "-", str(native_session_id))
+    correlation = ("pi_provision_" + safe_native)[:128]
+
+    # Attest once as a read-only gate: this is where cwd-under-repo-root and the
+    # runtime-home proof are checked, so a bad cwd/repo refuses before any write.
+    # Capture the session_ref so the owner key is computed without re-attesting.
+    try:
+        session_ref = provider.attest(
+            subject,
+            runtime_home=runtime_home,
+            observed_at_utc=created,
+            correlation_id=correlation,
+            trusted_project_root=trusted,
+        )
+    except (ref_module.SessionRefError, lifecycle_module.SessionLifecycleError) as error:
+        raise PiProvisioningRefused("canonical_attestation_failed", str(error))
+    owner_key = ref_module.derive_session_owner_key(
+        workspace_id=str(workspace_id),
+        endpoint_id=str(endpoint_id),
+        native_session_id=str(native_session_id),
+        runtime_home=runtime_home,
+        authority=provider.authority(),
+    )
+    session_ref_id = str(session_ref["session_ref_id"])
+
+    paths = ledger_module.LedgerPaths.derive(project_state_root(), str(workspace_id))
+    with ledger_module.LedgerStore.open_writer(paths) as store:
+        _require_registry_project(store, str(workspace_id), str(project_id))
+        # A native session owns at most one mutation-capable binding
+        # (conversation_bindings_one_mutation_owner_per_native_session). Refuse a
+        # second scope BEFORE reserve writes a challenge, reusing that exact owner
+        # key/index — no new ownership rule.
+        _refuse_if_native_owned_elsewhere(
+            store,
+            workspace_id=str(workspace_id),
+            provider_id=str(descriptor["provider_id"]),
+            endpoint_id=str(endpoint_id),
+            owner_key=owner_key,
+            native_session_id=str(native_session_id),
+            runtime_instance_id=str(runtime_instance_id),
+        )
+        _ensure_lifecycle_prerequisites(store, subject, descriptor, created)
+        try:
+            challenge = core.reserve(
+                store,
+                subject,
+                runtime_home=runtime_home,
+                created_at_utc=created,
+                expires_at_utc=expires,
+                correlation_id=correlation,
+                trusted_project_root=trusted,
+            )
+            core.consume(
+                store,
+                subject,
+                challenge,
+                runtime_home=runtime_home,
+                consumed_at_utc=created,
+                correlation_id=correlation,
+                trusted_project_root=trusted,
+            )
+        except sqlite3.IntegrityError as error:
+            # A concurrent register took this owner between the prevention check
+            # and consume. Convert the raw index violation to a bounded refusal;
+            # the prevention check keeps repeated (sequential) attempts from
+            # writing a challenge at all, so they cannot accumulate.
+            raise PiProvisioningRefused("canonical_native_session_already_bound", str(error))
+
+
 def binding_payload_from_session(
     session: dict,
     existing: dict[str, Any] | None = None,

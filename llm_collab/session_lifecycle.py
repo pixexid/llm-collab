@@ -134,6 +134,69 @@ class FakeLifecycleProvider:
         }
 
 
+@dataclass(frozen=True)
+class PiLifecycleProvider:
+    """The production native authority for Pi attached sessions.
+
+    Not the fake: a Pi worker is a native attachment (`native_attached`), not a
+    lifecycle process llm-collab manages. Identity values are frozen; the real
+    proof is build_session_ref's repository/runtime-home checks, which the
+    extension-supplied endpoint/native ids and cwd feed. The extension owns those
+    ids; reserve/consume freeze them, the bridge derives no second identity.
+    """
+
+    provider_id: str = "provider_pi"
+    provider_revision: str = "revision_1"
+    authority_identity: str = "pi_extension_provider"
+    capability_profile_id: str = "native_session_binding"
+    capability_profile_revision: str = "revision_1"
+    trust_class: str = "native_attached"
+    supported_operations_json: str = DEFAULT_SUPPORTED_OPERATIONS_JSON
+    challenge_algorithm: str = "sha256"
+    challenge_ttl_seconds: int = 60
+
+    def authority(self) -> SessionAuthority:
+        return SessionAuthority(
+            authority_kind="native_runtime",
+            identity=self.authority_identity,
+            implementation_revision=self.provider_revision,
+            capability_profile_id=self.capability_profile_id,
+            capability_profile_revision=self.capability_profile_revision,
+        )
+
+    def descriptor(self) -> Mapping[str, object]:
+        return {
+            "provider_id": self.provider_id,
+            "provider_revision": self.provider_revision,
+            "trust_class": self.trust_class,
+            "supported_operations_json": self.supported_operations_json,
+            "challenge_algorithm": self.challenge_algorithm,
+            "challenge_ttl_seconds": self.challenge_ttl_seconds,
+        }
+
+    def attest(
+        self,
+        subject: LifecycleSubject,
+        *,
+        runtime_home: RuntimeHomeIdentity,
+        observed_at_utc: str,
+        correlation_id: str,
+        trusted_project_root: TrustedProjectRoot | None = None,
+    ) -> Mapping[str, object]:
+        repository = _repository_binding(subject, trusted_project_root)
+        return build_session_ref(
+            workspace_id=subject.workspace_id,
+            scope=subject.scope(),
+            endpoint_id=subject.endpoint_id,
+            native_session_id=subject.native_session_id,
+            runtime_home=runtime_home,
+            authority=self.authority(),
+            observed_at_utc=observed_at_utc,
+            correlation_id=correlation_id,
+            repository_binding=repository,
+        )
+
+
 class SessionLifecycleCore:
     def __init__(
         self,
