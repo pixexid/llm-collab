@@ -130,10 +130,12 @@ Registration is not complete until `show` and `show-binding` agree on all of:
 - project, chat, agent, and repository.
 
 Missing canonical fields are a failed setup, not a pull-only success. Do not
-install a monitor or claim automatic wake until the binding is complete. Pinned
-provider, model, and thinking-level capture plus a pre-wake drift check are
-required before this setup can claim fingerprint enforcement; the current
-runtime does not enforce them yet.
+install a monitor or claim automatic wake until the binding is complete.
+Registration also pins the native Pi session's provider, model, and
+thinking-level fingerprint, and each wake re-reads it from the session's own
+append-only log and compares it to the pinned value before emitting a wake.
+Any mismatch, missing field, or unreadable source emits no wake and leaves the
+packet durable and pull-pending as `pi_fingerprint_drift`.
 
 The exact-session event log contains diagnostics as well as wake events, so a
 plain `/monitor-watch` on the file is wrong: refusals and lease diagnostics
