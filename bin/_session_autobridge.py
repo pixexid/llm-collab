@@ -1209,28 +1209,35 @@ MAX_CLAUDE_RECORD_PREFIX_BYTES = 32 * 1024
 
 
 def _claude_session_evidence(
-    path: Path, prefix_bytes: int
-) -> tuple[str, str | None] | None:
-    """Bounded prefix read of a Claude session .jsonl; return ``(cwd, session_id)``
-    gathered from the earliest records that carry each, or None if no cwd-bearing
-    record appears within the prefix.
+    path: Path, prefix_bytes: int, resolved_project: str, expected_stem: str
+) -> str:
+    """Bound and classify one Claude session .jsonl candidate.
 
-    A transcript can be tens of MB, but the cwd/sessionId metadata sit near the
-    start, so only a bounded prefix is read and charged to the active cumulative
-    read budget. Mirrors ``read_regular_file_bounded``: a non-blocking open plus a
-    same-descriptor regular-file guard so a writer-less FIFO or a non-regular
-    path cannot block or impersonate a transcript. Returns None (fail closed for
-    THIS candidate) on any open/read/parse problem or when cwd is absent -- a
-    session whose project cannot be proven is never selected. session_id may be
-    None when cwd is present but no sessionId field appeared in the prefix.
+    Returns one of:
+      * ``"match"`` -- a record asserts an ABSOLUTE cwd that canonicalizes to
+        ``resolved_project`` AND, in that SAME record, a ``sessionId`` equal to
+        ``expected_stem`` (project + identity proved together).
+      * ``"other_project"`` -- at least one record asserted an absolute cwd, and
+        none of them is this project (the artifact is demonstrably not ours).
+      * ``"unprovable"`` -- the artifact is unreadable/non-regular, asserts no
+        absolute cwd at all, or a record asserts our project but its identity is
+        missing/conflicting. Unprovable candidates must fail closed: they may be
+        a second exact session, so a readable sibling must never be returned as
+        unique by silently treating them as absent.
+
+    Only a bounded prefix is read and charged to the active cumulative budget
+    (transcripts can be tens of MB; the cwd/sessionId metadata sit near the
+    start). Mirrors ``read_regular_file_bounded``: a non-blocking open plus a
+    same-descriptor regular-file guard. A relative cwd is never resolved against
+    the caller's process cwd -- it is not absolute, so it asserts nothing.
     """
     try:
         descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
     except (FileNotFoundError, OSError):
-        return None
+        return "unprovable"
     try:
         if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-            return None
+            return "unprovable"
         chunks: list[bytes] = []
         remaining = prefix_bytes
         while remaining > 0:
@@ -1240,14 +1247,14 @@ def _claude_session_evidence(
             chunks.append(chunk)
             remaining -= len(chunk)
     except OSError:
-        return None
+        return "unprovable"
     finally:
         os.close(descriptor)
     raw = b"".join(chunks)
     if _ACTIVE_READ_BUDGET:
         _ACTIVE_READ_BUDGET[-1].charge(len(raw), path)
-    cwd: str | None = None
-    session_id: str | None = None
+    saw_absolute_cwd = False
+    saw_project_cwd = False
     for line in raw.splitlines():
         if not line.strip():
             continue
@@ -1257,19 +1264,24 @@ def _claude_session_evidence(
             continue
         if not isinstance(record, dict):
             continue
-        if cwd is None:
-            value = record.get("cwd")
-            if isinstance(value, str) and value:
-                cwd = value
-        if session_id is None:
-            value = record.get("sessionId")
-            if isinstance(value, str) and value:
-                session_id = value
-        if cwd is not None and session_id is not None:
-            break
-    if cwd is None:
-        return None
-    return cwd, session_id
+        cwd = record.get("cwd")
+        # Only an ABSOLUTE cwd is project evidence; a relative cwd must never be
+        # resolved against the discovery process cwd.
+        if not isinstance(cwd, str) or not cwd or not os.path.isabs(cwd):
+            continue
+        saw_absolute_cwd = True
+        if os.path.realpath(cwd) != resolved_project:
+            continue
+        saw_project_cwd = True
+        # Project and identity must be asserted by the SAME record.
+        session_id = record.get("sessionId")
+        if isinstance(session_id, str) and session_id and session_id == expected_stem:
+            return "match"
+    if saw_project_cwd:
+        return "unprovable"
+    if saw_absolute_cwd:
+        return "other_project"
+    return "unprovable"
 
 
 def discover_claude_runtime_session(project_path: str | None = None) -> dict[str, Any]:
@@ -1279,17 +1291,19 @@ def discover_claude_runtime_session(project_path: str | None = None) -> dict[str
     # the legacy sessions-index.json. The slug directory alone is NOT exact
     # project evidence -- path.replace("/", "-") is not injective
     # (/a-b/c and /a/b-c collide) -- so each candidate's canonical ``cwd`` field
-    # must be read and matched exactly, and each record's ``sessionId`` must equal
-    # the artifact filename so identity is proved rather than inferred. Directory
-    # enumeration is bounded at the scandir boundary. Zero, multiple, or
-    # unprovable candidates fail closed; there is never a newest/legacy/unscoped
+    # must be an ABSOLUTE path that canonicalizes to the exact project and, in
+    # that SAME record, ``sessionId`` must equal the artifact filename -- project
+    # and identity are proved together, never accumulated across records or
+    # derived from a relative (caller-cwd-dependent) cwd. Directory enumeration
+    # is bounded at the scandir boundary. Unreadable/unprovable, zero, multiple,
+    # or unscoped candidates all fail closed; there is never a newest/legacy
     # fallback.
     if not project_path:
         raise FileNotFoundError(
             "claude_app discovery requires --project-path; an unscoped read could "
             "select another project's session"
         )
-    resolved_project = str(Path(project_path).expanduser().resolve())
+    resolved_project = os.path.realpath(os.path.expanduser(project_path))
     project_slug = claude_project_slug(project_path)
     project_dir = claude_home() / "projects" / project_slug
     # Bound directory enumeration at the earliest boundary: count EVERY entry
@@ -1322,25 +1336,19 @@ def discover_claude_runtime_session(project_path: str | None = None) -> dict[str
     with active_read_budget(budget):
         try:
             for artifact in candidates:
-                evidence = _claude_session_evidence(
-                    artifact, MAX_CLAUDE_RECORD_PREFIX_BYTES
+                status = _claude_session_evidence(
+                    artifact,
+                    MAX_CLAUDE_RECORD_PREFIX_BYTES,
+                    resolved_project,
+                    artifact.stem,
                 )
-                if evidence is None:
+                if status == "other_project":
                     continue
-                cwd, session_id = evidence
-                try:
-                    if str(Path(cwd).expanduser().resolve()) != resolved_project:
-                        continue
-                except (OSError, RuntimeError):
-                    continue
-                # cwd proves the project; the record sessionId must prove the
-                # artifact identity rather than trusting the filename. A
-                # filename/body mismatch is a corruption signal -> fail closed.
-                if not session_id or session_id != artifact.stem:
+                if status == "unprovable":
                     raise FileNotFoundError(
-                        f"Claude session artifact {artifact.name} sessionId "
-                        f"({session_id!r}) does not match its filename; use "
-                        "register --runtime-session-id"
+                        f"Claude session artifact {artifact.name} is unreadable or "
+                        f"its project/identity could not be proven for "
+                        f"{project_path}; use register --runtime-session-id"
                     )
                 matches.append(artifact)
         except UnreadableFile as error:

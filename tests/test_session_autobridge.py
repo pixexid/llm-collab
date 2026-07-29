@@ -3446,6 +3446,91 @@ class SessionAutobridgeTest(unittest.TestCase):
                 str(project_path),
             )
 
+    def test_claude_discovery_fails_closed_when_a_sibling_artifact_is_unreadable(self):
+        # P1: an unreadable candidate may be a second exact session, so discovery
+        # must fail closed -- never silently skip it and return the readable one.
+        root = self.make_workspace()
+        claude_home = root / ".claude"
+        project_path = root / "fake-project"
+        project_path.mkdir(parents=True, exist_ok=True)
+        slug = str(project_path.resolve()).replace("/", "-")
+        session_dir = claude_home / "projects" / slug
+        write_claude_session_jsonl(session_dir / "good.jsonl", cwd=project_path.resolve())
+        hidden = session_dir / "hidden.jsonl"
+        write_claude_session_jsonl(hidden, cwd=project_path.resolve())
+        os.chmod(hidden, 0o000)
+        self.addCleanup(os.chmod, hidden, 0o600)
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.run_cli_with_env(
+                root,
+                {"CLAUDE_HOME": str(claude_home)},
+                "discover-runtime",
+                "--runtime-family",
+                "claude_app",
+                "--project-path",
+                str(project_path),
+            )
+
+    def test_claude_discovery_requires_cwd_and_session_id_in_the_same_record(self):
+        # P1: cwd and sessionId must be asserted by the SAME record. Accumulating
+        # them independently across records would let a fabricated pair prove a
+        # synthetic identity.
+        root = self.make_workspace()
+        claude_home = root / ".claude"
+        project_path = root / "fake-project"
+        project_path.mkdir(parents=True, exist_ok=True)
+        slug = str(project_path.resolve()).replace("/", "-")
+        artifact = claude_home / "projects" / slug / "session-a.jsonl"
+        artifact.parent.mkdir(parents=True, exist_ok=True)
+        artifact.write_text(
+            json.dumps({"type": "user", "sessionId": "session-a"})
+            + "\n"
+            + json.dumps(
+                {
+                    "type": "attachment",
+                    "sessionId": "session-b",
+                    "cwd": str(project_path.resolve()),
+                }
+            )
+            + "\n"
+        )
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.run_cli_with_env(
+                root,
+                {"CLAUDE_HOME": str(claude_home)},
+                "discover-runtime",
+                "--runtime-family",
+                "claude_app",
+                "--project-path",
+                str(project_path),
+            )
+
+    def test_claude_discovery_rejects_relative_cwd_from_artifact(self):
+        # P1: project evidence must be an ABSOLUTE canonical cwd from the
+        # artifact; a relative cwd must never be resolved against the discovery
+        # process cwd.
+        root = self.make_workspace()
+        claude_home = root / ".claude"
+        project_path = root / "fake-project"
+        project_path.mkdir(parents=True, exist_ok=True)
+        slug = str(project_path.resolve()).replace("/", "-")
+        artifact = claude_home / "projects" / slug / "session.jsonl"
+        artifact.parent.mkdir(parents=True, exist_ok=True)
+        artifact.write_text(
+            json.dumps({"type": "attachment", "sessionId": "session", "cwd": "."})
+            + "\n"
+        )
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.run_cli_with_env(
+                root,
+                {"CLAUDE_HOME": str(claude_home)},
+                "discover-runtime",
+                "--runtime-family",
+                "claude_app",
+                "--project-path",
+                str(project_path),
+            )
+
     def test_resolve_exact_dispatch_target_refuses_missing_and_stale_bindings(self):
         root = self.make_workspace()
         self.add_agent(
