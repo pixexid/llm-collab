@@ -160,45 +160,32 @@ that capability does not make it a Codex-to-Codex transport.
 
 ## GH-135 update-survival decision and recovery evidence
 
-**Decision state: `PENDING REAL-UPDATE EVIDENCE`.** Neither a stable
-symlink/alias nor a stable helper has been selected. The current evidence does
-not establish that either candidate is feasible or infeasible, and a process
-restart or relaunch alone is not update-survival proof. GH-135 requires evidence
-from a real app update before the decision can change.
+**Selected decision: option 3 — documented runbook.** The current accepted
+mechanism is operator recovery after a real app update strands the running app
+on a deleted versioned bundle path. No stable symlink/alias or stable helper is
+selected in the current implementation, and this runbook does not authorize one.
 
-### Confirmed version-path/TCC incident
+### Confirmed version-path/TCC incident and real-update recovery
 
 - Claude Code continued running from the versioned `2.1.209` path after that
   version tree had been deleted and only `2.1.215` remained on disk.
 - GH-127A surfaced the resulting failed AX trust state as `[ax] DOWN`.
 - The durable mailbox remained the source of truth while the doorbell was
   unavailable.
-- Demonstrated recovery required a full app quit and relaunch, operator
-  Accessibility re-approval, and a successful `tools/axbridge/axsend check`.
+- A second real app update on 2026-07-21/22 reproduced the same failure class:
+  the running process stayed pinned to the deleted `2.1.215` bundle while only
+  `2.1.217` existed on disk, and `axsend check` reported `AX trusted: NO`.
+- The app's post-update auto-restart is not sufficient recovery for this class;
+  it can leave background tasks running in the stranded process. Use a **full
+  app quit + reopen**, not an auto-restart, before retrying AX.
+- After full quit + reopen, `axsend check` returned `AX trusted: YES`
+  immediately and a live ring delivered. Accessibility re-approval was not
+  required.
+- If AX trust is still down after a full quit + reopen, only then move on to
+  operator TCC/Accessibility repair.
 
-That sequence is recovery evidence for the observed incident, not proof that a
-candidate survives an update. Draft/composer-targeting failures, including the
-GH-1547 target-side hold, are a different failure class and are not TCC
-update-survival evidence.
-
-### Operator-run evidence matrix for a genuine update
-
-For each row, the operator records the same before-and-after fields around one
-genuine application update. A blank or ambiguous field leaves that candidate
-undecided.
-
-| Candidate or control | Before the real app update | After the real app update | Visibility and outcome |
-|---|---|---|---|
-| Current versioned-path control | App version; executable path; resolved path; AX trust | App version; executable path; resolved path; AX trust | GH-127A status; live-ring result; rollback result; recovery result |
-| Stable symlink/alias candidate | App version; executable path; resolved path; AX trust | App version; executable path; resolved path; AX trust | GH-127A status; live-ring result; rollback result; recovery result |
-| Stable-helper candidate | App version; executable path; resolved path; AX trust | App version; executable path; resolved path; AX trust | GH-127A status; live-ring result; rollback result; recovery result |
-
-Installation, launchd or service-lifecycle changes, TCC/Accessibility changes,
-the genuine app update, and live-ring validation are operator-owned. This
-protocol does not authorize an agent to perform those actions, install a
-candidate, or change targeting/session semantics. Any future implementation
-must be scoped separately after the evidence supports a mechanism decision;
-this runbook intentionally specifies no code, signing, or IPC design.
+Draft/composer-targeting failures, including the GH-1547 target-side hold, are
+a different failure class and are not TCC update-survival evidence.
 
 ## Two channels: mailbox + doorbell
 
