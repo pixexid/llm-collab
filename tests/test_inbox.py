@@ -341,6 +341,75 @@ class InboxMarkAllReadTest(unittest.TestCase):
         self.assertIn("--packet requires a non-empty packet selector", result.stderr)
         self.assertNotIn("secret", result.stdout)
 
+    def test_inbox_writes_serialize_so_a_delivery_and_ack_cannot_lose_a_packet(self) -> None:
+        """GH-343: add_to_inbox (delivery) and mark_messages_read (ack drain) are
+        load-modify-save on one index; unlocked, one overwrites the other. The lock
+        makes each atomic. Proved deterministically: hold the lock, a concurrent
+        mark_messages_read BLOCKS rather than clobbering; remove the lock and it does
+        not block (which is how a pointer is lost).
+        """
+        import threading
+        import time
+        import tempfile
+        from unittest.mock import patch
+        import _helpers as helpers
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "agents" / "pi").mkdir(parents=True)
+            (root / "agents" / "pi" / "inbox.json").write_text(
+                json.dumps({"unread": ["Chats/x.md"], "read": []})
+            )
+            with patch.object(helpers, "ROOT", root):
+                done = threading.Event()
+
+                def acker():
+                    helpers.mark_messages_read("pi", ["Chats/x.md"])
+                    done.set()
+
+                with helpers.inbox_write_lock("pi"):
+                    worker = threading.Thread(target=acker)
+                    worker.start()
+                    time.sleep(0.05)
+                    blocked = not done.is_set()
+                worker.join(timeout=2)
+
+            self.assertTrue(blocked, "an inbox write ran while the lock was held")
+
+    def test_acknowledge_drains_the_exact_set_and_leaves_a_wrong_session_unread(self) -> None:
+        """GH-343: one coalesced wake, drain the durable queue. Two packets for the
+        bound session are exposed and acknowledged (marked read) by a single
+        --acknowledge; a packet for another session was never in the exact set and
+        stays unread. The event count never mattered — the queue does.
+        """
+        self.add_exact_session()
+        # Body markers deliberately distinct from the paths, so the assertions
+        # discriminate BODY rendering from the always-printed Path line: deleting
+        # the body render must fail this.
+        a = self.add_exact_message("BODY-A", path="Chats/exact__CHAT-EXACT/mA.md")
+        b = self.add_exact_message("BODY-B", path="Chats/exact__CHAT-EXACT/mB.md")
+        other = self.add_exact_message(
+            "BODY-OTHER", path="Chats/exact__CHAT-EXACT/mOther.md",
+            target_session_id="SESSION-OTHER")
+
+        # The documented human-path command (no --json): Pi must SEE the bodies it
+        # drains, not just a count.
+        result = self.run_inbox(
+            "--project", "amiga", "--chat", "CHAT-EXACT",
+            "--session", "SESSION-EXACT", "--acknowledge",
+            env={"LLM_COLLAB_READER_RUNTIME_ID": "pi-exact"},
+        )
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("BODY-A", result.stdout)
+        self.assertIn("BODY-B", result.stdout)
+        self.assertNotIn("BODY-OTHER", result.stdout, "the wrong-session body must not be exposed")
+        self.assertIn("Acknowledged 2", result.stdout)
+        inbox = self.load_inbox()
+        self.assertEqual([other], inbox["unread"], "the wrong-session packet must remain unread")
+        self.assertIn(a, inbox["read"])
+        self.assertIn(b, inbox["read"])
+
     def test_exact_session_returns_every_match_without_the_display_limit(self) -> None:
         self.add_exact_session()
         paths = [self.add_exact_message(str(index)) for index in range(12)]

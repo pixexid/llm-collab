@@ -93,6 +93,12 @@ def parse_args():
     p.add_argument("--limit", type=int, default=None, help="Max ordinary inbox messages to show (default: 10)")
     p.add_argument("--all", dest="show_all", action="store_true", help="Show all messages including read")
     p.add_argument("--peek", action="store_true", help="Do not mark shown messages as read")
+    p.add_argument(
+        "--acknowledge",
+        action="store_true",
+        help="Exact-session only: read the bound session's unread set and mark exactly "
+        "that set read. This is the Pi wake drain — one event, drain the durable queue.",
+    )
     scope = p.add_mutually_exclusive_group()
     scope.add_argument("--project", default=None, help="Filter by exact project_id")
     scope.add_argument(
@@ -170,10 +176,13 @@ def parse_args():
                 + "; narrow by --project or opt in with --all-projects"
             )
 
+    if args.acknowledge and args.session is None:
+        p.error("--acknowledge is an exact-session operation and requires --session")
     exact_read = args.session is not None and not args.publish_session
     if exact_read:
-        if not args.peek:
-            p.error("--session exact reads are read-only and require --peek")
+        if args.peek == args.acknowledge:
+            p.error("--session requires exactly one of --peek (read) or "
+                    "--acknowledge (read and drain)")
         if args.show_all:
             p.error("--session exact reads do not support --all")
         if args.project is None or args.chat is None:
@@ -765,6 +774,30 @@ def main():
                         file=sys.stderr,
                     )
             sys.exit(75)
+        if args.acknowledge:
+            # Drain: mark exactly the packets this exact-session read selected. The
+            # binding was already validated by exact_read_session, and the set is the
+            # bounded exact-session unread — so a coalesced wake drains every packet
+            # for this binding and a packet for another session was never in `messages`
+            # to begin with. mark_messages_read is the same durable serialized inbox
+            # write deliver.py uses; no second queue, no dispatch loop (which would
+            # re-emit a wake).
+            acknowledged = [message["path"] for message in messages]
+            # Render the selected set BEFORE marking read, following inbox.py's
+            # existing consume order: a render/output failure after the mark would
+            # lose already-acknowledged packets. And a Pi worker draining on the
+            # human path must SEE the bodies, not just a count, or the wake loses
+            # the work while claiming acknowledgment.
+            if args.json_output:
+                print(json.dumps(
+                    {"acknowledged": acknowledged, "messages": messages},
+                    indent=2, sort_keys=True))
+            else:
+                for index, message in enumerate(messages):
+                    print(format_message(message, index))
+                print(f"[inbox] Acknowledged {len(acknowledged)} exact-session packet(s).")
+            mark_messages_read(args.me, acknowledged)
+            return
     elif args.packet:
         messages = load_all_messages(args.me)
     elif args.show_all:
