@@ -152,9 +152,28 @@ def dispatch_autobridge(
     consumed_paths: list[str] = []
 
     for session_id in autobridge_session_ids(agent_id, project_id):
-        result = dispatch_session(
-            session_id, project_id=project_id, repo_targets=repo_targets
-        )
+        try:
+            result = dispatch_session(
+                session_id, project_id=project_id, repo_targets=repo_targets
+            )
+        except Exception as error:
+            # Isolate per session: one session's failure (e.g. the save_session
+            # resurrection guard racing a deactivation, now that #378 stops sessions on
+            # every Pi lifecycle event) must not abort the rest of the cycle. Surface it
+            # and move on. The watcher top loop already isolates whole cycles; this
+            # isolates siblings within a cycle.
+            emit(
+                {
+                    "ts": utc_now_str(),
+                    "event": "autobridge_dispatch_error",
+                    "detail": session_id,
+                    "agent": agent_id,
+                    "session_id": session_id,
+                    "reason": f"{type(error).__name__}: {error}",
+                },
+                json_output,
+            )
+            continue
         for refusal in result.get("repo_scope_refused", []):
             emit(
                 {

@@ -745,6 +745,35 @@ class SessionAutobridgeTest(unittest.TestCase):
         self.assertEqual(0, stale)
         digest_iter.assert_called_once_with()
 
+    def test_dispatch_autobridge_isolates_a_failing_session(self):
+        # #393: one session raising (e.g. the save_session resurrection guard racing a
+        # #378 deactivation) must not abort the rest of the cycle. The failure is
+        # emitted as an event and the remaining sessions still dispatch.
+        dispatched = []
+        events = []
+
+        def fake_dispatch(session_id, **_kwargs):
+            dispatched.append(session_id)
+            if session_id == "SESSION-RACED":
+                raise ValueError("refusing to resurrect stopped session SESSION-RACED")
+            return {"actions": [], "repo_scope_refused": []}
+
+        with patch.object(
+            watch_inbox_lib, "autobridge_session_ids",
+            return_value=["SESSION-RACED", "SESSION-OK"],
+        ), patch.object(
+            watch_inbox_lib, "dispatch_session", side_effect=fake_dispatch
+        ), patch.object(
+            watch_inbox_lib, "emit", side_effect=lambda payload, _json: events.append(payload)
+        ):
+            watch_inbox_lib.dispatch_autobridge("glmpi", False)
+
+        self.assertEqual(["SESSION-RACED", "SESSION-OK"], dispatched)
+        error_events = [e for e in events if e.get("event") == "autobridge_dispatch_error"]
+        self.assertEqual(1, len(error_events))
+        self.assertEqual("SESSION-RACED", error_events[0]["session_id"])
+        self.assertIn("resurrect stopped session", error_events[0]["reason"])
+
     def test_dispatch_inbox_counts_entries_before_project_filtering(self):
         root = self.make_workspace()
         self.add_agent(
