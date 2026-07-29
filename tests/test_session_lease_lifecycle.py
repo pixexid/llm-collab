@@ -15,9 +15,11 @@ reclaimable.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import sys
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 
@@ -166,6 +168,42 @@ class SupersessionRetiresTheOldSessionTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.sa.save_session(stale)
         self.assertEqual("superseded", self.sa.load_session("SESSION-Z")["status"])
+
+    def test_a_dispatch_save_cannot_resurrect_a_concurrent_retirement(self) -> None:
+        """#373: the check and write are one critical section, so a retirement
+        cannot land between them. The test holds the write lock, writes superseded
+        under it (as the retirement would), starts a stale dispatch save, and shows
+        it BLOCKS on the lock rather than clobbering; once the lock releases the
+        blocked save sees superseded and refuses. Bare check-then-write would let
+        the dispatch write proceed and resurrect. Forcing the exact interleaving
+        directly is impossible without deadlocking the locked version — that it
+        deadlocks is the serialization working — so this proves both mechanisms.
+        """
+        import threading
+        import time
+
+        self.write("SESSION-Z", "active")
+        stale = {"session_id": "SESSION-Z", "agent_id": "claude", "project_id": "p",
+                 "chat_id": "c", "status": "active",
+                 "runtime": {"family": "claude_app", "session_id": "t", "home": "/h"}}
+        refused = []
+
+        def dispatch():
+            try:
+                self.sa.save_session(dict(stale))
+            except ValueError:
+                refused.append(True)
+
+        with self.sa._session_write_lock():
+            self.write("SESSION-Z", "superseded")  # retirement's write, under the lock
+            worker = threading.Thread(target=dispatch)
+            worker.start()
+            time.sleep(0.05)
+            self.assertTrue(worker.is_alive(), "a session write ran while the lock was held")
+        worker.join(timeout=2)
+
+        self.assertEqual("superseded", self.sa.load_session("SESSION-Z")["status"])
+        self.assertTrue(refused, "the blocked save must refuse once it sees superseded")
 
     def test_writing_the_retirement_itself_is_allowed(self) -> None:
         """The guard must not block the retire write — candidate status superseded

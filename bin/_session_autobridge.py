@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
 import importlib
 import os
@@ -399,6 +401,26 @@ def prepare_session_write(payload: dict) -> tuple[dict, str]:
     return candidate, content
 
 
+SESSION_WRITE_LOCK = AUTOBRIDGE_ROOT / ".session-write.lock"
+
+
+@contextlib.contextmanager
+def _session_write_lock():
+    """Serialize the superseded-check and the write against other session writes.
+
+    ponytail: one process-wide blocking flock; per-session locks only if session
+    write throughput ever matters (it is a handful of writes per dispatch here).
+    """
+    SESSION_WRITE_LOCK.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(SESSION_WRITE_LOCK, os.O_CREAT | os.O_RDWR)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
 def save_session(
     payload: dict,
     prepared: tuple[dict, str] | None = None,
@@ -409,21 +431,23 @@ def save_session(
     candidate, content = prepared or prepare_session_write(payload)
     # A superseded record is terminal. A dispatch that loaded the session before it
     # was retired still holds a live in-memory copy, and its processed-state save
-    # would otherwise write that copy back — resurrecting the predecessor as active
-    # after supersession, which is the two-writer window from the other side. Refuse
-    # to move an on-disk `superseded` record to any non-terminal status. Writing the
-    # retirement itself (candidate status == superseded) is unaffected, and a genuine
-    # new/re-registration never has an on-disk superseded record for its id.
-    if str(candidate.get("status")) != "superseded":
-        try:
-            on_disk = load_session(session_id)
-        except (FileNotFoundError, ValueError, UnreadableFile):
-            on_disk = None
-        if on_disk is not None and on_disk.get("status") == "superseded":
-            raise ValueError(
-                f"refusing to resurrect superseded session {session_id}"
-            )
-    write_regular_file_atomically(path, content)
+    # would otherwise write that copy back — resurrecting the predecessor as active.
+    # The check and the write must be one critical section: a bare check-then-write
+    # lets a retirement land between them, so the guard sees `active`, allows, and
+    # the stale write clobbers the superseded record. Holding the lock across both
+    # forces every session write to serialize, so whichever order runs, the
+    # superseded state wins or the guard fires.
+    with _session_write_lock():
+        if str(candidate.get("status")) != "superseded":
+            try:
+                on_disk = load_session(session_id)
+            except (FileNotFoundError, ValueError, UnreadableFile):
+                on_disk = None
+            if on_disk is not None and on_disk.get("status") == "superseded":
+                raise ValueError(
+                    f"refusing to resurrect superseded session {session_id}"
+                )
+        write_regular_file_atomically(path, content)
     payload.clear()
     payload.update(candidate)
 
