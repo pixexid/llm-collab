@@ -1058,25 +1058,16 @@ class ReviewLoopCapContractTest(unittest.TestCase):
         ):
             self.assertIn(phrase, section)
 
-    def test_the_request_limit_exempts_the_single_re_trigger(self):
-        """The absolute reading forbids the only recovery the same file mandates.
-
-        `Request once per candidate final head` and `issue exactly one re-trigger` are
-        contradictory as written, leaving a worker to violate one of them.
-        """
-        # normalized(): the phrases wrap across lines in both documents.
-        for doc in (WORKFLOW_DOC, AGENTS_DOC):
+    def test_contract_v7_retires_the_per_head_re_request_loop(self):
+        """Contract v7 makes the external review one pass per PR."""
+        for doc in (AGENTS_DOC,):
             text = normalized(doc.read_text(encoding="utf-8"))
             with self.subTest(doc=doc.name):
-                self.assertIn("one initial request per candidate final head", text)
-                self.assertNotIn("Request **once per candidate final head**", text)
-        workflow = normalized(WORKFLOW_DOC.read_text(encoding="utf-8"))
-        self.assertIn("the single request-anchored re-trigger below is", workflow)
-        self.assertIn("explicit exemption", workflow)
-        self.assertIn(
-            "the single request-anchored re-trigger in",
-            normalized(AGENTS_DOC.read_text(encoding="utf-8")),
-        )
+                self.assertIn("Contract v7", text)
+                self.assertIn("review **once per PR**", text)
+                self.assertIn("Do **not** re-request a review on the fixed head", text)
+                self.assertNotIn("one initial request per candidate final head", text)
+                self.assertNotIn("single request-anchored re-trigger", text)
 
     def test_a_reaction_is_bound_to_the_latest_unedited_request(self):
         """GitHub preserves reactions across an edit.
@@ -1456,9 +1447,9 @@ class ReviewLoopCapContractTest(unittest.TestCase):
     def test_the_contract_version_advanced_with_the_gate_rewrite(self):
         """A cached copy of the old gate can produce a wrong merge.
 
-        Workers on v4 get no signal that v5 added the lane contract, defer-first
-        findings, one reviewer per head, and the merge-or-kill lane budget, so the
-        version marker and the v5 summary have to move together.
+        Workers on older contracts get no signal that v7 retired the per-head
+        re-request loop, so the version marker and the v7 summary have to move
+        together.
 
         The v4 and v3 changelog entries used to be pinned here too, in AGENTS.md.
         They were deleted with the rest of the v1-v4 narrative (GH-365): a changelog
@@ -1468,13 +1459,17 @@ class ReviewLoopCapContractTest(unittest.TestCase):
         the assertions below moved to the document that owns them.
         """
         text = AGENTS_DOC.read_text(encoding="utf-8")
-        self.assertIn("<!-- CONTRACT_VERSION: 6 -->", text)
+        self.assertIn("<!-- CONTRACT_VERSION: 7 -->", text)
         self.assertNotIn("<!-- CONTRACT_VERSION: 3 -->", text)
 
-        v5_entry = contract_section(
+        recent_entry = contract_section(
             text, "### Recent contract changes", "## Required Reading"
         )
         for phrase in (
+            "Contract v7",
+            "one pass, not a loop",
+            "once per PR",
+            "Do **not** re-request a review on the fixed head",
             "lane contract",
             "per-finding",
             "One external reviewer per head",
@@ -1483,10 +1478,10 @@ class ReviewLoopCapContractTest(unittest.TestCase):
             "review_request.py",
             "two active implementation lanes",
         ):
-            self.assertIn(normalized(phrase), v5_entry)
+            self.assertIn(normalized(phrase), recent_entry)
         # The summary is only safe to keep short because it names where the full
         # rules live. Without this the section becomes a lossy paraphrase.
-        self.assertIn("commit-push-prs.md", v5_entry)
+        self.assertIn("commit-push-prs.md", recent_entry)
 
         workflow = normalized(WORKFLOW_DOC.read_text(encoding="utf-8"))
         for phrase in (
@@ -1623,8 +1618,8 @@ class ReviewLoopCapContractTest(unittest.TestCase):
             "a connector `+1` is terminal only while the head still equals the SHA "
             "that request named",
             "a request without one leaves the reaction path unsatisfiable",
-            "Issue **one initial request per candidate final head**",
-            "the single request-anchored re-trigger",
+            "**Per Contract v7, request this review ONCE per PR**",
+            "do **not** re-request a review on the fixed head",
         ):
             self.assertIn(phrase, section)
 
