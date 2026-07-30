@@ -257,8 +257,11 @@ class LifecycleTest(unittest.TestCase):
             "provider_revision": "revision_1",
             "creation_provenance": {
                 "source": "managed_thread_start",
-                "server_correlation_id": "server-create-1",
                 "native_thread_id": native_session_id,
+                "approval_policy": "never",
+                "sandbox": {"type": "readOnly"},
+                "model": "gpt-test",
+                "cwd": cwd,
             },
             "read_back": {
                 "operation": "thread_read",
@@ -274,6 +277,34 @@ class LifecycleTest(unittest.TestCase):
             },
         }
 
+    def test_codex_start_evidence_accepts_codex_0146_create_shape_without_correlation(self) -> None:
+        candidate = self.start_candidate()
+        evidence = validate_codex_start_evidence(
+            candidate,
+            runtime_home=self.runtime_home,
+            trusted_project_root=self.trusted_root,
+            expected_endpoint_id="endpoint_codex",
+            expected_runtime_instance_id="runtime_one",
+            provider_revision="revision_1",
+        )
+        self.assertIsNone(evidence.creation.server_correlation_id)
+        self.assertEqual("never", evidence.creation.approval_policy)
+        self.assertEqual({"type": "readOnly"}, evidence.creation.sandbox)
+
+    def test_codex_start_evidence_rejects_attach_shaped_readback_without_create_fields(self) -> None:
+        candidate = self.start_candidate()
+        candidate["creation_provenance"] = dict(candidate["creation_provenance"])
+        del candidate["creation_provenance"]["sandbox"]
+        with self.assertRaisesRegex(SessionLifecycleError, "creation provenance is incomplete"):
+            validate_codex_start_evidence(
+                candidate,
+                runtime_home=self.runtime_home,
+                trusted_project_root=self.trusted_root,
+                expected_endpoint_id="endpoint_codex",
+                expected_runtime_instance_id="runtime_one",
+                provider_revision="revision_1",
+            )
+
     def test_codex_start_evidence_rejects_trusted_cwd_mismatch_without_ledger_mutation(self) -> None:
         candidate = {
             "native_thread_id": "native_session_new",
@@ -287,8 +318,11 @@ class LifecycleTest(unittest.TestCase):
             "provider_revision": "revision_1",
             "creation_provenance": {
                 "source": "managed_thread_start",
-                "server_correlation_id": "server-create-1",
                 "native_thread_id": "native_session_new",
+                "approval_policy": "never",
+                "sandbox": {"type": "readOnly"},
+                "model": "gpt-test",
+                "cwd": str(self.outside),
             },
             "read_back": {
                 "operation": "thread_read",
