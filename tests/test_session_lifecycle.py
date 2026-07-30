@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import inspect
+import json
 import sqlite3
 import unittest
 from pathlib import Path
@@ -27,6 +28,7 @@ from llm_collab.session_lifecycle import (
 WORKSPACE = "ws_alpha"
 PROJECT = "amiga"
 OTHER_PROJECT = "nuvyr"
+TEST_REGISTRY_REVISION = "sha256:" + hashlib.sha256(b"test-registry-provision").hexdigest()
 NOW = "2026-07-23T00:00:00+00:00"
 BEFORE_EXPIRY = "2026-07-23T00:00:59+00:00"
 AT_EXPIRY = "2026-07-23T00:01:00+00:00"
@@ -143,17 +145,20 @@ class LifecycleTest(unittest.TestCase):
         self.outside.mkdir()
         self.runtime_home = bind_runtime_home(self.codex_home)
         self.trusted_root = TrustedProjectRoot(PROJECT, "repo_app", str(self.repo), str(self.cwd))
-        self.paths = LedgerPaths.derive(root / "state", WORKSPACE)
-        self.paths2 = LedgerPaths.derive(root / "state2", WORKSPACE)
-        self.paths3 = LedgerPaths.derive(root / "state3", WORKSPACE)
-        self.core = SessionLifecycleCore(
-            FakeLifecycleProvider(), token_factory=lambda: "token-alpha"
-        )
         patcher = patch.object(
             store_module, "_linked_sqlite_version_info", return_value=SAFE_VERSION
         )
         patcher.start()
         self.addCleanup(patcher.stop)
+        self.paths = LedgerPaths.derive(root / "state", WORKSPACE)
+        self.paths2 = LedgerPaths.derive(root / "state2", WORKSPACE)
+        self.paths3 = LedgerPaths.derive(root / "state3", WORKSPACE)
+        for _paths in (self.paths, self.paths2, self.paths3):
+            with LedgerStore.open_writer(_paths) as _store:
+                self._register_projects(_store)
+        self.core = SessionLifecycleCore(
+            FakeLifecycleProvider(), token_factory=lambda: "token-alpha"
+        )
 
     def reserve(self, store: LedgerStore, active_subject: LifecycleSubject):
         self.provision(store, active_subject, self.core.provider)
@@ -167,48 +172,47 @@ class LifecycleTest(unittest.TestCase):
             trusted_project_root=self.trusted_root,
         )
 
+    def _register_projects(self, store: LedgerStore) -> None:
+        # Idempotent test-setup: register PROJECT + OTHER_PROJECT via the proper
+        # record_registry_snapshot (FK-safe). Trusted-operator authority (tests).
+        already = store._connection.execute(
+            "SELECT 1 FROM project_registry_snapshots "
+            "WHERE workspace_id = ? AND project_id = ? LIMIT 1",
+            (WORKSPACE, PROJECT),
+        ).fetchone()
+        if already is not None:
+            return
+        store.record_registry_snapshot(
+            workspace_id=WORKSPACE,
+            registry_revision=TEST_REGISTRY_REVISION,
+            registry_source_sha256=TEST_REGISTRY_REVISION.split(":", 1)[1],
+            captured_at_utc=NOW,
+            workspace_snapshot_json=json.dumps({
+                "workspace_id": WORKSPACE,
+                "projects": [PROJECT, OTHER_PROJECT],
+            }),
+            project_snapshots={
+                PROJECT: json.dumps({"id": PROJECT}),
+                OTHER_PROJECT: json.dumps({"id": OTHER_PROJECT}),
+            },
+            source_snapshots={},
+        )
+
     def provision(
         self,
         store: LedgerStore,
         active_subject: LifecycleSubject,
         provider: FakeLifecycleProvider,
     ) -> None:
-        descriptor = provider.descriptor()
-        store._connection.execute(
-            """
-            INSERT INTO conversation_participants
-            (workspace_id, scope_kind, scope_identity, conversation_id, participant_id, agent_id, created_at_utc)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                active_subject.workspace_id,
-                active_subject.scope_kind,
-                active_subject.scope_identity,
-                active_subject.conversation_id,
-                active_subject.participant_id,
-                active_subject.agent_id,
-                NOW,
-            ),
+        self._register_projects(store)
+        core = SessionLifecycleCore(provider, token_factory=lambda: "token-provision")
+        core.register_participant(store, active_subject, created_at_utc=NOW,
+            registry_revision=TEST_REGISTRY_REVISION,
         )
-        store._connection.execute(
-            """
-            INSERT OR IGNORE INTO lifecycle_provider_registry
-            (
-                workspace_id, provider_id, provider_revision, trust_class,
-                supported_operations_json, challenge_algorithm, challenge_ttl_seconds, created_at_utc
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                active_subject.workspace_id,
-                descriptor["provider_id"],
-                descriptor["provider_revision"],
-                descriptor["trust_class"],
-                descriptor["supported_operations_json"],
-                descriptor["challenge_algorithm"],
-                descriptor["challenge_ttl_seconds"],
-                NOW,
-            ),
+        store.register_lifecycle_provider(
+            workspace_id=active_subject.workspace_id,
+            provider_descriptor=provider.descriptor(),
+            created_at_utc=NOW,
         )
 
     def consume(self, store: LedgerStore, active_subject: LifecycleSubject, challenge):
@@ -339,6 +343,208 @@ class LifecycleTest(unittest.TestCase):
         self.assertTrue(challenge.challenge_id)
         diffs = {t: after[t] - before[t] for t in LIFECYCLE_ROW_COUNT_TABLES if after[t] != before[t]}
         self.assertEqual({"session_binding_challenges": 1}, diffs)
+
+    def test_register_participant_enables_reserve_and_is_idempotent(self) -> None:
+        # register_participant is the production provision seam: before it, reserve
+        # fails closed (participant not provisioned); after it, reserve succeeds;
+        # re-registering is idempotent (no error, no duplicate rows).
+        native = "native_session_one"
+        provider = CodexLifecycleProvider(
+            exact_thread_probe=lambda _tid: CodexAppServerExactThreadResult(
+                thread_id=native, methods=("initialize", "thread/read")
+            )
+        )
+        core = SessionLifecycleCore(provider, token_factory=lambda: "token-provision")
+        active_subject = subject(native_session_id=native)
+        with LedgerStore.open_writer(self.paths) as store:
+            with self.assertRaises(CanonicalConflictError):
+                core.reserve(
+                    store, active_subject, runtime_home=self.runtime_home,
+                    created_at_utc=NOW, expires_at_utc=AT_EXPIRY,
+                    correlation_id="corr_reserve", trusted_project_root=self.trusted_root,
+                )
+            core.register_participant(store, active_subject, created_at_utc=NOW,
+            registry_revision=TEST_REGISTRY_REVISION)
+            store.register_lifecycle_provider(
+                workspace_id=active_subject.workspace_id,
+                provider_descriptor=provider.descriptor(),
+                created_at_utc=NOW,
+            )
+            before = row_counts(store)
+            challenge = core.reserve(
+                store, active_subject, runtime_home=self.runtime_home,
+                created_at_utc=NOW, expires_at_utc=AT_EXPIRY,
+                correlation_id="corr_reserve", trusted_project_root=self.trusted_root,
+            )
+            after = row_counts(store)
+            self.assertTrue(challenge.challenge_id)
+            self.assertEqual(
+                {"session_binding_challenges": 1},
+                {t: after[t] - before[t] for t in LIFECYCLE_ROW_COUNT_TABLES if after[t] != before[t]},
+            )
+            participants = after["conversation_participants"]
+            providers = after["lifecycle_provider_registry"]
+            core.register_participant(store, active_subject, created_at_utc=NOW,
+            registry_revision=TEST_REGISTRY_REVISION)
+            final = row_counts(store)
+            self.assertEqual(participants, final["conversation_participants"])
+            self.assertEqual(providers, final["lifecycle_provider_registry"])
+
+    def test_register_participant_does_not_self_mint_the_trusted_provider_registry(self) -> None:
+        # P1-1: register_participant must NOT write the provider registry.
+        with LedgerStore.open_writer(self.paths) as store:
+            before = row_counts(store)["lifecycle_provider_registry"]
+            self.core.register_participant(store, subject(), created_at_utc=NOW,
+            registry_revision=TEST_REGISTRY_REVISION)
+            after = row_counts(store)["lifecycle_provider_registry"]
+        self.assertEqual(before, after)
+
+    def test_register_participant_rejects_a_conflicting_agent(self) -> None:
+        # P1-2: same participant key + different agent -> CanonicalConflictError.
+        active = subject()
+        with LedgerStore.open_writer(self.paths) as store:
+            self.provision(store, active, FakeLifecycleProvider())
+            with self.assertRaises(CanonicalConflictError):
+                self.core.register_participant(
+                    store, subject(agent_id="agent_other"), created_at_utc=NOW,
+                    registry_revision=TEST_REGISTRY_REVISION
+                )
+
+    def test_register_lifecycle_provider_rejects_a_conflicting_descriptor(self) -> None:
+        # P1-2: same provider id + different descriptor -> CanonicalConflictError.
+        with LedgerStore.open_writer(self.paths) as store:
+            store.register_lifecycle_provider(
+                workspace_id=WORKSPACE,
+                provider_descriptor=FakeLifecycleProvider().descriptor(),
+                created_at_utc=NOW,
+            )
+            altered = FakeLifecycleProvider(trust_class="native_attached")
+            with self.assertRaises(CanonicalConflictError):
+                store.register_lifecycle_provider(
+                    workspace_id=WORKSPACE,
+                    provider_descriptor=altered.descriptor(),
+                    created_at_utc=NOW,
+                )
+
+    def test_register_lifecycle_provider_allows_a_new_revision_but_rejects_a_conflicting_descriptor(self) -> None:
+        # The registry is keyed by (provider_id, provider_revision): a new
+        # revision is a legitimate insert (upgrade); same key + different
+        # descriptor is a conflict.
+        with LedgerStore.open_writer(self.paths) as store:
+            store.register_lifecycle_provider(
+                workspace_id=WORKSPACE,
+                provider_descriptor=FakeLifecycleProvider().descriptor(),
+                created_at_utc=NOW,
+            )
+            upgraded = FakeLifecycleProvider(provider_revision="revision_2")
+            store.register_lifecycle_provider(
+                workspace_id=WORKSPACE,
+                provider_descriptor=upgraded.descriptor(),
+                created_at_utc=NOW,
+            )
+            rows = store._connection.execute(
+                "SELECT provider_revision FROM lifecycle_provider_registry"
+                " WHERE workspace_id = ? AND provider_id = ? ORDER BY provider_revision",
+                (WORKSPACE, FakeLifecycleProvider().provider_id),
+            ).fetchall()
+            self.assertEqual([("revision_1",), ("revision_2",)], rows)
+            altered = FakeLifecycleProvider(provider_revision="revision_1", trust_class="native_attached")
+            with self.assertRaises(CanonicalConflictError):
+                store.register_lifecycle_provider(
+                    workspace_id=WORKSPACE,
+                    provider_descriptor=altered.descriptor(),
+                    created_at_utc=NOW,
+                )
+
+    def test_register_conversation_participant_rejects_an_unregistered_project(self) -> None:
+        # A well-formed but unregistered project_id must not create a participant row.
+        with LedgerStore.open_writer(self.paths) as store:
+            with self.assertRaises(ValueError):
+                store.register_conversation_participant(
+                    workspace_id=WORKSPACE,
+                    scope_kind="project",
+                    scope_identity="unregistered_project",
+                    conversation_id="CHAT-X",
+                    participant_id="p1",
+                    agent_id="agent_codex",
+                    created_at_utc=NOW,
+                    registry_revision=TEST_REGISTRY_REVISION,
+                )
+
+    def test_register_conversation_participant_rejects_a_project_dropped_from_the_supplied_revision(self) -> None:
+        # A project present in an OLDER revision but dropped from the SUPPLIED
+        # revision must be rejected — immutable history is not current authority.
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            paths = LedgerPaths.derive(Path(tmp) / "state", WORKSPACE)
+            _s1 = hashlib.sha256(b"rev-1").hexdigest()
+            _s2 = hashlib.sha256(b"rev-2").hexdigest()
+            with LedgerStore.open_writer(paths) as store:
+                store.record_registry_snapshot(
+                    workspace_id=WORKSPACE,
+                    registry_revision=f"sha256:{_s1}",
+                    registry_source_sha256=_s1,
+                    captured_at_utc=NOW,
+                    workspace_snapshot_json=json.dumps({"workspace_id": WORKSPACE, "projects": [PROJECT, OTHER_PROJECT]}),
+                    project_snapshots={PROJECT: json.dumps({"id": PROJECT}), OTHER_PROJECT: json.dumps({"id": OTHER_PROJECT})},
+                    source_snapshots={},
+                )
+                store.record_registry_snapshot(
+                    workspace_id=WORKSPACE,
+                    registry_revision=f"sha256:{_s2}",
+                    registry_source_sha256=_s2,
+                    captured_at_utc=NOW,
+                    workspace_snapshot_json=json.dumps({"workspace_id": WORKSPACE, "projects": [PROJECT]}),
+                    project_snapshots={PROJECT: json.dumps({"id": PROJECT})},
+                    source_snapshots={},
+                )
+                # PROJECT is in revision_2 -> succeeds.
+                store.register_conversation_participant(
+                    workspace_id=WORKSPACE, scope_kind="project", scope_identity=PROJECT,
+                    conversation_id="CHAT-X", participant_id="participant_test_a", agent_id="agent_codex",
+                    created_at_utc=NOW, registry_revision=f"sha256:{_s2}",
+                )
+                # OTHER_PROJECT is in revision_1 but NOT revision_2 -> fails.
+                with self.assertRaises(ValueError):
+                    store.register_conversation_participant(
+                        workspace_id=WORKSPACE, scope_kind="project", scope_identity=OTHER_PROJECT,
+                        conversation_id="CHAT-Y", participant_id="participant_test_b", agent_id="agent_codex",
+                        created_at_utc=NOW, registry_revision=f"sha256:{_s2}",
+                    )
+
+    def test_register_conversation_participant_rejects_an_old_supplied_revision(self) -> None:
+        # P1: a caller supplying an OLD registry revision (not current) must be
+        # rejected — historical snapshots are not current authority.
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            paths = LedgerPaths.derive(Path(tmp) / "state", WORKSPACE)
+            _s1 = hashlib.sha256(b"old-rev").hexdigest()
+            _s2 = hashlib.sha256(b"new-rev").hexdigest()
+            with LedgerStore.open_writer(paths) as store:
+                store.record_registry_snapshot(
+                    workspace_id=WORKSPACE, registry_revision=f"sha256:{_s1}",
+                    registry_source_sha256=_s1, captured_at_utc="2026-01-01T00:00:00+00:00",
+                    workspace_snapshot_json=json.dumps({"workspace_id": WORKSPACE, "projects": [PROJECT, OTHER_PROJECT]}),
+                    project_snapshots={PROJECT: json.dumps({"id": PROJECT}), OTHER_PROJECT: json.dumps({"id": OTHER_PROJECT})},
+                    source_snapshots={},
+                )
+                store.record_registry_snapshot(
+                    workspace_id=WORKSPACE, registry_revision=f"sha256:{_s2}",
+                    registry_source_sha256=_s2, captured_at_utc="2026-07-01T00:00:00+00:00",
+                    workspace_snapshot_json=json.dumps({"workspace_id": WORKSPACE, "projects": [PROJECT]}),
+                    project_snapshots={PROJECT: json.dumps({"id": PROJECT})}, source_snapshots={},
+                )
+                # Supply the OLD revision + OTHER_PROJECT → must fail (not current).
+                with self.assertRaises(ValueError):
+                    store.register_conversation_participant(
+                        workspace_id=WORKSPACE, scope_kind="project", scope_identity=OTHER_PROJECT,
+                        conversation_id="CHAT-X", participant_id="participant_test_c",
+                        agent_id="agent_kimi", created_at_utc=NOW, registry_revision=f"sha256:{_s1}",
+                    )
+                # Supply the CURRENT revision + PROJECT → succeeds.
+                store.register_conversation_participant(
+                    workspace_id=WORKSPACE, scope_kind="project", scope_identity=PROJECT,
+                    conversation_id="CHAT-Y", participant_id="participant_test_d",
+                    agent_id="agent_kimi", created_at_utc=NOW, registry_revision=f"sha256:{_s2}",
+                )
 
     def test_reserve_consume_resolves_and_replay_fails(self) -> None:
         active_subject = subject()

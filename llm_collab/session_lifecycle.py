@@ -261,6 +261,33 @@ class SessionLifecycleCore:
         self.provider = provider
         self._token_factory = token_factory or _secret_token
 
+    def register_participant(
+        self,
+        store: LedgerStore,
+        subject: LifecycleSubject,
+        *,
+        created_at_utc: str,
+        registry_revision: str,
+    ) -> None:
+        """Idempotently pre-provision the conversation participant.
+
+        Does NOT write the trusted provider registry -- that is a separate
+        authority (P1-1): worker-start consumes an already-approved registry
+        entry; it does not mint one. Required before ``reserve``/``consume``;
+        re-registering the same participant key with the same identity is a no-op.
+        """
+        store.register_conversation_participant(
+            workspace_id=subject.workspace_id,
+            scope_kind=subject.scope_kind,
+            scope_identity=subject.scope_identity,
+            conversation_id=subject.conversation_id,
+            participant_id=subject.participant_id,
+            agent_id=subject.agent_id,
+            created_at_utc=created_at_utc,
+            registry_revision=registry_revision,
+        )
+
+
     def reserve(
         self,
         store: LedgerStore,
