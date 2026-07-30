@@ -57,6 +57,21 @@ The registry entry defines:
 - whether the provider may create a fresh native session, attach an existing
   one, or only inspect.
 
+The merged providers deliberately occupy three different roles; they MUST NOT
+be treated as one interchangeable implementation pattern:
+
+1. **IDENTITY-ONLY attester** — Codex, and incoming Claude/OpenCode providers,
+   call an injected exact-evidence source first, compare the exact native ID,
+   then construct `SessionRefV1`; they support exactly `reserve` and `attach`,
+   and `open_ui` fails closed. New attached-session providers MUST mirror only
+   this role.
+2. **START-FIXTURE** — `FakeLifecycleProvider` directly constructs
+   `SessionRefV1`, advertises the broad default operations including `start` and
+   presentation-only `open_ui`, and exists for tests/inert managed-start work.
+3. **NATIVE-ATTACHED** — `PiLifecycleProvider` independently owns the
+   authority/descriptor/attestation plumbing for the native Pi extension path
+   and retains presentation-only `open_ui`.
+
 Untrusted payloads, remote messages, adapter output, window titles, cwd claims,
 display labels, "latest", sidebar order, and AX state cannot select a lifecycle
 provider.

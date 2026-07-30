@@ -339,6 +339,15 @@ def _trusted_canonical_cwd(trusted_project_root: TrustedProjectRoot) -> str:
 
 @dataclass(frozen=True)
 class FakeLifecycleProvider:
+    """START-FIXTURE provider for tests and the inert managed-start saga.
+
+    This fixture builds ``SessionRefV1`` directly, advertises the broad default
+    operations (including ``start`` and presentation-only ``open_ui``), and is
+    deliberately not the pattern for a real attached-session provider. New
+    attached-session providers such as Codex, Claude, or OpenCode MUST use the
+    identity-only attester role below instead.
+    """
+
     provider_id: str = "provider_codex"
     provider_revision: str = "revision_1"
     authority_identity: str = "fake_lifecycle_provider"
@@ -403,13 +412,16 @@ class FakeLifecycleProvider:
 
 @dataclass(frozen=True)
 class PiLifecycleProvider:
-    """The production native authority for Pi attached sessions.
+    """NATIVE-ATTACHED authority for production Pi extension sessions.
 
-    Not the fake: a Pi worker is a native attachment (`native_attached`), not a
-    lifecycle process llm-collab manages. Identity values are frozen; the real
-    proof is build_session_ref's repository/runtime-home checks, which the
-    extension-supplied endpoint/native ids and cwd feed. The extension owns those
-    ids; reserve/consume freeze them, the bridge derives no second identity.
+    Pi is a native attachment (``native_attached``), not a lifecycle process
+    llm-collab manages. It independently owns its authority/descriptor/attest
+    plumbing and keeps presentation-only ``open_ui``; it is deliberately not
+    the identity-only exact-probe pattern used by Codex, Claude, or OpenCode.
+    Identity values are frozen; the real proof is build_session_ref's
+    repository/runtime-home checks, which the extension-supplied endpoint/native
+    ids and cwd feed. The extension owns those ids; reserve/consume freeze them,
+    and the bridge derives no second identity.
     """
 
     provider_id: str = "provider_pi"
@@ -466,7 +478,14 @@ class PiLifecycleProvider:
 
 @dataclass(frozen=True, kw_only=True)
 class CodexLifecycleProvider(FakeLifecycleProvider):
-    """Read-only Codex exact-thread IDENTITY attester (re-attestation precondition).
+    """IDENTITY-ONLY exact-thread attester for Codex attached sessions.
+
+    This is the required pattern for new attached-session providers, including
+    the incoming Claude provider and a future OpenCode provider: call an
+    injected exact-evidence source FIRST, compare the exact native ID, then
+    delegate SessionRefV1 construction. The supported operations are exactly
+    ``["reserve", "attach"]`` and ``open_ui`` fails closed. It must not be
+    treated as the START-FIXTURE role inherited for code reuse.
 
     Proves exact native-thread IDENTITY / addressability only, through an INJECTED
     exact-thread probe the caller has already bound to the trusted endpoint/runtime
