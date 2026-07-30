@@ -67,6 +67,9 @@ def resolver_consumer_offenders(root: Path) -> list[str]:
         Path("llm_collab/canonical/delivery.py"),
         Path("llm_collab/canonical/legacy_packet_materialization.py"),
         Path("llm_collab/session_lifecycle.py"),
+        # Codex delivery (#422) performs the exact binding join before any native
+        # side effect; it is an approved read-only resolver consumer in this slice.
+        Path("llm_collab/canonical/codex_delivery.py"),
         # Pi registration (#346) reads the active binding to stamp the session, its
         # file binding, and the delivered packet with one canonical identity. This
         # exact file is the only runtime consumer; any other runtime path resolving

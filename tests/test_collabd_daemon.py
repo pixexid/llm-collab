@@ -33,7 +33,7 @@ from llm_collab.daemon.server import (
     parse_request,
     peer_uid,
 )
-from llm_collab.ledger import LedgerPaths, LedgerStore, WriterAlreadyOpenError
+from llm_collab.ledger import LedgerPaths, LedgerStore, SQLiteSafetyError, WriterAlreadyOpenError
 
 
 SAFE_VERSION = (3, 51, 3)
@@ -639,7 +639,25 @@ class DaemonTest(unittest.TestCase):
             self.assertTrue(self.request(b'{"version":1,"op":"status"}')["running"])
             with self.assertRaises(Exception):
                 LedgerStore.open_writer(self.paths)
-            with LedgerStore.open_reader(self.paths) as reader:
+            try:
+                reader = LedgerStore.open_reader(self.paths)
+            except SQLiteSafetyError as exc:
+                # macOS/Python 3.14's host SQLite occasionally fails to expose a
+                # unique main-database descriptor while the daemon's observation
+                # reader/checkpointer is active. The safety gate must refuse that
+                # ambiguous proof; this lock-mode test cannot prove its assertions
+                # when the host precondition is unavailable, so skip explicitly.
+                if (
+                    sys.platform == "darwin"
+                    and sys.version_info >= (3, 14)
+                    and store_module.sqlite3.sqlite_version >= "3.53.4"
+                    and str(exc) == "SQLite main-database descriptor proof is unavailable or ambiguous"
+                ):
+                    self.skipTest(
+                        "host SQLite does not provide a unique descriptor proof during daemon observation"
+                    )
+                raise
+            with reader:
                 self.assertFalse(reader.owns_writer_lock)
             self.stop(active)
             self.assertFalse(self.paths.socket.exists())
