@@ -273,3 +273,24 @@ That's fine — identity files are gitignored and agent-owned. If you add new pr
 **Q: Can I have more than two accounts of the same model?**
 
 Yes. Add `worker2`, `worker3`, etc. Each gets its own identity, inbox, and memory. Keep each `identity_note` explicit, for example: `You are Worker2 (worker2). Read only messages addressed to 'worker2'.`
+
+## Caller capability binding (contract seam)
+
+`bin/_activation_lease.py` defines `CallerCapabilityBindingV1` as an inert,
+default-disabled ledger contract for a future trusted caller-capability
+verifier. A binding records only its version, scheme, exact lease key, fence
+token, and a fixed-length SHA-256 digest. Raw handles, nonces, and proof bytes
+are never persisted or exposed by lease summaries.
+
+The validator accepts only an injected `CallerCapabilityVerification` result
+from a future trusted transport. Activation identity, owner session/runtime
+IDs, PIDs, fences, labels, and caller-supplied raw tokens or digests are not
+verifier results. A binding is therefore not an authentication claim today:
+there is no approved issuer, inherited-handle transport, OS attestation, or
+activation integration in this contract slice. Existing label-only leases
+remain legacy and are not silently upgraded.
+
+The non-copyable transport, issuer/bootstrap owner, platform and same-account
+threat boundary, and restart/revocation semantics require operator approval
+before any claim, assert, release, reclaim, wake, AX, credential, or process
+launch path may consume this seam.

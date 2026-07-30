@@ -2131,5 +2131,174 @@ class ActivationLeaseTest(unittest.TestCase):
         self.assertEqual(0, code, claimed)
 
 
+    def test_caller_capability_binding_is_closed_and_verifier_owned(self):
+        identity = {
+            "project": "amiga",
+            "chat": "CHAT-TEST0001",
+            "task": "TASK-TEST01",
+            "worktree": "/tmp/lane",
+            "branch": "codex/test",
+            "target_agent": "claude",
+        }
+        digest = "a" * 64
+        verification = lease_lib._injected_capability_verification(digest)
+        binding = lease_lib.caller_capability_binding(
+            identity, fence_token=7, verification=verification
+        )
+        self.assertEqual(
+            {
+                "version": 1,
+                "scheme": "injected_verifier_sha256",
+                "lease_key": lease_lib.lease_key(identity),
+                "fence_token": 7,
+                "proof_digest": digest,
+            },
+            binding,
+        )
+        self.assertEqual(
+            binding,
+            lease_lib.validate_caller_capability_binding(
+                identity,
+                fence_token=7,
+                binding=binding,
+                verification=verification,
+            ).as_dict(),
+        )
+        with self.assertRaises(lease_lib.LeaseRefused) as raw:
+            lease_lib.caller_capability_binding(
+                identity, fence_token=7, verification=digest
+            )
+        self.assertEqual("caller_capability_verification_required", raw.exception.reason)
+        with self.assertRaises(TypeError):
+            lease_lib.CallerCapabilityVerification(digest, origin="trusted_verifier")
+        with self.assertRaises(lease_lib.LeaseRefused) as copied:
+            lease_lib.caller_capability_binding(
+                identity,
+                fence_token=7,
+                verification={
+                    "origin": "trusted_verifier",
+                    "proof_digest": digest,
+                    "runtime_id": "copied-runtime",
+                    "owner_pid": 123,
+                    "owner_session_id": "copied-session",
+                },
+            )
+        self.assertEqual("caller_capability_verification_required", copied.exception.reason)
+
+    def test_caller_capability_binding_rejects_wrong_origin_digest_and_fence(self):
+        identity = {
+            "project": "amiga",
+            "chat": "CHAT-TEST0001",
+            "task": "TASK-TEST01",
+            "worktree": "/tmp/lane",
+            "branch": "codex/test",
+            "target_agent": "claude",
+        }
+        digest = "b" * 64
+        verification = lease_lib._injected_capability_verification(digest)
+        binding = lease_lib.caller_capability_binding(
+            identity, fence_token=3, verification=verification
+        )
+        with self.assertRaises(lease_lib.LeaseRefused) as origin:
+            lease_lib.caller_capability_binding(
+                identity,
+                fence_token=3,
+                verification=lease_lib._injected_capability_verification(
+                    digest, origin="copied-labels"
+                ),
+            )
+        self.assertEqual("untrusted_caller_capability_verifier", origin.exception.reason)
+        replay = dict(binding, proof_digest="c" * 64)
+        with self.assertRaises(lease_lib.LeaseRefused) as replayed:
+            lease_lib.validate_caller_capability_binding(
+                identity,
+                fence_token=3,
+                binding=replay,
+                verification=verification,
+            )
+        self.assertEqual("caller_capability_binding_mismatch", replayed.exception.reason)
+        old_fence = dict(binding, fence_token=2)
+        with self.assertRaises(lease_lib.LeaseRefused) as stale:
+            lease_lib.validate_caller_capability_binding(
+                identity,
+                fence_token=3,
+                binding=old_fence,
+                verification=verification,
+            )
+        self.assertEqual("caller_capability_binding_mismatch", stale.exception.reason)
+        malformed = dict(binding)
+        malformed["unexpected"] = "copied"
+        with self.assertRaises(lease_lib.LeaseRefused) as shape:
+            lease_lib.validate_caller_capability_binding(
+                identity,
+                fence_token=3,
+                binding=malformed,
+                verification=verification,
+            )
+        self.assertEqual("malformed_caller_capability_binding", shape.exception.reason)
+
+    def test_capability_digest_check_blocks_replay_before_mutation(self):
+        root = self.make_workspace()
+        self.register_session(root, "SESSION-A", runtime_id="runtime-a")
+        claimed, code = self.claim(root, "SESSION-A", "--claimant-runtime-id", "runtime-a")
+        self.assertEqual(0, code, claimed)
+        identity = lease_lib.lease_identity(
+            {
+                "project": "amiga",
+                "chat": "CHAT-TEST0001",
+                "task": "TASK-TEST01",
+                "worktree": str(self.worktree),
+                "branch": "codex/gh-1571-test",
+                "target_agent": "claude",
+            }
+        )
+        session_path = root / "State" / "session_autobridge" / "sessions" / "SESSION-A.json"
+        with patch.object(lease_lib, "get_project", return_value={"id": "amiga"}), patch.object(
+            lease_lib,
+            "project_state_dir",
+            return_value=root / "projects" / "amiga",
+        ), patch.object(
+            lease_lib,
+            "load_session",
+            side_effect=lambda session_id: json.loads(session_path.read_text())
+            if session_id == "SESSION-A"
+            else None,
+        ):
+            payload = lease_lib.load_authority_lease(identity)
+            self.assertIsNotNone(payload)
+            digest = "d" * 64
+            verification = lease_lib._injected_capability_verification(digest)
+            payload["caller_capability_binding"] = lease_lib.caller_capability_binding(
+                identity,
+                fence_token=int(payload["fence_token"]),
+                verification=verification,
+            )
+            lease_lib.save_lease(payload)
+
+            mutations: list[str] = []
+            lease_lib.with_lease_fence(
+                identity,
+                owner_session_id="SESSION-A",
+                fence_token=int(payload["fence_token"]),
+                claimant_runtime_id="runtime-a",
+                caller_capability_verification=verification,
+                mutation=lambda: mutations.append("accepted"),
+            )
+            self.assertEqual(["accepted"], mutations)
+            with self.assertRaises(lease_lib.LeaseRefused) as refused:
+                lease_lib.with_lease_fence(
+                    identity,
+                    owner_session_id="SESSION-A",
+                    fence_token=int(payload["fence_token"]),
+                    claimant_runtime_id="runtime-a",
+                    caller_capability_verification=lease_lib._injected_capability_verification(
+                        digest[:-1] + "e"
+                    ),
+                    mutation=lambda: mutations.append("replayed"),
+                )
+            self.assertEqual("caller_capability_binding_mismatch", refused.exception.reason)
+            self.assertEqual(["accepted"], mutations)
+
+
 if __name__ == "__main__":
     unittest.main()
