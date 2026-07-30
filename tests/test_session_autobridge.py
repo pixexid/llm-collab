@@ -7446,6 +7446,169 @@ class SessionAutobridgeTest(unittest.TestCase):
         self.assertNotIn("binding_id", session_a)
         self.assertNotIn("binding_id", session_b)
 
+    def test_attach_ledger_binding_composes_with_exact_receive_dispatch(self):
+        """The attach-shaped lifecycle flow reaches only its exact native session."""
+        root = self.make_workspace()
+        self.add_agent(
+            root,
+            {
+                "id": "gemini",
+                "display_name": "Gemini",
+                "activation": {"type": "cli_session", "watcher_enabled": True},
+            },
+        )
+        self.add_agent(root, {"id": "codex", "display_name": "Codex"})
+        chat_id = "CHAT-F1-E2E"
+        native_n = "native-session-n"
+        native_m = "native-session-m"
+        resolved = self._mint_pi_binding_through_lifecycle(
+            root,
+            chat_id=chat_id,
+            project="amiga",
+            agent_id="gemini",
+            endpoint_id="endpoint_f1_e2e",
+            native_session_id=native_n,
+            runtime_instance_id="runtime-f1-e2e",
+        )
+        worker = root / "gemini_worker.py"
+        output = root / "gemini_worker_output.json"
+        write(
+            worker,
+            "\n".join(
+                [
+                    "import json",
+                    "import sys",
+                    "from pathlib import Path",
+                    "payload = json.load(sys.stdin)",
+                    "Path(sys.argv[1]).write_text(json.dumps(payload, sort_keys=True))",
+                ]
+            ),
+        )
+        register_args = [
+            "--agent",
+            "gemini",
+            "--project",
+            "amiga",
+            "--chat",
+            chat_id,
+            "--mode",
+            "auto-read",
+            "--wake-strategy",
+            "runtime_trigger",
+            "--runtime-family",
+            "gemini_cli",
+            "--runtime-session-source",
+            "explicit",
+            "--runtime-command",
+            json.dumps([sys.executable, str(worker), str(output)]),
+            "--repo-target",
+            "llm-collab",
+        ]
+        self.run_cli(root, "register", "--session", "SESSION-F1-N", "--runtime-session-id", native_n, *register_args)
+        self.run_cli(root, "register", "--session", "SESSION-F1-M", "--runtime-session-id", native_m, *register_args)
+
+        target_path = self.add_message(
+            root,
+            agent_id="gemini",
+            chat_id=chat_id,
+            project_id="amiga",
+            title="F1 exact target",
+            sender_session_id="codex-f1",
+            target_session_id=native_n,
+            sender_agent_id="codex",
+            repo_targets=["llm-collab"],
+            target_binding_id=resolved["binding_id"],
+            target_binding_generation=resolved["generation"],
+            packet_slug="target",
+        )
+        generic_path = self.add_message(
+            root,
+            agent_id="gemini",
+            chat_id=chat_id,
+            project_id="amiga",
+            title="F1 generic packet",
+            sender_session_id="codex-f1-generic",
+            sender_agent_id="codex",
+            repo_targets=["llm-collab"],
+            packet_slug="generic",
+        )
+
+        watcher = subprocess.run(
+            [sys.executable, str(WATCH_INBOX_SCRIPT), "--me", "gemini", "--max-polls", "1", "--json"],
+            cwd=root,
+            text=True,
+            capture_output=True,
+            env=self.subprocess_env(root),
+            check=True,
+        )
+        self.assertNotIn("autobridge_binding_refused", watcher.stdout)
+        inbox = json.loads((root / "agents" / "gemini" / "inbox.json").read_text())
+        self.assertIn(target_path, inbox["read"])
+        self.assertIn(generic_path, inbox["unread"])
+
+        session_n = json.loads(
+            (root / "State" / "session_autobridge" / "sessions" / "SESSION-F1-N.json").read_text()
+        )
+        session_m = json.loads(
+            (root / "State" / "session_autobridge" / "sessions" / "SESSION-F1-M.json").read_text()
+        )
+        self.assertNotIn("binding_id", session_n)
+        self.assertNotIn("binding_generation", session_n)
+        self.assertIn(target_path, session_n["processed_messages"])
+        self.assertNotIn(target_path, session_m.get("processed_messages", []))
+
+        events = [
+            json.loads(line)
+            for line in (
+                root
+                / "State"
+                / "session_autobridge"
+                / "events"
+                / "SESSION-F1-N.jsonl"
+            ).read_text().splitlines()
+            if line.strip()
+        ]
+        dispatch = next(
+            event
+            for event in events
+            if event.get("event") == "message_dispatched"
+            and event.get("message_path") == target_path
+        )
+        self.assertTrue(dispatch["canonical_materialization_result"]["resolved"])
+        self.assertTrue(dispatch["canonical_materialization_result"]["created"])
+        self.assertTrue(
+            any(
+                event.get("event") == "autobridge_consumed"
+                and event.get("message_path") == target_path
+                for event in (
+                    json.loads(line)
+                    for line in watcher.stdout.splitlines()
+                    if line.strip()
+                )
+            )
+        )
+
+        # A session with no native identity remains on the legacy generic route;
+        # the otherwise-unbound native-M session does not.
+        truly_unbound = {
+            "session_id": "SESSION-F1-UNBOUND",
+            "agent_id": "gemini",
+            "project_id": "amiga",
+            "chat_id": chat_id,
+            "mode": "notify",
+            "wake_strategy": "notify",
+            "runtime": {},
+        }
+        generic_message = {"frontmatter": {"project_id": "amiga", "chat_id": chat_id}}
+        self.assertEqual(
+            (True, "broadcast_or_agent_scoped"),
+            session_autobridge_lib.message_targets_session(truly_unbound, generic_message),
+        )
+        self.assertEqual(
+            (False, session_autobridge_lib.ROUTE_AMBIGUOUS_REASON),
+            session_autobridge_lib.message_targets_session(session_m, generic_message),
+        )
+
     def test_pi_registration_fails_closed_without_a_canonical_binding(self):
         # GH-346/#378: with a valid fingerprint source but no resolvable binding and
         # incomplete provisioning inputs, register must refuse rather than publish a
