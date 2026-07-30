@@ -1565,6 +1565,12 @@ def binding_scoped_message_matches_session(
     session_binding_id = _declared_target(
         session.get("binding_id", session.get("conversation_binding_id"))
     )
+    # A bound session requires the packet to carry a matching target_binding_id.
+    # A generic (null-target) packet does not address this binding and must stay
+    # unread (#95). Unbound sessions (no session_binding_id) keep today's
+    # project/chat matching — a null-target packet still reaches them.
+    if session_binding_id is not None and target_binding_id is None:
+        return False, ROUTE_AMBIGUOUS_REASON
     if target_binding_id is not None and target_binding_id != session_binding_id:
         return False, ROUTE_AMBIGUOUS_REASON
 
