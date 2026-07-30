@@ -854,8 +854,61 @@ The method-specific shapes are:
     affected session ids, and the exact original request, delivery, and attempt
     ids for every unresolved attempt when applicable, bounded stderr byte and
     truncation counts when applicable, evidence references, and timestamps after
-    redaction. Quarantine and unhealthy state MUST NOT auto-clear on reconnect,
-    process restart, successful reconciliation, handshake, or health response.
+    redaction. The record created by this step is the incident identity; it MUST
+    be independent of any one request or attempt. Quarantine and unhealthy state
+    MUST NOT auto-clear on reconnect, process restart, successful reconciliation,
+    handshake, or health response.
+
+    **Clause 12 incident and event contract.** The host's post-P3-P7 validation
+    boundary is the sole producer of the incident record and its events. It MUST
+    create one producer-assigned non-empty S2-token `incident_id` (the durable
+    record identity) for each incident and MUST NOT derive that identity from
+    one request id, delivery id, or attempt id. One incident owns zero or more
+    exact attempt tuples. An attempt tuple is the complete
+    `(original_request_id, delivery_id, attempt_id)` relation, where
+    `original_request_id` uses Clause 1's exact `RequestId` scalar and the other
+    two members use the exact `DeliveryV1` scalar definitions. A tuple is never
+    represented by a partial subset, and a single incident MUST be able to
+    retain multiple distinct tuples concurrently. `attempt_reconciled` events
+    name exactly one tuple; incident-wide events MAY name zero or more tuples.
+
+    Every incident event MUST carry one producer-supplied `occurrence_at_utc`
+    timestamp, encoded as an ISO-8601 UTC date-time. The storage append time is
+    implementation metadata and MUST NOT substitute for the event occurrence
+    timestamp. The closed event-kind vocabulary is
+    `quarantine_opened`, `health_failed`, `recovery_authorized`,
+    `attempt_reconciled`, `fresh_handshake`, `valid_health`,
+    `release_reviewed`, and `released`. `health_failed` is a distinct event
+    from `valid_health`, MUST identify one of Clause 11's exhaustive failure
+    categories, and MUST NOT be represented only by a counter or by a valid
+    health event with a non-healthy status.
+
+    Each incident record and each event MUST carry the trusted initialized
+    endpoint relation: the exact `adapter_id`, `adapter_revision`, `manifest_id`,
+    `manifest_revision`, `endpoint_id`, `workspace_id`, and complete scope from
+    the successful Clause 4 exchange, plus the exact `capability_set_id` and
+    `capability_set_revision` from the Clause 6 registry-bound
+    `EndpointV1`/`CapabilitySetV1` relation. The host producer MUST source these
+    values from that initialized trusted relation, not from caller input or an
+    unvalidated adapter event. Redaction MAY preserve only the approved safe
+    representation of these values; state MUST persist and fold them but MUST
+    not derive, repair, or infer a missing relation.
+
+    A `release_reviewed` event is required before `released`. It MUST carry one
+    or more explicit `review_reference` objects. Each reference MUST name the
+    exact `manifest_id` and `manifest_revision`, `capability_set_id` and
+    `capability_set_revision`, and a non-empty producer-assigned S2-token
+    `diagnostic_id` for the redacted diagnostic reviewed for that incident.
+    These references MUST match the incident's trusted initialized relation and
+    the exact diagnostic record; a release producer MUST NOT replace a missing
+    reference with a current registry value, a timestamp, or a generic review
+    flag.
+    The host validation producer supplies all IDs, tuples, timestamps, event
+    kinds, and review references. The redaction boundary only removes
+    prohibited secrets and preserves the approved evidence or fails closed;
+    the state boundary only persists and folds already-produced evidence and
+    MUST NOT invent an event, timestamp, attempt, capability relation, or review
+    reference.
 
     While either state is active, ordinary connection and request admission is
     closed. An operator MAY explicitly authorize one recovery-only connection
