@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+import os
 import secrets
 from typing import Callable, Mapping
 
@@ -45,6 +46,49 @@ class TrustedProjectRoot:
 
 
 @dataclass(frozen=True)
+class CodexCreationProvenance:
+    source: str
+    server_correlation_id: str
+    native_thread_id: str
+
+
+@dataclass(frozen=True)
+class CodexThreadReadBack:
+    operation: str
+    native_thread_id: str
+    endpoint_id: str
+    runtime_instance_id: str
+    runtime_home_id: str
+    runtime_home_realpath: str
+    project_id: str
+    repo_id: str
+    canonical_cwd: str
+    provider_revision: str
+
+
+@dataclass(frozen=True)
+class CodexStartEvidence:
+    """Closed, create-only evidence for one managed Codex thread.
+
+    This value is deliberately separate from the attach probe result: a native
+    start correlation and an independent exact read-back are both required.
+    It proves no binding and performs no native operation.
+    """
+
+    native_thread_id: str
+    endpoint_id: str
+    runtime_instance_id: str
+    runtime_home_id: str
+    runtime_home_realpath: str
+    project_id: str
+    repo_id: str
+    canonical_cwd: str
+    provider_revision: str
+    creation: CodexCreationProvenance
+    read_back: CodexThreadReadBack
+
+
+@dataclass(frozen=True)
 class LifecycleSubject:
     workspace_id: str
     scope_kind: str
@@ -69,6 +113,162 @@ class LifecycleChallenge:
     challenge_id: str
     challenge_token: str
     expires_at_utc: str
+
+
+_CODEX_START_EVIDENCE_FIELDS = frozenset(
+    {
+        "native_thread_id",
+        "endpoint_id",
+        "runtime_instance_id",
+        "runtime_home_id",
+        "runtime_home_realpath",
+        "project_id",
+        "repo_id",
+        "canonical_cwd",
+        "provider_revision",
+        "creation_provenance",
+        "read_back",
+    }
+)
+_CREATION_PROVENANCE_FIELDS = frozenset(
+    {"source", "server_correlation_id", "native_thread_id"}
+)
+_READ_BACK_FIELDS = frozenset(
+    {
+        "operation",
+        "native_thread_id",
+        "endpoint_id",
+        "runtime_instance_id",
+        "runtime_home_id",
+        "runtime_home_realpath",
+        "project_id",
+        "repo_id",
+        "canonical_cwd",
+        "provider_revision",
+    }
+)
+_RESERVED_CODEX_IDENTITIES = frozenset({"*", "current", "frontmost", "latest", "newest"})
+
+
+def validate_codex_start_evidence(
+    candidate: Mapping[str, object],
+    *,
+    runtime_home: RuntimeHomeIdentity,
+    trusted_project_root: TrustedProjectRoot,
+    expected_endpoint_id: str,
+    expected_runtime_instance_id: str,
+    provider_revision: str,
+) -> CodexStartEvidence:
+    """Validate one create-only Codex start result against trusted launch inputs."""
+    if not isinstance(candidate, Mapping) or set(candidate) != _CODEX_START_EVIDENCE_FIELDS:
+        raise SessionLifecycleError("Codex start evidence has an unexpected shape")
+    if not isinstance(runtime_home, RuntimeHomeIdentity):
+        raise SessionLifecycleError("runtime_home must be a RuntimeHomeIdentity")
+    expected_cwd = _trusted_canonical_cwd(trusted_project_root)
+    expected = {
+        "endpoint_id": expected_endpoint_id,
+        "runtime_instance_id": expected_runtime_instance_id,
+        "runtime_home_id": runtime_home.runtime_home_id,
+        "runtime_home_realpath": runtime_home.runtime_home_realpath,
+        "project_id": trusted_project_root.project_id,
+        "repo_id": trusted_project_root.repo_id,
+        "canonical_cwd": expected_cwd,
+        "provider_revision": provider_revision,
+    }
+    for field, expected_value in expected.items():
+        actual = _start_text(candidate.get(field), field)
+        if actual != _start_text(expected_value, field):
+            raise SessionLifecycleError(f"Codex start evidence {field} does not match trusted inputs")
+
+    native_thread_id = _start_text(candidate.get("native_thread_id"), "native_thread_id")
+    provenance = candidate["creation_provenance"]
+    if not isinstance(provenance, Mapping) or set(provenance) != _CREATION_PROVENANCE_FIELDS:
+        raise SessionLifecycleError("Codex start creation provenance is incomplete")
+    if provenance.get("source") != "managed_thread_start":
+        raise SessionLifecycleError("Codex start creation source is invalid")
+    creation = CodexCreationProvenance(
+        source="managed_thread_start",
+        server_correlation_id=_start_text(
+            provenance.get("server_correlation_id"), "server_correlation_id"
+        ),
+        native_thread_id=_start_text(provenance.get("native_thread_id"), "creation native_thread_id"),
+    )
+    if creation.native_thread_id != native_thread_id:
+        raise SessionLifecycleError("Codex creation provenance thread id mismatch")
+
+    read_back_value = candidate["read_back"]
+    if not isinstance(read_back_value, Mapping) or set(read_back_value) != _READ_BACK_FIELDS:
+        raise SessionLifecycleError("Codex start read-back evidence is incomplete")
+    read_back = CodexThreadReadBack(
+        operation=_start_text(read_back_value.get("operation"), "read-back operation"),
+        native_thread_id=_start_text(
+            read_back_value.get("native_thread_id"), "read-back native_thread_id"
+        ),
+        endpoint_id=_start_text(read_back_value.get("endpoint_id"), "read-back endpoint_id"),
+        runtime_instance_id=_start_text(
+            read_back_value.get("runtime_instance_id"), "read-back runtime_instance_id"
+        ),
+        runtime_home_id=_start_text(
+            read_back_value.get("runtime_home_id"), "read-back runtime_home_id"
+        ),
+        runtime_home_realpath=_start_text(
+            read_back_value.get("runtime_home_realpath"), "read-back runtime_home_realpath"
+        ),
+        project_id=_start_text(read_back_value.get("project_id"), "read-back project_id"),
+        repo_id=_start_text(read_back_value.get("repo_id"), "read-back repo_id"),
+        canonical_cwd=_start_text(read_back_value.get("canonical_cwd"), "read-back canonical_cwd"),
+        provider_revision=_start_text(
+            read_back_value.get("provider_revision"), "read-back provider_revision"
+        ),
+    )
+    if read_back.operation != "thread_read":
+        raise SessionLifecycleError("Codex start read-back operation is invalid")
+    read_back_fields = {
+        "native_thread_id": native_thread_id,
+        **expected,
+    }
+    if any(getattr(read_back, field) != value for field, value in read_back_fields.items()):
+        raise SessionLifecycleError("Codex start read-back does not match trusted evidence")
+    return CodexStartEvidence(
+        native_thread_id=native_thread_id,
+        endpoint_id=expected_endpoint_id,
+        runtime_instance_id=expected_runtime_instance_id,
+        runtime_home_id=runtime_home.runtime_home_id,
+        runtime_home_realpath=runtime_home.runtime_home_realpath,
+        project_id=trusted_project_root.project_id,
+        repo_id=trusted_project_root.repo_id,
+        canonical_cwd=expected_cwd,
+        provider_revision=provider_revision,
+        creation=creation,
+        read_back=read_back,
+    )
+
+
+def _start_text(value: object, field: str) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or "\x00" in value
+        or any(0xD800 <= ord(char) <= 0xDFFF for char in value)
+        or value.casefold() in _RESERVED_CODEX_IDENTITIES
+    ):
+        raise SessionLifecycleError(f"Codex start evidence {field} must be exact text")
+    return value
+
+
+def _trusted_canonical_cwd(trusted_project_root: TrustedProjectRoot) -> str:
+    if not isinstance(trusted_project_root, TrustedProjectRoot):
+        raise SessionLifecycleError("trusted_project_root is required")
+    try:
+        repo_root = os.path.realpath(trusted_project_root.repo_root)
+        cwd = os.path.realpath(trusted_project_root.cwd)
+        if not os.path.isdir(repo_root) or not os.path.isdir(cwd):
+            raise SessionLifecycleError("trusted project paths must be directories")
+        if os.path.commonpath((repo_root, cwd)) != repo_root:
+            raise SessionLifecycleError("trusted cwd must be under the repository root")
+    except (TypeError, ValueError) as error:
+        raise SessionLifecycleError("trusted project paths are invalid") from error
+    return cwd
 
 
 @dataclass(frozen=True)

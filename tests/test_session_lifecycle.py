@@ -18,6 +18,7 @@ from llm_collab.codex_app_server_live_probe import CodexAppServerExactThreadResu
 from llm_collab.session_lifecycle import (
     CodexLifecycleProvider,
     FakeLifecycleProvider,
+    validate_codex_start_evidence,
     LifecycleSubject,
     SessionLifecycleCore,
     SessionLifecycleError,
@@ -225,6 +226,48 @@ class LifecycleTest(unittest.TestCase):
             correlation_id="corr_consume",
             trusted_project_root=self.trusted_root,
         )
+
+    def test_codex_start_evidence_rejects_trusted_cwd_mismatch_without_ledger_mutation(self) -> None:
+        candidate = {
+            "native_thread_id": "native_session_new",
+            "endpoint_id": "endpoint_codex",
+            "runtime_instance_id": "runtime_one",
+            "runtime_home_id": self.runtime_home.runtime_home_id,
+            "runtime_home_realpath": self.runtime_home.runtime_home_realpath,
+            "project_id": PROJECT,
+            "repo_id": "repo_app",
+            "canonical_cwd": str(self.outside),
+            "provider_revision": "revision_1",
+            "creation_provenance": {
+                "source": "managed_thread_start",
+                "server_correlation_id": "server-create-1",
+                "native_thread_id": "native_session_new",
+            },
+            "read_back": {
+                "operation": "thread_read",
+                "native_thread_id": "native_session_new",
+                "endpoint_id": "endpoint_codex",
+                "runtime_instance_id": "runtime_one",
+                "runtime_home_id": self.runtime_home.runtime_home_id,
+                "runtime_home_realpath": self.runtime_home.runtime_home_realpath,
+                "project_id": PROJECT,
+                "repo_id": "repo_app",
+                "canonical_cwd": str(self.outside),
+                "provider_revision": "revision_1",
+            },
+        }
+        with LedgerStore.open_writer(self.paths) as store:
+            before = row_counts(store)
+            with self.assertRaises(SessionLifecycleError):
+                validate_codex_start_evidence(
+                    candidate,
+                    runtime_home=self.runtime_home,
+                    trusted_project_root=self.trusted_root,
+                    expected_endpoint_id="endpoint_codex",
+                    expected_runtime_instance_id="runtime_one",
+                    provider_revision="revision_1",
+                )
+            self.assertEqual(before, row_counts(store))
 
     def test_codex_lifecycle_provider_attests_after_an_exact_thread_match(self) -> None:
         native = "native_session_one"
