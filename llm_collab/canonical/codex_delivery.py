@@ -79,6 +79,8 @@ def deliver_next_turn_idle(
     is started only when all four pass, and the outcome is receipted from
     native terminal evidence for the SAME turn id only.
     """
+    if not isinstance(timeout_seconds, (int, float)) or timeout_seconds <= 0 or timeout_seconds == float("inf") or timeout_seconds != timeout_seconds:
+        raise CodexDeliveryError("timeout_seconds must be a positive finite number")
     # 0. ONE authority: the caller session and the lifecycle subject must agree
     # with each other (and therefore with the binding materialize resolves) on
     # every identity field, before any side effect of any kind.
@@ -159,9 +161,28 @@ def deliver_next_turn_idle(
     deadline = time.monotonic() + timeout_seconds
 
     def _exchange(frame: dict[str, Any]) -> Mapping[str, Any]:
-        if time.monotonic() >= deadline:
-            raise CodexDeliveryError("absolute delivery deadline exceeded before exchange")
-        return turn_transport.exchange(frame)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise CodexDeliveryError("absolute delivery deadline exceeded")
+        if not callable(getattr(turn_transport, "set_deadline", None)):
+            raise CodexDeliveryError("transport must support set_deadline")
+        turn_transport.set_deadline(deadline)
+        result = turn_transport.exchange(frame)
+        if not isinstance(result, Mapping):
+            raise CodexDeliveryError("malformed JSON-RPC response")
+        if result.get("jsonrpc") != "2.0":
+            raise CodexDeliveryError("invalid JSON-RPC version")
+        has_result = "result" in result
+        has_error = "error" in result
+        if has_result == has_error:
+            raise CodexDeliveryError("response must contain exactly one of result or error")
+        if result.get("id") != frame.get("id"):
+            raise CodexDeliveryError("JSON-RPC response id mismatch")
+        if has_error:
+            raise CodexDeliveryError(
+                f"JSON-RPC error on {frame.get('method')}: {result['error']}"
+            )
+        return result
 
     _exchange(
         {
@@ -175,6 +196,7 @@ def deliver_next_turn_idle(
             },
         }
     )
+    turn_transport.set_deadline(deadline)
     turn_transport.notify({"jsonrpc": "2.0", "method": "initialized"})
     _exchange(
         {
@@ -207,6 +229,8 @@ def deliver_next_turn_idle(
 
     terminal_status: str | None = None
     while turn_id is not None and time.monotonic() < deadline:
+        if hasattr(turn_transport, "set_deadline"):
+            turn_transport.set_deadline(deadline)
         try:
             frame = turn_transport.recv_json()
         except Exception:
@@ -294,6 +318,39 @@ def _require_exact_join(
     if mismatches:
         raise CodexDeliveryError(
             "session/subject identity split: " + ", ".join(mismatches)
+        )
+
+    # The frozen canonical binding is the SOLE authority — not session↔subject
+    # agreement. EVERY identity field the binding carries (native_session_id,
+    # endpoint_id, runtime_instance_id) must match both subject AND caller session.
+    resolved = store.resolve_conversation_binding(
+        workspace_id=subject.workspace_id,
+        scope_kind=subject.scope_kind,
+        scope_identity=subject.scope_identity,
+        conversation_id=subject.conversation_id,
+        participant_id=subject.participant_id,
+    )
+    binding = resolved if isinstance(resolved, dict) and resolved.get("resolved") else None
+    if not binding:
+        raise CodexDeliveryError("no resolved frozen binding for this participant")
+    for field in ("native_session_id", "endpoint_id", "runtime_instance_id"):
+        binding_val = binding.get(field)
+        if not isinstance(binding_val, str) or not binding_val:
+            raise CodexDeliveryError(f"frozen binding is missing {field}")
+        if getattr(subject, field) != binding_val:
+            raise CodexDeliveryError(
+                f"subject {field} does not match the frozen binding"
+            )
+    session_endpoint = session.get("endpoint_id")
+    if not isinstance(session_endpoint, str) or not session_endpoint:
+        raise CodexDeliveryError("caller session is missing endpoint_id")
+    if session_endpoint != binding["endpoint_id"]:
+        raise CodexDeliveryError(
+            "caller session endpoint_id does not match the frozen binding"
+        )
+    if str(runtime.get("session_id") or "") != binding["native_session_id"]:
+        raise CodexDeliveryError(
+            "caller session native_session_id does not match the frozen binding"
         )
 
 
