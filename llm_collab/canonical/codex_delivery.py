@@ -3,9 +3,12 @@
 INERT BY CONTRACT: nothing in production calls this module in this slice; the
 daemon/worker-send wiring is a separately reviewed follow-up, as are busy
 coalescing, steer, interrupt, UI refresh, correlation hardening, and the
-canonical mutation lease. Every gate below fails closed with no partial
-mutation: a delivery resolves the exact active binding and NEVER injects on a
-busy or uncertain thread.
+canonical mutation lease. Durable intent lands first (the canonical
+message/delivery/attempt rows ARE the recovery record), exact-thread identity
+is attested before any NATIVE side effect, and a turn is started only for a
+proven idle/admissible thread — never on busy or uncertain. One authority: the
+session, the lifecycle subject, and the resolved canonical binding must agree
+exactly before anything happens.
 """
 
 from __future__ import annotations
@@ -37,7 +40,6 @@ OUTCOME_GATE_DISABLED = "gate_disabled"
 OUTCOME_DEFERRED_BUSY = "deferred_busy"
 OUTCOME_UNCERTAIN = "uncertain"
 OUTCOME_ACCEPTED = "accepted"
-OUTCOME_REJECTED = "rejected_before_acceptance"
 OUTCOME_AMBIGUOUS = "ambiguous"
 
 _TERMINAL_TURN_METHODS = {"turn/completed", "turn/failed", "turn/cancelled"}
@@ -71,11 +73,17 @@ def deliver_next_turn_idle(
 ) -> dict[str, object]:
     """Deliver one canonical message to one exact idle Codex thread, or do not.
 
-    Order is non-negotiable: canonical write gate and binding-generation freeze
-    first, exact-thread identity attestation second, admissibility observation
-    third — a turn is started only when all three pass, and the outcome is
-    receipted from native terminal evidence only.
+    Order is non-negotiable: one exact identity join (session/subject/binding
+    agree), then durable intent (canonical rows) with the binding-generation
+    freeze, then exact-thread identity attestation, then admissibility — a turn
+    is started only when all four pass, and the outcome is receipted from
+    native terminal evidence for the SAME turn id only.
     """
+    # 0. ONE authority: the caller session and the lifecycle subject must agree
+    # with each other (and therefore with the binding materialize resolves) on
+    # every identity field, before any side effect of any kind.
+    _require_exact_join(store, session, subject)
+
     # 1-2. Canonical message/delivery through the existing write gate, then the
     # binding-generation freeze. A mismatch/rebind or a disabled gate produces
     # no attempt and no dispatch.
@@ -138,15 +146,24 @@ def deliver_next_turn_idle(
             "classification": observation.classification,
         }
 
-    # 5. One turn on the exact thread over the provider-bound transport. The
-    # read-gated probe _request is deliberately NOT reused; the frames below are
-    # the delivery path's own. The prompt is a pointer, never the packet body.
+    # 5. One turn on the exact thread over the provider-bound transport, under
+    # ONE absolute deadline checked before every blocking call (the transport's
+    # own recv timeout bounds each read; no second timeout layer). The read-gated
+    # probe _request is deliberately NOT reused; the prompt is a pointer, never
+    # the packet body.
     sender = str(message.get("frontmatter", {}).get("sender_agent_id", "unknown"))
     prompt = (
         f"[from {sender}] Read latest {session['agent_id']} packet in "
         f"{session['chat_id']}: {materialized['packet_relpath']}"
     )
-    turn_transport.exchange(
+    deadline = time.monotonic() + timeout_seconds
+
+    def _exchange(frame: dict[str, Any]) -> Mapping[str, Any]:
+        if time.monotonic() >= deadline:
+            raise CodexDeliveryError("absolute delivery deadline exceeded before exchange")
+        return turn_transport.exchange(frame)
+
+    _exchange(
         {
             "jsonrpc": "2.0",
             "id": "llm-collab-delivery-1",
@@ -159,7 +176,7 @@ def deliver_next_turn_idle(
         }
     )
     turn_transport.notify({"jsonrpc": "2.0", "method": "initialized"})
-    turn_transport.exchange(
+    _exchange(
         {
             "jsonrpc": "2.0",
             "id": "llm-collab-delivery-2",
@@ -173,7 +190,7 @@ def deliver_next_turn_idle(
     }
     if model:
         turn_payload["model"] = model
-    started = turn_transport.exchange(
+    started = _exchange(
         {
             "jsonrpc": "2.0",
             "id": "llm-collab-delivery-3",
@@ -183,31 +200,42 @@ def deliver_next_turn_idle(
     )
     turn = (started.get("result") or {}).get("turn") if isinstance(started, dict) else None
     turn_id = turn.get("id") if isinstance(turn, dict) else None
+    if not isinstance(turn_id, str) or not turn_id:
+        # turn/start did not return a usable turn identity: nothing authoritative
+        # can ever be claimed for this attempt.
+        turn_id = None
 
     terminal_status: str | None = None
-    deadline = time.monotonic() + timeout_seconds
-    while time.monotonic() < deadline:
+    while turn_id is not None and time.monotonic() < deadline:
         try:
             frame = turn_transport.recv_json()
         except Exception:
             # A lost connection mid-turn is a lost response: ambiguous, never retried.
             break
-        method = str(frame.get("method", "")) if isinstance(frame, dict) else ""
-        if method in _TERMINAL_TURN_METHODS:
-            terminal_status = _TERMINAL_BY_METHOD[method]
+        if time.monotonic() >= deadline:
+            # Evidence that arrives after the absolute deadline is not this
+            # attempt's evidence.
             break
+        method = str(frame.get("method", "")) if isinstance(frame, dict) else ""
+        if method not in _TERMINAL_TURN_METHODS:
+            continue
+        params = frame.get("params") if isinstance(frame, dict) else None
+        terminal_turn = params.get("turn") if isinstance(params, dict) else None
+        terminal_turn_id = terminal_turn.get("id") if isinstance(terminal_turn, dict) else None
+        if terminal_turn_id != turn_id:
+            # A terminal for any other (or no) turn is not this delivery's evidence.
+            continue
+        terminal_status = _TERMINAL_BY_METHOD[method]
+        break
 
     # 6. Receipt from NATIVE terminal evidence only; a lost response is
     # ambiguous and is never blindly retried (reconcile-first is a follow-up).
     if terminal_status == "completed":
         state, quality, outcome = OUTCOME_ACCEPTED, "authoritative", OUTCOME_ACCEPTED
-    elif terminal_status == "failed":
-        state, quality, outcome = (
-            OUTCOME_REJECTED,
-            "best_effort",
-            OUTCOME_REJECTED,
-        )
     else:
+        # turn/failed or turn/cancelled after a started turn, a lost response, or
+        # a missing turn id: a turn EXISTS (or may), so this is never
+        # rejected_before_acceptance — that state would authorize a blind retry.
         state, quality, outcome = OUTCOME_AMBIGUOUS, "best_effort", OUTCOME_AMBIGUOUS
     receipt_id, _ = _append_native_receipt(
         store,
@@ -235,6 +263,38 @@ def deliver_next_turn_idle(
         "turn_id": turn_id,
         "terminal_status": terminal_status,
     }
+
+
+def _require_exact_join(
+    store: LedgerStore,
+    session: Mapping[str, object],
+    subject: LifecycleSubject,
+) -> None:
+    """Fail closed unless the caller session and the lifecycle subject describe
+    one exact worker: workspace, project, chat, agent, endpoint, and native
+    thread must all agree before any side effect. Two independently supplied
+    identities are never allowed to split authority across one delivery."""
+    runtime = session.get("runtime") or {}
+    mismatches = []
+    if subject.workspace_id != store.paths.workspace_id:
+        mismatches.append("workspace_id")
+    if subject.scope_kind != "project" or subject.scope_identity != session.get("project_id"):
+        mismatches.append("project_id")
+    if subject.conversation_id != session.get("chat_id"):
+        mismatches.append("chat_id")
+    if subject.participant_id != "participant_" + str(session.get("agent_id")):
+        mismatches.append("participant_id")
+    if subject.agent_id != "agent_" + str(session.get("agent_id")):
+        mismatches.append("agent_id")
+    session_endpoint = session.get("endpoint_id")
+    if session_endpoint is not None and subject.endpoint_id != session_endpoint:
+        mismatches.append("endpoint_id")
+    if subject.native_session_id != str(runtime.get("session_id") or ""):
+        mismatches.append("native_session_id")
+    if mismatches:
+        raise CodexDeliveryError(
+            "session/subject identity split: " + ", ".join(mismatches)
+        )
 
 
 def _append_native_receipt(

@@ -53,10 +53,14 @@ SESSION_ID = "SESSION-PI-KIMI-DELIVER"
 
 
 class FakeTurnTransport:
-    def __init__(self, terminal=({"method": "turn/completed", "params": {"turn": {"id": "turn-1", "status": "completed"}}},)):
+    def __init__(self, terminal=({"method": "turn/completed", "params": {"turn": {"id": "turn-1", "status": "completed"}}},),
+                 turn_start_result=None, recv_sleep=0.0):
         self.frames = []
         self.notifications = []
+        self.recv_calls = 0
         self._terminal = list(terminal)
+        self._turn_start_result = turn_start_result
+        self._recv_sleep = recv_sleep
 
     def exchange(self, frame):
         self.frames.append(frame)
@@ -64,6 +68,8 @@ class FakeTurnTransport:
         if method == "initialize" or method == "thread/resume":
             return {"jsonrpc": "2.0", "id": frame["id"], "result": {}}
         if method == "turn/start":
+            if self._turn_start_result is not None:
+                return self._turn_start_result
             return {
                 "jsonrpc": "2.0",
                 "id": frame["id"],
@@ -75,6 +81,10 @@ class FakeTurnTransport:
         self.notifications.append(frame)
 
     def recv_json(self):
+        self.recv_calls += 1
+        if self._recv_sleep:
+            import time as _time
+            _time.sleep(self._recv_sleep)
         if not self._terminal:
             raise TimeoutError("no terminal frame")
         return self._terminal.pop(0)
@@ -330,6 +340,129 @@ class DeliveryTest(unittest.TestCase):
             )
         self.assertEqual(result["outcome"], OUTCOME_GATE_DISABLED)
         self.assertEqual(transport.frames, [])
+
+
+    def test_subject_session_identity_split_refuses_before_anything(self) -> None:
+        wrong = LifecycleSubject(
+            workspace_id=self.subject.workspace_id,
+            scope_kind=self.subject.scope_kind,
+            scope_identity=self.subject.scope_identity,
+            conversation_id=self.subject.conversation_id,
+            participant_id=self.subject.participant_id,
+            agent_id=self.subject.agent_id,
+            endpoint_id=self.subject.endpoint_id,
+            native_session_id="native_session_other",
+            runtime_instance_id=self.subject.runtime_instance_id,
+        )
+        transport = FakeTurnTransport()
+        message = self.packet("Chats/chat-dir/deliver.md")
+        with mock.patch.dict(os.environ, {CANONICAL_CONTROL_ENV: CANONICAL_CONTROL_ENABLED}):
+            with LedgerStore.open_writer(self.paths) as store:
+                from llm_collab.canonical.codex_delivery import CodexDeliveryError
+                with self.assertRaises(CodexDeliveryError):
+                    deliver_next_turn_idle(
+                        store,
+                        workspace_root=self.workspace_root,
+                        session=self.session(),
+                        message=message,
+                        subject=wrong,
+                        provider=self.provider,
+                        observe=lambda _tid: self.observation(
+                            OBSERVATION_ADMISSIBLE, status_type="idle", can_accept=True
+                        ),
+                        turn_transport=transport,
+                        runtime_home=self.runtime_home,
+                        trusted_project_root=self.trusted_root,
+                        observed_at_utc=NOW,
+                        correlation_id="corr_deliver",
+                        timeout_seconds=0.05,
+                    )
+        self.assertEqual(transport.frames, [])
+        with LedgerStore.open_reader(self.paths) as store:
+            attempts = store._connection.execute(
+                "SELECT count(*) FROM canonical_delivery_attempts"
+            ).fetchone()[0]
+        self.assertEqual(attempts, 0)
+
+    def test_terminal_for_a_different_turn_is_not_acceptance(self) -> None:
+        transport = FakeTurnTransport(
+            terminal=(
+                {"method": "turn/completed", "params": {"turn": {"id": "turn-other", "status": "completed"}}},
+            )
+        )
+        result, transport, receipts = self.deliver(transport=transport)
+        self.assertEqual(result["outcome"], "ambiguous")
+        self.assertIn(("ambiguous", "best_effort"), receipts)
+        self.assertNotIn(("accepted", "authoritative"), receipts)
+
+    def test_null_turn_start_result_is_ambiguous_never_accepted(self) -> None:
+        transport = FakeTurnTransport(turn_start_result={"jsonrpc": "2.0", "id": "llm-collab-delivery-3", "result": None})
+        result, transport, receipts = self.deliver(transport=transport)
+        self.assertEqual(result["outcome"], "ambiguous")
+        self.assertIsNone(result["turn_id"])
+        self.assertIn(("ambiguous", "best_effort"), receipts)
+        self.assertNotIn(("accepted", "authoritative"), receipts)
+
+    def test_failed_turn_after_start_is_not_retry_safe(self) -> None:
+        transport = FakeTurnTransport(
+            terminal=(
+                {"method": "turn/failed", "params": {"turn": {"id": "turn-1", "status": "failed"}}},
+            )
+        )
+        result, transport, receipts = self.deliver(transport=transport)
+        self.assertEqual(result["outcome"], "ambiguous")
+        states = {state for state, _quality in receipts}
+        self.assertNotIn("rejected_before_acceptance", states)
+
+    def test_absolute_deadline_bounds_the_blocking_read(self) -> None:
+        import time as _time
+        transport = FakeTurnTransport(recv_sleep=0.3)
+        started = _time.monotonic()
+        result, transport, receipts = self.deliver(transport=transport)
+        elapsed = _time.monotonic() - started
+        self.assertEqual(result["outcome"], "ambiguous")
+        self.assertEqual(transport.recv_calls, 1)
+        self.assertLess(elapsed, 0.6)
+
+    def test_attestation_failure_leaves_durable_intent_but_no_receipt(self) -> None:
+        def failing_probe(_tid):
+            raise RuntimeError("app server unreachable")
+
+        provider = CodexLifecycleProvider(exact_thread_probe=failing_probe)
+        transport = FakeTurnTransport()
+        message = self.packet("Chats/chat-dir/deliver.md")
+        with mock.patch.dict(os.environ, {CANONICAL_CONTROL_ENV: CANONICAL_CONTROL_ENABLED}):
+            with LedgerStore.open_writer(self.paths) as store:
+                with self.assertRaises(RuntimeError):
+                    deliver_next_turn_idle(
+                        store,
+                        workspace_root=self.workspace_root,
+                        session=self.session(),
+                        message=message,
+                        subject=self.subject,
+                        provider=provider,
+                        observe=lambda _tid: self.observation(
+                            OBSERVATION_ADMISSIBLE, status_type="idle", can_accept=True
+                        ),
+                        turn_transport=transport,
+                        runtime_home=self.runtime_home,
+                        trusted_project_root=self.trusted_root,
+                        observed_at_utc=NOW,
+                        correlation_id="corr_deliver",
+                        timeout_seconds=0.05,
+                    )
+        self.assertEqual(transport.frames, [])
+        with LedgerStore.open_reader(self.paths) as store:
+            messages = store._connection.execute(
+                "SELECT count(*) FROM canonical_messages"
+            ).fetchone()[0]
+            receipts = store._connection.execute(
+                "SELECT count(*) FROM canonical_delivery_receipts"
+            ).fetchone()[0]
+        # Durable intent (message/delivery/attempt) is the recovery record; no
+        # receipt may exist without native evidence.
+        self.assertEqual(messages, 1)
+        self.assertEqual(receipts, 0)
 
     def test_probe_failure_fails_closed_before_any_frame(self) -> None:
         def failing_probe(_tid):
