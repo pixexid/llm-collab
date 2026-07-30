@@ -7305,6 +7305,147 @@ class SessionAutobridgeTest(unittest.TestCase):
             events,
         )
 
+        # Option B: remove the file projection without touching the active ledger
+        # row. The exact native-session resolver must derive the binding only in
+        # memory, and dispatch must not write those fields back to the session file.
+        session_payload.pop("binding_id")
+        session_payload.pop("binding_generation")
+        session_payload.pop("endpoint_id")
+        write_json(session_path, session_payload)
+        unbound_deliver = subprocess.run(
+            [
+                sys.executable,
+                str(DELIVER_SCRIPT),
+                "--chat",
+                "CHAT-PI-BIND",
+                "--from",
+                "codex",
+                "--to",
+                "glmpi",
+                "--project",
+                "amiga",
+                "--title",
+                "Pi native-resolved wake",
+                "--sender-session-id",
+                "codex-pi-send-2",
+                "--repo-targets",
+                "llm-collab",
+                "--body-file",
+                "-",
+            ],
+            cwd=root,
+            text=True,
+            input="native-resolved packet",
+            capture_output=True,
+            check=False,
+            env=self.subprocess_env(root),
+        )
+        self.assertEqual(0, unbound_deliver.returncode, unbound_deliver.stdout + unbound_deliver.stderr)
+        unbound_packet = sorted(root.glob("Chats/**/*_to-glmpi_*.md"))[-1]
+        subprocess.run(
+            [
+                sys.executable,
+                str(WATCH_INBOX_SCRIPT),
+                "--me",
+                "glmpi",
+                "--max-polls",
+                "1",
+                "--json",
+            ],
+            cwd=root,
+            text=True,
+            capture_output=True,
+            env=self.subprocess_env(root),
+            check=True,
+        )
+        unbound_events = [
+            json.loads(line)
+            for line in event_path.read_text().splitlines()
+            if line.strip()
+        ]
+        unbound_packet_rel = unbound_packet.relative_to(root).as_posix()
+        self.assertTrue(
+            any(
+                event.get("event") == "pi_inbox_wake"
+                and event.get("message_path") == unbound_packet_rel
+                for event in unbound_events
+            ),
+            unbound_events,
+        )
+        session_after_dispatch = json.loads(session_path.read_text())
+        self.assertIn(
+            unbound_packet_rel,
+            session_after_dispatch.get("processed_messages", []),
+            unbound_events,
+        )
+        self.assertNotIn("binding_id", session_after_dispatch)
+        self.assertNotIn("binding_generation", session_after_dispatch)
+        self.assertNotIn("endpoint_id", session_after_dispatch)
+
+    def test_unbound_native_resolver_does_not_cross_route_same_chat_sessions(self):
+        binding = {
+            "binding_id": "binding-native-a",
+            "binding_generation": 4,
+            "endpoint_id": "endpoint-native-a",
+        }
+        session_a = {
+            "session_id": "SESSION-NATIVE-A",
+            "agent_id": "codex",
+            "project_id": "amiga",
+            "chat_id": "CHAT-NATIVE-PAIR",
+            "wake_strategy": "runtime_trigger",
+            "runtime": {"family": "codex_app", "session_id": "native-a"},
+        }
+        session_b = {
+            **session_a,
+            "session_id": "SESSION-NATIVE-B",
+            "runtime": {"family": "codex_app", "session_id": "native-b"},
+        }
+
+        def exact_resolver(project, chat, agent, native):
+            self.assertEqual(("amiga", "CHAT-NATIVE-PAIR", "codex"), (project, chat, agent))
+            return binding if native == "native-a" else None
+
+        with patch.object(
+            session_autobridge_lib,
+            "resolve_active_canonical_binding",
+            side_effect=exact_resolver,
+        ):
+            eligible_a, resolved_a = session_autobridge_lib.resolve_session_receive_binding(session_a)
+            eligible_b, resolved_b = session_autobridge_lib.resolve_session_receive_binding(session_b)
+
+        self.assertTrue(eligible_a)
+        self.assertEqual(binding, resolved_a)
+        self.assertTrue(eligible_b)
+        self.assertIsNone(resolved_b)
+        packet_a = {
+            "frontmatter": {
+                "project_id": "amiga",
+                "chat_id": "CHAT-NATIVE-PAIR",
+                "target_session_id": "native-a",
+                "target_binding_id": "binding-native-a",
+                "target_binding_generation": 4,
+            }
+        }
+        packet_b = {
+            "frontmatter": {
+                **packet_a["frontmatter"],
+                "target_session_id": "native-b",
+            }
+        }
+        self.assertEqual(
+            (True, "explicit_target_match"),
+            session_autobridge_lib.message_targets_session(
+                {**session_a, **(resolved_a or {})}, packet_a
+            ),
+        )
+        self.assertEqual(
+            (False, session_autobridge_lib.ROUTE_AMBIGUOUS_REASON),
+            session_autobridge_lib.message_targets_session(session_b, packet_b),
+        )
+        self.assertNotIn("binding_id", session_a)
+        self.assertNotIn("binding_id", session_b)
+
     def test_pi_registration_fails_closed_without_a_canonical_binding(self):
         # GH-346/#378: with a valid fingerprint source but no resolvable binding and
         # incomplete provisioning inputs, register must refuse rather than publish a

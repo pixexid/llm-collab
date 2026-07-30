@@ -44,6 +44,7 @@ from _session_autobridge import (
     load_session,
     repo_scope_matches,
     resolve_active_canonical_binding,
+    resolve_session_receive_binding,
     runtime_metadata,
 )
 from inbox import (
@@ -122,21 +123,16 @@ class ExactWatcherAuthorityError(RuntimeError):
 
 
 def session_has_exact_canonical_binding(session: dict) -> bool:
-    """Resolve the session's canonical binding from the ledger store.
+    """Run the receive binding gate without mutating the session file.
 
-    The ledger — not the file binding cache — is the authority for which
-    participant/binding/generation is active. Returns True only when the
-    store's active binding for this session's participant matches the
-    session's own ``binding_id`` and ``binding_generation``. A stale,
-    foreign, quarantined, or absent binding fails closed (False) so the
-    session never reaches packet match, materialization, claim, runtime
-    write, or shared-inbox read-state mutation.
-
-    Sessions that carry no ``binding_id`` are not part of the canonical
-    binding system and use the legacy dispatch path unchanged (True).
+    Existing file bindings retain the watcher-local exact check. Otherwise
+    ``dispatch_session`` derives an exact native-session ledger binding in
+    memory when one exists, while target matching rejects targeted packets when
+    it does not.
     """
     if not session.get("binding_id"):
-        return True
+        eligible, _binding = resolve_session_receive_binding(session)
+        return eligible
     runtime = runtime_metadata(session)
     runtime_session_id = runtime.get("session_id")
     project_id = session.get("project_id")

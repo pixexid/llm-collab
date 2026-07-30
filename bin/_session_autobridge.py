@@ -566,6 +566,46 @@ def resolve_active_canonical_binding(
     }
 
 
+def resolve_session_receive_binding(
+    session: dict,
+) -> tuple[bool, dict[str, Any] | None]:
+    """Resolve an exact receive binding without mutating the session record.
+
+    The session file supplies the participant and native-session identity; the
+    ledger remains the sole binding authority. A session that already carries a
+    binding must still match the active ledger row. An otherwise-unbound session
+    may receive a derived in-memory binding only when the ledger resolver proves
+    the same exact native session. No binding means ``(True, None)`` so legacy
+    generic routing remains available; target-bound matching rejects that session
+    separately.
+    """
+    runtime = runtime_metadata(session)
+    runtime_session_id = runtime.get("session_id")
+    project_id = session.get("project_id")
+    chat_id = session.get("chat_id")
+    agent_id = session.get("agent_id")
+    stored_binding_id = session.get("binding_id")
+    stored_generation = session.get("binding_generation")
+
+    if not (runtime_session_id and project_id and chat_id and agent_id):
+        return (not stored_binding_id, None)
+    try:
+        canonical = resolve_active_canonical_binding(
+            str(project_id), str(chat_id), str(agent_id), str(runtime_session_id)
+        )
+    except (CanonicalBindingNativeMismatch, SystemExit):
+        canonical = None
+    if stored_binding_id:
+        if canonical is None:
+            return False, None
+        return (
+            canonical.get("binding_id") == stored_binding_id
+            and canonical.get("binding_generation") == stored_generation,
+            canonical,
+        )
+    return True, canonical
+
+
 def resolve_active_canonical_owner(
     project_id: str, chat_id: str, agent_id: str
 ) -> dict[str, Any] | None:
@@ -3675,6 +3715,33 @@ def dispatch_session(
     repo_targets: list[str] | None = None,
 ) -> dict[str, Any]:
     session = load_session(session_id)
+    if session.get("binding_id"):
+        # The watcher gate validates an existing file binding before calling this
+        # function. Keep direct/unit callers compatible without reopening the
+        # ledger; only otherwise-unbound sessions need the new derived lookup.
+        binding_ok, resolved_binding = True, None
+    else:
+        binding_ok, resolved_binding = resolve_session_receive_binding(session)
+    if not binding_ok:
+        append_event(
+            session_id,
+            {
+                "event": "session_skipped",
+                "reason": "stale_or_foreign_canonical_binding",
+                "status": session.get("status"),
+            },
+        )
+        return {
+            "session_id": session_id,
+            "dispatchable": False,
+            "reason": "stale_or_foreign_canonical_binding",
+            "matched_messages": 0,
+            "actions": [],
+        }
+    # Keep the derived binding in an ephemeral routing view. It is deliberately
+    # not added to ``session``: later processed/settlement writes must not turn
+    # this read-only resolver into a second session-file authority.
+    routing_session = session if resolved_binding is None else {**session, **resolved_binding}
     if project_id is not None and session.get("project_id") != project_id:
         append_event(
             session_id,
@@ -3714,19 +3781,19 @@ def dispatch_session(
     completed_settlements = []
     seen = processed_messages(session)
     for message in matching_unread_messages(
-        session,
+        routing_session,
         invocation_repo_targets=repo_targets,
         repo_scope_refusals=repo_scope_refusals,
     ):
-        if processed_message_blocks_dispatch(session, message, seen):
+        if processed_message_blocks_dispatch(routing_session, message, seen):
             if (
-                message_needs_canonical_materialization(session, message)
+                message_needs_canonical_materialization(routing_session, message)
                 and message["path"] in canonical_settled_message_paths(session)
             ):
                 completed_settlements.append(message)
             continue
         target_match, target_reason = message_targets_session(
-            session,
+            routing_session,
             message,
             invocation_repo_targets=repo_targets,
         )
@@ -3867,14 +3934,14 @@ def dispatch_session(
             runtime = runtime_metadata(session)
             if (
                 runtime.get("family") == "pi"
-                and not message_needs_canonical_materialization(session, message)
+                and not message_needs_canonical_materialization(routing_session, message)
             ):
                 event["reason"] = EXACT_BINDING_REQUIRED_REASON
                 should_mark_processed = False
                 append_event(session_id, event)
                 actions.append(event)
                 continue
-            if message_needs_canonical_materialization(session, message):
+            if message_needs_canonical_materialization(routing_session, message):
                 if not materialization_slot_available:
                     event["reason"] = "pull_pending"
                     event["canonical_materialization_result"] = {
@@ -3892,7 +3959,7 @@ def dispatch_session(
                     session,
                     message,
                     boundary="canonical_receive_materialization",
-                    mutation=lambda: materialize_selected_runtime_packet(session, message),
+                    mutation=lambda: materialize_selected_runtime_packet(routing_session, message),
                 )
                 if assertion_event is not None:
                     event.setdefault("activation_assertions", []).append(assertion_event)
