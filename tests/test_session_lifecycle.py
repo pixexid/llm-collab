@@ -357,7 +357,7 @@ class LifecycleTest(unittest.TestCase):
         core = SessionLifecycleCore(provider, token_factory=lambda: "token-provision")
         active_subject = subject(native_session_id=native)
         with LedgerStore.open_writer(self.paths) as store:
-            with self.assertRaises(CanonicalConflictError):
+            with self.assertRaises(SessionLifecycleError):
                 core.reserve(
                     store, active_subject, runtime_home=self.runtime_home,
                     created_at_utc=NOW, expires_at_utc=AT_EXPIRY,
@@ -546,6 +546,83 @@ class LifecycleTest(unittest.TestCase):
                     agent_id="agent_kimi", created_at_utc=NOW, registry_revision=f"sha256:{_s2}",
                 )
 
+    def test_worker_start_consume_failure_leaves_zero_binding_rows(self) -> None:
+        # ponytail ceiling: a consume failure (attestation raises at consume time)
+        # leaves a self-expiring dangling challenge but ZERO binding rows — no
+        # partial binding is ever written.
+        from llm_collab.codex_app_server_live_probe import CodexAppServerLiveProbeError
+        native = "native_session_one"
+        call_count = [0]
+
+        def probe(tid):
+            call_count[0] += 1
+            if call_count[0] > 1:
+                raise CodexAppServerLiveProbeError("thread drifted at consume")
+            return CodexAppServerExactThreadResult(
+                thread_id=native, methods=("initialize", "thread/read"))
+
+        provider = CodexLifecycleProvider(exact_thread_probe=probe)
+        core = SessionLifecycleCore(provider)
+        active_subject = subject(native_session_id=native)
+        with LedgerStore.open_writer(self.paths) as store:
+            self.provision(store, active_subject, provider)
+            challenge = core.reserve(
+                store, active_subject, runtime_home=self.runtime_home,
+                created_at_utc=NOW, expires_at_utc=AT_EXPIRY,
+                correlation_id="corr_start", trusted_project_root=self.trusted_root,
+            )
+            before = row_counts(store)
+            with self.assertRaises(CodexAppServerLiveProbeError):
+                core.consume(
+                    store, active_subject, challenge,
+                    runtime_home=self.runtime_home, consumed_at_utc=BEFORE_EXPIRY,
+                    correlation_id="corr_start", trusted_project_root=self.trusted_root,
+                )
+            after = row_counts(store)
+            self.assertEqual(
+                before["conversation_bindings"], after["conversation_bindings"])
+
+    def test_worker_attach_command_refuses_without_preapproved_provider(self) -> None:
+        # P1-4: the command body is actually exercised — calling
+        # bin.worker.main(["attach", ...]) directly with a registered project +
+        # participant but NO lifecycle_provider row fails closed (reserve cannot
+        # find the trusted provider) and leaves provider/challenge/binding counts
+        # unchanged.
+        import bin.worker as worker_module
+        with LedgerStore.open_writer(self.paths) as store:
+            self._register_projects(store)
+            self.core.register_participant(
+                store, subject(), created_at_utc=NOW,
+                registry_revision=TEST_REGISTRY_REVISION)
+            before = row_counts(store)
+        from llm_collab.codex_app_server_live_probe import CodexAppServerExactThreadResult
+        _fake_probe = lambda tid: CodexAppServerExactThreadResult(
+            thread_id=tid, methods=("initialize", "thread/read"))
+        with patch.object(worker_module, "ensure_project"), \
+             patch.object(worker_module, "config_get", return_value=WORKSPACE), \
+             patch.object(worker_module, "project_state_root",
+                          return_value=Path(self.tmp.name) / "state"), \
+             patch.object(worker_module, "resolve_project_repo_path",
+                          return_value=self.repo), \
+             patch.object(worker_module, "probe_exact_thread", side_effect=_fake_probe):
+            with self.assertRaisesRegex(SessionLifecycleError, "pre-approved"):
+                worker_module.main([
+                    "attach", "--project", PROJECT, "--chat", "CHAT-SAMEID",
+                    "--participant", "participant_kimi", "--agent", "agent_kimi",
+                    "--endpoint-id", "endpoint_codex", "--native-session", "native_session_one",
+                    "--runtime-instance", "runtime_one", "--codex-home", str(self.codex_home),
+                    "--endpoint", "ws://127.0.0.1:1",
+                ])
+        with LedgerStore.open_writer(self.paths) as store:
+            after = row_counts(store)
+        # Provider/challenge/binding counts must be unchanged (the participant may
+        # have been re-registered — that's idempotent bridge bookkeeping, not
+        # trusted-registry authority).
+        for table in ("lifecycle_provider_registry",
+                      "session_binding_challenges",
+                      "conversation_bindings"):
+            self.assertEqual(before[table], after[table])
+
     def test_reserve_consume_resolves_and_replay_fails(self) -> None:
         active_subject = subject()
         with LedgerStore.open_writer(self.paths) as store:
@@ -598,7 +675,7 @@ class LifecycleTest(unittest.TestCase):
         active_subject = subject()
         with LedgerStore.open_writer(self.paths) as store:
             before = row_counts(store)
-            with self.assertRaisesRegex(CanonicalConflictError, "pre-provisioned"):
+            with self.assertRaisesRegex(SessionLifecycleError, "pre-approved"):
                 self.core.reserve(
                     store,
                     active_subject,
@@ -919,6 +996,7 @@ class LifecycleTest(unittest.TestCase):
         wrong_root = TrustedProjectRoot(OTHER_PROJECT, "repo_app", str(self.repo), str(self.cwd))
         outside_root = TrustedProjectRoot(PROJECT, "repo_app", str(self.repo), str(self.outside))
         with LedgerStore.open_writer(self.paths) as store:
+            self.provision(store, active_subject, self.core.provider)
             with self.assertRaisesRegex(SessionLifecycleError, "trusted project root"):
                 self.core.reserve(
                     store,
@@ -1257,6 +1335,8 @@ class LifecycleTest(unittest.TestCase):
             # inspection seam for `worker show/list`; it is query-only and
             # never calls the provider or a mutation path.
             Path("llm_collab/worker.py"),
+            # worker start verb (#271) drives register->reserve->consume->active.
+            Path("bin/worker.py"),
             # Codex delivery (#94) calls provider.attest as the exact-thread
             # identity proof before one idle-thread turn; it never drives
             # reserve/consume/retire lifecycle state in this slice.

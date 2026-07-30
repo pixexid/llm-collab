@@ -300,6 +300,17 @@ class SessionLifecycleCore:
         trusted_project_root: TrustedProjectRoot | None = None,
     ) -> LifecycleChallenge:
         _require_project_subject(subject)
+        # P1-1: require the provider to be pre-approved in the trusted registry
+        # BEFORE any probe/attest — the verb does not mint it.
+        descriptor = self.provider.descriptor()
+        if not store.has_lifecycle_provider(
+            workspace_id=subject.workspace_id,
+            provider_id=descriptor["provider_id"],
+            provider_revision=descriptor["provider_revision"],
+        ):
+            raise SessionLifecycleError(
+                "provider is not pre-approved in the trusted registry"
+            )
         session_ref = self.provider.attest(
             subject,
             runtime_home=runtime_home,

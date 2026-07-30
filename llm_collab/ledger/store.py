@@ -6372,6 +6372,19 @@ class LedgerStore:
             (workspace_id, scope_kind, scope_identity, conversation_id, participant_id, agent_id, created_at_utc),
         )
 
+    def has_lifecycle_provider(
+        self, *, workspace_id: str, provider_id: str, provider_revision: str
+    ) -> bool:
+        """True if the exact (provider_id, provider_revision) row is pre-approved."""
+        self._ensure_thread()
+        if validate_workspace_id(workspace_id) != self.paths.workspace_id:
+            raise ValueError("workspace_id does not own this ledger")
+        return self._connection.execute(
+            "SELECT 1 FROM lifecycle_provider_registry "
+            "WHERE workspace_id = ? AND provider_id = ? AND provider_revision = ? LIMIT 1",
+            (workspace_id, provider_id, provider_revision),
+        ).fetchone() is not None
+
     def register_lifecycle_provider(
         self,
         *,
