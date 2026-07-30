@@ -2501,6 +2501,91 @@ class CanonicalMessageTest(_CanonicalMessageTestBase):
                     freeze_before,
                 )
 
+    def test_native_session_replacement_refuses_unresolved_predecessor_attempt(self) -> None:
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            paths = LedgerPaths.derive(tmp, WORKSPACE)
+            with LedgerStore.open_writer(paths) as store:
+                record_registry(store)
+                message_id, delivery_id = delivery_route_fixture(store)
+                seed_delivery_binding(store)
+                attempt = create_bound_attempt(
+                    store,
+                    workspace_id=WORKSPACE,
+                    scope_kind="project",
+                    scope_identity=PROJECT,
+                    message_id=message_id,
+                    delivery_id=delivery_id,
+                    attempt_index=0,
+                    attempt_epoch_ms=1_100,
+                    created_at_utc=NOW,
+                    conversation_id="CHAT-SAMEID",
+                    participant_id="participant_claude",
+                )
+                seed_delivery_binding(
+                    store,
+                    binding_id="binding_two",
+                    generation=2,
+                    state="reserved",
+                    session_ref_id="session_ref_two",
+                    native_session_id="native_session_two",
+                    runtime_instance_id="runtime_two",
+                )
+
+                transition = dict(
+                    workspace_id=WORKSPACE,
+                    scope_kind="project",
+                    scope_identity=PROJECT,
+                    conversation_id="CHAT-SAMEID",
+                    participant_id="participant_claude",
+                    predecessor_binding_id="binding_one",
+                    predecessor_generation=1,
+                    successor_binding_id="binding_two",
+                    successor_generation=2,
+                    transition_kind="rebind",
+                    actor_id="SESSION-NEW",
+                    reason="native_session_replacement",
+                    evidence=b"native replacement",
+                    created_at_utc=NOW,
+                )
+                with self.assertRaisesRegex(
+                    CanonicalConflictError, "unresolved predecessor delivery attempts"
+                ):
+                    store.record_conversation_binding_transition(**transition)
+                self.assertEqual(
+                    [("binding_one", "active"), ("binding_two", "reserved")],
+                    store._connection.execute(
+                        "SELECT binding_id, state FROM conversation_bindings ORDER BY generation"
+                    ).fetchall(),
+                )
+
+                append_receipt(
+                    store,
+                    workspace_id=WORKSPACE,
+                    scope_kind="project",
+                    scope_identity=PROJECT,
+                    message_id=message_id,
+                    delivery_id=delivery_id,
+                    attempt_id=attempt["attempt_id"],
+                    evidence=state_evidence(
+                        message_id=message_id,
+                        delivery_id=delivery_id,
+                        attempt_id=attempt["attempt_id"],
+                        endpoint_id="endpoint_claude_desktop",
+                        state="completed",
+                        session_ref_id="session_ref_one",
+                    ),
+                    session_ref_id="session_ref_one",
+                    created_at_utc=NOW,
+                )
+                result = store.record_conversation_binding_transition(**transition)
+                self.assertEqual(1, result["preserved_pending_count"])
+                self.assertEqual(
+                    [("binding_one", "superseded"), ("binding_two", "active")],
+                    store._connection.execute(
+                        "SELECT binding_id, state FROM conversation_bindings ORDER BY generation"
+                    ).fetchall(),
+                )
+
     def test_binding_transition_audit_failure_rolls_back_both_states(self) -> None:
         with TemporaryDirectory(dir="/tmp") as tmp:
             paths = LedgerPaths.derive(tmp, WORKSPACE)

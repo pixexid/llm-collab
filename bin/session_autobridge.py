@@ -113,6 +113,13 @@ def parse_args():
         help="Working directory of the native Pi session (its ctx.cwd). Must be a real "
         "directory beneath the project's repository root.",
     )
+    register.add_argument(
+        "--expect-pi-provider",
+        default=None,
+        help="Expected Pi provider; requires the matching model and thinking flags.",
+    )
+    register.add_argument("--expect-pi-model", default=None, help="Expected Pi model ID.")
+    register.add_argument("--expect-pi-thinking", default=None, help="Expected Pi thinking level.")
     register.add_argument("--supersedes-session", default=None, help="Older llm-collab session replaced by this registration")
     register.add_argument(
         "--runtime-command",
@@ -508,6 +515,29 @@ def register_session(args) -> dict:
                 "provider/model/thinking/cwd fingerprint from the exact native session "
                 "source; no session was written."
             )
+        expected_fingerprint = (
+            getattr(args, "expect_pi_provider", None),
+            getattr(args, "expect_pi_model", None),
+            getattr(args, "expect_pi_thinking", None),
+        )
+        if any(value is not None for value in expected_fingerprint):
+            if not all(isinstance(value, str) and value for value in expected_fingerprint):
+                raise SystemExit(
+                    "[error] canonical_pi_fingerprint_precondition_incomplete: "
+                    "--expect-pi-provider, --expect-pi-model, and --expect-pi-thinking "
+                    "must be supplied together; no session was written."
+                )
+            observed_fingerprint = (
+                fingerprint["provider"],
+                fingerprint["model_id"],
+                fingerprint["thinking_level"],
+            )
+            if observed_fingerprint != expected_fingerprint:
+                raise SystemExit(
+                    "[error] canonical_pi_fingerprint_precondition_mismatch: the exact "
+                    "native session source no longer matches the expected provider/model/"
+                    "thinking tuple; no session was written."
+                )
         # The source's own cwd must be the exact checkout the binding attests to
         # (same canonical realpath as --cwd); otherwise the binding proves checkout A
         # while the session runs in B and the pinned fingerprint (B) passes forever.
