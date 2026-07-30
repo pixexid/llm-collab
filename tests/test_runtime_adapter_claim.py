@@ -106,7 +106,7 @@ class RuntimeAdapterClaimTests(unittest.TestCase):
 
         result = build_claim(self.protocol)
         self.assertIsInstance(result, ClaimFailure)
-        self.assertEqual(len(result.gaps), 110)
+        self.assertEqual(len(result.gaps), 127)
         gap_keys = {gap["clause_key"] for gap in result.gaps}
         self.assertNotIn(C06_INDEPENDENCE_KEY, gap_keys)
         self.assertNotIn(C07_P5_NON_CLASSIFYING_KEY, gap_keys)
@@ -128,7 +128,7 @@ class RuntimeAdapterClaimTests(unittest.TestCase):
         )
 
         self.assertIsInstance(result, ClaimFailure)
-        self.assertEqual(len(result.gaps), 111)
+        self.assertEqual(len(result.gaps), 128)
         self.assertIn(C06_INDEPENDENCE_KEY, {gap["clause_key"] for gap in result.gaps})
 
     def test_stale_varied_binding_c06_ref_fails_closed(self) -> None:

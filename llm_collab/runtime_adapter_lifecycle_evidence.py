@@ -931,25 +931,60 @@ def _recovery_observation() -> RecoveryObservation:
             _redacted(identity, request_id="host-close-1", fault="INVALID_FRAMING", method="runtime.deliver")
         )
         after_host_fault = runtime_adapter_state.read_record(db_path, record_id)
-
-        second_record = runtime_adapter_state.record_quarantine_opened(
+        runtime_adapter_state.record_health_failed(
             db_path,
-            _redacted(identity, request_id="attempt-2", fault="INVALID_SESSION_REF"),
+            record_id,
+            _redacted(
+                identity,
+                request_id="health-failure-1",
+                attempts=[],
+                health_failure_reason="HEALTH_TIMEOUT",
+                method="runtime.health",
+            ),
         )
+        runtime_adapter_state.record_release_reviewed(
+            db_path,
+            record_id,
+            _redacted(
+                identity,
+                request_id="review-1",
+                attempts=[],
+                review_references=[{
+                    "manifest_id": "manifest_a",
+                    "manifest_revision": "manifest_rev_1",
+                    "capability_set_id": "caps_a",
+                    "capability_set_revision": "caps_rev_1",
+                    "diagnostic_id": "diagnostic_recovery",
+                }],
+            ),
+        )
+
+        second_opened = _redacted(
+            identity,
+            incident_id="incident_beta",
+            request_id="attempt-2",
+            fault="INVALID_SESSION_REF",
+        )
+        second_record = runtime_adapter_state.record_quarantine_opened(db_path, second_opened)
         runtime_adapter_state.record_recovery_authorized(
             db_path,
             second_record,
-            _redacted(identity, request_id="attempt-2"),
+            _redacted(identity, incident_id="incident_beta", request_id="attempt-2"),
         )
         runtime_adapter_state.record_fresh_handshake(
             db_path,
             second_record,
-            _redacted(identity, request_id="handshake-2"),
+            _redacted(identity, incident_id="incident_beta", request_id="handshake-2"),
         )
         runtime_adapter_state.record_valid_health(
             db_path,
             second_record,
-            _redacted(identity, request_id="health-recovery-1", method="runtime.health"),
+            _redacted(
+                identity,
+                incident_id="incident_beta",
+                request_id="health-recovery-1",
+                method="runtime.health",
+            ),
         )
         uncleared = runtime_adapter_state.read_record(db_path, second_record)
 
@@ -1590,6 +1625,13 @@ def _redaction_observation() -> RedactionObservation:
         db_path = Path(tmp) / "adapter-state.sqlite"
         raw_document = {
             **_state_identity(),
+            "incident_id": "incident_redaction",
+            "occurrence_at_utc": "2026-07-30T00:00:00Z",
+            "attempts": [{
+                "original_request_id": "redaction-attempt",
+                "delivery_id": "delivery_redaction-attempt",
+                "attempt_id": "attempt_redaction-attempt",
+            }],
             "request_id": "redaction-attempt",
             "fault": "ADAPTER_QUARANTINED",
             "method": "runtime.deliver",
@@ -2052,6 +2094,19 @@ def _plain_initialize_params(params: Mapping[str, Any]) -> dict[str, Any]:
 
 def _redacted(payload: Mapping[str, Any], **overrides: Any) -> RedactedDocument:
     document = dict(payload)
+    request_id = overrides.get("request_id", document.get("request_id"))
+    document.setdefault("incident_id", "incident_alpha")
+    document.setdefault("occurrence_at_utc", "2026-07-30T00:00:00Z")
+    if request_id is not None and "attempts" not in document:
+        safe = str(request_id).replace(" ", "-")
+        document["attempts"] = [
+            {
+                "original_request_id": request_id,
+                "delivery_id": f"delivery_{safe}",
+                "attempt_id": f"attempt_{safe}",
+            }
+        ]
+    document.setdefault("attempts", [])
     document.update(overrides)
     result = redact_document(document)
     if not isinstance(result, RedactedDocument):
@@ -2068,6 +2123,8 @@ def _state_identity() -> Mapping[str, Any]:
             "manifest_id": "manifest_a",
             "manifest_revision": "manifest_rev_1",
             "profile_id": "profile_a",
+            "capability_set_id": "caps_a",
+            "capability_set_revision": "caps_rev_1",
             "endpoint_id": "endpoint_a",
             "workspace_id": "ws_alpha",
             "scope_identity": "workspace:ws_alpha|project:amiga",
@@ -2082,6 +2139,9 @@ _STATE_IDENTITY_FIELDS = (
     "manifest_id",
     "manifest_revision",
     "profile_id",
+    "capability_set_id",
+    "capability_set_revision",
+    "incident_id",
     "endpoint_id",
     "workspace_id",
     "scope_identity",
@@ -2246,6 +2306,7 @@ def _validate_recovery_observation(observation: RecoveryObservation) -> None:
     if not observation.quarantine_record_opened:
         raise LifecycleEvidenceFailure("quarantine record was not opened")
     expected_identity = dict(_state_identity())
+    expected_identity["incident_id"] = "incident_alpha"
     expected_identity["request_id"] = "attempt-1"
     if dict(observation.quarantine_record_identity) != expected_identity:
         raise LifecycleEvidenceFailure("quarantine record did not preserve exact redacted identity")

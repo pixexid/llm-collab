@@ -309,6 +309,62 @@ class RuntimeAdapterRedactionTests(unittest.TestCase):
         self.assertIsInstance(result, RedactedDocument)
         self.assertEqual(result.as_dict(), {"adapter_id": "adapter.alpha"})
 
+    def test_clause_12_fields_are_explicitly_preserved_and_nested_shapes_are_closed(self):
+        result = redact_document(
+            {
+                "incident_id": "incident_alpha",
+                "occurrence_at_utc": "2026-07-30T00:00:00Z",
+                "capability_set_id": "caps_alpha",
+                "capability_set_revision": "caps_rev_1",
+                "attempts": [{
+                    "original_request_id": "original_alpha",
+                    "delivery_id": "delivery_alpha",
+                    "attempt_id": "attempt_alpha",
+                }],
+                "review_references": [{
+                    "manifest_id": "manifest_alpha",
+                    "manifest_revision": "manifest_rev_1",
+                    "capability_set_id": "caps_alpha",
+                    "capability_set_revision": "caps_rev_1",
+                    "diagnostic_id": "diagnostic_alpha",
+                }],
+                "raw_payload": "Bearer secret-token",
+            }
+        )
+        self.assertIsInstance(result, RedactedDocument)
+        payload = result.as_dict()
+        self.assertEqual(payload["incident_id"], "incident_alpha")
+        self.assertEqual(payload["attempts"][0]["attempt_id"], "attempt_alpha")
+        self.assertEqual(payload["review_references"][0]["diagnostic_id"], "diagnostic_alpha")
+        self.assertNotIn("raw_payload", payload)
+        malformed = redact_document({"attempts": [{"delivery_id": "delivery_alpha", "secret": "x"}]})
+        self.assertIsInstance(malformed, RedactionFailure)
+
+    def test_clause_12_scalars_use_exact_shared_contract_validators(self):
+        attempts = [{
+            "original_request_id": "orig_valid",
+            "delivery_id": "delivery_valid",
+            "attempt_id": "attempt_valid",
+        }]
+        reviews = [{
+            "manifest_id": "manifest_valid",
+            "manifest_revision": "manifest_rev_valid",
+            "capability_set_id": "caps_valid",
+            "capability_set_revision": "caps_rev_valid",
+            "diagnostic_id": "diagnostic_valid",
+        }]
+        cases = (
+            {"incident_id": "not a token\n"},
+            {"attempts": [{**attempts[0], "original_request_id": "x" * 200_000}]},
+            {"attempts": [{**attempts[0], "delivery_id": "delivery_!!!"}]},
+            {"attempts": [{**attempts[0], "attempt_id": "attempt_???"}]},
+            {"review_references": [{**reviews[0], "diagnostic_id": "diagnostic_???"}]},
+        )
+        for mutation in cases:
+            with self.subTest(mutation=mutation):
+                result = redact_document({"incident_id": "incident_valid", "attempts": attempts, **mutation})
+                self.assertIsInstance(result, RedactionFailure)
+
     def test_protocol_fault_literals_are_retained_by_closed_allowlist(self):
         protocol_faults = _protocol_fault_literals()
         self.assertGreaterEqual(len(protocol_faults), 23)

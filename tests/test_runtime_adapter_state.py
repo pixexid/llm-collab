@@ -18,6 +18,26 @@ MODULE_PATH = ROOT / "llm_collab" / "runtime_adapter_state.py"
 _MISSING = object()
 
 
+def _release_with_review(db_path, record_id, redacted):
+    payload = redacted.as_dict()
+    payload["review_references"] = [{
+        "manifest_id": payload["manifest_id"],
+        "manifest_revision": payload["manifest_revision"],
+        "capability_set_id": payload["capability_set_id"],
+        "capability_set_revision": payload["capability_set_revision"],
+        "diagnostic_id": "diagnostic.test",
+    }]
+    reviewed = redact_document(payload)
+    if not isinstance(reviewed, RedactedDocument):
+        raise AssertionError(reviewed)
+    state.record_release_reviewed(db_path, record_id, reviewed)
+    return state._record_release(db_path, record_id, redacted)
+
+
+state._record_release = state.record_release
+state.record_release = _release_with_review
+
+
 class RuntimeAdapterStateTests(unittest.TestCase):
     def test_quarantine_store_uses_redacted_document_and_folds_release_explicitly(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -61,7 +81,7 @@ class RuntimeAdapterStateTests(unittest.TestCase):
             with sqlite3.connect(db_path) as conn:
                 raw = conn.execute(
                     """
-                    SELECT event_sequence, event_kind, append_time_utc
+                    SELECT event_sequence, event_kind, payload_json
                     FROM runtime_adapter_events
                     WHERE record_id = ?
                     ORDER BY event_sequence
@@ -71,7 +91,7 @@ class RuntimeAdapterStateTests(unittest.TestCase):
             self.assertEqual(len(raw), 3)
             self.assertEqual(
                 current.journal,
-                tuple((int(seq), str(kind), str(stamp)) for seq, kind, stamp in raw),
+                tuple((int(seq), str(kind), json.loads(payload)["occurrence_at_utc"]) for seq, kind, payload in raw),
             )
             self.assertEqual(
                 [kind for _, kind, _ in current.journal],
@@ -82,25 +102,16 @@ class RuntimeAdapterStateTests(unittest.TestCase):
             self.assertTrue(current.recovery_authorized)
             self.assertEqual(current.event_count, 2)
             self.assertEqual(len(current.journal), 3)
-            for sequence, kind, stamp in current.journal:
+            for sequence, kind, occurrence in current.journal:
                 self.assertIsInstance(sequence, int)
                 self.assertIn(kind, state.EVENT_KINDS)
-                self.assertTrue(stamp)
+                self.assertTrue(occurrence.endswith("Z"))
 
-            # Nothing unrecorded is inferred or exposed: no delivery/attempt
-            # lineage ids, capability-set identity, failed-health, or authority
-            # evidence fields exist on the state or in the journal vocabulary.
-            forbidden = {
-                "delivery_id",
-                "attempt_id",
-                "original_request_id",
-                "capability_set_id",
-                "capability_set_revision",
-                "failed_health",
-                "authority",
-                "authorized_by",
-            }
-            self.assertFalse(forbidden & set(current.__dataclass_fields__))
+            self.assertEqual(
+                current.unresolved_attempt_tuples,
+                (("attempt-1", "delivery_attempt-1", "attempt_attempt-1"),),
+            )
+            self.assertEqual(current.incident_id, "incident.alpha")
             self.assertTrue({kind for _, kind, _ in current.journal} <= state.EVENT_KINDS)
 
     def test_journal_read_is_bounded_and_fails_closed(self):
@@ -136,7 +147,7 @@ class RuntimeAdapterStateTests(unittest.TestCase):
                         (record_id, event_kind, payload_json, payload_sha256, append_time_utc)
                     VALUES (?, 'valid_health', ?, ?, ?)
                     """,
-                    (record_id, payload_json, digest, b"blob-timestamp"),
+                    (record_id, payload_json.replace('2026-07-30T00:00:00Z', 'not-a-timestamp'), digest, b"blob-timestamp"),
                 )
 
             with self.assertRaises(state.AdapterStateIntegrityError):
@@ -307,7 +318,7 @@ class RuntimeAdapterStateTests(unittest.TestCase):
 
             current = state.read_record(db_path, record_id)
 
-            self.assertEqual(current.valid_health_count, 0)
+            self.assertEqual(current.valid_health_count, 1)
             self.assertTrue(current.release_event_seen)
             self.assertFalse(current.released)
 
@@ -322,7 +333,9 @@ class RuntimeAdapterStateTests(unittest.TestCase):
                 state.record_valid_health(db_path, first_id, _redacted(request_id=f"health-{index}"))
             state.record_release(db_path, first_id, _redacted(request_id="attempt-1"))
 
-            second_id = state.record_quarantine_opened(db_path, _redacted(request_id="attempt-2"))
+            second_id = state.record_quarantine_opened(
+                db_path, _redacted(incident_id="incident.beta", request_id="attempt-2")
+            )
 
             self.assertNotEqual(first_id, second_id)
             self.assertTrue(state.read_record(db_path, first_id).released)
@@ -353,7 +366,12 @@ class RuntimeAdapterStateTests(unittest.TestCase):
             self.assertTrue(project_id.startswith("adapter_record_"))
             workspace_id = state.record_quarantine_opened(
                 db_path,
-                _redacted(scope_identity="workspace:ws_alpha", project_id=_MISSING, request_id="attempt-1"),
+                _redacted(
+                    incident_id="incident.workspace",
+                    scope_identity="workspace:ws_alpha",
+                    project_id=_MISSING,
+                    request_id="attempt-1",
+                ),
             )
             self.assertTrue(workspace_id.startswith("adapter_record_"))
 
@@ -457,6 +475,7 @@ class RuntimeAdapterStateTests(unittest.TestCase):
                     state.record_attempt_reconciled(db_path, record_id, _redacted(request_id="attempt-1"))
                     for index in range(state.FRESH_HEALTHY_SEQUENCE_LENGTH):
                         state.record_valid_health(db_path, record_id, _redacted(request_id=f"health-{index}"))
+                    state.record_release_reviewed(db_path, record_id, _reviewed(_redacted(request_id="attempt-1")))
                     state.record_release(db_path, record_id, _redacted(request_id="attempt-1"))
 
                     self.assertTrue(state.read_record(db_path, record_id).released)
@@ -531,6 +550,323 @@ class RuntimeAdapterStateTests(unittest.TestCase):
                 self.assertNotIn("dict", annotations.values())
         self.assertEqual(found, public_writes)
 
+    def test_open_v1_legacy_incident_identity_blocks_upgrade_atomically(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "adapter-state.sqlite"
+            legacy_document = _legacy_document("incident.legacy", with_attempt=False)
+            legacy_record_id, legacy_rows = _legacy_rows(
+                legacy_document, ["quarantine_opened"], legacy_incident="incident legacy"
+            )
+            _create_v1_database(db_path, legacy_record_id, legacy_rows)
+
+            with self.assertRaisesRegex(
+                state.AdapterStateStoreError,
+                rf"migration blocked for open v1 record {legacy_record_id}",
+            ):
+                state.initialize_store(db_path)
+            with sqlite3.connect(db_path) as conn:
+                self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 1)
+                self.assertEqual(
+                    conn.execute("SELECT COUNT(*) FROM runtime_adapter_events").fetchone()[0], 1
+                )
+
+    def test_open_v1_v2_valid_identity_migrates_and_can_continue(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "adapter-state.sqlite"
+            legacy_document = _legacy_document("incident.valid", with_attempt=False)
+            legacy_record_id, legacy_rows = _legacy_rows(legacy_document, ["quarantine_opened"])
+            _create_v1_database(db_path, legacy_record_id, legacy_rows)
+
+            state.initialize_store(db_path)
+            state.record_recovery_authorized(
+                db_path,
+                legacy_record_id,
+                _redacted(incident_id="incident.valid", attempts=[]),
+            )
+            self.assertTrue(state.read_record(db_path, legacy_record_id).recovery_authorized)
+
+    def test_open_v1_legacy_incident_blocks_upgrade_atomically(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "adapter-state.sqlite"
+            legacy_document = _legacy_document("incident.open")
+            legacy_record_id, legacy_rows = _legacy_rows(legacy_document, ["quarantine_opened"])
+            _create_v1_database(db_path, legacy_record_id, legacy_rows)
+
+            with self.assertRaisesRegex(
+                state.AdapterStateStoreError,
+                rf"migration blocked for open v1 record {legacy_record_id}",
+            ):
+                state.initialize_store(db_path)
+            with sqlite3.connect(db_path) as conn:
+                self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 1)
+                self.assertEqual(
+                    conn.execute("SELECT COUNT(*) FROM runtime_adapter_events").fetchone()[0], 1
+                )
+                self.assertEqual(
+                    conn.execute("PRAGMA table_info(runtime_adapter_events)").fetchall()[-1][1],
+                    "append_time_utc",
+                )
+
+    def test_reconciled_v1_legacy_tuple_migrates_and_can_release(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "adapter-state.sqlite"
+            legacy_document = _legacy_document("incident.reconciled")
+            kinds = [
+                "quarantine_opened",
+                "recovery_authorized",
+                "fresh_handshake",
+                "attempt_reconciled",
+            ]
+            legacy_record_id, legacy_rows = _legacy_rows(legacy_document, kinds)
+            _create_v1_database(db_path, legacy_record_id, legacy_rows)
+
+            state.initialize_store(db_path)
+            migrated = state.read_record(db_path, legacy_record_id)
+            self.assertEqual(migrated.unresolved_attempt_tuples, ())
+            self.assertEqual(
+                migrated.reconciled_attempt_tuples,
+                (("orig-legacy", "delivery_a", "attempt_a"),),
+            )
+            for index in range(state.FRESH_HEALTHY_SEQUENCE_LENGTH):
+                state.record_valid_health(
+                    db_path,
+                    legacy_record_id,
+                    _redacted(
+                        incident_id="incident.reconciled",
+                        attempts=[],
+                        occurrence_at_utc=f"2026-07-30T00:01:0{index}Z",
+                    ),
+                )
+            state.record_release_reviewed(
+                db_path,
+                legacy_record_id,
+                _reviewed(_redacted(incident_id="incident.reconciled", attempts=[])),
+            )
+            state._record_release(
+                db_path,
+                legacy_record_id,
+                _redacted(incident_id="incident.reconciled", attempts=[]),
+            )
+            self.assertTrue(state.read_record(db_path, legacy_record_id).released)
+
+    def test_released_v1_legacy_incident_upgrades_and_remains_readable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "adapter-state.sqlite"
+            legacy_document = _legacy_document("incident.released")
+            kinds = [
+                "quarantine_opened",
+                "recovery_authorized",
+                "fresh_handshake",
+                "attempt_reconciled",
+                "valid_health",
+                "valid_health",
+                "valid_health",
+                "released",
+            ]
+            legacy_record_id, legacy_rows = _legacy_rows(legacy_document, kinds)
+            _create_v1_database(db_path, legacy_record_id, legacy_rows)
+
+            state.initialize_store(db_path)
+            legacy_state = state.read_record(db_path, legacy_record_id)
+            self.assertTrue(legacy_state.released)
+            self.assertEqual(
+                legacy_state.unresolved_attempt_tuples,
+                (),
+            )
+            self.assertEqual(
+                legacy_state.reconciled_attempt_tuples,
+                (("orig-legacy", "delivery_a", "attempt_a"),),
+            )
+
+            base = {"incident_id": "incident.upgrade", "attempts": []}
+            record_id = state.record_quarantine_opened(db_path, "incident.upgrade", _redacted(**base))
+            state.record_health_failed(
+                db_path,
+                record_id,
+                _redacted(**{**base, "health_failure_reason": "HEALTH_TIMEOUT"}),
+            )
+            state.record_release_reviewed(db_path, record_id, _reviewed(_redacted(**base)))
+            with sqlite3.connect(db_path) as conn:
+                kinds = [row[0] for row in conn.execute(
+                    "SELECT event_kind FROM runtime_adapter_events WHERE record_id = ? ORDER BY event_sequence",
+                    (record_id,),
+                )]
+            self.assertEqual(kinds, ["quarantine_opened", "health_failed", "release_reviewed"])
+
+    def test_released_incident_rejects_later_disqualifying_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "adapter-state.sqlite"
+            base = {"incident_id": "incident.latch", "attempts": []}
+            record_id = state.record_quarantine_opened(db_path, "incident.latch", _redacted(**base))
+            state.record_recovery_authorized(db_path, record_id, _redacted(**base))
+            state.record_fresh_handshake(db_path, record_id, _redacted(**base))
+            for index in range(state.FRESH_HEALTHY_SEQUENCE_LENGTH):
+                state.record_valid_health(
+                    db_path,
+                    record_id,
+                    _redacted(**{**base, "occurrence_at_utc": f"2026-07-30T00:00:0{index}Z"}),
+                )
+            state.record_release_reviewed(db_path, record_id, _reviewed(_redacted(**base)))
+            state._record_release(db_path, record_id, _redacted(**base))
+            with self.assertRaisesRegex(ValueError, "released adapter incident"):
+                state.record_health_failed(
+                    db_path,
+                    record_id,
+                    _redacted(**{**base, "health_failure_reason": "HEALTH_TIMEOUT"}),
+                )
+            current = state.read_record(db_path, record_id)
+            self.assertTrue(current.released)
+            self.assertEqual(current.health_failure_count, 0)
+
+    def test_contract_incident_has_two_attempts_and_release_requires_both(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "adapter-state.sqlite"
+            attempts = [
+                {"original_request_id": "orig-a", "delivery_id": "delivery_aaa", "attempt_id": "attempt_aaa"},
+                {"original_request_id": "orig-b", "delivery_id": "delivery_bbb", "attempt_id": "attempt_bbb"},
+            ]
+            opened = _redacted(incident_id="incident.contract", attempts=attempts, request_id="orig-a")
+            record_id = state.record_quarantine_opened(db_path, "incident.contract", opened)
+            state.record_recovery_authorized(db_path, record_id, _redacted(incident_id="incident.contract", attempts=[]))
+            state.record_fresh_handshake(db_path, record_id, _redacted(incident_id="incident.contract", attempts=[]))
+            for index in range(state.FRESH_HEALTHY_SEQUENCE_LENGTH):
+                state.record_valid_health(
+                    db_path, record_id,
+                    _redacted(
+                        incident_id="incident.contract",
+                        attempts=[],
+                        request_id=f"health-{index}",
+                        occurrence_at_utc=f"2026-07-30T00:00:0{index}Z",
+                    ),
+                )
+            state.record_attempt_reconciled(
+                db_path, record_id,
+                _redacted(incident_id="incident.contract", attempts=[attempts[0]]),
+            )
+            state.record_release_reviewed(
+                db_path, record_id,
+                _reviewed(_redacted(incident_id="incident.contract", attempts=[])),
+            )
+            state._record_release(db_path, record_id, _redacted(incident_id="incident.contract", attempts=[]))
+            blocked = state.read_record(db_path, record_id)
+            self.assertFalse(blocked.released)
+            self.assertEqual(blocked.unresolved_attempt_tuples, (('orig-b', 'delivery_bbb', 'attempt_bbb'),))
+
+            state.record_attempt_reconciled(
+                db_path, record_id,
+                _redacted(incident_id="incident.contract", attempts=[attempts[1]]),
+            )
+            state._record_release(
+                db_path, record_id,
+                _redacted(incident_id="incident.contract", attempts=[], occurrence_at_utc="2026-07-30T00:00:01Z"),
+            )
+            self.assertTrue(state.read_record(db_path, record_id).released)
+
+    def test_contract_incident_id_is_stable_when_attempt_set_changes(self):
+        first = _redacted(incident_id="incident.stable", attempts=[])
+        second = _redacted(
+            incident_id="incident.stable",
+            attempts=[{"original_request_id": "orig", "delivery_id": "delivery_xxx", "attempt_id": "attempt_xxx"}],
+        )
+        self.assertEqual(state.record_id_for(first), state.record_id_for(second))
+
+    def test_contract_health_failed_resets_valid_sequence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "adapter-state.sqlite"
+            base = {"incident_id": "incident.health", "attempts": []}
+            record_id = state.record_quarantine_opened(db_path, "incident.health", _redacted(**base))
+            state.record_recovery_authorized(db_path, record_id, _redacted(**base))
+            state.record_fresh_handshake(db_path, record_id, _redacted(**base))
+            for index in range(state.FRESH_HEALTHY_SEQUENCE_LENGTH):
+                state.record_valid_health(
+                    db_path, record_id,
+                    _redacted(**{**base, "occurrence_at_utc": f"2026-07-30T00:00:0{index}Z"}),
+                )
+            state.record_health_failed(
+                db_path, record_id,
+                _redacted(**{**base, "health_failure_reason": "HEALTH_TIMEOUT", "occurrence_at_utc": "2026-07-30T00:00:10Z"}),
+            )
+            current = state.read_record(db_path, record_id)
+            self.assertEqual(current.valid_health_count, 0)
+            self.assertFalse(current.fresh_handshake)
+            self.assertEqual(current.health_failure_count, 1)
+
+    def test_contract_mismatched_review_reference_cannot_release(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "adapter-state.sqlite"
+            base = {"incident_id": "incident.review", "attempts": []}
+            record_id = state.record_quarantine_opened(db_path, "incident.review", _redacted(**base))
+            state.record_recovery_authorized(db_path, record_id, _redacted(**base))
+            state.record_fresh_handshake(db_path, record_id, _redacted(**base))
+            for index in range(state.FRESH_HEALTHY_SEQUENCE_LENGTH):
+                state.record_valid_health(
+                    db_path, record_id,
+                    _redacted(**{**base, "occurrence_at_utc": f"2026-07-30T00:00:1{index}Z"}),
+                )
+            bad = _redacted(**base)
+            bad_payload = bad.as_dict()
+            bad_payload["review_references"] = [{
+                "manifest_id": "wrong-manifest",
+                "manifest_revision": bad_payload["manifest_revision"],
+                "capability_set_id": bad_payload["capability_set_id"],
+                "capability_set_revision": bad_payload["capability_set_revision"],
+                "diagnostic_id": "diagnostic.bad",
+            }]
+            bad = redact_document(bad_payload)
+            self.assertIsInstance(bad, RedactedDocument)
+            with self.assertRaises(ValueError):
+                state.record_release_reviewed(db_path, record_id, bad)
+            state._record_release(db_path, record_id, _redacted(**base))
+            self.assertFalse(state.read_record(db_path, record_id).released)
+
+    def test_contract_release_prerequisite_removal_is_mutation_proven(self):
+        for missing in ("review", "reconcile", "handshake", "health"):
+            with self.subTest(missing=missing), tempfile.TemporaryDirectory() as tmp:
+                db_path = Path(tmp) / "adapter-state.sqlite"
+                attempt = {"original_request_id": "orig", "delivery_id": "delivery_orig", "attempt_id": "attempt_orig"}
+                base = {"incident_id": "incident-{0}".format(missing), "attempts": [attempt]}
+                record_id = state.record_quarantine_opened(db_path, base["incident_id"], _redacted(**base))
+                state.record_recovery_authorized(db_path, record_id, _redacted(**{**base, "attempts": []}))
+                if missing != "handshake":
+                    state.record_fresh_handshake(db_path, record_id, _redacted(**{**base, "attempts": []}))
+                if missing != "reconcile":
+                    state.record_attempt_reconciled(db_path, record_id, _redacted(**{**base, "attempts": [attempt]}))
+                if missing != "health":
+                    for index in range(state.FRESH_HEALTHY_SEQUENCE_LENGTH):
+                        state.record_valid_health(
+                            db_path, record_id,
+                            _redacted(**{**base, "attempts": [], "occurrence_at_utc": f"2026-07-30T00:00:2{index}Z"}),
+                        )
+                if missing != "review":
+                    state.record_release_reviewed(db_path, record_id, _reviewed(_redacted(**{**base, "attempts": []})))
+                state._record_release(db_path, record_id, _redacted(**{**base, "attempts": []}))
+                self.assertFalse(state.read_record(db_path, record_id).released)
+
+    def test_contract_secret_input_never_reaches_persisted_payload(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "adapter-state.sqlite"
+            payload = _redacted(incident_id="incident.secret", attempts=[], raw_payload="Bearer secret-token", authorization="secret")
+            record_id = state.record_quarantine_opened(db_path, "incident.secret", payload)
+            with sqlite3.connect(db_path) as conn:
+                stored = conn.execute("SELECT payload_json FROM runtime_adapter_events WHERE record_id = ?", (record_id,)).fetchone()[0]
+            self.assertNotIn("secret-token", stored)
+            self.assertNotIn("authorization", stored)
+
+
+def _reviewed(redacted, diagnostic_id="diagnostic.contract"):
+    payload = redacted.as_dict()
+    payload["review_references"] = [{
+        "manifest_id": payload["manifest_id"],
+        "manifest_revision": payload["manifest_revision"],
+        "capability_set_id": payload["capability_set_id"],
+        "capability_set_revision": payload["capability_set_revision"],
+        "diagnostic_id": diagnostic_id,
+    }]
+    result = redact_document(payload)
+    if not isinstance(result, RedactedDocument):
+        raise AssertionError(result)
+    return result
+
 
 def _redacted(**overrides):
     payload = {
@@ -539,11 +875,27 @@ def _redacted(**overrides):
         "manifest_id": "manifest.alpha",
         "manifest_revision": "mrev1",
         "profile_id": "profile.alpha",
+        "capability_set_id": "caps.alpha",
+        "capability_set_revision": "caps.rev1",
         "endpoint_id": "endpoint.alpha",
         "workspace_id": "ws_alpha",
         "scope_identity": "workspace:ws_alpha|project:amiga",
         "project_id": "amiga",
     }
+    request_id = overrides.get("request_id", payload.get("request_id"))
+    payload.setdefault("incident_id", "incident.alpha")
+    payload.setdefault("occurrence_at_utc", "2026-07-30T00:00:00Z")
+    if request_id is not None and "attempts" not in payload:
+        safe = str(request_id).replace(" ", "-")
+        payload.setdefault(
+            "attempts",
+            [{
+                "original_request_id": request_id,
+                "delivery_id": f"delivery_{safe}",
+                "attempt_id": f"attempt_{safe}",
+            }],
+        )
+    payload.setdefault("attempts", [])
     payload.update(overrides)
     for key, value in list(payload.items()):
         if value is _MISSING:
@@ -552,6 +904,62 @@ def _redacted(**overrides):
     if not isinstance(result, RedactedDocument):
         raise AssertionError(result)
     return result
+
+
+def _legacy_document(incident_id, *, with_attempt=True):
+    attempts = [{
+        "original_request_id": "orig-legacy",
+        "delivery_id": "delivery_aaa",
+        "attempt_id": "attempt_aaa",
+    }] if with_attempt else []
+    return _redacted(incident_id=incident_id, attempts=attempts)
+
+
+def _legacy_rows(document, kinds, legacy_incident=None):
+    base = document.as_dict()
+    if legacy_incident is not None:
+        base["incident_id"] = legacy_incident
+    record_id = "adapter_record_" + hashlib.sha256(base["incident_id"].encode()).hexdigest()
+    if base["attempts"]:
+        base["attempts"][0]["delivery_id"] = "delivery_a"
+        base["attempts"][0]["attempt_id"] = "attempt_a"
+    rows = []
+    for index, kind in enumerate(kinds):
+        payload = json.loads(json.dumps(base))
+        payload["occurrence_at_utc"] = f"2026-07-30T00:00:{index:02d}Z"
+        rows.append((kind, payload))
+    return record_id, rows
+
+
+def _create_v1_database(db_path, record_id, rows):
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE runtime_adapter_events (
+                event_sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                record_id TEXT NOT NULL,
+                event_kind TEXT NOT NULL CHECK(event_kind IN (
+                    'quarantine_opened', 'recovery_authorized',
+                    'attempt_reconciled', 'fresh_handshake',
+                    'valid_health', 'released'
+                )),
+                payload_json TEXT NOT NULL CHECK(json_valid(payload_json)),
+                payload_sha256 TEXT NOT NULL,
+                append_time_utc TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        for kind, payload in rows:
+            payload_json = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+            conn.execute(
+                """
+                INSERT INTO runtime_adapter_events
+                    (record_id, event_kind, payload_json, payload_sha256)
+                VALUES (?, ?, ?, ?)
+                """,
+                (record_id, kind, payload_json, hashlib.sha256(payload_json.encode()).hexdigest()),
+            )
+        conn.execute("PRAGMA user_version=1")
 
 
 def _payload_and_digest(redacted):

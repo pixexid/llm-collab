@@ -7,11 +7,17 @@ state.
 
 from __future__ import annotations
 
+from datetime import datetime
 import hashlib
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Mapping
 
+from llm_collab.runtime_adapter_conformance import (
+    validate_delivery_scalar,
+    validate_request_id_scalar,
+    validate_s2_token,
+)
 from llm_collab.runtime_adapter_supervisor import MAX_STDERR_BYTES_PER_CONNECTION
 
 
@@ -25,24 +31,46 @@ _SAFE_TOP_LEVEL_FIELDS = frozenset(
     (
         "adapter_id",
         "adapter_revision",
+        "attempts",
+        "capability_set_id",
+        "capability_set_revision",
         "diagnostic",
+        "diagnostic_id",
+        "delivery_id",
         "endpoint_id",
         "fault",
+        "health_failure_reason",
+        "incident_id",
         "manifest_id",
         "manifest_revision",
         "method",
+        "occurrence_at_utc",
+        "original_request_id",
         "native_session_id",
         "profile_id",
         "project_id",
         "reason",
         "request_id",
+        "review_references",
         "scope_identity",
         "session_ref_id",
         "stderr",
+        "attempt_id",
         "workspace_id",
     )
 )
 _SAFE_DIAGNOSTIC_FIELDS = frozenset(("code", "context", "detail", "fault", "reason"))
+_ATTEMPT_FIELDS = frozenset(("original_request_id", "delivery_id", "attempt_id"))
+_REVIEW_REFERENCE_FIELDS = frozenset(
+    (
+        "manifest_id",
+        "manifest_revision",
+        "capability_set_id",
+        "capability_set_revision",
+        "diagnostic_id",
+    )
+)
+_HEALTH_FAILURE_VALUES = frozenset(("HEALTH_TIMEOUT", "INVALID_HEALTH_RESPONSE"))
 _HASHED_IDENTIFIER_FIELDS = frozenset(("native_session_id", "session_ref_id"))
 _REDACTED_TEXT_FIELDS = frozenset(("detail", "reason"))
 _FAULT_VALUES = frozenset(
@@ -97,18 +125,25 @@ _DROP_ONLY_FIELDS = frozenset(
 )
 _REDACTION_REASON_CODES = frozenset(
     (
+        "attempt_shape_invalid",
+        "attempts_not_array",
         "closed_literal_not_string",
         "cyclic_input",
         "cyclic_stderr",
+        "delivery_token_invalid",
         "identifier_not_string",
         "mapping_field_not_object",
         "no_allowlisted_fields",
         "non_mapping_root",
+        "occurrence_not_timestamp",
         "nul_bearing_string",
         "prefix_not_bytes_or_string",
         "redaction_depth_exceeded",
         REDACTION_REASON_GENERIC,
         "request_id_not_scalar",
+        "review_reference_shape_invalid",
+        "review_references_required",
+        "schema_identity_invalid",
         "schema_identity_not_string",
         "stderr_not_object",
         "stderr_prefix_too_long_for_total",
@@ -232,6 +267,12 @@ def _redact_field(key: str, raw: Any, *, depth: int, seen: set[int]) -> Any:
     _check_depth(depth)
     if key == "stderr":
         return _redact_stderr(raw, depth=depth, seen=seen)
+    if key == "attempts":
+        return _redact_attempts(raw)
+    if key == "review_references":
+        return _redact_review_references(raw)
+    if key == "occurrence_at_utc":
+        return _redact_occurrence(raw)
     if key in ("diagnostic", "context"):
         if not isinstance(raw, Mapping):
             raise RedactionError("mapping_field_not_object")
@@ -241,10 +282,24 @@ def _redact_field(key: str, raw: Any, *, depth: int, seen: set[int]) -> Any:
         return _redact_text(raw)
     if key in _HASHED_IDENTIFIER_FIELDS:
         return _hash_identifier(raw)
-    if key in _SCHEMA_IDENTITY_FIELDS:
+    if key in {"diagnostic_id", "incident_id"}:
+        try:
+            return validate_s2_token(raw)
+        except ValueError as error:
+            raise RedactionError("schema_identity_invalid") from error
+    if key in _SCHEMA_IDENTITY_FIELDS or key in {
+        "capability_set_id",
+        "capability_set_revision",
+    }:
         return _schema_identity(raw, key)
+    if key in {"delivery_id", "attempt_id"}:
+        return _delivery_token(raw, key)
+    if key == "original_request_id":
+        return _request_id(raw)
     if key == "request_id":
         return _request_id(raw)
+    if key == "health_failure_reason":
+        return _closed_string(raw, _HEALTH_FAILURE_VALUES, "health_failure_reason")
     if key == "fault":
         return _closed_string(raw, _FAULT_VALUES, "fault")
     if key == "method":
@@ -300,20 +355,76 @@ def _schema_identity(raw: Any, name: str) -> str:
     return _redact_string(raw)
 
 
-def _request_id(raw: Any) -> str | int | float | None:
-    if raw is None:
-        return None
-    if isinstance(raw, bool):
-        raise RedactionError("request_id_not_scalar")
-    if isinstance(raw, str):
-        return _redact_string(raw)
-    if isinstance(raw, int):
-        return raw
-    if isinstance(raw, float):
-        if raw != raw or raw in (float("inf"), float("-inf")):
-            raise RedactionError("unsafe_float")
-        return raw
-    raise RedactionError("request_id_not_scalar")
+def _validated_s2_token(raw: Any, name: str) -> str:
+    try:
+        return validate_s2_token(raw)
+    except ValueError as error:
+        raise RedactionError("schema_identity_invalid") from error
+
+
+def _redact_attempts(raw: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw, (list, tuple)):
+        raise RedactionError("attempts_not_array")
+    output: list[dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, Mapping) or set(item) != _ATTEMPT_FIELDS:
+            raise RedactionError("attempt_shape_invalid")
+        output.append(
+            {
+                "original_request_id": _request_id(item["original_request_id"]),
+                "delivery_id": _delivery_token(item["delivery_id"], "delivery_id"),
+                "attempt_id": _delivery_token(item["attempt_id"], "attempt_id"),
+            }
+        )
+    return output
+
+
+def _redact_review_references(raw: Any) -> list[dict[str, str]]:
+    if not isinstance(raw, (list, tuple)) or not raw:
+        raise RedactionError("review_references_required")
+    output: list[dict[str, str]] = []
+    for item in raw:
+        if not isinstance(item, Mapping) or set(item) != _REVIEW_REFERENCE_FIELDS:
+            raise RedactionError("review_reference_shape_invalid")
+        output.append(
+            {
+                "manifest_id": _schema_identity(item["manifest_id"], "manifest_id"),
+                "manifest_revision": _schema_identity(item["manifest_revision"], "manifest_revision"),
+                "capability_set_id": _schema_identity(item["capability_set_id"], "capability_set_id"),
+                "capability_set_revision": _schema_identity(
+                    item["capability_set_revision"], "capability_set_revision"
+                ),
+                "diagnostic_id": _validated_s2_token(item["diagnostic_id"], "diagnostic_id"),
+            }
+        )
+    return output
+
+
+def _redact_occurrence(raw: Any) -> str:
+    if not isinstance(raw, str):
+        raise RedactionError("occurrence_not_timestamp")
+    value = _redact_string(raw)
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise RedactionError("occurrence_not_timestamp") from error
+    if parsed.tzinfo is None or parsed.utcoffset() is None or parsed.utcoffset().total_seconds() != 0:
+        raise RedactionError("occurrence_not_timestamp")
+    return value
+
+
+def _delivery_token(raw: Any, name: str) -> str:
+    try:
+        return validate_delivery_scalar(raw, name)
+    except ValueError as error:
+        raise RedactionError("delivery_token_invalid") from error
+
+
+def _request_id(raw: Any) -> str | int | None:
+    try:
+        return validate_request_id_scalar(raw)
+    except ValueError as error:
+        raise RedactionError("request_id_not_scalar") from error
 
 
 def _redact_scalar(raw: Any) -> str | int | float | bool | None:
