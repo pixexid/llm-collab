@@ -61,6 +61,10 @@ class FakeTurnTransport:
         self._terminal = list(terminal)
         self._turn_start_result = turn_start_result
         self._recv_sleep = recv_sleep
+        self._deadline = None
+
+    def set_deadline(self, deadline):
+        self._deadline = deadline
 
     def exchange(self, frame):
         self.frames.append(frame)
@@ -81,9 +85,16 @@ class FakeTurnTransport:
         self.notifications.append(frame)
 
     def recv_json(self):
+        import time as _time
         self.recv_calls += 1
+        if self._deadline is not None:
+            remaining = self._deadline - _time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("deadline exceeded")
+            if self._recv_sleep and self._recv_sleep > remaining:
+                _time.sleep(remaining)
+                raise TimeoutError("deadline exceeded during recv")
         if self._recv_sleep:
-            import time as _time
             _time.sleep(self._recv_sleep)
         if not self._terminal:
             raise TimeoutError("no terminal frame")
@@ -492,6 +503,53 @@ class DeliveryTest(unittest.TestCase):
                         timeout_seconds=0.05,
                     )
         self.assertEqual(transport.frames, [])
+
+    def test_coordinated_session_subject_split_from_frozen_binding_is_refused(self) -> None:
+        # P1-1: BOTH session and subject = native_session_other (they agree with
+        # each other), but the frozen binding = native_session_one. The binding
+        # is the authority; the coordinated pair cannot split it.
+        from llm_collab.canonical.codex_delivery import CodexDeliveryError
+        other_subject = LifecycleSubject(
+            workspace_id=WORKSPACE, scope_kind="project", scope_identity=PROJECT,
+            conversation_id=CHAT, participant_id="participant_kimi", agent_id="agent_kimi",
+            endpoint_id="endpoint_codex", native_session_id="native_session_other",
+            runtime_instance_id="runtime_one",
+        )
+        other_session = self.session()
+        other_session["runtime"] = {"family": "pi", "session_id": "native_session_other", "home": str(self.codex_home)}
+        with mock.patch.dict(os.environ, {CANONICAL_CONTROL_ENV: CANONICAL_CONTROL_ENABLED}):
+            with LedgerStore.open_writer(self.paths) as store:
+                with self.assertRaises(CodexDeliveryError):
+                    deliver_next_turn_idle(
+                        store, workspace_root=self.workspace_root,
+                        session=other_session, message=self.packet("Chats/chat-dir/deliver.md"),
+                        subject=other_subject, provider=self.provider,
+                        observe=lambda _tid: self.observation(OBSERVATION_ADMISSIBLE, status_type="idle", can_accept=True),
+                        turn_transport=FakeTurnTransport(),
+                        runtime_home=self.runtime_home, trusted_project_root=self.trusted_root,
+                        observed_at_utc=NOW, correlation_id="corr_deliver", timeout_seconds=0.05,
+                    )
+
+    def test_transport_deadline_bounds_blocking_recv(self) -> None:
+        # P1-2: a blocked recv that exceeds the budget terminates at ~budget,
+        # not after the block. The outcome is ambiguous (never accepted).
+        transport = FakeTurnTransport(recv_sleep=0.3)
+        result, _, _ = self.deliver(transport=transport)
+        self.assertNotEqual("accepted", result["outcome"])
+        self.assertEqual(1, transport.recv_calls)
+
+    def test_jsonrpc_error_on_initialize_stops_before_turn_start(self) -> None:
+        # P1-3: a JSON-RPC error on initialize must STOP; no turn/start frame.
+        from llm_collab.canonical.codex_delivery import CodexDeliveryError
+        class ErrorTransport(FakeTurnTransport):
+            def exchange(self, frame):
+                if frame["method"] == "initialize":
+                    return {"jsonrpc": "2.0", "id": frame["id"], "error": {"code": -32603, "message": "initialize failed"}}
+                return super().exchange(frame)
+        transport = ErrorTransport()
+        with self.assertRaises(CodexDeliveryError):
+            self.deliver(transport=transport)
+        self.assertEqual(0, len([f for f in transport.frames if f["method"] == "turn/start"]))
 
 
 if __name__ == "__main__":

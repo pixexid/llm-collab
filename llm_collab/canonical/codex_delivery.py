@@ -159,9 +159,21 @@ def deliver_next_turn_idle(
     deadline = time.monotonic() + timeout_seconds
 
     def _exchange(frame: dict[str, Any]) -> Mapping[str, Any]:
-        if time.monotonic() >= deadline:
-            raise CodexDeliveryError("absolute delivery deadline exceeded before exchange")
-        return turn_transport.exchange(frame)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise CodexDeliveryError("absolute delivery deadline exceeded")
+        if hasattr(turn_transport, "set_deadline"):
+            turn_transport.set_deadline(deadline)
+        result = turn_transport.exchange(frame)
+        if not isinstance(result, Mapping):
+            raise CodexDeliveryError("malformed JSON-RPC response")
+        if result.get("id") != frame.get("id"):
+            raise CodexDeliveryError("JSON-RPC response id mismatch")
+        if "error" in result:
+            raise CodexDeliveryError(
+                f"JSON-RPC error on {frame.get('method')}: {result['error']}"
+            )
+        return result
 
     _exchange(
         {
@@ -207,6 +219,8 @@ def deliver_next_turn_idle(
 
     terminal_status: str | None = None
     while turn_id is not None and time.monotonic() < deadline:
+        if hasattr(turn_transport, "set_deadline"):
+            turn_transport.set_deadline(deadline)
         try:
             frame = turn_transport.recv_json()
         except Exception:
@@ -294,6 +308,31 @@ def _require_exact_join(
     if mismatches:
         raise CodexDeliveryError(
             "session/subject identity split: " + ", ".join(mismatches)
+        )
+
+    # The frozen canonical binding is the authority — not session↔subject
+    # agreement. Both session AND subject must match the binding's
+    # native_session_id; a coordinated caller+subject pair cannot split authority
+    # away from the frozen binding (P1-1).
+    resolved = store.resolve_conversation_binding(
+        workspace_id=subject.workspace_id,
+        scope_kind=subject.scope_kind,
+        scope_identity=subject.scope_identity,
+        conversation_id=subject.conversation_id,
+        participant_id=subject.participant_id,
+    )
+    binding_native = resolved.get("native_session_id") if isinstance(resolved, dict) else None
+    if not isinstance(binding_native, str) or not binding_native:
+        raise CodexDeliveryError(
+            "no frozen binding native_session_id for this participant"
+        )
+    if subject.native_session_id != binding_native:
+        raise CodexDeliveryError(
+            "subject native_session_id does not match the frozen binding"
+        )
+    if str(runtime.get("session_id") or "") != binding_native:
+        raise CodexDeliveryError(
+            "caller session native_session_id does not match the frozen binding"
         )
 
 
