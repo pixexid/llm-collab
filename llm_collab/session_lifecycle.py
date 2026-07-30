@@ -8,6 +8,7 @@ import secrets
 from typing import Callable, Mapping
 
 from llm_collab.codex_runtime_home import RuntimeHomeIdentity
+from llm_collab.codex_app_server_live_probe import CodexAppServerExactThreadResult
 from llm_collab.codex_session_ref import (
     RepositoryBinding,
     SessionAuthority,
@@ -194,6 +195,59 @@ class PiLifecycleProvider:
             observed_at_utc=observed_at_utc,
             correlation_id=correlation_id,
             repository_binding=repository,
+        )
+
+
+@dataclass(frozen=True, kw_only=True)
+class CodexLifecycleProvider(FakeLifecycleProvider):
+    """Read-only Codex exact-thread IDENTITY attester (re-attestation precondition).
+
+    Proves exact native-thread IDENTITY / addressability only, through an INJECTED
+    exact-thread probe the caller has already bound to the trusted endpoint/runtime
+    home. ``attest`` calls the probe with ``subject.native_session_id`` and requires
+    the returned thread id to match before delegating SessionRefV1 construction to
+    the inherited ``FakeLifecycleProvider.attest`` (no copied
+    authority/descriptor/repository-binding plumbing).
+
+    This is the lifecycle identity/re-attestation precondition #94 consumes; it is
+    NOT idle/admissibility state and is NOT authorization to turn/start. The merged
+    probe_exact_thread proves identity only; the missing exact idle/admissibility
+    observation is a later #93 slice. A probe exception fails closed and retains its
+    real type/cause. No start/resume/fork/turn/open_ui; no delivery/receipt store.
+    """
+
+    exact_thread_probe: Callable[[str], CodexAppServerExactThreadResult]
+    authority_identity: str = "codex_exact_thread_provider"
+    supported_operations_json: str = '["reserve","attach"]'
+
+    def attest(
+        self,
+        subject: LifecycleSubject,
+        *,
+        runtime_home: RuntimeHomeIdentity,
+        observed_at_utc: str,
+        correlation_id: str,
+        trusted_project_root: TrustedProjectRoot | None = None,
+    ) -> Mapping[str, object]:
+        # Prove exact identity FIRST; require the returned id to match before any
+        # binding/ledger mutation. A probe exception propagates (fail closed, real
+        # type/cause); only a mismatch is normalized to SessionLifecycleError.
+        proven = self.exact_thread_probe(subject.native_session_id)
+        if not isinstance(proven, CodexAppServerExactThreadResult) or proven.thread_id != subject.native_session_id:
+            raise SessionLifecycleError("exact-thread probe did not prove the subject native session id")
+        return super().attest(
+            subject,
+            runtime_home=runtime_home,
+            observed_at_utc=observed_at_utc,
+            correlation_id=correlation_id,
+            trusted_project_root=trusted_project_root,
+        )
+
+    def open_ui(self, subject: LifecycleSubject) -> dict[str, object]:
+        # Identity-only provider: open_ui is not supported and must fail closed
+        # rather than inherit FakeLifecycleProvider's success-returning stub.
+        raise SessionLifecycleError(
+            "CodexLifecycleProvider is identity-only; open_ui is not supported"
         )
 
 
