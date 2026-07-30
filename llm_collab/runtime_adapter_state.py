@@ -57,6 +57,16 @@ _IDENTITY_FIELDS = (
     "workspace_id",
     "scope_identity",
 )
+_LEGACY_IDENTITY_FIELDS = (
+    "adapter_id",
+    "adapter_revision",
+    "manifest_id",
+    "manifest_revision",
+    "profile_id",
+    "endpoint_id",
+    "workspace_id",
+    "scope_identity",
+)
 _PROJECT_IDENTITY_FIELD = "project_id"
 _OCCURRENCE_FIELD = "occurrence_at_utc"
 _INCIDENT_FIELD = "incident_id"
@@ -189,9 +199,9 @@ def read_record(db_path: str | Path, record_id: str) -> AdapterRecordState:
         (
             _stored_int(event_sequence, "event_sequence"),
             _stored_text(event_kind, "event_kind"),
-            _stored_text(json.loads(payload_json).get(_OCCURRENCE_FIELD), _OCCURRENCE_FIELD),
+            _journal_occurrence(payload_json, schema_version),
         )
-        for event_sequence, event_kind, payload_json, _payload_sha256, _append_time_utc, _schema_version
+        for event_sequence, event_kind, payload_json, _payload_sha256, _append_time_utc, schema_version
         in rows
     )
     return replace(_fold(record_id, [(*row[:4], row[5]) for row in rows]), journal=journal)
@@ -338,10 +348,20 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
         return
     if version == SCHEMA_VERSION:
+        if not _has_v2_table_shape(conn):
+            raise AdapterStateStoreError("adapter-state store schema version is unsupported")
         return
     if version != 1:
         raise AdapterStateStoreError("adapter-state store schema version is unsupported")
     _migrate_schema_v1_to_v2(conn)
+
+
+def _has_v2_table_shape(conn: sqlite3.Connection) -> bool:
+    columns = {
+        row[1]
+        for row in conn.execute("PRAGMA table_info(runtime_adapter_events)").fetchall()
+    }
+    return "event_schema_version" in columns
 
 
 def _migrate_schema_v1_to_v2(conn: sqlite3.Connection) -> None:
@@ -349,6 +369,17 @@ def _migrate_schema_v1_to_v2(conn: sqlite3.Connection) -> None:
 
     conn.execute("BEGIN IMMEDIATE")
     try:
+        # A second migrator may have observed v1 before waiting for this lock.
+        # Re-read both guards after acquiring it; otherwise it can rebuild the
+        # already-v2 table and relabel its events as permissive v1 rows.
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        if version == SCHEMA_VERSION:
+            if not _has_v2_table_shape(conn):
+                raise AdapterStateStoreError("adapter-state store schema version is unsupported")
+            conn.commit()
+            return
+        if version != 1:
+            raise AdapterStateStoreError("adapter-state store schema version is unsupported")
         _preflight_v1_records(conn)
         conn.execute("DROP TRIGGER IF EXISTS runtime_adapter_events_no_update")
         conn.execute("DROP TRIGGER IF EXISTS runtime_adapter_events_no_delete")
@@ -377,6 +408,7 @@ def _migrate_schema_v1_to_v2(conn: sqlite3.Connection) -> None:
 def _preflight_v1_records(conn: sqlite3.Connection) -> None:
     current_record_id: str | None = None
     current_rows: list[tuple[Any, ...]] = []
+    total_events = 0
     for row in conn.execute(
         """
         SELECT record_id, event_sequence, event_kind, payload_json, payload_sha256
@@ -384,17 +416,18 @@ def _preflight_v1_records(conn: sqlite3.Connection) -> None:
         ORDER BY record_id, event_sequence
         """
     ):
+        total_events += 1
+        if total_events > MAX_ADAPTER_STATE_EVENTS:
+            raise AdapterStateStoreError(
+                "adapter-state migration blocked: "
+                f"more than {MAX_ADAPTER_STATE_EVENTS} total v1 events"
+            )
         record_id = row[0]
         if current_record_id is not None and record_id != current_record_id:
             _preflight_v1_record(current_record_id, current_rows)
             current_rows = []
         current_record_id = record_id
         current_rows.append(tuple(row[1:]))
-        if len(current_rows) > MAX_ADAPTER_STATE_EVENTS:
-            raise AdapterStateStoreError(
-                f"adapter-state migration blocked for v1 record {record_id}: "
-                f"more than {MAX_ADAPTER_STATE_EVENTS} events"
-            )
     if current_record_id is not None:
         _preflight_v1_record(current_record_id, current_rows)
 
@@ -461,6 +494,8 @@ def _fold_record_rows(conn: sqlite3.Connection, record_id: str) -> AdapterRecord
 
 
 def _fold(record_id: str, rows: list[sqlite3.Row] | list[tuple[Any, ...]]) -> AdapterRecordState:
+    if rows and _all_true_legacy_v1(rows):
+        return _fold_legacy_v1(record_id, rows)
     opened = False
     recovery_authorized = False
     incident_id = ""
@@ -554,6 +589,130 @@ def _fold(record_id: str, rows: list[sqlite3.Row] | list[tuple[Any, ...]]) -> Ad
     )
 
 
+def _fold_legacy_v1(
+    record_id: str, rows: list[sqlite3.Row] | list[tuple[Any, ...]]
+) -> AdapterRecordState:
+    """Fold the original v1 journal, whose occurrence was request_id.
+
+    v1 did not persist an incident identity, attempt tuples, occurrence
+    timestamps, or capability-set identity. It is readable for compatibility,
+    but an open record with an unresolved request cannot be continued safely.
+    """
+    opened = False
+    recovery_authorized = False
+    unresolved: set[tuple[Any, Any, Any]] = set()
+    reconciled: set[tuple[Any, Any, Any]] = set()
+    fresh_handshake = False
+    valid_health_count = 0
+    release_event_seen = False
+    release_accepted = False
+    event_count = 0
+    seen: set[tuple[str, str]] = set()
+    for row in rows:
+        event_sequence, event_kind, payload_json, payload_sha256 = row[:4]
+        if hashlib.sha256(payload_json.encode("utf-8")).hexdigest() != payload_sha256:
+            raise AdapterStateIntegrityError("adapter-state payload digest mismatch")
+        try:
+            payload = json.loads(payload_json)
+            _validate_event_payload(event_kind, payload, schema_version=1)
+        except (TypeError, ValueError, json.JSONDecodeError) as error:
+            raise AdapterStateIntegrityError("adapter-state event payload is invalid") from error
+        request_id = payload.get("request_id")
+        attempt = None if request_id is None else _legacy_request_id(request_id)
+        attempt_label = (
+            _canonical_json({"request_id": attempt}) if attempt is not None else None
+        )
+        if event_kind == EVENT_QUARANTINE_OPENED:
+            dedupe_key = (event_kind, "record")
+        elif event_kind in {EVENT_RECOVERY_AUTHORIZED, EVENT_FRESH_HANDSHAKE, EVENT_RELEASED}:
+            dedupe_key = (event_kind, attempt_label or f"missing-{event_kind}-request")
+        elif event_kind in {EVENT_ATTEMPT_RECONCILED, EVENT_VALID_HEALTH}:
+            dedupe_key = (event_kind, attempt_label or f"missing-{event_kind}-request")
+        else:
+            dedupe_key = (event_kind, str(event_sequence))
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        event_count += 1
+        legacy_tuple = (attempt, None, None) if attempt is not None else None
+        if event_kind == EVENT_QUARANTINE_OPENED:
+            opened = True
+            if legacy_tuple is not None:
+                unresolved.add(legacy_tuple)
+        elif event_kind == EVENT_RECOVERY_AUTHORIZED:
+            if opened:
+                recovery_authorized = True
+                fresh_handshake = False
+                valid_health_count = 0
+        elif event_kind == EVENT_ATTEMPT_RECONCILED:
+            if fresh_handshake and legacy_tuple is not None:
+                reconciled.add(legacy_tuple)
+                unresolved.discard(legacy_tuple)
+        elif event_kind == EVENT_FRESH_HANDSHAKE:
+            if recovery_authorized:
+                fresh_handshake = True
+                valid_health_count = 0
+        elif event_kind == EVENT_VALID_HEALTH:
+            if fresh_handshake and attempt is not None:
+                valid_health_count += 1
+        elif event_kind == EVENT_RELEASED:
+            release_event_seen = True
+            if (
+                opened
+                and recovery_authorized
+                and not unresolved
+                and fresh_handshake
+                and valid_health_count >= FRESH_HEALTHY_SEQUENCE_LENGTH
+            ):
+                release_accepted = True
+    return AdapterRecordState(
+        record_id=record_id,
+        incident_id="",
+        opened=opened,
+        recovery_authorized=recovery_authorized,
+        unresolved_attempts=tuple(sorted((_legacy_attempt_label(item) for item in unresolved))),
+        reconciled_attempts=tuple(sorted((_legacy_attempt_label(item) for item in reconciled))),
+        unresolved_attempt_tuples=tuple(sorted(unresolved, key=_canonical_json)),
+        reconciled_attempt_tuples=tuple(sorted(reconciled, key=_canonical_json)),
+        fresh_handshake=fresh_handshake,
+        valid_health_count=valid_health_count,
+        health_failure_count=0,
+        release_reviewed=False,
+        release_event_seen=release_event_seen,
+        released=release_accepted,
+        event_count=event_count,
+    )
+
+
+def _all_true_legacy_v1(rows: list[sqlite3.Row] | list[tuple[Any, ...]]) -> bool:
+    for row in rows:
+        if len(row) >= 5 and row[4] != 1:
+            return False
+        try:
+            payload = json.loads(row[2])
+        except (TypeError, json.JSONDecodeError):
+            return False
+        if not _is_true_legacy_payload(payload):
+            return False
+    return True
+
+
+def _is_true_legacy_payload(payload: dict[str, Any]) -> bool:
+    return any(
+        field not in payload
+        for field in (_INCIDENT_FIELD, _OCCURRENCE_FIELD, _ATTEMPTS_FIELD, "capability_set_id", "capability_set_revision")
+    )
+
+
+def _journal_occurrence(payload_json: str, schema_version: int) -> str:
+    payload = json.loads(payload_json)
+    if schema_version != 1 or not _is_true_legacy_payload(payload):
+        return _stored_text(payload.get(_OCCURRENCE_FIELD), _OCCURRENCE_FIELD)
+    # v1 had no occurrence timestamp. Preserve a deterministic representation
+    # of its request_id in the existing journal slot without inventing evidence.
+    return _canonical_json(payload.get("request_id"))
+
+
 def _payload(redacted: RedactedDocument) -> dict[str, Any]:
     if not isinstance(redacted, RedactedDocument):
         raise TypeError("adapter-state writes require RedactedDocument")
@@ -587,6 +746,9 @@ def _validate_event_payload(
         raise ValueError("adapter-state payload must be an object")
     if schema_version not in (1, SCHEMA_VERSION):
         raise ValueError("adapter-state event schema version is invalid")
+    if schema_version == 1 and _is_true_legacy_payload(payload):
+        _validate_legacy_event_payload(payload)
+        return
     if schema_version == 1:
         _legacy_incident_id(payload)
     else:
@@ -606,6 +768,32 @@ def _validate_event_payload(
     if event_kind == EVENT_RELEASE_REVIEWED:
         if not payload.get(_REVIEW_FIELD) or not _review_matches_incident(payload, schema_version=schema_version):
             raise ValueError("release_reviewed requires matching review references")
+
+
+def _validate_legacy_event_payload(payload: dict[str, Any]) -> None:
+    """Validate the pre-Clause-12 v1 grammar without requiring v2 fields."""
+    _legacy_base_identity(payload)
+    if "request_id" in payload:
+        _legacy_request_id(payload["request_id"])
+
+
+def _legacy_base_identity(payload: dict[str, Any]) -> dict[str, Any]:
+    identity = {field: _required_identity(payload, field) for field in _LEGACY_IDENTITY_FIELDS}
+    for field, value in identity.items():
+        if not isinstance(value, str) or not value or len(value) > 128 or _unsafe_text(value):
+            raise ValueError(f"legacy adapter-state {field} is invalid")
+    scope = identity["scope_identity"]
+    project = _scope_project_id(scope)
+    if project is not None:
+        project_id = _required_identity(payload, _PROJECT_IDENTITY_FIELD)
+        if project_id != project:
+            raise ValueError("legacy adapter-state project_id must match scope_identity")
+    elif _has_scope_segment(scope, "workspace"):
+        if payload.get(_PROJECT_IDENTITY_FIELD) is not None:
+            raise ValueError("workspace-scope legacy adapter-state records must not carry project_id")
+    else:
+        raise ValueError("legacy adapter-state scope_identity must denote project or workspace scope")
+    return identity
 
 
 def _legacy_incident_id(payload: dict[str, Any]) -> str:

@@ -649,6 +649,79 @@ class RuntimeAdapterStateTests(unittest.TestCase):
             )
             self.assertTrue(state.read_record(db_path, legacy_record_id).released)
 
+    def test_genuine_old_v1_payload_migrates_and_remains_readable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "adapter-state.sqlite"
+            legacy_record_id, legacy_rows = _genuine_v1_rows("attempt-old")
+            _create_v1_database(db_path, legacy_record_id, legacy_rows)
+
+            state.initialize_store(db_path)
+            migrated = state.read_record(db_path, legacy_record_id)
+
+            self.assertTrue(migrated.released)
+            self.assertEqual(migrated.incident_id, "")
+            with sqlite3.connect(db_path) as conn:
+                self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 2)
+                self.assertEqual(
+                    conn.execute(
+                        "SELECT DISTINCT event_schema_version FROM runtime_adapter_events"
+                    ).fetchall(),
+                    [(1,)],
+                )
+
+    def test_second_migration_after_v2_is_a_no_op(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "adapter-state.sqlite"
+            record_id = state.record_quarantine_opened(
+                db_path, _redacted(incident_id="incident.v2", attempts=[])
+            )
+            with sqlite3.connect(db_path) as conn:
+                before = conn.execute(
+                    "SELECT event_schema_version FROM runtime_adapter_events WHERE record_id = ?",
+                    (record_id,),
+                ).fetchall()
+                state._migrate_schema_v1_to_v2(conn)
+                after = conn.execute(
+                    "SELECT event_schema_version FROM runtime_adapter_events WHERE record_id = ?",
+                    (record_id,),
+                ).fetchall()
+
+            self.assertEqual(before, [(2,)])
+            self.assertEqual(after, before)
+
+    def test_migration_budget_is_cumulative_across_records(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "adapter-state.sqlite"
+            first_id, first_rows = _genuine_v1_rows("attempt-first")
+            second_id, second_rows = _genuine_v1_rows("attempt-second")
+            _create_v1_database(db_path, first_id, first_rows + [])
+            with sqlite3.connect(db_path) as conn:
+                for kind, payload in second_rows:
+                    payload_json = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+                    conn.execute(
+                        """
+                        INSERT INTO runtime_adapter_events
+                            (record_id, event_kind, payload_json, payload_sha256)
+                        VALUES (?, ?, ?, ?)
+                        """,
+                        (
+                            second_id,
+                            kind,
+                            payload_json,
+                            hashlib.sha256(payload_json.encode()).hexdigest(),
+                        ),
+                    )
+                conn.commit()
+
+            with mock.patch.object(state, "MAX_ADAPTER_STATE_EVENTS", len(first_rows)):
+                with self.assertRaisesRegex(
+                    state.AdapterStateStoreError,
+                    r"more than .* total v1 events",
+                ):
+                    state.initialize_store(db_path)
+            with sqlite3.connect(db_path) as conn:
+                self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 1)
+
     def test_released_v1_legacy_incident_upgrades_and_remains_readable(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "adapter-state.sqlite"
@@ -904,6 +977,43 @@ def _redacted(**overrides):
     if not isinstance(result, RedactedDocument):
         raise AssertionError(result)
     return result
+
+
+def _genuine_v1_rows(request_id):
+    document = _redacted(request_id=request_id)
+    payload = document.as_dict()
+    for field in ("incident_id", "occurrence_at_utc", "attempts", "capability_set_id", "capability_set_revision", "review_references"):
+        payload.pop(field, None)
+    identity = {
+        field: payload[field]
+        for field in (
+            "adapter_id", "adapter_revision", "manifest_id", "manifest_revision",
+            "profile_id", "endpoint_id", "workspace_id", "scope_identity", "project_id",
+        )
+    }
+    identity["request_id"] = request_id
+    record_id = "adapter_record_" + hashlib.sha256(
+        json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    requests = [
+        ("quarantine_opened", request_id),
+        ("recovery_authorized", request_id),
+        ("fresh_handshake", request_id),
+        ("attempt_reconciled", request_id),
+        ("valid_health", "health-1"),
+        ("valid_health", "health-2"),
+        ("valid_health", "health-3"),
+        ("released", request_id),
+    ]
+    rows = []
+    for kind, occurrence in requests:
+        row_payload = dict(payload)
+        if occurrence is None:
+            row_payload.pop("request_id", None)
+        else:
+            row_payload["request_id"] = occurrence
+        rows.append((kind, row_payload))
+    return record_id, rows
 
 
 def _legacy_document(incident_id, *, with_attempt=True):
