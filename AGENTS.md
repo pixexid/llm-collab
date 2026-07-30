@@ -1,4 +1,4 @@
-<!-- CONTRACT_VERSION: 6 -->
+<!-- CONTRACT_VERSION: 7 -->
 # AGENTS.md
 
 ## This file is the source of truth
