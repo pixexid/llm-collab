@@ -7,7 +7,7 @@ import hashlib
 import json
 import os
 import secrets
-from typing import Callable, Mapping
+from typing import Callable, Mapping, TYPE_CHECKING
 
 from llm_collab.codex_runtime_home import RuntimeHomeIdentity
 from llm_collab.codex_app_server_live_probe import CodexAppServerExactThreadResult
@@ -19,6 +19,9 @@ from llm_collab.codex_session_ref import (
 )
 from llm_collab.ledger import LedgerStore
 from llm_collab.ledger.store import CanonicalConflictError
+
+if TYPE_CHECKING:
+    from llm_collab.claude_attach_evidence import ClaudeAttachEvidenceResult
 
 
 class SessionLifecycleError(ValueError):
@@ -533,6 +536,63 @@ class CodexLifecycleProvider(FakeLifecycleProvider):
         # rather than inherit FakeLifecycleProvider's success-returning stub.
         raise SessionLifecycleError(
             "CodexLifecycleProvider is identity-only; open_ui is not supported"
+        )
+
+
+@dataclass(frozen=True, kw_only=True)
+class ClaudeLifecycleProvider(FakeLifecycleProvider):
+    """Identity-only Claude attester over injected hook/channel evidence.
+
+    This provider does not authenticate a real Claude session by itself. The
+    real hook, channel, and CLAUDE_HOME identity binding remain gated; this
+    class only enforces their injected evidence contract before SessionRefV1
+    construction.
+    """
+
+    attach_evidence: Callable[
+        [LifecycleSubject, TrustedProjectRoot | None, RuntimeHomeIdentity],
+        "ClaudeAttachEvidenceResult",
+    ]
+    provider_id: str = "provider_claude"
+    authority_identity: str = "claude_session_start_provider"
+    supported_operations_json: str = '["reserve","attach"]'
+
+    def attest(
+        self,
+        subject: LifecycleSubject,
+        *,
+        runtime_home: RuntimeHomeIdentity,
+        observed_at_utc: str,
+        correlation_id: str,
+        trusted_project_root: TrustedProjectRoot | None = None,
+    ) -> Mapping[str, object]:
+        from llm_collab.claude_attach_evidence import ClaudeAttachEvidenceResult
+
+        proven = self.attach_evidence(subject, trusted_project_root, runtime_home)
+        expected_cwd = _trusted_canonical_cwd(trusted_project_root)
+        try:
+            cwd_matches = os.path.realpath(proven.validated_cwd) == expected_cwd
+        except (AttributeError, TypeError, ValueError):
+            cwd_matches = False
+        if (
+            not isinstance(proven, ClaudeAttachEvidenceResult)
+            or proven.native_session_id != subject.native_session_id
+            or not cwd_matches
+        ):
+            raise SessionLifecycleError(
+                "Claude attach evidence did not prove the subject session and cwd"
+            )
+        return super().attest(
+            subject,
+            runtime_home=runtime_home,
+            observed_at_utc=observed_at_utc,
+            correlation_id=correlation_id,
+            trusted_project_root=trusted_project_root,
+        )
+
+    def open_ui(self, subject: LifecycleSubject) -> dict[str, object]:
+        raise SessionLifecycleError(
+            "ClaudeLifecycleProvider is identity-only; open_ui is not supported"
         )
 
 
