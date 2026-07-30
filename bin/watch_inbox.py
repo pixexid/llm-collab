@@ -37,10 +37,14 @@ from _helpers import (
     parse_frontmatter,
 )
 from _session_autobridge import (
+    CanonicalBindingNativeMismatch,
     active_read_budget,
     dispatch_session,
     iter_sessions,
+    load_session,
     repo_scope_matches,
+    resolve_active_canonical_binding,
+    runtime_metadata,
 )
 from inbox import (
     MAX_EXACT_SESSION_BYTES,
@@ -117,6 +121,43 @@ class ExactWatcherAuthorityError(RuntimeError):
     pass
 
 
+def session_has_exact_canonical_binding(session: dict) -> bool:
+    """Resolve the session's canonical binding from the ledger store.
+
+    The ledger — not the file binding cache — is the authority for which
+    participant/binding/generation is active. Returns True only when the
+    store's active binding for this session's participant matches the
+    session's own ``binding_id`` and ``binding_generation``. A stale,
+    foreign, quarantined, or absent binding fails closed (False) so the
+    session never reaches packet match, materialization, claim, runtime
+    write, or shared-inbox read-state mutation.
+
+    Sessions that carry no ``binding_id`` are not part of the canonical
+    binding system and use the legacy dispatch path unchanged (True).
+    """
+    if not session.get("binding_id"):
+        return True
+    runtime = runtime_metadata(session)
+    runtime_session_id = runtime.get("session_id")
+    project_id = session.get("project_id")
+    chat_id = session.get("chat_id")
+    agent_id = session.get("agent_id")
+    if not (runtime_session_id and project_id and chat_id and agent_id):
+        return False
+    try:
+        canonical = resolve_active_canonical_binding(
+            str(project_id), str(chat_id), str(agent_id), str(runtime_session_id)
+        )
+    except CanonicalBindingNativeMismatch:
+        return False
+    if canonical is None:
+        return False
+    return (
+        canonical.get("binding_id") == session.get("binding_id")
+        and canonical.get("binding_generation") == session.get("binding_generation")
+    )
+
+
 def exact_session_messages(args) -> list[dict]:
     budget = ExactReadBudget(MAX_EXACT_SESSION_BYTES)
     with active_read_budget(budget):
@@ -152,6 +193,39 @@ def dispatch_autobridge(
     consumed_paths: list[str] = []
 
     for session_id in autobridge_session_ids(agent_id, project_id):
+        # Canonical binding gate (#95): resolve the session's exact binding from
+        # the ledger store BEFORE dispatch. A stale or foreign session (its
+        # binding_id/generation differ from the canonical active one) never
+        # reaches packet match, materialization, claim, runtime write, or
+        # mark_messages_read. No active binding -> fail closed for that session.
+        try:
+            session = load_session(session_id)
+        except Exception as error:
+            emit(
+                {
+                    "ts": utc_now_str(),
+                    "event": "autobridge_dispatch_error",
+                    "detail": session_id,
+                    "agent": agent_id,
+                    "session_id": session_id,
+                    "reason": f"{type(error).__name__}: {error}",
+                },
+                json_output,
+            )
+            continue
+        if not session_has_exact_canonical_binding(session):
+            emit(
+                {
+                    "ts": utc_now_str(),
+                    "event": "autobridge_binding_refused",
+                    "detail": session_id,
+                    "agent": agent_id,
+                    "session_id": session_id,
+                    "reason": "stale_or_foreign_canonical_binding",
+                },
+                json_output,
+            )
+            continue
         try:
             result = dispatch_session(
                 session_id, project_id=project_id, repo_targets=repo_targets

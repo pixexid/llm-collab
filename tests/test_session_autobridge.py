@@ -782,6 +782,10 @@ class SessionAutobridgeTest(unittest.TestCase):
             watch_inbox_lib, "autobridge_session_ids",
             return_value=["SESSION-RACED", "SESSION-OK"],
         ), patch.object(
+            watch_inbox_lib, "load_session", return_value={},
+        ), patch.object(
+            watch_inbox_lib, "session_has_exact_canonical_binding", return_value=True,
+        ), patch.object(
             watch_inbox_lib, "dispatch_session", side_effect=fake_dispatch
         ), patch.object(
             watch_inbox_lib, "emit", side_effect=lambda payload, _json: events.append(payload)
@@ -793,6 +797,218 @@ class SessionAutobridgeTest(unittest.TestCase):
         self.assertEqual(1, len(error_events))
         self.assertEqual("SESSION-RACED", error_events[0]["session_id"])
         self.assertIn("resurrect stopped session", error_events[0]["reason"])
+
+    def test_dispatch_autobridge_gates_on_exact_canonical_binding(self):
+        # #95: the watcher resolves each session's exact canonical binding from the
+        # ledger store BEFORE dispatch. Two sessions under one agent share one
+        # canonical active binding; only the session whose own binding_id /
+        # generation match it reaches dispatch_session (materialization / claim /
+        # runtime write / mark_messages_read). The stale session fails closed and
+        # its packets stay unread. Mutation-proof: removing the gate lets both
+        # sessions through.
+        exact_session = {
+            "session_id": "SESSION-EXACT",
+            "agent_id": "claude",
+            "project_id": "amiga",
+            "chat_id": "CHAT-A",
+            "binding_id": "binding-active",
+            "binding_generation": 2,
+            "runtime": {"family": "claude_app", "session_id": "rt-exact"},
+        }
+        stale_session = {
+            "session_id": "SESSION-STALE",
+            "agent_id": "claude",
+            "project_id": "amiga",
+            "chat_id": "CHAT-A",
+            "binding_id": "binding-stale",
+            "binding_generation": 1,
+            "runtime": {"family": "claude_app", "session_id": "rt-stale"},
+        }
+        canonical_active = {
+            "binding_id": "binding-active",
+            "binding_generation": 2,
+            "endpoint_id": "endpoint-claude",
+        }
+        sessions = {"SESSION-EXACT": exact_session, "SESSION-STALE": stale_session}
+        dispatched: list[str] = []
+        marked_read: list[str] = []
+        events: list[dict] = []
+
+        def fake_dispatch(session_id, **_kwargs):
+            dispatched.append(session_id)
+            return {
+                "actions": [
+                    {
+                        "effective_action": "runtime_trigger",
+                        "message_path": f"Chats/packet-{session_id}.md",
+                        "runtime_result": {"returncode": 0, "delivery_accepted": True},
+                    }
+                ],
+                "repo_scope_refused": [],
+                "matched_messages": 1,
+            }
+
+        with patch.object(
+            watch_inbox_lib, "autobridge_session_ids",
+            return_value=["SESSION-EXACT", "SESSION-STALE"],
+        ), patch.object(
+            watch_inbox_lib, "load_session",
+            side_effect=lambda sid: sessions[sid],
+        ), patch.object(
+            watch_inbox_lib, "resolve_active_canonical_binding",
+            return_value=canonical_active,
+        ), patch.object(
+            watch_inbox_lib, "dispatch_session", side_effect=fake_dispatch,
+        ), patch.object(
+            watch_inbox_lib, "mark_messages_read",
+            side_effect=lambda _agent, paths: marked_read.extend(paths),
+        ), patch.object(
+            watch_inbox_lib, "emit",
+            side_effect=lambda payload, _json: events.append(payload),
+        ):
+            watch_inbox_lib.dispatch_autobridge("claude", False)
+
+        # Only the exact session reaches dispatch + mark_messages_read.
+        self.assertEqual(["SESSION-EXACT"], dispatched)
+        self.assertEqual(["Chats/packet-SESSION-EXACT.md"], marked_read)
+        refused = [e for e in events if e.get("event") == "autobridge_binding_refused"]
+        self.assertEqual(1, len(refused))
+        self.assertEqual("SESSION-STALE", refused[0]["session_id"])
+        self.assertEqual("stale_or_foreign_canonical_binding", refused[0]["reason"])
+
+    def test_dispatch_autobridge_fails_closed_when_no_active_binding(self):
+        # #95: no resolvable active binding -> fail closed. The session never
+        # reaches dispatch_session and nothing is marked read.
+        session = {
+            "session_id": "SESSION-NONE",
+            "agent_id": "claude",
+            "project_id": "amiga",
+            "chat_id": "CHAT-A",
+            "binding_id": "binding-x",
+            "binding_generation": 1,
+            "runtime": {"family": "claude_app", "session_id": "rt-x"},
+        }
+        dispatched: list[str] = []
+        events: list[dict] = []
+        with patch.object(
+            watch_inbox_lib, "autobridge_session_ids", return_value=["SESSION-NONE"],
+        ), patch.object(
+            watch_inbox_lib, "load_session", return_value=session,
+        ), patch.object(
+            watch_inbox_lib, "resolve_active_canonical_binding", return_value=None,
+        ), patch.object(
+            watch_inbox_lib, "dispatch_session",
+            side_effect=lambda sid, **_: dispatched.append(sid) or {"actions": [], "repo_scope_refused": []},
+        ), patch.object(
+            watch_inbox_lib, "emit",
+            side_effect=lambda payload, _json: events.append(payload),
+        ):
+            watch_inbox_lib.dispatch_autobridge("claude", False)
+        self.assertEqual([], dispatched)
+        refused = [e for e in events if e.get("event") == "autobridge_binding_refused"]
+        self.assertEqual(1, len(refused))
+
+    def test_bound_session_refuses_generic_null_target_packet(self):
+        # #95 frozen invariant half 2: a bound session must refuse a generic
+        # (null-target_binding_id) packet; only an exact binding-targeted packet
+        # proceeds to materialization/claim. Uses the REAL matcher (NOT stubbed):
+        # matching_unread_messages -> message_targets_session ->
+        # binding_scoped_message_matches_session. Mutation-proof: neuter the
+        # null-target refusal -> the generic packet leaks through -> test fails.
+        root = self.make_workspace()
+        agent_id = "claude"
+        binding_id = "binding-bound"
+        runtime_id = "runtime-bound"
+        targeted = "Chats/gate/packet-targeted.md"
+        generic = "Chats/gate/packet-generic.md"
+        inbox_path = root / "agents" / agent_id / "inbox.json"
+        write_json(
+            inbox_path,
+            # generic first: with the null-target refusal removed, the generic
+            # packet would match and consume the one-per-poll materialization
+            # slot before the targeted packet — making the mutation visible.
+            {"agent": agent_id, "unread": [generic, targeted], "read": []},
+        )
+
+        def packet_frontmatter(extra: dict) -> str:
+            fm = {
+                "to": agent_id,
+                "project_id": "amiga",
+                "chat_id": "CHAT-GATE",
+                "target_session_id": runtime_id,
+                **extra,
+            }
+            lines = ["---"]
+            for key in sorted(fm):
+                lines.append(f"{key}: {fm[key]}")
+            lines.append("---")
+            lines.append("")
+            lines.append("body")
+            return "\n".join(lines)
+
+        write(root / targeted, packet_frontmatter({"target_binding_id": binding_id}))
+        write(root / generic, packet_frontmatter({}))
+
+        session = {
+            "session_id": "SESSION-BOUND",
+            "agent_id": agent_id,
+            "project_id": "amiga",
+            "chat_id": "CHAT-GATE",
+            "mode": "auto-read",
+            "wake_strategy": "runtime_trigger",
+            "binding_id": binding_id,
+            "binding_generation": 1,
+            "runtime": {"family": "claude_app", "session_id": runtime_id},
+        }
+        materialized: list[str] = []
+
+        with patch.object(session_autobridge_lib, "ROOT", root), patch.object(
+            session_autobridge_lib, "agent_inbox_path", return_value=inbox_path
+        ), patch.object(
+            session_autobridge_lib, "load_session", return_value=session,
+        ), patch.object(
+            session_autobridge_lib, "session_is_dispatchable",
+            return_value=(True, "ok"),
+        ), patch.object(
+            session_autobridge_lib, "processed_messages", return_value=set(),
+        ), patch.object(
+            session_autobridge_lib, "reserve_message_result",
+            return_value=({}, "prepared"),
+        ), patch.object(
+            session_autobridge_lib, "classify_activation",
+            return_value=("ok", ""),
+        ), patch.object(
+            session_autobridge_lib, "claim_message_activation",
+            return_value=(True, None),
+        ), patch.object(
+            session_autobridge_lib, "resolve_effective_action",
+            return_value=("runtime_trigger", "test"),
+        ), patch.object(
+            session_autobridge_lib, "materialize_selected_runtime_packet",
+            side_effect=lambda _s, msg: materialized.append(msg["path"]) or {
+                "resolved": True, "canonical_write_started": True, "created": True,
+            },
+        ), patch.object(
+            session_autobridge_lib, "mark_canonical_settlement_complete",
+        ), patch.object(
+            session_autobridge_lib, "execute_runtime_trigger",
+            return_value={"returncode": 0},
+        ), patch.object(
+            session_autobridge_lib, "mark_message_processed",
+        ), patch.object(
+            session_autobridge_lib, "save_session",
+        ), patch.object(
+            session_autobridge_lib, "append_event",
+        ), patch.object(
+            session_autobridge_lib, "write_operator_turn_summary",
+            return_value={},
+        ), patch.object(
+            session_autobridge_lib, "refresh_runtime_ui", return_value={},
+        ):
+            session_autobridge_lib.dispatch_session("SESSION-BOUND")
+
+        # Only the binding-targeted packet reaches materialization.
+        self.assertEqual([targeted], materialized)
 
     def test_dispatch_inbox_counts_entries_before_project_filtering(self):
         root = self.make_workspace()
@@ -9000,6 +9216,10 @@ class SessionAutobridgeTest(unittest.TestCase):
         with patch.object(
             watch_inbox_lib, "autobridge_session_ids", return_value=["SESSION-REPO"]
         ), patch.object(
+            watch_inbox_lib, "load_session", return_value={},
+        ), patch.object(
+            watch_inbox_lib, "session_has_exact_canonical_binding", return_value=True,
+        ), patch.object(
             watch_inbox_lib,
             "dispatch_session",
             return_value={"actions": []},
@@ -9397,6 +9617,10 @@ class SessionAutobridgeTest(unittest.TestCase):
     def test_watch_inbox_read_state_guard_is_not_in_helpers(self):
         with patch.object(watch_inbox_lib, "autobridge_session_ids", return_value=["SESSION-A"]):
             with patch.object(
+                watch_inbox_lib, "load_session", return_value={},
+            ), patch.object(
+                watch_inbox_lib, "session_has_exact_canonical_binding", return_value=True,
+            ), patch.object(
                 watch_inbox_lib,
                 "dispatch_session",
                 return_value={
