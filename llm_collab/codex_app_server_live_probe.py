@@ -346,8 +346,10 @@ def _request(
     params: Mapping[str, Any],
     *,
     require_jsonrpc: bool = True,
+    allowed_methods: frozenset[str] | None = None,
 ) -> Mapping[str, Any]:
-    if method not in READ_ONLY_REQUEST_METHODS and method != THREAD_READ_METHOD:
+    allowed = allowed_methods or frozenset((*READ_ONLY_REQUEST_METHODS, THREAD_READ_METHOD))
+    if method not in allowed:
         raise CodexAppServerLiveProbeError("method is outside the allowed probe set")
     try:
         response = transport.exchange(
