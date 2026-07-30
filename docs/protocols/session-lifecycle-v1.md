@@ -113,6 +113,28 @@ Challenge consumption and binding creation are one atomic operation. Production
 challenge tokens come from OS-backed secrets; tests may inject fixed tokens, but
 the protocol never derives tokens from counters or wall-clock time.
 
+## Managed-start reservation saga
+
+A managed provider that creates a native session MUST use the same-ledger start
+reservation saga; it MUST NOT place a placeholder native session ID in a
+challenge or binding. The reservation fences one compound participant before
+external I/O, then the provider starts the native session outside the SQLite
+transaction, validates create-only evidence plus an exact read-back, and
+completes the challenge, binding, and reservation in one SQLite transaction.
+
+`managed_start_reservations` has the closed states `reserved`,
+`ambiguous_start`, `orphaned`, `bound`, `failed`, and `retired`. Only one
+`reserved`, `ambiguous_start`, or `orphaned` reservation may exist for one
+compound participant. `reserved`, `ambiguous_start`, and `failed` rows carry no
+native session, SessionRef, or evidence digest. `orphaned`, `bound`, and
+`retired` rows retain the exact validated native identity and evidence digest.
+
+A lost start response becomes `ambiguous_start` and MUST NOT trigger a blind
+retry. A validated native start whose binding transaction fails becomes
+`orphaned`; later cleanup may retire only that exact re-attested native session.
+A failed start with no validated native identity becomes `failed`. None of
+these paths may select a replacement by latest, frontmost, or display state.
+
 ## Dispatch freeze
 
 Before a mutation-capable dispatch, the router resolves and freezes

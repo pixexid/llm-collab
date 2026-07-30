@@ -18,7 +18,7 @@ from pathlib import Path
 from .paths import LedgerPaths, validate_project_id, validate_registry_token, validate_workspace_id
 
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 BUSY_TIMEOUT_MS = 5_000
 SYNCHRONOUS_FULL = 2
 MIGRATION_TOOL_VERSION = "llm-collab-ledger/1"
@@ -78,6 +78,7 @@ V9_TABLES = V8_TABLES | frozenset({"canonical_delivery_attempt_binding_freezes"}
 V10_TABLES = V9_TABLES | frozenset({"conversation_binding_transition_audit"})
 V11_TABLES = V10_TABLES | frozenset({"legacy_autobridge_provenance_imports"})
 V12_TABLES = V11_TABLES
+V13_TABLES = V12_TABLES | frozenset({"managed_start_reservations"})
 
 
 class SQLiteSafetyError(RuntimeError):
@@ -114,6 +115,7 @@ _CANONICAL_MANIFEST_ID = re.compile(r"manifest_[A-Za-z0-9][A-Za-z0-9_-]{2,127}\Z
 _CANONICAL_ENDPOINT_ID = re.compile(r"endpoint_[A-Za-z0-9][A-Za-z0-9_-]{2,127}\Z")
 _CANONICAL_SESSION_REF_ID = re.compile(r"session_[A-Za-z0-9][A-Za-z0-9_-]{2,127}\Z")
 _CANONICAL_OWNER_KEY = re.compile(r"owner_[0-9a-f]{32}\Z")
+_CANONICAL_START_ID = re.compile(r"start_[0-9a-f]{64}\Z")
 _CANONICAL_REGISTRY_REVISION = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _CANONICAL_TOKEN = re.compile(r"[A-Za-z][A-Za-z0-9._-]{0,127}\Z")
 _CANONICAL_EVIDENCE_ID = re.compile(r"evidence_[A-Za-z0-9][A-Za-z0-9_-]{2,127}\Z")
@@ -397,6 +399,12 @@ def _optional_session_ref_id(value: object) -> str | None:
         return None
     if not isinstance(value, str) or _CANONICAL_SESSION_REF_ID.fullmatch(value) is None:
         raise ValueError("session_ref_id must be a session_ identifier")
+    return value
+
+
+def _canonical_start_id(value: object) -> str:
+    if not isinstance(value, str) or _CANONICAL_START_ID.fullmatch(value) is None:
+        raise ValueError("start_id must be a start_ identifier")
     return value
 
 
@@ -3029,6 +3037,94 @@ V12_SQL = (
 )
 V12_MIGRATION_CHECKSUM = "sha256:c8ce8b30824ec939e5e7a50ed4ab70cc79b2057befe5010526c1cced2cb49f1e"
 V12_SCHEMA_FINGERPRINT = "sha256:1d67d6fed6d3959029184c4cf9cf9055ac13baac6476f7c694e99991e6e05347"
+V13_SQL = (
+    """
+    CREATE TABLE managed_start_reservations (
+        workspace_id TEXT NOT NULL
+            CHECK (instr(workspace_id, char(0)) = 0 AND length(CAST(workspace_id AS BLOB)) BETWEEN 3 AND 131),
+        scope_kind TEXT NOT NULL CHECK (scope_kind = 'project'),
+        scope_identity TEXT NOT NULL
+            CHECK (instr(scope_identity, char(0)) = 0 AND length(CAST(scope_identity AS BLOB)) BETWEEN 1 AND 200),
+        conversation_id TEXT NOT NULL
+            CHECK (instr(conversation_id, char(0)) = 0 AND length(CAST(conversation_id AS BLOB)) BETWEEN 6 AND 128),
+        participant_id TEXT NOT NULL
+            CHECK (instr(participant_id, char(0)) = 0 AND length(CAST(participant_id AS BLOB)) BETWEEN 3 AND 128),
+        start_id TEXT NOT NULL CHECK (
+            instr(start_id, char(0)) = 0
+            AND length(CAST(start_id AS BLOB)) = 70
+            AND substr(start_id, 1, 6) = 'start_'
+            AND substr(start_id, 7) NOT GLOB '*[^0-9a-f]*'
+        ),
+        state TEXT NOT NULL CHECK (
+            state IN ('reserved', 'ambiguous_start', 'orphaned', 'bound', 'failed', 'retired')
+        ),
+        provider_id TEXT NOT NULL
+            CHECK (instr(provider_id, char(0)) = 0 AND length(CAST(provider_id AS BLOB)) BETWEEN 3 AND 128),
+        provider_revision TEXT NOT NULL
+            CHECK (instr(provider_revision, char(0)) = 0 AND length(CAST(provider_revision AS BLOB)) BETWEEN 8 AND 128),
+        endpoint_id TEXT NOT NULL
+            CHECK (instr(endpoint_id, char(0)) = 0 AND length(CAST(endpoint_id AS BLOB)) BETWEEN 3 AND 128),
+        runtime_instance_id TEXT NOT NULL
+            CHECK (instr(runtime_instance_id, char(0)) = 0 AND length(CAST(runtime_instance_id AS BLOB)) BETWEEN 3 AND 128),
+        runtime_home_id TEXT NOT NULL
+            CHECK (
+                instr(runtime_home_id, char(0)) = 0
+                AND length(CAST(runtime_home_id AS BLOB)) = 64
+                AND runtime_home_id NOT GLOB '*[^0-9a-f]*'
+            ),
+        runtime_home_realpath TEXT NOT NULL
+            CHECK (instr(runtime_home_realpath, char(0)) = 0 AND length(CAST(runtime_home_realpath AS BLOB)) BETWEEN 1 AND 4096),
+        project_id TEXT NOT NULL
+            CHECK (instr(project_id, char(0)) = 0 AND length(CAST(project_id AS BLOB)) BETWEEN 1 AND 128),
+        repo_id TEXT NOT NULL
+            CHECK (instr(repo_id, char(0)) = 0 AND length(CAST(repo_id AS BLOB)) BETWEEN 1 AND 128),
+        canonical_cwd TEXT NOT NULL
+            CHECK (instr(canonical_cwd, char(0)) = 0 AND length(CAST(canonical_cwd AS BLOB)) BETWEEN 1 AND 4096),
+        start_correlation_id TEXT NOT NULL
+            CHECK (instr(start_correlation_id, char(0)) = 0 AND length(CAST(start_correlation_id AS BLOB)) BETWEEN 1 AND 256),
+        expires_at_utc TEXT NOT NULL
+            CHECK (instr(expires_at_utc, char(0)) = 0 AND length(CAST(expires_at_utc AS BLOB)) BETWEEN 1 AND 64),
+        created_at_utc TEXT NOT NULL
+            CHECK (instr(created_at_utc, char(0)) = 0 AND length(CAST(created_at_utc AS BLOB)) BETWEEN 1 AND 64),
+        updated_at_utc TEXT NOT NULL
+            CHECK (instr(updated_at_utc, char(0)) = 0 AND length(CAST(updated_at_utc AS BLOB)) BETWEEN 1 AND 64),
+        native_session_id TEXT
+            CHECK (native_session_id IS NULL OR (instr(native_session_id, char(0)) = 0 AND length(CAST(native_session_id AS BLOB)) BETWEEN 3 AND 256)),
+        session_ref_id TEXT
+            CHECK (session_ref_id IS NULL OR (instr(session_ref_id, char(0)) = 0 AND length(CAST(session_ref_id AS BLOB)) BETWEEN 11 AND 128 AND substr(session_ref_id, 1, 8) = 'session_')),
+        evidence_sha256 TEXT
+            CHECK (evidence_sha256 IS NULL OR (instr(evidence_sha256, char(0)) = 0 AND length(CAST(evidence_sha256 AS BLOB)) = 64 AND evidence_sha256 NOT GLOB '*[^0-9a-f]*')),
+        failure_reason TEXT
+            CHECK (failure_reason IS NULL OR (instr(failure_reason, char(0)) = 0 AND length(CAST(failure_reason AS BLOB)) BETWEEN 1 AND 512)),
+        PRIMARY KEY (workspace_id, start_id),
+        FOREIGN KEY (workspace_id, scope_kind, scope_identity, conversation_id, participant_id)
+            REFERENCES conversation_participants
+                (workspace_id, scope_kind, scope_identity, conversation_id, participant_id)
+            ON DELETE RESTRICT,
+        FOREIGN KEY (workspace_id, provider_id, provider_revision)
+            REFERENCES lifecycle_provider_registry
+                (workspace_id, provider_id, provider_revision)
+            ON DELETE RESTRICT,
+        CHECK (project_id = scope_identity),
+        CHECK (
+            (state IN ('reserved', 'ambiguous_start', 'failed')
+                AND native_session_id IS NULL AND session_ref_id IS NULL AND evidence_sha256 IS NULL)
+            OR
+            (state IN ('orphaned', 'bound', 'retired')
+                AND native_session_id IS NOT NULL AND session_ref_id IS NOT NULL AND evidence_sha256 IS NOT NULL)
+        )
+    ) STRICT
+    """,
+    """
+    CREATE UNIQUE INDEX managed_start_reservations_one_pending_participant
+    ON managed_start_reservations (
+        workspace_id, scope_kind, scope_identity, conversation_id, participant_id
+    )
+    WHERE state IN ('reserved', 'ambiguous_start', 'orphaned')
+    """,
+)
+V13_MIGRATION_CHECKSUM = "sha256:3b6b8d0d73a876824bd001adf5c229549382f45401967943e677f3b3de9c43cf"
+V13_SCHEMA_FINGERPRINT = "sha256:68e3c66f92db9d516a9c48b44ad5f278889d2d77f2588707958c1f441613cc51"
 MIGRATIONS = (
     (1, V1_SQL),
     (2, V2_SQL),
@@ -3042,6 +3138,7 @@ MIGRATIONS = (
     (10, V10_SQL),
     (11, V11_SQL),
     (12, V12_SQL),
+    (13, V13_SQL),
 )
 
 
@@ -3228,6 +3325,30 @@ def _v12_schema_fingerprint_from_sql() -> str:
             *V10_SQL,
             *V11_SQL,
             *V12_SQL,
+        ):
+            connection.execute(statement)
+        return _schema_fingerprint(connection)
+    finally:
+        connection.close()
+
+
+def _v13_schema_fingerprint_from_sql() -> str:
+    connection = sqlite3.connect(":memory:", isolation_level=None)
+    try:
+        for statement in (
+            *V1_SQL,
+            *V2_SQL,
+            *V3_SQL,
+            *V4_SQL,
+            *V5_SQL,
+            *V6_SQL,
+            *V7_SQL,
+            *V8_SQL,
+            *V9_SQL,
+            *V10_SQL,
+            *V11_SQL,
+            *V12_SQL,
+            *V13_SQL,
         ):
             connection.execute(statement)
         return _schema_fingerprint(connection)
@@ -3613,6 +3734,9 @@ class LedgerStore:
         if claimed == 11:
             cls._validate_released_v11(connection, paths)
             return
+        if claimed == 12:
+            cls._validate_released_v12(connection, paths)
+            return
         cls._validate_schema(connection, paths)
 
     @staticmethod
@@ -3689,8 +3813,12 @@ class LedgerStore:
                 raise MigrationError("released v12 migration checksum is incoherent")
             if _v12_schema_fingerprint_from_sql() != V12_SCHEMA_FINGERPRINT:
                 raise MigrationError("released v12 schema fingerprint is incoherent")
+            if _migration_checksum(V13_SQL) != V13_MIGRATION_CHECKSUM:
+                raise MigrationError("released v13 migration checksum is incoherent")
+            if _v13_schema_fingerprint_from_sql() != V13_SCHEMA_FINGERPRINT:
+                raise MigrationError("released v13 schema fingerprint is incoherent")
             rows = cls._migration_rows(connection)
-            if [row[0] for row in rows] != [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]:
+            if [row[0] for row in rows] != list(range(1, 14)):
                 raise MigrationError("ledger migration metadata is incoherent")
             cls._validate_migration_row(rows[0], V1_MIGRATION_CHECKSUM, 0, paths)
             cls._validate_migration_row(rows[1], V2_MIGRATION_CHECKSUM, 1, paths)
@@ -3704,15 +3832,16 @@ class LedgerStore:
             cls._validate_migration_row(rows[9], V10_MIGRATION_CHECKSUM, 9, paths)
             cls._validate_migration_row(rows[10], V11_MIGRATION_CHECKSUM, 10, paths)
             cls._validate_migration_row(rows[11], V12_MIGRATION_CHECKSUM, 11, paths)
+            cls._validate_migration_row(rows[12], V13_MIGRATION_CHECKSUM, 12, paths)
             actual_tables = cls._table_names(connection)
-            if actual_tables != V12_TABLES:
+            if actual_tables != V13_TABLES:
                 raise MigrationError(
-                    "ledger v12 table set is incoherent: "
-                    f"missing={sorted(V12_TABLES - actual_tables)}, "
-                    f"extra={sorted(actual_tables - V12_TABLES)}"
+                    "ledger v13 table set is incoherent: "
+                    f"missing={sorted(V13_TABLES - actual_tables)}, "
+                    f"extra={sorted(actual_tables - V13_TABLES)}"
                 )
-            if _schema_fingerprint(connection) != V12_SCHEMA_FINGERPRINT:
-                raise MigrationError("ledger v12 schema fingerprint is incoherent")
+            if _schema_fingerprint(connection) != V13_SCHEMA_FINGERPRINT:
+                raise MigrationError("ledger v13 schema fingerprint is incoherent")
         except sqlite3.DatabaseError as exc:
             raise MigrationError("ledger schema is corrupt or incoherent") from exc
 
@@ -3769,6 +3898,59 @@ class LedgerStore:
                 )
             if _schema_fingerprint(connection) != V10_SCHEMA_FINGERPRINT:
                 raise MigrationError("ledger v10 schema fingerprint is incoherent")
+        except sqlite3.DatabaseError as exc:
+            raise MigrationError("ledger schema is corrupt or incoherent") from exc
+
+    @classmethod
+    def _validate_released_v12(
+        cls, connection: sqlite3.Connection, paths: LedgerPaths
+    ) -> None:
+        """Accept only the exact released v12 long enough for the v13 migration."""
+        try:
+            cls._validate_database_health(connection)
+            if connection.execute("PRAGMA user_version").fetchone()[0] != 12:
+                raise MigrationError("ledger is not released schema v12")
+            released = tuple(
+                (
+                    statements,
+                    checksum,
+                    fingerprint,
+                    fingerprint_from_sql,
+                )
+                for statements, checksum, fingerprint, fingerprint_from_sql in (
+                    (V1_SQL, V1_MIGRATION_CHECKSUM, V1_SCHEMA_FINGERPRINT, _v1_schema_fingerprint_from_sql),
+                    (V2_SQL, V2_MIGRATION_CHECKSUM, V2_SCHEMA_FINGERPRINT, _v2_schema_fingerprint_from_sql),
+                    (V3_SQL, V3_MIGRATION_CHECKSUM, V3_SCHEMA_FINGERPRINT, _v3_schema_fingerprint_from_sql),
+                    (V4_SQL, V4_MIGRATION_CHECKSUM, V4_SCHEMA_FINGERPRINT, _v4_schema_fingerprint_from_sql),
+                    (V5_SQL, V5_MIGRATION_CHECKSUM, V5_SCHEMA_FINGERPRINT, _v5_schema_fingerprint_from_sql),
+                    (V6_SQL, V6_MIGRATION_CHECKSUM, V6_SCHEMA_FINGERPRINT, _v6_schema_fingerprint_from_sql),
+                    (V7_SQL, V7_MIGRATION_CHECKSUM, V7_SCHEMA_FINGERPRINT, _v7_schema_fingerprint_from_sql),
+                    (V8_SQL, V8_MIGRATION_CHECKSUM, V8_SCHEMA_FINGERPRINT, _v8_schema_fingerprint_from_sql),
+                    (V9_SQL, V9_MIGRATION_CHECKSUM, V9_SCHEMA_FINGERPRINT, _v9_schema_fingerprint_from_sql),
+                    (V10_SQL, V10_MIGRATION_CHECKSUM, V10_SCHEMA_FINGERPRINT, _v10_schema_fingerprint_from_sql),
+                    (V11_SQL, V11_MIGRATION_CHECKSUM, V11_SCHEMA_FINGERPRINT, _v11_schema_fingerprint_from_sql),
+                    (V12_SQL, V12_MIGRATION_CHECKSUM, V12_SCHEMA_FINGERPRINT, _v12_schema_fingerprint_from_sql),
+                )
+            )
+            for statements, checksum, fingerprint, fingerprint_from_sql in released:
+                if _migration_checksum(statements) != checksum:
+                    raise MigrationError("released migration checksum is incoherent")
+                if fingerprint_from_sql() != fingerprint:
+                    raise MigrationError("released schema fingerprint is incoherent")
+            rows = cls._migration_rows(connection)
+            if [row[0] for row in rows] != list(range(1, 13)):
+                raise MigrationError("ledger migration metadata is incoherent")
+            for index, (_statements, checksum, _fingerprint, _fingerprint_from_sql) in enumerate(released):
+                cls._validate_migration_row(rows[index], checksum, index, paths)
+            actual_tables = cls._table_names(connection)
+            if actual_tables != V12_TABLES:
+                raise MigrationError(
+                    "ledger v12 table set is incoherent: "
+                    f"missing={sorted(V12_TABLES - actual_tables)}, "
+                    f"extra={sorted(actual_tables - V12_TABLES)}"
+                )
+            if _schema_fingerprint(connection) != V12_SCHEMA_FINGERPRINT:
+                raise MigrationError("ledger v12 schema fingerprint is incoherent")
         except sqlite3.DatabaseError as exc:
             raise MigrationError("ledger schema is corrupt or incoherent") from exc
 
@@ -4097,6 +4279,7 @@ class LedgerStore:
                     10: V10_MIGRATION_CHECKSUM,
                     11: V11_MIGRATION_CHECKSUM,
                     12: V12_MIGRATION_CHECKSUM,
+                    13: V13_MIGRATION_CHECKSUM,
                 }.get(version)
                 if expected_checksum is None or checksum != expected_checksum:
                     raise MigrationError(f"migration {version} does not match its released checksum")
@@ -4127,6 +4310,7 @@ class LedgerStore:
                     10: V10_SCHEMA_FINGERPRINT,
                     11: V11_SCHEMA_FINGERPRINT,
                     12: V12_SCHEMA_FINGERPRINT,
+                    13: V13_SCHEMA_FINGERPRINT,
                 }[version]
                 if _schema_fingerprint(self._connection) != expected_fingerprint:
                     raise MigrationError(f"migration {version} produced an incoherent schema")
@@ -6449,6 +6633,391 @@ class LedgerStore:
                 challenge_ttl_seconds,
                 created_at_utc,
             ),
+        )
+
+    def reserve_managed_start(
+        self,
+        *,
+        workspace_id: str,
+        scope_kind: str,
+        scope_identity: str,
+        conversation_id: str,
+        participant_id: str,
+        agent_id: str,
+        provider_descriptor: Mapping[str, object],
+        endpoint_id: str,
+        runtime_instance_id: str,
+        runtime_home_id: str,
+        runtime_home_realpath: str,
+        project_id: str,
+        repo_id: str,
+        canonical_cwd: str,
+        start_id: str,
+        start_correlation_id: str,
+        expires_at_utc: str,
+        created_at_utc: str,
+    ) -> None:
+        """Fence one managed native start before any external I/O."""
+        self._ensure_thread()
+        if self._read_only:
+            raise PermissionError("query-only readers cannot reserve managed starts")
+        workspace_id, scope_kind, scope_identity = _canonical_scope(
+            workspace_id, scope_kind, scope_identity
+        )
+        if scope_kind != "project" or project_id != scope_identity:
+            raise CanonicalConflictError("managed starts require the exact project scope")
+        self._validate_canonical_scope(workspace_id, scope_kind, scope_identity)
+        conversation_id = _conversation_binding_text(conversation_id, "conversation_id", 128)
+        participant_id = _conversation_binding_text(participant_id, "participant_id", 128)
+        agent_id = _canonical_agent_id(agent_id, "agent_id")
+        endpoint_id = _canonical_endpoint_id(endpoint_id, "endpoint_id")
+        runtime_instance_id = _conversation_binding_text(runtime_instance_id, "runtime_instance_id", 128)
+        runtime_home_id = _canonical_sha256(runtime_home_id, "runtime_home_id")
+        runtime_home_realpath = _bounded_text(runtime_home_realpath, "runtime_home_realpath", 4096)
+        project_id = _bounded_text(project_id, "project_id", 128)
+        repo_id = _bounded_text(repo_id, "repo_id", 128)
+        canonical_cwd = _bounded_text(canonical_cwd, "canonical_cwd", 4096)
+        start_id = _canonical_start_id(start_id)
+        start_correlation_id = _bounded_text(start_correlation_id, "start_correlation_id", 256)
+        expires_at_utc = _utc_timestamp(expires_at_utc, "expires_at_utc")
+        created_at_utc = _utc_timestamp(created_at_utc, "created_at_utc")
+        (
+            provider_id,
+            provider_revision,
+            trust_class,
+            supported_operations_json,
+            challenge_algorithm,
+            challenge_ttl_seconds,
+        ) = _provider_descriptor(
+            provider_descriptor, required_operations=frozenset({"start"})
+        )
+        self._connection.execute("BEGIN IMMEDIATE")
+        try:
+            participant = self._connection.execute(
+                """
+                SELECT agent_id FROM conversation_participants
+                WHERE workspace_id = ? AND scope_kind = ? AND scope_identity = ?
+                  AND conversation_id = ? AND participant_id = ?
+                """,
+                (workspace_id, scope_kind, scope_identity, conversation_id, participant_id),
+            ).fetchone()
+            if participant is None or participant[0] != agent_id:
+                raise CanonicalConflictError("participant is not pre-provisioned or agent does not match")
+            provider = self._connection.execute(
+                """
+                SELECT trust_class, supported_operations_json,
+                       challenge_algorithm, challenge_ttl_seconds
+                FROM lifecycle_provider_registry
+                WHERE workspace_id = ? AND provider_id = ? AND provider_revision = ?
+                """,
+                (workspace_id, provider_id, provider_revision),
+            ).fetchone()
+            if provider is None or tuple(provider) != (
+                trust_class,
+                supported_operations_json,
+                challenge_algorithm,
+                challenge_ttl_seconds,
+            ):
+                raise CanonicalConflictError("provider descriptor is not allowlisted")
+            active = self._connection.execute(
+                """
+                SELECT 1 FROM conversation_bindings
+                WHERE workspace_id = ? AND scope_kind = ? AND scope_identity = ?
+                  AND conversation_id = ? AND participant_id = ?
+                  AND mutation_capable = 1 AND state IN ('active', 'draining')
+                LIMIT 1
+                """,
+                (workspace_id, scope_kind, scope_identity, conversation_id, participant_id),
+            ).fetchone()
+            if active is not None:
+                raise CanonicalConflictError("participant already has an active binding")
+            try:
+                self._connection.execute(
+                    """
+                    INSERT INTO managed_start_reservations
+                    (
+                        workspace_id, scope_kind, scope_identity, conversation_id, participant_id,
+                        start_id, state, provider_id, provider_revision, endpoint_id,
+                        runtime_instance_id, runtime_home_id, runtime_home_realpath, project_id,
+                        repo_id, canonical_cwd, start_correlation_id, expires_at_utc,
+                        created_at_utc, updated_at_utc
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, 'reserved', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        workspace_id, scope_kind, scope_identity, conversation_id, participant_id,
+                        start_id, provider_id, provider_revision, endpoint_id, runtime_instance_id,
+                        runtime_home_id, runtime_home_realpath, project_id, repo_id, canonical_cwd,
+                        start_correlation_id, expires_at_utc, created_at_utc, created_at_utc,
+                    ),
+                )
+            except sqlite3.IntegrityError as error:
+                raise CanonicalConflictError("participant already has a pending managed start") from error
+            self._connection.execute("COMMIT")
+        except BaseException:
+            self._connection.execute("ROLLBACK")
+            raise
+
+    def mark_managed_start(
+        self,
+        *,
+        workspace_id: str,
+        start_id: str,
+        state: str,
+        updated_at_utc: str,
+        failure_reason: str,
+        native_session_id: str | None = None,
+        session_ref_id: str | None = None,
+        evidence_sha256: str | None = None,
+    ) -> None:
+        """Record a pre-bind start outcome without retrying native work."""
+        if state not in {"ambiguous_start", "failed", "orphaned"}:
+            raise ValueError("managed start outcome state is invalid")
+        self._ensure_thread()
+        if self._read_only:
+            raise PermissionError("query-only readers cannot mark managed starts")
+        workspace_id = validate_workspace_id(workspace_id)
+        start_id = _canonical_start_id(start_id)
+        updated_at_utc = _utc_timestamp(updated_at_utc, "updated_at_utc")
+        failure_reason = _bounded_text(failure_reason, "failure_reason", 512)
+        if state == "orphaned":
+            native_session_id = _conversation_binding_text(native_session_id, "native_session_id", 256)
+            session_ref_id = _optional_session_ref_id(session_ref_id)
+            if session_ref_id is None:
+                raise ValueError("orphaned managed starts require a session_ref_id")
+            evidence_sha256 = _canonical_sha256(evidence_sha256, "evidence_sha256")
+        elif any(value is not None for value in (native_session_id, session_ref_id, evidence_sha256)):
+            raise ValueError("unvalidated managed start outcomes cannot carry native evidence")
+        self._connection.execute("BEGIN IMMEDIATE")
+        try:
+            updated = self._connection.execute(
+                """
+                UPDATE managed_start_reservations
+                SET state = ?, updated_at_utc = ?, failure_reason = ?,
+                    native_session_id = ?, session_ref_id = ?, evidence_sha256 = ?
+                WHERE workspace_id = ? AND start_id = ? AND state = 'reserved'
+                """,
+                (
+                    state, updated_at_utc, failure_reason, native_session_id,
+                    session_ref_id, evidence_sha256, workspace_id, start_id,
+                ),
+            ).rowcount
+            if updated != 1:
+                raise CanonicalConflictError("managed start reservation is not pending")
+            self._connection.execute("COMMIT")
+        except BaseException:
+            self._connection.execute("ROLLBACK")
+            raise
+
+    def complete_managed_start(
+        self,
+        *,
+        workspace_id: str,
+        start_id: str,
+        native_session_id: str,
+        session_ref_id: str,
+        session_owner_key: str,
+        evidence_sha256: str,
+        provider_id: str,
+        provider_revision: str,
+        endpoint_id: str,
+        runtime_instance_id: str,
+        runtime_home_id: str,
+        runtime_home_realpath: str,
+        project_id: str,
+        repo_id: str,
+        canonical_cwd: str,
+        challenge_id: str,
+        challenge_token_sha256: str,
+        consumed_at_utc: str,
+    ) -> dict[str, object]:
+        """Atomically challenge, bind, and complete one validated native start."""
+        self._ensure_thread()
+        if self._read_only:
+            raise PermissionError("query-only readers cannot complete managed starts")
+        workspace_id = validate_workspace_id(workspace_id)
+        start_id = _canonical_start_id(start_id)
+        native_session_id = _conversation_binding_text(native_session_id, "native_session_id", 256)
+        session_ref_id = _optional_session_ref_id(session_ref_id)
+        if session_ref_id is None:
+            raise ValueError("session_ref_id must be a session_ identifier")
+        session_owner_key = _canonical_owner_key(session_owner_key)
+        evidence_sha256 = _canonical_sha256(evidence_sha256, "evidence_sha256")
+        provider_id = _bounded_text(provider_id, "provider_id", 128)
+        provider_revision = _bounded_text(provider_revision, "provider_revision", 128)
+        endpoint_id = _canonical_endpoint_id(endpoint_id, "endpoint_id")
+        runtime_instance_id = _conversation_binding_text(runtime_instance_id, "runtime_instance_id", 128)
+        runtime_home_id = _canonical_sha256(runtime_home_id, "runtime_home_id")
+        runtime_home_realpath = _bounded_text(runtime_home_realpath, "runtime_home_realpath", 4096)
+        project_id = _bounded_text(project_id, "project_id", 128)
+        repo_id = _bounded_text(repo_id, "repo_id", 128)
+        canonical_cwd = _bounded_text(canonical_cwd, "canonical_cwd", 4096)
+        challenge_id = _conversation_binding_text(challenge_id, "challenge_id", 128)
+        challenge_token_sha256 = _canonical_sha256(challenge_token_sha256, "challenge_token_sha256")
+        consumed_at_utc = _utc_timestamp(consumed_at_utc, "consumed_at_utc")
+        self._connection.execute("BEGIN IMMEDIATE")
+        try:
+            reservation = self._connection.execute(
+                """
+                SELECT scope_kind, scope_identity, conversation_id, participant_id,
+                       provider_id, provider_revision, endpoint_id, runtime_instance_id,
+                       runtime_home_id, runtime_home_realpath, project_id, repo_id,
+                       canonical_cwd, expires_at_utc, state
+                FROM managed_start_reservations
+                WHERE workspace_id = ? AND start_id = ?
+                """,
+                (workspace_id, start_id),
+            ).fetchone()
+            if reservation is None or reservation[-1] != "reserved":
+                raise CanonicalConflictError("managed start reservation is not pending")
+            (
+                scope_kind, scope_identity, conversation_id, participant_id,
+                provider_id, provider_revision, endpoint_id, runtime_instance_id,
+                runtime_home_id, runtime_home_realpath, project_id, repo_id,
+                canonical_cwd, expires_at_utc, _state,
+            ) = reservation
+            if consumed_at_utc >= _utc_timestamp(expires_at_utc, "expires_at_utc"):
+                raise CanonicalConflictError("managed start reservation expired")
+            if (
+                provider_id,
+                provider_revision,
+                endpoint_id,
+                runtime_instance_id,
+                runtime_home_id,
+                runtime_home_realpath,
+                project_id,
+                repo_id,
+                canonical_cwd,
+            ) != (
+                reservation[4],
+                reservation[5],
+                reservation[6],
+                reservation[7],
+                reservation[8],
+                reservation[9],
+                reservation[10],
+                reservation[11],
+                reservation[12],
+            ):
+                raise CanonicalConflictError("managed start trusted inputs changed")
+            active = self._connection.execute(
+                """
+                SELECT 1 FROM conversation_bindings
+                WHERE workspace_id = ? AND scope_kind = ? AND scope_identity = ?
+                  AND conversation_id = ? AND participant_id = ?
+                  AND mutation_capable = 1 AND state IN ('active', 'draining')
+                LIMIT 1
+                """,
+                (workspace_id, scope_kind, scope_identity, conversation_id, participant_id),
+            ).fetchone()
+            if active is not None:
+                raise CanonicalConflictError("participant already has an active binding")
+            participant = self._connection.execute(
+                """
+                SELECT agent_id FROM conversation_participants
+                WHERE workspace_id = ? AND scope_kind = ? AND scope_identity = ?
+                  AND conversation_id = ? AND participant_id = ?
+                """,
+                (workspace_id, scope_kind, scope_identity, conversation_id, participant_id),
+            ).fetchone()
+            if participant is None:
+                raise CanonicalConflictError("participant is not pre-provisioned")
+            provider = self._connection.execute(
+                """
+                SELECT supported_operations_json FROM lifecycle_provider_registry
+                WHERE workspace_id = ? AND provider_id = ? AND provider_revision = ?
+                """,
+                (workspace_id, provider_id, provider_revision),
+            ).fetchone()
+            if provider is None:
+                raise CanonicalConflictError("provider descriptor is not allowlisted")
+            _validate_supported_operations(provider[0], required_operations=frozenset({"start"}))
+            challenge = self._connection.execute(
+                """
+                INSERT INTO session_binding_challenges
+                (
+                    workspace_id, scope_kind, scope_identity, conversation_id, participant_id,
+                    agent_id, challenge_id, challenge_state, provider_id, provider_revision,
+                    endpoint_id, session_ref_id, native_session_id, runtime_instance_id,
+                    challenge_token_sha256, expires_at_utc, created_at_utc, consumed_at_utc
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+                """,
+                (
+                    workspace_id, scope_kind, scope_identity, conversation_id, participant_id,
+                    participant[0], challenge_id, provider_id, provider_revision, endpoint_id,
+                    session_ref_id, native_session_id, runtime_instance_id,
+                    challenge_token_sha256, expires_at_utc, consumed_at_utc,
+                ),
+            )
+            self._connection.execute(
+                """
+                UPDATE session_binding_challenges
+                SET challenge_state = 'consumed', consumed_at_utc = ?
+                WHERE workspace_id = ? AND challenge_id = ? AND challenge_state = 'pending'
+                """,
+                (consumed_at_utc, workspace_id, challenge_id),
+            )
+            generation = int(
+                self._connection.execute(
+                    """
+                    SELECT COALESCE(MAX(generation), 0) + 1 FROM conversation_bindings
+                    WHERE workspace_id = ? AND scope_kind = ? AND scope_identity = ?
+                      AND conversation_id = ? AND participant_id = ?
+                    """,
+                    (workspace_id, scope_kind, scope_identity, conversation_id, participant_id),
+                ).fetchone()[0]
+            )
+            binding_id = _derive_conversation_binding_id(
+                workspace_id, scope_kind, scope_identity, conversation_id, participant_id,
+                generation, provider_id, provider_revision, endpoint_id, session_ref_id,
+                native_session_id, runtime_instance_id,
+            )
+            try:
+                self._connection.execute(
+                    """
+                    INSERT INTO conversation_bindings
+                    (
+                        workspace_id, scope_kind, scope_identity, conversation_id, participant_id,
+                        binding_id, generation, state, mutation_capable, provider_id,
+                        provider_revision, endpoint_id, session_ref_id, owner_key,
+                        native_session_id, runtime_instance_id, registered_at_utc
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 'active', 1, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        workspace_id, scope_kind, scope_identity, conversation_id, participant_id,
+                        binding_id, generation, provider_id, provider_revision, endpoint_id,
+                        session_ref_id, session_owner_key, native_session_id,
+                        runtime_instance_id, consumed_at_utc,
+                    ),
+                )
+            except sqlite3.IntegrityError as error:
+                raise CanonicalConflictError("managed start binding conflicts with existing ownership") from error
+            self._connection.execute(
+                """
+                UPDATE managed_start_reservations
+                SET state = 'bound', updated_at_utc = ?, native_session_id = ?,
+                    session_ref_id = ?, evidence_sha256 = ?, failure_reason = NULL
+                WHERE workspace_id = ? AND start_id = ? AND state = 'reserved'
+                """,
+                (
+                    consumed_at_utc, native_session_id, session_ref_id, evidence_sha256,
+                    workspace_id, start_id,
+                ),
+            )
+            self._connection.execute("COMMIT")
+        except BaseException:
+            self._connection.execute("ROLLBACK")
+            raise
+        return self.resolve_conversation_binding(
+            workspace_id=workspace_id,
+            scope_kind=scope_kind,
+            scope_identity=scope_identity,
+            conversation_id=conversation_id,
+            participant_id=participant_id,
+            expected_binding_id=binding_id,
+            expected_generation=generation,
         )
 
     def reserve_session_binding_challenge(
