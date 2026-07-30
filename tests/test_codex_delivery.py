@@ -395,6 +395,18 @@ class DeliveryTest(unittest.TestCase):
             ).fetchone()[0]
         self.assertEqual(attempts, 0)
 
+    def test_inconsistent_terminal_status_is_not_authoritative_acceptance(self) -> None:
+        transport = FakeTurnTransport(
+            terminal=(
+                {"method": "turn/completed", "params": {"turn": {"id": "turn-1", "status": "failed"}}},
+            )
+        )
+        result, transport, receipts = self.deliver(transport=transport)
+        self.assertEqual(result["outcome"], "ambiguous")
+        self.assertIsNone(result["terminal_status"])
+        self.assertIn(("ambiguous", "best_effort"), receipts)
+        self.assertNotIn(("accepted", "authoritative"), receipts)
+
     def test_terminal_for_a_different_turn_is_not_acceptance(self) -> None:
         transport = FakeTurnTransport(
             terminal=(
@@ -580,8 +592,9 @@ class DeliveryTest(unittest.TestCase):
         with self.assertRaisesRegex(CodexDeliveryError, "set_deadline"):
             self.deliver(transport=transport)
 
-    def test_jsonrpc_error_on_initialize_stops_before_turn_start(self) -> None:
-        # P1-3: a JSON-RPC error on initialize must STOP; no turn/start frame.
+    def test_jsonrpc_error_on_initialize_records_rejection_and_stops_before_turn_start(self) -> None:
+        # A peer JSON-RPC error proves rejection before acceptance and must be
+        # durable even though the delivery API still surfaces the error.
         from llm_collab.canonical.codex_delivery import CodexDeliveryError
         class ErrorTransport(FakeTurnTransport):
             def exchange(self, frame):
@@ -592,6 +605,29 @@ class DeliveryTest(unittest.TestCase):
         with self.assertRaises(CodexDeliveryError):
             self.deliver(transport=transport)
         self.assertEqual(0, len([f for f in transport.frames if f["method"] == "turn/start"]))
+        with LedgerStore.open_reader(self.paths) as store:
+            receipts = store._connection.execute(
+                "SELECT state, quality FROM canonical_delivery_receipts"
+            ).fetchall()
+        self.assertIn(("rejected_before_acceptance", "authoritative"), receipts)
+
+    def test_lost_turn_start_response_records_ambiguity_before_raising(self) -> None:
+        from llm_collab.canonical.codex_delivery import CodexDeliveryError
+        class LostTurnStartTransport(FakeTurnTransport):
+            def exchange(self, frame):
+                if frame["method"] == "turn/start":
+                    self.frames.append(frame)
+                    raise TimeoutError("turn/start response lost")
+                return super().exchange(frame)
+        transport = LostTurnStartTransport()
+        with self.assertRaises((CodexDeliveryError, TimeoutError)):
+            self.deliver(transport=transport)
+        self.assertEqual(1, len(self.turn_frames(transport)))
+        with LedgerStore.open_reader(self.paths) as store:
+            receipts = store._connection.execute(
+                "SELECT state, quality FROM canonical_delivery_receipts"
+            ).fetchall()
+        self.assertIn(("ambiguous", "best_effort"), receipts)
 
 
 if __name__ == "__main__":

@@ -54,6 +54,14 @@ class CodexDeliveryError(RuntimeError):
     pass
 
 
+class _JsonRpcPeerError(CodexDeliveryError):
+    """A response explicitly rejected by the native JSON-RPC peer."""
+
+
+class _TurnStartResponseLost(CodexDeliveryError):
+    """The turn/start request was sent but its response was not recovered."""
+
+
 def deliver_next_turn_idle(
     store: LedgerStore,
     *,
@@ -167,7 +175,12 @@ def deliver_next_turn_idle(
         if not callable(getattr(turn_transport, "set_deadline", None)):
             raise CodexDeliveryError("transport must support set_deadline")
         turn_transport.set_deadline(deadline)
-        result = turn_transport.exchange(frame)
+        try:
+            result = turn_transport.exchange(frame)
+        except Exception as error:
+            if frame.get("method") == "turn/start":
+                raise _TurnStartResponseLost("turn/start response lost") from error
+            raise
         if not isinstance(result, Mapping):
             raise CodexDeliveryError("malformed JSON-RPC response")
         if result.get("jsonrpc") != "2.0":
@@ -179,12 +192,32 @@ def deliver_next_turn_idle(
         if result.get("id") != frame.get("id"):
             raise CodexDeliveryError("JSON-RPC response id mismatch")
         if has_error:
-            raise CodexDeliveryError(
+            raise _JsonRpcPeerError(
                 f"JSON-RPC error on {frame.get('method')}: {result['error']}"
             )
         return result
 
-    _exchange(
+    def _exchange_or_reject(frame: dict[str, Any]) -> Mapping[str, Any]:
+        try:
+            return _exchange(frame)
+        except _JsonRpcPeerError:
+            _append_native_receipt(
+                store,
+                subject=subject,
+                provider=provider,
+                message_id=message_id,
+                delivery_id=delivery_id,
+                attempt_id=attempt_id,
+                session_ref_id=session_ref_id,
+                state="rejected_before_acceptance",
+                quality="authoritative",
+                correlation_id=correlation_id,
+                observed_at_utc=observed_at_utc,
+                native_detail={"x_note_rejection_method": frame["method"]},
+            )
+            raise
+
+    _exchange_or_reject(
         {
             "jsonrpc": "2.0",
             "id": "llm-collab-delivery-1",
@@ -198,7 +231,7 @@ def deliver_next_turn_idle(
     )
     turn_transport.set_deadline(deadline)
     turn_transport.notify({"jsonrpc": "2.0", "method": "initialized"})
-    _exchange(
+    _exchange_or_reject(
         {
             "jsonrpc": "2.0",
             "id": "llm-collab-delivery-2",
@@ -212,14 +245,32 @@ def deliver_next_turn_idle(
     }
     if model:
         turn_payload["model"] = model
-    started = _exchange(
-        {
-            "jsonrpc": "2.0",
-            "id": "llm-collab-delivery-3",
-            "method": "turn/start",
-            "params": turn_payload,
-        }
-    )
+    turn_start_frame = {
+        "jsonrpc": "2.0",
+        "id": "llm-collab-delivery-3",
+        "method": "turn/start",
+        "params": turn_payload,
+    }
+    try:
+        started = _exchange_or_reject(turn_start_frame)
+    except _JsonRpcPeerError:
+        raise
+    except _TurnStartResponseLost:
+        _append_native_receipt(
+            store,
+            subject=subject,
+            provider=provider,
+            message_id=message_id,
+            delivery_id=delivery_id,
+            attempt_id=attempt_id,
+            session_ref_id=session_ref_id,
+            state=OUTCOME_AMBIGUOUS,
+            quality="best_effort",
+            correlation_id=correlation_id,
+            observed_at_utc=observed_at_utc,
+            native_detail={"x_note_turn_start": "response_lost_or_timeout"},
+        )
+        raise
     turn = (started.get("result") or {}).get("turn") if isinstance(started, dict) else None
     turn_id = turn.get("id") if isinstance(turn, dict) else None
     if not isinstance(turn_id, str) or not turn_id:
@@ -249,7 +300,13 @@ def deliver_next_turn_idle(
         if terminal_turn_id != turn_id:
             # A terminal for any other (or no) turn is not this delivery's evidence.
             continue
-        terminal_status = _TERMINAL_BY_METHOD[method]
+        expected_status = _TERMINAL_BY_METHOD[method]
+        if terminal_turn.get("status") != expected_status:
+            # The method is peer-controlled input; it is not enough to prove
+            # authoritative terminal evidence without the matching inner status.
+            terminal_status = None
+            break
+        terminal_status = expected_status
         break
 
     # 6. Receipt from NATIVE terminal evidence only; a lost response is
