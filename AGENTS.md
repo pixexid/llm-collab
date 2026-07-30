@@ -17,6 +17,18 @@ Amiga workspace, the Nuvyr workspace, or any other product repository.
 
 ### Recent contract changes
 
+Contract v7 (2026-07-30) makes review **one pass, not a loop**. Request the
+bot/connector review **once per PR** — not once per amended head. Fix what that
+single pass (plus the one durable Codex review of record) surfaces, verify the fix
+at the new exact head yourself (focused tests green and the fix visibly closes the
+findings), and **merge**. Do **not** re-request a review on the fixed head, and do
+**not** re-review each new head: the per-candidate-head re-request cycle is retired
+because it never converged — each re-review surfaced a deeper edge case and PRs ran
+5–6 rounds. Capture remaining edge-case findings as a tracked **follow-up issue**
+rather than another round; a confirmed *serious* defect is still fixed before merge,
+but the bar is "confirmed serious," not "the bot found one more thing." This
+supersedes the v5/v6 request-shape and re-trigger rules wherever they conflict.
+
 Contract v6 (2026-07-28) makes the installed **Ponytail** skill mandatory at
 full intensity before every task: planning, review, implementation, testing,
 documentation, and operations. Load it first; missing Ponytail is incomplete
@@ -185,11 +197,11 @@ Request with `@codex review for <focus>`, naming **every** Tier A family the dif
 touches, asking for the full diff through those lenses, and **stating the exact head
 SHA the request is for**. The SHA is not decoration: a connector `+1` is terminal only
 while the head still equals the SHA that request named, so a request without one leaves
-the reaction path unsatisfiable and there is nothing to bind the verdict to. Issue **one initial request per
-candidate final head** — an amendment stales the review and needs a new request. That
-limit is on *initial* requests; the single request-anchored re-trigger in
-`docs/workflows/commit-push-prs.md` is an explicit exemption and the only recovery for
-a request the connector silently dropped.
+the reaction path unsatisfiable and there is nothing to bind the verdict to. **Per
+Contract v7, request this review ONCE per PR** — not once per amended head. Fix what
+that single pass surfaces, verify the fixed head yourself, and merge; do **not**
+re-request a review on the fixed head and do **not** loop. A remaining edge-case
+finding becomes a tracked follow-up issue, not another review round.
 
 Every **arriving finding** must be adjudicated in writing at every tier, whatever
 head raised it and whatever its current resolution state — enumerate every thread,
