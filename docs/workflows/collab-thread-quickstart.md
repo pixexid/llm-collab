@@ -136,6 +136,10 @@ thinking-level fingerprint, and each wake re-reads it from the session's own
 append-only log and compares it to the pinned value before emitting a wake.
 Any mismatch, missing field, or unreadable source emits no wake and leaves the
 packet durable and pull-pending as `pi_fingerprint_drift`.
+Controllers that configure Pi before registration pass
+`--expect-pi-provider`, `--expect-pi-model`, and `--expect-pi-thinking`
+together. Registration compares that tuple with the same authoritative session
+log read it persists, and refuses before writing if they differ.
 
 The exact-session event log contains diagnostics as well as wake events, so a
 plain `/monitor-watch` on the file is wrong: refusals and lease diagnostics

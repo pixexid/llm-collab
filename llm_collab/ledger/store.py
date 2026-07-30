@@ -7572,6 +7572,49 @@ class LedgerStore:
                     ),
                 ).fetchone()[0]
             )
+            if reason == "native_session_replacement" and preserved_pending_count:
+                receipt_rows = self._connection.execute(
+                    """
+                    SELECT f.message_id, f.delivery_id, f.attempt_id, r.receipt_id, r.state
+                    FROM canonical_delivery_attempt_binding_freezes AS f
+                    LEFT JOIN canonical_delivery_receipts AS r
+                      ON r.workspace_id = f.workspace_id
+                     AND r.scope_kind = f.scope_kind
+                     AND r.scope_identity = f.scope_identity
+                     AND r.message_id = f.message_id
+                     AND r.delivery_id = f.delivery_id
+                     AND r.attempt_id = f.attempt_id
+                    WHERE f.workspace_id = ? AND f.scope_kind = ? AND f.scope_identity = ?
+                      AND f.conversation_id = ? AND f.participant_id = ?
+                      AND f.binding_id = ? AND f.binding_generation = ?
+                    ORDER BY f.message_id, f.delivery_id, f.attempt_id, r.receipt_id
+                    """,
+                    (
+                        workspace_id,
+                        scope_kind,
+                        scope_identity,
+                        conversation_id,
+                        participant_id,
+                        predecessor_binding_id,
+                        predecessor_generation,
+                    ),
+                ).fetchall()
+                attempts: dict[tuple[str, str, str], list[dict[str, object]]] = {}
+                for message_id, delivery_id, attempt_id, receipt_id, state in receipt_rows:
+                    receipts = attempts.setdefault(
+                        (str(message_id), str(delivery_id), str(attempt_id)), []
+                    )
+                    if receipt_id is not None:
+                        receipts.append({"receipt_id": receipt_id, "state": state})
+                unresolved = sum(
+                    self._delivery_outcome(receipts)[0]
+                    not in {"completed", "rejected_before_acceptance"}
+                    for receipts in attempts.values()
+                )
+                if unresolved:
+                    raise CanonicalConflictError(
+                        "native session replacement has unresolved predecessor delivery attempts"
+                    )
             self._connection.execute(
                 """
                 UPDATE conversation_bindings

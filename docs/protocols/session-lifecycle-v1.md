@@ -200,6 +200,10 @@ the predecessor generation; new attempts can resolve the successor only after
 the swap commits. Nonzero transfer of never-attempted work remains a later
 live-dispatcher child, not v10 authority.
 
+The `native_session_replacement` transition is stricter: the same transaction
+refuses the swap while any predecessor attempt remains unresolved. Reconcile
+that attempt first; a caller-side preflight cannot replace this atomic check.
+
 Rollback disables binding resolution for new mutation work first. It preserves
 canonical messages, delivery attempts, receipts, binding records, and binding
 audit. Existing unresolved work returns to pull/manual or stays quarantined; it

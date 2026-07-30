@@ -7830,6 +7830,7 @@ class SessionAutobridgeTest(unittest.TestCase):
         agent="glmpi",
         session_source=None,
         supersedes=None,
+        expect_fingerprint=None,
         check=True,
     ):
         if session_source is None:
@@ -7848,6 +7849,15 @@ class SessionAutobridgeTest(unittest.TestCase):
         ]
         if supersedes is not None:
             argv += ["--supersedes-session", supersedes]
+        if expect_fingerprint is not None:
+            provider, model, thinking = expect_fingerprint
+            for flag, value in (
+                ("--expect-pi-provider", provider),
+                ("--expect-pi-model", model),
+                ("--expect-pi-thinking", thinking),
+            ):
+                if value is not None:
+                    argv += [flag, value]
         done = subprocess.run(
             argv,
             cwd=root, text=True, capture_output=True,
@@ -8426,10 +8436,31 @@ class SessionAutobridgeTest(unittest.TestCase):
                     root, native, cwd=str(work), provider="pinned-prov",
                     model_id="pinned-model", thinking_level="high",
                 )
+                partial = self._register_pi(
+                    root, session="SESSION-FP-PARTIAL", project=project, chat=chat,
+                    native=native, endpoint="endpoint_native", runtime_instance="rt-fp",
+                    cwd=work, home=home, repo_target="app", session_source=str(source),
+                    expect_fingerprint=("pinned-prov", None, None), check=False,
+                )
+                self.assertNotEqual(0, partial.returncode)
+                self.assertIn("canonical_pi_fingerprint_precondition_incomplete", partial.stderr)
+                self.assertFalse(self._session_json(root, "SESSION-FP-PARTIAL").exists())
+                mismatch = self._register_pi(
+                    root, session="SESSION-FP-MISMATCH", project=project, chat=chat,
+                    native=native, endpoint="endpoint_native", runtime_instance="rt-fp",
+                    cwd=work, home=home, repo_target="app", session_source=str(source),
+                    expect_fingerprint=("pinned-prov", "different-model", "high"),
+                    check=False,
+                )
+                self.assertNotEqual(0, mismatch.returncode)
+                self.assertIn("canonical_pi_fingerprint_precondition_mismatch", mismatch.stderr)
+                self.assertFalse(self._session_json(root, "SESSION-FP-MISMATCH").exists())
+                self.assertEqual(0, self._active_binding_count(root, native))
                 self._register_pi(
                     root, session="SESSION-FP-OK", project=project, chat=chat,
                     native=native, endpoint="endpoint_native", runtime_instance="rt-fp",
                     cwd=work, home=home, repo_target="app", session_source=str(source),
+                    expect_fingerprint=("pinned-prov", "pinned-model", "high"),
                 )
                 record = json.loads(self._session_json(root, "SESSION-FP-OK").read_text())
                 self.assertEqual(
