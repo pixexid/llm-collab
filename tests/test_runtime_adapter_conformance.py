@@ -68,11 +68,11 @@ class RuntimeAdapterConformanceTests(unittest.TestCase):
         first = extract_clause_occurrences(self.protocol)
         second = extract_clause_occurrences(self.protocol)
         self.assertEqual(first, second)
-        self.assertEqual(len(first), 154)
-        self.assertEqual(len({clause.clause_key for clause in first}), 154)
+        self.assertEqual(len(first), 171)
+        self.assertEqual(len({clause.clause_key for clause in first}), 171)
         self.assertEqual(sum(clause.keyword == "SHALL" for clause in first), 0)
-        self.assertEqual(sum(clause.keyword == "MUST NOT" for clause in first), 34)
-        self.assertEqual(sum(clause.keyword == "MUST" for clause in first), 120)
+        self.assertEqual(sum(clause.keyword == "MUST NOT" for clause in first), 39)
+        self.assertEqual(sum(clause.keyword == "MUST" for clause in first), 132)
 
     def test_harness_outputs_are_structurally_repeatable(self) -> None:
         def run_harness_once() -> tuple:
@@ -95,8 +95,9 @@ class RuntimeAdapterConformanceTests(unittest.TestCase):
         for row in ledger:
             key = tuple(sorted(row.owners))
             owner_counts[key] = owner_counts.get(key, 0) + 1
-        self.assertEqual(sum(owner_counts.values()), 154)
-        self.assertEqual(owner_counts[("P3e-redact", "P3e-state")], 6)
+        self.assertEqual(sum(owner_counts.values()), 171)
+        self.assertEqual(owner_counts[("P3e-redact", "P3e-state")], 23)
+        self.assertEqual(owner_counts[("P3e-state",)], 17)
         self.assertEqual(owner_counts[("P3b", "P3c")], 2)
 
     def test_ledger_source_line_is_advisory_only(self) -> None:

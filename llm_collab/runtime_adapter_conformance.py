@@ -41,6 +41,30 @@ J7_OWNER_VOCABULARY = frozenset(
         "P3f",
     )
 )
+# Clause 12 additions in the contract amendment are jointly owned by the
+# redaction and state seams. Keep the mapping keyed to the extracted clause
+# identity so a changed normative sentence cannot silently inherit ownership.
+_CLAUSE_12_REDACTION_STATE_KEYS = frozenset(
+    (
+        "C0ea2059110f9.1",
+        "C21eb083ed472.1",
+        "C2bed799095ab.1",
+        "C2bed799095ab.2",
+        "C3848362e01b9.1",
+        "C4011c2381c50.1",
+        "C535809cab8d3.1",
+        "C535809cab8d3.2",
+        "C5d04a7d472d3.1",
+        "C6c609c91f7f3.1",
+        "C7089e63378d8.1",
+        "Ca5ec43715274.1",
+        "Ca5ec43715274.2",
+        "Caf8953c7afbf.1",
+        "Cba9ca178006c.1",
+        "Cba9ca178006c.2",
+        "Cd75d60726569.1",
+    )
+)
 
 _KEYWORD_PATTERN = re.compile(r"\bMUST NOT\b|\bMUST\b(?!\s+NOT)|\bSHALL\b")
 _SECTION_PATTERN = re.compile(r"^(\d+)\. \*\*(.+?) \(normative\)\.\*\*", re.M)
@@ -100,7 +124,9 @@ ENDPOINT_SCHEMA_ID = "https://llm-collab.dev/schemas/standalone/v1/endpoint.sche
 SESSION_REF_SCHEMA_ID = "https://llm-collab.dev/schemas/standalone/v1/session-ref.schema.json"
 CATALOG_ID = "https://llm-collab.dev/schemas/standalone/v1/index.json"
 SCHEMA_DIR = Path(__file__).resolve().parents[1] / "schemas" / "standalone" / "v1"
+DELIVERY_SCHEMA_ID = "https://llm-collab.dev/schemas/standalone/v1/delivery.schema.json"
 _SCHEMA_VALIDATORS: dict[str, Any] = {}
+_SCALAR_VALIDATORS: dict[str, Any] = {}
 
 
 class ConformanceFailure(AssertionError):
@@ -182,7 +208,14 @@ def dumps_frame(obj: Mapping[str, Any]) -> str:
 
 
 def _is_request_id(value: Any) -> bool:
-    return isinstance(value, (str, int, float)) and not isinstance(value, bool)
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, str):
+        try:
+            return 1 <= len(value.encode("utf-8")) <= 256
+        except UnicodeEncodeError:
+            return False
+    return isinstance(value, int) and -(2**53 - 1) <= value <= 2**53 - 1
 
 
 def _is_request_form(obj: Mapping[str, Any]) -> bool:
@@ -319,6 +352,36 @@ def validate_session_ref_v1(value: Any) -> Mapping[str, Any]:
     return document
 
 
+def validate_request_id_scalar(value: Any) -> str | int:
+    """Validate the frozen bounded RequestId contract."""
+
+    if not _is_request_id(value):
+        raise ValueError("invalid RequestId scalar")
+    return value
+
+
+def validate_s2_token(value: Any) -> str:
+    """Validate the shared S2 token definition from the standalone schema."""
+
+    try:
+        _scalar_validator("token").validate(value)
+    except Exception as error:
+        raise ValueError("invalid S2 token") from error
+    return value
+
+
+def validate_delivery_scalar(value: Any, field: str) -> str:
+    """Validate an exact DeliveryV1 delivery_id or attempt_id scalar."""
+
+    if field not in {"delivery_id", "attempt_id"}:
+        raise ValueError("unsupported DeliveryV1 scalar")
+    try:
+        _scalar_validator(field).validate(value)
+    except Exception as error:
+        raise ValueError(f"invalid DeliveryV1 {field}") from error
+    return value
+
+
 def error_code(name: str) -> int:
     return ERROR_CODES[name]
 
@@ -340,6 +403,26 @@ def error_response(request_id: Any, name: str) -> str:
             },
         }
     )
+
+
+def _scalar_validator(name: str):
+    validator = _SCALAR_VALIDATORS.get(name)
+    if validator is not None:
+        return validator
+    try:
+        from jsonschema import Draft202012Validator
+    except ImportError as error:
+        raise ValueError("JSON Schema validator unavailable") from error
+    schema = _load_json(SCHEMA_DIR / "delivery.schema.json")
+    if name == "token":
+        scalar = {"$schema": schema["$schema"], "$defs": schema["$defs"], "$ref": "#/$defs/token"}
+    elif name in {"delivery_id", "attempt_id"}:
+        scalar = schema["properties"][name]
+    else:
+        raise ValueError("unsupported scalar schema")
+    validator = Draft202012Validator(scalar)
+    _SCALAR_VALIDATORS[name] = validator
+    return validator
 
 
 def _schema_validator(schema_id: str):
@@ -558,6 +641,8 @@ def _owners_for_clause(clause: ClauseOccurrence) -> frozenset[str]:
     if section.startswith("C11"):
         return frozenset(("P3d-lifecycle",))
     if section.startswith("C12"):
+        if clause.clause_key in _CLAUSE_12_REDACTION_STATE_KEYS:
+            return frozenset(("P3e-redact", "P3e-state"))
         return frozenset(("P3e-state",))
     if section.startswith("C14"):
         if any(token in text for token in ("written", "persisted", "persistence", "quarantine")):
