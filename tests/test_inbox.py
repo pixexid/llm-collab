@@ -784,10 +784,68 @@ class InboxMarkAllReadTest(unittest.TestCase):
             env={"LLM_COLLAB_READER_RUNTIME_ID": "pi-exact"},
         )
 
-        self.assertEqual(75, result.returncode, result.stderr)
+        # GH-417: a repo-scope (route_ambiguous) refusal is now NON-fatal (exit 0)
+        # and reported, rather than aborting the batch and silencing the watcher.
+        self.assertEqual(0, result.returncode, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual([], payload["messages"])
         self.assertEqual(
             [{"path": refused, "reason": "route_ambiguous"}],
-            json.loads(result.stdout)["repo_scope_refused"],
+            payload["repo_scope_refused"],
+        )
+
+    def test_exact_read_skips_a_repo_scope_refusal_and_returns_the_routable(self) -> None:
+        # GH-417: one route_ambiguous packet must not suppress the routable ones.
+        self.add_exact_session()
+        routable = [
+            self.add_exact_message(f"ok{index}", repo_targets=["app"])
+            for index in range(2)
+        ]
+        refused = self.add_exact_message("misscoped", repo_targets=["docs"])
+
+        result = self.run_inbox(
+            "--project", "amiga", "--chat", "CHAT-EXACT",
+            "--session", "SESSION-EXACT", "--repo-target", "app",
+            "--peek", "--json",
+            env={"LLM_COLLAB_READER_RUNTIME_ID": "pi-exact"},
+        )
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(routable, [message["path"] for message in payload["messages"]])
+        self.assertEqual(
+            [refused], [entry["path"] for entry in payload.get("repo_scope_refused", [])]
+        )
+
+    def test_exact_read_fails_closed_on_a_wrong_binding_id_with_a_routable_packet(
+        self,
+    ) -> None:
+        # GH-417 P1: a wrong target_binding_id also returns route_ambiguous, but it is
+        # a BINDING-identity refusal, NOT repo-scope — it must still fail closed (exit
+        # 75, messages suppressed), even alongside a routable packet. Classifying by
+        # the reason string alone would wrongly skip it.
+        self.add_exact_session(binding_id="binding-current", binding_generation=3)
+        self.add_exact_message("routable", repo_targets=["app"])
+        wrong_binding = self.add_exact_message(
+            "wrongbinding",
+            repo_targets=["app"],
+            target_binding_id="binding-foreign",
+            target_binding_generation=3,
+        )
+
+        result = self.run_inbox(
+            "--project", "amiga", "--chat", "CHAT-EXACT",
+            "--session", "SESSION-EXACT", "--repo-target", "app",
+            "--peek", "--json",
+            env={"LLM_COLLAB_READER_RUNTIME_ID": "pi-exact"},
+        )
+
+        self.assertEqual(75, result.returncode, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual([], payload["messages"])
+        self.assertIn(
+            wrong_binding,
+            [entry["path"] for entry in payload["repo_scope_refused"]],
         )
 
     def test_exact_session_refuses_malformed_repo_targets_before_rendering(self) -> None:
