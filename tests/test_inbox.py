@@ -796,26 +796,37 @@ class InboxMarkAllReadTest(unittest.TestCase):
 
     def test_exact_read_skips_a_repo_scope_refusal_and_returns_the_routable(self) -> None:
         # GH-417: one route_ambiguous packet must not suppress the routable ones.
-        self.add_exact_session()
-        routable = [
-            self.add_exact_message(f"ok{index}", repo_targets=["app"])
-            for index in range(2)
-        ]
-        refused = self.add_exact_message("misscoped", repo_targets=["docs"])
+        # The exact-read repo-scope contract is project-agnostic, so cover a
+        # non-Amiga project (nuvyr) as well as Amiga.
+        for project, chat in (("amiga", "CHAT-EXACT"), ("nuvyr", "CHAT-NUVYR")):
+            with self.subTest(project=project):
+                self.add_exact_session(project_id=project, chat_id=chat)
+                routable = [
+                    self.add_exact_message(
+                        f"ok{index}", project_id=project, chat_id=chat, repo_targets=["app"]
+                    )
+                    for index in range(2)
+                ]
+                refused = self.add_exact_message(
+                    "misscoped", project_id=project, chat_id=chat, repo_targets=["docs"]
+                )
 
-        result = self.run_inbox(
-            "--project", "amiga", "--chat", "CHAT-EXACT",
-            "--session", "SESSION-EXACT", "--repo-target", "app",
-            "--peek", "--json",
-            env={"LLM_COLLAB_READER_RUNTIME_ID": "pi-exact"},
-        )
+                result = self.run_inbox(
+                    "--project", project, "--chat", chat,
+                    "--session", "SESSION-EXACT", "--repo-target", "app",
+                    "--peek", "--json",
+                    env={"LLM_COLLAB_READER_RUNTIME_ID": "pi-exact"},
+                )
 
-        self.assertEqual(0, result.returncode, result.stderr)
-        payload = json.loads(result.stdout)
-        self.assertEqual(routable, [message["path"] for message in payload["messages"]])
-        self.assertEqual(
-            [refused], [entry["path"] for entry in payload.get("repo_scope_refused", [])]
-        )
+                self.assertEqual(0, result.returncode, result.stderr)
+                payload = json.loads(result.stdout)
+                self.assertEqual(
+                    routable, [message["path"] for message in payload["messages"]]
+                )
+                self.assertEqual(
+                    [refused],
+                    [entry["path"] for entry in payload.get("repo_scope_refused", [])],
+                )
 
     def test_exact_read_fails_closed_on_a_wrong_binding_id_with_a_routable_packet(
         self,
