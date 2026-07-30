@@ -6306,6 +6306,138 @@ class LedgerStore:
             "runtime_instance_id": binding["runtime_instance_id"],
         }
 
+    def register_conversation_participant(
+        self,
+        *,
+        workspace_id: str,
+        scope_kind: str,
+        scope_identity: str,
+        conversation_id: str,
+        participant_id: str,
+        agent_id: str,
+        created_at_utc: str,
+        registry_revision: str,
+    ) -> None:
+        """Idempotently pre-provision one conversation participant + its agent.
+
+        Re-registering the same participant key with the same agent is a no-op;
+        a different agent raises CanonicalConflictError. Never a blind OR IGNORE.
+        """
+        self._ensure_thread()
+        if self._read_only:
+            raise PermissionError("query-only readers cannot register participants")
+        workspace_id, scope_kind, scope_identity = _canonical_scope(
+            workspace_id, scope_kind, scope_identity
+        )
+        if scope_kind != "project":
+            raise CanonicalConflictError(
+                "attached-session lifecycle registration requires project scope"
+            )
+        self._validate_canonical_scope(workspace_id, scope_kind, scope_identity)
+        # Require an EXACT registered project membership — spelling validation
+        # alone is insufficient (a well-formed but unregistered project_id must
+        # not create runtime-binding state outside the registered project boundary).
+        # The supplied revision must be the CURRENT registry revision — a caller
+        # cannot make a historical snapshot authoritative by supplying it.
+        if registry_revision != self.current_registry_revision(workspace_id=workspace_id):
+            raise ValueError("registry_revision is not the current registry revision")
+        if scope_identity not in self.registered_project_ids(
+            workspace_id=workspace_id, registry_revision=registry_revision
+        ):
+            raise ValueError("project_id is not a registered project")
+        conversation_id = _conversation_binding_text(conversation_id, "conversation_id", 128)
+        participant_id = _conversation_binding_text(participant_id, "participant_id", 128)
+        agent_id = _canonical_agent_id(agent_id, "agent_id")
+        created_at_utc = _utc_timestamp(created_at_utc, "created_at_utc")
+        existing = self._connection.execute(
+            """
+            SELECT agent_id FROM conversation_participants
+            WHERE workspace_id = ? AND scope_kind = ? AND scope_identity = ?
+              AND conversation_id = ? AND participant_id = ?
+            """,
+            (workspace_id, scope_kind, scope_identity, conversation_id, participant_id),
+        ).fetchone()
+        if existing is not None:
+            if existing[0] != agent_id:
+                raise CanonicalConflictError(
+                    "participant is already registered with a different agent"
+                )
+            return
+        self._connection.execute(
+            """
+            INSERT INTO conversation_participants
+            (workspace_id, scope_kind, scope_identity, conversation_id, participant_id, agent_id, created_at_utc)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (workspace_id, scope_kind, scope_identity, conversation_id, participant_id, agent_id, created_at_utc),
+        )
+
+    def register_lifecycle_provider(
+        self,
+        *,
+        workspace_id: str,
+        provider_descriptor: Mapping[str, object],
+        created_at_utc: str,
+    ) -> None:
+        """Idempotently pre-provision a lifecycle provider descriptor.
+
+        Same (provider_id, provider_revision) + same descriptor is a no-op;
+        same key + different descriptor raises CanonicalConflictError; a new
+        revision is a legitimate insert. Never a blind OR IGNORE.
+        """
+        self._ensure_thread()
+        if self._read_only:
+            raise PermissionError("query-only readers cannot register lifecycle providers")
+        if validate_workspace_id(workspace_id) != self.paths.workspace_id:
+            raise ValueError("workspace_id does not own this ledger")
+        (
+            provider_id,
+            provider_revision,
+            trust_class,
+            supported_operations_json,
+            challenge_algorithm,
+            challenge_ttl_seconds,
+        ) = _provider_descriptor(provider_descriptor, required_operations=frozenset({"reserve"}))
+        created_at_utc = _utc_timestamp(created_at_utc, "created_at_utc")
+        existing = self._connection.execute(
+            """
+            SELECT trust_class, supported_operations_json,
+                   challenge_algorithm, challenge_ttl_seconds
+            FROM lifecycle_provider_registry
+            WHERE workspace_id = ? AND provider_id = ? AND provider_revision = ?
+            """,
+            (workspace_id, provider_id, provider_revision),
+        ).fetchone()
+        if existing is not None:
+            if existing != (
+                trust_class,
+                supported_operations_json,
+                challenge_algorithm,
+                challenge_ttl_seconds,
+            ):
+                raise CanonicalConflictError(
+                    "provider is already registered with a different descriptor"
+                )
+            return
+        self._connection.execute(
+            """
+            INSERT INTO lifecycle_provider_registry
+            (workspace_id, provider_id, provider_revision, trust_class,
+             supported_operations_json, challenge_algorithm, challenge_ttl_seconds, created_at_utc)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                workspace_id,
+                provider_id,
+                provider_revision,
+                trust_class,
+                supported_operations_json,
+                challenge_algorithm,
+                challenge_ttl_seconds,
+                created_at_utc,
+            ),
+        )
+
     def reserve_session_binding_challenge(
         self,
         *,
@@ -7110,6 +7242,22 @@ class LedgerStore:
             ).fetchone()
             is not None
         )
+
+    def current_registry_revision(self, *, workspace_id: str) -> str:
+        """The latest immutable registry revision, ordered captured_at_utc DESC,
+        registry_revision DESC. Mirrors the established rule in
+        _latest_project_registry_revision and _require_registry_project."""
+        self._ensure_thread()
+        if validate_workspace_id(workspace_id) != self.paths.workspace_id:
+            raise ValueError("workspace_id does not own this ledger")
+        row = self._connection.execute(
+            "SELECT registry_revision FROM workspace_registry_snapshots "
+            "WHERE workspace_id = ? ORDER BY captured_at_utc DESC, registry_revision DESC LIMIT 1",
+            (workspace_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError("no registry snapshots for this workspace")
+        return row[0]
 
     def registered_project_ids(
         self, *, workspace_id: str, registry_revision: str
