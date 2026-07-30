@@ -311,6 +311,35 @@ class LifecycleTest(unittest.TestCase):
                 )
             self.assertEqual(before, row_counts(store))
 
+    def test_codex_provider_reserve_creates_a_challenge_when_the_exact_thread_matches(self) -> None:
+        # reserve() consumes the CodexLifecycleProvider attester end-to-end: a
+        # matching probe mints exactly one challenge row (the success complement
+        # to the mismatch fail-closed / ledger-unchanged test in #415).
+        native = "native_session_one"
+        provider = CodexLifecycleProvider(
+            exact_thread_probe=lambda _tid: CodexAppServerExactThreadResult(
+                thread_id=native, methods=("initialize", "thread/read")
+            )
+        )
+        active_subject = subject(native_session_id=native)
+        with LedgerStore.open_writer(self.paths) as store:
+            self.provision(store, active_subject, provider)
+            core = SessionLifecycleCore(provider, token_factory=lambda: "token-reserve")
+            before = row_counts(store)
+            challenge = core.reserve(
+                store,
+                active_subject,
+                runtime_home=self.runtime_home,
+                created_at_utc=NOW,
+                expires_at_utc=AT_EXPIRY,
+                correlation_id="corr_reserve",
+                trusted_project_root=self.trusted_root,
+            )
+            after = row_counts(store)
+        self.assertTrue(challenge.challenge_id)
+        diffs = {t: after[t] - before[t] for t in LIFECYCLE_ROW_COUNT_TABLES if after[t] != before[t]}
+        self.assertEqual({"session_binding_challenges": 1}, diffs)
+
     def test_reserve_consume_resolves_and_replay_fails(self) -> None:
         active_subject = subject()
         with LedgerStore.open_writer(self.paths) as store:
