@@ -31,6 +31,16 @@ The provider returns or verifies a `SessionRefV1`. The core derives every
 `ConversationBindingV1.binding_id` and generation from storage state. Callers
 MUST NOT submit a binding ID or generation as authority.
 
+For Codex App Server protocol v2 as shipped in Codex CLI 0.146.0, managed-start
+provenance is structural, not request-ID based. `thread/start` returns a
+`ThreadStartResponse` whose required `approvalPolicy`, `sandbox`, `model`, and
+`cwd` fields are absent from `ThreadReadResponse`; the provider records those
+create-only fields with `source = managed_thread_start`, the exact server-owned
+`thread.id`, and the independent same-connection `thread/read` result. The
+native protocol supplies no distinct server creation-correlation field, so
+`server_correlation_id` is optional and MUST remain absent when unavailable; the
+JSON-RPC request ID MUST NOT be substituted.
+
 ## Lifecycle provider registry
 
 A lifecycle provider registry entry is trusted configuration for one provider
@@ -119,8 +129,10 @@ A managed provider that creates a native session MUST use the same-ledger start
 reservation saga; it MUST NOT place a placeholder native session ID in a
 challenge or binding. The reservation fences one compound participant before
 external I/O, then the provider starts the native session outside the SQLite
-transaction, validates create-only evidence plus an exact read-back, and
-completes the challenge, binding, and reservation in one SQLite transaction.
+transaction, validates the Codex-0.146.0 create-only fields plus an exact
+same-connection read-back, and completes the challenge, binding, and
+reservation in one SQLite transaction. Evidence containing only a thread ID and
+read-back is attach-shaped and MUST be rejected as managed-start evidence.
 
 `managed_start_reservations` has the closed states `reserved`,
 `ambiguous_start`, `orphaned`, `bound`, `failed`, and `retired`. Only one

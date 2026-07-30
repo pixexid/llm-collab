@@ -49,8 +49,12 @@ class TrustedProjectRoot:
 @dataclass(frozen=True)
 class CodexCreationProvenance:
     source: str
-    server_correlation_id: str
+    server_correlation_id: str | None
     native_thread_id: str
+    approval_policy: str | Mapping[str, object]
+    sandbox: Mapping[str, object]
+    model: str
+    cwd: str
 
 
 @dataclass(frozen=True)
@@ -148,8 +152,9 @@ _CODEX_START_EVIDENCE_FIELDS = frozenset(
     }
 )
 _CREATION_PROVENANCE_FIELDS = frozenset(
-    {"source", "server_correlation_id", "native_thread_id"}
+    {"source", "native_thread_id", "approval_policy", "sandbox", "model", "cwd"}
 )
+_CREATION_PROVENANCE_OPTIONAL_FIELDS = frozenset({"server_correlation_id"})
 _READ_BACK_FIELDS = frozenset(
     {
         "operation",
@@ -199,16 +204,32 @@ def validate_codex_start_evidence(
 
     native_thread_id = _start_text(candidate.get("native_thread_id"), "native_thread_id")
     provenance = candidate["creation_provenance"]
-    if not isinstance(provenance, Mapping) or set(provenance) != _CREATION_PROVENANCE_FIELDS:
+    if not isinstance(provenance, Mapping):
+        raise SessionLifecycleError("Codex start creation provenance is incomplete")
+    provenance_fields = set(provenance)
+    if provenance_fields - (_CREATION_PROVENANCE_FIELDS | _CREATION_PROVENANCE_OPTIONAL_FIELDS):
+        raise SessionLifecycleError("Codex start creation provenance is incomplete")
+    if provenance_fields - _CREATION_PROVENANCE_OPTIONAL_FIELDS != _CREATION_PROVENANCE_FIELDS:
         raise SessionLifecycleError("Codex start creation provenance is incomplete")
     if provenance.get("source") != "managed_thread_start":
         raise SessionLifecycleError("Codex start creation source is invalid")
+    server_correlation_id = provenance.get("server_correlation_id")
+    if server_correlation_id is not None:
+        server_correlation_id = _start_text(server_correlation_id, "server_correlation_id")
+    approval_policy = _codex_approval_policy(provenance.get("approval_policy"))
+    sandbox = _codex_sandbox(provenance.get("sandbox"))
+    model = _start_text(provenance.get("model"), "creation model")
+    cwd = _start_text(provenance.get("cwd"), "creation cwd")
+    if cwd != expected_cwd:
+        raise SessionLifecycleError("Codex creation cwd does not match trusted cwd")
     creation = CodexCreationProvenance(
         source="managed_thread_start",
-        server_correlation_id=_start_text(
-            provenance.get("server_correlation_id"), "server_correlation_id"
-        ),
+        server_correlation_id=server_correlation_id,
         native_thread_id=_start_text(provenance.get("native_thread_id"), "creation native_thread_id"),
+        approval_policy=approval_policy,
+        sandbox=sandbox,
+        model=model,
+        cwd=cwd,
     )
     if creation.native_thread_id != native_thread_id:
         raise SessionLifecycleError("Codex creation provenance thread id mismatch")
@@ -259,6 +280,34 @@ def validate_codex_start_evidence(
         creation=creation,
         read_back=read_back,
     )
+
+
+def _codex_approval_policy(value: object) -> str | Mapping[str, object]:
+    if isinstance(value, str):
+        if value not in {"untrusted", "on-request", "never"}:
+            raise SessionLifecycleError("Codex creation approval policy is invalid")
+        return value
+    if not isinstance(value, Mapping) or set(value) != {"granular"}:
+        raise SessionLifecycleError("Codex creation approval policy is invalid")
+    granular = value.get("granular")
+    if not isinstance(granular, Mapping):
+        raise SessionLifecycleError("Codex creation approval policy is invalid")
+    required = {"mcp_elicitations", "rules", "sandbox_approval"}
+    optional = {"request_permissions", "skill_approval"}
+    if set(granular) - (required | optional) or not required <= set(granular):
+        raise SessionLifecycleError("Codex creation approval policy is invalid")
+    if any(not isinstance(granular[key], bool) for key in granular):
+        raise SessionLifecycleError("Codex creation approval policy is invalid")
+    return dict(value)
+
+
+def _codex_sandbox(value: object) -> Mapping[str, object]:
+    if not isinstance(value, Mapping) or not isinstance(value.get("type"), str):
+        raise SessionLifecycleError("Codex creation sandbox is invalid")
+    allowed = {"dangerFullAccess", "readOnly", "externalSandbox", "workspaceWrite"}
+    if value["type"] not in allowed:
+        raise SessionLifecycleError("Codex creation sandbox is invalid")
+    return dict(value)
 
 
 def _start_text(value: object, field: str) -> str:
