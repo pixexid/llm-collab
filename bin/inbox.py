@@ -391,7 +391,26 @@ def exact_read_messages(
         if matched:
             messages.append(message)
         else:
-            refusals.append({"path": relative_path, "reason": reason})
+            # GH-417: distinguish a REPO-SCOPE refusal (the packet is simply not for
+            # this repo scope -> skippable) from a binding-identity or stale-generation
+            # refusal (fail-closed) by re-running the repo-scope check, NOT by the
+            # shared route_ambiguous reason string, which binding_scoped_message_
+            # matches_session returns for BOTH repo-scope and target_binding_id
+            # mismatch. `repo_scope_only` is True only when repo scope is the failing
+            # dimension.
+            repo_allowed, _repo_reason = repo_scope_matches(
+                args.repo_target,
+                frontmatter.get("repo_targets"),
+                subscriber_project=args.project,
+                packet_project=frontmatter.get("project_id"),
+            )
+            refusals.append(
+                {
+                    "path": relative_path,
+                    "reason": reason,
+                    "repo_scope_only": not repo_allowed,
+                }
+            )
     return messages, refusals
 
 
@@ -774,7 +793,24 @@ def main():
                     file=sys.stderr,
                 )
             sys.exit(75)
-        if repo_scope_refused:
+        # GH-417: only a REPO-SCOPE (route_ambiguous) refusal is non-fatal — those
+        # packets are simply not for this repo scope, so skip them and return the
+        # routable messages (the non-exact path already does this). Any refusal whose
+        # source is NOT repo scope (a wrong target_binding_id, or a stale binding
+        # generation) still fails closed: a superseded/foreign binding must never fall
+        # through to the current session. `repo_scope_only` was set by re-checking the
+        # repo scope, not by the overloaded reason string.
+        fatal_refusals = [
+            refusal
+            for refusal in repo_scope_refused
+            if not refusal.get("repo_scope_only")
+        ]
+        # Surface refusals as {path, reason}; drop the internal source flag.
+        repo_scope_refused = [
+            {"path": refusal["path"], "reason": refusal["reason"]}
+            for refusal in repo_scope_refused
+        ]
+        if fatal_refusals:
             payload = {"messages": [], "repo_scope_refused": repo_scope_refused}
             if args.json_output:
                 print(json.dumps(payload, indent=2))
@@ -801,9 +837,13 @@ def main():
             # human path must SEE the bodies, not just a count, or the wake loses
             # the work while claiming acknowledgment.
             if args.json_output:
-                print(json.dumps(
-                    {"acknowledged": acknowledged, "messages": messages},
-                    indent=2, sort_keys=True))
+                drained_payload: dict[str, object] = {
+                    "acknowledged": acknowledged,
+                    "messages": messages,
+                }
+                if repo_scope_refused:
+                    drained_payload["repo_scope_refused"] = repo_scope_refused
+                print(json.dumps(drained_payload, indent=2, sort_keys=True))
             else:
                 for index, message in enumerate(messages):
                     print(format_message(message, index))
