@@ -32,6 +32,9 @@ SANCTIONED_CONSUMERS = {
     "llm_collab/daemon/gate.py",
     "tests/test_collabd_canonical.py",
     "tests/test_collabd_gate.py",
+    # Codex delivery fixtures (#94) declare canonical_writes to exercise the
+    # gated materialization path exactly like test_collabd_canonical does.
+    "tests/test_codex_delivery.py",
 }
 THREAD_EVENT_RUNNER_RFC = ROOT / "docs" / "workflows" / "thread-event-runner-rfc.md"
 
@@ -158,6 +161,7 @@ class StandaloneFeatureDeclarationTests(unittest.TestCase):
                 "llm_collab/daemon/gate.py",
                 "tests/test_collabd_canonical.py",
                 "tests/test_collabd_gate.py",
+                "tests/test_codex_delivery.py",
             },
         )
         self.assertIn(

@@ -1257,6 +1257,10 @@ class LifecycleTest(unittest.TestCase):
             # inspection seam for `worker show/list`; it is query-only and
             # never calls the provider or a mutation path.
             Path("llm_collab/worker.py"),
+            # Codex delivery (#94) calls provider.attest as the exact-thread
+            # identity proof before one idle-thread turn; it never drives
+            # reserve/consume/retire lifecycle state in this slice.
+            Path("llm_collab/canonical/codex_delivery.py"),
         }
         offenders = []
         for checked in (root / "bin", root / "scripts", root / "llm_collab"):
