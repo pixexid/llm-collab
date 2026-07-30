@@ -269,7 +269,7 @@ def insert_v8_challenge(connection: sqlite3.Connection, *, challenge_id: str = "
 def v8_fingerprint_for(statements: tuple[str, ...]) -> str:
     connection = sqlite3.connect(":memory:")
     try:
-        for _version, migration in store_module.MIGRATIONS[:-5]:
+        for _version, migration in store_module.MIGRATIONS[:-6]:
             for statement in migration:
                 connection.execute(statement)
         for statement in statements:
@@ -282,7 +282,7 @@ def v8_fingerprint_for(statements: tuple[str, ...]) -> str:
 def v9_fingerprint_for_v8(statements: tuple[str, ...]) -> str:
     connection = sqlite3.connect(":memory:")
     try:
-        for _version, migration in store_module.MIGRATIONS[:-5]:
+        for _version, migration in store_module.MIGRATIONS[:-6]:
             for statement in migration:
                 connection.execute(statement)
         for statement in statements:
@@ -297,7 +297,7 @@ def v9_fingerprint_for_v8(statements: tuple[str, ...]) -> str:
 def v10_fingerprint_for_v8(statements: tuple[str, ...]) -> str:
     connection = sqlite3.connect(":memory:")
     try:
-        for _version, migration in store_module.MIGRATIONS[:-5]:
+        for _version, migration in store_module.MIGRATIONS[:-6]:
             for statement in migration:
                 connection.execute(statement)
         for statement in statements:
@@ -314,7 +314,7 @@ def v10_fingerprint_for_v8(statements: tuple[str, ...]) -> str:
 def v11_fingerprint_for_v8(statements: tuple[str, ...]) -> str:
     connection = sqlite3.connect(":memory:")
     try:
-        for _version, migration in store_module.MIGRATIONS[:-5]:
+        for _version, migration in store_module.MIGRATIONS[:-6]:
             for statement in migration:
                 connection.execute(statement)
         for statement in statements:
@@ -330,10 +330,33 @@ def v11_fingerprint_for_v8(statements: tuple[str, ...]) -> str:
         connection.close()
 
 
+def v13_fingerprint_for_v8(statements: tuple[str, ...]) -> str:
+    connection = sqlite3.connect(":memory:")
+    try:
+        for _version, migration in store_module.MIGRATIONS[:-6]:
+            for statement in migration:
+                connection.execute(statement)
+        for statement in statements:
+            connection.execute(statement)
+        for statement in store_module.V9_SQL:
+            connection.execute(statement)
+        for statement in store_module.V10_SQL:
+            connection.execute(statement)
+        for statement in store_module.V11_SQL:
+            connection.execute(statement)
+        for statement in store_module.V12_SQL:
+            connection.execute(statement)
+        for statement in store_module.V13_SQL:
+            connection.execute(statement)
+        return store_module._schema_fingerprint(connection)
+    finally:
+        connection.close()
+
+
 def v12_fingerprint_for_v8(statements: tuple[str, ...]) -> str:
     connection = sqlite3.connect(":memory:")
     try:
-        for _version, migration in store_module.MIGRATIONS[:-5]:
+        for _version, migration in store_module.MIGRATIONS[:-6]:
             for statement in migration:
                 connection.execute(statement)
         for statement in statements:
@@ -359,13 +382,15 @@ def open_store_with_v8(paths: LedgerPaths, statements: tuple[str, ...]):
     v10_fingerprint = v10_fingerprint_for_v8(statements)
     v11_fingerprint = v11_fingerprint_for_v8(statements)
     v12_fingerprint = v12_fingerprint_for_v8(statements)
+    v13_fingerprint = v13_fingerprint_for_v8(statements)
     migrations = (
-        *store_module.MIGRATIONS[:-5],
+        *store_module.MIGRATIONS[:-6],
         (8, statements),
         (9, store_module.V9_SQL),
         (10, store_module.V10_SQL),
         (11, store_module.V11_SQL),
         (12, store_module.V12_SQL),
+        (13, store_module.V13_SQL),
     )
     with (
         patch.object(store_module, "V8_SQL", statements),
@@ -375,6 +400,7 @@ def open_store_with_v8(paths: LedgerPaths, statements: tuple[str, ...]):
         patch.object(store_module, "V10_SCHEMA_FINGERPRINT", v10_fingerprint),
         patch.object(store_module, "V11_SCHEMA_FINGERPRINT", v11_fingerprint),
         patch.object(store_module, "V12_SCHEMA_FINGERPRINT", v12_fingerprint),
+        patch.object(store_module, "V13_SCHEMA_FINGERPRINT", v13_fingerprint),
         LedgerStore.open_writer(paths, migrations=migrations) as store,
     ):
         yield store
@@ -914,8 +940,9 @@ class CompatibilityProjectionTest(unittest.TestCase):
             "V10_SQL": "8270fde4fb3e86eb0bf743c1d1222a5e1961e2436b79cffbbbbbf92f4298e2c9",
             "V11_SQL": "905783c2dda078ff675b51e942fb4786e0ca48612778e09289eb689b26578a2d",
             "V12_SQL": "6db7c4fd394c394fefdcd441ed8ce7e06fb06972e28bfda7cfb87b87a6d3cd44",
+            "V13_SQL": "8572fffa356fa7b14a618435e052628a2df6be53cd3f7c67d05e1fa95763b70e",
         }
-        self.assertEqual(store_module.SCHEMA_VERSION, 12)
+        self.assertEqual(store_module.SCHEMA_VERSION, 13)
         self.assertEqual(
             {
                 name: hashlib.sha256("\n".join(getattr(store_module, name)).encode()).hexdigest()
@@ -937,6 +964,7 @@ class CompatibilityProjectionTest(unittest.TestCase):
                 store_module.V10_MIGRATION_CHECKSUM,
                 store_module.V11_MIGRATION_CHECKSUM,
                 store_module.V12_MIGRATION_CHECKSUM,
+                store_module.V13_MIGRATION_CHECKSUM,
                 store_module.V1_SCHEMA_FINGERPRINT,
                 store_module.V2_SCHEMA_FINGERPRINT,
                 store_module.V3_SCHEMA_FINGERPRINT,
@@ -949,6 +977,7 @@ class CompatibilityProjectionTest(unittest.TestCase):
                 store_module.V10_SCHEMA_FINGERPRINT,
                 store_module.V11_SCHEMA_FINGERPRINT,
                 store_module.V12_SCHEMA_FINGERPRINT,
+                store_module.V13_SCHEMA_FINGERPRINT,
             ),
             (
                 "sha256:ce236daff444f736e01f3666ed44baf1c3ba17e81215fedb638276aff76b01c7",
@@ -963,6 +992,7 @@ class CompatibilityProjectionTest(unittest.TestCase):
                 "sha256:44547c1810cacf9ba9d8edc2e7ee057446d93d1103d4c1424a868febbb525ecd",
                 "sha256:4b61d82c2a2578fdd25f39ea42f73cc5545edf40460df45c0ef986eae84c57fe",
                 "sha256:c8ce8b30824ec939e5e7a50ed4ab70cc79b2057befe5010526c1cced2cb49f1e",
+                "sha256:3b6b8d0d73a876824bd001adf5c229549382f45401967943e677f3b3de9c43cf",
                 "sha256:26a856329406e45d22a8fbecdbd769d9c632acae3652d8c72438d228de7cfca2",
                 "sha256:805aa5ae43c31d85dbe9a84590050b701ddc69cfe1dd225e9c6e67afbd889a7c",
                 "sha256:88e59c9be91df366c03985f99f8b3db1c68382b4846612c0334fd15cc505e673",
@@ -975,6 +1005,7 @@ class CompatibilityProjectionTest(unittest.TestCase):
                 "sha256:f32ef268eb81fced863c66f0209cc8fcfaac87a3c87bf628454d74c405124427",
                 "sha256:decb92cd78ac700383cf7e1b5a7b2c5137e37978b2b06a1cc108bcb9da559081",
                 "sha256:1d67d6fed6d3959029184c4cf9cf9055ac13baac6476f7c694e99991e6e05347",
+                "sha256:68e3c66f92db9d516a9c48b44ad5f278889d2d77f2588707958c1f441613cc51",
             ),
         )
 

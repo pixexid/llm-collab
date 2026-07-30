@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 import hashlib
+import json
 import os
 import secrets
 from typing import Callable, Mapping
@@ -106,6 +107,22 @@ class LifecycleSubject:
         if self.scope_kind == "workspace":
             return {"kind": "workspace"}
         raise SessionLifecycleError("scope_kind must be project or workspace")
+
+
+@dataclass(frozen=True)
+class ManagedStartRequest:
+    workspace_id: str
+    scope_kind: str
+    scope_identity: str
+    conversation_id: str
+    participant_id: str
+    agent_id: str
+    endpoint_id: str
+    runtime_instance_id: str
+
+
+class ManagedStartResponseLost(SessionLifecycleError):
+    """The native start request may have succeeded but its response was lost."""
 
 
 @dataclass(frozen=True)
@@ -589,6 +606,156 @@ class SessionLifecycleCore:
             binding_state=binding_state,
         )
 
+    def start_managed(
+        self,
+        store: LedgerStore,
+        request: ManagedStartRequest,
+        *,
+        runtime_home: RuntimeHomeIdentity,
+        trusted_project_root: TrustedProjectRoot,
+        created_at_utc: str,
+        expires_at_utc: str,
+        correlation_id: str,
+        start_native: Callable[[str], Mapping[str, object]],
+    ) -> dict[str, object]:
+        """Run the fake/provider start saga without enabling live transport."""
+        if not isinstance(request, ManagedStartRequest):
+            raise SessionLifecycleError("managed start request is invalid")
+        if request.scope_kind != "project" or request.scope_identity != trusted_project_root.project_id:
+            raise SessionLifecycleError("managed start request project does not match trusted root")
+        if not isinstance(runtime_home, RuntimeHomeIdentity):
+            raise SessionLifecycleError("runtime_home must be a RuntimeHomeIdentity")
+        start_id = "start_" + secrets.token_hex(32)
+        canonical_cwd = _trusted_canonical_cwd(trusted_project_root)
+        store.reserve_managed_start(
+            workspace_id=request.workspace_id,
+            scope_kind=request.scope_kind,
+            scope_identity=request.scope_identity,
+            conversation_id=request.conversation_id,
+            participant_id=request.participant_id,
+            agent_id=request.agent_id,
+            provider_descriptor=self.provider.descriptor(),
+            endpoint_id=request.endpoint_id,
+            runtime_instance_id=request.runtime_instance_id,
+            runtime_home_id=runtime_home.runtime_home_id,
+            runtime_home_realpath=runtime_home.runtime_home_realpath,
+            project_id=trusted_project_root.project_id,
+            repo_id=trusted_project_root.repo_id,
+            canonical_cwd=canonical_cwd,
+            start_id=start_id,
+            start_correlation_id=correlation_id,
+            expires_at_utc=expires_at_utc,
+            created_at_utc=created_at_utc,
+        )
+        try:
+            candidate = start_native(start_id)
+        except ManagedStartResponseLost:
+            store.mark_managed_start(
+                workspace_id=request.workspace_id,
+                start_id=start_id,
+                state="ambiguous_start",
+                updated_at_utc=created_at_utc,
+                failure_reason="start response lost; exact native identity is unknown",
+            )
+            raise
+        except Exception as error:
+            store.mark_managed_start(
+                workspace_id=request.workspace_id,
+                start_id=start_id,
+                state="failed",
+                updated_at_utc=created_at_utc,
+                failure_reason=type(error).__name__,
+            )
+            raise
+        evidence: CodexStartEvidence | None = None
+        session_ref_id: str | None = None
+        try:
+            evidence = validate_codex_start_evidence(
+                candidate,
+                runtime_home=runtime_home,
+                trusted_project_root=trusted_project_root,
+                expected_endpoint_id=request.endpoint_id,
+                expected_runtime_instance_id=request.runtime_instance_id,
+                provider_revision=self.provider.provider_revision,
+            )
+            subject = LifecycleSubject(
+                workspace_id=request.workspace_id,
+                scope_kind=request.scope_kind,
+                scope_identity=request.scope_identity,
+                conversation_id=request.conversation_id,
+                participant_id=request.participant_id,
+                agent_id=request.agent_id,
+                endpoint_id=request.endpoint_id,
+                native_session_id=evidence.native_thread_id,
+                runtime_instance_id=request.runtime_instance_id,
+            )
+            session_ref = self.provider.attest(
+                subject,
+                runtime_home=runtime_home,
+                observed_at_utc=created_at_utc,
+                correlation_id=correlation_id,
+                trusted_project_root=trusted_project_root,
+            )
+            session_ref_id = str(session_ref["session_ref_id"])
+            token = self._token_factory()
+            if not isinstance(token, str) or not token:
+                raise SessionLifecycleError("challenge token factory must return non-empty text")
+            challenge_id = "challenge_" + _sha256_text(f"{start_id}|{token}")[:32]
+            owner_key = derive_session_owner_key(
+                workspace_id=subject.workspace_id,
+                endpoint_id=subject.endpoint_id,
+                native_session_id=subject.native_session_id,
+                runtime_home=runtime_home,
+                authority=self.provider.authority(),
+            )
+            binding = store.complete_managed_start(
+                workspace_id=request.workspace_id,
+                start_id=start_id,
+                native_session_id=evidence.native_thread_id,
+                session_ref_id=session_ref_id,
+                session_owner_key=owner_key,
+                evidence_sha256=codex_start_evidence_digest(evidence),
+                provider_id=self.provider.provider_id,
+                provider_revision=self.provider.provider_revision,
+                endpoint_id=request.endpoint_id,
+                runtime_instance_id=request.runtime_instance_id,
+                runtime_home_id=runtime_home.runtime_home_id,
+                runtime_home_realpath=runtime_home.runtime_home_realpath,
+                project_id=trusted_project_root.project_id,
+                repo_id=trusted_project_root.repo_id,
+                canonical_cwd=canonical_cwd,
+                challenge_id=challenge_id,
+                challenge_token_sha256=_sha256_text(token),
+                consumed_at_utc=created_at_utc,
+            )
+        except Exception as error:
+            if evidence is None or session_ref_id is None:
+                store.mark_managed_start(
+                    workspace_id=request.workspace_id,
+                    start_id=start_id,
+                    state="failed",
+                    updated_at_utc=created_at_utc,
+                    failure_reason=type(error).__name__,
+                )
+            else:
+                store.mark_managed_start(
+                    workspace_id=request.workspace_id,
+                    start_id=start_id,
+                    state="orphaned",
+                    updated_at_utc=created_at_utc,
+                    failure_reason=type(error).__name__,
+                    native_session_id=evidence.native_thread_id,
+                    session_ref_id=session_ref_id,
+                    evidence_sha256=codex_start_evidence_digest(evidence),
+                )
+            raise
+        return {
+            "start_id": start_id,
+            "evidence": evidence,
+            "session_ref": session_ref,
+            "binding": binding,
+        }
+
     def inspect(
         self,
         store: LedgerStore,
@@ -775,6 +942,13 @@ def _require_project_subject(subject: LifecycleSubject) -> None:
         raise SessionLifecycleError(
             "attached-session lifecycle registration requires project scope"
         )
+
+def codex_start_evidence_digest(evidence: CodexStartEvidence) -> str:
+    if not isinstance(evidence, CodexStartEvidence):
+        raise SessionLifecycleError("evidence must be CodexStartEvidence")
+    body = json.dumps(asdict(evidence), sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(body).hexdigest()
+
 
 def _secret_token() -> str:
     return secrets.token_urlsafe(32)

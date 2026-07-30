@@ -18,11 +18,14 @@ from llm_collab.codex_app_server_live_probe import CodexAppServerExactThreadResu
 from llm_collab.session_lifecycle import (
     CodexLifecycleProvider,
     FakeLifecycleProvider,
-    validate_codex_start_evidence,
     LifecycleSubject,
+    ManagedStartRequest,
+    ManagedStartResponseLost,
+    validate_codex_start_evidence,
     SessionLifecycleCore,
     SessionLifecycleError,
     TrustedProjectRoot,
+    codex_start_evidence_digest,
 )
 
 
@@ -64,6 +67,7 @@ LIFECYCLE_ROW_COUNT_TABLES = (
     "conversation_binding_transition_audit",
     "legacy_provenance_imports",
     "legacy_autobridge_provenance_imports",
+    "managed_start_reservations",
 )
 WRITE_SQL_PREFIXES = (
     "INSERT",
@@ -227,6 +231,49 @@ class LifecycleTest(unittest.TestCase):
             trusted_project_root=self.trusted_root,
         )
 
+    def managed_request(self) -> ManagedStartRequest:
+        return ManagedStartRequest(
+            workspace_id=WORKSPACE,
+            scope_kind="project",
+            scope_identity=PROJECT,
+            conversation_id="CHAT-SAMEID",
+            participant_id="participant_codex",
+            agent_id="agent_codex",
+            endpoint_id="endpoint_codex",
+            runtime_instance_id="runtime_one",
+        )
+
+    def start_candidate(self, native_session_id="native_session_new") -> dict[str, object]:
+        cwd = str(self.cwd.resolve())
+        return {
+            "native_thread_id": native_session_id,
+            "endpoint_id": "endpoint_codex",
+            "runtime_instance_id": "runtime_one",
+            "runtime_home_id": self.runtime_home.runtime_home_id,
+            "runtime_home_realpath": self.runtime_home.runtime_home_realpath,
+            "project_id": PROJECT,
+            "repo_id": "repo_app",
+            "canonical_cwd": cwd,
+            "provider_revision": "revision_1",
+            "creation_provenance": {
+                "source": "managed_thread_start",
+                "server_correlation_id": "server-create-1",
+                "native_thread_id": native_session_id,
+            },
+            "read_back": {
+                "operation": "thread_read",
+                "native_thread_id": native_session_id,
+                "endpoint_id": "endpoint_codex",
+                "runtime_instance_id": "runtime_one",
+                "runtime_home_id": self.runtime_home.runtime_home_id,
+                "runtime_home_realpath": self.runtime_home.runtime_home_realpath,
+                "project_id": PROJECT,
+                "repo_id": "repo_app",
+                "canonical_cwd": cwd,
+                "provider_revision": "revision_1",
+            },
+        }
+
     def test_codex_start_evidence_rejects_trusted_cwd_mismatch_without_ledger_mutation(self) -> None:
         candidate = {
             "native_thread_id": "native_session_new",
@@ -268,6 +315,153 @@ class LifecycleTest(unittest.TestCase):
                     provider_revision="revision_1",
                 )
             self.assertEqual(before, row_counts(store))
+
+    def test_managed_start_binds_valid_evidence_without_placeholder_native_id(self) -> None:
+        active_subject = subject()
+        with LedgerStore.open_writer(self.paths) as store:
+            self.provision(store, active_subject, self.core.provider)
+            observed_during_start = []
+
+            def fake_start(start_id):
+                observed_during_start.append(
+                    store._connection.execute(
+                        "SELECT native_session_id FROM managed_start_reservations WHERE start_id = ?",
+                        (start_id,),
+                    ).fetchone()[0]
+                )
+                return self.start_candidate()
+
+            result = self.core.start_managed(
+                store, self.managed_request(), runtime_home=self.runtime_home,
+                trusted_project_root=self.trusted_root, created_at_utc=NOW,
+                expires_at_utc=AT_EXPIRY, correlation_id="corr_start",
+                start_native=fake_start,
+            )
+            self.assertEqual(observed_during_start, [None])
+            self.assertTrue(result["binding"]["resolved"])
+            self.assertEqual(
+                store._connection.execute(
+                    "SELECT state, native_session_id FROM managed_start_reservations"
+                ).fetchall(),
+                [("bound", "native_session_new")],
+            )
+            self.assertEqual(
+                store._connection.execute("SELECT count(*) FROM conversation_bindings").fetchone()[0],
+                1,
+            )
+            self.assertEqual(
+                store._connection.execute(
+                    "SELECT count(*) FROM session_binding_challenges WHERE challenge_state = 'consumed'"
+                ).fetchone()[0],
+                1,
+            )
+
+    def test_managed_start_pending_reservation_fences_concurrent_native_starts(self) -> None:
+        active_subject = subject()
+        starts = []
+        with LedgerStore.open_writer(self.paths) as store:
+            self.provision(store, active_subject, self.core.provider)
+
+            def fake_start(_start_id):
+                with self.assertRaises(CanonicalConflictError):
+                    self.core.start_managed(
+                        store, self.managed_request(), runtime_home=self.runtime_home,
+                        trusted_project_root=self.trusted_root, created_at_utc=NOW,
+                        expires_at_utc=AT_EXPIRY, correlation_id="corr_nested",
+                        start_native=lambda _nested: self.start_candidate("native_nested"),
+                    )
+                starts.append(True)
+                return self.start_candidate()
+
+            self.core.start_managed(
+                store, self.managed_request(), runtime_home=self.runtime_home,
+                trusted_project_root=self.trusted_root, created_at_utc=NOW,
+                expires_at_utc=AT_EXPIRY, correlation_id="corr_start",
+                start_native=fake_start,
+            )
+        self.assertEqual(starts, [True])
+
+    def test_managed_start_lost_response_is_ambiguous_and_blocks_retry(self) -> None:
+        active_subject = subject()
+        with LedgerStore.open_writer(self.paths) as store:
+            self.provision(store, active_subject, self.core.provider)
+            with self.assertRaises(ManagedStartResponseLost):
+                self.core.start_managed(
+                    store, self.managed_request(), runtime_home=self.runtime_home,
+                    trusted_project_root=self.trusted_root, created_at_utc=NOW,
+                    expires_at_utc=AT_EXPIRY, correlation_id="corr_lost",
+                    start_native=lambda _start_id: (_ for _ in ()).throw(
+                        ManagedStartResponseLost("lost")
+                    ),
+                )
+            self.assertEqual(
+                store._connection.execute(
+                    "SELECT state, native_session_id FROM managed_start_reservations"
+                ).fetchall(),
+                [("ambiguous_start", None)],
+            )
+            with self.assertRaises(CanonicalConflictError):
+                self.core.start_managed(
+                    store, self.managed_request(), runtime_home=self.runtime_home,
+                    trusted_project_root=self.trusted_root, created_at_utc=NOW,
+                    expires_at_utc=AT_EXPIRY, correlation_id="corr_retry",
+                    start_native=lambda _start_id: self.start_candidate("native_retry"),
+                )
+
+    def test_managed_start_bind_conflict_orphans_exact_validated_native_evidence(self) -> None:
+        active_subject = subject()
+        with LedgerStore.open_writer(self.paths) as store:
+            self.provision(store, active_subject, self.core.provider)
+
+            def fake_start(_start_id):
+                other_subject = subject(
+                    participant_id="participant_other", native_session_id="native_session_new"
+                )
+                self.provision(store, other_subject, self.core.provider)
+                existing_core = SessionLifecycleCore(
+                    self.core.provider, token_factory=lambda: "token-existing"
+                )
+                challenge = existing_core.reserve(
+                    store, other_subject,
+                    runtime_home=self.runtime_home, created_at_utc=NOW,
+                    expires_at_utc=AT_EXPIRY, correlation_id="corr_existing",
+                    trusted_project_root=self.trusted_root,
+                )
+                existing_core.consume(
+                    store, other_subject, challenge,
+                    runtime_home=self.runtime_home, consumed_at_utc=NOW,
+                    correlation_id="corr_existing_consume",
+                    trusted_project_root=self.trusted_root,
+                )
+                return self.start_candidate()
+
+            with self.assertRaises(CanonicalConflictError):
+                self.core.start_managed(
+                    store, self.managed_request(), runtime_home=self.runtime_home,
+                    trusted_project_root=self.trusted_root, created_at_utc=NOW,
+                    expires_at_utc=AT_EXPIRY, correlation_id="corr_orphan",
+                    start_native=fake_start,
+                )
+            row = store._connection.execute(
+                "SELECT state, native_session_id, evidence_sha256 FROM managed_start_reservations"
+            ).fetchone()
+            expected = validate_codex_start_evidence(
+                self.start_candidate(), runtime_home=self.runtime_home,
+                trusted_project_root=self.trusted_root,
+                expected_endpoint_id="endpoint_codex",
+                expected_runtime_instance_id="runtime_one",
+                provider_revision="revision_1",
+            )
+            self.assertEqual(row[0:2], ("orphaned", "native_session_new"))
+            self.assertEqual(row[2], codex_start_evidence_digest(expected))
+            self.assertEqual(
+                store._connection.execute("SELECT count(*) FROM session_binding_challenges").fetchone()[0],
+                1,
+            )
+            self.assertEqual(
+                store._connection.execute("SELECT count(*) FROM conversation_bindings").fetchone()[0],
+                1,
+            )
 
     def test_codex_lifecycle_provider_attests_after_an_exact_thread_match(self) -> None:
         native = "native_session_one"
