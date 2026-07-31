@@ -48,23 +48,47 @@ def page(
     next_page: bool = False,
     cursor: str | None = None,
     author: str = "pixexid",
-    viewer: str = "pixexid",
+    association: str = "OWNER",
+    review_authors: list[str] | None = None,
+    comment_reactors: list[str] | None = None,
+    pr_reactors: list[str] | None = None,
+    thread_authors: list[str] | None = None,
 ):
+    def reactions(logins):
+        return [{"users": {"totalCount": len(logins or []), "nodes": [
+            {"login": login} for login in (logins or [])
+        ]}}]
+
     return {
         "data": {
-            "viewer": {"login": viewer},
             "repository": {
                 "pullRequest": {
+                    "reactionGroups": reactions(pr_reactors),
                     "comments": {
                         "nodes": [
-                            {"body": body, "author": {"login": author}}
+                            {"body": body, "author": {"login": author},
+                             "authorAssociation": association,
+                             "reactionGroups": reactions(comment_reactors)}
                             for body in bodies
                         ],
                         "pageInfo": {
                             "hasNextPage": next_page,
                             "endCursor": cursor,
                         },
-                    }
+                    },
+                    "reviews": {
+                        "nodes": [
+                            {"author": {"login": login}}
+                            for login in (review_authors or [])
+                        ],
+                        "pageInfo": {"hasNextPage": False, "endCursor": None},
+                    },
+                    "reviewThreads": {
+                        "nodes": [{"comments": {"nodes": [
+                            {"author": {"login": login}}
+                        ]}} for login in (thread_authors or [])],
+                        "pageInfo": {"hasNextPage": False, "endCursor": None},
+                    },
                 }
             }
         }
@@ -159,7 +183,7 @@ class ProjectResolutionTest(unittest.TestCase):
 
 
 class RequestHistoryTest(unittest.TestCase):
-    def test_counts_only_requests_naming_this_head(self):
+    def test_counts_every_request_on_the_pr(self):
         bodies = [
             f"@codex review for lenses at exact head `{SHA}`.",
             f"@codex review for lenses at exact head `{OTHER_SHA}`.",
@@ -170,7 +194,11 @@ class RequestHistoryTest(unittest.TestCase):
             "unrelated comment",
             f"quoted text\n@codex review not at line start {SHA}",
         ]
-        self.assertEqual(review_request.prior_requests(bodies, SHA), [bodies[0]])
+        self.assertEqual(review_request.prior_requests(bodies), [*bodies[:3], bodies[4]])
+
+    def test_request_with_a_sender_preamble_spends_the_budget(self):
+        body = f"Sender: Claude.\n\n@codex review for lenses at exact head `{SHA}`."
+        self.assertEqual(review_request.prior_requests([body]), [body])
 
     def test_paginates_until_the_initial_request_is_found(self):
         first = ["later"] * review_request.COMMENT_PAGE_SIZE
@@ -183,11 +211,12 @@ class RequestHistoryTest(unittest.TestCase):
                 page([initial]),
             ],
         ) as run_json:
-            bodies = review_request.pr_comment_bodies(
+            bodies, connector_seen = review_request.pr_review_history(
                 1, "pixexid", "llm-collab"
             )
         self.assertEqual(bodies[-1], initial)
-        self.assertIn("after=cursor-1", run_json.call_args_list[1].args[0])
+        self.assertFalse(connector_seen)
+        self.assertIn("commentsAfter=cursor-1", run_json.call_args_list[1].args[0])
 
     def test_fails_closed_when_history_bound_is_exhausted(self):
         with (
@@ -199,7 +228,7 @@ class RequestHistoryTest(unittest.TestCase):
             ),
         ):
             with self.assertRaisesRegex(SystemExit, "declared bound"):
-                review_request.pr_comment_bodies(1, "pixexid", "llm-collab")
+                review_request.pr_review_history(1, "pixexid", "llm-collab")
 
     def test_fails_closed_when_pagination_cursor_does_not_advance(self):
         with mock.patch.object(
@@ -211,7 +240,7 @@ class RequestHistoryTest(unittest.TestCase):
             ],
         ):
             with self.assertRaisesRegex(SystemExit, "did not advance"):
-                review_request.pr_comment_bodies(1, "pixexid", "llm-collab")
+                review_request.pr_review_history(1, "pixexid", "llm-collab")
 
     def test_fails_closed_when_page_bound_is_exhausted(self):
         with (
@@ -226,19 +255,63 @@ class RequestHistoryTest(unittest.TestCase):
             ),
         ):
             with self.assertRaisesRegex(SystemExit, "page bound"):
-                review_request.pr_comment_bodies(1, "pixexid", "llm-collab")
+                review_request.pr_review_history(1, "pixexid", "llm-collab")
 
-    def test_ignores_requests_from_other_commenters(self):
+    def test_counts_requests_from_authorized_workers(self):
         request = f"@codex review for lenses at exact head `{SHA}`."
         with mock.patch.object(
             review_request,
             "run_json",
-            return_value=page([request], author="untrusted-commenter"),
+            return_value=page(
+                [request], author="other-worker", association="COLLABORATOR"
+            ),
         ):
-            self.assertEqual(
-                review_request.pr_comment_bodies(1, "pixexid", "llm-collab"),
-                [],
+            bodies, connector_seen = review_request.pr_review_history(
+                1, "pixexid", "llm-collab"
             )
+        self.assertEqual(review_request.prior_requests(bodies), [request])
+        self.assertFalse(connector_seen)
+
+    def test_untrusted_comment_cannot_spend_the_fallback_budget(self):
+        request = f"@codex review for lenses at exact head `{SHA}`."
+        with mock.patch.object(
+            review_request,
+            "run_json",
+            return_value=page(
+                [request], author="untrusted-commenter", association="NONE"
+            ),
+        ):
+            bodies, connector_seen = review_request.pr_review_history(
+                1, "pixexid", "llm-collab"
+            )
+        self.assertEqual(bodies, [])
+        self.assertFalse(connector_seen)
+
+    def test_connector_review_spends_the_fallback_budget(self):
+        with mock.patch.object(
+            review_request,
+            "run_json",
+            return_value=page([], review_authors=[review_request.CONNECTOR_LOGIN]),
+        ):
+            bodies, connector_seen = review_request.pr_review_history(
+                1, "pixexid", "llm-collab"
+            )
+        self.assertEqual(bodies, [])
+        self.assertTrue(connector_seen)
+
+    def test_connector_reaction_or_thread_spends_the_fallback_budget(self):
+        for kwargs in (
+            {"comment_reactors": [review_request.CONNECTOR_LOGIN]},
+            {"pr_reactors": [review_request.CONNECTOR_LOGIN]},
+            {"thread_authors": [review_request.CONNECTOR_LOGIN]},
+        ):
+            with self.subTest(kwargs=kwargs), mock.patch.object(
+                review_request, "run_json", return_value=page(["note"], **kwargs),
+            ):
+                _bodies, connector_seen = review_request.pr_review_history(
+                    1, "pixexid", "llm-collab"
+                )
+            self.assertTrue(connector_seen)
 
 
 class MainFlowTest(unittest.TestCase):
@@ -271,8 +344,8 @@ class MainFlowTest(unittest.TestCase):
             mock.patch.object(review_request, "local_head", return_value=local),
             mock.patch.object(
                 review_request,
-                "pr_comment_bodies",
-                return_value=comments or [],
+                "pr_review_history",
+                return_value=(comments or [], False),
             ),
             mock.patch.object(review_request, "post_comment"),
         )
@@ -293,58 +366,40 @@ class MainFlowTest(unittest.TestCase):
                 review_request.main(INITIAL_ARGS)
         post.assert_not_called()
 
-    def test_refuses_second_initial_request_for_same_head(self):
-        initial = f"@codex review for lenses at exact head `{SHA}`."
+    def test_refuses_second_request_even_after_the_head_changes(self):
+        initial = f"@codex review for lenses at exact head `{OTHER_SHA}`."
         patches = self.patches(comments=[initial])
         with patches[0], patches[1], patches[2], patches[3], patches[4] as post:
-            with self.assertRaisesRegex(SystemExit, "--retrigger"):
+            with self.assertRaisesRegex(SystemExit, "one-pass budget is spent"):
                 review_request.main(INITIAL_ARGS)
         post.assert_not_called()
 
-    def test_retrigger_requires_one_initial_request(self):
-        args = ["--pr", "1", "--project", "llm-collab", "--retrigger"]
+    def test_refuses_when_the_automatic_connector_already_reviewed(self):
         patches = self.patches()
+        patches = (*patches[:3], mock.patch.object(
+            review_request, "pr_review_history", return_value=([], True)
+        ), patches[4])
         with patches[0], patches[1], patches[2], patches[3], patches[4] as post:
-            with self.assertRaisesRegex(SystemExit, "no initial request"):
-                review_request.main(args)
+            with self.assertRaisesRegex(SystemExit, "automatic connector artifact"):
+                review_request.main(INITIAL_ARGS)
         post.assert_not_called()
-
-    def test_retrigger_repeats_initial_scope_verbatim(self):
-        initial = f"@codex review for original lenses at exact head `{SHA}`."
-        args = ["--pr", "1", "--project", "llm-collab", "--retrigger"]
-        patches = self.patches(comments=[initial])
-        with patches[0], patches[1], patches[2], patches[3], patches[4] as post:
-            self.assertEqual(review_request.main(args), 0)
-        body = post.call_args.args[-1]
-        self.assertTrue(body.startswith(initial))
-        self.assertIn(review_request.RETRIGGER_NOTE, body)
-
-    def test_retrigger_rejects_new_scope(self):
-        args = [
-            "--pr",
-            "1",
-            "--project",
-            "llm-collab",
-            "--retrigger",
-            "--focus",
-            "changed",
-        ]
-        with self.assertRaisesRegex(SystemExit, "cannot amend its scope"):
-            review_request.main(args)
 
     def test_tier_a_requires_lane_contract(self):
         args = INITIAL_ARGS[:-2]
         with self.assertRaisesRegex(SystemExit, "Tier A requires --contract"):
             review_request.main(args)
 
-    def test_tier_c_is_refused_before_posting(self):
-        with self.assertRaisesRegex(SystemExit, "Tier C changes do not request"):
-            review_request.main(
-                [
-                    "--pr", "1", "--project", "llm-collab", "--tier", "C",
-                    "--focus", "mechanical prose",
-                ]
-            )
+    def test_manual_fallback_is_tier_a_only(self):
+        for tier in ("B", "C"):
+            with self.subTest(tier=tier), self.assertRaisesRegex(
+                SystemExit, "manual fallback is Tier A only"
+            ):
+                review_request.main(
+                    [
+                        "--pr", "1", "--project", "llm-collab", "--tier", tier,
+                        "--focus", "mechanical prose",
+                    ]
+                )
 
     def test_head_move_before_post_has_no_side_effect(self):
         patches = self.patches(heads=[SHA, OTHER_SHA])
@@ -405,103 +460,9 @@ class RequestShapingTest(unittest.TestCase):
         self.assertNotIn("private repository", unknown)
         self.assertNotIn("public repository", unknown)
 
-    def test_delta_scoped_body_names_base_and_p0_only_rule(self):
-        body = review_request.build_request_body(
-            "lenses", SHA, contract=352, delta_base=OTHER_SHA
-        )
-        self.assertIn(f"delta `{OTHER_SHA}..{SHA}`", body)
-        self.assertIn("outside the delta only when P0", body)
-        self.assertIn("lane contract in #352", body)
-        self.assertNotIn("full diff", body)
-
-    def test_full_audit_body_when_no_delta_base(self):
+    def test_manual_fallback_is_always_a_full_audit(self):
         body = review_request.build_request_body("lenses", SHA, contract=352)
         self.assertIn("full diff", body)
-
-    def test_settled_families_are_named_as_do_not_reraise(self):
-        body = review_request.build_request_body(
-            "lenses", SHA, settled="budget reconstruction, hostile filesystem"
-        )
-        self.assertIn("do not re-raise", body)
-        self.assertIn("budget reconstruction, hostile filesystem", body)
-
-    def test_settled_text_cannot_name_a_head(self):
-        with self.assertRaisesRegex(SystemExit, "caller text"):
-            review_request.reject_caller_supplied_shas({"settled": f"at {SHA}"})
-
-    def test_prior_heads_skip_unparseable_and_non_request_bodies(self):
-        bodies = [
-            f"@codex review for lenses at exact head `{OTHER_SHA}`.",
-            "@codex review for lenses with no head",
-            "unrelated comment",
-            f"@codex review for lenses at exact head `{SHA}`.",
-        ]
-        self.assertEqual(
-            review_request.prior_request_heads(bodies), [OTHER_SHA, SHA]
-        )
-
-
-class DeltaScopeMainTest(unittest.TestCase):
-    def setUp(self):
-        patcher = mock.patch.object(review_request, "require_contract")
-        patcher.start()
-        self.addCleanup(patcher.stop)
-        visibility = mock.patch.object(
-            review_request, "repo_is_private", return_value=True
-        )
-        visibility.start()
-        self.addCleanup(visibility.stop)
-
-    def patches(self, *, comments: list[str]):
-        return (
-            mock.patch.object(
-                review_request,
-                "repo_coordinates",
-                return_value=("pixexid", "llm-collab"),
-            ),
-            mock.patch.object(
-                review_request, "pr_head", side_effect=[SHA, SHA, SHA]
-            ),
-            mock.patch.object(review_request, "local_head", return_value=SHA),
-            mock.patch.object(
-                review_request, "pr_comment_bodies", return_value=comments
-            ),
-            mock.patch.object(review_request, "post_comment"),
-        )
-
-    def test_delta_request_uses_prior_head_and_carries_settled(self):
-        prior = f"@codex review for lenses at exact head `{OTHER_SHA}`."
-        patches = self.patches(comments=[prior])
-        with patches[0], patches[1], patches[2], patches[3], patches[4] as post:
-            self.assertEqual(
-                review_request.main([*INITIAL_ARGS, "--settled", "budget family"]), 0
-            )
-        body = post.call_args.args[-1]
-        self.assertIn(f"delta `{OTHER_SHA}..{SHA}`", body)
-        self.assertIn("do not re-raise: budget family", body)
-
-    def test_first_request_on_a_pr_remains_a_full_audit(self):
-        patches = self.patches(comments=["unrelated comment"])
-        with patches[0], patches[1], patches[2], patches[3], patches[4] as post:
-            self.assertEqual(review_request.main(INITIAL_ARGS), 0)
-        body = post.call_args.args[-1]
-        self.assertIn("full diff", body)
-        self.assertIn("private repository", body)
-
-    def test_first_request_rejects_settled_families(self):
-        patches = self.patches(comments=["unrelated comment"])
-        with patches[0], patches[1], patches[2], patches[3], patches[4] as post:
-            with self.assertRaisesRegex(SystemExit, "requires a prior requested head"):
-                review_request.main(
-                    [*INITIAL_ARGS, "--settled", "budget family"]
-                )
-        post.assert_not_called()
-
-    def test_unparseable_prior_falls_back_to_full_audit(self):
-        patches = self.patches(comments=["@codex review for lenses with no head"])
-        with patches[0], patches[1], patches[2], patches[3], patches[4] as post:
-            self.assertEqual(review_request.main(INITIAL_ARGS), 0)
-        self.assertIn("full diff", post.call_args.args[-1])
 
 
 class CommandContractTest(unittest.TestCase):

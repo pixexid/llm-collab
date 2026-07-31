@@ -124,12 +124,37 @@ bin/llm-collab worker.py start-pi \
   --repo-target <repo-id>
 ```
 
-`start-pi` creates a fresh Pi Web tab, restores the agent's pinned
+For the first profile in a project, provide the profile and exact Pi runtime
+home explicitly instead of fabricating history:
+
+```bash
+bin/llm-collab worker.py start-pi \
+  --agent <agent-id> --project <project-id> --chat <CHAT-ID> \
+  --repo-target <repo-id> \
+  --provider <provider-id> --model <model-id> --thinking <level> \
+  --runtime-home <absolute-pi-runtime-home>
+```
+
+`start-pi` creates a fresh Pi Web session, restores the agent's pinned
 provider/model/thinking profile, registers the exact native session in the
 canonical workspace, starts one persistent `monitor_watch_path` on that
 session's event file, and waits for the worker's bootstrap marker. It fails
-closed instead of guessing when the project has no eligible profile history or
-the profile is ambiguous, corrupt, or unreadable.
+closed instead of guessing when the profile is ambiguous, corrupt, unreadable,
+or newer than the last complete fingerprint. The explicit first-profile form is
+the only zero-history exception.
+
+Install the lifecycle extension once for the Pi runtime, then reload Pi:
+
+```bash
+mkdir -p '<absolute-pi-runtime-home>/agent/extensions'
+ln -sfn \
+  '<absolute-workspace>/pi-extensions/llm-collab-lifecycle.ts' \
+  '<absolute-pi-runtime-home>/agent/extensions/llm-collab-lifecycle.ts'
+```
+
+The extension deactivates the old exact binding on switch, fork, shutdown, and
+reload. Without it, a dead native session can remain dispatchable after its
+monitor is gone; `start-pi` does not install the extension for you.
 
 The returned `verified=true` proves the canonical binding was created. Complete
 setup with one disposable durable packet targeted through that binding; require
@@ -232,10 +257,11 @@ JSON. `--seconds` bounds the run.
 
 ## 7. Getting reviewed
 
-**Codex code review is manual only.** Automatic review is off; nothing arrives
-unless someone asks. **Do not wait for a review nobody requested.**
+GitHub Codex review starts automatically when a PR is opened or marked ready.
+**Every PR waits for that first bot pass before merge.** Do not infer a pass from
+green checks, silence, or a low review tier.
 
-Whether you must request one is decided by the Tier A/B/C rule in
+Whether a manual fallback is allowed is decided by the Tier A/B/C rule in
 [`AGENTS.md` → Requesting Code Review](../../AGENTS.md#requesting-code-review-all-workers-every-repository).
 **There is deliberately no short version, of the inclusions or the exclusions.**
 Both paraphrases drifted. The Tier C one dropped the canonical qualifiers —
@@ -246,8 +272,8 @@ so a worker could classify a mandatory change as needing no review. Read the tie
 lists in `AGENTS.md` itself; a summary of them here is a second source that goes
 stale the moment the first one moves.
 
-Issue one *initial* request, on the head you believe is final. The command reads
-the PR and local heads itself; never type the SHA:
+For Tier A only, if the automatic review did not start, issue one fallback
+request. The command reads the PR and local heads itself; never type the SHA:
 
 ```bash
 python bin/review_request.py --pr <number> --project <project_id> \
@@ -259,22 +285,17 @@ The generated comment states the SHA. A connector `+1` counts as CLEAN only whil
 the head still equals the SHA the request named, so a request without one cannot be
 satisfied by a reaction.
 
-An amendment stales the review; request again on the new final head. Any finding
-that arrives is adjudicated in writing whatever the tier — including a finding whose
+Do not request a second bot pass after an amendment. Any finding that arrives is
+adjudicated in writing whatever the tier — including a finding whose
 thread you resolve — the merge checklist enumerates every thread, resolved or not,
 precisely because a resolved-and-unanswered one is the way a finding gets lost.
 
-The one-initial-request limit is not a ban on ever asking twice. If the connector
-silently drops your request and no **terminal** signal arrives, the
-**single request-anchored re-trigger** in
-[`commit-push-prs.md`](commit-push-prs.md) is the explicit exemption and the only
-recovery — without it a Tier A head would sit pending forever.
+If neither the automatic trigger nor the one fallback request produces a terminal
+review, the PR is blocked on review infrastructure. Waiting longer is not a pass.
 
-An `eyes` reaction is not a terminal signal. It does not exit requested-review
-precedence and does not reset the request clock, so a head that got `eyes` and
-nothing else still receives the re-trigger and, if that too stays silent, the
-lane owner and release-gate worker's exact-head disposition. "A reaction arrived"
-is not the test; a *terminal* signal is.
+An `eyes` reaction is not a terminal signal; it means pickup only. A PR with
+`eyes` and nothing else remains blocked on its first pass. "A reaction arrived"
+is not the test; a *terminal* review is.
 
 ## 8. When something looks wrong
 
@@ -283,7 +304,7 @@ is not the test; a *terminal* signal is.
 | Peer never replies; their thread is idle | packet refused at dispatch | check the watcher log (step 5); re-send with `--repo-targets` |
 | `deliver.py` prints `DURABLE WRITE OK — RUNTIME DISPATCH REFUSED` | packet scope not a subset of the recipient's | declare the right `--repo-targets` |
 | `blocker: the recipient's binding could not be READ` | the binding file exists but is unreadable | repair or remove that binding; nothing will wake them until then |
-| Waiting a long time for a bot review | nobody requested one | see step 7; auto review is off |
+| Waiting a long time for a bot review | automatic review did not start or stalled | see step 7; use the one Tier A fallback request, otherwise report the review-infrastructure blocker |
 | `codex_stream` refuses with "not registered in projects.json" | project not registered, or wrong id | register it, or correct the id |
 | `codex_stream` refuses naming two different homes | binding and session disagree on `CODEX_HOME` | re-register the session; the pair is torn |
 | Your reply reached the wrong session | replied in a different chat than the request | reply in the originating chat |
@@ -295,7 +316,7 @@ broken. Each line is a merged change and the symptom it produces.
 
 | Change | What you see if you did not know |
 |---|---|
-| Review is **manual only** | You wait indefinitely for a bot review that will never arrive. See step 7. |
+| Review is automatic and mandatory once per PR | Do not merge before its first terminal pass. See step 7. |
 | `deliver.py` refuses an out-of-scope packet up front | `autobridge_ready: false` with `route_ambiguous`, and a loud banner. Previously it reported success and dropped the packet silently. |
 | New field `binding_unreadable_blocker` in `deliver.py` output | `true` means the recipient's binding exists but could not be **read**. Every wake flag is false and nothing will reach them until it is repaired or removed — this is the one refusal with no automatic fallback. |
 | `codex_stream.py` exists | You can watch a peer's thread live instead of guessing whether it is working. Step 6. |

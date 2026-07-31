@@ -1,4 +1,4 @@
-<!-- CONTRACT_VERSION: 8 -->
+<!-- CONTRACT_VERSION: 9 -->
 # AGENTS.md
 
 ## This file is the source of truth
@@ -45,6 +45,11 @@ workflows below.
 
 ### Recent contract changes
 
+Contract v9 (2026-07-31) makes the configured GitHub Codex review a mandatory
+one-pass PR gate. Every PR waits for that first bot review before merge. Fix and
+adjudicate its findings, verify the amended head locally, and do not request a
+second bot pass. No elapsed time or review tier bypasses the first pass.
+
 Contract v8 (2026-07-31) adds the shared philosophy above: simple complete changes,
 current primary evidence, early use of existing capabilities, durable collaboration,
 discriminating proof, preserved knowledge, and finished outcomes are universal worker
@@ -52,7 +57,7 @@ defaults.
 
 Contract v7 (2026-07-30) makes review **one pass, not a loop**. Request the
 bot/connector review **once per PR** — not once per amended head. Fix what that
-single pass (plus the one durable Codex review of record) surfaces, verify the fix
+single pass (plus the one independent local review of record) surfaces, verify the fix
 at the new exact head yourself (focused tests green and the fix visibly closes the
 findings), and **merge**. Do **not** re-request a review on the fixed head, and do
 **not** re-review each new head: the per-candidate-head re-request cycle is retired
@@ -77,8 +82,9 @@ all of it:
   the review verifies the diff against it;
 - findings route **per-finding** at arrival — contract violations and regressions
   block, pre-existing issues and broadenings defer in writing;
-- **One external reviewer per head**: the requested connector review is that
-  head's external gate, and a second model review must not be run;
+- **One external bot review per PR**: the first connector pass is the PR's
+  external gate, and amended heads use local exact-head proof rather than a
+  second model review;
 - the cap default is **merge-with-followups**; 3 amended heads or 4 hours in
   review-fix forces a recorded merge-with-followups-or-close decision;
 - review requests are generated mechanically by `bin/review_request.py`; a
@@ -147,9 +153,11 @@ runtime session, starting your watcher, and repairing your own environment. An o
 naming the work — "implement X with zcode on project Y" — is the whole instruction; the
 setup it implies is yours.
 
-For Pi workers, use the one-command first-start flow in
+For Pi workers, install the lifecycle extension once, then use the start flow in
 [`collab-thread-quickstart.md`](docs/workflows/collab-thread-quickstart.md#pi-workers);
-do not duplicate its registration and monitor setup by hand.
+do not duplicate its registration and monitor setup by hand. A worker with no
+eligible project profile supplies its profile and runtime home explicitly on that
+first start; later starts restore the recorded profile.
 
 **Genuinely operator-owned**, and worth stopping for: credentials and account
 settings, legal or financial commitments, destructive actions outside normal
@@ -201,9 +209,11 @@ autolink in a merge commit body, and in both cases the adjacent prose was
 
 ## Requesting Code Review (all workers, every repository)
 
-Codex code review is **manual only**. Automatic review is off account-wide, so a
-review happens when a worker asks for it and never otherwise. Do **not** wait for a
-bot review that nobody requested.
+GitHub Codex review is automatic when a PR is opened or marked ready. **Every PR
+waits for that first bot review before merge.** A clean first pass may proceed
+through the remaining gates. If it reports findings, fix or disposition them,
+verify the amended exact head locally, and merge without requesting a second bot
+pass. Silence, elapsed time, and review tier never substitute for the first pass.
 
 This section is worker-facing and applies in **every** repository a lane touches, not
 only this one. It is reachable from every worker because this file is Required
@@ -211,7 +221,8 @@ Reading. It is distinct from the `## Code Review Rules` section below, which is 
 by the reviewer when it reviews *this* repository and must be authored per repository
 from that repository's own incidents.
 
-**Tier A — you MUST request a review on the candidate final head.** Any change
+**Tier A — you MUST ensure the automatic review starts, and request it manually
+only if the automatic trigger did not start.** Any change
 touching credentials, authentication or an authority decision; money, provider or
 idempotency paths; **input we do not control** — network peers, another project's
 data, an external API, or anything a user or third party supplies — including its
@@ -220,22 +231,23 @@ shape, authority or source selection, side effects, persistence, ordering,
 deadline/resource behaviour, compatibility, failure handling); concurrency, ordering,
 partial state, TOCTOU or atomicity; migrations, DDL, grants or RLS; a defect family
 that has already produced a finding in that repository; or tests and docs that govern
-or can weaken any of the above. **Failing to request is itself a gate violation.**
+or can weaken any of the above. **Failing to ensure that first pass starts is itself
+a gate violation.**
 
-**Tier B — your discretion.** New feature surface or a multi-module refactor with no
+**Tier B — do not add a manual request when the automatic review started.** New feature surface or a multi-module refactor with no
 Tier A contact; proof-reshaping test changes that do not cover a Tier A invariant;
 normative docs for non-Tier-A behaviour.
 
-**Tier C — do not request.** Formatting, lint or mechanical changes; non-normative
+**Tier C — do not request manually, but still wait for the automatic first pass.** Formatting, lint or mechanical changes; non-normative
 prose and comments; additive tests with no gate, fixture or baseline change;
 single-caller behaviour-preserving edits.
 
-Request with `@codex review for <focus>`, naming **every** Tier A family the diff
+When the Tier A fallback is needed, request with `@codex review for <focus>`, naming **every** Tier A family the diff
 touches, asking for the full diff through those lenses, and **stating the exact head
 SHA the request is for**. The SHA is not decoration: a connector `+1` is terminal only
 while the head still equals the SHA that request named, so a request without one leaves
-the reaction path unsatisfiable and there is nothing to bind the verdict to. **Per
-Contract v7, request this review ONCE per PR** — not once per amended head. Fix what
+the reaction path unsatisfiable and there is nothing to bind the verdict to. **Request
+at most ONCE per PR** — automatic or manual, not once per amended head. Fix what
 that single pass surfaces, verify the fixed head yourself, and merge; do **not**
 re-request a review on the fixed head and do **not** loop. A remaining edge-case
 finding becomes a tracked follow-up issue, not another review round.
@@ -258,7 +270,7 @@ reads against *accidents* (a huge directory, a hung mount, a corrupt record) and
 there. Hardening a local tool against a hostile local filesystem has no natural floor
 and will loop forever; llm-collab#306 spent eleven review rounds proving it.
 
-Canonical detail — lane contract, per-finding routing, one reviewer per head,
+Canonical detail — lane contract, per-finding routing, one bot pass per PR,
 terminal signals, the lane budget, and ownership — is in
 `docs/workflows/commit-push-prs.md` and `docs/workflows/review-and-handoff.md`.
 Which repositories are enrolled and what the rule audit found:

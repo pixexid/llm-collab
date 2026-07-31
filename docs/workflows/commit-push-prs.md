@@ -85,8 +85,8 @@ not the implementer. Treat this as the primary code-review gate:
 - only then commit, push, and open the PR
 
 This manual branch-diff review happens once before the initial PR-ready head.
-GitHub Codex PR review is the external reviewer for later exact heads, not the
-mechanism that should discover routine issues for the first time.
+The first automatic GitHub Codex pass is the PR's only external bot review;
+later heads receive local exact-head verification.
 
 The standard Amiga mechanism is collab/doorbell review: the implementer sends
 the final branch, base ref or merge base, final head SHA, scope, and verification
@@ -118,8 +118,8 @@ live-head SHA binding remain mandatory.
 
 Batch related findings locally into one amendment instead of producing one
 pushed head per micro-fix. Verify the affected invariants and resulting
-base-to-head coherence locally, then use the connector as the external reviewer
-for the new exact head. Do not run a second independent model review.
+base-to-head coherence locally. Do not run another bot or independent model
+review on the amended head.
 
 ### Per-finding disposition at arrival (defer-first)
 
@@ -193,8 +193,9 @@ Hard cycle cap, independent of family counting:
   still open here, so a cap disposition is the rare case where the lane
   contract itself could not be satisfied — which usually means the authority
   boundary was wrong, and the fix is a new contract, not another reorder. A capped
-  head with zero open actionable findings and a completed exact-head connector review
-  follows the normal merge gate with no convergence-disposition label.
+  head with zero open actionable findings, a completed first connector pass,
+  and local exact-head verification follows the normal merge gate with no
+  convergence-disposition label.
   "No further amendment" bars content changes only; the publication steps the
   chosen disposition itself requires — pushing the already-reviewed head,
   opening its PR, and merging — remain permitted, so a lane that caps during
@@ -218,19 +219,19 @@ When a project supports structured review notes, the disposition may be
 recorded as the optional line `Convergence-disposition: <value>` and must use
 exactly one of the five values above.
 
-One final exact-head full-diff gate is mandatory before merge. Automated-review
+One final exact-head local full-diff gate is mandatory before merge. Automated-review
 findings on the current head that were classified contract-violating remain
 blocking until fixed or individually accepted under the bounded-risk cap
 disposition above; out-of-contract findings follow the defer-first disposition
 and do not block. After a pushed
 amendment, stale review-attestation CI is an expected transitional state rather
 than evidence that product verification failed. Refresh the PR body only after
-the amended head passes its required review.
+the amended head passes its required local verification.
 
-There is no automatic GitHub Codex review flow to rely on: automatic review is off
-account-wide. A review exists because someone requested it. Consume
-everything in [the reviewed artifact set](#reviewed-artifact-set) that appears, and see
-the policy below for when requesting one is mandatory.
+GitHub Codex review is configured to start when a PR opens or becomes ready.
+Every PR waits for that first pass before merge. Consume everything in
+[the reviewed artifact set](#reviewed-artifact-set); silence and elapsed time are
+never a substitute for the bot's terminal result.
 
 ## PR requirements
 
@@ -265,60 +266,44 @@ orchestrator has inspected:
 
 Do not idle on review while `mergeStateStatus` is dirty. A dirty merge state is
 an active blocker: refresh the branch against the target base, resolve conflicts,
-rerun verification, push, and then request/inspect review again.
+rerun verification, push, then locally verify the amended head and inspect the
+existing first-pass review record. Do not request a second bot pass.
 
 ### GitHub Codex review policy
 
-> **Reviews are MANUAL ONLY (operator decision, 2026-07-25).** Automatic review is
-> off account-wide. Nothing arrives unless someone asks for it, so the question is
-> no longer "how long do we wait" but "must this change be reviewed at all". That
-> is decided by the Tier A/B/C rule in
+> **One automatic bot pass is mandatory for every PR (operator decision,
+> 2026-07-31).** Do not merge an open PR before that pass completes. The Tier
+> A/B/C rule in
 > [`AGENTS.md` → Requesting Code Review](../../AGENTS.md#requesting-code-review-all-workers-every-repository),
-> which is the **only** place that defines it. This copy previously restated the tiers
-> and went stale the moment Tier A was narrowed — the restatement still carried the
-> superseded meaning in which "untrusted" covered our own workspace. Pointing is the
-> rule this repository sets for exactly that reason.
+> decides only whether a missing automatic trigger also requires the one manual
+> fallback request; it never waives the automatic first-pass gate.
 >
-> What matters here: **Tier A must request on the candidate final head**, failing to
-> request is itself a gate violation, **Tier B/C do not wait** when nothing was
-> requested, and any finding that does arrive is adjudicated in writing at every tier.
+> What matters here: wait for the first pass, adjudicate every finding, fix the
+> serious defects, verify the amended exact head locally, and do not request a
+> second bot pass.
 >
-> "Request once" means **one initial request per candidate final head**, not once
-> per PR: any amendment stales the review and requires a new request. The limit
-> governs *initial* requests only — the single request-anchored re-trigger below is
-> an explicit exemption, and is the only recovery for a silently dropped request.
-> Read as absolute it leaves a Tier A worker choosing between violating it and
-> having no recovery at all.
+> "One pass" means one review per PR, not one per amended head. A missing or
+> stalled first pass is a review-infrastructure blocker, not permission to merge.
 
-**Request late, and request shaped.** The first connector request for a lane
-goes out only when the worker would merge that head the same day absent the
-bot: lane contract written, pre-PR cold review clean, local verification
-green. The connector review is the final gate, never the design-discovery
-mechanism. Requests are generated by `bin/review_request.py`, which shapes
-them: a first request on a PR is a full audit; a request for a later head is
-scoped to the delta from the previous requested head and names the families
-already adjudicated on this PR, and every request carries the lane's threat
-model and recorded accepted risks so the reviewer does not re-raise settled
-or out-of-threat-model findings. A connector finding about a family the
-request named as settled is answered with the recorded disposition and
-resolved, not re-fixed (GH-357; the deleted-comment request-budget family was
-raised on four consecutive heads of #356 and answered four times).
+The automatic connector pass starts when the PR opens. `bin/review_request.py`
+exists only as the one Tier A fallback when that automatic trigger is absent;
+it permits exactly one full-audit request for the PR. The connector review is
+a final gate, never a design-discovery loop.
 
-Use `local_required_github_codex_opportunistic` as the default queue-runner
-policy:
+Use the mandatory one-pass GitHub Codex gate:
 
 - the orchestrator's local review and required project gates are mandatory
-- GitHub Codex review/comments are consumed when they appear; under manual-only
-  they appear because they were requested
+- GitHub Codex review/comments are consumed before every merge
 - a clean `chatgpt-codex-connector` review/comment that explicitly covers the
   exact current OID is terminal for that head
-- a connector-authored `+1` (`thumbs-up`) **on the exact manual-review request
+- a connector-authored `+1` (`thumbs-up`) **on the exact manual fallback request
   comment** is terminal CLEAN, after pickup, while the PR head still equals the SHA
   that request named. Verify all six: the actor is the connector, the reaction is
   on that request comment, the requested SHA, the current head, that this request is
   the latest for this head, and that it has not been edited since the reaction was
-  left. Any head change voids it and requires a new request. An ambiguous or removed reaction is
-  non-terminal, and a bare `eyes` reaction or the request comment itself is never a
+  left. Any head change voids that reaction-only clean signal. It does not create
+  permission for a second bot pass: locally prove the amended head or remain blocked.
+  An ambiguous or removed reaction is non-terminal, and a bare `eyes` reaction or the request comment itself is never a
   verdict — `eyes` means accepted and in progress
 - the meaning of `+1` does **not** vary by tier. Tier A takes its strength from the
   mandatory final-head request, required local exact-head verification, mutation and
@@ -439,155 +424,63 @@ else is a second source that goes stale the moment this one moves.
   current one still carries the `+1` the connector left for the *old* head, and all
   four checks then pass on a review that never happened. If the request artifact has
   been edited since the reaction was left, or is not the most recent request for this
-  head, the reaction is not terminal. What to do next turns on the **re-trigger
-  budget**, not on whether a valid artifact happens to exist right now. If the single
-  request-anchored re-trigger for this head has not been used, use it. If it has been
-  used — whether it is still valid, or was since edited, deleted or otherwise made
-  invalid — the budget is spent and there is no further request to issue: continue to
-  the exact-head release-gate disposition. Reading this as "issue one whenever no valid
-  latest request exists" produces a third same-head request every time an artifact is
-  tampered with, and the single re-trigger is the only exempted recovery
+  head, the reaction is not terminal. Do not issue another request to repair an
+  invalid reaction; hold for a textual first-pass verdict or report the review
+  infrastructure blocker
 - a finding rejected or deferred without a code change is completed by its
   thread-linked disposition accepted by the lane owner and release-gate worker.
   Do not request another connector review on the unchanged head; the exact-head
   review already happened, and another request would violate the one-external-
-  review-per-head rule. Once every thread from that exact-head review has such
+  review-per-PR rule. Once every thread from that exact-head review has such
   a disposition, the completed review is a terminal gate outcome and receives
   the same settle and full artifact re-read as a clean verdict
-- report the exact verdict, or the connector-authored `+1` on the manual-review
+- report the exact verdict, or the connector-authored `+1` on the manual fallback
   request comment with its timestamps and the SHA that request named, and confirm
   that no later push occurred
-- any push creates a new head and invalidates every prior verdict and reaction
-  lifecycle
-- **there is no silence fallback for an unrequested review.** Under manual-only,
-  waiting out a clock for a review nobody asked for is a path that always ends in
-  silence. A Tier A head with no request has exactly one remedy: **issue the
-  request.** Failing to request is itself a gate violation, so an unrequested head
-  is not a head awaiting a waiver — it is a head whose worker has not yet done the
-  mandatory step, and no waiver is available for skipping it. Only once the request
-  exists does the precedence flow below apply: the initial request, its single
-  request-anchored re-trigger, and the two request-anchored expiries, at the end of
-  which a release-gate disposition is the defined outcome. A Tier B/C head with no request
-  does not wait at all. At no tier is quiet a signal: never merge on silence
+- a push after the first pass requires local exact-head verification of every fix;
+  it does not start or require a second bot pass
+- **there is no silence fallback.** A PR with no terminal first bot pass does not
+  merge at any tier. Tier A may issue the one manual fallback request when the
+  automatic trigger did not start; otherwise report the review-infrastructure
+  blocker. At no tier is quiet a signal
 - **no elapsed time is ever a terminal signal.** There is no resettable settle
   that ripens a head for merge. Waiting is what a Tier A head does while a
   requested review is outstanding; it is not a way to acquire the signal
-- **the worker who pushed the change owns re-requesting the amended head, at every
-  tier.** Tier decides whether a review must be *initiated*; once a worker has
-  explicitly requested one, every amended candidate head needs a new exact-head request
-  from the change owner, unless the release-gate worker withdraws the review requirement **for that
-  exact head**. A withdrawal is a durable artifact naming the commit OID
-  it applies to, and **a later push invalidates it**: the next head owes a new request
-  like any other. "Explicit" alone was not enough — a withdrawal recorded on an earlier
-  head could be read as retiring the obligation for every head after it, which turns one
-  decision into a standing exemption nobody granted.
-  Tier C does not make an old-head artifact valid, and a requested Tier C review with no
-  named owner is how an amended head sits waiting for a re-request nobody believes is
-  theirs
-- after every review-fix push, evaluate the new exact head under the same rule:
-  a clean exact-head verdict or head-attributable connector `+1` is terminal.
-  If neither exists, **any head carrying an outstanding request** is not
-  merge-eligible no matter how long it has been quiet — the request, not the tier,
-  is what makes it pending, so an amended Tier B/C head whose review was requested
-  waits exactly as a Tier A head does. Heartbeat inspections observe the wait and
-  merge nothing
+- **the worker who pushed a review fix owns proving that amended exact head.**
+  Rerun the focused and required checks and inspect the fix directly. Do not
+  re-request or withdraw the bot review; the first pass is the PR's review record
 - neither a bot verdict nor a reaction waives required CI, mergeability, the
   lane's required local verification (tests and defect-verbatim mutation
   proof), or full inspection of [the reviewed artifact set](#reviewed-artifact-set).
-  On a head where a connector review has been requested, that review is the
-  external gate for the head: the other exact-head obligations are
-  discharged by that local verification, and a second independent model review
-  on the same head must not be run — it consumes cycle budget and manufactures
-  new findings instead of adding signal. The pre-PR cold full-diff review is
-  unchanged and happens once, before the first PR-ready head.
+  The first connector pass is the PR's external gate; local verification owns
+  amended-head proof. A second model review must not be run. The pre-PR cold
+  full-diff review is unchanged and happens once, before the first PR-ready head.
 
-**All three former no-terminal-artifact fallback variants are deleted, not
-shortened.** Each one measured how long to wait for a review that manual-only
-review never sends unrequested, so each clock always expired -- and its expiry
-handed a Tier A worker a path to merge on nothing. What remains is a
-classification of non-signals, with no clock attached to any of them:
+**All no-terminal-artifact fallbacks are deleted.** Automatic-trigger silence,
+eyes-only artifacts, and prior-head artifacts are non-signals with no clock:
 
-- **No explicit review request.** At Tier A this is a **gate violation to fix,
-  not a delay to wait out**: request the review. At Tier B/C there is nothing to
-  wait for and nothing to merge on.
+- **No terminal first pass.** At Tier A, request once if the automatic trigger
+  never started. At every tier, hold until the bot returns a terminal review.
 - **Eyes-only current-head artifact.** A current-head `eyes` reaction is not a
   terminal signal and never becomes one. It neither blocks nor ripens anything.
-- **Prior-head artifacts only.** Any push creates a new head and invalidates every
-  prior verdict and reaction lifecycle; a prior-head `Codex Review:` body or
-  `eyes`/`+1` reaction is not head-attributable for the current head and is
-  ignored for terminal-signal purposes.
+- **Prior-head artifacts only.** A prior-head clean verdict is not evidence for
+  an unrelated push. After review findings, however, the completed first pass
+  remains the PR review record and the amended head is proved locally.
 
-#### Explicit requested-review precedence
+#### First-pass precedence
 
-An explicitly requested review remains pending until its roughly 30–35-minute
-clock expires unless one of the two connector clean signals or a disposed-review
-completion arrives; it
-never ages into a merge-eligible state, because no silence fallback exists to
-age into. Anchor each clock to the corresponding explicit request artifact's
-GitHub `created_at`, never to the latest push or the time the head became
-reviewable. That clock decides only when to re-trigger once and when to
-escalate -- never when to merge. A current-head `eyes` reaction alone is
-non-terminal: it does not exit requested-review precedence or reset that
-request's clock.
-
-**On a lane with no GitHub surface, every anchor in this section has a mailbox
-equivalent, and nothing else about the flow changes.** Without them a Tier A
-non-GitHub lane could request a review and then stall forever, or invent its own
-timing — which is why they are written here rather than left to the lane:
-
-| GitHub anchor | Mailbox equivalent |
-| --- | --- |
-| request comment naming the head | request packet naming the exact commit OID |
-| the comment's `created_at` | the packet's recorded delivery timestamp |
-| `@codex review` re-trigger comment | a second request packet, same exact OID, marked as the re-trigger |
-| the three exact-head terminal outcomes | a verdict or disposition packet naming that exact OID |
-| PR-wait heartbeat | the same heartbeat cadence against the mailbox thread |
-
-The two clocks, the single re-trigger, the ban on a second one, and the
-exact-head release-gate disposition are unchanged — they are properties of the
-request, not of GitHub. The one asymmetry is the one already stated above: a
-mailbox lane has no reaction-only terminal path, so its terminal signal is
-always a textual verdict packet.
-
-When the initial request's clock expires without a terminal signal, treat that
-request as silently dropped and issue exactly one re-trigger. **The re-trigger
-repeats the full request shape — focus and the exact head SHA — never a bare
-`@codex review`:** a reaction is terminal only when it sits on a comment that
-named the current head, so a SHA-less retry cannot produce a usable signal even
-when the connector answers it.
-The re-trigger is the sole automatic retry and starts its own 30–35-minute clock
-at its GitHub `created_at`. If that clock also expires without a terminal
-signal, do not re-trigger again. The PR remains unmergeable until the lane
-owner and release-gate worker record an explicit disposition bound to the exact
-current head. The disposition must state exactly one of these outcomes: merge of that
-exact head is authorized despite the absent connector terminal signal; or that
-exact head must not merge and remains blocked or is closed. An ambiguous note,
-a disposition not bound to the current head, or an older-head disposition does
-not lift the merge block. Any later push invalidates the disposition and
-restarts exact-head evaluation.
-
-An exact-current-head merge authorization lifts only the missing
-connector-signal subgate caused by the silently dropped requested review. It is
-not a connector terminal signal, is not a third automated terminal-signal
-model, and creates no fallback path. It does not waive required local exact-head
-verification, green required checks, mergeability, a full re-read of
-[the reviewed artifact set](#reviewed-artifact-set), or unresolved-feedback
-handling. If a connector clean signal later
-arrives, its signal-specific settle and reread still apply normally; the
-release-gate disposition does not masquerade as that signal or inherit its
-handling. Report and escalate the stuck review at each expiry. The existing
-PR-wait heartbeat observes these clocks; neither the re-trigger nor the
-release-gate disposition is a new terminal signal or watcher mechanism. The
-longer request-anchored timer exists because a dropped request is
-indistinguishable from a review that is still processing, unlike the
-absent-request variant, where there is nothing to drop.
+The first bot pass is pending until a clean review or a completed review with
+findings arrives. An `eyes` reaction is pickup only. If the automatic trigger did
+not start, Tier A may issue one manual fallback request; do not retry it and do
+not replace a missing terminal review with a timer or disposition. Non-GitHub
+lanes use an exact-OID mailbox request and verdict, with the same no-silence rule.
 
 If the PR is waiting only for remote checks or remote review state, keep it open
 and create or update a Codex heartbeat attached to the current thread with a
 6-minute cadence. Each heartbeat must re-check the PR checks, merge state, and
-[the reviewed artifact set](#reviewed-artifact-set) in full. "Automatic" is dropped
-deliberately: reactions arrive because a review was requested, and a heartbeat that
-waits for an automatic one waits forever.
+[the reviewed artifact set](#reviewed-artifact-set) in full. It waits for the
+configured automatic first pass and reports a stalled trigger; it never converts
+time into a pass.
 
 PR-wait heartbeats are a safety-fuse, not the primary routing path. When a
 heartbeat or queue owner finds actionable PR feedback that needs the implementer
@@ -612,7 +505,7 @@ Codex review gate as complete when any of these holds:
 
 - the latest top-level `chatgpt-codex-connector` review/comment explicitly
   covers the exact current OID and reports no actionable or major issues, or
-- a connector-authored `+1` (`thumbs-up`) sits on **the exact manual-review request
+- a connector-authored `+1` (`thumbs-up`) sits on **the exact manual fallback request
   comment**, the PR head still equals the SHA that request named, and no subsequent
   push occurred. Verify all six: the actor, that request comment, the requested SHA,
   the current head, that this request is the **latest** one for this head, and that it
@@ -624,15 +517,21 @@ Codex review gate as complete when any of these holds:
   head when the required gates above remain clean, and it receives the same
   approximately five-minute post-clean settle and full re-read as a text verdict,
   or
-- the connector completed a review for the exact current OID and every thread
+- the connector completed the PR's first pass clean on a prior OID (by text
+  verdict or request-comment `+1`), and the amended current head has complete
+  local exact-head verification. The original artifact remains the one bot pass;
+  every change since its reviewed/requested OID must be included in the local
+  proof, and no arriving finding may remain unadjudicated, or
+- the connector completed the PR's first review with findings and every thread
   it initiated has a thread-linked disposition accepted by the lane owner and
-  release-gate worker. This disposed-review completion is terminal for the wait
-  on that head and receives the same settle and full artifact re-read.
+  release-gate worker. Any amended current head also needs local exact-head proof.
+  This disposed-review completion receives the same settle and full artifact
+  re-read.
 
 The re-read that follows a reaction covers
 **all of [the reviewed artifact set](#reviewed-artifact-set)**, and
-revalidates all six reaction conditions. A
-new request for an amended head invalidates the older head's `+1`.
+revalidates all six reaction conditions. Do not create a new request for an
+amended head.
 
 For the clean-verdict path, do not merge immediately after the first
 head-named clean artifact. Observe the approximately five-minute post-clean
@@ -640,32 +539,19 @@ settle and then re-read [the reviewed artifact set](#reviewed-artifact-set) in f
 exact-head review raises findings, apply their written dispositions; do not
 request another connector review on the unchanged head.
 
-If no clean verdict, head-attributable connector `+1`, or disposed-review
-completion exists for the exact current head, a Tier A head does not merge — there is
-no elapsed-time substitute. What to do next depends on whether a request exists
-for this head, and the two cases are **not** alternatives:
+If no clean verdict, valid fallback-request `+1`, or disposed-review completion
+exists for this PR, it does not merge at any tier — there is no elapsed-time
+substitute:
 
-- **No request for this head** (never made, or staled by an amendment): issue it.
-  That is the only move. The release-gate-disposition route is not available here —
-  it is reachable only after a request and its single re-trigger have both existed
-  and run out, and offering it as a choice on an unrequested head recreates the
-  closed path where a worker skips review entirely and asks for authorization
-  instead.
-- **A request for this head exists and has gone unanswered**: follow
-  [Explicit requested-review precedence](#explicit-requested-review-precedence)
-  through the single re-trigger to the release-gate disposition. A Tier B/C head **for which no review was requested**
-needs no connector signal at all. A requested review is pending whatever its tier:
-once a request exists, precedence is tier-agnostic, so a voluntarily or
-worker-requested Tier B/C review is outstanding until a terminal signal or an
-exact-head release-gate disposition -- exactly as the fixture matrix records it.
+- **No automatic review exists for this PR**: Tier A issues the one manual
+  fallback request; every other tier reports the review-infrastructure blocker.
+- **The automatic review or fallback request is unanswered**: hold. No elapsed
+  time, tier, or release-gate disposition substitutes for the required first pass.
 Proceed only when all of these are true:
 
-- when a connector review was requested, either it completed for the exact head
-  and every finding has a written disposition accepted by the lane owner and
-  release-gate worker, or both request-anchored clocks expired and an exact-head
-  release-gate disposition lifted the missing review-completion subgate without
-  claiming the connector completed; required local exact-head verification also
-  passed
+- the connector completed the PR's first pass; every finding has a written
+  disposition accepted by the lane owner and release-gate worker; and required
+  local exact-head verification passed after any fixes
 - required checks are green on the latest head
 - the PR is mergeable and `mergeStateStatus` is clean
 - **every arriving finding has a thread-linked written outcome, whatever head it was
@@ -688,31 +574,11 @@ Proceed only when all of these are true:
 - the release-gate worker has recorded the merge decision under the standing
   project policy
 
-Read [the reviewed artifact set](#reviewed-artifact-set) directly. Do not infer the current
-result from stale inline review-thread objects alone. The watcher must report the
-exact current-head verdict, or the connector-authored `+1` on the manual-review
-request comment together with the SHA that request named, with timestamps, and
-confirm that no later push occurred. Where both request-anchored clocks have expired,
-an exact-head release-gate disposition has lifted the missing-signal subgate, **and no
-terminal connector signal has arrived since**, the watcher reports **that
-disposition** instead, naming the head it was given for --
-otherwise the one path the precedence section authorises for a silently dropped
-review cannot be completed, because a connector artifact is precisely what does not
-exist there. A signal that arrives late still wins, and that is an action rather than
-a principle: **after selecting the disposition path and before reporting it or
-merging, re-read [the reviewed artifact set](#reviewed-artifact-set) once more.** Choosing the
-branch is not the same as checking it, and without that read a verdict landing in
-between is completed straight past — skipping the settle and full re-read it is owed.
-If the read finds one, abandon the disposition branch and report the signal instead. A release-gate disposition is
-not a connector terminal signal and never substitutes for one where a signal did
-arrive. Any terminal outcome
-stops the heartbeat from waiting for further artifacts;
-it does not waive post-signal handling. For a head-named clean verdict **and for a
-request-comment `+1` alike**, the approximately five-minute post-clean settle and a full
-re-read of [the reviewed artifact set](#reviewed-artifact-set) remain mandatory before merge. If review feedback lands, fix or respond
-to it, push the update, rerun required local/CI checks, then evaluate the new
-exact head from scratch before
-continuing toward merge.
+Read [the reviewed artifact set](#reviewed-artifact-set) directly. Do not infer the
+result from a review body alone: inline threads carry findings. After the terminal
+first pass, observe the approximately five-minute settle and re-read the full set.
+If feedback landed, fix or respond to it, push, and rerun required local and CI
+checks on the new exact head; do not request a second bot pass.
 
 If the wait cannot self-progress because checks stalled, review state is
 ambiguous, or the implementer has not acknowledged a routed review-fix request,

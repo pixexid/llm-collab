@@ -82,9 +82,9 @@ from implementation (see role model in `task-intake-and-delegation.md`).
   not the pre-PR review of record.
 
 For amended heads, follow the canonical bounded-amendment and convergence rules
-in `commit-push-prs.md`. Batch related findings locally, run the required local
-exact-head verification, and use the requested connector review as the one
-external reviewer for that head. Do not add another independent model review.
+in `commit-push-prs.md`. Batch related findings locally and run the required
+local exact-head verification. The first connector pass remains the PR's one
+external review; do not add another model or bot review.
 
 Count finding rounds by family, where same-family means the same file or the
 same named invariant/mechanism across files. The second round makes the family
@@ -200,15 +200,18 @@ those changes before starting the next lane or ending the thread.
 
 For PR-review wait heartbeats, follow `commit-push-prs.md`: the manual
 branch-diff review happens once before the initial PR-ready head. Amended heads
-receive local exact-head verification and the requested connector review, not a
-second independent model review. Merge
+receive local exact-head verification; the first connector pass remains the
+PR's only bot review. Merge
 from the current thread only after the exact current head has green required
-checks, the PR is mergeable with clean merge state, the requested connector
-review gate is complete, required local exact-head verification is clean, and
+checks, the PR is mergeable with clean merge state, the mandatory one-pass
+connector review gate is complete, required local exact-head verification is clean, and
 [the reviewed artifact set](commit-push-prs.md#reviewed-artifact-set) has no
-actionable finding. Reviews are MANUAL ONLY as of 2026-07-25; nothing arrives unrequested, and whether a change must be reviewed is decided by the Tier A/B/C rule in
+actionable finding. Reviews start automatically for opened or ready PRs, and
+every PR waits for that first pass. The Tier A/B/C rule in
 [`AGENTS.md` → Requesting Code Review](../../AGENTS.md#requesting-code-review-all-workers-every-repository),
-which is the only place that defines it.
+which is the only place that defines it. The completion cases, including a clean
+first pass on a prior OID followed by complete local verification of the amended
+head, are defined only in the canonical terminal list in `commit-push-prs.md`.
 The GitHub Codex gate is complete when the latest
 `chatgpt-codex-connector` review/comment explicitly covers that exact OID with
 no actionable issues, or a connector-authored `+1` (`thumbs-up`) sits on the exact
@@ -240,37 +243,26 @@ artifacts only; it does not waive the handling below:
   settle and full artifact re-read. Any new or unadjudicated finding cancels
   that completion.
 
-Whether a review must be requested at all is the Tier A/B/C rule in
+Whether a missing automatic trigger needs the one manual fallback request is the Tier A/B/C rule in
 [`AGENTS.md` → Requesting Code Review](../../AGENTS.md#requesting-code-review-all-workers-every-repository),
-which is the only place that defines it. The section linked below governs clocks
-and dispositions **after** a review has been requested, and answers a different
-question.
+which is the only place that defines it.
 
-For requested-review silence, follow the canonical
-[Explicit requested-review precedence](commit-push-prs.md#explicit-requested-review-precedence).
-Automation may issue exactly one re-trigger, repeating the focus and exact head
-SHA of the original request, and no further automatic retry is allowed. The
-canonical section is the sole authority for the request-anchored clocks,
-current-head invalidation, the post-timeout disposition choices, and every
-effect of an exact-head release-gate disposition; this compact guidance defines no
-separate disposition effect.
+For first-pass silence, follow the canonical
+[First-pass precedence](commit-push-prs.md#first-pass-precedence).
+Tier A may issue exactly one fallback request when the automatic trigger did not
+start. No retry or elapsed-time disposition replaces the mandatory first pass.
 
-**No silence fallback exists.** All three former no-terminal-artifact variants —
-no explicit review request, eyes-only current-head artifact, prior-head artifacts
-only — are deleted, not shortened. Each measured how long to wait for a review
-manual-only review never sends unrequested, so each always expired into a merge
-on nothing. They remain a classification of non-signals with no clock: at Tier A
-an absent request is a **gate violation to fix, not a delay to wait out**; at
-Tier B/C there is nothing to wait for. This compact handoff rule must not define
-a competing timer or disposition rule.
+**No silence fallback exists.** No automatic artifact, eyes-only artifact, or
+prior-head artifact is a pass. Tier A may repair a missing trigger with its one
+fallback request; every other silent or stalled case remains blocked on review
+infrastructure.
 
 If GitHub Codex comments on the PR, every finding is adjudicated in writing —
 which is not the same as accepted. Two paths, and which one applies depends on
 whether the code changes:
 
-- **Fix it.** Repair the pointed issue, rerun required local verification and
-  checks, then **issue a new exact-head request for the amended head**. Do not
-  run a second independent model review on that head.
+- **Fix it.** Repair the pointed issue and rerun required local exact-head
+  verification and checks. Do not request a second bot or model review.
 - **Reject it.** A finding that is wrong, out of scope, or already handled is
   answered with a written disposition posted on that thread, naming the head it
   was judged at, and accepted by the lane owner and release-gate worker. No code
@@ -281,12 +273,10 @@ Requiring a fix for every finding left an invalid one with no legal move — a
 worker had to either make an unwarranted change or stall — and the governing
 contract asks for adjudication, not compliance.
 
-Automatic review is off, so nothing arrives unrequested: a fix push invalidates
-every prior-head signal and produces no replacement on its own. Waiting on the
-amended head's "automatic artifacts" waits forever. Evaluate that head from
-scratch once the requested signal arrives. Do not substitute a resolved older thread or
-stale inline review-thread object for current-head evidence. Delete the
-heartbeat before post-merge cleanup.
+The first pass is the PR's only bot pass. A fix push does not require another
+one; its findings remain the review record while local exact-head verification
+proves the repair. Do not substitute a resolved thread with no written
+disposition for that evidence. Delete the heartbeat before post-merge cleanup.
 
 When the PR comment needs implementer action, route it through the mailbox and
 doorbell immediately instead of leaving the PR-wait heartbeat to poll in silence.
