@@ -9230,6 +9230,16 @@ class SessionAutobridgeTest(unittest.TestCase):
             agent_id="claude",
             chat_id="CHAT-CLAUDE-A",
             project_id="amiga",
+            title="Wrong repo",
+            target_session_id="runtime-claude-a",
+            repo_targets=["docs"],
+            packet_slug="wrong-repo",
+        )
+        self.add_message(
+            root,
+            agent_id="claude",
+            chat_id="CHAT-CLAUDE-A",
+            project_id="amiga",
             title="For B",
             target_session_id="runtime-claude-b",
             repo_targets=["app"],
@@ -9262,9 +9272,10 @@ class SessionAutobridgeTest(unittest.TestCase):
                 **self.subprocess_env(root),
                 "LLM_COLLAB_READER_RUNTIME_ID": "runtime-claude-a",
             },
-            check=True,
+            check=False,
         )
 
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
         events = [json.loads(line) for line in result.stdout.splitlines()]
         self.assertEqual(
             [packet_a],
@@ -9275,7 +9286,7 @@ class SessionAutobridgeTest(unittest.TestCase):
             any(event["event"].startswith("autobridge_") for event in events)
         )
         self.assertEqual(
-            2,
+            3,
             len(json.loads((root / "agents" / "claude" / "inbox.json").read_text())["unread"]),
         )
         stale = subprocess.run(
@@ -9460,13 +9471,46 @@ class SessionAutobridgeTest(unittest.TestCase):
         ), patch.object(
             watch_inbox_lib,
             "exact_read_messages",
-            return_value=([], [{"path": "Chats/exact/wrong.md", "reason": "repo_mismatch"}]),
+            return_value=(
+                [],
+                [
+                    {
+                        "path": "Chats/exact/wrong.md",
+                        "reason": "binding_mismatch",
+                        "repo_scope_only": False,
+                    }
+                ],
+            ),
         ):
             with self.assertRaisesRegex(
                 watch_inbox_lib.ExactWatcherAuthorityError,
                 "exact_session_repo_scope_refused",
             ):
                 watch_inbox_lib.exact_session_messages(args)
+
+    def test_exact_watcher_skips_only_repository_scope_refusals(self):
+        args = object()
+        messages = [{"path": "Chats/exact/valid.md"}]
+        with patch.object(
+            watch_inbox_lib, "exact_read_session", return_value={}
+        ), patch.object(
+            watch_inbox_lib,
+            "exact_read_messages",
+            return_value=(
+                messages,
+                [
+                    {
+                        "path": "Chats/exact/wrong.md",
+                        "reason": "route_ambiguous",
+                        "repo_scope_only": True,
+                    }
+                ],
+            ),
+        ):
+            self.assertEqual(
+                messages,
+                watch_inbox_lib.exact_session_messages(args),
+            )
 
     def test_registration_retires_the_session_it_supersedes(self):
         """GH-373: end to end through the CLI, not the helper in isolation. Under
