@@ -3189,6 +3189,13 @@ def execute_runtime_trigger(session: dict, message: dict) -> dict[str, Any]:
     return trigger_result
 
 
+def runtime_delivery_accepted(runtime_result: dict[str, Any]) -> bool:
+    return (
+        runtime_result.get("returncode") == 0
+        and bool(runtime_result.get("delivery_accepted", True))
+    )
+
+
 def ui_refresh_enabled(runtime: dict[str, Any]) -> bool:
     override = os.environ.get("LLM_COLLAB_UI_REFRESH")
     if override is not None:
@@ -4039,31 +4046,6 @@ def dispatch_session(
                     prepared_candidate,
                     json.dumps(prepared_candidate, indent=2, sort_keys=True),
                 )
-            asserted, assertion_event, _ = activation_fenced_mutation(
-                session,
-                message,
-                boundary="operator_turn_summary",
-                mutation=lambda: write_operator_turn_summary(
-                    session,
-                    message,
-                    event_name="picked_up",
-                    body="\n".join(
-                        [
-                            f"{session['agent_id']} picked up `{message['frontmatter'].get('title', '(no title)')}`.",
-                            f"From: `{message['frontmatter'].get('sender_agent_id', message['frontmatter'].get('from', ''))}`",
-                            f"Receiver runtime thread: `{runtime.get('session_id', '')}`",
-                            f"Sender thread: `{message['frontmatter'].get('sender_session_id', '')}`",
-                        ]
-                    ),
-                ),
-            )
-            if assertion_event is not None:
-                event.setdefault("activation_assertions", []).append(assertion_event)
-            if not asserted:
-                event["reason"] = assertion_event["reason"] if assertion_event else "activation_assert_refused"
-                append_event(session_id, event)
-                actions.append(event)
-                continue
             asserted, assertion_event, runtime_result = activation_fenced_mutation(
                 session,
                 message,
@@ -4079,6 +4061,27 @@ def dispatch_session(
                 continue
             event["runtime_result"] = runtime_result
             should_mark_processed = runtime_result.get("returncode") == 0
+            if runtime_delivery_accepted(runtime_result):
+                asserted, assertion_event, _ = activation_fenced_mutation(
+                    session,
+                    message,
+                    boundary="operator_turn_summary",
+                    mutation=lambda: write_operator_turn_summary(
+                        session,
+                        message,
+                        event_name="picked_up",
+                        body="\n".join(
+                            [
+                                f"{session['agent_id']} picked up `{message['frontmatter'].get('title', '(no title)')}`.",
+                                f"From: `{message['frontmatter'].get('sender_agent_id', message['frontmatter'].get('from', ''))}`",
+                                f"Receiver runtime thread: `{runtime.get('session_id', '')}`",
+                                f"Sender thread: `{message['frontmatter'].get('sender_session_id', '')}`",
+                            ]
+                        ),
+                    ),
+                )
+                if assertion_event is not None:
+                    event.setdefault("activation_assertions", []).append(assertion_event)
             if should_mark_processed:
                 try:
                     asserted, assertion_event, ui_refresh_result = activation_fenced_mutation(
