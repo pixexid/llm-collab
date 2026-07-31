@@ -1,4 +1,4 @@
-<!-- CONTRACT_VERSION: 7 -->
+<!-- CONTRACT_VERSION: 8 -->
 # AGENTS.md
 
 ## This file is the source of truth
@@ -15,7 +15,40 @@ restated command is a cached copy that goes stale without telling anyone. On
 This repository is the shared `llm-collab` coordination runtime. It is not the
 Amiga workspace, the Nuvyr workspace, or any other product repository.
 
+## Shared Philosophy
+
+These defaults govern every worker and project; mechanics remain in the linked
+workflows below.
+
+- **Make the smallest complete change.** Load Ponytail; delete or reuse before
+  adding code, and fix the root cause at the shared seam rather than every symptom.
+- **Use evidence, not recollection.** Memory, summaries, prompts, and model knowledge
+  are leads. Read current source and the installed environment. For volatile APIs,
+  libraries, models, or platforms, use current primary docs or live metadata and
+  official web sources when local evidence cannot answer.
+- **Use capabilities before inventing.** Check relevant tools, skills, and plugins as
+  soon as they may help. Reuse the repository's authority; do not create a second
+  store, queue, policy engine, or helper for a decision it already owns.
+- **Work as a team, with one writer.** Ask the worker with relevant context early via
+  the durable mailbox; identify the sender and exact scope, and keep safe work moving.
+  Collaborate on design and review, but keep one writer per implementation lane.
+- **Prove the claim, not the activity.** A green test, review, wake, or summary counts
+  only when it distinguishes the failure being ruled out. Inspect the actual artifact
+  and prefer the smallest check that fails when the claimed invariant breaks.
+- **Make learning durable.** Update the existing canonical source in the same change,
+  link to it, and remove stale copies. Do not leave reusable knowledge only in a chat,
+  memory, PR body, or worker session.
+- **Finish outcomes.** Setup, messages, reviews, and tests are intermediate. Keep safe
+  queue work moving; escalate only an exact authority or external blocker; carry clean
+  work through merge, release, reconciliation, and justified closure. Preserve explicit
+  follow-ups, and never close a requested feature merely because review exposed defects.
+
 ### Recent contract changes
+
+Contract v8 (2026-07-31) adds the shared philosophy above: simple complete changes,
+current primary evidence, early use of existing capabilities, durable collaboration,
+discriminating proof, preserved knowledge, and finished outcomes are universal worker
+defaults.
 
 Contract v7 (2026-07-30) makes review **one pass, not a loop**. Request the
 bot/connector review **once per PR** — not once per amended head. Fix what that

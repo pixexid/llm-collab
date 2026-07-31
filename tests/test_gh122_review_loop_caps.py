@@ -1444,11 +1444,11 @@ class ReviewLoopCapContractTest(unittest.TestCase):
         self.assertNotIn("operator disposition", text)
         self.assertIn("lane owner and release-gate worker", text)
 
-    def test_the_contract_version_advanced_with_the_gate_rewrite(self):
+    def test_the_contract_version_and_recent_summaries_stay_current(self):
         """A cached copy of the old gate can produce a wrong merge.
 
-        Workers on older contracts get no signal that v7 retired the per-head
-        re-request loop, so the version marker and the v7 summary have to move
+        Workers on older contracts get no signal that the shared philosophy or v7
+        review rules changed, so the version marker and recent summaries move
         together.
 
         The v4 and v3 changelog entries used to be pinned here too, in AGENTS.md.
@@ -1459,13 +1459,15 @@ class ReviewLoopCapContractTest(unittest.TestCase):
         the assertions below moved to the document that owns them.
         """
         text = AGENTS_DOC.read_text(encoding="utf-8")
-        self.assertIn("<!-- CONTRACT_VERSION: 7 -->", text)
+        self.assertIn("<!-- CONTRACT_VERSION: 8 -->", text)
         self.assertNotIn("<!-- CONTRACT_VERSION: 3 -->", text)
 
         recent_entry = contract_section(
             text, "### Recent contract changes", "## Required Reading"
         )
         for phrase in (
+            "Contract v8",
+            "shared philosophy",
             "Contract v7",
             "one pass, not a loop",
             "once per PR",
