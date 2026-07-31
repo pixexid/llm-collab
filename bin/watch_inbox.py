@@ -163,9 +163,13 @@ def exact_session_messages(args) -> list[dict]:
         except Exception as error:
             raise ExactWatcherAuthorityError(str(error)) from error
         messages, refusals = exact_read_messages(args, session, budget)
-        if refusals:
+        fatal_refusals = [
+            refusal for refusal in refusals if not refusal.get("repo_scope_only")
+        ]
+        if fatal_refusals:
             raise ExactWatcherAuthorityError(
-                f"exact_session_repo_scope_refused: {json.dumps(refusals, sort_keys=True)}"
+                "exact_session_repo_scope_refused: "
+                f"{json.dumps(fatal_refusals, sort_keys=True)}"
             )
     return messages
 
