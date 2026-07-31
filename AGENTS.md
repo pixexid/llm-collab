@@ -114,6 +114,10 @@ runtime session, starting your watcher, and repairing your own environment. An o
 naming the work — "implement X with zcode on project Y" — is the whole instruction; the
 setup it implies is yours.
 
+For Pi workers, use the one-command first-start flow in
+[`collab-thread-quickstart.md`](docs/workflows/collab-thread-quickstart.md#pi-workers);
+do not duplicate its registration and monitor setup by hand.
+
 **Genuinely operator-owned**, and worth stopping for: credentials and account
 settings, legal or financial commitments, destructive actions outside normal
 recovery, and product decisions for which the workers have no stated authority.
