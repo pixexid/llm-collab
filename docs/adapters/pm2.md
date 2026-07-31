@@ -157,9 +157,8 @@ adapters, but it cannot perform Codex Computer Use recovery.
 
 Current safe ordering:
 
-These target-side AX and Computer Use steps apply only to non-Claude workers.
-Canonical `agent_id == "claude"` uses its durable packet and background inbox
-watcher alone.
+AX applies only to the Codex recipient. Every non-Codex watcher-backed worker
+uses its durable packet and background watcher alone.
 
 - if AX must be the primary wake, first ensure no matching dispatchable session
   autobridge is active; current `deliver.py` gives `autobridge_ready` precedence
@@ -168,8 +167,8 @@ watcher alone.
   reports `autobridge_ready: true`, the current Phase 1 route is session
   autobridge, not AX
 - only when it reports `ax_doorbell_required: true`, first prove through
-  readable `AXValue` that the native composer is empty, then use
-  `bin/axsend-ensure ring --submit --verify` (from the llm-collab checkout root, or the exact absolute command `deliver.py` prints) once even when the recipient is busy.
+  readable `AXValue` that the native composer is empty, then run exactly the
+  command `deliver.py` prints once even when the recipient is busy.
   Busy alone is not a hold after that proof. A non-empty, unreadable,
   unprovable, or `AXValue`-opaque composer means hold and enter attended
   recovery—never infer empty or blind-ring. `VERIFIED` exit 0 confirms delivery;
@@ -192,11 +191,12 @@ Why:
 Watcher policy for desktop-app agents:
 
 PM2/heartbeat is only the bounded, provisional safety-fuse described in
-`session-autobridge-runbook.md`. The target-side AX and Computer Use policy
-below excludes canonical `claude`; inbound Claude-to-Codex AX is unchanged.
+`session-autobridge-runbook.md`. AX may target only Codex; every non-Codex
+watcher-backed worker owns its own pickup.
 
-- primary: after readable `AXValue` proves the native composer is empty, ring
-  the registered AX app once, even while it is busy, with one short pointer to
+- primary for a Codex recipient only: after readable `AXValue` proves the native
+  composer is empty, run the exact command `deliver.py` prints once, even while
+  it is busy, with one short pointer to
   the durable packet. Busy alone is not a hold. A non-empty, unreadable,
   unprovable, or `AXValue`-opaque composer means hold and attended recovery,
   never a blind ring. `VERIFIED` exit 0 confirms delivery;

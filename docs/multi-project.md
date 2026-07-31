@@ -181,14 +181,11 @@ uses only the task's exact registered `project_id`; missing, empty, null,
 unknown, or foreign IDs never inherit another project's guard, ref, or tool
 surfaces.
 
-`claude_desktop_bridge` no longer selects a wake path: Claude is woken by its
-durable packet and the Claude app's own background inbox watcher in every project
-and registration shape. A non-Claude CLI-session worker uses the
-project-independent AX doorbell only when its agent entry selects a supported
-AX-readable `activation.ax_app` profile (a supported opaque-composer target
-instead reports `ax_attended_recovery_required` and routes to Codex-attended
-recovery); otherwise
-it needs a dispatchable runtime session.
+`claude_desktop_bridge` no longer selects a wake path. Every non-Codex worker
+with `watcher_enabled: true` is woken by its durable packet and its own watcher
+in every project and registration shape. Only the Codex recipient may use the
+project-independent AX doorbell, and only through the exact command printed by
+`deliver.py`; a worker without either route needs a dispatchable runtime session.
 
 ### Project state root
 

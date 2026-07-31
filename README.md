@@ -23,10 +23,9 @@ notifications are optional adapters for teams that need them.
 - **Isolated implementation lanes** — worktree metadata, checkpoint commits,
   independent review, project preflight, and post-merge cleanup are supported
   as mechanical gates.
-- **Explicit activation transports** — runtime sessions, AX-capable desktop
-  apps, and human relay are distinct activation paths; Claude is woken only by
-  its durable packet and its own background inbox watcher. Missing transports
-  report `activation_unavailable`.
+- **Explicit activation transports** — runtime sessions, Codex's AX doorbell,
+  watcher-backed durable pickup, and human relay are distinct activation paths.
+  Missing transports report `activation_unavailable`.
 - **Local project state** — real queues, runbooks, routing policy, and memory
   templates live under `{project_state_root}/{project_id}/`, normally outside
   this public Git checkout.
@@ -294,7 +293,8 @@ For GitHub-backed projects:
 | Activation | Behavior |
 |---|---|
 | Dispatchable runtime session | Message can be routed to the bound runtime session |
-| Non-Claude `cli_session` with a supported AX-readable `activation.ax_app` profile (Codex/ChatGPT) | `deliver.py` prints an AX doorbell command |
+| Codex `cli_session` with a supported AX-readable `activation.ax_app` profile (Codex/ChatGPT) | `deliver.py` prints the only permitted AX doorbell command |
+| Non-Codex worker with `watcher_enabled: true` | Durable packet is written; the worker's watcher owns pickup |
 | `ax_attended_only: true` with a supported opaque profile (ZCode) or no app profile | Reports `ax_attended_recovery_required`; Codex-attended recovery, no routine ring |
 | Terminal-only `cli_session` | Requires a dispatchable runtime session |
 | `human_relay` | Prints a human handoff prompt |

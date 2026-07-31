@@ -42,6 +42,16 @@ class AxDoorbellRoutingTest(unittest.TestCase):
             deliver.is_ax_doorbell_target(codex, "codex", sender_id="claude")
         )
 
+    def test_codex_identity_with_opaque_app_is_not_routine_ax(self) -> None:
+        codex = {
+            "id": "codex",
+            "activation": {"type": "cli_session", "ax_app": "ZCode"},
+        }
+        self.assertIsNone(deliver.ax_doorbell_app(codex))
+        self.assertFalse(
+            deliver.is_ax_doorbell_target(codex, "codex", sender_id="claude")
+        )
+
     def test_codex_self_target_is_not_ax_doorbell(self) -> None:
         codex = {
             "id": "codex",
@@ -95,7 +105,7 @@ class AxAttendedRecoveryRoutingTest(unittest.TestCase):
         "id": "zcode",
         "activation": {
             "type": "cli_session",
-            "watcher_enabled": True,
+            "watcher_enabled": False,
             "ax_app": "ZCode",
             "ax_attended_only": True,
         },
@@ -147,7 +157,7 @@ class AxAttendedRecoveryRoutingTest(unittest.TestCase):
                     "ax_app": app,
                 },
             }
-            self.assertEqual(deliver.ax_doorbell_app(agent), app)
+            self.assertIsNone(deliver.ax_doorbell_app(agent))
             self.assertEqual(deliver.ax_app_profile(app), profile)
 
     def test_only_the_native_codex_profile_is_routine_capable(self) -> None:
@@ -215,28 +225,26 @@ class AxAttendedRecoveryRoutingTest(unittest.TestCase):
             )
         )
 
-    def test_readable_targets_keep_routine_doorbell(self) -> None:
-        # Claude is deliberately absent: it is excluded from the doorbell selector
-        # entirely (its own background inbox watcher owns pickup), and
-        # test_claude_is_never_a_routine_doorbell_target below covers that.
-        for agent_id, app in (("codex", "Codex"), ("relay", "Codex")):
-            agent = {
-                "id": agent_id,
-                "activation": {
-                    "type": "cli_session",
-                    "watcher_enabled": True,
-                    "ax_app": app,
-                },
-            }
-            self.assertFalse(deliver.ax_attended_only(agent))
-            self.assertTrue(
-                deliver.is_ax_doorbell_target(agent, agent_id, sender_id="zcode")
-            )
-            self.assertFalse(
-                deliver.is_ax_attended_recovery_target(
-                    agent, agent_id, sender_id="zcode"
-                )
-            )
+    def test_only_codex_identity_keeps_the_routine_doorbell(self) -> None:
+        codex = {
+            "id": "codex",
+            "activation": {
+                "type": "cli_session",
+                "watcher_enabled": True,
+                "ax_app": "Codex",
+            },
+        }
+        relay = {
+            "id": "relay",
+            "activation": {
+                "type": "cli_session",
+                "watcher_enabled": True,
+                "ax_app": "Codex",
+            },
+        }
+        self.assertTrue(deliver.is_ax_doorbell_target(codex, "codex", sender_id="zcode"))
+        self.assertFalse(deliver.is_ax_doorbell_target(relay, "relay", sender_id="zcode"))
+        self.assertTrue(deliver.is_watcher_only_target(relay, "relay"))
 
     def test_flagged_human_relay_routes_to_attended_recovery_not_operator(self) -> None:
         # GH-1547 cold-review P2: Antigravity (human_relay, ax_attended_only,
@@ -393,6 +401,19 @@ class AxRecoveryWordingPinTest(unittest.TestCase):
     instruction is no longer executable (routine ring refuses with exit 11)."""
 
     AXBRIDGE = REPO_ROOT / "tools" / "axbridge"
+
+    def test_canonical_docs_do_not_hand_author_ax_commands(self) -> None:
+        import re
+
+        docs = [REPO_ROOT / "AGENTS.md", REPO_ROOT / "README.md"]
+        docs.extend((REPO_ROOT / "docs").rglob("*.md"))
+        command = re.compile(r"(?:bin/)?axsend(?:-ensure)?\s+ring|\$AX\s+ring")
+        for path in docs:
+            self.assertIsNone(
+                command.search(path.read_text()),
+                f"{path.relative_to(REPO_ROOT)} hand-authors an AX command; "
+                "run only the exact command printed by deliver.py",
+            )
 
     def test_stale_unconditional_re_ring_wording_is_gone(self) -> None:
         for rel in ("axsend.swift", "README.md"):
