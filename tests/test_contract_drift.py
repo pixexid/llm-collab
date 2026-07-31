@@ -24,6 +24,14 @@ class ContractDriftTest(unittest.TestCase):
             )
         )
 
+    def test_bare_or_wrapped_automatic_review_off_copy_is_stale(self):
+        for text in (
+            "Automatic review is off account-wide.",
+            "Automatic review is\n  disabled for this account.",
+        ):
+            with self.subTest(text=text):
+                self.assertTrue(contract_drift.claims_review_is_manual_only(text))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -48,6 +48,7 @@ def page(
     next_page: bool = False,
     cursor: str | None = None,
     author: str = "pixexid",
+    association: str = "OWNER",
     review_authors: list[str] | None = None,
     comment_reactors: list[str] | None = None,
     pr_reactors: list[str] | None = None,
@@ -66,6 +67,7 @@ def page(
                     "comments": {
                         "nodes": [
                             {"body": body, "author": {"login": author},
+                             "authorAssociation": association,
                              "reactionGroups": reactions(comment_reactors)}
                             for body in bodies
                         ],
@@ -255,17 +257,34 @@ class RequestHistoryTest(unittest.TestCase):
             with self.assertRaisesRegex(SystemExit, "page bound"):
                 review_request.pr_review_history(1, "pixexid", "llm-collab")
 
-    def test_counts_requests_from_other_workers(self):
+    def test_counts_requests_from_authorized_workers(self):
         request = f"@codex review for lenses at exact head `{SHA}`."
         with mock.patch.object(
             review_request,
             "run_json",
-            return_value=page([request], author="untrusted-commenter"),
+            return_value=page(
+                [request], author="other-worker", association="COLLABORATOR"
+            ),
         ):
             bodies, connector_seen = review_request.pr_review_history(
                 1, "pixexid", "llm-collab"
             )
         self.assertEqual(review_request.prior_requests(bodies), [request])
+        self.assertFalse(connector_seen)
+
+    def test_untrusted_comment_cannot_spend_the_fallback_budget(self):
+        request = f"@codex review for lenses at exact head `{SHA}`."
+        with mock.patch.object(
+            review_request,
+            "run_json",
+            return_value=page(
+                [request], author="untrusted-commenter", association="NONE"
+            ),
+        ):
+            bodies, connector_seen = review_request.pr_review_history(
+                1, "pixexid", "llm-collab"
+            )
+        self.assertEqual(bodies, [])
         self.assertFalse(connector_seen)
 
     def test_connector_review_spends_the_fallback_budget(self):

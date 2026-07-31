@@ -209,7 +209,9 @@ connector review gate is complete, required local exact-head verification is cle
 actionable finding. Reviews start automatically for opened or ready PRs, and
 every PR waits for that first pass. The Tier A/B/C rule in
 [`AGENTS.md` → Requesting Code Review](../../AGENTS.md#requesting-code-review-all-workers-every-repository),
-which is the only place that defines it.
+which is the only place that defines it. The completion cases, including a clean
+first pass on a prior OID followed by complete local verification of the amended
+head, are defined only in the canonical terminal list in `commit-push-prs.md`.
 The GitHub Codex gate is complete when the latest
 `chatgpt-codex-connector` review/comment explicitly covers that exact OID with
 no actionable issues, or a connector-authored `+1` (`thumbs-up`) sits on the exact

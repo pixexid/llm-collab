@@ -55,11 +55,13 @@ def deliver_without_repo_targets(text: str) -> list[str]:
 def claims_review_is_manual_only(text: str) -> list[str]:
     """Text caching the retired manual-only review policy."""
     stale = re.compile(
-        r"review.{0,40}(?:manual only|automatic review (?:is )?(?:off|disabled))"
+        r"review.{0,40}manual only"
+        r"|automatic review.{0,20}(?:off|disabled)"
         r"|nothing arrives unless requested",
         re.IGNORECASE,
     )
-    return [line.strip()[:110] for line in text.splitlines() if stale.search(line)]
+    normalized = " ".join(text.split())
+    return [match.group(0)[:110] for match in stale.finditer(normalized)]
 
 
 def chat_last_in_a_send_command(text: str) -> list[str]:

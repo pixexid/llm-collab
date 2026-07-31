@@ -60,8 +60,12 @@ class FakeTransport:
             self._polls += 1
             if self.marker_after is not None and self._polls >= self.marker_after:
                 self.chronology.append(("marker_ready", self._marker))
-                return 200, {"messages": [{"role": "assistant", "content": [{"type": "text", "text": self._marker}]}]}
-            return 200, {"messages": []}
+                return 200, {
+                    "messages": [{"role": "assistant", "content": [{"type": "text", "text": self._marker}]}],
+                    "start": 0,
+                    "total": 1,
+                }
+            return 200, {"messages": [], "start": 0, "total": 0}
         if method == "POST" and base == f"/api/sessions/{NATIVE}/stop":
             return 200, {"stopped": True}
         raise AssertionError(f"unexpected request {method} {path}")
@@ -217,6 +221,28 @@ class WorkerRotatePiTest(unittest.TestCase):
 
     def test_operator_pi_web_is_the_default(self):
         self.assertEqual(wr.DEFAULT_PI_WEB_URL, "http://127.0.0.1:8504")
+
+    def test_marker_search_pages_past_non_assistant_tail(self):
+        paths = []
+
+        def request(method, path, body):
+            paths.append(path)
+            if "before=12" in path:
+                return 200, {
+                    "messages": [{"role": "assistant", "content": "READY"}],
+                    "start": 0,
+                    "total": 22,
+                }
+            return 200, {
+                "messages": [{"role": "toolResult"}] * 10,
+                "start": 12,
+                "total": 22,
+            }
+
+        client = wr.PiWeb(wr.DEFAULT_PI_WEB_URL, request=request)
+        client._sessions[NATIVE] = {"cwd": "/repo"}
+        self.assertEqual(client.last_assistant_text(NATIVE), "READY")
+        self.assertIn("before=12", paths[1])
 
 
 if __name__ == "__main__":

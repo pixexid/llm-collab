@@ -39,6 +39,7 @@ from _helpers import parse_frontmatter
 
 REQUEST_MARKER = "@codex review"
 CONNECTOR_LOGIN = "chatgpt-codex-connector"
+AUTHORIZED_ASSOCIATIONS = {"OWNER", "MEMBER", "COLLABORATOR"}
 COMMENT_PAGE_SIZE = 100
 # Declared bound on the exhaustive enumeration. Hitting it with pages still
 # outstanding fails closed: a truncated history must never read as "no prior
@@ -91,6 +92,7 @@ COMMENTS_QUERY = f"""query($owner: String!, $name: String!, $pr: Int!, $comments
         nodes {{
           body
           author {{ login }}
+          authorAssociation
           reactionGroups {{ users(first: {COMMENT_PAGE_SIZE}) {{ totalCount nodes {{ login }} }} }}
         }}
         pageInfo {{ hasNextPage endCursor }}
@@ -317,7 +319,10 @@ def pr_review_history(pr: int, owner: str, name: str) -> tuple[list[str], bool]:
         threads = pr_data["reviewThreads"]
         connector_seen = connector_seen or _connector_reacted(pr_data["reactionGroups"])
         if active["comments"]:
-            bodies.extend(node["body"] for node in comments["nodes"])
+            bodies.extend(
+                node["body"] for node in comments["nodes"]
+                if node.get("authorAssociation") in AUTHORIZED_ASSOCIATIONS
+            )
             connector_seen = connector_seen or any(
                 node.get("author", {}).get("login") == CONNECTOR_LOGIN
                 for node in comments["nodes"]

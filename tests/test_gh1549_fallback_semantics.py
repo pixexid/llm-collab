@@ -344,8 +344,17 @@ class Gh1549FallbackFixturesTest(unittest.TestCase):
                     self.assertIs(False, expected["merge_eligible_on_silence"])
                     self.assertIn(
                         expected["disposition"],
-                        {"review_infrastructure_blocker", "first_pass_pending"},
+                        {
+                            "manual_fallback_required",
+                            "review_infrastructure_blocker",
+                            "first_pass_pending",
+                        },
                     )
+
+    def test_absent_request_requires_tier_a_manual_fallback_only(self) -> None:
+        cases = {case["tier"]: case for case in self._project_cases("absent_request")}
+        self.assertEqual(cases["A"]["expected"]["disposition"], "manual_fallback_required")
+        self.assertEqual(cases["C"]["expected"]["disposition"], "review_infrastructure_blocker")
 
     def test_retired_manual_request_machine_is_absent(self) -> None:
         retired = (

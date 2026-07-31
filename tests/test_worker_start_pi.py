@@ -141,7 +141,11 @@ class _Transport:
             self._marker = re.search(r"BOOTSTRAP_READY_\S+", body["text"]).group(0)
             return 200, {"accepted": True}
         if method == "GET" and base == f"/api/sessions/{NATIVE}/messages":
-            return 200, {"messages": [{"role": "assistant", "content": [{"type": "text", "text": self._marker}]}]}
+            return 200, {
+                "messages": [{"role": "assistant", "content": [{"type": "text", "text": self._marker}]}],
+                "start": 0,
+                "total": 1,
+            }
         if method == "POST" and base == f"/api/sessions/{NATIVE}/stop":
             return 200, {"stopped": True}
         raise AssertionError(f"unexpected {method} {path}")

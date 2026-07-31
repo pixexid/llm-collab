@@ -36,6 +36,8 @@ AUTOBRIDGE = _BIN / "session_autobridge.py"
 MONITOR_PYTHON = str(Path(sys.executable).resolve())
 # start-pi owns the Pi Web transport; only these records seed a first-start profile.
 PI_WEB_ENDPOINT = "endpoint_pi_web_local"
+MESSAGE_PAGE_SIZE = 500
+MESSAGE_SCAN_LIMIT = 5000
 
 
 def _workspace_root() -> Path:
@@ -140,25 +142,50 @@ class PiWeb:
 
     def last_assistant_text(self, tab_id: str):
         cwd = self._sessions[tab_id]["cwd"]
-        status, body = self._request(
-            "GET", f"/api/sessions/{urllib.parse.quote(tab_id)}/messages?cwd="
-            + urllib.parse.quote(cwd) + "&limit=10", None,
-        )
-        if status != 200 or not isinstance(body, dict):
-            return None
-        for message in reversed(body.get("messages", [])):
-            if message.get("role") != "assistant":
-                continue
-            content = message.get("content")
-            if isinstance(content, str):
-                return content
-            if isinstance(content, list):
-                return "".join(
-                    block["text"] for block in content
-                    if isinstance(block, dict) and block.get("type") == "text"
-                    and isinstance(block.get("text"), str)
-                ) or None
-        return None
+        before = None
+        scanned = 0
+        while True:
+            path = (
+                f"/api/sessions/{urllib.parse.quote(tab_id)}/messages?cwd="
+                + urllib.parse.quote(cwd) + f"&limit={MESSAGE_PAGE_SIZE}"
+            )
+            if before is not None:
+                path += f"&before={before}"
+            status, body = self._request("GET", path, None)
+            if status != 200:
+                return None
+            if not isinstance(body, dict) or not isinstance(body.get("messages"), list):
+                raise RotateError("messages response malformed")
+            messages = body["messages"]
+            scanned += len(messages)
+            if scanned > MESSAGE_SCAN_LIMIT:
+                raise RotateError("messages history exceeds scan limit")
+            for message in reversed(messages):
+                if not isinstance(message, dict) or message.get("role") != "assistant":
+                    continue
+                content = message.get("content")
+                if isinstance(content, str):
+                    return content
+                if isinstance(content, list):
+                    return "".join(
+                        block["text"] for block in content
+                        if isinstance(block, dict) and block.get("type") == "text"
+                        and isinstance(block.get("text"), str)
+                    ) or None
+                return None
+            start = body.get("start")
+            total = body.get("total")
+            if (
+                not isinstance(start, int) or isinstance(start, bool)
+                or not isinstance(total, int) or isinstance(total, bool)
+                or start < 0 or total < start
+            ):
+                raise RotateError("messages pagination malformed")
+            if start == 0:
+                return None
+            if before is not None and start >= before:
+                raise RotateError("messages pagination did not advance")
+            before = start
 
     def close_tab(self, tab_id: str) -> None:
         try:

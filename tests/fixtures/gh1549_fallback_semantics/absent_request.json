@@ -1,13 +1,13 @@
 {
   "variant": "absent_request",
-  "description": "The automatic first bot pass has not started. This is a review-infrastructure blocker at every tier; silence never permits merge.",
+  "description": "The automatic first bot pass has not started. Tier A requires its single manual fallback; other tiers remain blocked. Silence never permits merge.",
   "project_cases": [
     {
       "project_id": "amiga",
       "tier": "A",
       "expected": {
         "terminal_signal_present": false,
-        "disposition": "review_infrastructure_blocker",
+        "disposition": "manual_fallback_required",
         "merge_eligible_on_silence": false
       }
     },
