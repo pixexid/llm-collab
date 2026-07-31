@@ -1,35 +1,18 @@
 #!/usr/bin/env python3
-"""
-review_request.py — post a Codex review request whose SHA can only be real.
+"""Post the one Tier A manual fallback review request for a PR.
 
 The exact-head SHA in a review request is what every terminal signal binds to,
 so it must never be hand-typed: PR #347 came to contain a fabricated,
 later-retracted SHA precisely because a model typed one. This tool has no
 --sha option and rejects SHA-shaped caller text. It reads the PR head from
 GitHub, reads the local HEAD, and refuses on mismatch — there is no bypass
-flag. It enforces the request budget from docs/workflows/commit-push-prs.md:
-one initial request per candidate head, plus the single request-anchored
-re-trigger as the only exempted recovery, repeated verbatim from the initial
-request it is anchored to. The request history is enumerated exhaustively by
-pagination inside a declared bound; reaching the bound with pages outstanding
-fails closed rather than treating a truncated history as an empty one.
-
-Requests are shaped to cost one audit instead of five (GH-357). The first
-request on a PR is a full audit. A request for a later head is scoped to the
-delta from the most recent prior requested head — recovered from the request
-history, never from caller text — and carries the lane's threat model, its
-recorded accepted risks, and any --settled families the reviewer must not
-re-raise. A prior head that cannot be parsed falls back to a full audit:
-the safe direction, never a narrower review.
+flag. Automatic review is the normal path. This tool is only the Tier A
+fallback when that trigger is absent, and it permits one full-audit request per
+PR. The request history is enumerated exhaustively inside a declared bound;
+reaching the bound with pages outstanding fails closed.
 
   bin/review_request.py --pr 356 --project llm-collab --tier A \
       --contract 352 --focus "exact-session authority selection, bounded reads"
-  bin/review_request.py --pr 356 --project llm-collab --tier A \
-      --contract 352 --focus "..." \
-      --settled "deleted-comment request-budget reconstruction"
-  bin/review_request.py --pr 356 --project llm-collab --retrigger
-  bin/review_request.py --pr 356 --project llm-collab --tier B \
-      --focus "..." --dry-run
 
 Exits 0 after posting (or printing with --dry-run); exits 2 with the
 reason on any refusal. Read-only against the workspace; the only write is the
@@ -55,6 +38,7 @@ import subprocess
 from _helpers import parse_frontmatter
 
 REQUEST_MARKER = "@codex review"
+CONNECTOR_LOGIN = "chatgpt-codex-connector"
 COMMENT_PAGE_SIZE = 100
 # Declared bound on the exhaustive enumeration. Hitting it with pages still
 # outstanding fails closed: a truncated history must never read as "no prior
@@ -73,13 +57,6 @@ EXACT_HEAD_WORDING_RE = re.compile(r"exact\s+head", re.IGNORECASE)
 AUTOLINK_CLOSING_RE = re.compile(
     r"\b(?:close(?:s|d)?|fix(?:es|ed)?|resolve(?:s|d)?)\s+GH-\d+\b",
     re.IGNORECASE,
-)
-RETRIGGER_NOTE = (
-    "Re-triggered once as the single exempted recovery: the initial request "
-    "for this exact head is repeated verbatim above."
-)
-REQUEST_HEAD_RE = re.compile(
-    r"at\s+exact\s+head\s+`([0-9a-f]{40})`", re.IGNORECASE
 )
 # Carried by every initial request so the reviewer audits the adversaries the
 # lane actually defends against, instead of inventing ones it does not.
@@ -106,12 +83,24 @@ def threat_model_note(is_private: bool | None) -> str:
         )
     return "Context: " + WORKSPACE_TRUST_NOTE
 
-COMMENTS_QUERY = f"""query($owner: String!, $name: String!, $pr: Int!, $after: String) {{
-  viewer {{ login }}
+COMMENTS_QUERY = f"""query($owner: String!, $name: String!, $pr: Int!, $commentsAfter: String, $reviewsAfter: String, $threadsAfter: String) {{
   repository(owner: $owner, name: $name) {{
     pullRequest(number: $pr) {{
-      comments(first: {COMMENT_PAGE_SIZE}, after: $after) {{
-        nodes {{ body author {{ login }} }}
+      reactionGroups {{ users(first: {COMMENT_PAGE_SIZE}) {{ totalCount nodes {{ login }} }} }}
+      comments(first: {COMMENT_PAGE_SIZE}, after: $commentsAfter) {{
+        nodes {{
+          body
+          author {{ login }}
+          reactionGroups {{ users(first: {COMMENT_PAGE_SIZE}) {{ totalCount nodes {{ login }} }} }}
+        }}
+        pageInfo {{ hasNextPage endCursor }}
+      }}
+      reviews(first: {COMMENT_PAGE_SIZE}, after: $reviewsAfter) {{
+        nodes {{ author {{ login }} }}
+        pageInfo {{ hasNextPage endCursor }}
+      }}
+      reviewThreads(first: {COMMENT_PAGE_SIZE}, after: $threadsAfter) {{
+        nodes {{ comments(first: 1) {{ nodes {{ author {{ login }} }} }} }}
         pageInfo {{ hasNextPage endCursor }}
       }}
     }}
@@ -289,12 +278,24 @@ def require_contract(
     )
 
 
-def pr_comment_bodies(pr: int, owner: str, name: str) -> list[str]:
+def _connector_reacted(groups: list[dict]) -> bool:
+    for group in groups:
+        users = group["users"]
+        if users["totalCount"] > COMMENT_PAGE_SIZE:
+            raise SystemExit("error: reaction actors exceed the declared bound; failing closed")
+        if any(node.get("login") == CONNECTOR_LOGIN for node in users["nodes"]):
+            return True
+    return False
+
+
+def pr_review_history(pr: int, owner: str, name: str) -> tuple[list[str], bool]:
     bodies: list[str] = []
-    after: str | None = None
-    cursors: set[str] = set()
+    connector_seen = False
+    cursors = {"comments": None, "reviews": None, "threads": None}
+    seen_cursors = {"comments": set(), "reviews": set(), "threads": set()}
+    active = {"comments": True, "reviews": True, "threads": True}
     pages = 0
-    while True:
+    while any(active.values()):
         pages += 1
         if pages > COMMENT_PAGE_HARD_CAP:
             raise SystemExit(
@@ -306,68 +307,72 @@ def pr_comment_bodies(pr: int, owner: str, name: str) -> list[str]:
             "-F", f"owner={owner}", "-F", f"name={name}", "-F", f"pr={pr}",
             "-f", f"query={COMMENTS_QUERY}",
         ]
-        if after is not None:
-            argv += ["-f", f"after={after}"]
+        for connection, cursor in cursors.items():
+            if cursor is not None:
+                argv += ["-f", f"{connection}After={cursor}"]
         data = run_json(argv)
-        viewer_login = data["data"]["viewer"]["login"]
-        comments = data["data"]["repository"]["pullRequest"]["comments"]
-        bodies.extend(
-            node["body"]
-            for node in comments["nodes"]
-            if node.get("author", {}).get("login") == viewer_login
-        )
+        pr_data = data["data"]["repository"]["pullRequest"]
+        comments = pr_data["comments"]
+        reviews = pr_data["reviews"]
+        threads = pr_data["reviewThreads"]
+        connector_seen = connector_seen or _connector_reacted(pr_data["reactionGroups"])
+        if active["comments"]:
+            bodies.extend(node["body"] for node in comments["nodes"])
+            connector_seen = connector_seen or any(
+                node.get("author", {}).get("login") == CONNECTOR_LOGIN
+                for node in comments["nodes"]
+            )
+            connector_seen = connector_seen or any(
+                _connector_reacted(node["reactionGroups"])
+                for node in comments["nodes"]
+            )
+        if active["reviews"]:
+            connector_seen = connector_seen or any(
+                node.get("author", {}).get("login") == CONNECTOR_LOGIN
+                for node in reviews["nodes"]
+            )
+        if active["threads"]:
+            connector_seen = connector_seen or any(
+                comment.get("author", {}).get("login") == CONNECTOR_LOGIN
+                for thread in threads["nodes"]
+                for comment in thread["comments"]["nodes"]
+            )
         if len(bodies) > COMMENT_HARD_CAP:
             raise SystemExit(
                 f"error: comment history exceeds the declared bound "
                 f"({COMMENT_HARD_CAP}); failing closed"
             )
-        page = comments["pageInfo"]
-        if not page["hasNextPage"]:
-            return bodies
-        if len(bodies) >= COMMENT_HARD_CAP:
-            raise SystemExit(
-                f"error: comment history exceeds the declared bound "
-                f"({COMMENT_HARD_CAP}) with pages still outstanding; failing "
-                "closed rather than treating a truncated history as an empty one"
-            )
-        cursor = page.get("endCursor")
-        if not cursor or cursor == after or cursor in cursors:
-            raise SystemExit(
-                "error: GitHub comment pagination did not advance; failing closed"
-            )
-        cursors.add(cursor)
-        after = cursor
+        for connection, result in (
+            ("comments", comments), ("reviews", reviews), ("threads", threads),
+        ):
+            if not active[connection]:
+                continue
+            page = result["pageInfo"]
+            if not page["hasNextPage"]:
+                active[connection] = False
+                continue
+            if connection == "comments" and len(bodies) >= COMMENT_HARD_CAP:
+                raise SystemExit(
+                    f"error: comment history exceeds the declared bound "
+                    f"({COMMENT_HARD_CAP}) with pages still outstanding; failing "
+                    "closed rather than treating a truncated history as an empty one"
+                )
+            cursor = page.get("endCursor")
+            if not cursor or cursor == cursors[connection] or cursor in seen_cursors[connection]:
+                raise SystemExit(
+                    f"error: GitHub {connection} pagination did not advance; failing closed"
+                )
+            seen_cursors[connection].add(cursor)
+            cursors[connection] = cursor
+    return bodies, connector_seen
 
 
 def local_head() -> str:
     return run(["git", "rev-parse", "HEAD"], GH_READ_TIMEOUT_SECONDS).stdout.strip()
 
 
-def prior_requests(bodies: list[str], sha: str) -> list[str]:
-    return [
-        body
-        for body in bodies
-        if body.startswith(REQUEST_MARKER)
-        and (match := REQUEST_HEAD_RE.search(body))
-        and match.group(1) == sha
-    ]
-
-
-def prior_request_heads(bodies: list[str]) -> list[str]:
-    """Heads named by earlier requests on the PR, oldest first.
-
-    The delta base for a scoped re-request is the most recent prior head; a
-    prior request whose head cannot be parsed yields no entry, which falls
-    back to a full audit — the safe direction, never a narrower review.
-    """
-    heads: list[str] = []
-    for body in bodies:
-        if not body.startswith(REQUEST_MARKER):
-            continue
-        match = REQUEST_HEAD_RE.search(body)
-        if match:
-            heads.append(match.group(1))
-    return heads
+def prior_requests(bodies: list[str]) -> list[str]:
+    return [body for body in bodies if REQUEST_MARKER in body]
 
 
 def reject_caller_supplied_shas(fields: dict[str, str]) -> None:
@@ -390,8 +395,6 @@ def build_request_body(
     sha: str,
     contract: str | int | None = None,
     note: str | None = None,
-    delta_base: str | None = None,
-    settled: str | None = None,
     is_private: bool | None = None,
 ) -> str:
     if not focus.strip():
@@ -406,18 +409,7 @@ def build_request_body(
     else:
         scope = ""
         lead = "Please review"
-    if delta_base is not None:
-        parts.append(
-            f"{lead} the delta `{delta_base}..{sha}` {scope}through those "
-            "lenses; findings outside the delta only when P0."
-        )
-    else:
-        parts.append(f"{lead} the full diff {scope}through those lenses.")
-    if settled:
-        parts.append(
-            "Settled families already adjudicated on earlier heads — do not "
-            f"re-raise: {settled.strip()}."
-        )
+    parts.append(f"{lead} the full diff {scope}through those lenses.")
     if note:
         parts.append(note.strip())
     parts.append(threat_model_note(is_private))
@@ -458,8 +450,8 @@ def main(argv: list[str] | None = None) -> int:
         "projects.json entry, never from ambient checkout state",
     )
     parser.add_argument(
-        "--tier", choices=("A", "B", "C"),
-        help="review tier; Tier A requires --contract naming the lane-contract issue",
+        "--tier", choices=("A", "B", "C"), required=True,
+        help="review tier; only Tier A may use the manual fallback",
     )
     parser.add_argument(
         "--focus",
@@ -470,57 +462,27 @@ def main(argv: list[str] | None = None) -> int:
         help="issue number or TASK-id carrying the lane contract (required for --tier A)",
     )
     parser.add_argument("--note", default=None, help="one extra sentence appended verbatim")
-    parser.add_argument(
-        "--settled", default=None,
-        help="comma-separated finding families already adjudicated on earlier "
-        "heads; the request tells the reviewer not to re-raise them",
-    )
-    parser.add_argument(
-        "--retrigger", action="store_true",
-        help="repeat the single prior request for this exact head verbatim, as "
-        "the one exempted recovery for a silently dropped request",
-    )
     parser.add_argument("--dry-run", action="store_true", help="print, do not post")
     args = parser.parse_args(argv)
 
-    if args.retrigger:
-        if (
-            args.tier is not None
-            or args.focus is not None
-            or args.contract is not None
-            or args.note is not None
-            or args.settled is not None
-        ):
-            raise SystemExit(
-                "error: --retrigger repeats the initial request verbatim; "
-                "--tier/--focus/--contract/--note/--settled cannot amend its scope"
-            )
-    else:
-        if args.tier is None:
-            raise SystemExit("error: --tier is required for an initial request")
-        if args.tier == "C":
-            raise SystemExit("error: Tier C changes do not request review")
-        if args.focus is None:
-            raise SystemExit("error: --focus is required for an initial request")
-        if args.tier == "A" and args.contract is None:
-            raise SystemExit(
-                "error: Tier A requires --contract naming the issue that carries "
-                "the lane contract; a generic full-diff request does not "
-                "satisfy the Tier A gate"
-            )
-        reject_caller_supplied_shas(
-            {
-                k: v
-                for k, v in (
-                    ("focus", args.focus), ("note", args.note), ("settled", args.settled)
-                )
-                if v
-            }
+    if args.tier != "A":
+        raise SystemExit(
+            "error: the manual fallback is Tier A only; wait for the automatic "
+            "first pass at every other tier"
         )
+    if args.focus is None:
+        raise SystemExit("error: --focus is required")
+    if args.contract is None:
+        raise SystemExit(
+            "error: Tier A requires --contract naming the issue that carries "
+            "the lane contract"
+        )
+    reject_caller_supplied_shas(
+        {k: v for k, v in (("focus", args.focus), ("note", args.note)) if v}
+    )
 
     owner, name = repo_coordinates(args.project)
-    if args.tier == "A":
-        require_contract(args.contract, args.project, owner, name)
+    require_contract(args.contract, args.project, owner, name)
     sha = pr_head(args.pr, owner, name)
     local = local_head()
     if local != sha:
@@ -530,44 +492,24 @@ def main(argv: list[str] | None = None) -> int:
             "lane's local verification"
         )
 
-    bodies = pr_comment_bodies(args.pr, owner, name)
-    priors = prior_requests(bodies, sha)
-    if args.retrigger:
-        if not priors:
-            raise SystemExit(
-                "error: no initial request for this exact head exists to "
-                "repeat; a re-trigger must anchor to one"
-            )
-        if len(priors) >= 2:
-            raise SystemExit(
-                f"error: request budget for this head is spent ({len(priors)} "
-                "requests already); there is no further request to issue — "
-                "continue to the exact-head release-gate disposition"
-            )
-        body = priors[0] + "\n\n" + RETRIGGER_NOTE
-    else:
-        if priors:
-            raise SystemExit(
-                "error: an initial request for this exact head already exists; "
-                "pass --retrigger only if the connector silently dropped it "
-                "(the single exempted recovery)"
-            )
-        heads = prior_request_heads(bodies)
-        delta_base = next((h for h in reversed(heads) if h != sha), None)
-        if args.settled and delta_base is None:
-            raise SystemExit(
-                "error: --settled requires a prior requested head whose "
-                "adjudication can support the exclusion"
-            )
-        body = build_request_body(
-            args.focus,
-            sha,
-            args.contract,
-            args.note,
-            delta_base=delta_base,
-            settled=args.settled,
-            is_private=repo_is_private(owner, name),
+    bodies, connector_seen = pr_review_history(args.pr, owner, name)
+    if connector_seen:
+        raise SystemExit(
+            "error: this PR already has an automatic connector artifact; the one-pass budget is spent"
         )
+    priors = prior_requests(bodies)
+    if priors:
+        raise SystemExit(
+            "error: this PR already has a manual review request; the one-pass "
+            "budget is spent"
+        )
+    body = build_request_body(
+        args.focus,
+        sha,
+        args.contract,
+        args.note,
+        is_private=repo_is_private(owner, name),
+    )
 
     if args.dry_run:
         print(body)
@@ -580,7 +522,7 @@ def main(argv: list[str] | None = None) -> int:
     if pr_head(args.pr, owner, name) != sha:
         raise SystemExit(
             "error: review request was posted, but the PR head changed during "
-            "publication; the posted request is stale and a new-head request is required"
+            "publication; the posted request is stale and the PR remains blocked"
         )
     print(f"posted review request for exact head {sha} on {owner}/{name}#{args.pr}")
     return 0

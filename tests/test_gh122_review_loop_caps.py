@@ -200,21 +200,15 @@ class ReviewLoopCapContractTest(unittest.TestCase):
                 check(case, self.sources_by_outcome[outcome])
 
     def assert_wait_gate_residual_contract(self, workflow_text, handoff_text):
-        """Assert the GH-133/GH-140 wait residuals against supplied doc text."""
+        """Assert the mandatory one-pass review gate against supplied docs."""
         review_policy = contract_section(
             workflow_text,
             "### GitHub Codex review policy",
             "## Autonomous Queue Runner State",
         )
-        fallback = contract_section(
-            workflow_text,
-            "**All three former no-terminal-artifact fallback variants are "
-            "deleted, not",
-            "#### Explicit requested-review precedence",
-        )
         precedence = contract_section(
             workflow_text,
-            "#### Explicit requested-review precedence",
+            "#### First-pass precedence",
             "If the PR is waiting only for remote checks or remote review state",
         )
         handoff_wait = contract_section(
@@ -222,136 +216,26 @@ class ReviewLoopCapContractTest(unittest.TestCase):
             "For PR-review wait heartbeats",
             "If GitHub Codex comments on the PR",
         )
-        compact_precedence = contract_section(
-            handoff_text,
-            "For requested-review silence, follow the canonical",
-            "If GitHub Codex comments on the PR",
-        ).strip()
-
-        required_phrases = (
-            (
-                precedence,
-                (
-                    "remains pending until its roughly 30–35-minute clock expires",
-                    "never ages into a merge-eligible state, because no silence "
-                    "fallback exists to age into",
-                    "That clock decides only when to re-trigger once and when to "
-                    "escalate -- never when to merge",
-                    "Anchor each clock to the corresponding explicit request "
-                    "artifact's GitHub `created_at`, never to the latest push or "
-                    "the time the head became reviewable",
-                    "A current-head `eyes` reaction alone is non-terminal: it "
-                    "does not exit requested-review precedence",
-                    "issue exactly one re-trigger",
-                    "The re-trigger repeats the full request shape",
-                    "The re-trigger is the sole automatic retry",
-                    "do not re-trigger again",
-                    "explicit disposition bound to the exact current head",
-                    "The disposition must state exactly one of these outcomes",
-                    "merge of that exact head is authorized despite the absent "
-                    "connector terminal signal",
-                    "that exact head must not merge and remains blocked or is "
-                    "closed",
-                    "An ambiguous note, a disposition not bound to the current "
-                    "head, or an older-head disposition does not lift the merge "
-                    "block",
-                    "Any later push invalidates the disposition and restarts "
-                    "exact-head evaluation",
-                    "lifts only the missing connector-signal subgate",
-                    "is not a third automated terminal-signal model",
-                    "It does not waive required local exact-head verification, green "
-                    "required checks, mergeability, a full re-read of "
-                    "[the reviewed artifact set](#reviewed-artifact-set), or "
-                    "unresolved-feedback handling",
-                    "the release-gate disposition does not masquerade as that "
-                    "signal or inherit its handling",
-                    "a dropped request is indistinguishable from a review that "
-                    "is still processing",
-                    "unlike the absent-request variant, where there is nothing "
-                    "to drop",
-                ),
-            ),
-            (
-                fallback,
-                (
-                    "Eyes-only current-head artifact",
-                    "with no clock attached to any of them",
-                    "gate violation to fix, not a delay to wait out",
-                ),
-            ),
-            (
-                review_policy,
-                (
-                    "no elapsed time is ever a terminal signal",
-                    "There is no resettable settle that ripens a head for merge",
-                    "it does not waive post-signal handling",
-                    "the approximately five-minute post-clean settle and a full "
-                    "re-read of [the reviewed artifact set](#reviewed-artifact-set) "
-                    "remain mandatory before merge",
-                    "only two connector-authored clean signal models",
-                    "third terminal gate outcome",
-                ),
-            ),
-            (
-                handoff_wait,
-                (
-                    "[Explicit requested-review precedence]"
-                    "(commit-push-prs.md#explicit-requested-review-precedence)",
-                    "**No silence fallback exists.**",
-                    "repeating the focus and exact head SHA of the original request",
-                    "no further automatic retry is allowed",
-                    "The canonical section is the sole authority for the request-anchored "
-                    "clocks, current-head invalidation, the post-timeout disposition "
-                    "choices, and every effect of an exact-head release-gate disposition; "
-                    "this compact guidance defines no separate disposition effect",
-                    "A terminal outcome stops waiting for further artifacts only; it does "
-                    "not waive the handling below",
-                    "approximately five-minute mandatory post-clean settle",
-                    "connector completed an exact-head review",
-                    "Each outcome is terminal for the bot wait",
-                ),
-            ),
-        )
-        for source, phrases in required_phrases:
-            for phrase in phrases:
-                self.assertIn(phrase, source)
-        self.assertNotIn(
-            "remains unmergeable until a terminal human/operator disposition "
-            "is recorded",
-            handoff_wait,
-        )
-        self.assertEqual(
-            compact_precedence,
-            normalized(
-                'For requested-review silence, follow the canonical [Explicit requested-review '
-                'precedence](commit-push-prs.md#explicit-requested-review-precedence). Automation may '
-                'issue exactly one re-trigger, repeating the focus and exact head SHA of the original '
-                'request, and no further automatic retry is allowed. The canonical section is the sole '
-                'authority for the request-anchored clocks, current-head invalidation, the post-timeout '
-                'disposition choices, and every effect of an exact-head release-gate disposition; this '
-                'compact guidance defines no separate disposition effect. **No silence fallback exists.** '
-                'All three former no-terminal-artifact variants — no explicit review request, eyes-only '
-                'current-head artifact, prior-head artifacts only — are deleted, not shortened. Each '
-                'measured how long to wait for a review manual-only review never sends unrequested, so '
-                'each always expired into a merge on nothing. They remain a classification of non-signals '
-                'with no clock: at Tier A an absent request is a **gate violation to fix, not a delay to '
-                'wait out**; at Tier B/C there is nothing to wait for. This compact handoff rule must not '
-                'define a competing timer or disposition rule.'
-            ),
-        )
-
-        fallback_variants = re.findall(r"- \*\*([^*]+)\.\*\*", fallback)
-        # All three survive as a CLASSIFICATION with no clock. Deleting the timer for only
-        # the unrequested-review variant left the other two ripening a head on silence,
-        # which is the same defect under a narrower name.
-        self.assertEqual(
-            fallback_variants,
-            [
-                "No explicit review request",
-                "Eyes-only current-head artifact",
-                "Prior-head artifacts only",
-            ],
-        )
+        for phrase in (
+            "One automatic bot pass is mandatory for every PR",
+            "Do not merge an open PR before that pass completes",
+            "do not request a second bot pass",
+            "No elapsed time, tier, or release-gate disposition substitutes",
+        ):
+            self.assertIn(phrase, review_policy)
+        for phrase in (
+            "The first bot pass is pending",
+            "An `eyes` reaction is pickup only",
+            "one manual fallback request",
+            "do not replace a missing terminal review with a timer or disposition",
+        ):
+            self.assertIn(phrase, precedence)
+        for phrase in (
+            "every PR waits for that first pass",
+            "the first connector pass remains the PR's only bot review",
+            "Amended heads receive local exact-head verification",
+        ):
+            self.assertIn(phrase, handoff_wait)
 
     def test_project_cases_are_concrete(self):
         required_keys = {"project_id", "scenario", "expected_outcome"}
@@ -475,9 +359,9 @@ class ReviewLoopCapContractTest(unittest.TestCase):
                 sources["cap"],
             )
             self.assertIn(
-                "A capped head with zero open actionable findings and a completed "
-                "exact-head connector review follows the normal merge gate with no "
-                "convergence-disposition label",
+                "A capped head with zero open actionable findings, a completed "
+                "first connector pass, and local exact-head verification follows "
+                "the normal merge gate with no convergence-disposition label",
                 sources["cap"],
             )
 
@@ -544,10 +428,7 @@ class ReviewLoopCapContractTest(unittest.TestCase):
             "it is never a silent default for a contract violation",
             text,
         )
-        self.assertIn(
-            "a second independent model review on the same head must not be run",
-            text,
-        )
+        self.assertIn("A second model review must not be run", text)
         intake = normalized(
             (REPO_ROOT / "docs" / "workflows" / "task-intake-and-delegation.md")
             .read_text(encoding="utf-8")
@@ -572,7 +453,7 @@ class ReviewLoopCapContractTest(unittest.TestCase):
             # No line break in the pinned phrase: this source is whitespace-normalised, so a
             # substring spanning a markdown wrap can never match.
             self.assertIn(
-                "on the exact manual-review request",
+                "on the exact manual fallback request",
                 sources["review_policy"],
             )
             self.assertIn("is terminal CLEAN", sources["review_policy"])
@@ -1282,49 +1163,21 @@ class ReviewLoopCapContractTest(unittest.TestCase):
         )
 
     def test_the_mailbox_lane_has_an_equivalent_for_every_github_anchor(self):
-        """A lane that may request a review must be able to finish waiting for one.
-
-        Requested-review precedence anchored both clocks to GitHub `created_at`,
-        re-triggered with a GitHub comment, and waited for two GitHub connector signals.
-        A mailbox lane has none of those, so a Tier A non-GitHub head could request and
-        then stall forever -- or invent its own timing, which is a second contract.
-        """
+        """A non-GitHub lane uses one exact-OID request and verdict."""
         import re
 
         text = re.sub(r"\s+", " ", WORKFLOW_DOC.read_text(encoding="utf-8"))
-        self.assertIn("every anchor in this section has a mailbox equivalent", text)
-        for equivalent in (
-            "request packet naming the exact commit OID",
-            "recorded delivery timestamp",
-            "marked as the re-trigger",
-            "verdict or disposition packet naming that exact OID",
-        ):
-            self.assertIn(equivalent, text, f"no mailbox equivalent for {equivalent!r}")
-        # The clocks and the single-re-trigger rule are properties of the request, so
-        # they must NOT be redefined per lane -- that would be the competing contract.
-        self.assertIn(
-            "are unchanged — they are properties of the request, not of GitHub", text
-        )
+        self.assertIn("Non-GitHub lanes use an exact-OID mailbox request and verdict", text)
+        self.assertIn("with the same no-silence rule", text)
 
     def test_an_unrequested_tier_a_head_offers_no_waiver_alternative(self):
-        """"Fix the missing request, OR go to the operator disposition" was a choice.
-
-        Requested-review precedence is reachable only after a request and its single
-        re-trigger have both existed and run out. Offering it beside the missing request
-        reopened the closed path where a worker never requests review at all and asks for
-        authorization on an unreviewed head instead -- the waiver is the end of the
-        requested flow, not a substitute for entering it.
-        """
+        """A missing automatic pass may not be waived."""
         import re
 
         text = re.sub(r"\s+", " ", WORKFLOW_DOC.read_text(encoding="utf-8"))
-        self.assertNotIn("Fix the missing request, or follow", text)
-        self.assertIn("the two cases are **not** alternatives", text)
-        self.assertIn("issue it. That is the only move", text)
-        self.assertRegex(
-            text,
-            r"reachable only after a request and its single re-trigger have both existed",
-        )
+        self.assertIn("Tier A issues the one manual fallback request", text)
+        self.assertIn("every other tier reports the review-infrastructure blocker", text)
+        self.assertIn("No elapsed time, tier, or release-gate disposition substitutes", text)
 
     def test_a_finding_may_be_rejected_in_writing_without_a_fix(self):
         """Requiring a fix for every finding left an invalid one with no legal move.
@@ -1348,19 +1201,12 @@ class ReviewLoopCapContractTest(unittest.TestCase):
         )
 
     def test_a_withdrawal_is_bound_to_the_head_it_was_granted_on(self):
-        """An operator decision about one head was readable as a standing exemption.
-
-        The fixture helper already required withdrawal evidence naming the current head,
-        but that requirement lived only in the tests: the worker-facing rule said
-        "explicit" and nothing more, so a withdrawal recorded before an amendment could
-        be read as retiring the new head's obligation too.
-        """
+        """The first bot pass has no withdrawal path."""
         import re
 
         text = re.sub(r"\s+", " ", WORKFLOW_DOC.read_text(encoding="utf-8"))
-        self.assertIn("withdraws the review requirement **for that exact head**", text)
-        self.assertIn("naming the commit OID it applies to", text)
-        self.assertIn("a later push invalidates it", text)
+        self.assertIn("No elapsed time, tier, or release-gate disposition substitutes", text)
+        self.assertNotIn("withdraws the review requirement", text)
 
     def test_the_rule_heading_covers_resolved_threads(self):
         """A worker who reads only the bold heading is the one who loses a finding.
@@ -1442,12 +1288,12 @@ class ReviewLoopCapContractTest(unittest.TestCase):
         self.assertIn("python bin/review_request.py --pr", text)
         self.assertNotIn("@codex review for <every Tier A family", text)
         self.assertNotIn("operator disposition", text)
-        self.assertIn("lane owner and release-gate worker", text)
+        self.assertIn("review-infrastructure blocker", text)
 
     def test_the_contract_version_and_recent_summaries_stay_current(self):
         """A cached copy of the old gate can produce a wrong merge.
 
-        Workers on older contracts get no signal that the shared philosophy or v7
+        Workers on older contracts get no signal that the mandatory bot pass, shared philosophy, or v7
         review rules changed, so the version marker and recent summaries move
         together.
 
@@ -1459,13 +1305,16 @@ class ReviewLoopCapContractTest(unittest.TestCase):
         the assertions below moved to the document that owns them.
         """
         text = AGENTS_DOC.read_text(encoding="utf-8")
-        self.assertIn("<!-- CONTRACT_VERSION: 8 -->", text)
+        self.assertIn("<!-- CONTRACT_VERSION: 9 -->", text)
         self.assertNotIn("<!-- CONTRACT_VERSION: 3 -->", text)
 
         recent_entry = contract_section(
             text, "### Recent contract changes", "## Required Reading"
         )
         for phrase in (
+            "Contract v9",
+            "mandatory",
+            "Every PR waits",
             "Contract v8",
             "shared philosophy",
             "Contract v7",
@@ -1474,7 +1323,7 @@ class ReviewLoopCapContractTest(unittest.TestCase):
             "Do **not** re-request a review on the fixed head",
             "lane contract",
             "per-finding",
-            "One external reviewer per head",
+            "One external bot review per PR",
             "merge-with-followups",
             "merge-with-followups-or-close",
             "review_request.py",
@@ -1488,7 +1337,7 @@ class ReviewLoopCapContractTest(unittest.TestCase):
         workflow = normalized(WORKFLOW_DOC.read_text(encoding="utf-8"))
         for phrase in (
             "silence fallback",
-            "one initial request per candidate final head",
+            "One automatic bot pass is mandatory for every PR",
             "a connector review body that lists no findings is not a clean verdict",
             "Never `comments.nodes[0].commit.oid`",
             "**A push is not an adjudication**",
@@ -1532,31 +1381,22 @@ class ReviewLoopCapContractTest(unittest.TestCase):
             "Proceed only when all of these are true:",
             "Read [the reviewed artifact set](#reviewed-artifact-set) directly.",
         )
-        self.assertIn(
-            "release-gate disposition lifted the missing review-completion "
-            "subgate without claiming the connector completed",
-            normalized(section),
-        )
+        self.assertIn("connector completed the PR's first pass", section)
+        self.assertNotIn("release-gate disposition lifted", section)
 
-    def test_the_compact_handoff_requires_a_new_request_after_a_fix_push(self):
-        """With automatic review off, nothing replaces an invalidated signal.
-
-        The compact handoff still told a worker to evaluate the amended head's
-        "automatic artifacts". A fix push invalidates every prior-head signal and
-        produces no replacement on its own, so that instruction waits forever.
-        """
+    def test_the_compact_handoff_uses_one_bot_pass_and_local_fix_proof(self):
         section = contract_section(
             HANDOFF_DOC.read_text(encoding="utf-8"),
             "If GitHub Codex comments on the PR",
-            "Do not substitute a resolved older thread",
+            "Delete the heartbeat before post-merge cleanup.",
         )
         for phrase in (
-            "issue a new exact-head request for",
-            "Automatic review is off, so nothing arrives unrequested",
-            "waits forever",
+            "Do not request a second bot or model review",
+            "The first pass is the PR's only bot pass",
+            "local exact-head verification",
         ):
             self.assertIn(phrase, section)
-        self.assertNotIn("automatic artifacts from scratch", section)
+        self.assertNotIn("issue a new exact-head request", section)
 
     def test_the_doc_names_the_authoritative_field_and_rejects_the_mutable_one(self):
         text = WORKFLOW_DOC.read_text(encoding="utf-8")
@@ -1611,7 +1451,7 @@ class ReviewLoopCapContractTest(unittest.TestCase):
         """
         section = contract_section(
             AGENTS_DOC.read_text(encoding="utf-8"),
-            "Request with `@codex review for <focus>`",
+            "When the Tier A fallback is needed, request with `@codex review for <focus>`",
             '**"Untrusted" means input we do not control.**',
         )
         for phrase in (
@@ -1620,38 +1460,30 @@ class ReviewLoopCapContractTest(unittest.TestCase):
             "a connector `+1` is terminal only while the head still equals the SHA "
             "that request named",
             "a request without one leaves the reaction path unsatisfiable",
-            "**Per Contract v7, request this review ONCE per PR**",
+            "**Request at most ONCE per PR**",
             "do **not** re-request a review on the fixed head",
         ):
             self.assertIn(phrase, section)
 
-    def test_silently_dropped_review_gets_one_request_anchored_retrigger(self):
+    def test_silently_dropped_review_does_not_become_a_pass(self):
         def check(case, sources):
             self.assertIn(
-                "remains pending until its roughly 30–35-minute clock expires",
+                "The first bot pass is pending",
                 sources["review_policy"],
             )
             self.assertIn(
-                "request as silently dropped and issue exactly one re-trigger",
-                sources["review_policy"],
-            )
-            # GH-313 finding 3: the retry shape is the contract, not prose. A bare
-            # `@codex review` names no SHA, and a reaction on a comment that named no
-            # SHA can never satisfy the terminal-signal rule.
-            self.assertIn(
-                "The re-trigger repeats the full request shape — focus and the exact "
-                "head SHA — never a bare `@codex review`",
+                "one manual fallback request",
                 sources["review_policy"],
             )
             self.assertIn(
-                "starts its own 30–35-minute clock at its GitHub `created_at`",
+                "do not replace a missing terminal review with a timer or disposition",
                 sources["review_policy"],
             )
-            self.assertIn("do not re-trigger again", sources["review_policy"])
+            self.assertNotIn("re-trigger", sources["review_policy"])
 
         self.assert_scenario_cases("canonical_wait_gate", check)
 
-    def test_release_gate_disposition_is_exact_head_and_narrow(self):
+    def test_release_gate_disposition_cannot_replace_first_pass(self):
         def check(case, sources):
             self.assertEqual(
                 case["expected_outcome"],
@@ -1823,18 +1655,16 @@ class ReviewLoopCapContractTest(unittest.TestCase):
 
         self.assert_scenario_cases("compact_wait_gate", check)
 
-    def test_compact_silently_dropped_review_is_retriggered(self):
+    def test_compact_silently_dropped_review_is_blocked(self):
         def check(case, sources):
             handoff = sources["handoff_wait"]
             self.assertIn(
-                "[Explicit requested-review precedence]"
-                "(commit-push-prs.md#explicit-requested-review-precedence)",
+                "[First-pass precedence](commit-push-prs.md#first-pass-precedence)",
                 handoff,
             )
             self.assertIn(
-                "repeating the focus and exact head SHA of the original request",
+                "No retry or elapsed-time disposition replaces the mandatory first pass",
                 handoff,
-                "a SHA-less retry cannot produce a usable reaction signal",
             )
             self.assertIn("**No silence fallback exists.**", handoff)
 
@@ -1860,128 +1690,28 @@ class ReviewLoopCapContractTest(unittest.TestCase):
         )
         mutations = (
             (
-                "requested-review silence re-aged into a merge path",
+                "missing review becomes mergeable",
                 "workflow",
-                "never ages into a merge-eligible state",
-                "ages into a merge-eligible state",
+                "Do not merge an open PR before that pass completes",
+                "Merge an open PR before that pass completes",
             ),
             (
-                "a deleted fallback variant reintroduced",
+                "eyes becomes terminal",
                 "workflow",
-                "- **Prior-head artifacts only.**",
-                "- **Explicit requested-review silence.** Broadened case.\n"
-                "- **Prior-head artifacts only.**",
+                "An `eyes` reaction is pickup only",
+                "An `eyes` reaction is terminal",
             ),
             (
-                "post-clean settle made waivable",
-                "workflow",
-                # The enumeration between "re-read" and "remain" is now a reference, so
-                # the mutation targets the clause that carries the obligation.
-                "remain mandatory before merge",
-                "may be skipped after a terminal signal",
-            ),
-            (
-                "terminal signal source altered",
-                "workflow",
-                "third terminal\n  gate outcome",
-                "optional disposed-review\n  outcome",
-            ),
-            (
-                "only the canonical document updated",
+                "compact guidance permits second bot pass",
                 "handoff",
-                "[Explicit requested-review precedence]"
-                "(commit-push-prs.md#explicit-requested-review-precedence)",
-                "Explicit requested-review precedence",
+                "the first connector pass remains the PR's only bot review",
+                "a second bot review may replace local verification",
             ),
             (
                 "elapsed time reinstated as a terminal signal",
                 "workflow",
-                "no elapsed time is ever a terminal signal",
-                "elapsed time is a terminal signal",
-            ),
-            (
-                "generic terminal signal waives post-signal handling",
-                "workflow",
-                "it does not waive post-signal handling",
-                "it waives post-signal handling",
-            ),
-            (
-                "automatic re-trigger repeats indefinitely",
-                "workflow",
-                "issue exactly one re-trigger",
-                "repeatedly issue a re-trigger",
-            ),
-            (
-                "request clock re-anchored to latest push",
-                "workflow",
-                "GitHub `created_at`, never to the latest push",
-                "the latest push, never to GitHub `created_at`",
-            ),
-            (
-                "eyes exits requested-review precedence",
-                "workflow",
-                "does not exit requested-review precedence",
-                "exits requested-review precedence",
-            ),
-            (
-                "any recorded note lifts the block",
-                "workflow",
-                "An ambiguous note,\na disposition not bound to the current "
-                "head, or an older-head disposition does\nnot lift the merge "
-                "block",
-                "Any recorded note lifts the merge block",
-            ),
-            (
-                "older-head authorization survives a push",
-                "workflow",
-                "Any later push invalidates the disposition and\nrestarts "
-                "exact-head evaluation",
-                "A later push preserves the disposition",
-            ),
-            (
-                "authorization becomes a third connector signal",
-                "workflow",
-                "is not a third automated terminal-signal\nmodel",
-                "is a third automated terminal-signal model",
-            ),
-            (
-                "authorization waives independent gates",
-                "workflow",
-                "It does not waive required local exact-head\nverification, green "
-                "required checks, mergeability, a full re-read of\n"
-                "[the reviewed artifact set](#reviewed-artifact-set), or unresolved-feedback\n"
-                "handling",
-                "It waives independent review, checks, and reread",
-            ),
-            (
-                "compact guidance defines a divergent disposition effect",
-                "handoff",
-                "this compact guidance defines no\nseparate disposition effect",
-                "this compact guidance says any disposition ends the wait",
-            ),
-            (
-                "canonical outcomes permit either or both",
-                "workflow",
-                "must state exactly one",
-                "may state either or both",
-            ),
-            (
-                "compact guidance adds a contradictory disposition effect",
-                "handoff",
-                "timer or disposition rule.\n\nIf GitHub Codex comments",
-                "timer or disposition rule.\n"
-                "Nevertheless, any recorded disposition ends the "
-                "requested-review wait.\n\n"
-                "If GitHub Codex comments",
-            ),
-            (
-                "compact guidance adds a synonymous human-decision effect",
-                "handoff",
-                "timer or disposition rule.\n\nIf GitHub Codex comments",
-                "timer or disposition rule.\n"
-                "Nevertheless, any recorded human decision ends the "
-                "requested-review wait.\n\n"
-                "If GitHub Codex comments",
+                "No elapsed time, tier, or release-gate disposition substitutes",
+                "Elapsed time or a disposition substitutes",
             ),
         )
         for name, target, old, new in mutations:
@@ -1989,6 +1719,7 @@ class ReviewLoopCapContractTest(unittest.TestCase):
                 original = (
                     self.workflow_text if target == "workflow" else self.handoff_text
                 )
+                original = normalized(original)
                 self.assertEqual(original.count(old), 1)
                 mutated = original.replace(old, new, 1)
                 workflow_text = (
@@ -2006,6 +1737,21 @@ class ReviewLoopCapContractTest(unittest.TestCase):
     def test_guard_has_no_live_project_registry_dependency(self):
         test_source = Path(__file__).read_text(encoding="utf-8")
         self.assertNotIn("projects" + ".json", test_source)
+
+    def test_amended_heads_never_route_back_to_the_bot(self):
+        text = normalized(self.workflow_text)
+        self.assertIn(
+            "later heads receive local exact-head verification",
+            text,
+        )
+        self.assertIn(
+            "Do not run another bot or independent model review on the amended head",
+            text,
+        )
+        self.assertIn("completed the PR's first pass clean on a prior OID", text)
+        self.assertIn("amended current head has complete local exact-head verification", text)
+        self.assertNotIn("external reviewer for later exact heads", text)
+        self.assertNotIn("connector as the external reviewer for the new exact head", text)
 
 
 if __name__ == "__main__":

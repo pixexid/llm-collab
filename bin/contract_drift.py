@@ -52,19 +52,14 @@ def deliver_without_repo_targets(text: str) -> list[str]:
     return hits
 
 
-def waits_for_an_unrequested_review(text: str) -> list[str]:
-    """Text telling a worker to wait for a review that, since auto-review was disabled,
-    never arrives unless someone asks for it."""
-    hits = []
-    for line in text.splitlines():
-        low = line.lower()
-        if "review" not in low:
-            continue
-        if re.search(r"\b(wait|waiting)\b", low) and re.search(
-            r"\b(bot|automatic|auto|connector)\b", low
-        ):
-            hits.append(line.strip()[:110])
-    return hits
+def claims_review_is_manual_only(text: str) -> list[str]:
+    """Text caching the retired manual-only review policy."""
+    stale = re.compile(
+        r"review.{0,40}(?:manual only|automatic review (?:is )?(?:off|disabled))"
+        r"|nothing arrives unless requested",
+        re.IGNORECASE,
+    )
+    return [line.strip()[:110] for line in text.splitlines() if stale.search(line)]
 
 
 def chat_last_in_a_send_command(text: str) -> list[str]:
@@ -82,10 +77,10 @@ RULES = [
          "a packet with no repo scope is written and then refused at dispatch; this "
          "silently dropped 27 packets",
          deliver_without_repo_targets),
-    Rule("waits-for-unrequested-review",
-         "review is manual only; nothing arrives unless requested, so this instruction "
-         "makes a worker wait forever",
-         waits_for_an_unrequested_review),
+    Rule("manual-only-review-policy",
+         "every PR now waits for one automatic bot pass; cached manual-only guidance "
+         "can authorize a premature merge",
+         claims_review_is_manual_only),
     Rule("chat-last-in-send",
          "`--chat last` resolves across projects and addresses the wrong lane once a "
          "second project is active",

@@ -1,9 +1,8 @@
 """Profile-reader proof for worker start-pi (#271).
 
-Fixture-based: proves the greatest-binding-generation reduction, the Pi Web
-endpoint scoping, wake forced to runtime_trigger, the preserved display alias,
-and the fail-closed `pi_profile_required` cases (zero eligible, conflicting
-home, greatest-generation tie, incomplete-only, partial override).
+Fixture-based: proves the greatest-binding-generation reduction, project and Pi
+Web endpoint scoping, first-profile bootstrap, wake forced to runtime_trigger,
+and the fail-closed `pi_profile_required` cases.
 """
 
 from __future__ import annotations
@@ -48,6 +47,14 @@ class ResolvePiProfileTest(unittest.TestCase):
         with self.assertRaisesRegex(wr.RotateError, "pi_profile_required"):
             wr.resolve_pi_profile("ghost", "llm-collab", sessions_dir=self.tmp)
 
+    def test_explicit_profile_bootstraps_first_project_profile(self):
+        p = wr.resolve_pi_profile(
+            "glmpi", "amiga", sessions_dir=self.tmp,
+            override=("zai", "glm-5.2", "max"), runtime_home="/pi",
+        )
+        self.assertEqual((p["provider"], p["model"], p["thinking"]), ("zai", "glm-5.2", "max"))
+        self.assertEqual((p["runtime_home"], p["display"]), ("/pi", "GLMPI"))
+
     def test_conflicting_home_fails_closed(self):
         _rec(self.tmp, "SESSION-PIWEB-RELAY-A-01", gen=8, home="/pi-a")
         _rec(self.tmp, "SESSION-PIWEB-RELAY-A-02", gen=8, home="/pi-b")
@@ -58,6 +65,12 @@ class ResolvePiProfileTest(unittest.TestCase):
         _rec(self.tmp, "SESSION-PIWEB-RELAY-A-01", gen=8, model="gpt-5.6-luna")
         _rec(self.tmp, "SESSION-PIWEB-RELAY-A-02", gen=8, model="gpt-5.7")
         with self.assertRaisesRegex(wr.RotateError, "conflicting tuples"):
+            wr.resolve_pi_profile("relay", "llm-collab", sessions_dir=self.tmp)
+
+    def test_incomplete_newest_generation_fails_instead_of_restoring_older_profile(self):
+        _rec(self.tmp, "SESSION-PIWEB-RELAY-A-01", gen=8, model="gpt-5.6-luna")
+        _rec(self.tmp, "SESSION-PIWEB-RELAY-A-02", gen=9, model=None)
+        with self.assertRaisesRegex(wr.RotateError, "generation 9 has an incomplete fingerprint"):
             wr.resolve_pi_profile("relay", "llm-collab", sessions_dir=self.tmp)
 
     def test_override_disambiguates_but_must_be_complete(self):
@@ -73,6 +86,15 @@ class ResolvePiProfileTest(unittest.TestCase):
         _rec(self.tmp, "SESSION-PIWEB-RELAY-A-02", gen=99, project="other", model="leaked")
         p = wr.resolve_pi_profile("relay", "llm-collab", sessions_dir=self.tmp)
         self.assertEqual(p["model"], "gpt-5.6-luna")  # the other project's gen-99 must not win
+
+    def test_amiga_and_non_amiga_profiles_are_selected_independently(self):
+        _rec(self.tmp, "SESSION-PIWEB-RELAY-A-01", project="amiga", model="amiga-model")
+        _rec(self.tmp, "SESSION-PIWEB-RELAY-B-01", project="llm-collab", model="collab-model")
+        self.assertEqual(wr.resolve_pi_profile("relay", "amiga", sessions_dir=self.tmp)["model"], "amiga-model")
+        self.assertEqual(
+            wr.resolve_pi_profile("relay", "llm-collab", sessions_dir=self.tmp)["model"],
+            "collab-model",
+        )
 
     def test_corrupt_candidate_fails_closed(self):
         _rec(self.tmp, "SESSION-PIWEB-RELAY-A-01", gen=8)
@@ -107,20 +129,21 @@ class _Transport:
     def __call__(self, method, path, body):
         base = path.split("?")[0]
         self.paths.append(f"{method} {base}")
-        if method == "POST" and base == "/api/tabs":
-            return 201, {"ok": True, "data": {"tab": {"id": "tab-9", "cwd": "/repo", "sessionFile": "/s.jsonl"}}}
-        if method == "POST" and base in ("/api/model", "/api/thinking"):
-            return 200, {"success": True, "data": {"level": "max"}}
-        if method == "GET" and base == "/api/state":
-            return 200, {"success": True, "data": {"sessionId": NATIVE, "sessionFile": "/s.jsonl",
-                         "model": {"provider": "zai", "id": "glm-5.2"}, "thinkingLevel": "max"}}
-        if method == "POST" and base == "/api/prompt":
-            self._marker = re.search(r"BOOTSTRAP_READY_\S+", body["message"]).group(0)
-            return 200, {"success": True}
-        if method == "GET" and base == "/api/last-assistant-text":
-            return 200, {"success": True, "data": {"text": self._marker}}
-        if method == "DELETE" and base.startswith("/api/tabs/"):
-            return 200, {"ok": True, "data": {}}
+        if method == "POST" and base == "/api/sessions":
+            return 200, {"id": NATIVE, "cwd": "/repo", "path": "/s.jsonl"}
+        if method == "POST" and base in (
+            f"/api/sessions/{NATIVE}/model", f"/api/sessions/{NATIVE}/thinking-level",
+        ):
+            return 200, {"sessionId": NATIVE, "model": {"provider": "zai", "id": "glm-5.2"}, "thinkingLevel": "max"}
+        if method == "GET" and base == f"/api/sessions/{NATIVE}/status":
+            return 200, {"sessionId": NATIVE, "model": {"provider": "zai", "id": "glm-5.2"}, "thinkingLevel": "max"}
+        if method == "POST" and base == f"/api/sessions/{NATIVE}/prompt":
+            self._marker = re.search(r"BOOTSTRAP_READY_\S+", body["text"]).group(0)
+            return 200, {"accepted": True}
+        if method == "GET" and base == f"/api/sessions/{NATIVE}/messages":
+            return 200, {"messages": [{"role": "assistant", "content": [{"type": "text", "text": self._marker}]}]}
+        if method == "POST" and base == f"/api/sessions/{NATIVE}/stop":
+            return 200, {"stopped": True}
         raise AssertionError(f"unexpected {method} {path}")
 
 
@@ -139,18 +162,20 @@ class _Autobridge:
 
 
 def _cfg(**over):
-    d = dict(pi_web_url="http://127.0.0.1:31415", agent="glmpi", project="llm-collab",
+    d = dict(pi_web_url=wr.DEFAULT_PI_WEB_URL, agent="glmpi", project="llm-collab",
              chat="CHAT-NEWPROJ", repo_target="app", provider=None, model=None, thinking=None,
+             runtime_home=None,
              bootstrap_timeout=5.0, poll_interval=0.0, json_output=True)
     d.update(over)
     return argparse.Namespace(**d)
 
 
 class StartPiFlowTest(unittest.TestCase):
-    def _run(self, cfg, transport, run):
+    def _run(self, cfg, transport, run, *, resolve_profile=None):
         return wr.start_pi(cfg, piweb=wr.PiWeb("http://x", request=transport), run_autobridge=run,
                            event_path_for=lambda l: f"/e/{l}.jsonl", resolve_cwd=lambda p, r: "/repo",
-                           resolve_profile=lambda agent, project, override=None: dict(PROFILE), prepare_event=lambda p: None,
+                           resolve_profile=resolve_profile or (lambda agent, project, **_kw: dict(PROFILE)),
+                           prepare_event=lambda p: None,
                            sleep=lambda _s: None, clock=(lambda c=[0.0]: (c.__setitem__(0, c[0] + 1), c[0])[1]))
 
     def test_first_start_registers_without_supersede_and_verifies(self):
@@ -163,6 +188,24 @@ class StartPiFlowTest(unittest.TestCase):
         self.assertEqual(reg[reg.index("--status") + 1], "active")
         self.assertEqual(reg[reg.index("--expect-pi-model") + 1], "glm-5.2")
         self.assertEqual(reg[reg.index("--wake-strategy") + 1], "runtime_trigger")
+
+    def test_first_project_profile_reaches_registration(self):
+        import tempfile
+
+        sessions = Path(tempfile.mkdtemp())
+        resolve = lambda agent, project, **kw: wr.resolve_pi_profile(  # noqa: E731
+            agent, project, sessions_dir=sessions, **kw
+        )
+        t, run = _Transport(), _Autobridge()
+        self._run(
+            _cfg(provider="zai", model="glm-5.2", thinking="max", runtime_home="/pi"),
+            t,
+            run,
+            resolve_profile=resolve,
+        )
+        reg = next(a for a in run.calls if a[0] == "register")
+        self.assertEqual(reg[reg.index("--runtime-home") + 1], "/pi")
+        self.assertEqual(reg[reg.index("--expect-pi-provider") + 1], "zai")
 
     def test_register_failure_reports_and_leaves_no_false_success(self):
         t, run = _Transport(), _Autobridge(register_rc=1)

@@ -41,29 +41,29 @@ class FakeTransport:
         base = path.split("?")[0]
         self.paths.append(f"{method} {base}")
         self.chronology.append(("http", f"{method} {base}"))
-        if method == "POST" and base == "/api/tabs":
-            return 201, {"ok": True, "data": {"tab": {"id": "tab-1", "cwd": "/repo", "sessionFile": "/s.jsonl", "running": True}, "tabs": []}}
-        if method == "POST" and base == "/api/model":
-            return 200, {"success": True, "data": {}, "tab": {}}
-        if method == "POST" and base == "/api/thinking":
-            return 200, {"success": True, "data": {"level": self.thinking, "requestedLevel": self.thinking}, "tab": {}}
-        if method == "GET" and base == "/api/state":
+        if method == "POST" and base == "/api/sessions":
+            return 200, {"id": NATIVE, "cwd": "/repo", "path": "/s.jsonl"}
+        if method == "POST" and base == f"/api/sessions/{NATIVE}/model":
+            return 200, {"sessionId": NATIVE, "model": {"provider": self.provider, "id": self.model_id}, "thinkingLevel": self.thinking}
+        if method == "POST" and base == f"/api/sessions/{NATIVE}/thinking-level":
+            return 200, {"sessionId": NATIVE, "model": {"provider": self.provider, "id": self.model_id}, "thinkingLevel": self.thinking}
+        if method == "GET" and base == f"/api/sessions/{NATIVE}/status":
             self._state_calls += 1
             if self.bad_state:
-                return 200, {"success": True, "data": {}}  # missing sessionId -> KeyError
+                return 200, {}  # missing sessionId -> KeyError
             provider = "openai" if (self.drift and self._state_calls >= 2) else self.provider
-            return 200, {"success": True, "data": {"sessionId": NATIVE, "sessionFile": "/new.jsonl", "model": {"provider": provider, "id": self.model_id}, "thinkingLevel": self.thinking, "isStreaming": False}}
-        if method == "POST" and base == "/api/prompt":
-            self._marker = re.search(r"BOOTSTRAP_READY_\S+", body["message"]).group(0)
-            return 200, {"success": True}
-        if method == "GET" and base == "/api/last-assistant-text":
+            return 200, {"sessionId": NATIVE, "model": {"provider": provider, "id": self.model_id}, "thinkingLevel": self.thinking, "isStreaming": False}
+        if method == "POST" and base == f"/api/sessions/{NATIVE}/prompt":
+            self._marker = re.search(r"BOOTSTRAP_READY_\S+", body["text"]).group(0)
+            return 200, {"accepted": True}
+        if method == "GET" and base == f"/api/sessions/{NATIVE}/messages":
             self._polls += 1
             if self.marker_after is not None and self._polls >= self.marker_after:
                 self.chronology.append(("marker_ready", self._marker))
-                return 200, {"success": True, "data": {"text": self._marker}}
-            return 200, {"success": True, "data": {"text": None}}
-        if method == "DELETE" and base.startswith("/api/tabs/"):
-            return 200, {"ok": True, "data": {"tabs": [], "activeTabId": None}}
+                return 200, {"messages": [{"role": "assistant", "content": [{"type": "text", "text": self._marker}]}]}
+            return 200, {"messages": []}
+        if method == "POST" and base == f"/api/sessions/{NATIVE}/stop":
+            return 200, {"stopped": True}
         raise AssertionError(f"unexpected request {method} {path}")
 
 
@@ -106,7 +106,7 @@ class FakeAutobridge:
 
 def make_cfg():
     return argparse.Namespace(
-        pi_web_url="http://127.0.0.1:31415", agent="relay", project="llm-collab", chat="CHAT-1",
+        pi_web_url=wr.DEFAULT_PI_WEB_URL, agent="relay", project="llm-collab", chat="CHAT-1",
         repo_target="app", provider="zai", model="glm-5.2", thinking="max",
         supersedes_session=PRED, bootstrap_timeout=5.0, poll_interval=0.0, json_output=True,
     )
@@ -126,7 +126,7 @@ def _fake_clock(step=1.0):
 def _run(cfg, transport, autobridge):
     return wr.rotate(
         cfg,
-        piweb=wr.PiWeb("http://127.0.0.1:31415", request=transport),
+        piweb=wr.PiWeb(wr.DEFAULT_PI_WEB_URL, request=transport),
         run_autobridge=autobridge,
         event_path_for=lambda logical: f"/State/events/{logical}.jsonl",
         resolve_cwd=lambda project, repo: "/repo",
@@ -169,7 +169,7 @@ class WorkerRotatePiTest(unittest.TestCase):
         with self.assertRaises(wr.RotateError):
             _run(make_cfg(), transport, run)
         self.assertNotIn("register", [c[0] for c in run.calls])
-        self.assertTrue(any(p.startswith("DELETE /api/tabs/") for p in transport.paths))
+        self.assertIn(f"POST /api/sessions/{NATIVE}/stop", transport.paths)
 
     def test_bootstrap_timeout_closes_tab_and_skips_register(self):
         chron: list = []
@@ -177,7 +177,7 @@ class WorkerRotatePiTest(unittest.TestCase):
         with self.assertRaises(wr.RotateError):
             _run(make_cfg(), transport, run)
         self.assertNotIn("register", [c[0] for c in run.calls])
-        self.assertTrue(any(p.startswith("DELETE /api/tabs/") for p in transport.paths))
+        self.assertIn(f"POST /api/sessions/{NATIVE}/stop", transport.paths)
 
     def test_state_mismatch_closes_tab_and_skips_register(self):
         chron: list = []
@@ -185,7 +185,7 @@ class WorkerRotatePiTest(unittest.TestCase):
         with self.assertRaises(wr.RotateError):
             _run(make_cfg(), transport, run)
         self.assertNotIn("register", [c[0] for c in run.calls])
-        self.assertTrue(any(p.startswith("DELETE /api/tabs/") for p in transport.paths))
+        self.assertIn(f"POST /api/sessions/{NATIVE}/stop", transport.paths)
 
     def test_malformed_state_closes_tab_and_skips_register(self):
         chron: list = []
@@ -193,14 +193,14 @@ class WorkerRotatePiTest(unittest.TestCase):
         with self.assertRaises(wr.RotateError):
             _run(make_cfg(), transport, run)
         self.assertNotIn("register", [c[0] for c in run.calls])
-        self.assertTrue(any(p.startswith("DELETE /api/tabs/") for p in transport.paths))
+        self.assertIn(f"POST /api/sessions/{NATIVE}/stop", transport.paths)
 
     def test_superseded_predecessor_refused_before_any_tab(self):
         chron: list = []
         transport, run = FakeTransport(chron), FakeAutobridge(chron, pred_active=False)
         with self.assertRaises(wr.RotateError):
             _run(make_cfg(), transport, run)
-        self.assertNotIn("POST /api/tabs", transport.paths)
+        self.assertNotIn("POST /api/sessions", transport.paths)
 
     def test_show_and_binding_authority_divergence_refused_before_any_tab(self):
         chron: list = []
@@ -208,12 +208,15 @@ class WorkerRotatePiTest(unittest.TestCase):
         run = FakeAutobridge(chron, binding_overrides={"binding_id": "bind-2"})
         with self.assertRaises(wr.RotateError):
             _run(make_cfg(), transport, run)
-        self.assertNotIn("POST /api/tabs", transport.paths)
+        self.assertNotIn("POST /api/sessions", transport.paths)
 
     def test_non_loopback_url_refused(self):
         with self.assertRaises(wr.RotateError):
             wr.require_loopback("http://example.com:31415")
         self.assertEqual(wr.require_loopback("http://127.0.0.1:31415"), "http://127.0.0.1:31415")
+
+    def test_operator_pi_web_is_the_default(self):
+        self.assertEqual(wr.DEFAULT_PI_WEB_URL, "http://127.0.0.1:8504")
 
 
 if __name__ == "__main__":

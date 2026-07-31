@@ -28,7 +28,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-DEFAULT_PI_WEB_URL = "http://127.0.0.1:31415"
+DEFAULT_PI_WEB_URL = "http://127.0.0.1:8504"
 _BIN = Path(__file__).resolve().parent
 AUTOBRIDGE = _BIN / "session_autobridge.py"
 # The persistent monitor must reference the stable workspace root, not this
@@ -54,7 +54,7 @@ def _monitor_inbox() -> str:
 def _sessions_dir() -> Path:
     return _workspace_root() / "State" / "session_autobridge" / "sessions"
 
-BOOTSTRAP_TEMPLATE = """From Claude, worker provisioning only. You are {agent} in fresh Pi native session {native}. Do not start project work. Start exactly one persistent monitor now with monitor_watch_path (NOT monitor_start — monitor_start needs an attended confirmation and will time out).
+BOOTSTRAP_TEMPLATE = """Automated llm-collab worker provisioning. You are {agent} in fresh Pi native session {native}. Do not start project work. Start exactly one persistent monitor now with monitor_watch_path (NOT monitor_start — monitor_start needs an attended confirmation and will time out).
 
 Watch this exact file: {event_path}
 On each change to that file, run exactly: LLM_COLLAB_READER_RUNTIME_ID={native} {py} '{inbox}' --me {agent} --session {logical} --project {project} --chat {chat} --repo-target {repo}
@@ -68,11 +68,12 @@ class RotateError(Exception):
 
 
 class PiWeb:
-    """Thin stdlib client over Pi Web's loopback manager API."""
+    """Thin stdlib client over jmfederico/pi-web's loopback session API."""
 
     def __init__(self, base_url: str, request=None):
         self.base = base_url.rstrip("/")
         self._request = request or self._http
+        self._sessions = {}
 
     def _http(self, method: str, path: str, body):
         data = json.dumps(body).encode() if body is not None else None
@@ -87,57 +88,86 @@ class PiWeb:
             return exc.code, (json.loads(raw) if raw else None)
 
     def create_tab(self, cwd: str, title: str) -> dict:
-        status, body = self._request("POST", "/api/tabs", {"cwd": cwd, "title": title})
-        if status != 201 or not body:
-            raise RotateError(f"create tab failed (HTTP {status})")
-        tab = body["data"]["tab"]
-        return {"id": tab["id"], "cwd": tab["cwd"], "session_file": tab.get("sessionFile")}
+        status, body = self._request("POST", "/api/sessions", {"cwd": cwd})
+        if status != 200 or not body:
+            raise RotateError(f"create session failed (HTTP {status})")
+        session = {"id": body["id"], "cwd": body["cwd"], "session_file": body.get("path")}
+        self._sessions[session["id"]] = session
+        return session
 
     def set_model(self, tab_id: str, provider: str, model_id: str) -> None:
+        cwd = self._sessions[tab_id]["cwd"]
         status, body = self._request(
-            "POST", "/api/model", {"tabId": tab_id, "provider": provider, "modelId": model_id}
+            "POST", f"/api/sessions/{urllib.parse.quote(tab_id)}/model",
+            {"cwd": cwd, "provider": provider, "modelId": model_id},
         )
-        if status != 200 or not (body and body.get("success")):
+        if status != 200 or not body:
             raise RotateError("set_model refused")
 
     def set_thinking(self, tab_id: str, level: str) -> None:
-        status, body = self._request("POST", "/api/thinking", {"tabId": tab_id, "level": level})
-        if status != 200 or not (body and body.get("success") and body["data"].get("level") == level):
+        cwd = self._sessions[tab_id]["cwd"]
+        status, body = self._request(
+            "POST", f"/api/sessions/{urllib.parse.quote(tab_id)}/thinking-level",
+            {"cwd": cwd, "level": level},
+        )
+        if status != 200 or not body or body.get("thinkingLevel") != level:
             raise RotateError("set_thinking refused")
 
     def get_state(self, tab_id: str) -> dict:
+        session = self._sessions[tab_id]
         status, body = self._request(
-            "GET", "/api/state?tabId=" + urllib.parse.quote(tab_id), None
+            "GET", f"/api/sessions/{urllib.parse.quote(tab_id)}/status?cwd="
+            + urllib.parse.quote(session["cwd"]), None,
         )
-        if status != 200 or not (body and body.get("success")):
+        if status != 200 or not body:
             raise RotateError("get_state failed")
-        data = body["data"]
         return {
-            "native": data["sessionId"],
-            "session_file": data["sessionFile"],
-            "provider": data["model"]["provider"],
-            "model_id": data["model"]["id"],
-            "thinking": data["thinkingLevel"],
+            "native": body["sessionId"],
+            "session_file": session["session_file"],
+            "provider": body["model"]["provider"],
+            "model_id": body["model"]["id"],
+            "thinking": body["thinkingLevel"],
         }
 
     def prompt(self, tab_id: str, message: str) -> None:
-        status, _ = self._request("POST", "/api/prompt", {"tabId": tab_id, "message": message})
+        cwd = self._sessions[tab_id]["cwd"]
+        status, _ = self._request(
+            "POST", f"/api/sessions/{urllib.parse.quote(tab_id)}/prompt",
+            {"cwd": cwd, "text": message},
+        )
         if status != 200:
             raise RotateError("prompt not accepted")
 
     def last_assistant_text(self, tab_id: str):
+        cwd = self._sessions[tab_id]["cwd"]
         status, body = self._request(
-            "GET", "/api/last-assistant-text?tabId=" + urllib.parse.quote(tab_id), None
+            "GET", f"/api/sessions/{urllib.parse.quote(tab_id)}/messages?cwd="
+            + urllib.parse.quote(cwd) + "&limit=10", None,
         )
-        if status != 200 or not (body and body.get("success")):
+        if status != 200 or not isinstance(body, dict):
             return None
-        return body["data"].get("text")
+        for message in reversed(body.get("messages", [])):
+            if message.get("role") != "assistant":
+                continue
+            content = message.get("content")
+            if isinstance(content, str):
+                return content
+            if isinstance(content, list):
+                return "".join(
+                    block["text"] for block in content
+                    if isinstance(block, dict) and block.get("type") == "text"
+                    and isinstance(block.get("text"), str)
+                ) or None
+        return None
 
     def close_tab(self, tab_id: str) -> None:
         try:
-            self._request("DELETE", "/api/tabs/" + urllib.parse.quote(tab_id), None)
+            cwd = self._sessions[tab_id]["cwd"]
+            self._request(
+                "POST", f"/api/sessions/{urllib.parse.quote(tab_id)}/stop", {"cwd": cwd}
+            )
         except Exception:
-            pass  # best-effort cleanup; the caller already has the real error
+            pass  # best-effort stop; the caller already has the real error
 
 
 def require_loopback(url: str) -> str:
@@ -236,14 +266,17 @@ MAX_SESSION_BYTES = 1_000_000
 MAX_TOTAL_SESSION_BYTES = 200_000_000
 
 
-def resolve_pi_profile(agent: str, project: str, *, sessions_dir=None, override=None) -> dict:
+def resolve_pi_profile(
+    agent: str, project: str, *, sessions_dir=None, override=None, runtime_home=None,
+) -> dict:
     """Reduce the agent's prior Pi Web records FOR THIS PROJECT to one transport
     profile (Codex #271 ruling): eligible = endpoint_pi_web_local + exact
     project_id, wake forced to runtime_trigger, provider/model/thinking from the
     greatest canonical binding_generation (strict int) with a complete tuple.
-    Zero eligible, conflicting home, or a greatest-generation tie fails closed
-    `pi_profile_required`. An unreadable/oversized/corrupt candidate also fails
-    closed — never skipped into an apparently-complete older profile."""
+    Zero eligible requires an explicit full profile plus runtime home. Conflicting
+    home or a greatest-generation tie fails closed `pi_profile_required`. An
+    unreadable/oversized/corrupt candidate also fails closed — never skipped into
+    an apparently-complete older profile."""
     sessions_dir = Path(sessions_dir) if sessions_dir is not None else _sessions_dir()
     records, homes, display, total = [], set(), None, 0
     for path in sorted(sessions_dir.glob("*.json")):
@@ -279,20 +312,33 @@ def resolve_pi_profile(agent: str, project: str, *, sessions_dir=None, override=
             "home": runtime["home"],
         })
     if not records:
-        raise RotateError(f"pi_profile_required: no eligible Pi Web records for {agent} in {project}")
+        if override is None or not isinstance(runtime_home, str) or not runtime_home.strip():
+            raise RotateError(f"pi_profile_required: no eligible Pi Web records for {agent} in {project}")
+        if not all(isinstance(v, str) and v.strip() for v in override):
+            raise RotateError("pi_profile_required: override needs all of provider/model/thinking")
+        provider, model, thinking = override
+        return {
+            "endpoint_id": PI_WEB_ENDPOINT,
+            "runtime_home": runtime_home,
+            "wake_strategy": "runtime_trigger",
+            "provider": provider,
+            "model": model,
+            "thinking": thinking,
+            "display": agent.upper(),
+        }
     if len(homes) != 1:
         raise RotateError(f"pi_profile_required: conflicting runtime homes for {agent}: {sorted(homes)}")
 
     if override is not None:
-        if not all(isinstance(v, str) and v for v in override):
+        if not all(isinstance(v, str) and v.strip() for v in override):
             raise RotateError("pi_profile_required: override needs all of provider/model/thinking")
         provider, model, thinking = override
     else:
-        complete = [r for r in records if all(r["tuple"])]
-        if not complete:
-            raise RotateError(f"pi_profile_required: no complete fingerprint for {agent}")
-        top_gen = max(r["gen"] for r in complete)
-        distinct = {r["tuple"] for r in complete if r["gen"] == top_gen}
+        top_gen = max(r["gen"] for r in records)
+        latest = [r for r in records if r["gen"] == top_gen]
+        if not all(all(r["tuple"]) for r in latest):
+            raise RotateError(f"pi_profile_required: generation {top_gen} has an incomplete fingerprint for {agent}")
+        distinct = {r["tuple"] for r in latest}
         if len(distinct) != 1:
             raise RotateError(
                 f"pi_profile_required: generation {top_gen} has {len(distinct)} conflicting tuples for {agent}"
@@ -460,7 +506,9 @@ def start_pi(
     override = None
     if any((cfg.provider, cfg.model, cfg.thinking)):
         override = (cfg.provider, cfg.model, cfg.thinking)
-    profile = resolve_profile(cfg.agent, cfg.project, override=override)
+    profile = resolve_profile(
+        cfg.agent, cfg.project, override=override, runtime_home=cfg.runtime_home,
+    )
     repo_cwd = resolve_cwd(cfg.project, cfg.repo_target)
     if not repo_cwd:
         raise RotateError(f"no repo path for project {cfg.project} repo {cfg.repo_target}")
@@ -540,6 +588,8 @@ def add_start_pi_arguments(p) -> None:
     p.add_argument("--provider", default=None)
     p.add_argument("--model", default=None)
     p.add_argument("--thinking", default=None)
+    p.add_argument("--runtime-home", default=None,
+                   help="Required with provider/model/thinking when no prior project profile exists")
     p.add_argument("--bootstrap-timeout", type=float, default=180.0)
     p.add_argument("--poll-interval", type=float, default=2.0)
     p.add_argument("--json", dest="json_output", action="store_true")
