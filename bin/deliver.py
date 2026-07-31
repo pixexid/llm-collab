@@ -681,8 +681,8 @@ def main():
     activation_unavailable_reason = None
     if activation_unavailable:
         if is_watcher_only_target(args.recipient):
-            # Never "no ax_app": Claude usually has one, and it is irrelevant. The
-            # packet is durable and the repair is the binding or the watcher.
+            # Never "no ax_app": Claude does not use AX. The packet is durable and
+            # the repair is the binding or the watcher.
             activation_unavailable_reason = (
                 "claude is woken by its background inbox watcher: no dispatchable "
                 "binding resolved for this chat, so repair the binding or the watcher "

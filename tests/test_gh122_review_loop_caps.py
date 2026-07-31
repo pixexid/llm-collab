@@ -1293,9 +1293,9 @@ class ReviewLoopCapContractTest(unittest.TestCase):
     def test_the_contract_version_and_recent_summaries_stay_current(self):
         """A cached copy of the old gate can produce a wrong merge.
 
-        Workers on older contracts get no signal that the mandatory bot pass, shared philosophy, or v7
-        review rules changed, so the version marker and recent summaries move
-        together.
+        Workers on older contracts get no signal that AX ownership, the mandatory
+        bot pass, shared philosophy, or v7 review rules changed, so the version
+        marker and recent summaries move together.
 
         The v4 and v3 changelog entries used to be pinned here too, in AGENTS.md.
         They were deleted with the rest of the v1-v4 narrative (GH-365): a changelog
@@ -1305,13 +1305,17 @@ class ReviewLoopCapContractTest(unittest.TestCase):
         the assertions below moved to the document that owns them.
         """
         text = AGENTS_DOC.read_text(encoding="utf-8")
-        self.assertIn("<!-- CONTRACT_VERSION: 9 -->", text)
+        self.assertIn("<!-- CONTRACT_VERSION: 10 -->", text)
         self.assertNotIn("<!-- CONTRACT_VERSION: 3 -->", text)
 
         recent_entry = contract_section(
             text, "### Recent contract changes", "## Required Reading"
         )
         for phrase in (
+            "Contract v10",
+            "AX a Codex/ChatGPT-app doorbell only",
+            "run only the exact command printed by `deliver.py`",
+            "recipient's watcher owns pickup",
             "Contract v9",
             "mandatory",
             "Every PR waits",

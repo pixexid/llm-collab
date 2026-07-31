@@ -102,9 +102,8 @@ class AxAttendedRecoveryRoutingTest(unittest.TestCase):
     }
 
     def test_claude_is_never_a_routine_doorbell_target(self) -> None:
-        # agents.json registers Claude as a cli_session with ax_app "Claude", which is
-        # exactly the shape the selector accepts. The exclusion is what keeps
-        # deliver.py from printing a runnable ring for it.
+        # The watcher-only exclusion remains authoritative even for a malformed
+        # registry entry that tries to give Claude an AX app.
         claude = {
             "id": "claude",
             "activation": {
@@ -354,6 +353,10 @@ class AxRegistryBinaryAgreementTest(unittest.TestCase):
 
         table = self._swift_opacity()
         agents = _json.loads((REPO_ROOT / "agents.json").read_text())["agents"]
+        self.assertEqual(
+            [agent["id"] for agent in agents if agent.get("activation", {}).get("ax_app")],
+            ["codex"],
+        )
         checked = 0
         for agent in agents:
             activation = agent.get("activation", {})
@@ -380,7 +383,7 @@ class AxRegistryBinaryAgreementTest(unittest.TestCase):
                 f"binary says readable={readable}, registry ax_attended_only={attended_only}",
             )
             checked += 1
-        self.assertGreaterEqual(checked, 2)  # codex plus one attended-only app
+        self.assertEqual(checked, 1)
 
 
 class AxRecoveryWordingPinTest(unittest.TestCase):

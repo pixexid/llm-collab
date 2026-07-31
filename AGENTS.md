@@ -1,4 +1,4 @@
-<!-- CONTRACT_VERSION: 9 -->
+<!-- CONTRACT_VERSION: 10 -->
 # AGENTS.md
 
 ## This file is the source of truth
@@ -44,6 +44,11 @@ workflows below.
   follow-ups, and never close a requested feature merely because review exposed defects.
 
 ### Recent contract changes
+
+Contract v10 (2026-07-31) makes AX a Codex/ChatGPT-app doorbell only. Never
+invent or hand-author an AX command: run only the exact command printed by
+`deliver.py`. For every non-Codex watcher/monitor-backed recipient, including
+Claude, deliver durably and stop; the recipient's watcher owns pickup.
 
 Contract v9 (2026-07-31) makes the configured GitHub Codex review a mandatory
 one-pass PR gate. Every PR waits for that first bot review before merge. Fix and
@@ -184,6 +189,11 @@ writer is already active on a change, yield and coordinate through the mailbox
 rather than opening a parallel lane. The mailbox is the only channel between
 workers — a PR comment is not a message, and a GitHub verdict is not a substitute
 for draining the inbox before you open a PR or merge.
+
+AX is not a general worker wake. Only a Codex/ChatGPT recipient may receive it,
+and only through the exact command `deliver.py` prints. For every non-Codex
+watcher/monitor-backed recipient, including Claude, write the durable packet and
+stop; never invent an `axsend` command or bypass the recipient's watcher.
 
 ## Shared Checkout Safety
 
