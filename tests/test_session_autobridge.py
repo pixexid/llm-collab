@@ -6544,6 +6544,42 @@ class SessionAutobridgeTest(unittest.TestCase):
         self.assertIn("runtime_session_id: gemini-thread-1", note_text)
         self.assertIn("gemini picked up `Operator summary pickup`.", note_text)
 
+    def test_pull_pending_runtime_does_not_write_picked_up_summary(self):
+        session = {
+            "session_id": "SESSION-PULL-PENDING",
+            "agent_id": "relay",
+            "project_id": "amiga",
+            "chat_id": "CHAT-PULL-PENDING",
+            "mode": "auto-read",
+            "wake_strategy": "runtime_trigger",
+            "runtime": {"family": "gemini_cli", "session_id": "relay-native"},
+        }
+        message = {
+            "path": "Chats/pull-pending/packet.md",
+            "frontmatter": {
+                "from": "claude",
+                "sender_agent_id": "claude",
+                "title": "Still waiting for native acceptance",
+                "chat_id": "CHAT-PULL-PENDING",
+            },
+        }
+        with self._dispatch_patch_context(session, [message]), patch.object(
+            session_autobridge_lib,
+            "execute_runtime_trigger",
+            return_value={
+                "returncode": 0,
+                "delivery_accepted": False,
+                "reason": "pull_pending",
+            },
+        ), patch.object(
+            session_autobridge_lib,
+            "write_operator_turn_summary",
+        ) as write_summary:
+            result = session_autobridge_lib.dispatch_session("SESSION-PULL-PENDING")
+
+        write_summary.assert_not_called()
+        self.assertFalse(result["actions"][0]["runtime_result"]["delivery_accepted"])
+
     def test_watch_inbox_skips_codex_self_target_but_activates_external_sender(self):
         root = self.make_workspace()
         self.add_agent(

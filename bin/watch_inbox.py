@@ -45,6 +45,7 @@ from _session_autobridge import (
     repo_scope_matches,
     resolve_active_canonical_binding,
     resolve_session_receive_binding,
+    runtime_delivery_accepted,
     runtime_metadata,
 )
 from inbox import (
@@ -275,8 +276,10 @@ def dispatch_autobridge(
         for action in result["actions"]:
             runtime_result = action.get("runtime_result") or {}
             runtime_ok = runtime_result.get("returncode") == 0
-            delivery_accepted = runtime_ok and runtime_result.get("delivery_accepted", True)
-            if action.get("effective_action") == "runtime_trigger" and delivery_accepted:
+            if (
+                action.get("effective_action") == "runtime_trigger"
+                and runtime_delivery_accepted(runtime_result)
+            ):
                 # Stored session scope was already checked by dispatch_session;
                 # an explicit watcher scope is rechecked at the read boundary.
                 effective_repo_targets = repo_targets
