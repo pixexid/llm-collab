@@ -132,6 +132,7 @@ def _run(cfg, transport, autobridge):
         resolve_cwd=lambda project, repo: "/repo",
         sleep=lambda _s: None,
         clock=_fake_clock(),
+        prepare_event=lambda p: None,
     )
 
 

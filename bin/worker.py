@@ -67,11 +67,15 @@ def main(argv: list[str] | None = None) -> int:
     import worker_rotate_pi as _rotate_pi
     _rotate_pi.add_rotate_pi_arguments(
         commands.add_parser("rotate-pi", help="Rotate a bloated Pi worker to a fresh native session"))
+    _rotate_pi.add_start_pi_arguments(
+        commands.add_parser("start-pi", help="Start a fresh Pi worker session for an existing agent"))
     args = parser.parse_args(argv)
     ensure_project(args.project, allow_none=False)
 
     if args.command == "rotate-pi":
         return _rotate_pi.run(args)
+    if args.command == "start-pi":
+        return _rotate_pi.run_start_pi(args)
 
     if args.command == "attach":
         import datetime as _dt
