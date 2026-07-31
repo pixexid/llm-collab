@@ -16,14 +16,14 @@ deliver.py — Send a message from one agent to another.
 Writes the message to Chats/ (canonical record) and appends
 a pointer to the recipient's agents/{id}/inbox.json.
 
-If a non-Claude CLI-session recipient configures a supported AX-readable
+If the Codex CLI-session recipient configures a supported AX-readable
 activation.ax_app profile, prints an AX doorbell instruction; a supported
 ax_attended_only recipient (AXValue-opaque composer) instead gets an ATTENDED
 RECOVERY REQUIRED instruction routing control to Codex (GH-1547). Codex-to-Codex delivery is a
 deliberate exception:
 the durable packet is preserved, but app activation is suppressed in favor of
-Thread Coordination. Canonical Claude is also excluded: its durable packet and
-background inbox watcher are its only target-side wake path. If the recipient
+Thread Coordination. Every non-Codex watcher-backed recipient is also excluded:
+its durable packet and background watcher are its target-side wake path. If the recipient
 has activation.type == "human_relay", prints
 a ready-to-paste handoff prompt for the human operator. Other unresolved
 activation types report an explicit unavailable state.
@@ -239,8 +239,10 @@ def resolve_bound_runtime_session_id(project_id: str, chat_id: str, agent_id: st
 
 
 def ax_doorbell_app(recipient_agent: dict) -> str | None:
+    if recipient_agent.get("id") != "codex":
+        return None
     ax_app = recipient_agent.get("activation", {}).get("ax_app")
-    if ax_app_profile(ax_app) not in {"codex", "zcode"}:
+    if not ax_app_supports_routine_doorbell(ax_app):
         return None
     return ax_app.strip()
 
@@ -253,13 +255,13 @@ def ax_attended_only(recipient_agent: dict) -> bool:
     return bool(recipient_agent.get("activation", {}).get("ax_attended_only"))
 
 
-def is_watcher_only_target(recipient_id: str) -> bool:
-    """Claude: the durable packet plus the app's own background inbox watcher is the
-    whole wake path. Every producer below asks this, because excluding it from one
-    selector only pushes delivery into the next: the routine doorbell falls through to
-    attended recovery, and a suppressed desktop bridge falls through to human relay.
-    Both were emitted defects, not hypotheticals."""
-    return recipient_id == "claude"
+def is_watcher_only_target(recipient_agent: dict, recipient_id: str) -> bool:
+    """A non-Codex worker's durable packet plus its watcher is the wake path."""
+    activation = recipient_agent.get("activation", {})
+    return (
+        recipient_id != "codex"
+        and activation.get("watcher_enabled") is True
+    )
 
 
 def is_codex_self_target(sender_id: str, recipient_id: str) -> bool:
@@ -276,9 +278,9 @@ def is_ax_doorbell_target(
     return (
         not is_codex_self_target(sender_id, recipient_id)
         and recipient_id != "operator"
-        and not is_watcher_only_target(recipient_id)
+        and not is_watcher_only_target(recipient_agent, recipient_id)
         and activation.get("type") == "cli_session"
-        and ax_app_supports_routine_doorbell(activation.get("ax_app"))
+        and ax_doorbell_app(recipient_agent) is not None
         # GH-1547: an AXValue-opaque target never gets a routine doorbell —
         # it routes to Codex-attended recovery instead (never silently to
         # mailbox-only).
@@ -303,7 +305,7 @@ def is_ax_attended_recovery_target(
     return (
         not is_codex_self_target(sender_id, recipient_id)
         and recipient_id != "operator"
-        and not is_watcher_only_target(recipient_id)
+        and not is_watcher_only_target(recipient_agent, recipient_id)
         and (
             ("ax_app" not in activation and profile is None)
             or profile in {"codex", "zcode"}
@@ -662,12 +664,18 @@ def main():
         and not desktop_bridge_required
         and not ax_doorbell_required
         and not ax_attended_recovery_required
-        and not is_watcher_only_target(args.recipient)
+        and not is_watcher_only_target(recipient_agent, args.recipient)
         and (
             not recipient_ax_app_present
             or recipient_ax_profile in {"codex", "zcode"}
         )
         and is_human_relay(recipient_agent)
+    )
+    watcher_pickup_ready = (
+        args.recipient != "operator"
+        and not thread_coordination_required
+        and wake_fallback_allowed
+        and is_watcher_only_target(recipient_agent, args.recipient)
     )
     activation_unavailable = (
         args.recipient != "operator"
@@ -677,21 +685,11 @@ def main():
         and not ax_doorbell_required
         and not ax_attended_recovery_required
         and not operator_relay_required
+        and not watcher_pickup_ready
     )
     activation_unavailable_reason = None
     if activation_unavailable:
-        if is_watcher_only_target(args.recipient):
-            # Never "no ax_app": Claude usually has one, and it is irrelevant. The
-            # packet is durable and the repair is the binding or the watcher.
-            activation_unavailable_reason = (
-                "claude is woken by its background inbox watcher: no dispatchable "
-                "binding resolved for this chat, so repair the binding or the watcher "
-                f"({autobridge_refusal_reason})"
-                if autobridge_refusal_reason
-                else "claude is woken by its background inbox watcher: no dispatchable "
-                "binding resolved for this chat, so repair the binding or the watcher"
-            )
-        elif recipient_ax_app_present and recipient_ax_profile is None:
+        if recipient_ax_app_present and recipient_ax_profile is None:
             activation_unavailable_reason = (
                 "activation.ax_app must be a non-empty string when present"
             )
@@ -730,6 +728,7 @@ def main():
         "ax_attended_recovery_required": ax_attended_recovery_required,
         "ax_attended_recovery_prompt": ax_attended_recovery_prompt,
         "thread_coordination_required": thread_coordination_required,
+        "watcher_pickup_ready": watcher_pickup_ready,
         "activation_unavailable": activation_unavailable,
         "activation_unavailable_reason": activation_unavailable_reason,
         "resolved_target_session_id": args.target_session_id,
@@ -893,11 +892,7 @@ def main():
         )
         print()
         print(f"Reason: {activation_unavailable_reason}")
-        if is_watcher_only_target(args.recipient):
-            print("Repair the binding or the app's background inbox watcher. Do not ring,")
-            print("relay, resume, or type into the app to deliver this packet.")
-        else:
-            print("Configure a dispatchable runtime session or a supported AX profile, then retry the wake.")
+        print("Configure a dispatchable runtime session or a supported AX profile, then retry the wake.")
         print()
         print(border)
 

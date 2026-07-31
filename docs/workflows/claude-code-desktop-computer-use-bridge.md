@@ -42,8 +42,9 @@ operator stalls the work (they can't adjudicate them).
 **Queueing to a busy recipient is SAFE after composer-safety proof.** A routine
 AX ring requires a provably empty native composer. Once that proof exists, do
 NOT wait/poll for the other agent to be idle merely because `Stop`, `Running`,
-or processing is visible. Send one AX doorbell on a supported distinct-app
-route; if the target is busy, the message queues and is processed when its
+or processing is visible. Only a Codex recipient may receive an AX doorbell,
+using exactly the command `deliver.py` prints; if Codex is busy, the message
+queues and is processed when its
 current turn ends.
 Queueing is *insurance* that the receiver gets the message even if it already
 saw it on another channel; it does **not** corrupt the running turn (only a
@@ -55,7 +56,7 @@ target likewise enters recovery. Never stack or re-ring the same pointer; if it
 is already queued, one copy is enough.
 Receiver discipline: when not running, read queued messages and ignore a queued
 copy already handled from the inbox. This policy does not authorize a Codex
-self-doorbell.
+self-doorbell or AX delivery to any non-Codex worker.
 
 **Verification is enforced, not optional.** `ring --submit` verifies by default.
 Exit 0 with `VERIFIED` confirms a visible conversation turn. Exit 0 with
@@ -70,11 +71,9 @@ pointer is absent on the same proven target, one re-ring is allowed. Never
 re-ring an exit-0 queued/unconfirmed result or an identity-loss/ambiguous
 result. Other non-zero results enter recovery. NEVER use Computer
 Use/screenshots to verify an AX send. Routine target composers are validated
-for Codex. ZCode or Antigravity may originate a ring to a
-supported target, but when either app is the target its `AXValue`-opaque or
-otherwise unprovable composer requires hold and attended recovery; never use a
-blind key-typed AX ring. Busy alone is not a hold after composer safety is
-actually proved.
+for Codex. ZCode or Antigravity may originate a ring to Codex only; neither is
+an AX target. Busy alone is not a hold after composer safety is actually
+proved.
 
 ## Managed Codex and native subagent routing
 
@@ -110,10 +109,11 @@ screenshot.
 ```bash
 AX=/Users/pixexid/Projects/llm-collab/bin/axsend-ensure   # auto-builds if needed
 $AX state --app Codex                                   # optional status + recent messages
-$AX ring  --app Codex --submit --dry-run --text "x"     # confirm send target (new app/window)
-$AX ring  --app Codex --submit --verify --text "[from <me>] <pointer to durable packet>"
 $AX state --app Codex                                   # read the reply
 ```
+
+For delivery, run only the complete command printed by `deliver.py`; never
+hand-author a ring command.
 
 Rules: deliver the durable packet with `deliver.py` FIRST (mailbox = truth);
 prove the native composer is empty, then ring once even when the recipient is
@@ -123,9 +123,9 @@ busy. An unreadable, unprovable, or `AXValue`-opaque composer enters recovery.
 or claiming exact-thread delivery. Use `--dry-run` first on any new app and
 `--verify` (non-zero means the text did not land; a post-send empty composer is
 not proof of delivery). The idle input gate applies only to attended screenshot/keyboard
-Computer Use fallback. Any collaborator (Codex, Claude, Gemini, ZCode) can call
-`axsend-ensure` via shell for a distinct-app route, but Codex must not target
-itself, a managed Codex worker, or Claude. Needs the running process enabled in
+Computer Use fallback. Any collaborator may run the exact command printed by
+`deliver.py` to ring the canonical Codex recipient. No other recipient is an
+AX target, and Codex must not target itself. Needs the running process enabled in
 Privacy & Security → Accessibility. Falls back to screenshot Computer Use only if
 AX fails for an external-app target that is a valid ring target at all — never
 for Claude. Full reference:
@@ -192,12 +192,9 @@ a different failure class and are not TCC update-survival evidence.
 - **Mailbox = `llm-collab` (durable source of truth).** Every task, handoff,
   blocker, clarification, decision, and piece of evidence is a file written with
   `deliver.py`. Nothing load-bearing lives only in an app's visible thread.
-- **Doorbell = AX (immediate, event-driven nudge).** The moment one participant
-  in a distinct-app route other than Claude finishes
-  a task, hits a blocker, needs a clarification, or completes a handoff, it uses
-  `bin/axsend-ensure ring --submit --verify` (run from the llm-collab checkout
-  root, or use the exact absolute command `deliver.py` prints)
-  to send one short, sender-tagged pointer to the
+- **Doorbell = AX (immediate, event-driven nudge to Codex only).** When
+  `deliver.py` reports `ax_doorbell_required`, run its exact printed command to
+  send one short, sender-tagged pointer to the
   durable packet. Screenshot/keyboard Computer Use is a fallback only when AX is
   unavailable and the target path is explicitly configured for desktop bridging.
 
@@ -231,13 +228,11 @@ For task-grade work, in order:
 
 1. Write the durable instruction/handoff with `deliver.py` to `Chats/` and the
    recipient's `agents/<agent>/inbox.json`.
-2. If the recipient is Claude, stop: its background inbox watcher owns pickup.
+2. If the recipient is non-Codex, stop: its background watcher owns pickup.
    If sender and recipient are both `codex`, stop app routing and use Thread
-   Coordination (`read_thread` / `send_message_to_thread`). Otherwise ring the
-   distinct external-app recipient with
-   `bin/axsend-ensure ring --submit --verify --text "<pointer>"`
-   (from the checkout root; or the exact absolute command `deliver.py` prints)
-   only after the native
+   Coordination (`read_thread` / `send_message_to_thread`). Otherwise, only
+   when `deliver.py` reports `ax_doorbell_required`, run its exact printed
+   command after the native
    composer is provably empty. Once proven empty, ring even if the recipient is
    busy. A non-empty draft or unreadable, unprovable, or `AXValue`-opaque
    composer state means hold and recovery—never infer empty. The one-line
@@ -256,14 +251,13 @@ For task-grade work, in order:
    Never re-ring queued/unconfirmed or identity-loss/ambiguous results; route
    other non-zero results into recovery.
 4. Use screenshot/keyboard Computer Use only as attended fallback or recovery
-   for an external collaborator app other than Claude when `axsend` is unavailable or unsafe. In
+   for an external collaborator app when AX is unavailable or unsafe. In
    that fallback path, pass the idle input gate before typing.
 5. Record the ring result in your own thread and, when relevant, in the mailbox.
 
 For non-task ad-hoc chat, the mailbox is optional, but a sender tag is still
-required. Prefer `axsend` only on a supported distinct-app route; the idle gate
-applies only to attended screenshot/keyboard Computer Use fallback for an
-external collaborator app.
+required. AX targets Codex only; the idle gate applies only to attended
+screenshot/keyboard Computer Use fallback for an external collaborator app.
 
 ## Idle input gate (Computer Use fallback only)
 

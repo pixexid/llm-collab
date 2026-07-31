@@ -160,14 +160,13 @@ Operational rule:
 - do not synthesize desktop-visible Claude threads by writing local app cache/index files
 - use `Chats/` messages as the transport of record (the durable mailbox)
 - when no matching dispatchable session autobridge exists and `deliver.py`
-  reports `ax_doorbell_required: true`, the primary wake for an AX-capable
-  `cli_session` worker is the **bidirectional AX doorbell** (see
+  reports `ax_doorbell_required: true`, the primary wake for Codex is the
+  **bidirectional AX doorbell** (see
   `claude-code-desktop-computer-use-bridge.md`); terminal-only sessions require a
   dispatchable runtime binding
-- **except Claude**, whose runtime carries its own background inbox watcher: it
-  is woken by the durable packet and that watcher alone, never by AX. If no
-  dispatchable binding matches a Claude packet, the binding or the watcher is
-  the defect — preserve the packet and report it, rather than ringing. See
+- every non-Codex worker with a background inbox watcher is woken by the durable
+  packet and that watcher alone, never by AX. Preserve the packet and let the
+  watcher own pickup. See
   `session-autobridge-runbook.md` for the full rule
 - attended Computer Use is fallback/recovery when AX cannot safely target or
   verify the native composer; it is never the universal first path, and it is
@@ -189,13 +188,11 @@ Safest task-grade workflow for desktop-app agents:
 1. `llm-collab` delivers the task into `Chats/` with `deliver.py`
    - `autobridge_ready: true` takes precedence and means no AX doorbell was
      requested for this packet
-   - for an AX-capable `cli_session` worker **other than Claude** (Claude is
-     woken by its own background inbox watcher and is never rung),
-     `ax_doorbell_required` means the
-     sender rings the worker with the printed `axsend-ensure ring` command (the
-     printed form is the absolute executable under the llm-collab checkout's
-     `bin/` directory); it is
+   - for Codex, `ax_doorbell_required` means the sender runs exactly the command
+     printed by `deliver.py`; it is
      not a manual operator relay request
+   - `watcher_pickup_ready` means the durable packet is ready and the
+     non-Codex recipient's watcher owns pickup
    - `desktop_bridge_required` is always false: the Claude Computer Use fallback
      it selected is removed, and Claude is woken by its own background watcher
    - `activation_unavailable` means the durable packet exists but neither a

@@ -9,14 +9,10 @@ autonomous.
 ## Status: provisional safety-fuse, not the primary wake
 
 Current `deliver.py` gives a matching dispatchable session autobridge precedence
-and suppresses `ax_doorbell_required` for that packet. The primary wake for an
-AX-capable `cli_session` only when no such autobridge resolves is the busy-safe
-**bidirectional AX doorbell**. This applies only to a worker with no background
-event pickup of its own — Codex today. The canonical `claude` agent is woken by
-its durable packet and its own inbox watcher alone; see the Claude bullets
-below, which override this paragraph for that identity.
-The doorbell is `bin/axsend-ensure ring --submit --verify`, run from the
-llm-collab checkout root; see
+and suppresses `ax_doorbell_required` for that packet. Only Codex may receive
+the busy-safe **bidirectional AX doorbell**, and only through the exact command
+printed by `deliver.py`. Every non-Codex watcher-backed worker is woken by its
+durable packet and its own watcher. See
 `claude-code-desktop-computer-use-bridge.md`. First prove through readable
 `AXValue` that the native composer is empty, then ring once even when the
 recipient is busy; busy alone is not a hold after that proof. A non-empty,

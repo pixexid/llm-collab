@@ -4592,18 +4592,14 @@ class SessionAutobridgeTest(unittest.TestCase):
         Hard-coding amiga in the helper meant every case could only ever exercise one project, so a
         project-specific behaviour leaking into the universal path would have been invisible.
 
-        Parameterized by subscriber because the canonical `claude` identity is no longer an AX
-        doorbell target at all: a scope-refusal case written against it asserts `False` for the
-        wrong reason. The AX-lane cases pass a non-Claude agent with a Codex-profile `ax_app`,
-        which is a real doorbell target, so their assertions bind scope refusal rather than
-        identity exclusion. (#344)
+        Parameterized by subscriber so scope refusal is checked independently of one
+        canonical worker identity.
         """
         root = self.make_workspace()
         for agent in ("codex", subscriber_agent):
             activation = {"type": "cli_session", "watcher_enabled": True}
             if agent == subscriber_agent and subscriber_ax_app:
-                # The real shape that makes this a doorbell target: a cli_session recipient with an
-                # explicit activation.ax_app. Codex reproduced the wrong-wake with exactly this.
+                # Malformed legacy entries must not override recipient identity.
                 activation["ax_app"] = subscriber_ax_app
             self.add_agent(root, {
                 "id": agent,
@@ -4698,30 +4694,19 @@ class SessionAutobridgeTest(unittest.TestCase):
                   "desktop_bridge_required", "operator_relay_required")
     WAKE_PROMPTS = ("ax_doorbell_prompt", "ax_attended_recovery_prompt", "desktop_bridge_prompt")
 
-    def test_the_scope_refusal_fixture_reaches_AX_when_there_is_no_session(self):
-        """Positive control for the AX lane, on the same fixture the refusal case uses.
-
-        With no session registered there is nothing to refuse, so `ax_doorbell_required` must be
-        true. If this ever goes false the refusal case below proves nothing: a subject that can
-        never reach the selector asserts False for free. (#344)
-        """
+    def test_the_scope_fixture_uses_its_watcher_when_there_is_no_session(self):
         root, _chat_dir = self.scoped_subscriber_workspace(
             subscriber_repo_targets=["llm-collab"], subscriber_ax_app="Codex",
             subscriber_agent="relay", runtime_family="codex_app",
             register_session=False)
         payload, _stderr = self.deliver_with_scope(root, "CHAT-SCOPE1", recipient="relay")
         self.assertFalse(payload["autobridge_ready"])
-        self.assertTrue(payload["ax_doorbell_required"],
-                        "no bound session means nothing to refuse, so the doorbell stands")
-        self.assertIsNotNone(payload["ax_doorbell_prompt"])
+        self.assertTrue(payload["watcher_pickup_ready"])
+        self.assertFalse(payload["activation_unavailable"])
+        self.assertFalse(payload["ax_doorbell_required"])
 
     def test_a_scope_refusal_wakes_the_recipient_by_no_lane_at_all(self):
-        """Codex's reproduction: scoped cli_session + activation.ax_app, empty packet scope.
-
-        The subject is a non-Claude agent with a Codex-profile ax_app, which is a real doorbell
-        target. Written against canonical `claude` this asserted False because that identity is
-        excluded from the selector outright, not because the refusal suppressed the lane. (#344)
-        """
+        """A scope refusal suppresses the worker's watcher pickup too."""
         root, _chat_dir = self.scoped_subscriber_workspace(
             subscriber_repo_targets=["llm-collab"], subscriber_ax_app="Codex",
             subscriber_agent="relay", runtime_family="codex_app")
@@ -4734,10 +4719,10 @@ class SessionAutobridgeTest(unittest.TestCase):
         for prompt in self.WAKE_PROMPTS:
             self.assertIsNone(payload.get(prompt),
                               f"{prompt} must be null, got {payload.get(prompt)!r}")
+        self.assertFalse(payload["watcher_pickup_ready"])
         self.assertIn("RUNTIME DISPATCH REFUSED", stderr)
 
-    def test_the_same_agent_shape_DOES_get_a_doorbell_when_scope_matches(self):
-        """Otherwise the test above would pass by disabling the doorbell entirely."""
+    def test_the_same_agent_shape_dispatches_when_scope_matches(self):
         root, _chat_dir = self.scoped_subscriber_workspace(
             subscriber_repo_targets=["llm-collab"], subscriber_ax_app="Codex",
             subscriber_agent="relay", runtime_family="codex_app")
@@ -4748,14 +4733,7 @@ class SessionAutobridgeTest(unittest.TestCase):
         self.assertFalse(payload["ax_doorbell_required"],
                          "a dispatchable packet needs no doorbell either -- autobridge has it")
 
-    def test_an_ax_app_recipient_with_no_live_session_still_gets_its_doorbell(self):
-        """The lane must remain reachable for its real purpose: no session bound at all.
-
-        This is the control that proves the gate is narrow. If this ever goes false, the fix has
-        broken the doorbell rather than confined it to non-refusal cases.
-        """
-        # The subject is relay, not claude: Claude is excluded from the doorbell
-        # selector outright, so it can no longer serve as this lane's control.
+    def test_a_non_codex_ax_app_cannot_override_watcher_pickup(self):
         root = self.make_workspace()
         for agent, activation in (
             ("codex", {"type": "cli_session", "watcher_enabled": True}),
@@ -4767,9 +4745,10 @@ class SessionAutobridgeTest(unittest.TestCase):
                          chat_id="CHAT-NOSESS", project_id="amiga")
         payload, _stderr = self.deliver_with_scope(root, "CHAT-NOSESS", recipient="relay")
         self.assertFalse(payload["autobridge_ready"])
-        self.assertTrue(payload["ax_doorbell_required"],
-                        "with no bound session there is nothing to refuse, so the doorbell stands")
-        self.assertIsNotNone(payload["ax_doorbell_prompt"])
+        self.assertTrue(payload["watcher_pickup_ready"])
+        self.assertFalse(payload["activation_unavailable"])
+        self.assertFalse(payload["ax_doorbell_required"])
+        self.assertIsNone(payload["ax_doorbell_prompt"])
 
     def test_claude_profile_cannot_fall_through_to_human_relay(self):
         root = self.make_workspace()
@@ -5456,7 +5435,8 @@ class SessionAutobridgeTest(unittest.TestCase):
         )
         payload = json.loads(result.stdout.split("\n\n", 1)[0])
         self.assertFalse(payload["autobridge_ready"])
-        self.assertTrue(payload["ax_doorbell_required"])
+        self.assertTrue(payload["watcher_pickup_ready"])
+        self.assertFalse(payload["ax_doorbell_required"])
         self.assertIsNone(payload["resolved_target_session_id"])
 
         delivered_candidates = sorted(chat_dir.glob("*_to-relay_readiness-drift.md"))
@@ -5762,21 +5742,15 @@ class SessionAutobridgeTest(unittest.TestCase):
         self.assertNotIn("AX DOORBELL REQUIRED", deliver_result.stdout)
         self.assertNotIn("ATTENDED RECOVERY REQUIRED", deliver_result.stdout.upper())
         self.assertNotIn("RELAY REQUIRED", deliver_result.stdout.upper())
-        # The banner used to end with "configure ... activation.ax_app", which is both
-        # wrong for Claude and an invitation to wire up a wake path.
-        self.assertNotIn("then retry the wake", deliver_result.stdout)
-        self.assertIn("background inbox watcher", deliver_result.stdout)
+        self.assertNotIn("ACTIVATION UNAVAILABLE", deliver_result.stdout)
         self.assertNotIn("axsend", deliver_result.stdout)
         self.assertNotIn("Computer Use", deliver_result.stdout)
 
-        # The packet is durable and the output names the repair, not a second wake path.
+        # The packet is durable and the watcher owns pickup without a second wake path.
         self.assertTrue((root / result_payload["to_file"]).exists())
-        self.assertTrue(result_payload["activation_unavailable"])
-        reason = result_payload["activation_unavailable_reason"]
-        self.assertIn("watcher", reason)
-        self.assertIn("binding", reason)
-        # The old generic reason claimed the ax_app was missing. This Claude has one.
-        self.assertNotIn("activation.ax_app", reason)
+        self.assertTrue(result_payload["watcher_pickup_ready"])
+        self.assertFalse(result_payload["activation_unavailable"])
+        self.assertIsNone(result_payload["activation_unavailable_reason"])
 
     def test_deliver_never_attends_recovery_for_an_opaque_claude(self):
         # ax_attended_only routes a target to Codex-attended AX/Computer Use. Excluding
@@ -5909,11 +5883,12 @@ class SessionAutobridgeTest(unittest.TestCase):
         # operator to activate Claude. One forbidden wake replaced by another.
         self.assertFalse(result_payload["operator_relay_required"])
         self.assertFalse(result_payload["relay_required"])
+        self.assertTrue(result_payload["watcher_pickup_ready"])
         self.assertNotIn("RELAY REQUIRED", deliver_result.stdout.upper())
 
         self.assertTrue((root / result_payload["to_file"]).exists())
 
-    def test_deliver_prints_ax_doorbell_for_supported_cli_session_worker(self):
+    def test_non_codex_identity_cannot_get_ax_doorbell_from_spoofed_app(self):
         root = self.make_workspace()
         self.add_agent(
             root,
@@ -5966,12 +5941,12 @@ class SessionAutobridgeTest(unittest.TestCase):
         self.assertFalse(result_payload["relay_required"])
         self.assertFalse(result_payload["operator_relay_required"])
         self.assertFalse(result_payload["desktop_bridge_required"])
-        self.assertTrue(result_payload["ax_doorbell_required"])
-        self.assertIn("[from codex]", result_payload["ax_doorbell_prompt"])
-        self.assertIn("AX DOORBELL REQUIRED", deliver_result.stdout)
-        self.assertIn('axsend-ensure ring --app "Codex"', deliver_result.stdout)
-        self.assertNotIn('--app "Codex Worker"', deliver_result.stdout)
-        self.assertIn("do not ask the operator to relay", deliver_result.stdout)
+        self.assertFalse(result_payload["ax_doorbell_required"])
+        self.assertIsNone(result_payload["ax_doorbell_prompt"])
+        self.assertTrue(result_payload["watcher_pickup_ready"])
+        self.assertFalse(result_payload["activation_unavailable"])
+        self.assertNotIn("AX DOORBELL REQUIRED", deliver_result.stdout)
+        self.assertNotIn("axsend-ensure ring", deliver_result.stdout)
         self.assertNotIn("RELAY REQUIRED FOR OPERATOR", deliver_result.stdout)
         delivered_candidates = sorted(
             (root / "Chats" / "2026-06-26_codex-doorbell__CHAT-CODEX2").glob("*_to-cdx2_*.md")
@@ -5998,7 +5973,7 @@ class SessionAutobridgeTest(unittest.TestCase):
             {
                 "id": "terminal-worker",
                 "display_name": "Terminal Worker",
-                "activation": {"type": "cli_session", "watcher_enabled": True},
+                "activation": {"type": "cli_session", "watcher_enabled": False},
             },
         )
         self.create_chat(
@@ -6201,7 +6176,7 @@ class SessionAutobridgeTest(unittest.TestCase):
             {
                 "id": "cdx2",
                 "display_name": "CDX2",
-                "activation": {"type": "human_relay", "watcher_enabled": True},
+                "activation": {"type": "human_relay", "watcher_enabled": False},
             },
         )
         self.create_chat(
