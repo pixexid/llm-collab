@@ -246,10 +246,11 @@ retry.
 threads whose composers legitimately hold drafts, and it truncates `AXValue` at
 about 40 characters. A stale-looking fragment from some other thread's composer
 reads exactly like a stuck draft in the one you are about to ring. Use
-`ring --submit --dry-run --text "probe"` instead. An empty target composer is
-temporarily populated, identified by `composer set (role=...)`, and restored
-without submitting; an existing draft is preserved and causes exit 11. If you
-need the full text of a draft, `tree` will not give it to you.
+`ring --submit --dry-run --text "probe"` instead. GH-470: `--dry-run` is
+side-effect-free — it resolves the send target from the composer's geometry and
+does NOT populate, clear, or restore the composer, so it never disturbs an
+existing draft (and a draft never causes a refusal). If you need the full text of
+a draft, `tree` will not give it to you.
 
 **For a non-Claude target, a failed mailbox wake says nothing about AX.**
 `deliver.py` refusing with

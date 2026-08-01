@@ -88,16 +88,14 @@ func selectAllAndDelete(pid: pid_t) {
 func setComposerText(_ composer: AXUIElement, pid: pid_t, _ text: String) -> Bool {
     AXUIElementSetAttributeValue(composer, kAXFocusedAttribute as CFString, kCFBooleanTrue)
     usleep(80_000)
-    // GH-470 P1: clear any existing draft BEFORE writing, then require an EXACT
-    // readback below. Otherwise, if a stale draft shares the new text's 20-char
-    // prefix and the AXValue write is ignored, the prefix `contains` check would
-    // false-positive and submit the stale pointer instead of the new text. With
-    // a pre-clear, an ignored AXValue write leaves the composer empty so the
-    // readback fails and we fall through to the key-event path.
-    if !text.isEmpty {
-        selectAllAndDelete(pid: pid)
-        usleep(40_000)
-    }
+    // GH-470 P1: element-targeted full-replacement write, then require an EXACT
+    // readback below. AXUIElementSetAttributeValue targets THIS composer element
+    // directly (not process-wide key events), so it replaces any existing draft
+    // without a focus-dependent Cmd+A/Delete that could clear the wrong control.
+    // The exact readback is what prevents a stale same-prefix draft from
+    // false-positiving: if the write is ignored, current() != text, so we fall
+    // through to the key-event path (which clears+types) rather than submitting
+    // the stale pointer.
     AXUIElementSetAttributeValue(composer, kAXValueAttribute as CFString, text as CFString)
     usleep(90_000)
     func current() -> String { str(composer, kAXValueAttribute) ?? "" }

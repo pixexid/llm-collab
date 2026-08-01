@@ -485,20 +485,25 @@ class AxRecoveryWordingPinTest(unittest.TestCase):
         self.assertNotIn("proven readable and empty", readme)
 
     def test_set_composer_text_uses_exact_readback_not_prefix_contains(self) -> None:
-        # GH-470 P1: setComposerText must clear before writing and require an
-        # EXACT readback (current() == text). The old 20-char-prefix `contains`
-        # check could false-positive on a stale same-prefix draft and submit the
-        # stale pointer. Pin both: the exact check present, the prefix check gone.
+        # GH-470 P1: setComposerText success requires an EXACT readback
+        # (current() == text), replacing the 20-char-prefix contains() check that
+        # could false-positive on a stale same-prefix draft and submit the stale
+        # pointer. The replacement is an element-targeted AXValue write (no
+        # focus-dependent process-wide Cmd+A/Delete pre-clear that could clear the
+        # wrong control); an ignored write fails the exact readback and falls to
+        # the key-event path.
         src = (self.AXBRIDGE / "axsend.swift").read_text()
         self.assertIn("if current() == text { return true }", src)
         self.assertNotIn("current().contains(String(text.prefix(20)))", src)
-        # And a clear happens before the AXValue write in setComposerText.
+        # No unconditional key-event pre-clear before the AXValue write in
+        # setComposerText (avoids clearing an unverified/foreign focused control).
         body = src[src.index("func setComposerText"):]
         body = body[: body.index("\nfunc ")]
-        clear_at = body.index("selectAllAndDelete(pid: pid)")
         write_at = body.index("kAXValueAttribute as CFString, text as CFString")
-        self.assertLess(clear_at, write_at,
-                        "setComposerText must clear the composer before writing (GH-470 P1)")
+        first_clear = body.find("selectAllAndDelete(pid: pid)")
+        self.assertTrue(first_clear == -1 or first_clear > write_at,
+                        "setComposerText must not key-event-clear before the "
+                        "element-targeted AXValue write (GH-470 P1 focus safety)")
 
     def test_attended_recovery_banner_is_target_resolution_not_value_opacity(self) -> None:
         # GH-470: the deliver.py attended-recovery banner must describe an
