@@ -486,7 +486,10 @@ class SessionAutobridgeTest(unittest.TestCase):
             binding_write.assert_not_called()
 
     # ---- GH-468: a native session may back at most one ACTIVE chat lease ----
-    def _sessions_with_active_native(self, status="active", native="NAT-1", expires=None):
+    OWNER_FAMILY = "claude_app"
+
+    def _sessions_with_active_native(self, status="active", native="NAT-1",
+                                     expires=None, family=OWNER_FAMILY):
         # Self-contained temp sessions dir (no make_workspace side effects).
         sessions = Path(tempfile.mkdtemp(prefix="gh468-", dir="/tmp")) / "sessions"
         sessions.mkdir(parents=True)
@@ -494,15 +497,18 @@ class SessionAutobridgeTest(unittest.TestCase):
         record = {
             "session_id": "SESSION-A", "agent_id": "claude",
             "project_id": "llm-collab", "chat_id": "CHAT-A",
-            "status": status, "runtime": {"session_id": native},
+            "status": status, "runtime": {"family": family, "session_id": native},
         }
         if expires is not None:
             record["lease_expires_utc"] = expires
         write_json(sessions / "SESSION-A.json", record)
         return sessions
 
-    def _guard(self, *args):
-        return session_autobridge_cli.refuse_native_session_active_elsewhere(*args)
+    def _guard(self, session_id, project, chat, native, status, family=OWNER_FAMILY):
+        # Native identity is (family, id); default the registering family to the
+        # owner's so existing scope/status cases keep testing one identity.
+        return session_autobridge_cli.refuse_native_session_active_elsewhere(
+            session_id, project, chat, native, family, status)
 
     def test_gh468_native_session_active_in_another_chat_is_refused(self):
         sessions = self._sessions_with_active_native()
@@ -548,6 +554,16 @@ class SessionAutobridgeTest(unittest.TestCase):
         sessions = self._sessions_with_active_native()
         with patch.object(session_autobridge_lib, "SESSIONS_DIR", sessions):
             self._guard("SESSION-B", "llm-collab", "CHAT-B", "NAT-2", "active")
+
+    def test_gh468_same_native_id_different_family_is_allowed(self):
+        # Native identity is (runtime_family, runtime_session_id) — the exact key
+        # resolve_exact_dispatch_pair() matches on. A different family reusing the
+        # same textual id is a DISTINCT native (dispatch would not route to it), so
+        # it must not be refused (id-only comparison would over-block it).
+        sessions = self._sessions_with_active_native(family="claude_app")
+        with patch.object(session_autobridge_lib, "SESSIONS_DIR", sessions):
+            self._guard("SESSION-B", "llm-collab", "CHAT-B", "NAT-1", "active",
+                        family="gemini_cli")
 
     def test_gh468_reuse_after_other_lease_stopped_is_allowed(self):
         sessions = self._sessions_with_active_native(status="stopped")

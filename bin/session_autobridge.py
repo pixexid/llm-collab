@@ -433,6 +433,7 @@ def refuse_native_session_active_elsewhere(
     project_id: str,
     chat_id: str,
     native_session_id: str | None,
+    native_family: str | None,
     status: str,
 ) -> None:
     """GH-468: a native runtime session may back a DISPATCHABLE lease in only one
@@ -447,11 +448,19 @@ def refuse_native_session_active_elsewhere(
     common path open: two scopes could each register the same native as `parked`,
     both stay dispatchable, and both route to one conversation.
 
-    The collision key is the (project_id, chat_id) scope — the exact key dispatch
-    resolves a target by — NOT the individual lease. Refuse only when the SAME
-    native backs a DISPATCHABLE lease (active, or parked-and-unexpired) held by a
-    DIFFERENT session in a DIFFERENT (project, chat) scope. Both conjuncts are
-    load-bearing:
+    Native IDENTITY is (runtime_family, runtime_session_id) — the exact key
+    `resolve_exact_dispatch_pair()` matches a target by (it requires BOTH the
+    bound family and the bound runtime session id). Comparing the runtime id
+    alone would over-block two DISTINCT family-scoped natives that happen to share
+    a textual id; comparing family too keeps the guard exactly as wide as
+    dispatch. A native with no family cannot be exact-dispatched, so it cannot be
+    a second routing target and is not guarded.
+
+    The collision SCOPE is the (project_id, chat_id) pair — again the exact key
+    dispatch resolves by — NOT the individual lease. Refuse only when the SAME
+    native identity backs a DISPATCHABLE lease (active, or parked-and-unexpired)
+    held by a DIFFERENT session in a DIFFERENT (project, chat) scope. Both scope
+    conjuncts are load-bearing:
       * A record is unique per session_id, so a re-registration of the SAME
         session_id (even one that moves it to another scope — a rebind/takeover)
         just overwrites that one record; it is a move, not a second owner.
@@ -459,8 +468,9 @@ def refuse_native_session_active_elsewhere(
         several leases that share a native (a wildcard lease alongside a
         binding-pinned one), so a same-scope second lease is not a collision.
     Allowed: same-session (re-)registration or move, a same-scope second lease, a
-    different native id, reuse after the other lease is stopped/superseded/
-    expired, and any non-dispatchable registration.
+    different native id, a different runtime family on the same id, reuse after
+    the other lease is stopped/superseded/expired, and any non-dispatchable
+    registration.
 
     Must run inside `_session_write_lock()` together with the register/reader
     write so the scan and the ownership-establishing write are one critical
@@ -468,13 +478,16 @@ def refuse_native_session_active_elsewhere(
     """
     # A fresh registration is born unexpired, so its live statuses are exactly the
     # dispatchable set; the other-lease side below applies the full
-    # session_is_dispatchable() rule (which also drops expired parked owners).
-    if not native_session_id or status not in {"active", "parked"}:
+    # session_is_dispatchable() rule (which also drops expired parked owners). A
+    # native without a family is not exact-dispatchable, so it is never a routing
+    # collision — mirror the resolver, which requires a truthy bound family.
+    if not native_session_id or not native_family or status not in {"active", "parked"}:
         return
     # strict=True: an unreadable/malformed lease must fail this authority scan
     # closed (refuse the registration) rather than be skipped as absent — a
     # corrupt record could be the dispatchable owner of this very native session.
     for other in iter_sessions(strict=True):
+        other_runtime = other.get("runtime") or {}
         different_scope = (
             other.get("project_id") != project_id
             or other.get("chat_id") != chat_id
@@ -483,14 +496,16 @@ def refuse_native_session_active_elsewhere(
             other.get("session_id") != session_id
             and different_scope
             and session_is_dispatchable(other)[0]
-            and (other.get("runtime") or {}).get("session_id") == native_session_id
+            and other_runtime.get("session_id") == native_session_id
+            and other_runtime.get("family") == native_family
         ):
             raise ValueError(
                 "native session already owns a dispatchable binding in "
                 f"{other.get('project_id')}/{other.get('chat_id')}/{other.get('agent_id')} "
-                f"(session {other.get('session_id')}); a native session may back a "
-                "dispatchable lease in only one project/chat scope — deactivate the "
-                "other lease or use a fresh native session"
+                f"(session {other.get('session_id')}); a native session (family "
+                f"{native_family}) may back a dispatchable lease in only one "
+                "project/chat scope — deactivate the other lease or use a fresh "
+                "native session"
             )
 
 
@@ -542,6 +557,7 @@ def register_session(args) -> dict:
     # write are one critical section (no check-then-write race between concurrent
     # registrations). Capture the native id before runtime may be set to None.
     gh468_native_session_id = runtime.get("session_id") if runtime else None
+    gh468_native_family = runtime.get("family") if runtime else None
 
     if not runtime:
         runtime = None
@@ -655,7 +671,8 @@ def register_session(args) -> dict:
         # canonical one-mutation-owner-per-native-session constraint.
         with _session_write_lock():
             refuse_native_session_active_elsewhere(
-                args.session, args.project, args.chat, gh468_native_session_id, args.status
+                args.session, args.project, args.chat,
+                gh468_native_session_id, gh468_native_family, args.status
             )
             prepared = prepare_session_write(payload)
             existing_binding = existing_binding_snapshot_or_refuse(payload)

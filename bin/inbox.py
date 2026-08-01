@@ -568,6 +568,9 @@ def ensure_reader_session(
                 identity["project"],
                 identity["chat"],
                 runtime_id,
+                # Native identity is (family, id); this reader stores family
+                # "reader" (see runtime above), so guard under that family.
+                "reader" if runtime_id else None,
                 "parked",
             )
             save_session(payload)

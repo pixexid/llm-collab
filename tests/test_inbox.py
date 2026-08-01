@@ -1442,7 +1442,9 @@ class InboxMarkAllReadTest(unittest.TestCase):
             "session_id": "SESSION-OWNER", "agent_id": "codex",
             "project_id": "amiga", "chat_id": "CHAT-A",
             "status": status, "lease_expires_utc": "2999-01-01T00:00:00+00:00",
-            "runtime": {"session_id": native},
+            # ensure_reader_session stores family "reader"; native identity is
+            # (family, id), so the owner must share the family to collide.
+            "runtime": {"family": "reader", "session_id": native},
         })
         return sessions
 

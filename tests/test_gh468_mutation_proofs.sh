@@ -30,9 +30,9 @@ PY
 }
 
 mutate_and_check "M1 helper-noop" \
-  'if not native_session_id or status not in {"active", "parked"}:
+  'if not native_session_id or not native_family or status not in {"active", "parked"}:
         return' \
-  'if not native_session_id or status not in {"active", "parked"}:
+  'if not native_session_id or not native_family or status not in {"active", "parked"}:
         return
     return' \
   "$T.test_gh468_native_session_active_in_another_chat_is_refused"
@@ -53,17 +53,21 @@ mutate_and_check "M5 drop-other-dispatchable" \
   'and session_is_dispatchable(other)[0]' 'and True' \
   "$T.test_gh468_reuse_after_other_lease_stopped_is_allowed"
 
-mutate_and_check "M6 guard-terminal-status" \
-  'if not native_session_id or status not in {"active", "parked"}:' \
-  'if not native_session_id or False:' \
+mutate_and_check "M6 drop-family-discrimination" \
+  'and other_runtime.get("family") == native_family' 'and True' \
+  "$T.test_gh468_same_native_id_different_family_is_allowed"
+
+mutate_and_check "M7 guard-terminal-status" \
+  'if not native_session_id or not native_family or status not in {"active", "parked"}:' \
+  'if not native_session_id or not native_family or False:' \
   "$T.test_gh468_terminal_status_registration_is_not_guarded"
 
-mutate_and_check "M7 drop-parked-from-new-side" \
-  'if not native_session_id or status not in {"active", "parked"}:' \
-  'if not native_session_id or status not in {"active"}:' \
+mutate_and_check "M8 drop-parked-from-new-side" \
+  'if not native_session_id or not native_family or status not in {"active", "parked"}:' \
+  'if not native_session_id or not native_family or status not in {"active"}:' \
   "$T.test_gh468_parked_registration_against_dispatchable_owner_is_refused"
 
-mutate_and_check "M8 scan-not-strict-fails-open" \
+mutate_and_check "M9 scan-not-strict-fails-open" \
   'for other in iter_sessions(strict=True):' \
   'for other in iter_sessions():' \
   "$T.test_gh468_malformed_lease_fails_the_ownership_scan_closed"
