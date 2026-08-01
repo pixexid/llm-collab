@@ -13,17 +13,26 @@ and suppresses `ax_doorbell_required` for that packet. Only Codex may receive
 the busy-safe **bidirectional AX doorbell**, and only through the exact command
 printed by `deliver.py`. Every non-Codex watcher-backed worker is woken by its
 durable packet and its own watcher. See
-`claude-code-desktop-computer-use-bridge.md`. First prove through readable
-`AXValue` that the native composer is empty, then ring once even when the
-recipient is busy; busy alone is not a hold after that proof. A non-empty,
-unreadable, unprovable, or `AXValue`-opaque composer means hold and enter
-attended recovery—never infer empty or blind-ring. `VERIFIED` exit 0 confirms
+`claude-code-desktop-computer-use-bridge.md`. **GH-470: composer content and
+`AXValue` readability are never a sender-side hold, and neither is a busy/running
+recipient.** The recipient never types into its own composer, so any value there
+— readable non-empty, readable empty, readable nil, or an opaque profile whose
+value cannot be read — is stray; the ring clears and overrides it, and AX send
+takes preference over any composer content, **including the operator actively
+typing**. Ring even when the recipient is busy; the doorbell queues. Do not wait
+for an empty composer and do not route a non-empty/unreadable composer to
+attended recovery — that stranded the sender indefinitely. A routine `ring`
+fails closed **only** on a genuine targeting or operation failure: no or
+ambiguous native composer target, an **unrecognized** composer profile (unknown
+target identity — some editable field resolved but it cannot be confirmed as the
+right target), an AX-trust failure, a clear/type/submit failure, or post-submit
+identity loss. Distinguish opaque `AXValue` **content** (proceed and override)
+from an unresolved/unknown **target** (fail closed). `VERIFIED` exit 0 confirms
 delivery. `QUEUED (UNCONFIRMED)` exit 0 does not prove exact-thread delivery:
 preserve the durable mailbox packet, record the unconfirmed blocker/follow-up,
 and never re-ring. The idle input gate applies only to attended
 screenshot/keyboard Computer Use fallback, not to AX `ring`. Computer Use is
-the recovery path when AX cannot safely target or verify the native composer or
-its empty state.
+the recovery path when AX cannot safely resolve the native composer target.
 `llm-collab` remains the durable mailbox. Routine/continuous polling is
 **deprecated** as the primary wake — it wastes tokens and a heartbeat set on
 guessed timing can fire into changed context.

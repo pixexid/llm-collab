@@ -731,28 +731,25 @@ func cmdRing(app: String, text: String, submit: Bool, windowIndex: Int?, dryRun:
         print(axOutcomeLine(.notDelivered(reason: "no_native_composer")))
         return 3
     }
-    // GH-1547 composer-safety gate: decide BEFORE any mutation (no clear,
-    // select-all, delete, typing, or submit happens on a refusal — including
-    // --dry-run, whose probe also populates the composer). The decision is the
-    // pure routineRingDecision; every refusal routes to Codex-attended recovery.
+    // GH-470 composer gate: a resolved composer's content and AXValue
+    // readability are NEVER a hold — the send below clears and overrides whatever
+    // is there (the recipient never types into its own composer, so any value is
+    // stray; AX send takes preference over any content, including operator
+    // typing). A busy/running recipient is not a hold either (the ring queues).
+    // The only routine refusal is an unrecognized profile: some editable field
+    // resolved but we cannot confirm it is the intended target, so fail closed
+    // rather than type into the wrong place. currentValue is read for diagnostics
+    // only. (`no_native_composer` above and set/submit failures below cover the
+    // other fail-closed cases.)
     let currentValue = str(composer, kAXValueAttribute)
     switch routineRingDecision(profile: profile, attended: attended, axValue: currentValue) {
     case .proceed:
-        if attended {
-            FileHandle.standardError.write("⚠️ ATTENDED MODE: bypassing composer-safety proof — Codex-supervised attended recovery only; key-event typing may overwrite draft state that AXValue cannot show.\n".data(using: .utf8)!)
+        if let v = currentValue, !v.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            FileHandle.standardError.write("clearing stray composer content (\(v.count) chars) — AX send takes preference (GH-470)\n".data(using: .utf8)!)
         }
-    case .refuseOpaqueProfile:
-        FileHandle.standardError.write("REFUSED (no mutation): \(app) composer is AXValue-opaque — emptiness cannot be proven, so a routine ring may not touch it. Keep the durable mailbox packet authoritative and request Codex-attended recovery; --attended is valid only inside that supervised recovery.\n".data(using: .utf8)!)
-        print(axOutcomeLine(.notDelivered(reason: "opaque_profile")))
-        return 11
-    case .refuseUnreadableValue:
-        FileHandle.standardError.write("REFUSED (no mutation): could not read \(app) composer AXValue — emptiness is unprovable right now. Re-probe with `axsend tree --app \(app) --editable-only`; if the value stays unreadable, request Codex-attended recovery. Do not retype.\n".data(using: .utf8)!)
-        print(axOutcomeLine(.notDelivered(reason: "unreadable_value")))
-        return 11
-    case .refuseNonEmptyDraft:
-        let n = currentValue?.count ?? 0
-        FileHandle.standardError.write("REFUSED (no mutation): \(app) composer holds a draft (\(n) chars) — not clobbering it. Wait for the draft to clear or request Codex-attended recovery to inspect/clear it.\n".data(using: .utf8)!)
-        print(axOutcomeLine(.notDelivered(reason: "non_empty_draft")))
+    case .refuseUnresolvedTarget:
+        FileHandle.standardError.write("REFUSED (no mutation): \(app) composer profile is unrecognized — a resolved editable field cannot be confirmed as the send target, so a routine ring will not type into it. Verify the target app/window.\n".data(using: .utf8)!)
+        print(axOutcomeLine(.notDelivered(reason: "unresolved_target")))
         return 11
     }
     // AXValue if the field accepts it, else key-event typing (Electron editors

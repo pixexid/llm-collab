@@ -261,11 +261,21 @@ func composerAXValueReadable(_ profile: ComposerProfile) -> Bool {
 }
 
 // Routine-ring safety decision, computed BEFORE any composer mutation.
+//
+// GH-470: composer CONTENT and AXValue readability/opacity are NOT sender-side
+// holds. The recipient (e.g. Codex) never types into its own composer, so any
+// value there — readable non-empty, readable empty, readable nil, or an opaque
+// profile whose value cannot be read — is stray and is cleared+overridden by the
+// send once a composer element is resolved. AX send takes preference over any
+// composer content, including operator typing. A busy/running recipient is
+// likewise never a hold (the ring queues). The ONLY routine-ring refusal is an
+// unrecognized profile (unknown target identity): we resolved some editable
+// field but cannot confirm it is the right send target, so we fail closed.
+// Other fail-closed outcomes (no/ambiguous composer target, set/submit failure,
+// post-submit identity loss) are decided by the caller, not here.
 enum RoutineRingDecision: Equatable {
     case proceed
-    case refuseOpaqueProfile   // composer tech cannot prove emptiness — attended recovery only
-    case refuseUnreadableValue // readable profile, but the AXValue read failed at runtime
-    case refuseNonEmptyDraft   // readable AXValue holds a draft — hold, never clobber
+    case refuseUnresolvedTarget // unrecognized composer profile — cannot confirm the send target
 }
 
 // A composer AXValue that holds only whitespace, or whitespace around the
@@ -288,16 +298,17 @@ func composerValueIsEffectivelyEmpty(_ profile: ComposerProfile, _ v: String) ->
     }
 }
 
-// The single authority for whether a `ring` may mutate the composer. Attended
-// mode (explicit --attended, Codex-supervised) bypasses the proof; every other
-// path requires a trustworthy readable AXValue that is effectively empty. All
-// refusals are decided here, before the caller performs ANY clear/select-all/
-// delete/type/submit — the mutation-free-refusal invariant of GH-1547.
+// The single authority for whether a `ring` may proceed to clear+type+send.
+// GH-470: a resolved composer's content and AXValue readability are never a
+// hold — the send clears and overrides whatever is there. `axValue` is accepted
+// for signature stability and diagnostics only; it does NOT gate the decision.
+// Attended mode is unconditional. The only routine refusal is an unrecognized
+// profile: `windowComposer` may still resolve a generic editable field for an
+// unknown app, but we cannot confirm it is the intended send target, so a
+// routine ring fails closed rather than typing into the wrong place.
 func routineRingDecision(profile: ComposerProfile, attended: Bool, axValue: String?) -> RoutineRingDecision {
     if attended { return .proceed }
-    if !composerAXValueReadable(profile) { return .refuseOpaqueProfile }
-    guard let v = axValue else { return .refuseUnreadableValue }
-    if !composerValueIsEffectivelyEmpty(profile, v) { return .refuseNonEmptyDraft }
+    if profile == .unknown { return .refuseUnresolvedTarget }
     return .proceed
 }
 
