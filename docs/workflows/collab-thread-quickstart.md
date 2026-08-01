@@ -46,14 +46,15 @@ python bin/new_collab_session.py \
   --me codex --my-runtime-session-id 019f9452-... --my-runtime-family codex_app \
   --with zcode --repo-target app
 #  -> creates the chat, registers ONLY codex's own session, prints codex's own
-#     inbox-watcher command, and prints a copy-paste setup prompt for zcode.
+#     pickup command (branched by wake channel), and a setup prompt for zcode.
 ```
 
-Share each printed prompt with its worker. A watcher-backed worker (claude,
-gemini, …) arms its own inbox watcher; Codex has no native session watcher, so
-its prompt tells it to poll and relies on the sender's AX doorbell for wakes.
-**Arm your own watcher** — the helper prints yours first; a packet you never see
-is a packet you never answer.
+Share each printed prompt with its worker. The initiator's own pickup command —
+and each co-worker's — is **branched by that agent's wake channel**: a
+watcher-backed worker (claude, gemini, …) arms its own inbox watcher, while Codex
+has no native session watcher, so its command polls the inbox and relies on the
+sender's AX doorbell for wakes. **Do your own pickup step** (the helper prints
+yours first); a packet you never see is a packet you never answer.
 
 The manual steps below are exactly what that helper automates; run them by hand
 only when you need to diverge from the defaults.

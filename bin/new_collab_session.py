@@ -13,8 +13,10 @@ It:
      code, not a parked/dirty operator checkout).
   2. Creates the chat.
   3. Registers ONLY the initiator's own, explicitly-supplied native session.
-  4. Prints the initiator's own inbox-watcher command (arm it — a packet you
-     never see is a packet you never answer).
+  4. Prints the initiator's own pickup command, branched by its wake channel
+     (a watcher-backed initiator arms an inbox watcher; Codex, with no native
+     watcher, gets poll/AX guidance) — do it, a packet you never see is a packet
+     you never answer.
   5. Emits a per-co-worker setup prompt: the exact `session_autobridge register`
      plus the pickup command for that worker's real wake channel (watcher-backed
      workers watch; Codex has no native watcher and is woken by the sender's AX
