@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -1431,6 +1432,48 @@ class InboxMarkAllReadTest(unittest.TestCase):
         self.assertEqual("unregistered_project_scope", result["reason"])
         # Terminal before reader-session creation: nothing was written.
         self.assertFalse(sessions_dir.exists() and any(sessions_dir.glob("*.json")))
+
+    def _reader_sessions_dir_with_owner(self, *, status="parked", native="NAT-1"):
+        import _session_autobridge as sa_lib  # noqa: F401 (patched by caller)
+        sessions = Path(tempfile.mkdtemp(prefix="gh468-reader-")) / "sessions"
+        sessions.mkdir(parents=True)
+        self.addCleanup(shutil.rmtree, sessions.parent, ignore_errors=True)
+        write_json(sessions / "SESSION-OWNER.json", {
+            "session_id": "SESSION-OWNER", "agent_id": "codex",
+            "project_id": "amiga", "chat_id": "CHAT-A",
+            "status": status, "lease_expires_utc": "2999-01-01T00:00:00+00:00",
+            "runtime": {"session_id": native},
+        })
+        return sessions
+
+    def test_gh468_reader_session_refuses_cross_scope_native_and_writes_nothing(self):
+        # Finding 1: ensure_reader_session() is a second parked/dispatchable write
+        # path. A reader for a native already dispatchable in another (project,
+        # chat) must refuse AND leave no record (the refused path writes nothing).
+        import _session_autobridge as sa_lib
+        sessions = self._reader_sessions_dir_with_owner()
+        identity = {"project": "nuvyr", "chat": "CHAT-B"}
+        with patch.object(sa_lib, "SESSIONS_DIR", sessions):
+            with self.assertRaisesRegex(ValueError, "already owns a dispatchable binding"):
+                inbox_lib.ensure_reader_session(
+                    "SESSION-READER", "codex", identity, runtime_id="NAT-1"
+                )
+            self.assertFalse(
+                (sessions / "SESSION-READER.json").exists(),
+                "a refused reader registration must not write a lease",
+            )
+
+    def test_gh468_reader_session_same_scope_native_is_created(self):
+        # The guard must not over-block the normal reader path: a reader in the
+        # SAME (project, chat) as the owner is disambiguated, not a collision.
+        import _session_autobridge as sa_lib
+        sessions = self._reader_sessions_dir_with_owner()
+        identity = {"project": "amiga", "chat": "CHAT-A"}
+        with patch.object(sa_lib, "SESSIONS_DIR", sessions):
+            inbox_lib.ensure_reader_session(
+                "SESSION-READER", "codex", identity, runtime_id="NAT-1"
+            )
+            self.assertTrue((sessions / "SESSION-READER.json").exists())
 
     def test_released_activation_packet_reclaims_with_newer_fence(self) -> None:
         path = self.add_message("RECLAIM", project_line="amiga", activation=True)

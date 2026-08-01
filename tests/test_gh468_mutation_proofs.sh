@@ -38,18 +38,22 @@ mutate_and_check "M1 helper-noop" \
   "$T.test_gh468_native_session_active_in_another_chat_is_refused"
 
 mutate_and_check "M2 drop-chat-discrimination" \
-  'and other.get("chat_id") != chat_id' 'and True' \
-  "$T.test_gh468_second_lease_in_same_scope_is_allowed"
+  'or other.get("chat_id") != chat_id' 'or False' \
+  "$T.test_gh468_native_session_active_in_another_chat_is_refused"
 
-mutate_and_check "M3 drop-session-discrimination" \
+mutate_and_check "M3 drop-project-discrimination" \
+  'other.get("project_id") != project_id' 'False' \
+  "$T.test_gh468_different_project_same_chat_is_refused"
+
+mutate_and_check "M4 drop-session-discrimination" \
   'other.get("session_id") != session_id' 'True' \
   "$T.test_gh468_same_session_move_to_a_different_chat_is_allowed"
 
-mutate_and_check "M4 drop-other-dispatchable" \
+mutate_and_check "M5 drop-other-dispatchable" \
   'and session_is_dispatchable(other)[0]' 'and True' \
   "$T.test_gh468_reuse_after_other_lease_stopped_is_allowed"
 
-mutate_and_check "M5 guard-terminal-status" \
+mutate_and_check "M6 guard-terminal-status" \
   'if not native_session_id or status not in {"active", "parked"}:' \
   'if not native_session_id or False:' \
   "$T.test_gh468_terminal_status_registration_is_not_guarded"
@@ -59,7 +63,7 @@ mutate_and_check "M7 drop-parked-from-new-side" \
   'if not native_session_id or status not in {"active"}:' \
   "$T.test_gh468_parked_registration_against_dispatchable_owner_is_refused"
 
-mutate_and_check "M6 scan-not-strict-fails-open" \
+mutate_and_check "M8 scan-not-strict-fails-open" \
   'for other in iter_sessions(strict=True):' \
   'for other in iter_sessions():' \
   "$T.test_gh468_malformed_lease_fails_the_ownership_scan_closed"

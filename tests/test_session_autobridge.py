@@ -534,13 +534,15 @@ class SessionAutobridgeTest(unittest.TestCase):
         with patch.object(session_autobridge_lib, "SESSIONS_DIR", sessions):
             self._guard("SESSION-A", "llm-collab", "CHAT-B", "NAT-1", "active")
 
-    def test_gh468_same_chat_different_project_different_session_is_allowed(self):
-        # Project is deliberately NOT part of the key: two projects may register
-        # under one chat_id on one native (canonical home derivation does this,
-        # test_session_register_runtime_home). The chat is the routing scope.
+    def test_gh468_different_project_same_chat_is_refused(self):
+        # Finding 2: the collision key is (project, chat) — the exact key dispatch
+        # resolves by. A DIFFERENT session reusing the native under the same
+        # chat_id but a different project is a second dispatchable routing target
+        # and must refuse.
         sessions = self._sessions_with_active_native()
         with patch.object(session_autobridge_lib, "SESSIONS_DIR", sessions):
-            self._guard("SESSION-B", "other-project", "CHAT-A", "NAT-1", "active")
+            with self.assertRaisesRegex(ValueError, "already owns a dispatchable binding"):
+                self._guard("SESSION-B", "other-project", "CHAT-A", "NAT-1", "active")
 
     def test_gh468_different_native_id_is_allowed(self):
         sessions = self._sessions_with_active_native()

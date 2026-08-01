@@ -65,8 +65,9 @@ from _session_autobridge import (
     runtime_metadata,
     save_session,
     session_target_ids,
+    _session_write_lock,
 )
-from session_autobridge import register_session
+from session_autobridge import register_session, refuse_native_session_active_elsewhere
 
 MAX_EXACT_SESSION_ENTRIES = 5_000
 MAX_EXACT_SESSION_BYTES = 16 * 1024 * 1024
@@ -556,7 +557,20 @@ def ensure_reader_session(
             "ephemeral_reader": True,
             "created_utc": utc_iso(),
         }
-        save_session(payload)
+        # GH-468: the auto-created reader lease is parked+unexpired+native-bound,
+        # i.e. dispatchable, so it is a second write path that could bind a native
+        # already dispatchable in another (project, chat). Route it through the
+        # same locked ownership seam as register — the guard raises (no write)
+        # before save_session on a cross-scope collision.
+        with _session_write_lock():
+            refuse_native_session_active_elsewhere(
+                session_id,
+                identity["project"],
+                identity["chat"],
+                runtime_id,
+                "parked",
+            )
+            save_session(payload)
         return payload
 
 
