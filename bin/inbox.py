@@ -614,7 +614,18 @@ def gate_activation_message(args, msg: dict, *, consume: bool) -> dict | None:
     runtime_id = activation_reader_runtime_id()
     owner_pid = None if runtime_id else activation_reader_pid()
     session_id = activation_reader_session_id(args, identity)
-    ensure_reader_session(session_id, args.me, identity, runtime_id=runtime_id)
+    try:
+        ensure_reader_session(session_id, args.me, identity, runtime_id=runtime_id)
+    except ValueError as exc:
+        # GH-468 ownership refusal on the reader path is a normal terminal
+        # outcome, not a crash: surface it as a structured refusal like every
+        # other gate, rather than letting the exception escape the inbox flow.
+        return {
+            "authorized": False,
+            "reason": "native_session_owned_elsewhere",
+            "identity": identity,
+            "detail": str(exc),
+        }
     try:
         claim = claim_activation_lease(
             identity,

@@ -1475,6 +1475,31 @@ class InboxMarkAllReadTest(unittest.TestCase):
             )
             self.assertTrue((sessions / "SESSION-READER.json").exists())
 
+    def test_gh468_reader_collision_returns_structured_refusal_not_exception(self):
+        # Finding A: an ownership refusal on the reader path must surface as a
+        # structured gate refusal (like every other gate), not an uncaught
+        # ValueError escaping the inbox flow.
+        def _boom(*a, **k):
+            raise ValueError("native session already owns a dispatchable binding in x/y/z")
+
+        msg = {
+            "frontmatter": {
+                "activation": True, "to": "codex",
+                "project_id": "amiga", "chat_id": "CHAT-B",
+                "related_task": "TASK-1", "worktree": str(self.worktree),
+                "branch": "codex/gh-468-test",
+            },
+            "path": "Chats/x/packet.md",
+        }
+        args = SimpleNamespace(me="codex", session="SESSION-READER")
+        with (
+            patch.object(inbox_lib, "load_lease", lambda identity: None),
+            patch.object(inbox_lib, "ensure_reader_session", _boom),
+        ):
+            result = inbox_lib.gate_activation_message(args, msg, consume=True)
+        self.assertFalse(result["authorized"])
+        self.assertEqual("native_session_owned_elsewhere", result["reason"])
+
     def test_released_activation_packet_reclaims_with_newer_fence(self) -> None:
         path = self.add_message("RECLAIM", project_line="amiga", activation=True)
         first = self.run_inbox(
