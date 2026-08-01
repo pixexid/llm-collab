@@ -75,6 +75,8 @@ from _session_autobridge import (
     _session_write_lock,
 )
 from session_autobridge import (
+    AmbiguousNativeFamily,
+    NativeSessionOwnedElsewhere,
     register_session,
     refuse_native_session_active_elsewhere,
     resolve_native_family,
@@ -653,16 +655,26 @@ def gate_activation_message(args, msg: dict, *, consume: bool) -> dict | None:
             runtime_id=runtime_id,
             runtime_family=activation_reader_runtime_family(),
         )
-    except ValueError as exc:
-        # GH-468 ownership refusal on the reader path is a normal terminal
-        # outcome, not a crash: surface it as a structured refusal like every
-        # other gate, rather than letting the exception escape the inbox flow.
+    except NativeSessionOwnedElsewhere as exc:
+        # A cross-scope ownership collision is a normal terminal outcome: surface
+        # a stable structured refusal (JSON clients branch on this reason).
         return {
             "authorized": False,
             "reason": "native_session_owned_elsewhere",
             "identity": identity,
             "detail": str(exc),
         }
+    except AmbiguousNativeFamily as exc:
+        # Several live families share the native id: a distinct reason, not an
+        # ownership collision — the remediation differs (disambiguate the id).
+        return {
+            "authorized": False,
+            "reason": "native_family_ambiguous",
+            "identity": identity,
+            "detail": str(exc),
+        }
+    # Registry corruption / save-validation raise other exceptions; they are NOT
+    # ownership outcomes and must surface distinctly rather than be mislabeled.
     try:
         claim = claim_activation_lease(
             identity,

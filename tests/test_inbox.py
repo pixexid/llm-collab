@@ -1543,9 +1543,12 @@ class InboxMarkAllReadTest(unittest.TestCase):
     def test_gh468_reader_collision_returns_structured_refusal_not_exception(self):
         # Finding A: an ownership refusal on the reader path must surface as a
         # structured gate refusal (like every other gate), not an uncaught
-        # ValueError escaping the inbox flow.
+        # exception escaping the inbox flow.
+        import session_autobridge as sa_cli
+
         def _boom(*a, **k):
-            raise ValueError("native session already owns a dispatchable binding in x/y/z")
+            raise sa_cli.NativeSessionOwnedElsewhere(
+                "native session already owns a dispatchable binding in x/y/z")
 
         msg = {
             "frontmatter": {
@@ -1564,6 +1567,43 @@ class InboxMarkAllReadTest(unittest.TestCase):
             result = inbox_lib.gate_activation_message(args, msg, consume=True)
         self.assertFalse(result["authorized"])
         self.assertEqual("native_session_owned_elsewhere", result["reason"])
+
+    def _gate_with_reader_raising(self, exc):
+        msg = {
+            "frontmatter": {
+                "activation": True, "to": "codex",
+                "project_id": "amiga", "chat_id": "CHAT-B",
+                "related_task": "TASK-1", "worktree": str(self.worktree),
+                "branch": "codex/gh-468-test",
+            },
+            "path": "Chats/x/packet.md",
+        }
+        args = SimpleNamespace(me="codex", session="SESSION-READER")
+
+        def _raise(*a, **k):
+            raise exc
+
+        with (
+            patch.object(inbox_lib, "load_lease", lambda identity: None),
+            patch.object(inbox_lib, "ensure_reader_session", _raise),
+        ):
+            return inbox_lib.gate_activation_message(args, msg, consume=True)
+
+    def test_gh468_reader_family_ambiguity_has_its_own_gate_reason(self):
+        # An ambiguity is not an ownership collision: the gate reports a distinct
+        # reason so JSON clients can branch on the correct remediation.
+        import session_autobridge as sa_cli
+        result = self._gate_with_reader_raising(
+            sa_cli.AmbiguousNativeFamily("two live families share NAT-1"))
+        self.assertFalse(result["authorized"])
+        self.assertEqual("native_family_ambiguous", result["reason"])
+
+    def test_gh468_reader_corruption_is_not_mislabeled_as_owned_elsewhere(self):
+        # A registry-corruption ValueError must NOT be caught as an ownership
+        # collision: the gate lets it surface distinctly rather than reporting a
+        # false native_session_owned_elsewhere.
+        with self.assertRaises(ValueError):
+            self._gate_with_reader_raising(ValueError("malformed session record SESSION-X"))
 
     def test_released_activation_packet_reclaims_with_newer_fence(self) -> None:
         path = self.add_message("RECLAIM", project_line="amiga", activation=True)

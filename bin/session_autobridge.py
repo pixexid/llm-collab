@@ -432,6 +432,16 @@ class AmbiguousNativeFamily(ValueError):
     """Several live runtime families share one native id — a reader cannot pick."""
 
 
+class NativeSessionOwnedElsewhere(ValueError):
+    """The native (family, id) already backs a dispatchable lease in another scope.
+
+    A distinct type so callers (e.g. the activation gate) can catch ONLY the
+    ownership collision and report a stable reason, rather than conflating it with
+    registry corruption, save-validation failures, or family ambiguity — JSON
+    clients branch on the reason to choose remediation.
+    """
+
+
 def resolve_native_family(native_session_id: str | None) -> str | None:
     """The runtime family that currently owns a native id, or None if none does.
 
@@ -545,7 +555,7 @@ def refuse_native_session_active_elsewhere(
             and other_runtime.get("session_id") == native_session_id
             and other_runtime.get("family") == native_family
         ):
-            raise ValueError(
+            raise NativeSessionOwnedElsewhere(
                 "native session already owns a dispatchable binding in "
                 f"{other.get('project_id')}/{other.get('chat_id')}/{other.get('agent_id')} "
                 f"(session {other.get('session_id')}); a native session (family "
