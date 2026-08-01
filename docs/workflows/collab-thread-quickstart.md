@@ -28,6 +28,45 @@ for a GitHub-backed project — materializing and validating the issue queue. An
 unregistered project is refused by the tooling rather than guessed at, so this is not
 optional. Missing agents go in `agents.json` the same way.
 
+**A new collab session is new for _everyone_.** It is not the reuse of whatever
+binding happened to be lying around. Each worker starts a fresh native session and
+registers *its own* — the initiator never discovers or registers a co-worker's
+session, because a guessed id binds the wrong thread. The initiator registers
+only itself and hands each co-worker an exact setup prompt for the part only they
+can do. Freshness is a convention each worker follows: ordinary registration does
+not yet reject a native id already active in another chat, so do not reuse one
+across chats (the enforcing registration-layer guard is tracked in GH-468).
+
+**The one-command path** does the initiator's share and prints those prompts:
+
+```bash
+# From the deployed runtime or a fresh origin/main worktree — NEVER a parked/dirty
+# operator checkout (it refuses if this checkout is behind origin/main, so a
+# co-worker cannot be pointed at stale code).
+python bin/new_collab_session.py \
+  --project demo-app --title "Checkout refactor" \
+  --me codex --my-runtime-session-id 019f9452-... --my-runtime-family codex_app \
+  --with claude:claude_app --repo-target app
+#  -> creates the chat, registers ONLY codex's own session, prints codex's own
+#     pickup command (branched by wake channel), and a setup prompt for claude.
+```
+
+Co-worker families are explicit (`agent:family`), never guessed. This helper
+supports the discover-runtime families only — `codex_app`, `claude_app`,
+`gemini_cli`. Pi workers (glmpi/relay/kimi) use `worker.py start-pi` and a
+human-relay (zcode) has no native session, so both are refused here rather than
+misbound.
+
+Share each printed prompt with its worker. The initiator's own pickup command —
+and each co-worker's — is **branched by that agent's wake channel**: a
+watcher-backed worker (claude, gemini, …) arms its own inbox watcher, while Codex
+has no native session watcher, so its command polls the inbox and relies on the
+sender's AX doorbell for wakes. **Do your own pickup step** (the helper prints
+yours first); a packet you never see is a packet you never answer.
+
+The manual steps below are exactly what that helper automates; run them by hand
+only when you need to diverge from the defaults.
+
 **Then, once per collaboration:**
 
 ```bash
