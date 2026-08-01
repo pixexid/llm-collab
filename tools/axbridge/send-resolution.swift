@@ -268,14 +268,15 @@ func composerAXValueReadable(_ profile: ComposerProfile) -> Bool {
 // profile whose value cannot be read — is stray and is cleared+overridden by the
 // send once a composer element is resolved. AX send takes preference over any
 // composer content, including operator typing. A busy/running recipient is
-// likewise never a hold (the ring queues). The ONLY routine-ring refusal is an
-// unrecognized profile (unknown target identity): we resolved some editable
-// field but cannot confirm it is the right send target, so we fail closed.
-// Other fail-closed outcomes (no/ambiguous composer target, set/submit failure,
+// likewise never a hold (the ring queues). The routine AX doorbell is Codex-only
+// per the repo contract, so a routine ring proceeds ONLY for the Codex profile;
+// every non-Codex profile (Claude durable-only, zcode relay, unknown target)
+// fails closed, even if a stale/direct caller reaches the binary. Other
+// fail-closed outcomes (no/ambiguous composer target, set/submit failure,
 // post-submit identity loss) are decided by the caller, not here.
 enum RoutineRingDecision: Equatable {
     case proceed
-    case refuseUnresolvedTarget // unrecognized composer profile — cannot confirm the send target
+    case refuseUnresolvedTarget // non-Codex / unrecognized profile — not a routine AX target
 }
 
 // A composer AXValue that holds only whitespace, or whitespace around the
@@ -308,8 +309,14 @@ func composerValueIsEffectivelyEmpty(_ profile: ComposerProfile, _ v: String) ->
 // routine ring fails closed rather than typing into the wrong place.
 func routineRingDecision(profile: ComposerProfile, attended: Bool, axValue: String?) -> RoutineRingDecision {
     if attended { return .proceed }
-    if profile == .unknown { return .refuseUnresolvedTarget }
-    return .proceed
+    // The AX doorbell is Codex-only (repo contract): Claude is durable-only and
+    // refused before dispatch; zcode is a human relay; unknown is an
+    // unrecognized target. Only Codex is a routine-ring target — and for Codex,
+    // composer content and AXValue readability are never a hold (the send clears
+    // and overrides). Every non-Codex profile fails closed even if a stale or
+    // direct caller reaches the binary.
+    if profile == .codex { return .proceed }
+    return .refuseUnresolvedTarget
 }
 
 // Closed machine-readable AX doorbell outcome vocabulary (GH-98). Exactly one

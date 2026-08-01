@@ -37,22 +37,26 @@ bin/axsend check        # -> "AX trusted: YES"
 
 ## Usage
 
-Before any routine `ring`, prove through readable `AXValue` that the native
-composer is empty. A busy recipient alone is not a hold after that proof, so
-one pointer may queue behind the active turn. A non-empty, unreadable,
-unprovable, or `AXValue`-opaque composer means hold and enter attended recovery;
-never infer empty or perform a blind ring.
+Routine `ring` targets Codex only. For Codex, composer **content** and
+`AXValue` readability/opacity are never a sender-side hold, and neither is a
+busy/running recipient: Codex never types into its own composer, so any value
+there — readable non-empty, readable empty, readable nil, or unreadable — is
+stray, and the ring clears and overrides it before sending. Ring even when the
+recipient is busy; the doorbell queues. Do not prove the composer empty first
+and do not route a non-empty/unreadable Codex composer to attended recovery —
+that stranded the sender indefinitely (GH-470).
 
-This proof gate is ENFORCED by the binary (GH-1547): routine `ring` computes a
-composer-safety decision BEFORE any mutation and refuses with **exit 11** when
-the target profile is `AXValue`-opaque (ZCode, unknown apps), the `AXValue`
-read fails, or a readable composer holds a draft. A refusal performs no clear,
-select-all, delete, typing, or submit. Key-event typing exists only behind the
-explicit `--attended` flag (`ring --attended`, and the `type` command which is
-attended-only), which prints a loud warning and is valid only inside a
-Codex-supervised attended-recovery turn. The sender-side readable
-empty-composer proof remains good practice for queue discipline, but the
-binary no longer relies on it for safety.
+Routine `ring` still fails closed on a genuine targeting or operation failure
+(GH-1547 target-safety decision): no or ambiguous native composer target, an
+unrecognized or opaque-profile target it cannot safely confirm (ZCode, unknown
+apps), an AX-trust failure, a clear/type/submit failure, or post-submit
+identity loss. **Exit 11** refuses before any mutation in those target cases;
+it no longer fires on a resolvable Codex composer merely for holding a draft
+or being unreadable — GH-470 overrides and sends through that instead. Key-event
+typing exists only behind the explicit `--attended` flag (`ring --attended`,
+and the `type` command which is attended-only), which prints a loud warning and
+is valid only inside a Codex-supervised attended-recovery turn for a genuinely
+opaque/unresolved target.
 
 ```bash
 # Inspect an app's tree to find the composer + send button
@@ -80,10 +84,12 @@ bin/axsend ring  --app Codex --submit --text "[from claude] ..."
 bin/axsend confirm --app Codex --text "[from claude] ..."
 
 # Only after a non-zero/not-delivered result, retry once — and ONLY when the
-# target composer is proven readable and empty (GH-1547): a routine ring refuses
-# with exit 11 on an opaque profile, an unreadable AXValue, or a remaining
-# draft. For any refused state, hold and request Codex-attended recovery
-# (`--attended`, supervised) instead of retrying. Never re-ring either exit-0 result.
+# target composer resolves cleanly (GH-1547): a routine ring refuses with exit
+# 11 only on a genuine targeting failure (no/ambiguous composer, an
+# unrecognized/opaque-profile target, an AX-trust failure) — a resolvable
+# Codex composer's content/readability is never a refusal reason (GH-470). For
+# a refused target, hold and request Codex-attended recovery (`--attended`,
+# supervised) instead of retrying. Never re-ring either exit-0 result.
 bin/axsend ring  --app Codex --submit --verify --text "[from claude] ..."
 
 # Post-send / anytime: is the recipient processing, and what are recent messages
@@ -169,12 +175,12 @@ out of range, REJECTED (not clamped). Absent is not the same as `0`.
   `QUEUED (UNCONFIRMED)` and `7` when the message did not land. A busy recipient
   is not an AX ring failure, but queued-unconfirmed is not exact-thread delivery
   proof.
-- **Busy-safe queueing:** after readable `AXValue` proves the native composer is
-  empty, `ring` is allowed while a distinct external collaborator is busy. A
-  visible `Stop`, `Running`, or processing state alone is not an idle-wait
-  requirement. Submit exactly one message. A non-empty, unreadable, unprovable,
-  or `AXValue`-opaque composer means hold and attended recovery; never infer
-  empty. Also hold when the same pointer is already queued, and never stack or
+- **Busy-safe queueing:** `ring` targets Codex only and is allowed while Codex
+  is busy regardless of composer content — content and `AXValue`
+  readability/opacity are never a hold for Codex, and the ring clears and
+  overrides whatever is there before sending. A visible `Stop`, `Running`, or
+  processing state alone is not an idle-wait requirement. Submit exactly one
+  message. Also hold when the same pointer is already queued, and never stack or
   re-ring that pointer behind the running turn. `VERIFIED` confirms delivery;
   `QUEUED (UNCONFIRMED)` preserves the mailbox/follow-up but cannot be reported
   as exact-thread delivery. `tree`/`state` are optional diagnostics, not AX ring
@@ -282,5 +288,7 @@ path. Inbound Claude-to-Codex AX remains permitted.
 
 Computer Use is a serialized control and recovery plane, not a replacement
 doorbell. Once Codex has restored a safe target/thread, normal delivery returns
-to one verified AX ring only when the native composer is again provably empty;
-an `AXValue`-opaque composer remains on the attended recovery path.
+to a verified AX ring: composer content and `AXValue` readability remain never
+a hold for Codex, so the ring overrides and sends regardless. An
+opaque/unresolved **target** — a composer AX cannot safely confirm belongs to
+the intended recipient — remains on the attended recovery path.

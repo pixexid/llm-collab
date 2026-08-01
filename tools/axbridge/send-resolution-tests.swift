@@ -292,44 +292,36 @@ check(composerAXValueReadable(.claude) == true,  "1547: claude composer is AXVal
 check(composerAXValueReadable(.codex) == true,   "1547: codex composer is AXValue-readable")
 check(composerAXValueReadable(.zcode) == false,  "1547: zcode composer is AXValue-opaque")
 check(composerAXValueReadable(.unknown) == false, "1547: unknown profile is opaque (fails closed)")
-// ---- GH-470: composer content + AXValue readability are NEVER a hold ----
-// A recognized profile proceeds regardless of what (if anything) is in the
-// composer; the send clears+overrides it. Each of these that reads "proceeds"
-// was a HOLD before GH-470 — a mutation restoring the readability/content
-// refusal (refuseNonEmptyDraft / refuseUnreadableValue / refuseOpaqueProfile)
-// fails the matching check here.
+// ---- GH-470: Codex-only routine ring; composer content/readability never a hold ----
+// For the Codex profile, ANY composer content proceeds (the send clears +
+// overrides it) — each "proceeds" below was a HOLD before GH-470, so a mutation
+// restoring the readability/content refusal fails the matching check.
 check(routineRingDecision(profile: .codex, attended: false, axValue: "") == .proceed,
-      "GH-470: readable empty AXValue proceeds (codex)")
-check(routineRingDecision(profile: .claude, attended: false, axValue: "") == .proceed,
-      "GH-470: readable empty AXValue proceeds (claude)")
-// A non-empty readable draft is stray and is overridden — was refuseNonEmptyDraft.
+      "GH-470: codex readable empty AXValue proceeds")
 check(routineRingDecision(profile: .codex, attended: false, axValue: "a real draft") == .proceed,
-      "GH-470: readable non-empty draft proceeds (cleared+overridden), no hold")
-check(routineRingDecision(profile: .claude, attended: false, axValue: "draft") == .proceed,
-      "GH-470: readable non-empty draft proceeds (claude)")
-// An unreadable value on a recognized profile does NOT strand the sender —
-// was refuseUnreadableValue.
+      "GH-470: codex readable non-empty draft proceeds (cleared+overridden), no hold")
 check(routineRingDecision(profile: .codex, attended: false, axValue: nil) == .proceed,
-      "GH-470: unreadable AXValue on a recognized profile proceeds, no hold")
-// A recognized-but-opaque profile (known VALUE-opacity) proceeds — was
-// refuseOpaqueProfile. Opaque VALUE is not opaque TARGET identity.
-check(routineRingDecision(profile: .zcode, attended: false, axValue: "") == .proceed,
-      "GH-470: known opaque-value profile (zcode) proceeds on empty-looking AXValue")
-check(routineRingDecision(profile: .zcode, attended: false, axValue: nil) == .proceed,
-      "GH-470: known opaque-value profile (zcode) proceeds on unreadable AXValue")
+      "GH-470: codex unreadable AXValue proceeds, no hold")
 check(routineRingDecision(profile: .codex, attended: false, axValue: "Do anything now") == .proceed,
-      "GH-470: former placeholder-plus-content draft now proceeds (overridden)")
+      "GH-470: codex former placeholder-plus-content draft now proceeds (overridden)")
 check(routineRingDecision(profile: .codex, attended: false, axValue: "\nreal draft") == .proceed,
-      "GH-470: whitespace-around-a-real-draft now proceeds (overridden)")
-// The ONLY routine refusal: an UNRECOGNIZED profile (unknown target identity).
-// A mutation that lets .unknown proceed fails this check.
+      "GH-470: codex whitespace-around-a-real-draft now proceeds (overridden)")
+// The AX doorbell is Codex-only: EVERY non-Codex profile fails closed as a
+// non-target (bot #471: keep non-Codex fail-closed even for a direct caller).
+// A mutation letting a non-Codex profile proceed fails these checks.
+check(routineRingDecision(profile: .claude, attended: false, axValue: "") == .refuseUnresolvedTarget,
+      "GH-470: claude is not a routine AX target (durable-only)")
+check(routineRingDecision(profile: .zcode, attended: false, axValue: "") == .refuseUnresolvedTarget,
+      "GH-470: zcode (relay) is not a routine AX target")
+check(routineRingDecision(profile: .zcode, attended: false, axValue: nil) == .refuseUnresolvedTarget,
+      "GH-470: zcode fails closed on unreadable value too")
 check(routineRingDecision(profile: .unknown, attended: false, axValue: "") == .refuseUnresolvedTarget,
       "GH-470: unrecognized profile fails closed (cannot confirm target)")
 check(routineRingDecision(profile: .unknown, attended: false, axValue: nil) == .refuseUnresolvedTarget,
       "GH-470: unrecognized profile fails closed on unreadable value too")
-// Attended recovery unlocks even the unrecognized-target case.
-check(routineRingDecision(profile: .unknown, attended: true, axValue: "draft") == .proceed,
-      "GH-470: attended mode proceeds even on an unrecognized profile")
+// Attended recovery (explicit, supervised) unlocks every profile/state.
+check(routineRingDecision(profile: .zcode, attended: true, axValue: "draft") == .proceed,
+      "GH-470: attended mode proceeds on a non-Codex profile")
 check(routineRingDecision(profile: .codex, attended: true, axValue: "draft") == .proceed,
       "GH-470: attended mode proceeds past any content")
 

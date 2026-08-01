@@ -430,14 +430,17 @@ class AxRecoveryWordingPinTest(unittest.TestCase):
                 )
 
     def test_schema_reference_doorbell_claim_is_conditional(self) -> None:
-        # GH-1547 PR #110 a369 P2: the schema-reference routing note must not
-        # claim unconditionally that ax_app => ax_doorbell_required; flagged
-        # supported targets emit attended recovery and unsupported profiles
-        # fail closed instead.
+        # The schema-reference routing note must not claim unconditionally that
+        # ax_app => ax_doorbell_required: an unresolvable/undriveable target
+        # (ax_attended_only) emits attended recovery. GH-470: it must NOT claim a
+        # value-opaque/non-empty composer holds, and must state Codex is the only
+        # routine target (others fail closed).
         schema = (REPO_ROOT / "docs" / "schema-reference.md").read_text()
-        self.assertIn("supported app profile", schema)
         self.assertIn("ATTENDED RECOVERY REQUIRED", schema)
-        self.assertIn("Unknown and Claude profiles fail closed", schema)
+        self.assertIn("GH-470", schema)
+        self.assertIn("Codex is the only routine AX target", schema)
+        # The old "value-opaque composer => hold" framing must be gone.
+        self.assertNotIn("Unknown and Claude profiles fail closed", schema)
 
     AUTHORITATIVE_ROUTING_DOCS = (
         "README.md",
@@ -469,12 +472,15 @@ class AxRecoveryWordingPinTest(unittest.TestCase):
                 "ax_attended_only qualification (GH-1547 family drift)",
             )
 
-    def test_conditional_recovery_wording_present(self) -> None:
+    def test_recovery_wording_is_gh470_not_empty_proof(self) -> None:
+        # GH-470: the old "re-ring ONLY when the composer is proven readable and
+        # empty" rule stranded the sender and must be gone from axsend.swift and
+        # the README; recovery no longer requires a proven-empty composer.
         confirm_msg = (self.AXBRIDGE / "axsend.swift").read_text()
-        self.assertIn("re-ring ONLY when the target composer is proven readable and empty", confirm_msg)
+        self.assertNotIn("proven readable and empty", confirm_msg)
+        self.assertIn("does not require a proven-empty composer", confirm_msg)
         readme = (self.AXBRIDGE / "README.md").read_text()
-        self.assertIn("ONLY when the", readme)
-        self.assertIn("proven readable and empty", readme)
+        self.assertNotIn("proven readable and empty", readme)
 
 
 class AxAttendedRecoveryPrintPriorityTest(unittest.TestCase):
@@ -559,6 +565,37 @@ class AxBoundVsUnboundPrecedenceTest(unittest.TestCase):
         marker = "ax_doorbell_required = ("
         idx = src.index(marker)
         self.assertIn("wake_fallback_allowed", src[idx:idx + 300])
+
+
+class Gh470CodexNotStrandedRoutingTest(unittest.TestCase):
+    """GH-470: a Codex target with a value-opaque or non-empty composer must NOT
+    be converted into an indefinite sender HOLD. deliver.py routes Codex to the
+    routine AX doorbell (which the GH-470 binary proceeds through, clearing +
+    overriding any composer content) and NEVER to attended recovery, because a
+    Codex target is not `ax_attended_only`. Value-opacity of a resolvable Codex
+    composer is not a routing hold; only an unresolvable/undriveable *target*
+    (ax_attended_only) routes to attended recovery."""
+
+    CODEX = {
+        "id": "codex",
+        "activation": {"type": "cli_session", "watcher_enabled": True, "ax_app": "Codex"},
+    }
+
+    def test_codex_routes_to_routine_doorbell_not_attended(self):
+        self.assertFalse(deliver.ax_attended_only(self.CODEX))
+        self.assertTrue(
+            deliver.is_ax_doorbell_target(self.CODEX, "codex", sender_id="claude"))
+        self.assertFalse(
+            deliver.is_ax_attended_recovery_target(self.CODEX, "codex", sender_id="claude"))
+
+    def test_only_unresolvable_target_flag_routes_to_attended(self):
+        # A genuinely unresolvable/undriveable target (the flag's remaining
+        # meaning) still routes to attended recovery — value-opacity does not.
+        opaque_target = {
+            "id": "antigravity",
+            "activation": {"type": "human_relay", "ax_attended_only": True},
+        }
+        self.assertTrue(deliver.ax_attended_only(opaque_target))
 
 
 if __name__ == "__main__":

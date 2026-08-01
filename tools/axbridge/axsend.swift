@@ -748,18 +748,24 @@ func cmdRing(app: String, text: String, submit: Bool, windowIndex: Int?, dryRun:
             FileHandle.standardError.write("clearing stray composer content (\(v.count) chars) — AX send takes preference (GH-470)\n".data(using: .utf8)!)
         }
     case .refuseUnresolvedTarget:
-        FileHandle.standardError.write("REFUSED (no mutation): \(app) composer profile is unrecognized — a resolved editable field cannot be confirmed as the send target, so a routine ring will not type into it. Verify the target app/window.\n".data(using: .utf8)!)
+        FileHandle.standardError.write("REFUSED (no mutation): the routine AX doorbell is Codex-only; \(app) is not a Codex target (non-Codex or unrecognized profile), so a routine ring will not type into its composer. Use the durable mailbox / the recipient's own channel.\n".data(using: .utf8)!)
         print(axOutcomeLine(.notDelivered(reason: "unresolved_target")))
         return 11
     }
     // AXValue if the field accepts it, else key-event typing (Electron editors
     // like ZCode/Antigravity reject AXValue and need real keystrokes).
-    if !setComposerText(composer, pid: pid, text) {
-        FileHandle.standardError.write("could not put text in composer (AXValue rejected and key-typing failed)\n".data(using: .utf8)!)
-        print(axOutcomeLine(.notDelivered(reason: "composer_set_failed")))
-        return 4
+    // A --dry-run is a side-effect-free probe: resolve the send target below
+    // WITHOUT populating the composer (send-button resolution is geometry-based
+    // and needs no text), so the probe never overwrites or clears existing
+    // composer content. Only a real (non-dry-run) send mutates.
+    if !dryRun {
+        if !setComposerText(composer, pid: pid, text) {
+            FileHandle.standardError.write("could not put text in composer (AXValue rejected and key-typing failed)\n".data(using: .utf8)!)
+            print(axOutcomeLine(.notDelivered(reason: "composer_set_failed")))
+            return 4
+        }
+        print("composer set (role=\(role(composer)))")
     }
-    print("composer set (role=\(role(composer)))")
 
     if submit {
         // Prefer the best-scoring send button that comes AFTER the composer.
@@ -808,13 +814,12 @@ func cmdRing(app: String, text: String, submit: Bool, windowIndex: Int?, dryRun:
         let bf = button.flatMap(frame).map { String(format: "x=%.0f y=%.0f", $0.x, $0.y) } ?? "none"
         let tgt = button.map { "label=\"\(label($0).prefix(20))\" sub=\"\(subrole($0))\" \(bf)" } ?? "no button"
         if dryRun {
-            // Side-effect-free probe: the composer was populated above to resolve
-            // the send target; clear it so a dry-run never leaves a stray draft
-            // (issue #77). Best-effort key-event clear (Electron-safe).
-            _ = setComposerText(composer, pid: pid, "")
+            // Side-effect-free probe: the composer was NOT populated (setComposerText
+            // is skipped on --dry-run), so there is nothing to clear and any
+            // existing composer content is left untouched (bot #471 @axsend:748).
             print(buttonOK
-                ? "DRY-RUN send target: \(tgt) — will press, then AXConfirm/key-return (not pressed; draft cleared)"
-                : "DRY-RUN no confident send button (resolved: \(tgt)) — will submit via AXConfirm/key-return only (not pressed; draft cleared)")
+                ? "DRY-RUN send target: \(tgt) — will press, then AXConfirm/key-return (not pressed; composer untouched)"
+                : "DRY-RUN no confident send button (resolved: \(tgt)) — will submit via AXConfirm/key-return only (not pressed; composer untouched)")
             return 0
         }
         // Sending to a BUSY recipient is allowed and SAFE: the app queues the
@@ -1070,19 +1075,19 @@ func cmdConfirm(app: String, text: String, windowIndex: Int?) -> Int32 {
 
     // Only the DELIVERED signal is reliable on Electron: a sent message renders
     // as a real conversation turn ABOVE the composer (AX-readable), whereas the
-    // composer's own draft/empty state is NOT reliably readable (AXValue is blank
-    // and the subtree keeps stale cached static-text nodes that false-positive a
-    // "stuck draft"). So report delivered vs not — and recovery for not-delivered
-    // is CONDITIONAL (GH-1547): re-ring only for a proven readable+empty
-    // composer; opaque/unreadable/draft states are refused by the routine ring
-    // (exit 11) and go through Codex-attended recovery.
+    // composer's own draft/empty state is NOT reliably readable. So report
+    // delivered vs not. GH-470: recovery for a Codex target does NOT require a
+    // proven-empty composer — a routine re-ring clears and overrides any content
+    // (opaque/unreadable/non-empty are not holds). Do not re-ring a QUEUED
+    // (UNCONFIRMED) send (it likely landed); a routine ring only fails closed on
+    // an unresolvable/undriveable *target*, which goes to Codex-attended recovery.
     let proc = isProcessing(win)
     if messageLanded(win, sentText: text, profileFor(app)) {
         print("delivered: text appears as a sent message\(proc ? "; recipient is processing" : "")")
         print(axOutcomeLine(.verified(method: "conversation_turn")))
         return 0
     }
-    FileHandle.standardError.write("not delivered: text is not a sent message (it's a draft or was never typed). Recovery is conditional (GH-1547): re-ring ONLY when the target composer is proven readable and empty — a routine ring refuses (exit 11) on an opaque profile, an unreadable AXValue, or a remaining draft, so for those states hold and request Codex-attended recovery instead. Confirm again after any recovery.\n".data(using: .utf8)!)
+    FileHandle.standardError.write("not delivered: text is not a sent message (it's a draft or was never typed). GH-470 recovery: a routine re-ring of a resolvable Codex composer clears and overrides any content and does not require a proven-empty composer; do NOT re-ring a QUEUED (UNCONFIRMED) send. Only an unresolvable/undriveable target fails closed (exit 11) and goes through Codex-attended recovery. Confirm again after any recovery.\n".data(using: .utf8)!)
     print(axOutcomeLine(.notDelivered(reason: "text_not_landed")))
     return 7
 }
