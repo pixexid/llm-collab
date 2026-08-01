@@ -35,8 +35,11 @@ class RegistryBoundedReadTest(unittest.TestCase):
         _helpers._projects_cache = None
 
     def _oversized(self, key: str, member: dict) -> str:
-        member = {**member, "pad": "A" * _helpers.MAX_REGISTRY_FILE_BYTES}
-        return json.dumps({key: [member]})
+        # A VALID JSON document followed by whitespace past the cap: the byte cap is
+        # the sole reason to refuse (the prefix parses fine), so a dropped cap guard
+        # is detected rather than masked by a JSON-parse error on a truncated blob.
+        valid = json.dumps({key: [member]})
+        return valid + " " * (_helpers.MAX_REGISTRY_FILE_BYTES + 1)
 
     def test_normal_amiga_and_non_amiga_paths(self):
         _helpers.AGENTS_FILE.write_text(json.dumps({"agents": [{"id": "codex"}]}))
@@ -60,24 +63,37 @@ class RegistryBoundedReadTest(unittest.TestCase):
         self.assertIsNone(_helpers._projects_cache,
                           "an over-limit read must not cache a partial/claimed result")
 
-    def test_short_read_fails_closed_with_no_partial_result(self):
-        # If fstat over-declares the size (file shrank / short read), the loop ends
-        # with bytes missing; parsing them would be a partial result claiming
-        # completeness. Simulate by inflating the fstat size over the real content.
+    def test_grow_past_cap_after_fstat_is_refused_not_truncated(self):
+        # The read is bounded by the CAP (not a recorded fstat size), so a registry
+        # that is/grows over the limit is refused, never parsed as a valid prefix.
+        # Simulate an fstat that under-reports while the file is actually over-cap.
         from unittest.mock import patch
-        _helpers.AGENTS_FILE.write_text(json.dumps({"agents": [{"id": "codex"}]}))
+        valid = json.dumps({"agents": [{"id": "codex"}]})
+        # Valid JSON prefix, then whitespace past the cap: reading to the cap must
+        # refuse; reading only to the (under-reported) fstat size would parse the
+        # valid prefix as complete.
+        _helpers.AGENTS_FILE.write_text(valid + " " * (_helpers.MAX_REGISTRY_FILE_BYTES + 1))
         real_fstat = os.fstat
+        under = len(valid.encode())
 
-        class _Inflated:
+        class _UnderReport:
             def __init__(self, real):
                 self.st_mode = real.st_mode
-                self.st_size = real.st_size + 10_000
+                self.st_size = under  # lies: claims just the valid prefix
 
-        with patch.object(_helpers.os, "fstat", lambda fd: _Inflated(real_fstat(fd))):
+        with patch.object(_helpers.os, "fstat", lambda fd: _UnderReport(real_fstat(fd))):
             with self.assertRaises(SystemExit):
                 _helpers.load_agents()
-        self.assertIsNone(_helpers._agents_cache,
-                          "a short read must not cache a partial/claimed result")
+        self.assertIsNone(_helpers._agents_cache)
+
+    def test_utf16_registry_is_refused_matching_the_daemon(self):
+        # json.loads(bytes) would auto-detect UTF-16; the daemon decodes the same
+        # authority registry strictly as UTF-8, so bin must too or authority splits.
+        payload = json.dumps({"agents": [{"id": "codex"}]}).encode("utf-16")
+        _helpers.AGENTS_FILE.write_bytes(payload)
+        with self.assertRaises(SystemExit):
+            _helpers.load_agents()
+        self.assertIsNone(_helpers._agents_cache)
 
     def test_corrupt_json_fails_closed(self):
         _helpers.AGENTS_FILE.write_text("{not valid json")

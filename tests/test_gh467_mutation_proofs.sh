@@ -27,8 +27,8 @@ PY
   cp "$F.mutbak" "$F"
 }
 
-mutate_and_check "M1 drop-size-guard" \
-  'if info.st_size > MAX_REGISTRY_FILE_BYTES:' \
+mutate_and_check "M1 drop-cap-guard" \
+  'if len(raw) > MAX_REGISTRY_FILE_BYTES:' \
   'if False:' \
   "$T.test_oversized_agents_fails_closed_with_no_partial_result"
 
@@ -37,15 +37,20 @@ mutate_and_check "M2 drop-regular-file-guard" \
   'if False:' \
   "$T.test_non_regular_file_is_refused"
 
-mutate_and_check "M3 json-parse-not-fail-closed" \
-  'except (ValueError, UnicodeDecodeError) as error:' \
-  'except (KeyError,) as error:' \
+mutate_and_check "M3 not-strict-utf8" \
+  'text = raw.decode("utf-8")' \
+  'text = raw' \
+  "$T.test_utf16_registry_is_refused_matching_the_daemon"
+
+mutate_and_check "M4 json-parse-not-fail-closed" \
+  'except ValueError as error:' \
+  'except KeyError as error:' \
   "$T.test_corrupt_json_fails_closed"
 
-mutate_and_check "M4 short-read-not-fail-closed" \
-  'if remaining != 0:' \
-  'if False:' \
-  "$T.test_short_read_fails_closed_with_no_partial_result"
+mutate_and_check "M5 read-to-fstat-size-not-cap" \
+  'remaining = MAX_REGISTRY_FILE_BYTES + 1' \
+  'remaining = info.st_size' \
+  "$T.test_grow_past_cap_after_fstat_is_refused_not_truncated"
 
 echo "---"; [ "$fail" = 0 ] && echo "ALL MUTATIONS KILLED" || echo "SOME SURVIVED"
 exit $fail

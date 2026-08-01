@@ -205,10 +205,14 @@ def _read_registry_json_bounded(path: Path) -> Any:
         (a regular file is always ready, so its read never blocks either);
       * a regular-file requirement on that SAME descriptor (a dir/FIFO/device is
         refused before any read);
-      * the fstat size is the authoritative byte cap — refuse over-limit BEFORE
-        reading, so there is never a partial or truncated result;
-      * the whole regular file (size already <= cap) is then read and parsed;
-        invalid JSON is a refusal, not a silent empty result.
+      * read through EOF but never beyond the cap (`remaining` = cap + 1), so a
+        file that grows in place past the cap after open is refused, not truncated
+        — reading to EOF (not to a recorded fstat size) also means an OS short read
+        just loops again, never yielding a partial result;
+      * decode strictly as UTF-8 before parsing, matching the daemon's authority
+        registry decode — an auto-detected UTF-16/BOM blob the daemon rejects must
+        not be accepted here, or shared authority semantics split;
+      * invalid JSON is a refusal, not a silent empty result.
     Fails closed (stderr + exit 1), matching this module's existing registry-read
     error style. Absence is the caller's concern (checked before calling).
     """
@@ -220,29 +224,27 @@ def _read_registry_json_bounded(path: Path) -> Any:
         info = os.fstat(descriptor)
         if not stat.S_ISREG(info.st_mode):
             _registry_read_error(f"{path} is not a regular file; refusing to read it")
-        if info.st_size > MAX_REGISTRY_FILE_BYTES:
-            _registry_read_error(
-                f"{path} exceeds the {MAX_REGISTRY_FILE_BYTES} byte limit; refusing to parse it")
         chunks: list[bytes] = []
-        remaining = info.st_size
+        remaining = MAX_REGISTRY_FILE_BYTES + 1
         while remaining > 0:
             chunk = os.read(descriptor, remaining)
             if not chunk:
                 break
             chunks.append(chunk)
             remaining -= len(chunk)
-        if remaining != 0:
-            # A short read or a file that shrank mid-read: json.loads on the bytes
-            # we did get would be a partial result claiming completeness. The
-            # bounded-work contract forbids silently truncating — fail closed.
-            _registry_read_error(
-                f"{path} returned a short read ({info.st_size - remaining} of "
-                f"{info.st_size} bytes); refusing a partial result")
     finally:
         os.close(descriptor)
+    raw = b"".join(chunks)
+    if len(raw) > MAX_REGISTRY_FILE_BYTES:
+        _registry_read_error(
+            f"{path} exceeds the {MAX_REGISTRY_FILE_BYTES} byte limit; refusing to parse it")
     try:
-        return json.loads(b"".join(chunks))
-    except (ValueError, UnicodeDecodeError) as error:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as error:
+        _registry_read_error(f"{path} is not valid UTF-8: {error}")
+    try:
+        return json.loads(text)
+    except ValueError as error:
         _registry_read_error(f"{path} is not valid JSON: {error}")
 
 
