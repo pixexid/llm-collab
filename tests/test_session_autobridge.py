@@ -486,19 +486,19 @@ class SessionAutobridgeTest(unittest.TestCase):
             binding_write.assert_not_called()
 
     # ---- GH-468: a native session may back at most one ACTIVE chat lease ----
-    def _sessions_with_active_native(self, status="active", native="NAT-1"):
+    def _sessions_with_active_native(self, status="active", native="NAT-1", expires=None):
         # Self-contained temp sessions dir (no make_workspace side effects).
         sessions = Path(tempfile.mkdtemp(prefix="gh468-", dir="/tmp")) / "sessions"
         sessions.mkdir(parents=True)
         self.addCleanup(shutil.rmtree, sessions.parent, ignore_errors=True)
-        write_json(
-            sessions / "SESSION-A.json",
-            {
-                "session_id": "SESSION-A", "agent_id": "claude",
-                "project_id": "llm-collab", "chat_id": "CHAT-A",
-                "status": status, "runtime": {"session_id": native},
-            },
-        )
+        record = {
+            "session_id": "SESSION-A", "agent_id": "claude",
+            "project_id": "llm-collab", "chat_id": "CHAT-A",
+            "status": status, "runtime": {"session_id": native},
+        }
+        if expires is not None:
+            record["lease_expires_utc"] = expires
+        write_json(sessions / "SESSION-A.json", record)
         return sessions
 
     def _guard(self, *args):
@@ -507,22 +507,31 @@ class SessionAutobridgeTest(unittest.TestCase):
     def test_gh468_native_session_active_in_another_chat_is_refused(self):
         sessions = self._sessions_with_active_native()
         with patch.object(session_autobridge_lib, "SESSIONS_DIR", sessions):
-            with self.assertRaisesRegex(ValueError, "already owns an active binding"):
+            with self.assertRaisesRegex(ValueError, "already owns a dispatchable binding"):
                 self._guard("SESSION-B", "llm-collab", "CHAT-B", "NAT-1", "active")
 
     def test_gh468_exact_same_lease_reregistration_is_allowed(self):
         sessions = self._sessions_with_active_native()
         with patch.object(session_autobridge_lib, "SESSIONS_DIR", sessions):
-            # In-place re-registration of the EXACT same lease (same session_id,
-            # project_id, and chat_id) is not a reuse.
+            # In-place re-registration in the same (project, chat) scope is not a
+            # cross-routing collision.
             self._guard("SESSION-A", "llm-collab", "CHAT-A", "NAT-1", "active")
+
+    def test_gh468_second_lease_in_same_scope_is_allowed(self):
+        # The exclusion unit is the (project, chat) SCOPE, not the lease: within
+        # one chat, binding-scoped dispatch disambiguates several leases sharing a
+        # native (e.g. a wildcard lease alongside a binding-pinned one), so a
+        # DIFFERENT session_id in the SAME scope on the same native is allowed.
+        sessions = self._sessions_with_active_native()
+        with patch.object(session_autobridge_lib, "SESSIONS_DIR", sessions):
+            self._guard("SESSION-B", "llm-collab", "CHAT-A", "NAT-1", "active")
 
     def test_gh468_same_id_move_to_a_different_chat_is_refused(self):
         # Finding #1: a same-id re-registration that MOVES the native to a
         # different chat must refuse (it is not the same lease). Deactivate first.
         sessions = self._sessions_with_active_native()
         with patch.object(session_autobridge_lib, "SESSIONS_DIR", sessions):
-            with self.assertRaisesRegex(ValueError, "already owns an active binding"):
+            with self.assertRaisesRegex(ValueError, "already owns a dispatchable binding"):
                 self._guard("SESSION-A", "llm-collab", "CHAT-B", "NAT-1", "active")
 
     def test_gh468_same_chat_id_in_a_different_project_is_refused(self):
@@ -532,7 +541,7 @@ class SessionAutobridgeTest(unittest.TestCase):
         # component of the exact-lease exclusion.
         sessions = self._sessions_with_active_native()
         with patch.object(session_autobridge_lib, "SESSIONS_DIR", sessions):
-            with self.assertRaisesRegex(ValueError, "already owns an active binding"):
+            with self.assertRaisesRegex(ValueError, "already owns a dispatchable binding"):
                 self._guard("SESSION-A", "other-project", "CHAT-A", "NAT-1", "active")
 
     def test_gh468_different_native_id_is_allowed(self):
@@ -545,10 +554,41 @@ class SessionAutobridgeTest(unittest.TestCase):
         with patch.object(session_autobridge_lib, "SESSIONS_DIR", sessions):
             self._guard("SESSION-B", "llm-collab", "CHAT-B", "NAT-1", "active")
 
-    def test_gh468_non_active_registration_is_not_guarded(self):
+    def test_gh468_parked_registration_against_dispatchable_owner_is_refused(self):
+        # Connector P1: register/publish-current DEFAULT to `parked`, and
+        # session_is_dispatchable() routes an unexpired `parked` lease. So a
+        # parked NEW registration for a native already held elsewhere must refuse
+        # too — guarding only `active` left the common path open.
         sessions = self._sessions_with_active_native()
         with patch.object(session_autobridge_lib, "SESSIONS_DIR", sessions):
+            with self.assertRaisesRegex(ValueError, "already owns a dispatchable binding"):
+                self._guard("SESSION-B", "llm-collab", "CHAT-B", "NAT-1", "parked")
+
+    def test_gh468_parked_owner_blocks_a_second_parked_lease(self):
+        # Connector P1, other-lease side: the EXISTING owner is an unexpired
+        # `parked` lease (the default register status), not `active`. Two chats
+        # defaulting to parked would both stay dispatchable and route to one
+        # native conversation unless the guard counts parked owners.
+        sessions = self._sessions_with_active_native(status="parked")
+        with patch.object(session_autobridge_lib, "SESSIONS_DIR", sessions):
+            with self.assertRaisesRegex(ValueError, "already owns a dispatchable binding"):
+                self._guard("SESSION-B", "llm-collab", "CHAT-B", "NAT-1", "parked")
+
+    def test_gh468_reuse_after_other_parked_lease_expired_is_allowed(self):
+        # An expired parked owner is not dispatchable (session_is_dispatchable
+        # drops it), so it no longer holds the native — reuse is allowed.
+        sessions = self._sessions_with_active_native(
+            status="parked", expires="2000-01-01T00:00:00+00:00"
+        )
+        with patch.object(session_autobridge_lib, "SESSIONS_DIR", sessions):
             self._guard("SESSION-B", "llm-collab", "CHAT-B", "NAT-1", "parked")
+
+    def test_gh468_terminal_status_registration_is_not_guarded(self):
+        # A non-dispatchable NEW status (e.g. stopped) creates no routable lease,
+        # so it is not subject to the ownership scan.
+        sessions = self._sessions_with_active_native()
+        with patch.object(session_autobridge_lib, "SESSIONS_DIR", sessions):
+            self._guard("SESSION-B", "llm-collab", "CHAT-B", "NAT-1", "stopped")
 
     def test_gh468_malformed_lease_fails_the_ownership_scan_closed(self):
         # Finding: the ownership scan is an authority decision, so a malformed

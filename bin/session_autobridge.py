@@ -36,6 +36,7 @@ from _session_autobridge import (
     discover_runtime_session,
     dispatch_session,
     iter_sessions,
+    session_is_dispatchable,
     _session_write_lock,
     load_binding,
     load_session,
@@ -434,44 +435,57 @@ def refuse_native_session_active_elsewhere(
     native_session_id: str | None,
     status: str,
 ) -> None:
-    """GH-468: a native runtime session may back at most one ACTIVE lease.
+    """GH-468: a native runtime session may back a DISPATCHABLE lease in only one
+    (project, chat) scope.
 
     The canonical binding layer already enforces one mutation owner per native
     session; this mirrors it for the ordinary session-lease register so two
-    project/chat scopes cannot target the same native conversation. Refuse when
-    the same native session id is already active in ANY lease that is not the
-    EXACT same lease being (re-)registered in place — i.e. any other active lease
-    whose (session_id, project_id, chat_id) differs. This covers a different
-    chat, a different project that happens to reuse a chat_id, and a same-id MOVE
-    to a different scope. Allowed: exact same-scope re-registration, a different
-    native id, reuse after the other lease is stopped/superseded, and any
-    non-active registration.
+    project/chat scopes cannot route to the same native conversation. The routing
+    invariant is defined by `session_is_dispatchable()`, which counts BOTH an
+    `active` lease and an unexpired `parked` lease as routable — and `register`/
+    `publish-current` default to `parked`. Guarding only `active` would leave the
+    common path open: two chats could each register the same native as `parked`,
+    both stay dispatchable, and both route to one conversation.
+
+    The unit of exclusion is the (project_id, chat_id) SCOPE, not the individual
+    lease: within one scope, binding-scoped dispatch legitimately disambiguates
+    several leases that share a native (e.g. a wildcard lease alongside a
+    binding-pinned one), so a same-scope registration is never a cross-routing
+    collision. Refuse when the same native id already backs a DISPATCHABLE lease
+    (active, or parked-and-unexpired) in a DIFFERENT scope — a different chat, or
+    a different project that happens to reuse a chat_id, or a same-id MOVE to a
+    different scope. Allowed: same-scope (re-)registration, a different native id,
+    reuse after the other lease is stopped/superseded/expired, and any
+    non-dispatchable registration.
 
     Must run inside `_session_write_lock()` together with the register write so
     the scan and the ownership-establishing write are one critical section (no
     check-then-write race between concurrent registrations).
     """
-    if not native_session_id or status != "active":
+    # A fresh registration is born unexpired, so its live statuses are exactly the
+    # dispatchable set; the other-lease side below applies the full
+    # session_is_dispatchable() rule (which also drops expired parked owners).
+    if not native_session_id or status not in {"active", "parked"}:
         return
     # strict=True: an unreadable/malformed lease must fail this authority scan
     # closed (refuse the registration) rather than be skipped as absent — a
-    # corrupt record could be the active owner of this very native session.
+    # corrupt record could be the dispatchable owner of this very native session.
     for other in iter_sessions(strict=True):
-        same_lease = (
-            other.get("session_id") == session_id
-            and other.get("project_id") == project_id
+        same_scope = (
+            other.get("project_id") == project_id
             and other.get("chat_id") == chat_id
         )
         if (
-            not same_lease
-            and other.get("status") == "active"
+            not same_scope
+            and session_is_dispatchable(other)[0]
             and (other.get("runtime") or {}).get("session_id") == native_session_id
         ):
             raise ValueError(
-                "native session already owns an active binding in "
+                "native session already owns a dispatchable binding in "
                 f"{other.get('project_id')}/{other.get('chat_id')}/{other.get('agent_id')} "
-                f"(session {other.get('session_id')}); a native session may back only "
-                "one active lease — deactivate the other lease or use a fresh native session"
+                f"(session {other.get('session_id')}); a native session may back a "
+                "dispatchable lease in only one project/chat scope — deactivate the "
+                "other lease or use a fresh native session"
             )
 
 

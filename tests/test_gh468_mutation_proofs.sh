@@ -30,29 +30,37 @@ PY
 }
 
 mutate_and_check "M1 helper-noop" \
-  'if not native_session_id or status != "active":
+  'if not native_session_id or status not in {"active", "parked"}:
         return' \
-  'if not native_session_id or status != "active":
+  'if not native_session_id or status not in {"active", "parked"}:
         return
     return' \
   "$T.test_gh468_native_session_active_in_another_chat_is_refused"
 
-mutate_and_check "M2 drop-chat-from-same-lease" \
+mutate_and_check "M2 drop-chat-from-same-scope" \
   'and other.get("chat_id") == chat_id' 'and True' \
   "$T.test_gh468_same_id_move_to_a_different_chat_is_refused"
 
-mutate_and_check "M3 drop-project-from-same-lease" \
-  'and other.get("project_id") == project_id' 'and True' \
+mutate_and_check "M3 drop-project-from-same-scope" \
+  'other.get("project_id") == project_id
+            and other.get("chat_id") == chat_id' \
+  'True
+            and other.get("chat_id") == chat_id' \
   "$T.test_gh468_same_chat_id_in_a_different_project_is_refused"
 
-mutate_and_check "M4 drop-other-active" \
-  'and other.get("status") == "active"' 'and True' \
+mutate_and_check "M4 drop-other-dispatchable" \
+  'and session_is_dispatchable(other)[0]' 'and True' \
   "$T.test_gh468_reuse_after_other_lease_stopped_is_allowed"
 
-mutate_and_check "M5 guard-non-active" \
-  'if not native_session_id or status != "active":' \
-  'if not native_session_id or status == "__never__":' \
-  "$T.test_gh468_non_active_registration_is_not_guarded"
+mutate_and_check "M5 guard-terminal-status" \
+  'if not native_session_id or status not in {"active", "parked"}:' \
+  'if not native_session_id or False:' \
+  "$T.test_gh468_terminal_status_registration_is_not_guarded"
+
+mutate_and_check "M7 drop-parked-from-new-side" \
+  'if not native_session_id or status not in {"active", "parked"}:' \
+  'if not native_session_id or status not in {"active"}:' \
+  "$T.test_gh468_parked_registration_against_dispatchable_owner_is_refused"
 
 mutate_and_check "M6 scan-not-strict-fails-open" \
   'for other in iter_sessions(strict=True):' \

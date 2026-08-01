@@ -33,10 +33,11 @@ binding happened to be lying around. Each worker starts a fresh native session a
 registers *its own* — the initiator never discovers or registers a co-worker's
 session, because a guessed id binds the wrong thread. The initiator registers
 only itself and hands each co-worker an exact setup prompt for the part only they
-can do. Freshness is a convention each worker follows: ordinary registration does
-REFUSES an active registration whose native id is already active in another
-(project, chat) lease (GH-468), so start a fresh native session per chat and
-deactivate an old lease before reusing its native session.
+can do. Freshness is a convention each worker follows: ordinary registration
+REFUSES a registration whose native id already backs a dispatchable lease
+(active, or the default `parked` when unexpired) in another (project, chat) scope
+(GH-468), so start a fresh native session per chat and deactivate an old lease
+before reusing its native session.
 
 **The one-command path** does the initiator's share and prints those prompts:
 
