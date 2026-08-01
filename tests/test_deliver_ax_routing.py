@@ -438,7 +438,9 @@ class AxRecoveryWordingPinTest(unittest.TestCase):
         schema = (REPO_ROOT / "docs" / "schema-reference.md").read_text()
         self.assertIn("ATTENDED RECOVERY REQUIRED", schema)
         self.assertIn("GH-470", schema)
-        self.assertIn("Codex is the only routine AX target", schema)
+        self.assertIn("Codex is the only routine doorbell target", schema)
+        # An unrecognized ax_app must be documented as fail-closed, not attended.
+        self.assertIn("does NOT get attended recovery", schema)
         # The old "value-opaque composer => hold" framing must be gone.
         self.assertNotIn("Unknown and Claude profiles fail closed", schema)
 

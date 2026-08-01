@@ -250,14 +250,15 @@ def ax_doorbell_app(recipient_agent: dict) -> str | None:
 
 
 def ax_attended_only(recipient_agent: dict) -> bool:
-    """Registry hint: the target cannot be safely reached by a routine AX ring —
-    its native composer cannot be resolved/verified as a send target at all (an
-    opaque *target*, e.g. an app Codex cannot drive), so only Codex-attended
-    recovery may touch it. Post-GH-470 this is NOT about a value-opaque or
-    non-empty composer of a *resolvable* Codex composer: a routine ring now
-    clears and overrides any content there and proceeds (see
-    tools/axbridge/send-resolution.swift routineRingDecision). The flag stays for
-    genuinely unresolvable/undriveable targets only."""
+    """Registry hint: the target's native composer cannot be resolved/driven for
+    a routine AX ring, so only Codex-attended recovery may reach it. This only
+    yields attended recovery for a no-app target or an ax_app that resolves to a
+    supported opaque profile (see is_ax_attended_recovery_target); an ax_app that
+    resolves to NO supported profile fails closed (activation_unavailable), not
+    attended recovery. Post-GH-470 this flag is NOT about a value-opaque or
+    non-empty composer of a *resolvable* Codex composer: a routine ring clears
+    and overrides that content and proceeds (see
+    tools/axbridge/send-resolution.swift routineRingDecision)."""
     return bool(recipient_agent.get("activation", {}).get("ax_attended_only"))
 
 

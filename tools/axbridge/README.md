@@ -115,16 +115,16 @@ turn is not yet present in the conversation tree, so immediate post-confirming
 would create a false failure and invite an unsafe duplicate send. The caller
 must record queued-unconfirmed as unresolved and follow up without re-ringing.
 
-**Electron apps (ZCode/Antigravity) — opaque composer rule:** when these
-composers do not reflect draft state through readable `AXValue`, their empty
-state cannot be proved. They are therefore routine hold-and-recovery/attended
-paths by definition: do not infer empty from a blank value, do not key-type a
-blind ring, and do not make an exception because the recipient is busy.
-`axsend confirm` checks the conversation after a ring; it cannot prove the
-composer was empty before one. After attended recovery establishes a safe send,
-`VERIFIED` exit 0 confirms delivery and `QUEUED (UNCONFIRMED)` exit 0 remains
-unresolved and must not be re-rung. Only a non-zero/not-delivered result whose
-absence is confirmed on the same target permits one re-ring.
+**Non-Codex apps (ZCode/Antigravity) are not routine ring targets:** the routine
+AX doorbell is Codex-only. ZCode is a relay and Antigravity is an
+opaque/undriveable **target** (`ax_attended_only`), so neither takes a routine
+ring — they route to Codex-attended recovery / their own channel. This is a
+TARGET-resolution rule, not an empty-composer rule (GH-470): composer content and
+`AXValue` readability are never a hold for a *resolvable* Codex composer — a
+routine ring clears and overrides whatever is there and sends, and busy is not a
+hold. `axsend confirm` checks the conversation after a ring. `VERIFIED` exit 0
+confirms delivery; `QUEUED (UNCONFIRMED)` exit 0 remains unresolved and must not
+be re-rung.
 
 `--app` matches by localized name or bundle id (substring ok). `--window-index N`
 targets a specific window. It is OPTIONAL: when ABSENT the resolver is in AUTO
