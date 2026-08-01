@@ -546,8 +546,33 @@ def ensure_reader_session(
     runtime_family: str | None = None,
 ) -> dict:
     try:
-        return load_session(session_id)
+        existing = load_session(session_id)
     except FileNotFoundError:
+        existing = None
+    if existing is not None:
+        # GH-468: a first family-less attempt persists a synthetic/unresolved reader
+        # that the consume gate refuses. If a later attempt now carries (or can
+        # resolve) the real family, upgrade this cached reader in place — otherwise
+        # the packet is refused forever. Only touch an ephemeral reader whose family
+        # is still unresolved; never mutate an ordinary or already-resolved session.
+        if existing.get("ephemeral_reader") and runtime_id:
+            cur_family = (existing.get("runtime") or {}).get("family")
+            if not cur_family or cur_family == "reader":
+                new_family = runtime_family or resolve_native_family(runtime_id)
+                if new_family:
+                    with _session_write_lock():
+                        refuse_native_session_active_elsewhere(
+                            existing["session_id"],
+                            existing["project_id"],
+                            existing["chat_id"],
+                            runtime_id,
+                            new_family,
+                            existing.get("status", "parked"),
+                        )
+                        existing.setdefault("runtime", {})["family"] = new_family
+                        save_session(existing)
+        return existing
+    if existing is None:
         expires = now_utc().timestamp() + 6 * 60 * 60
         payload = {
             "session_id": session_id,

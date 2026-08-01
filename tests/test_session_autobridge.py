@@ -595,6 +595,32 @@ class SessionAutobridgeTest(unittest.TestCase):
                         family="claude_app")
             self.assertIsNone(session_autobridge_cli.resolve_native_family("NAT-1"))
 
+    def test_gh468_routable_command_session_without_family_is_refused(self):
+        # A --runtime-command + --runtime-session-id session is exact-routable even
+        # without a family, so it would slip past the (family, id) ownership scan.
+        # Refuse it before any write rather than leave an unguarded phantom owner.
+        root = self.make_workspace()
+        self.add_agent(root, {
+            "id": "codex", "display_name": "Codex",
+            "activation": {"type": "cli_session", "watcher_enabled": False},
+        })
+        with self.assertRaises(subprocess.CalledProcessError) as cm:
+            self.run_cli(
+                root, "register",
+                "--session", "SESSION-CMD", "--agent", "codex",
+                "--project", "amiga", "--chat", "CHAT-CMD",
+                "--mode", "auto-read", "--wake-strategy", "runtime_trigger",
+                "--runtime-session-id", "cmd-native-1",
+                "--runtime-session-source", "test_fixture",
+                "--runtime-command", json.dumps([sys.executable, "-c", "pass"]),
+            )
+        out = (cm.exception.stderr or "") + (cm.exception.stdout or "")
+        self.assertIn("routable", out)
+        self.assertFalse(
+            (root / "State" / "session_autobridge" / "sessions" / "SESSION-CMD.json").exists(),
+            "a refused routable registration must not write a lease",
+        )
+
     def test_gh468_resolve_native_family_ambiguous_multiple_live_fails_closed(self):
         # Two live different-family leases share one id (the identity model allows
         # it): a reader has no basis to choose and must fail closed.

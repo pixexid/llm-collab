@@ -136,5 +136,20 @@ rc14=$?
 mv "$F3.mutbak" "$F3"
 if [ "$rc14" = 1 ]; then echo "killed: M14 gate-consume-refusal"; else echo "SURVIVED/ERR(rc=$rc14): M14 gate-consume-refusal"; fail=1; fi
 
+# M15: dropping the cached-reader upgrade leaves a persisted family-less reader
+# unresolved forever even when the family later arrives. bin/inbox.py.
+cp "$F3" "$F3.mutbak"
+$PY - "$F3" <<'PY'
+import sys
+p = sys.argv[1]; s = open(p).read()
+old = "new_family = runtime_family or resolve_native_family(runtime_id)"
+assert old in s, "M15 anchor missing"
+open(p, "w").write(s.replace(old, "new_family = None", 1))
+PY
+$PY -m unittest "tests.test_inbox.InboxMarkAllReadTest.test_gh468_cached_family_less_reader_is_upgraded_when_family_arrives" >/dev/null 2>&1
+rc15=$?
+mv "$F3.mutbak" "$F3"
+if [ "$rc15" = 1 ]; then echo "killed: M15 cached-reader-upgrade"; else echo "SURVIVED/ERR(rc=$rc15): M15 cached-reader-upgrade"; fail=1; fi
+
 echo "---"; [ "$fail" = 0 ] && echo "ALL MUTATIONS KILLED" || echo "SOME SURVIVED"
 exit $fail

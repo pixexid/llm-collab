@@ -1526,6 +1526,47 @@ class InboxMarkAllReadTest(unittest.TestCase):
         with patch.dict(os.environ, {"CODEX_SESSION_ID": "abc"}, clear=True):
             self.assertEqual("codex_app", inbox_lib.activation_reader_runtime_family())
 
+    def test_gh468_cached_family_less_reader_is_upgraded_when_family_arrives(self):
+        # A first family-less attempt persists an unresolved reader the gate
+        # refuses; a retry that now carries the family must upgrade the cached
+        # record in place (else the packet is refused forever).
+        import _session_autobridge as sa_lib
+        sessions = Path(tempfile.mkdtemp(prefix="gh468-upg-")) / "sessions"
+        sessions.mkdir(parents=True)
+        self.addCleanup(shutil.rmtree, sessions.parent, ignore_errors=True)
+        write_json(sessions / "SESSION-READER.json", {
+            "session_id": "SESSION-READER", "agent_id": "codex",
+            "project_id": "amiga", "chat_id": "CHAT-B", "status": "parked",
+            "ephemeral_reader": True, "lease_expires_utc": "2999-01-01T00:00:00+00:00",
+            "runtime": {"family": "reader", "session_id": "NAT-1"},
+        })
+        identity = {"project": "amiga", "chat": "CHAT-B"}
+        with patch.object(sa_lib, "SESSIONS_DIR", sessions):
+            rec = inbox_lib.ensure_reader_session(
+                "SESSION-READER", "codex", identity,
+                runtime_id="NAT-1", runtime_family="codex_app")
+            self.assertEqual("codex_app", rec["runtime"]["family"])
+            on_disk = json.loads((sessions / "SESSION-READER.json").read_text())
+            self.assertEqual("codex_app", on_disk["runtime"]["family"])
+
+    def test_gh468_cached_non_reader_session_is_not_mutated(self):
+        # The upgrade path must never rewrite an ordinary (non-ephemeral) session.
+        import _session_autobridge as sa_lib
+        sessions = Path(tempfile.mkdtemp(prefix="gh468-upg2-")) / "sessions"
+        sessions.mkdir(parents=True)
+        self.addCleanup(shutil.rmtree, sessions.parent, ignore_errors=True)
+        write_json(sessions / "SESSION-ORD.json", {
+            "session_id": "SESSION-ORD", "agent_id": "codex",
+            "project_id": "amiga", "chat_id": "CHAT-B", "status": "parked",
+            "runtime": {"family": "claude_app", "session_id": "NAT-1"},
+        })
+        identity = {"project": "amiga", "chat": "CHAT-B"}
+        with patch.object(sa_lib, "SESSIONS_DIR", sessions):
+            rec = inbox_lib.ensure_reader_session(
+                "SESSION-ORD", "codex", identity,
+                runtime_id="NAT-1", runtime_family="gemini_cli")
+            self.assertEqual("claude_app", rec["runtime"]["family"])
+
     def test_gh468_reader_with_no_ordinary_owner_falls_back_to_reader_family(self):
         # No ordinary lease owns this native id, so there is nothing to collide
         # with: the reader is created and falls back to the synthetic "reader"

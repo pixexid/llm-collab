@@ -37,6 +37,7 @@ from _session_autobridge import (
     dispatch_session,
     iter_sessions,
     session_is_dispatchable,
+    session_requires_exact_receive_target,
     _session_write_lock,
     load_binding,
     load_session,
@@ -725,6 +726,22 @@ def register_session(args) -> dict:
         # registrations for the same native in different scopes cannot both pass
         # the scan and both publish. The pi branch below is instead guarded by the
         # canonical one-mutation-owner-per-native-session constraint.
+        # GH-468: the ownership guard keys on (family, id) and returns early when
+        # the family is absent — but a routable session (exact-receive target) with
+        # a runtime command + session id is dispatchable WITHOUT a family, so it
+        # would slip past the scan and become an unguarded phantom owner. Its native
+        # identity is incomplete, so refuse before writing rather than route it.
+        if (
+            gh468_native_session_id
+            and not gh468_native_family
+            and session_requires_exact_receive_target(payload)
+        ):
+            raise ValueError(
+                "a routable session (runtime command or exact-receive target) must "
+                "declare --runtime-family so its native identity (family, session id) "
+                "is complete for the GH-468 ownership scan; refusing a family-less "
+                "routable registration"
+            )
         with _session_write_lock():
             refuse_native_session_active_elsewhere(
                 args.session, args.project, args.chat,
