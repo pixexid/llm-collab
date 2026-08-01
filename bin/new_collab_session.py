@@ -50,7 +50,7 @@ import shutil
 import subprocess
 
 sys.path.insert(0, str(Path(__file__).parent))
-from _helpers import ROOT, ensure_project, load_agents
+from _helpers import ROOT, ensure_project, get_project, load_agents
 
 BIN = Path(__file__).parent
 DEFAULT_HOMES = {
@@ -65,10 +65,16 @@ DEFAULT_HOMES = {
 SUPPORTED_FAMILIES = ("codex_app", "claude_app", "gemini_cli")
 
 
-def _git(*args: str) -> str:
+def _git(*args: str, timeout: float | None = None) -> str:
     return subprocess.run(
-        ["git", *args], cwd=ROOT, capture_output=True, text=True, check=True
+        ["git", *args], cwd=ROOT, capture_output=True, text=True, check=True,
+        timeout=timeout,
     ).stdout.strip()
+
+
+# The origin/main fetch is the only network op here; an unreachable or
+# auth-blocked origin would otherwise hang setup before any chat is created.
+FETCH_TIMEOUT_SECONDS = 20.0
 
 
 def assert_current_checkout() -> None:
@@ -76,10 +82,18 @@ def assert_current_checkout() -> None:
     pointed at a stale checkout runs outdated code — the exact trap that made a
     'new' session pick up 100+ commits of old behaviour."""
     try:
-        _git("fetch", "origin", "main", "--quiet")
+        _git("fetch", "origin", "main", "--quiet", timeout=FETCH_TIMEOUT_SECONDS)
         origin_main = _git("rev-parse", "origin/main")
         head = _git("rev-parse", "HEAD")
         dirty = _git("status", "--porcelain")
+    except subprocess.TimeoutExpired:
+        # An unreachable/auth-blocked origin must fail closed as a currency
+        # refusal, not hang setup before any chat is created.
+        sys.exit(
+            f"[error] git fetch origin main timed out after {FETCH_TIMEOUT_SECONDS}s; "
+            "cannot verify this checkout is current. Run from the deployed runtime or "
+            "a fresh origin/main worktree with a reachable origin."
+        )
     except subprocess.CalledProcessError as exc:  # pragma: no cover - env-dependent
         sys.exit(f"[error] could not compare against origin/main: {exc.stderr or exc}")
     if head != origin_main:
@@ -263,11 +277,37 @@ def main():
     # here, not routed through an unusable claude_app prompt.
     agent_activation(agents, args.me)
     for agent_id, family in coworkers:
-        agent_activation(agents, agent_id)
+        activation = agent_activation(agents, agent_id)
         if family not in SUPPORTED_FAMILIES:
             sys.exit(f"[error] {agent_id}: family {family!r} not supported by this "
                      f"helper (use {', '.join(SUPPORTED_FAMILIES)}). Pi workers use "
                      f"`worker.py start-pi`; a human_relay has no native session.")
+        # A supported family is a NATIVE family, so the agent's activation must be
+        # able to back a native session. A human_relay has none, and an
+        # attended-only identity cannot be autonomously registered — both would
+        # otherwise pass here and produce a bogus registration while suppressing
+        # the real relay/attended fallback. Refuse before any chat side effect.
+        channel = wake_channel(activation)
+        if channel not in ("watcher", "ax_doorbell"):
+            sys.exit(
+                f"[error] {agent_id}: activation type {activation.get('type')!r} "
+                f"(wake channel {channel!r}) has no autonomously-registerable native "
+                f"session, so it cannot back family {family!r}. A human_relay or "
+                "attended-only identity is refused here — reach it by its own "
+                "activation path, not this native-session setup."
+            )
+
+    # Validate --repo-target against the project's configured repos before creating
+    # the chat: a typo would otherwise persist into chat/session scope and only
+    # fail later at delivery.
+    project = get_project(args.project) or {}
+    configured_repos = project.get("repos") or {}
+    if args.repo_target not in configured_repos:
+        sys.exit(
+            f"[error] --repo-target {args.repo_target!r} is not a configured repo of "
+            f"project {args.project!r} (configured: "
+            f"{', '.join(sorted(configured_repos)) or 'none'})."
+        )
 
     created = subprocess.run(
         [sys.executable, str(BIN / "new_chat.py"),
