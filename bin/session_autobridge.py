@@ -36,6 +36,7 @@ from _session_autobridge import (
     discover_runtime_session,
     dispatch_session,
     iter_sessions,
+    _session_write_lock,
     load_binding,
     load_session,
     binding_payload_from_session,
@@ -427,32 +428,47 @@ def _replace_pi_binding_or_refuse(args, runtime: dict, native_session_id, predec
 
 
 def refuse_native_session_active_elsewhere(
-    session_id: str, chat_id: str, native_session_id: str | None, status: str
+    session_id: str,
+    project_id: str,
+    chat_id: str,
+    native_session_id: str | None,
+    status: str,
 ) -> None:
-    """GH-468: a native runtime session may back at most one ACTIVE chat lease.
+    """GH-468: a native runtime session may back at most one ACTIVE lease.
 
     The canonical binding layer already enforces one mutation owner per native
-    session; this mirrors it for the ordinary session-lease register so two chats
-    cannot target the same native conversation. Refuse only when the SAME native
-    session id is already active in a DIFFERENT chat (a different lease record).
-    Same-chat re-registration, a different native id, and reuse after the other
-    lease is stopped/superseded all remain allowed (and a non-active registration
-    is never guarded).
+    session; this mirrors it for the ordinary session-lease register so two
+    project/chat scopes cannot target the same native conversation. Refuse when
+    the same native session id is already active in ANY lease that is not the
+    EXACT same lease being (re-)registered in place — i.e. any other active lease
+    whose (session_id, project_id, chat_id) differs. This covers a different
+    chat, a different project that happens to reuse a chat_id, and a same-id MOVE
+    to a different scope. Allowed: exact same-scope re-registration, a different
+    native id, reuse after the other lease is stopped/superseded, and any
+    non-active registration.
+
+    Must run inside `_session_write_lock()` together with the register write so
+    the scan and the ownership-establishing write are one critical section (no
+    check-then-write race between concurrent registrations).
     """
     if not native_session_id or status != "active":
         return
     for other in iter_sessions():
+        same_lease = (
+            other.get("session_id") == session_id
+            and other.get("project_id") == project_id
+            and other.get("chat_id") == chat_id
+        )
         if (
-            other.get("session_id") != session_id
+            not same_lease
             and other.get("status") == "active"
-            and other.get("chat_id") != chat_id
             and (other.get("runtime") or {}).get("session_id") == native_session_id
         ):
             raise ValueError(
                 "native session already owns an active binding in "
                 f"{other.get('project_id')}/{other.get('chat_id')}/{other.get('agent_id')} "
                 f"(session {other.get('session_id')}); a native session may back only "
-                "one active chat — deactivate the other lease or use a fresh native session"
+                "one active lease — deactivate the other lease or use a fresh native session"
             )
 
 
@@ -499,10 +515,11 @@ def register_session(args) -> dict:
     elif "command" in runtime and "timeout_seconds" not in runtime:
         runtime["timeout_seconds"] = args.runtime_timeout
 
-    # GH-468: a native runtime session may back at most one ACTIVE chat lease.
-    refuse_native_session_active_elsewhere(
-        args.session, args.chat, runtime.get("session_id") if runtime else None, args.status
-    )
+    # GH-468: native-session ownership is checked INSIDE the write lock below,
+    # together with the register write, so the scan and the ownership-establishing
+    # write are one critical section (no check-then-write race between concurrent
+    # registrations). Capture the native id before runtime may be set to None.
+    gh468_native_session_id = runtime.get("session_id") if runtime else None
 
     if not runtime:
         runtime = None
@@ -608,14 +625,22 @@ def register_session(args) -> dict:
     # Otherwise a near-limit record could pass here, perform the rebind, then overflow
     # the final save on the added bytes — leaving the owner superseded with no session.
     if pi_native_session_id is None:
-        # Ordinary (non-canonical-mutating) registration: unchanged. The retire is the
-        # only mutation, so its own refusal cannot leave cross-store partial state.
-        prepared = prepare_session_write(payload)
-        existing_binding = existing_binding_snapshot_or_refuse(payload)
-        if args.supersedes_session and str(args.supersedes_session) != str(args.session):
-            retire_superseded_session(str(args.supersedes_session), payload)
-        binding = update_binding_from_session(payload, existing=existing_binding)
-        save_session(payload, prepared=prepared, allow_reactivation=True)
+        # Ordinary (non-canonical-mutating) registration. The GH-468 native-session
+        # ownership scan and the ownership-establishing writes run under ONE
+        # reentrant write lock (save_session re-enters it), so two concurrent
+        # registrations for the same native in different scopes cannot both pass
+        # the scan and both publish. The pi branch below is instead guarded by the
+        # canonical one-mutation-owner-per-native-session constraint.
+        with _session_write_lock():
+            refuse_native_session_active_elsewhere(
+                args.session, args.project, args.chat, gh468_native_session_id, args.status
+            )
+            prepared = prepare_session_write(payload)
+            existing_binding = existing_binding_snapshot_or_refuse(payload)
+            if args.supersedes_session and str(args.supersedes_session) != str(args.session):
+                retire_superseded_session(str(args.supersedes_session), payload)
+            binding = update_binding_from_session(payload, existing=existing_binding)
+            save_session(payload, prepared=prepared, allow_reactivation=True)
         if binding is not None:
             payload["binding"] = binding
         return payload

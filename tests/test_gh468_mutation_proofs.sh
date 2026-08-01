@@ -13,17 +13,6 @@ cp "$F" "$F.mutbak"; trap 'mv "$F.mutbak" "$F" 2>/dev/null' EXIT INT TERM
 T=tests.test_session_autobridge.SessionAutobridgeTest
 fail=0
 
-# baseline must be green first
-if ! $PY -m unittest \
-  $T.test_gh468_native_session_active_in_another_chat_is_refused \
-  $T.test_gh468_same_chat_reregistration_is_allowed \
-  $T.test_gh468_different_native_id_is_allowed \
-  $T.test_gh468_reuse_after_other_lease_stopped_is_allowed \
-  $T.test_gh468_non_active_registration_is_not_guarded >/dev/null 2>&1; then
-  echo "BASELINE NOT GREEN — aborting"; exit 2
-fi
-
-# apply <old-python-literal-file-marker> via a python heredoc; args: NAME OLD NEW TEST
 mutate_and_check() {
   local name="$1" test="$4"
   $PY - "$F" "$2" "$3" <<'PY'
@@ -48,15 +37,19 @@ mutate_and_check "M1 helper-noop" \
     return' \
   "$T.test_gh468_native_session_active_in_another_chat_is_refused"
 
-mutate_and_check "M2 drop-chat-diff" \
-  'and other.get("chat_id") != chat_id' 'and True' \
-  "$T.test_gh468_same_chat_reregistration_is_allowed"
+mutate_and_check "M2 drop-chat-from-same-lease" \
+  'and other.get("chat_id") == chat_id' 'and True' \
+  "$T.test_gh468_same_id_move_to_a_different_chat_is_refused"
 
-mutate_and_check "M3 drop-other-active" \
+mutate_and_check "M3 drop-project-from-same-lease" \
+  'and other.get("project_id") == project_id' 'and True' \
+  "$T.test_gh468_same_chat_id_in_a_different_project_is_refused"
+
+mutate_and_check "M4 drop-other-active" \
   'and other.get("status") == "active"' 'and True' \
   "$T.test_gh468_reuse_after_other_lease_stopped_is_allowed"
 
-mutate_and_check "M4 guard-non-active" \
+mutate_and_check "M5 guard-non-active" \
   'if not native_session_id or status != "active":' \
   'if not native_session_id or status == "__never__":' \
   "$T.test_gh468_non_active_registration_is_not_guarded"

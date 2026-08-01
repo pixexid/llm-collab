@@ -501,44 +501,77 @@ class SessionAutobridgeTest(unittest.TestCase):
         )
         return sessions
 
+    def _guard(self, *args):
+        return session_autobridge_cli.refuse_native_session_active_elsewhere(*args)
+
     def test_gh468_native_session_active_in_another_chat_is_refused(self):
         sessions = self._sessions_with_active_native()
         with patch.object(session_autobridge_lib, "SESSIONS_DIR", sessions):
             with self.assertRaisesRegex(ValueError, "already owns an active binding"):
-                session_autobridge_cli.refuse_native_session_active_elsewhere(
-                    "SESSION-B", "CHAT-B", "NAT-1", "active"
-                )
+                self._guard("SESSION-B", "llm-collab", "CHAT-B", "NAT-1", "active")
 
-    def test_gh468_same_chat_reregistration_is_allowed(self):
+    def test_gh468_exact_same_lease_reregistration_is_allowed(self):
         sessions = self._sessions_with_active_native()
         with patch.object(session_autobridge_lib, "SESSIONS_DIR", sessions):
-            # A DIFFERENT lease on the SAME chat with the same native is allowed —
-            # only the chat-difference guard permits it (a different session_id, so
-            # the self-exclusion does not apply). This discriminates the chat check.
-            session_autobridge_cli.refuse_native_session_active_elsewhere(
-                "SESSION-A2", "CHAT-A", "NAT-1", "active"
-            )
+            # In-place re-registration of the EXACT same lease (same session_id,
+            # project_id, and chat_id) is not a reuse.
+            self._guard("SESSION-A", "llm-collab", "CHAT-A", "NAT-1", "active")
+
+    def test_gh468_same_id_move_to_a_different_chat_is_refused(self):
+        # Finding #1: a same-id re-registration that MOVES the native to a
+        # different chat must refuse (it is not the same lease). Deactivate first.
+        sessions = self._sessions_with_active_native()
+        with patch.object(session_autobridge_lib, "SESSIONS_DIR", sessions):
+            with self.assertRaisesRegex(ValueError, "already owns an active binding"):
+                self._guard("SESSION-A", "llm-collab", "CHAT-B", "NAT-1", "active")
+
+    def test_gh468_same_chat_id_in_a_different_project_is_refused(self):
+        # Finding #3: scope is (project_id, chat_id), not chat_id alone. Same
+        # session_id + same chat_id but a DIFFERENT project is not the same lease
+        # (a cross-project move) and must refuse — this discriminates the project
+        # component of the exact-lease exclusion.
+        sessions = self._sessions_with_active_native()
+        with patch.object(session_autobridge_lib, "SESSIONS_DIR", sessions):
+            with self.assertRaisesRegex(ValueError, "already owns an active binding"):
+                self._guard("SESSION-A", "other-project", "CHAT-A", "NAT-1", "active")
 
     def test_gh468_different_native_id_is_allowed(self):
         sessions = self._sessions_with_active_native()
         with patch.object(session_autobridge_lib, "SESSIONS_DIR", sessions):
-            session_autobridge_cli.refuse_native_session_active_elsewhere(
-                "SESSION-B", "CHAT-B", "NAT-2", "active"
-            )
+            self._guard("SESSION-B", "llm-collab", "CHAT-B", "NAT-2", "active")
 
     def test_gh468_reuse_after_other_lease_stopped_is_allowed(self):
         sessions = self._sessions_with_active_native(status="stopped")
         with patch.object(session_autobridge_lib, "SESSIONS_DIR", sessions):
-            session_autobridge_cli.refuse_native_session_active_elsewhere(
-                "SESSION-B", "CHAT-B", "NAT-1", "active"
-            )
+            self._guard("SESSION-B", "llm-collab", "CHAT-B", "NAT-1", "active")
 
     def test_gh468_non_active_registration_is_not_guarded(self):
         sessions = self._sessions_with_active_native()
         with patch.object(session_autobridge_lib, "SESSIONS_DIR", sessions):
-            session_autobridge_cli.refuse_native_session_active_elsewhere(
-                "SESSION-B", "CHAT-B", "NAT-1", "parked"
-            )
+            self._guard("SESSION-B", "llm-collab", "CHAT-B", "NAT-1", "parked")
+
+    def test_gh468_write_lock_is_reentrant(self):
+        # Finding #2 prerequisite: the register write lock must be reentrant so
+        # the ownership scan can be held across save_session (which re-acquires
+        # it) without a self-deadlock.
+        with session_autobridge_lib._session_write_lock():
+            with session_autobridge_lib._session_write_lock():
+                pass  # nested acquisition must not deadlock or raise
+
+    def test_gh468_scan_and_write_share_one_lock(self):
+        # Finding #2: the ownership scan and the register writes must be one
+        # critical section — the guard call and save_session both inside a single
+        # `with _session_write_lock()` in the ordinary register branch.
+        src = (REPO_ROOT / "bin" / "session_autobridge.py").read_text()
+        anchor = "if pi_native_session_id is None:"
+        block = src[src.index(anchor):]
+        block = block[: block.index("return payload") + len("return payload")]
+        lock_at = block.index("with _session_write_lock():")
+        guard_at = block.index("refuse_native_session_active_elsewhere(")
+        save_at = block.index("save_session(")
+        self.assertLess(lock_at, guard_at, "guard must be inside the write lock")
+        self.assertLess(guard_at, save_at, "guard must precede the write")
+        self.assertLess(lock_at, save_at, "save must be inside the same lock")
 
     def test_dispatch_refuses_capacity_before_the_runtime_side_effect(self):
         root = self.make_workspace()

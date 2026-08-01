@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import threading
 import json
 import importlib
 import os
@@ -439,21 +440,39 @@ def prepare_session_write(payload: dict) -> tuple[dict, str]:
 
 
 SESSION_WRITE_LOCK = AUTOBRIDGE_ROOT / ".session-write.lock"
+_SESSION_WRITE_LOCK_DEPTH = threading.local()
 
 
 @contextlib.contextmanager
 def _session_write_lock():
     """Serialize the superseded-check and the write against other session writes.
 
+    Cross-process serialization is one process-wide blocking flock. It is also
+    REENTRANT within a process/thread (GH-468): a caller may hold it across a
+    check-then-write critical section (e.g. the native-session ownership scan plus
+    the register write) even though the inner save_session re-enters it. A plain
+    second flock on a new fd in the same process would deadlock, so nested
+    acquisitions just increment a thread-local depth and reuse the outer flock.
+
     ponytail: one process-wide blocking flock; per-session locks only if session
     write throughput ever matters (it is a handful of writes per dispatch here).
     """
+    depth = getattr(_SESSION_WRITE_LOCK_DEPTH, "value", 0)
+    if depth > 0:
+        _SESSION_WRITE_LOCK_DEPTH.value = depth + 1
+        try:
+            yield
+        finally:
+            _SESSION_WRITE_LOCK_DEPTH.value -= 1
+        return
     SESSION_WRITE_LOCK.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(SESSION_WRITE_LOCK, os.O_CREAT | os.O_RDWR)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
+        _SESSION_WRITE_LOCK_DEPTH.value = 1
         yield
     finally:
+        _SESSION_WRITE_LOCK_DEPTH.value = 0
         fcntl.flock(fd, fcntl.LOCK_UN)
         os.close(fd)
 
