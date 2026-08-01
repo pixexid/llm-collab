@@ -42,6 +42,13 @@ class CoworkerPromptTest(unittest.TestCase):
                                 "CHAT-ABCD1234", "app", "gemini_cli")
         self.assertIn("watch_inbox.py", p)
 
+    def test_prompt_states_full_project_chat_refusal_scope(self):
+        # GH-468: the refusal key is the (project_id, chat_id) scope, not "another
+        # chat" — the prompt must not imply cross-project chat_id reuse works.
+        p = ncs.coworker_prompt("gemini", "watcher", "llm-collab",
+                                "CHAT-ABCD1234", "app", "gemini_cli")
+        self.assertIn("(project_id, chat_id)", p)
+
     def test_prompt_never_hardcodes_a_native_id(self):
         p = ncs.coworker_prompt("codex", "ax_doorbell", "llm-collab",
                                 "CHAT-ABCD1234", "app", "codex_app")

@@ -492,6 +492,7 @@ def refuse_native_session_active_elsewhere(
     native_session_id: str | None,
     native_family: str | None,
     status: str,
+    readers_only: bool = False,
 ) -> None:
     """GH-468: a native runtime session may back a DISPATCHABLE lease in only one
     (project, chat) routing scope.
@@ -544,6 +545,13 @@ def refuse_native_session_active_elsewhere(
     # closed (refuse the registration) rather than be skipped as absent — a
     # corrupt record could be the dispatchable owner of this very native session.
     for other in iter_sessions(strict=True):
+        # readers_only: the Pi path already has the canonical one-owner-per-native
+        # constraint for canonical bindings, which raises its own specific reason;
+        # there this scan only needs to catch a JSON activation-reader lease (no
+        # ledger row), so skip non-reader records to avoid preempting the canonical
+        # refusal. Every other caller scans all records (default).
+        if readers_only and not other.get("ephemeral_reader"):
+            continue
         other_runtime = other.get("runtime") or {}
         different_scope = (
             other.get("project_id") != project_id
@@ -756,6 +764,20 @@ def register_session(args) -> dict:
         if binding is not None:
             payload["binding"] = binding
         return payload
+    # GH-468: the canonical one-owner-per-native constraint governs CANONICAL
+    # bindings only. A JSON activation-reader lease for this native (persisted by
+    # ensure_reader_session in another scope) has no ledger row, so the canonical
+    # check below cannot see it — a reader-first-then-Pi registration for the same
+    # (family, id) in a different scope would otherwise publish a second
+    # dispatchable owner. Run the session-registry ownership scan here too, under
+    # the session write lock (matching the reader's own locked write), as one more
+    # pure refusal before any canonical mutation.
+    with _session_write_lock():
+        refuse_native_session_active_elsewhere(
+            args.session, args.project, args.chat,
+            gh468_native_session_id, gh468_native_family, args.status,
+            readers_only=True,
+        )
     # Pi registration can MUTATE the ledger (mint, or a rebind that supersedes the
     # current owner), so EVERY pure refusal must run and be CARRIED before it. Sizing
     # the capacity preflight against the canonical fields' schema maxima (added only

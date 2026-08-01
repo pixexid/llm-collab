@@ -76,9 +76,9 @@ mutate_and_check "M8 drop-parked-from-new-side" \
 # identical loop header in resolve_native_family().
 mutate_and_check "M9 scan-not-strict-fails-open" \
   'for other in iter_sessions(strict=True):
-        other_runtime = other.get("runtime") or {}' \
+        # readers_only: the Pi path already has the canonical one-owner-per-native' \
   'for other in iter_sessions():
-        other_runtime = other.get("runtime") or {}' \
+        # readers_only: the Pi path already has the canonical one-owner-per-native' \
   "$T.test_gh468_malformed_lease_fails_the_ownership_scan_closed"
 
 # M10: the reader must resolve the native's REAL family; if resolution yields

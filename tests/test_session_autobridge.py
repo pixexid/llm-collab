@@ -595,6 +595,36 @@ class SessionAutobridgeTest(unittest.TestCase):
                         family="claude_app")
             self.assertIsNone(session_autobridge_cli.resolve_native_family("NAT-1"))
 
+    def test_gh468_reader_first_then_pi_registration_is_refused(self):
+        # A JSON activation-reader lease for a Pi native in scope A has no canonical
+        # ledger row, so the Pi canonical check cannot see it. The Pi path must run
+        # the session-registry ownership scan too: a Pi registration for the same
+        # (family, id) in a DIFFERENT scope must refuse and write no second owner.
+        root = self.make_workspace()
+        self.add_agent(root, {
+            "id": "glmpi", "display_name": "Glim",
+            "activation": {"type": "cli_session", "watcher_enabled": True},
+        })
+        sessions_dir = root / "State" / "session_autobridge" / "sessions"
+        sessions_dir.mkdir(parents=True, exist_ok=True)
+        write_json(sessions_dir / "SESSION-READER-A.json", {
+            "session_id": "SESSION-READER-A", "agent_id": "glmpi",
+            "project_id": "amiga", "chat_id": "CHAT-A", "status": "parked",
+            "ephemeral_reader": True, "lease_expires_utc": "2999-01-01T00:00:00+00:00",
+            "runtime": {"family": "pi", "session_id": "pi-native-1"},
+        })
+        pi_cwd = root / "pi-cwd"; pi_cwd.mkdir()
+        done = self._register_pi(
+            root, session="SESSION-PI-B", project="amiga", chat="CHAT-B",
+            native="pi-native-1", endpoint="endpoint_pi_b",
+            runtime_instance="runtime_pi_b", cwd=pi_cwd, home=root / "pi-home",
+            repo_target="app", check=False,
+        )
+        self.assertNotEqual(0, done.returncode, done.stdout + done.stderr)
+        self.assertIn("dispatchable binding", done.stderr + done.stdout)
+        self.assertFalse((sessions_dir / "SESSION-PI-B.json").exists(),
+                         "a refused Pi registration must not write a second owner")
+
     def test_gh468_routable_command_session_without_family_is_refused(self):
         # A --runtime-command + --runtime-session-id session is exact-routable even
         # without a family, so it would slip past the (family, id) ownership scan.
