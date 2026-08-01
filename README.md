@@ -140,8 +140,8 @@ workspace, edit `projects.json` instead of rerunning initialization.
 ### 2. Bootstrap each agent
 
 ```bash
-bin/llm-collab current_runtime.py --agent orchestrator
-bin/llm-collab inbox.py --me orchestrator --project my-app --limit 5 --peek
+~/.local/share/llm-collab/runtime/main/bin/llm-collab current_runtime.py --agent orchestrator
+~/.local/share/llm-collab/runtime/main/bin/llm-collab inbox.py --me orchestrator --project my-app --limit 5 --peek
 ```
 
 Bootstrap prints the agent identity, unread inbox summary, queue recovery state,
@@ -363,6 +363,7 @@ Prefix collaboration commands with `bin/llm-collab`:
 | Command | Purpose |
 |---|---|
 | `current_runtime.py --agent <id>` | Verify current tooling, then recover identity, inbox, queue, and watcher state |
+| `deploy_runtime.py --source <worktree> --target <runtime>` | Refresh the isolated deployed runtime without changing a source checkout |
 | `inbox.py --me <id> --project <project>` | Read project-filtered messages |
 | `new_chat.py --title "..." --project <project>` | Create a project-owned chat |
 | `new_task.py --title "..." --created-by <id> --project <project>` | Create a project-owned task |

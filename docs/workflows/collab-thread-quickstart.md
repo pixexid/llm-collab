@@ -78,8 +78,11 @@ python bin/deliver.py --project demo-app --chat CHAT-2F8529C5   --from codex --t
 ## 1. Bootstrap
 
 ```bash
-bin/llm-collab current_runtime.py --agent <agent_id>
+<runtime_root>/bin/llm-collab current_runtime.py --agent <agent_id>
 ```
+
+Use the deployed runtime root (normally
+`~/.local/share/llm-collab/runtime/main`), never a parked source checkout.
 
 Prints your identity, current project, recent mail, and the legacy agent-wide
 watcher status. Run it once per session, before anything else.

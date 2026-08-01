@@ -7,13 +7,17 @@ Start from a known-good environment before claiming or editing work.
 ## Bootstrap first
 
 ```bash
-cd <workspace_root>
-bin/llm-collab current_runtime.py --agent <agent_id>
+<runtime_root>/bin/llm-collab current_runtime.py --agent <agent_id>
 ```
 
+`<runtime_root>` is the deployed runtime (normally
+`~/.local/share/llm-collab/runtime/main`), not a parked or lane checkout. Source
+checkouts may be dirty; they are never session or watcher launch roots.
+
 The launcher fetches `origin/main`, verifies ancestry and the contract marker, then
-invokes the repository-local bootstrap. Use `bin/llm-collab current_runtime.py
---check` to report the verified heads without starting a session or watcher.
+invokes the repository-local bootstrap. Use `<runtime_root>/bin/llm-collab
+current_runtime.py --check` to report the verified heads without starting a
+session or watcher.
 
 For an interactive collab worker, startup is not complete until the exact
 native session watcher and its target/sibling probes pass. Follow
@@ -23,29 +27,26 @@ proof.
 
 ## Keep The Tooling Current
 
-`llm-collab` is the shared coordination tool. Before using a persistent checkout
-for inbox, task, queue, watcher, or delivery work, make sure the checkout is on
-the latest `main`.
+`llm-collab` is the shared coordination tool. Keep the parked operator checkout
+out of the runtime path. Refresh the deployed runtime from a fresh isolated
+source worktree:
 
 Safe refresh flow:
 
 ```bash
-git fetch origin main
-git status --short --branch --untracked-files=all
-git switch main
-git pull --ff-only origin main
-git status --short --branch --untracked-files=all
+<source_worktree>/bin/llm-collab deploy_runtime.py \
+  --source <source_worktree>
 ```
 
-If tracked or staged changes block `git switch main`, stop and classify them
-before proceeding:
+The deploy command fetches and validates only the named source before resetting
+the deployed runtime's tracked files. It leaves runtime-state symlinks and
+source-checkout files untouched. If the source is stale or its contract differs
+from `origin/main`, it refuses before changing the target.
 
-- merged/superseded feature-branch edits: discard only after confirming they are
-  already on `origin/main`
-- active task edits: keep working in that task branch or commit/stash before
-  switching
-- project-private or generated local files: keep them untracked; do not commit
-  them just to make the checkout clean
+Do not use these commands against a parked or dirty operator checkout:
+
+- `git switch main`
+- `git pull --ff-only origin main`
 
 Untracked/gitignored files normally persist across branch switches. Git blocks
 the switch instead of silently overwriting untracked files that conflict with
