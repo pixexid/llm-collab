@@ -982,7 +982,7 @@ def collab_join_skill_path() -> Path:
 
 
 def collab_bootstrap_command(agent_id: str) -> str:
-    return f"{ROOT}/bin/llm-collab session_bootstrap.py --agent {agent_id}"
+    return f"{ROOT}/bin/llm-collab current_runtime.py --agent {agent_id}"
 
 
 def build_handoff_prompt(

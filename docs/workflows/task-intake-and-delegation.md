@@ -109,7 +109,7 @@ python3 bin/autonomous_loop.py start --project <project_id> --agent codex --mode
 Each loop pass must recover all live coordination inputs before deciding the
 next action:
 
-- `session_bootstrap.py --agent codex`
+- `current_runtime.py --agent codex`
 - `inbox.py --me codex --project <project_id> --limit 5 --peek` or the
   project-approved unread check
 - canonical issue/design queue validation

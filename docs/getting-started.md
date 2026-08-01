@@ -123,7 +123,7 @@ python bin/init_agent_memory.py --agent claude --target claude-md \
 At the start of **every LLM session**, run the bootstrap command:
 
 ```bash
-python bin/session_bootstrap.py --agent <id>
+bin/llm-collab current_runtime.py --agent <id>
 ```
 
 This:

@@ -178,7 +178,7 @@ def build_identity_md(agent: dict, workspace_name: str, all_agent_ids: list[str]
         "",
         f"At the start of every session, run:",
         f"```",
-        f"{ROOT}/bin/llm-collab session_bootstrap.py --agent {aid}",
+        f"{ROOT}/bin/llm-collab current_runtime.py --agent {aid}",
         f"```",
         "",
         "## Key Commands",
@@ -773,7 +773,7 @@ def main(*, input_fn: Callable[[str], str] | None = None):
     print("1. Bootstrap each agent session:")
     for a in agents:
         if a.get("activation", {}).get("type") not in ("human",):
-            print(f"   bin/llm-collab session_bootstrap.py --agent {a['id']}")
+            print(f"   bin/llm-collab current_runtime.py --agent {a['id']}")
     print()
     print("2. Generate memory snippets for your LLM tools:")
     for a in agents:

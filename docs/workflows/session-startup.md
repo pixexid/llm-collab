@@ -8,8 +8,12 @@ Start from a known-good environment before claiming or editing work.
 
 ```bash
 cd <workspace_root>
-python bin/session_bootstrap.py --agent <agent_id>
+bin/llm-collab current_runtime.py --agent <agent_id>
 ```
+
+The launcher fetches `origin/main`, verifies ancestry and the contract marker, then
+invokes the repository-local bootstrap. Use `bin/llm-collab current_runtime.py
+--check` to report the verified heads without starting a session or watcher.
 
 For an interactive collab worker, startup is not complete until the exact
 native session watcher and its target/sibling probes pass. Follow

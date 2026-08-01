@@ -78,7 +78,7 @@ python bin/deliver.py --project demo-app --chat CHAT-2F8529C5   --from codex --t
 ## 1. Bootstrap
 
 ```bash
-python bin/session_bootstrap.py --agent <agent_id>
+bin/llm-collab current_runtime.py --agent <agent_id>
 ```
 
 Prints your identity, current project, recent mail, and the legacy agent-wide
