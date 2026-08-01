@@ -218,8 +218,8 @@ pm2 stop all
 
 # Start new workspace watchers
 cd ~/Projects/_collab
-python3 bin/pm2_watchers.py start --all
-python3 bin/pm2_watchers.py status --all
+<runtime_root>/bin/llm-collab pm2_watchers.py start --all
+<runtime_root>/bin/llm-collab pm2_watchers.py status --all
 ```
 
 Old PM2 apps are named `amiga-collab-{agent}`. New apps are named `{workspace_name}-{agent}`. They can coexist during cutover.
@@ -271,7 +271,7 @@ python3 scripts/migrate_from_amiga.py \
 
 To roll back to the Amiga workspace:
 
-1. Stop new workspace watchers: `python3 bin/pm2_watchers.py stop --all`
+1. Stop new workspace watchers: `<runtime_root>/bin/llm-collab pm2_watchers.py stop --all`
 2. Restart old watchers: `cd {amiga}/.ai-collaboration && pm2 start pm2/ecosystem.config.cjs`
 3. Restore CLAUDE.md to original Amiga bootstrap config
 

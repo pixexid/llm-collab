@@ -313,15 +313,15 @@ binding can still receive messages.
 PM2 watcher:
 
 ```bash
-python3 bin/pm2_watchers.py ensure --agent codex
-python3 bin/pm2_watchers.py status --agent codex
-python3 bin/pm2_watchers.py logs --agent codex --lines 100
+<runtime_root>/bin/llm-collab pm2_watchers.py ensure --agent codex
+<runtime_root>/bin/llm-collab pm2_watchers.py status --agent codex
+<runtime_root>/bin/llm-collab pm2_watchers.py logs --agent codex --lines 100
 ```
 
 Manual one-shot watcher:
 
 ```bash
-python3 bin/watch_inbox.py --me codex --max-polls 1 --json
+<runtime_root>/bin/llm-collab watch_inbox.py --me codex --max-polls 1 --json
 ```
 
 For Codex, manual and PM2 watcher runs default to:
@@ -392,7 +392,7 @@ python3 -m py_compile \
   bin/deliver.py \
   bin/inbox.py \
   bin/session_autobridge.py \
-  bin/watch_inbox.py \
+  <runtime_root>/bin/llm-collab watch_inbox.py \
   tests/test_session_autobridge.py
 
 python3 -m unittest tests.test_session_autobridge

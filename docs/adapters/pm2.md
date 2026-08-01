@@ -4,7 +4,7 @@ PM2-backed watchers run `watch_inbox.py` as a persistent background process per 
 
 PM2 is entirely optional. You can check your inbox manually at any time with:
 ```bash
-python bin/inbox.py --me <agent_id>
+<runtime_root>/bin/llm-collab inbox.py --me <agent_id>
 ```
 
 For Amiga collab-loop waits, Claude owns ongoing PR/CI, bot-review, inbox-reply,
@@ -16,7 +16,7 @@ monitors first, and delete or update it as soon as its purpose is served.
 Manual one-shot watcher runs use the same Codex refresh defaults as PM2:
 
 ```bash
-python bin/watch_inbox.py --me codex --max-polls 1 --json
+<runtime_root>/bin/llm-collab watch_inbox.py --me codex --max-polls 1 --json
 ```
 
 For Codex, both PM2 and manual watcher runs default to:
@@ -49,9 +49,9 @@ PM2 materializes this configuration when a process is started/reloaded; changing
 process. A PM2 process saved before an agent was disabled/removed can also return
 after reboot even though the current ecosystem would not create it.
 
-After roster/watcher changes, compare `python bin/pm2_watchers.py status --all`
+After roster/watcher changes, compare `<runtime_root>/bin/llm-collab pm2_watchers.py status --all`
 and `pm2 list` with current `watcher_enabled: true` entries. Stop/delete stale
-named processes (`python bin/pm2_watchers.py delete --agent <id>` while the ID
+named processes (`<runtime_root>/bin/llm-collab pm2_watchers.py delete --agent <id>` while the ID
 remains in the roster, otherwise `pm2 delete <workspace>-<agent>`). Then apply
 the current ecosystem definition to every intended watcher before saving:
 
@@ -87,25 +87,25 @@ real PIDs.
 
 ```bash
 # Start all watchers
-python bin/pm2_watchers.py start --all
+<runtime_root>/bin/llm-collab pm2_watchers.py start --all
 
 # Ensure a specific watcher is running (start if not)
-python bin/pm2_watchers.py ensure --agent orchestrator
+<runtime_root>/bin/llm-collab pm2_watchers.py ensure --agent orchestrator
 
 # Check status
-python bin/pm2_watchers.py status --all
-python bin/pm2_watchers.py status --agent orchestrator
+<runtime_root>/bin/llm-collab pm2_watchers.py status --all
+<runtime_root>/bin/llm-collab pm2_watchers.py status --agent orchestrator
 
 # View logs
-python bin/pm2_watchers.py logs --agent orchestrator
-python bin/pm2_watchers.py logs --agent orchestrator --lines 100
+<runtime_root>/bin/llm-collab pm2_watchers.py logs --agent orchestrator
+<runtime_root>/bin/llm-collab pm2_watchers.py logs --agent orchestrator --lines 100
 
 # Stop
-python bin/pm2_watchers.py stop --agent orchestrator
-python bin/pm2_watchers.py stop --all
+<runtime_root>/bin/llm-collab pm2_watchers.py stop --agent orchestrator
+<runtime_root>/bin/llm-collab pm2_watchers.py stop --all
 
 # Remove from PM2
-python bin/pm2_watchers.py delete --all
+<runtime_root>/bin/llm-collab pm2_watchers.py delete --all
 ```
 
 ---
@@ -329,13 +329,13 @@ Addressed as `codex-appserver` through the normal manager, and included in
 `--all` whenever the token file and the Codex binary both exist:
 
 ```bash
-python bin/pm2_watchers.py start --agent codex-appserver
-python bin/pm2_watchers.py status --agent codex-appserver
+<runtime_root>/bin/llm-collab pm2_watchers.py start --agent codex-appserver
+<runtime_root>/bin/llm-collab pm2_watchers.py status --agent codex-appserver
 # NOTE: `restart` reuses PM2's stored definition and does NOT re-read this config,
 # so changing CODEX_HOME, the port, the token path, or the binary needs a reload:
 pm2 startOrRestart pm2/ecosystem.config.cjs --only <workspace>-codex-appserver
-python bin/pm2_watchers.py logs --agent codex-appserver
-python bin/pm2_watchers.py stop --agent codex-appserver
+<runtime_root>/bin/llm-collab pm2_watchers.py logs --agent codex-appserver
+<runtime_root>/bin/llm-collab pm2_watchers.py stop --agent codex-appserver
 ```
 
 `status` reports `[sidecar] target=codex-appserver (no AX surface)` for it, and
@@ -353,7 +353,7 @@ pm2 save
 
 ```bash
 curl -s http://127.0.0.1:8767/readyz
-python bin/pm2_watchers.py status --agent codex-appserver
+<runtime_root>/bin/llm-collab pm2_watchers.py status --agent codex-appserver
 ```
 
 Delivery itself is exercised by the autobridge dispatch path, which reports

@@ -48,19 +48,10 @@ def current_tooling() -> dict[str, str]:
     git("fetch", "origin", "main", "--quiet")
     origin_main = git("rev-parse", "origin/main").stdout.strip()
     head = git("rev-parse", "HEAD").stdout.strip()
-    try:
-        ancestry = subprocess.run(
-            ["git", "-C", str(ROOT), "merge-base", "--is-ancestor", "origin/main", "HEAD"],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-    except (OSError, subprocess.SubprocessError) as error:
-        raise ToolingError(f"ancestry check failed: {error}") from error
-    if ancestry.returncode != 0:
+    if head != origin_main:
         raise ToolingError(
-            "checkout is stale or ancestry is unknown; "
-            f"origin/main={origin_main} HEAD={head} git_exit={ancestry.returncode}"
+            "runtime must be exact origin/main; "
+            f"origin/main={origin_main} HEAD={head}"
         )
 
     local_contract = contract_version((ROOT / "AGENTS.md").read_text(encoding="utf-8"))

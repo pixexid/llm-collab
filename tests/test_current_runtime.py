@@ -20,30 +20,28 @@ class CurrentRuntimeTest(unittest.TestCase):
             if list(command) == ["fetch", "origin", "main", "--quiet"]:
                 return completed()
             if list(command) == ["rev-parse", "origin/main"]:
-                return completed(stdout="origin-sha\n")
+                return completed(stdout="same-sha\n")
             if list(command) == ["rev-parse", "HEAD"]:
-                return completed(stdout="head-sha\n")
+                return completed(stdout="same-sha\n")
             if list(command) == ["show", "origin/main:AGENTS.md"]:
                 return completed(stdout="<!-- CONTRACT_VERSION: 10 -->\n")
             raise AssertionError(command)
 
         with patch.object(current_runtime, "git", side_effect=run), patch.object(
-            current_runtime.subprocess, "run", side_effect=[completed(), completed()]
-        ), patch.object(
             current_runtime.Path, "read_text", return_value="<!-- CONTRACT_VERSION: 10 -->\n"
         ):
             evidence = current_runtime.current_tooling()
 
         self.assertEqual(
-            {"head": "head-sha", "origin_main": "origin-sha", "contract_version": "10"},
+            {"head": "same-sha", "origin_main": "same-sha", "contract_version": "10"},
             evidence,
         )
 
-    def test_stale_checkout_is_refused_before_bootstrap(self):
+    def test_non_main_checkout_is_refused_before_bootstrap(self):
         with patch.object(
             current_runtime,
             "current_tooling",
-            side_effect=current_runtime.ToolingError("checkout is stale"),
+            side_effect=current_runtime.ToolingError("runtime must be exact origin/main"),
         ), patch.object(current_runtime.subprocess, "run") as run:
             self.assertEqual(current_runtime.main(), 1)
 

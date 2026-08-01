@@ -97,7 +97,7 @@ For a Claude Desktop task, have that same task run this command in a
 
 ```bash
 export LLM_COLLAB_READER_RUNTIME_ID=<native-runtime-session-id>
-python bin/watch_inbox.py \
+<runtime_root>/bin/llm-collab watch_inbox.py \
   --me <agent_id> --project <project_id> --chat <CHAT-ID> \
   --session <SESSION-ID> --repo-target <repo-id> --skip-existing --json
 ```
