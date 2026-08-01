@@ -79,7 +79,11 @@ class RegisterRuntimeHomeTest(unittest.TestCase):
         ]}), encoding="utf-8")
         shutil.copy(ROOT / "agents.json", self.workspace / "agents.json")
 
-    def _register(self, session: str, project: str, home: str) -> dict:
+    def _register(self, session: str, project: str, home: str,
+                  runtime_id: str = "thread-rh-test") -> dict:
+        # Native identity is incidental to home derivation, but GH-468 refuses one
+        # native across two (project, chat) scopes, so callers registering under
+        # multiple projects pass distinct runtime ids.
         result = subprocess.run(
             [
                 sys.executable, str(ROOT / "bin" / "session_autobridge.py"), "register",
@@ -89,7 +93,7 @@ class RegisterRuntimeHomeTest(unittest.TestCase):
                 "--mode", "auto-read", "--status", "parked",
                 "--wake-strategy", "runtime_trigger",
                 "--runtime-family", "codex_app",
-                "--runtime-session-id", "thread-rh-test",
+                "--runtime-session-id", runtime_id,
                 "--runtime-home", home,
                 "--ttl-seconds", "60", "--json",
             ],
@@ -146,13 +150,18 @@ class RegisterRuntimeHomeTest(unittest.TestCase):
         )
 
     def test_registers_canonical_home_for_amiga_and_non_amiga_projects(self) -> None:
-        for project, session in (("amiga", "SESSION-RH-AMIGA"), ("nuvyr", "SESSION-RH-OTHER")):
+        # Distinct native ids per project: this exercises home derivation, not
+        # native sharing, and GH-468 refuses one native across two scopes.
+        for project, session, runtime_id in (
+            ("amiga", "SESSION-RH-AMIGA", "thread-rh-amiga"),
+            ("nuvyr", "SESSION-RH-OTHER", "thread-rh-nuvyr"),
+        ):
             with self.subTest(project=project):
                 # trailing slash on input must not reach storage
-                payload = self._register(session, project, "/tmp/rh-home/")
+                payload = self._register(session, project, "/tmp/rh-home/", runtime_id)
                 self.assertEqual("/tmp/rh-home", payload["runtime"]["home"])
                 self.assertEqual(project, payload["project_id"])
-                self.assertEqual("thread-rh-test", payload["runtime"]["session_id"])
+                self.assertEqual(runtime_id, payload["runtime"]["session_id"])
 
 
 if __name__ == "__main__":

@@ -33,9 +33,12 @@ binding happened to be lying around. Each worker starts a fresh native session a
 registers *its own* — the initiator never discovers or registers a co-worker's
 session, because a guessed id binds the wrong thread. The initiator registers
 only itself and hands each co-worker an exact setup prompt for the part only they
-can do. Freshness is a convention each worker follows: ordinary registration does
-not yet reject a native id already active in another chat, so do not reuse one
-across chats (the enforcing registration-layer guard is tracked in GH-468).
+can do. Freshness is a convention each worker follows: ordinary registration
+REFUSES a registration whose native id already backs a dispatchable lease
+(active, or the default `parked` when unexpired) in a different `(project_id,
+chat_id)` scope — the same key exact dispatch resolves by, so two projects that
+reuse one `chat_id` are also refused (GH-468). Start a fresh native session per
+scope and deactivate an old lease before reusing its native session.
 
 **The one-command path** does the initiator's share and prints those prompts:
 
@@ -136,6 +139,7 @@ For a Claude Desktop task, have that same task run this command in a
 
 ```bash
 export LLM_COLLAB_READER_RUNTIME_ID=<native-runtime-session-id>
+export LLM_COLLAB_READER_RUNTIME_FAMILY=<native-runtime-family>  # (GH-468) reader adopts its real family
 <runtime_root>/bin/llm-collab watch_inbox.py \
   --me <agent_id> --project <project_id> --chat <CHAT-ID> \
   --session <SESSION-ID> --repo-target <repo-id> --skip-existing --json
@@ -231,6 +235,7 @@ to be watching.
 
 ```bash
 export LLM_COLLAB_READER_RUNTIME_ID=<native-runtime-session-id>
+export LLM_COLLAB_READER_RUNTIME_FAMILY=<native-runtime-family>  # (GH-468) reader adopts its real family
 python bin/inbox.py \
   --me <agent_id> --project <project_id> --chat <CHAT-ID> \
   --session <SESSION-ID> --repo-target <repo-id> --peek --limit 5

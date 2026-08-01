@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import threading
 import json
 import importlib
 import os
@@ -115,7 +116,7 @@ def load_session(session_id: str) -> dict:
     return payload
 
 
-def iter_sessions(agent_id: str | None = None) -> list[dict]:
+def iter_sessions(agent_id: str | None = None, *, strict: bool = False) -> list[dict]:
     try:
         scan = os.scandir(SESSIONS_DIR)
     except FileNotFoundError:
@@ -143,7 +144,13 @@ def iter_sessions(agent_id: str | None = None) -> list[dict]:
             )
             spent += len(raw)
             session = json.loads(raw.decode("utf-8"))
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as error:
+            # Default: skip a corrupt record (a best-effort listing). strict:
+            # fail closed — an authority scan (e.g. the GH-468 native-session
+            # ownership guard) must not treat an unreadable record as absent and
+            # let a duplicate active owner through.
+            if strict:
+                raise ValueError(f"malformed session record {path.stem}: {error}") from error
             continue
         if not isinstance(session, dict):
             raise ValueError(f"Malformed session: {path.stem}")
@@ -439,21 +446,39 @@ def prepare_session_write(payload: dict) -> tuple[dict, str]:
 
 
 SESSION_WRITE_LOCK = AUTOBRIDGE_ROOT / ".session-write.lock"
+_SESSION_WRITE_LOCK_DEPTH = threading.local()
 
 
 @contextlib.contextmanager
 def _session_write_lock():
     """Serialize the superseded-check and the write against other session writes.
 
+    Cross-process serialization is one process-wide blocking flock. It is also
+    REENTRANT within a process/thread (GH-468): a caller may hold it across a
+    check-then-write critical section (e.g. the native-session ownership scan plus
+    the register write) even though the inner save_session re-enters it. A plain
+    second flock on a new fd in the same process would deadlock, so nested
+    acquisitions just increment a thread-local depth and reuse the outer flock.
+
     ponytail: one process-wide blocking flock; per-session locks only if session
     write throughput ever matters (it is a handful of writes per dispatch here).
     """
+    depth = getattr(_SESSION_WRITE_LOCK_DEPTH, "value", 0)
+    if depth > 0:
+        _SESSION_WRITE_LOCK_DEPTH.value = depth + 1
+        try:
+            yield
+        finally:
+            _SESSION_WRITE_LOCK_DEPTH.value -= 1
+        return
     SESSION_WRITE_LOCK.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(SESSION_WRITE_LOCK, os.O_CREAT | os.O_RDWR)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
+        _SESSION_WRITE_LOCK_DEPTH.value = 1
         yield
     finally:
+        _SESSION_WRITE_LOCK_DEPTH.value = 0
         fcntl.flock(fd, fcntl.LOCK_UN)
         os.close(fd)
 
@@ -1464,6 +1489,18 @@ def session_is_dispatchable(session: dict) -> tuple[bool, str]:
     status = session.get("status")
     if status not in {"active", "parked"}:
         return False, f"status={status}"
+    # GH-468: an activation reader's native id IS the worker's ordinary native, so
+    # native identity is (family, id). A reader created from LLM_COLLAB_READER_
+    # RUNTIME_ID alone — with no carried/resolvable family — must not become a
+    # dispatchable (reader, id) route, or a later ordinary (real_family, id)
+    # registration in another scope would not collide with or be masked by it.
+    # Keep the record as a durable activation helper (claim/consume unchanged) but
+    # non-routable until its real family is known; the ownership guard and
+    # resolve_native_family() both key off this predicate, so this alone closes it.
+    if session.get("ephemeral_reader"):
+        family = (session.get("runtime") or {}).get("family")
+        if not family or family == "reader":
+            return False, "reader_runtime_family_unresolved"
     # An `active` session's validity follows its native task: it ends when that
     # task ends or an explicit continuation supersedes it, never on a clock. A
     # TTL is not evidence that a live session died, and treating it as evidence

@@ -59,7 +59,7 @@ def _sessions_dir() -> Path:
 BOOTSTRAP_TEMPLATE = """Automated llm-collab worker provisioning. You are {agent} in fresh Pi native session {native}. Do not start project work. Start exactly one persistent monitor now with monitor_watch_path (NOT monitor_start — monitor_start needs an attended confirmation and will time out).
 
 Watch this exact file: {event_path}
-On each change to that file, run exactly: LLM_COLLAB_READER_RUNTIME_ID={native} {py} '{inbox}' --me {agent} --session {logical} --project {project} --chat {chat} --repo-target {repo}
+On each change to that file, run exactly: LLM_COLLAB_READER_RUNTIME_ID={native} LLM_COLLAB_READER_RUNTIME_FAMILY=pi {py} '{inbox}' --me {agent} --session {logical} --project {project} --chat {chat} --repo-target {repo}
 Then summarize each durable packet and follow it. Waking on an unrelated append is fine — the drain is idempotent. Do not do other work.
 
 After the watcher is running, reply only {marker}"""

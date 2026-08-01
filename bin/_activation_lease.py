@@ -600,12 +600,34 @@ RUNTIME_ID_ENV_VARS = (
     "GEMINI_SESSION_ID",
 )
 
+# The reader's native id IS the worker's ordinary native, so native IDENTITY is
+# (family, id) — the reader must carry its ACTUAL family, never a synthetic label.
+# The generic watcher export pairs the id with LLM_COLLAB_READER_RUNTIME_FAMILY;
+# the family-specific id vars imply their family directly.
+RUNTIME_FAMILY_ENV_VAR = "LLM_COLLAB_READER_RUNTIME_FAMILY"
+RUNTIME_ID_ENV_FAMILY = {
+    "CODEX_SESSION_ID": "codex_app",
+    "CLAUDE_CODE_SESSION_ID": "claude_app",
+    "GEMINI_SESSION_ID": "gemini_cli",
+}
+
 
 def runtime_id_from_env() -> str | None:
     for name in RUNTIME_ID_ENV_VARS:
         value = os.environ.get(name)
         if value and value.strip():
             return value.strip()
+    return None
+
+
+def runtime_family_from_env() -> str | None:
+    explicit = os.environ.get(RUNTIME_FAMILY_ENV_VAR)
+    if explicit and explicit.strip():
+        return explicit.strip()
+    for name, family in RUNTIME_ID_ENV_FAMILY.items():
+        value = os.environ.get(name)
+        if value and value.strip():
+            return family
     return None
 
 

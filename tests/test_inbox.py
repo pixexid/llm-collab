@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -10,7 +11,7 @@ from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -1287,7 +1288,7 @@ class InboxMarkAllReadTest(unittest.TestCase):
             Path(path).name,
             "--json",
             env={
-                "LLM_COLLAB_READER_RUNTIME_ID": "runtime-a",
+                "LLM_COLLAB_READER_RUNTIME_ID": "runtime-a", "LLM_COLLAB_READER_RUNTIME_FAMILY": "codex_app",
                 "LLM_COLLAB_READER_PID": str(os.getpid()),
             },
         )
@@ -1329,7 +1330,7 @@ class InboxMarkAllReadTest(unittest.TestCase):
             "--packet",
             Path(path).name,
             "--json",
-            env={"LLM_COLLAB_READER_RUNTIME_ID": "runtime-a"},
+            env={"LLM_COLLAB_READER_RUNTIME_ID": "runtime-a", "LLM_COLLAB_READER_RUNTIME_FAMILY": "codex_app"},
         )
         self.assertEqual(0, first.returncode, first.stderr)
 
@@ -1342,7 +1343,7 @@ class InboxMarkAllReadTest(unittest.TestCase):
             Path(path).name,
             "--peek",
             "--json",
-            env={"LLM_COLLAB_READER_RUNTIME_ID": "runtime-b"},
+            env={"LLM_COLLAB_READER_RUNTIME_ID": "runtime-b", "LLM_COLLAB_READER_RUNTIME_FAMILY": "codex_app"},
         )
 
         self.assertEqual(0, observed.returncode, observed.stderr)
@@ -1363,7 +1364,7 @@ class InboxMarkAllReadTest(unittest.TestCase):
             Path(path).name,
             "--json",
             env={
-                "LLM_COLLAB_READER_RUNTIME_ID": "runtime-a",
+                "LLM_COLLAB_READER_RUNTIME_ID": "runtime-a", "LLM_COLLAB_READER_RUNTIME_FAMILY": "codex_app",
                 "LLM_COLLAB_READER_PID": str(os.getpid()),
             },
         )
@@ -1382,7 +1383,7 @@ class InboxMarkAllReadTest(unittest.TestCase):
             Path(path).name,
             "--json",
             env={
-                "LLM_COLLAB_READER_RUNTIME_ID": "runtime-b",
+                "LLM_COLLAB_READER_RUNTIME_ID": "runtime-b", "LLM_COLLAB_READER_RUNTIME_FAMILY": "codex_app",
                 "LLM_COLLAB_READER_PID": str(os.getpid()),
             },
         )
@@ -1432,6 +1433,263 @@ class InboxMarkAllReadTest(unittest.TestCase):
         # Terminal before reader-session creation: nothing was written.
         self.assertFalse(sessions_dir.exists() and any(sessions_dir.glob("*.json")))
 
+    def _reader_sessions_dir_with_owner(self, *, status="parked", native="NAT-1",
+                                        family="claude_app"):
+        import _session_autobridge as sa_lib  # noqa: F401 (patched by caller)
+        sessions = Path(tempfile.mkdtemp(prefix="gh468-reader-")) / "sessions"
+        sessions.mkdir(parents=True)
+        self.addCleanup(shutil.rmtree, sessions.parent, ignore_errors=True)
+        write_json(sessions / "SESSION-OWNER.json", {
+            "session_id": "SESSION-OWNER", "agent_id": "codex",
+            "project_id": "amiga", "chat_id": "CHAT-A",
+            "status": status, "lease_expires_utc": "2999-01-01T00:00:00+00:00",
+            # An ORDINARY-family lease: the reader must resolve THIS family for the
+            # native id (its runtime id IS the registered native), not a synthetic
+            # "reader", or the (family, id) guard would miss the collision.
+            "runtime": {"family": family, "session_id": native},
+        })
+        return sessions
+
+    def test_gh468_reader_session_refuses_cross_scope_native_and_writes_nothing(self):
+        # Finding 1 + reader-family P1: a reader whose native id is already owned
+        # by an ORDINARY lease in another (project, chat) must resolve that lease's
+        # family, refuse, AND leave no record (the refused path writes nothing).
+        import _session_autobridge as sa_lib
+        sessions = self._reader_sessions_dir_with_owner(family="claude_app")
+        identity = {"project": "nuvyr", "chat": "CHAT-B"}
+        with patch.object(sa_lib, "SESSIONS_DIR", sessions):
+            with self.assertRaisesRegex(ValueError, "already owns a dispatchable binding"):
+                inbox_lib.ensure_reader_session(
+                    "SESSION-READER", "codex", identity, runtime_id="NAT-1"
+                )
+            self.assertFalse(
+                (sessions / "SESSION-READER.json").exists(),
+                "a refused reader registration must not write a lease",
+            )
+
+    def test_gh468_reader_session_same_scope_native_is_created(self):
+        # The guard must not over-block the normal reader path: a reader in the
+        # SAME (project, chat) as the owner is disambiguated, not a collision, and
+        # it adopts the owner's real family.
+        import _session_autobridge as sa_lib
+        sessions = self._reader_sessions_dir_with_owner(family="claude_app")
+        identity = {"project": "amiga", "chat": "CHAT-A"}
+        with patch.object(sa_lib, "SESSIONS_DIR", sessions):
+            inbox_lib.ensure_reader_session(
+                "SESSION-READER", "codex", identity, runtime_id="NAT-1"
+            )
+            record = json.loads((sessions / "SESSION-READER.json").read_text())
+            self.assertEqual("claude_app", record["runtime"]["family"])
+
+    def test_gh468_reader_ambiguous_native_family_fails_closed(self):
+        # Two live different-family leases share the native id: the reader cannot
+        # resolve one, so ensure_reader_session must fail closed (raise) and write
+        # no lease.
+        import _session_autobridge as sa_lib
+        sessions = Path(tempfile.mkdtemp(prefix="gh468-reader-amb-")) / "sessions"
+        sessions.mkdir(parents=True)
+        self.addCleanup(shutil.rmtree, sessions.parent, ignore_errors=True)
+        for sid, fam, chat in (("A", "claude_app", "CHAT-A"), ("B", "gemini_cli", "CHAT-B")):
+            write_json(sessions / f"SESSION-OWN-{sid}.json", {
+                "session_id": f"SESSION-OWN-{sid}", "agent_id": "codex",
+                "project_id": "amiga", "chat_id": chat, "status": "parked",
+                "lease_expires_utc": "2999-01-01T00:00:00+00:00",
+                "runtime": {"family": fam, "session_id": "NAT-1"},
+            })
+        identity = {"project": "amiga", "chat": "CHAT-C"}
+        with patch.object(sa_lib, "SESSIONS_DIR", sessions):
+            with self.assertRaises(ValueError):
+                inbox_lib.ensure_reader_session(
+                    "SESSION-READER", "codex", identity, runtime_id="NAT-1"
+                )
+            self.assertFalse((sessions / "SESSION-READER.json").exists())
+
+    def test_gh468_reader_prefers_carried_family_over_inference(self):
+        # The reader's ACTUAL family carried from the environment is authoritative
+        # even before any ordinary lease exists, closing the reader-first ordering:
+        # the stored family is the carried one, not the synthetic "reader".
+        import _session_autobridge as sa_lib
+        sessions = self._reader_sessions_dir_with_owner(family="claude_app")
+        identity = {"project": "nuvyr", "chat": "CHAT-B"}
+        with patch.object(sa_lib, "SESSIONS_DIR", sessions):
+            inbox_lib.ensure_reader_session(
+                "SESSION-READER", "codex", identity,
+                runtime_id="NAT-UNOWNED", runtime_family="codex_app",
+            )
+            record = json.loads((sessions / "SESSION-READER.json").read_text())
+            self.assertEqual("codex_app", record["runtime"]["family"])
+
+    def test_gh468_activation_reader_runtime_family_from_env(self):
+        # Explicit family var wins; a family-specific id var implies its family.
+        with patch.dict(os.environ, {"LLM_COLLAB_READER_RUNTIME_FAMILY": "gemini_cli"}, clear=False):
+            self.assertEqual("gemini_cli", inbox_lib.activation_reader_runtime_family())
+        with patch.dict(os.environ, {"CODEX_SESSION_ID": "abc"}, clear=True):
+            self.assertEqual("codex_app", inbox_lib.activation_reader_runtime_family())
+
+    def test_gh468_cached_family_less_reader_is_upgraded_when_family_arrives(self):
+        # A first family-less attempt persists an unresolved reader the gate
+        # refuses; a retry that now carries the family must upgrade the cached
+        # record in place (else the packet is refused forever).
+        import _session_autobridge as sa_lib
+        sessions = Path(tempfile.mkdtemp(prefix="gh468-upg-")) / "sessions"
+        sessions.mkdir(parents=True)
+        self.addCleanup(shutil.rmtree, sessions.parent, ignore_errors=True)
+        write_json(sessions / "SESSION-READER.json", {
+            "session_id": "SESSION-READER", "agent_id": "codex",
+            "project_id": "amiga", "chat_id": "CHAT-B", "status": "parked",
+            "ephemeral_reader": True, "lease_expires_utc": "2999-01-01T00:00:00+00:00",
+            "runtime": {"family": "reader", "session_id": "NAT-1"},
+        })
+        identity = {"project": "amiga", "chat": "CHAT-B"}
+        with patch.object(sa_lib, "SESSIONS_DIR", sessions):
+            rec = inbox_lib.ensure_reader_session(
+                "SESSION-READER", "codex", identity,
+                runtime_id="NAT-1", runtime_family="codex_app")
+            self.assertEqual("codex_app", rec["runtime"]["family"])
+            on_disk = json.loads((sessions / "SESSION-READER.json").read_text())
+            self.assertEqual("codex_app", on_disk["runtime"]["family"])
+
+    def test_gh468_cached_non_reader_session_is_not_mutated(self):
+        # The upgrade path must never rewrite an ordinary (non-ephemeral) session.
+        import _session_autobridge as sa_lib
+        sessions = Path(tempfile.mkdtemp(prefix="gh468-upg2-")) / "sessions"
+        sessions.mkdir(parents=True)
+        self.addCleanup(shutil.rmtree, sessions.parent, ignore_errors=True)
+        write_json(sessions / "SESSION-ORD.json", {
+            "session_id": "SESSION-ORD", "agent_id": "codex",
+            "project_id": "amiga", "chat_id": "CHAT-B", "status": "parked",
+            "runtime": {"family": "claude_app", "session_id": "NAT-1"},
+        })
+        identity = {"project": "amiga", "chat": "CHAT-B"}
+        with patch.object(sa_lib, "SESSIONS_DIR", sessions):
+            rec = inbox_lib.ensure_reader_session(
+                "SESSION-ORD", "codex", identity,
+                runtime_id="NAT-1", runtime_family="gemini_cli")
+            self.assertEqual("claude_app", rec["runtime"]["family"])
+
+    def test_gh468_reader_with_no_ordinary_owner_falls_back_to_reader_family(self):
+        # No ordinary lease owns this native id, so there is nothing to collide
+        # with: the reader is created and falls back to the synthetic "reader"
+        # family.
+        import _session_autobridge as sa_lib
+        sessions = self._reader_sessions_dir_with_owner(family="claude_app")
+        identity = {"project": "nuvyr", "chat": "CHAT-B"}
+        with patch.object(sa_lib, "SESSIONS_DIR", sessions):
+            inbox_lib.ensure_reader_session(
+                "SESSION-READER", "codex", identity, runtime_id="NAT-UNOWNED"
+            )
+            record = json.loads((sessions / "SESSION-READER.json").read_text())
+            self.assertEqual("reader", record["runtime"]["family"])
+
+    def test_gh468_reader_collision_returns_structured_refusal_not_exception(self):
+        # Finding A: an ownership refusal on the reader path must surface as a
+        # structured gate refusal (like every other gate), not an uncaught
+        # exception escaping the inbox flow.
+        import session_autobridge as sa_cli
+
+        def _boom(*a, **k):
+            raise sa_cli.NativeSessionOwnedElsewhere(
+                "native session already owns a dispatchable binding in x/y/z")
+
+        msg = {
+            "frontmatter": {
+                "activation": True, "to": "codex",
+                "project_id": "amiga", "chat_id": "CHAT-B",
+                "related_task": "TASK-1", "worktree": str(self.worktree),
+                "branch": "codex/gh-468-test",
+            },
+            "path": "Chats/x/packet.md",
+        }
+        args = SimpleNamespace(me="codex", session="SESSION-READER")
+        with (
+            patch.object(inbox_lib, "load_lease", lambda identity: None),
+            patch.object(inbox_lib, "ensure_reader_session", _boom),
+        ):
+            result = inbox_lib.gate_activation_message(args, msg, consume=True)
+        self.assertFalse(result["authorized"])
+        self.assertEqual("native_session_owned_elsewhere", result["reason"])
+
+    def _gate_with_reader_raising(self, exc):
+        msg = {
+            "frontmatter": {
+                "activation": True, "to": "codex",
+                "project_id": "amiga", "chat_id": "CHAT-B",
+                "related_task": "TASK-1", "worktree": str(self.worktree),
+                "branch": "codex/gh-468-test",
+            },
+            "path": "Chats/x/packet.md",
+        }
+        args = SimpleNamespace(me="codex", session="SESSION-READER")
+
+        def _raise(*a, **k):
+            raise exc
+
+        with (
+            patch.object(inbox_lib, "load_lease", lambda identity: None),
+            patch.object(inbox_lib, "ensure_reader_session", _raise),
+        ):
+            return inbox_lib.gate_activation_message(args, msg, consume=True)
+
+    def _gate_with_reader_record(self, reader_record, *, runtime_id="NAT-1"):
+        # Drive gate_activation_message with a reader record of a chosen family and
+        # a mocked claim so we can assert refuse-before-claim vs proceed-to-claim.
+        msg = {
+            "frontmatter": {
+                "activation": True, "to": "codex",
+                "project_id": "amiga", "chat_id": "CHAT-B",
+                "related_task": "TASK-1", "worktree": str(self.worktree),
+                "branch": "codex/gh-468-test",
+            },
+            "path": "Chats/x/packet.md",
+        }
+        args = SimpleNamespace(me="codex", session="SESSION-READER")
+        claim_mock = Mock(return_value={"lease": {}, "fence_token": 1, "poller_audit": {}})
+        with (
+            patch.object(inbox_lib, "load_lease", lambda identity: None),
+            patch.object(inbox_lib, "activation_reader_runtime_id", lambda: runtime_id),
+            patch.object(inbox_lib, "activation_reader_runtime_family", lambda: None),
+            patch.object(inbox_lib, "ensure_reader_session", lambda *a, **k: reader_record),
+            patch.object(inbox_lib, "claim_activation_lease", claim_mock),
+        ):
+            result = inbox_lib.gate_activation_message(args, msg, consume=True)
+        return result, claim_mock
+
+    def test_gh468_gate_refuses_family_less_reader_before_claim(self):
+        # No family: refuse before claim, packet stays unread (claim not called).
+        result, claim = self._gate_with_reader_record({"runtime": {"session_id": "NAT-1"}})
+        self.assertFalse(result["authorized"])
+        self.assertEqual("reader_runtime_family_unresolved", result["reason"])
+        claim.assert_not_called()
+
+    def test_gh468_gate_refuses_legacy_reader_family_before_claim(self):
+        result, claim = self._gate_with_reader_record(
+            {"runtime": {"session_id": "NAT-1", "family": "reader"}})
+        self.assertFalse(result["authorized"])
+        self.assertEqual("reader_runtime_family_unresolved", result["reason"])
+        claim.assert_not_called()
+
+    def test_gh468_gate_allows_resolved_family_reader_to_claim(self):
+        result, claim = self._gate_with_reader_record(
+            {"runtime": {"session_id": "NAT-1", "family": "claude_app"}})
+        self.assertTrue(result["authorized"])
+        claim.assert_called_once()
+
+    def test_gh468_reader_family_ambiguity_has_its_own_gate_reason(self):
+        # An ambiguity is not an ownership collision: the gate reports a distinct
+        # reason so JSON clients can branch on the correct remediation.
+        import session_autobridge as sa_cli
+        result = self._gate_with_reader_raising(
+            sa_cli.AmbiguousNativeFamily("two live families share NAT-1"))
+        self.assertFalse(result["authorized"])
+        self.assertEqual("native_family_ambiguous", result["reason"])
+
+    def test_gh468_reader_corruption_is_not_mislabeled_as_owned_elsewhere(self):
+        # A registry-corruption ValueError must NOT be caught as an ownership
+        # collision: the gate lets it surface distinctly rather than reporting a
+        # false native_session_owned_elsewhere.
+        with self.assertRaises(ValueError):
+            self._gate_with_reader_raising(ValueError("malformed session record SESSION-X"))
+
     def test_released_activation_packet_reclaims_with_newer_fence(self) -> None:
         path = self.add_message("RECLAIM", project_line="amiga", activation=True)
         first = self.run_inbox(
@@ -1442,7 +1700,7 @@ class InboxMarkAllReadTest(unittest.TestCase):
             "--packet",
             Path(path).name,
             "--json",
-            env={"LLM_COLLAB_READER_RUNTIME_ID": "runtime-a"},
+            env={"LLM_COLLAB_READER_RUNTIME_ID": "runtime-a", "LLM_COLLAB_READER_RUNTIME_FAMILY": "codex_app"},
         )
         self.assertEqual(0, first.returncode, first.stderr)
         first_gate = json.loads(first.stdout)["messages"][0]["activation_gate"]
@@ -1493,7 +1751,7 @@ class InboxMarkAllReadTest(unittest.TestCase):
             "--packet",
             Path(path).name,
             "--json",
-            env={"LLM_COLLAB_READER_RUNTIME_ID": "runtime-b"},
+            env={"LLM_COLLAB_READER_RUNTIME_ID": "runtime-b", "LLM_COLLAB_READER_RUNTIME_FAMILY": "codex_app"},
         )
 
         self.assertEqual(0, second.returncode, second.stderr)

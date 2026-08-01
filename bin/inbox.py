@@ -33,7 +33,14 @@ from datetime import datetime
 sys.path.insert(0, str(Path(__file__).parent))
 from _activation_cleanup import claim_activation_lease
 from _activation_identity import classify_activation, lease_key
-from _activation_lease import LeaseRefused, load_lease, owner_summary, pid_from_env, runtime_id_from_env
+from _activation_lease import (
+    LeaseRefused,
+    load_lease,
+    owner_summary,
+    pid_from_env,
+    runtime_family_from_env,
+    runtime_id_from_env,
+)
 from _helpers import (
     AGENTS_FILE,
     PROJECTS_FILE,
@@ -65,8 +72,15 @@ from _session_autobridge import (
     runtime_metadata,
     save_session,
     session_target_ids,
+    _session_write_lock,
 )
-from session_autobridge import register_session
+from session_autobridge import (
+    AmbiguousNativeFamily,
+    NativeSessionOwnedElsewhere,
+    register_session,
+    refuse_native_session_active_elsewhere,
+    resolve_native_family,
+)
 
 MAX_EXACT_SESSION_ENTRIES = 5_000
 MAX_EXACT_SESSION_BYTES = 16 * 1024 * 1024
@@ -507,6 +521,10 @@ def activation_reader_runtime_id() -> str | None:
     return runtime_id_from_env()
 
 
+def activation_reader_runtime_family() -> str | None:
+    return runtime_family_from_env()
+
+
 def activation_reader_pid() -> int | None:
     return pid_from_env() or os.getpid()
 
@@ -525,10 +543,36 @@ def ensure_reader_session(
     identity: dict[str, str],
     *,
     runtime_id: str | None,
+    runtime_family: str | None = None,
 ) -> dict:
     try:
-        return load_session(session_id)
+        existing = load_session(session_id)
     except FileNotFoundError:
+        existing = None
+    if existing is not None:
+        # GH-468: a first family-less attempt persists a synthetic/unresolved reader
+        # that the consume gate refuses. If a later attempt now carries (or can
+        # resolve) the real family, upgrade this cached reader in place — otherwise
+        # the packet is refused forever. Only touch an ephemeral reader whose family
+        # is still unresolved; never mutate an ordinary or already-resolved session.
+        if existing.get("ephemeral_reader") and runtime_id:
+            cur_family = (existing.get("runtime") or {}).get("family")
+            if not cur_family or cur_family == "reader":
+                new_family = runtime_family or resolve_native_family(runtime_id)
+                if new_family:
+                    with _session_write_lock():
+                        refuse_native_session_active_elsewhere(
+                            existing["session_id"],
+                            existing["project_id"],
+                            existing["chat_id"],
+                            runtime_id,
+                            new_family,
+                            existing.get("status", "parked"),
+                        )
+                        existing.setdefault("runtime", {})["family"] = new_family
+                        save_session(existing)
+        return existing
+    if existing is None:
         expires = now_utc().timestamp() + 6 * 60 * 60
         payload = {
             "session_id": session_id,
@@ -545,7 +589,6 @@ def ensure_reader_session(
             "allowed_actions": [],
             "runtime": (
                 {
-                    "family": "reader",
                     "session_id": runtime_id,
                     "session_source": "activation_reader_env",
                 }
@@ -556,7 +599,38 @@ def ensure_reader_session(
             "ephemeral_reader": True,
             "created_utc": utc_iso(),
         }
-        save_session(payload)
+        # GH-468: the auto-created reader lease is parked+unexpired+native-bound,
+        # i.e. dispatchable, so it is a second write path that could bind a native
+        # already dispatchable in another (project, chat). Route it through the
+        # same locked ownership seam as register — the guard raises (no write)
+        # before save_session on a cross-scope collision.
+        #
+        # LLM_COLLAB_READER_RUNTIME_ID carries the REGISTERED native id, so a
+        # reader's runtime id IS the worker's ordinary native. Native identity is
+        # (family, id), so the reader must carry its ACTUAL family. Prefer the
+        # family carried from the environment (LLM_COLLAB_READER_RUNTIME_FAMILY or
+        # a family-specific id var) — that is authoritative even before any
+        # ordinary lease exists. Otherwise fall back to the family of an existing
+        # ordinary lease for this native, and only to the synthetic "reader" when
+        # neither is available (no owner to collide with). Resolve + guard + write
+        # under one lock.
+        with _session_write_lock():
+            native_family = (
+                (runtime_family or resolve_native_family(runtime_id) or "reader")
+                if runtime_id
+                else None
+            )
+            if runtime_id:
+                payload["runtime"]["family"] = native_family
+            refuse_native_session_active_elsewhere(
+                session_id,
+                identity["project"],
+                identity["chat"],
+                runtime_id,
+                native_family,
+                "parked",
+            )
+            save_session(payload)
         return payload
 
 
@@ -600,7 +674,50 @@ def gate_activation_message(args, msg: dict, *, consume: bool) -> dict | None:
     runtime_id = activation_reader_runtime_id()
     owner_pid = None if runtime_id else activation_reader_pid()
     session_id = activation_reader_session_id(args, identity)
-    ensure_reader_session(session_id, args.me, identity, runtime_id=runtime_id)
+    try:
+        reader = ensure_reader_session(
+            session_id, args.me, identity,
+            runtime_id=runtime_id,
+            runtime_family=activation_reader_runtime_family(),
+        )
+    except NativeSessionOwnedElsewhere as exc:
+        # A cross-scope ownership collision is a normal terminal outcome: surface
+        # a stable structured refusal (JSON clients branch on this reason).
+        return {
+            "authorized": False,
+            "reason": "native_session_owned_elsewhere",
+            "identity": identity,
+            "detail": str(exc),
+        }
+    except AmbiguousNativeFamily as exc:
+        # Several live families share the native id: a distinct reason, not an
+        # ownership collision — the remediation differs (disambiguate the id).
+        return {
+            "authorized": False,
+            "reason": "native_family_ambiguous",
+            "identity": identity,
+            "detail": str(exc),
+        }
+    # Registry corruption / save-validation raise other exceptions; they are NOT
+    # ownership outcomes and must surface distinctly rather than be mislabeled.
+
+    # GH-468: making an unresolved-family reader non-dispatchable only closes the
+    # autobridge route; the direct consume path below would still claim the lease
+    # and mark the packet read, so native X could serve scope A here while a later
+    # ordinary (real_family, id) registration serves scope B. When a reader has a
+    # runtime id but no resolvable real family (absent or the synthetic "reader"),
+    # native ownership cannot be established, so REFUSE before claiming — leave the
+    # packet unread. Readers with a carried/resolved family, or with no runtime id
+    # at all, are unaffected.
+    if runtime_id:
+        reader_family = (reader.get("runtime") or {}).get("family")
+        if not reader_family or reader_family == "reader":
+            return {
+                "authorized": False,
+                "reason": "reader_runtime_family_unresolved",
+                "identity": identity,
+            }
+
     try:
         claim = claim_activation_lease(
             identity,

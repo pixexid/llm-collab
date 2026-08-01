@@ -36,6 +36,9 @@ from _session_autobridge import (
     discover_runtime_session,
     dispatch_session,
     iter_sessions,
+    session_is_dispatchable,
+    session_requires_exact_receive_target,
+    _session_write_lock,
     load_binding,
     load_session,
     binding_payload_from_session,
@@ -426,6 +429,151 @@ def _replace_pi_binding_or_refuse(args, runtime: dict, native_session_id, predec
     )
 
 
+class AmbiguousNativeFamily(ValueError):
+    """Several live runtime families share one native id — a reader cannot pick."""
+
+
+class NativeSessionOwnedElsewhere(ValueError):
+    """The native (family, id) already backs a dispatchable lease in another scope.
+
+    A distinct type so callers (e.g. the activation gate) can catch ONLY the
+    ownership collision and report a stable reason, rather than conflating it with
+    registry corruption, save-validation failures, or family ambiguity — JSON
+    clients branch on the reason to choose remediation.
+    """
+
+
+def resolve_native_family(native_session_id: str | None) -> str | None:
+    """The runtime family that currently owns a native id, or None if none does.
+
+    Activation readers only learn the native id (exported as
+    LLM_COLLAB_READER_RUNTIME_ID), not its family — yet native IDENTITY is
+    (family, id). A reader must adopt the family of the ordinary lease that owns
+    this native so the GH-468 guard compares like-for-like; a synthetic label
+    would let (reader, id) slip past a real (family, id) owner.
+
+    Ownership is defined by DISPATCHABLE ordinary leases only:
+      * a stopped/expired lease no longer owns the native, so its (possibly
+        different) family must not be chosen over the live owner's — selecting by
+        first-match regardless of status would guard the wrong family and miss
+        the live collision;
+      * synthetic `reader` leases are skipped so resolution returns a real
+        family, never another reader's placeholder.
+    Return the family iff EXACTLY ONE live family owns the id; None if none does.
+    If several live families share the id (which the identity model permits), a
+    reader has no basis to choose and must FAIL CLOSED, so raise rather than guess.
+    """
+    if not native_session_id:
+        return None
+    families: set[str] = set()
+    for other in iter_sessions(strict=True):
+        runtime = other.get("runtime") or {}
+        family = runtime.get("family")
+        if (
+            family
+            and family != "reader"
+            and runtime.get("session_id") == native_session_id
+            and session_is_dispatchable(other)[0]
+        ):
+            families.add(family)
+    if len(families) > 1:
+        raise AmbiguousNativeFamily(
+            f"native session {native_session_id} is owned by multiple live runtime "
+            f"families {sorted(families)}; a reader cannot resolve one — refusing "
+            "rather than guessing"
+        )
+    return next(iter(families)) if families else None
+
+
+def refuse_native_session_active_elsewhere(
+    session_id: str,
+    project_id: str,
+    chat_id: str,
+    native_session_id: str | None,
+    native_family: str | None,
+    status: str,
+    readers_only: bool = False,
+) -> None:
+    """GH-468: a native runtime session may back a DISPATCHABLE lease in only one
+    (project, chat) routing scope.
+
+    The canonical binding layer already enforces one mutation owner per native
+    session; this mirrors it for the ordinary session-lease register so two
+    routing destinations cannot reach the same native conversation. The routing
+    invariant is defined by `session_is_dispatchable()`, which counts BOTH an
+    `active` lease and an unexpired `parked` lease as routable — and `register`/
+    `publish-current` default to `parked`. Guarding only `active` would leave the
+    common path open: two scopes could each register the same native as `parked`,
+    both stay dispatchable, and both route to one conversation.
+
+    Native IDENTITY is (runtime_family, runtime_session_id) — the exact key
+    `resolve_exact_dispatch_pair()` matches a target by (it requires BOTH the
+    bound family and the bound runtime session id). Comparing the runtime id
+    alone would over-block two DISTINCT family-scoped natives that happen to share
+    a textual id; comparing family too keeps the guard exactly as wide as
+    dispatch. A native with no family cannot be exact-dispatched, so it cannot be
+    a second routing target and is not guarded.
+
+    The collision SCOPE is the (project_id, chat_id) pair — again the exact key
+    dispatch resolves by — NOT the individual lease. Refuse only when the SAME
+    native identity backs a DISPATCHABLE lease (active, or parked-and-unexpired)
+    held by a DIFFERENT session in a DIFFERENT (project, chat) scope. Both scope
+    conjuncts are load-bearing:
+      * A record is unique per session_id, so a re-registration of the SAME
+        session_id (even one that moves it to another scope — a rebind/takeover)
+        just overwrites that one record; it is a move, not a second owner.
+      * Within one scope, binding-scoped dispatch legitimately disambiguates
+        several leases that share a native (a wildcard lease alongside a
+        binding-pinned one), so a same-scope second lease is not a collision.
+    Allowed: same-session (re-)registration or move, a same-scope second lease, a
+    different native id, a different runtime family on the same id, reuse after
+    the other lease is stopped/superseded/expired, and any non-dispatchable
+    registration.
+
+    Must run inside `_session_write_lock()` together with the register/reader
+    write so the scan and the ownership-establishing write are one critical
+    section (no check-then-write race between concurrent registrations).
+    """
+    # A fresh registration is born unexpired, so its live statuses are exactly the
+    # dispatchable set; the other-lease side below applies the full
+    # session_is_dispatchable() rule (which also drops expired parked owners). A
+    # native without a family is not exact-dispatchable, so it is never a routing
+    # collision — mirror the resolver, which requires a truthy bound family.
+    if not native_session_id or not native_family or status not in {"active", "parked"}:
+        return
+    # strict=True: an unreadable/malformed lease must fail this authority scan
+    # closed (refuse the registration) rather than be skipped as absent — a
+    # corrupt record could be the dispatchable owner of this very native session.
+    for other in iter_sessions(strict=True):
+        # readers_only: the Pi path already has the canonical one-owner-per-native
+        # constraint for canonical bindings, which raises its own specific reason;
+        # there this scan only needs to catch a JSON activation-reader lease (no
+        # ledger row), so skip non-reader records to avoid preempting the canonical
+        # refusal. Every other caller scans all records (default).
+        if readers_only and not other.get("ephemeral_reader"):
+            continue
+        other_runtime = other.get("runtime") or {}
+        different_scope = (
+            other.get("project_id") != project_id
+            or other.get("chat_id") != chat_id
+        )
+        if (
+            other.get("session_id") != session_id
+            and different_scope
+            and session_is_dispatchable(other)[0]
+            and other_runtime.get("session_id") == native_session_id
+            and other_runtime.get("family") == native_family
+        ):
+            raise NativeSessionOwnedElsewhere(
+                "native session already owns a dispatchable binding in "
+                f"{other.get('project_id')}/{other.get('chat_id')}/{other.get('agent_id')} "
+                f"(session {other.get('session_id')}); a native session (family "
+                f"{native_family}) may back a dispatchable lease in only one "
+                "project/chat scope — deactivate the other lease or use a fresh "
+                "native session"
+            )
+
+
 def register_session(args) -> dict:
     agent = get_agent(args.agent)
     now = now_utc()
@@ -468,6 +616,13 @@ def register_session(args) -> dict:
             raise ValueError("--runtime-command must be a JSON array of strings")
     elif "command" in runtime and "timeout_seconds" not in runtime:
         runtime["timeout_seconds"] = args.runtime_timeout
+
+    # GH-468: native-session ownership is checked INSIDE the write lock below,
+    # together with the register write, so the scan and the ownership-establishing
+    # write are one critical section (no check-then-write race between concurrent
+    # registrations). Capture the native id before runtime may be set to None.
+    gh468_native_session_id = runtime.get("session_id") if runtime else None
+    gh468_native_family = runtime.get("family") if runtime else None
 
     if not runtime:
         runtime = None
@@ -573,106 +728,150 @@ def register_session(args) -> dict:
     # Otherwise a near-limit record could pass here, perform the rebind, then overflow
     # the final save on the added bytes — leaving the owner superseded with no session.
     if pi_native_session_id is None:
-        # Ordinary (non-canonical-mutating) registration: unchanged. The retire is the
-        # only mutation, so its own refusal cannot leave cross-store partial state.
-        prepared = prepare_session_write(payload)
+        # Ordinary (non-canonical-mutating) registration. The GH-468 native-session
+        # ownership scan and the ownership-establishing writes run under ONE
+        # reentrant write lock (save_session re-enters it), so two concurrent
+        # registrations for the same native in different scopes cannot both pass
+        # the scan and both publish. The pi branch below is instead guarded by the
+        # canonical one-mutation-owner-per-native-session constraint.
+        # GH-468: the ownership guard keys on (family, id) and returns early when
+        # the family is absent — but a routable session (exact-receive target) with
+        # a runtime command + session id is dispatchable WITHOUT a family, so it
+        # would slip past the scan and become an unguarded phantom owner. Its native
+        # identity is incomplete, so refuse before writing rather than route it.
+        if (
+            gh468_native_session_id
+            and not gh468_native_family
+            and session_requires_exact_receive_target(payload)
+        ):
+            raise ValueError(
+                "a routable session (runtime command or exact-receive target) must "
+                "declare --runtime-family so its native identity (family, session id) "
+                "is complete for the GH-468 ownership scan; refusing a family-less "
+                "routable registration"
+            )
+        with _session_write_lock():
+            refuse_native_session_active_elsewhere(
+                args.session, args.project, args.chat,
+                gh468_native_session_id, gh468_native_family, args.status
+            )
+            prepared = prepare_session_write(payload)
+            existing_binding = existing_binding_snapshot_or_refuse(payload)
+            if args.supersedes_session and str(args.supersedes_session) != str(args.session):
+                retire_superseded_session(str(args.supersedes_session), payload)
+            binding = update_binding_from_session(payload, existing=existing_binding)
+            save_session(payload, prepared=prepared, allow_reactivation=True)
+        if binding is not None:
+            payload["binding"] = binding
+        return payload
+    # GH-468: the canonical one-owner-per-native constraint governs CANONICAL
+    # bindings only. A JSON activation-reader lease for this native (persisted by
+    # ensure_reader_session in another scope) has no ledger row, so the canonical
+    # check below cannot see it — a reader-first-then-Pi registration for the same
+    # (family, id) in a different scope would otherwise publish a second
+    # dispatchable owner. Run the session-registry ownership scan here too, and
+    # HOLD the cross-process session write lock continuously from the scan through
+    # the canonical mint and the ownership-establishing save_session below — if it
+    # were released after the scan, an activation reader for the same Pi native
+    # could acquire it in the gap, see no Pi record, and publish its own cross-scope
+    # lease while this registration proceeds unrescanned. This mirrors the non-pi
+    # branch, which already holds the lock across its binding write (same lock
+    # order, so no new deadlock surface).
+    with _session_write_lock():
+        refuse_native_session_active_elsewhere(
+            args.session, args.project, args.chat,
+            gh468_native_session_id, gh468_native_family, args.status,
+            readers_only=True,
+        )
+        # Pi registration can MUTATE the ledger (mint, or a rebind that supersedes the
+        # current owner), so EVERY pure refusal must run and be CARRIED before it. Sizing
+        # the capacity preflight against the canonical fields' schema maxima (added only
+        # after the mutation) is not enough on its own: prepare_session_write compacts the
+        # agent inbox when oversized, and recomputing after the swap would re-read a
+        # possibly-changed inbox — the TOCTOU this file already fights. So compact ONCE
+        # here and carry the settled candidate forward; the post-swap serialize re-adds the
+        # real (never-larger) canonical fields and cannot re-enter the oversized branch.
+        # Classify the registration read-only FIRST (no writes): an exact-native match
+        # resolves the binding; a DIFFERENT active native is a replacement iff
+        # --supersedes-session names that exact owner — authorize it purely here so a bad
+        # supersedes refuses with canonical_replacement_predecessor_mismatch BEFORE the
+        # retirement plan's own scope check could raise a less specific error.
+        replacement_predecessor = None
+        try:
+            canonical = resolve_active_canonical_binding(
+                args.project, args.chat, args.agent, pi_native_session_id
+            )
+        except CanonicalBindingNativeMismatch as mismatch:
+            canonical = None
+            replacement_predecessor = _authorize_pi_replacement_or_refuse(args, mismatch)
+        preflight_candidate, _ = prepare_session_write(
+            {
+                **payload,
+                "binding_id": "x" * 128,
+                "binding_generation": 9223372036854775807,
+                "endpoint_id": "x" * 128,
+            }
+        )
+        for placeholder in ("binding_id", "binding_generation", "endpoint_id"):
+            preflight_candidate.pop(placeholder, None)
+        payload = preflight_candidate
         existing_binding = existing_binding_snapshot_or_refuse(payload)
+        binding_candidate = binding_payload_from_session(
+            {
+                **payload,
+                "binding_id": "x" * 128,
+                "binding_generation": 9223372036854775807,
+                "endpoint_id": "x" * 128,
+            },
+            existing=existing_binding,
+        )
+        try:
+            prepared_binding_candidate, _ = prepare_binding_write(binding_candidate)
+        except BindingUnreadable as error:
+            raise SystemExit(
+                f"[error] {error}. Refusing to register before the canonical transition; "
+                "no session was written."
+            )
+        # Pre-validate the predecessor retirement as a pure refusal gate too: adding the
+        # terminal status can itself cross the cap / trip inbox compaction, and that save
+        # would otherwise land AFTER the swap. Plan (load + validate + prepare) now; commit
+        # the carried tuple after the swap. For a replacement the supersedes is already
+        # proven same-scope, so this only sizes the terminal record.
+        retirement = None
         if args.supersedes_session and str(args.supersedes_session) != str(args.session):
-            retire_superseded_session(str(args.supersedes_session), payload)
-        binding = update_binding_from_session(payload, existing=existing_binding)
+            retirement = plan_superseded_retirement(str(args.supersedes_session), payload)
+        # No pure refusal remains: NOW mint or swap. A fresh native session mints its
+        # binding (#378); an authorized replacement rebinds the successor in for the
+        # verified predecessor (#319); an exact-native re-registration already resolved
+        # read-only above.
+        if canonical is None:
+            if replacement_predecessor is not None:
+                canonical = _replace_pi_binding_or_refuse(
+                    args, runtime, pi_native_session_id, replacement_predecessor
+                )
+            else:
+                canonical = _provision_pi_binding_or_refuse(args, runtime, pi_native_session_id)
+        payload.update(canonical)
+        for key in ("binding_id", "binding_generation", "endpoint_id"):
+            prepared_binding_candidate[key] = payload[key]
+        prepared_binding = (
+            prepared_binding_candidate,
+            json.dumps(prepared_binding_candidate, indent=2, sort_keys=True),
+        )
+        prepared_candidate = dict(payload)
+        prepared = (
+            prepared_candidate,
+            json.dumps(prepared_candidate, indent=2, sort_keys=True),
+        )
+        # Swap done. Retire the predecessor legacy record (carried prepared tuple, no
+        # reopen), then write the new binding, then the new session (carried prepared).
+        if retirement is not None:
+            commit_superseded_retirement(*retirement)
+        binding = update_binding_from_session(payload, prepared=prepared_binding)
         save_session(payload, prepared=prepared, allow_reactivation=True)
         if binding is not None:
             payload["binding"] = binding
         return payload
-    # Pi registration can MUTATE the ledger (mint, or a rebind that supersedes the
-    # current owner), so EVERY pure refusal must run and be CARRIED before it. Sizing
-    # the capacity preflight against the canonical fields' schema maxima (added only
-    # after the mutation) is not enough on its own: prepare_session_write compacts the
-    # agent inbox when oversized, and recomputing after the swap would re-read a
-    # possibly-changed inbox — the TOCTOU this file already fights. So compact ONCE
-    # here and carry the settled candidate forward; the post-swap serialize re-adds the
-    # real (never-larger) canonical fields and cannot re-enter the oversized branch.
-    # Classify the registration read-only FIRST (no writes): an exact-native match
-    # resolves the binding; a DIFFERENT active native is a replacement iff
-    # --supersedes-session names that exact owner — authorize it purely here so a bad
-    # supersedes refuses with canonical_replacement_predecessor_mismatch BEFORE the
-    # retirement plan's own scope check could raise a less specific error.
-    replacement_predecessor = None
-    try:
-        canonical = resolve_active_canonical_binding(
-            args.project, args.chat, args.agent, pi_native_session_id
-        )
-    except CanonicalBindingNativeMismatch as mismatch:
-        canonical = None
-        replacement_predecessor = _authorize_pi_replacement_or_refuse(args, mismatch)
-    preflight_candidate, _ = prepare_session_write(
-        {
-            **payload,
-            "binding_id": "x" * 128,
-            "binding_generation": 9223372036854775807,
-            "endpoint_id": "x" * 128,
-        }
-    )
-    for placeholder in ("binding_id", "binding_generation", "endpoint_id"):
-        preflight_candidate.pop(placeholder, None)
-    payload = preflight_candidate
-    existing_binding = existing_binding_snapshot_or_refuse(payload)
-    binding_candidate = binding_payload_from_session(
-        {
-            **payload,
-            "binding_id": "x" * 128,
-            "binding_generation": 9223372036854775807,
-            "endpoint_id": "x" * 128,
-        },
-        existing=existing_binding,
-    )
-    try:
-        prepared_binding_candidate, _ = prepare_binding_write(binding_candidate)
-    except BindingUnreadable as error:
-        raise SystemExit(
-            f"[error] {error}. Refusing to register before the canonical transition; "
-            "no session was written."
-        )
-    # Pre-validate the predecessor retirement as a pure refusal gate too: adding the
-    # terminal status can itself cross the cap / trip inbox compaction, and that save
-    # would otherwise land AFTER the swap. Plan (load + validate + prepare) now; commit
-    # the carried tuple after the swap. For a replacement the supersedes is already
-    # proven same-scope, so this only sizes the terminal record.
-    retirement = None
-    if args.supersedes_session and str(args.supersedes_session) != str(args.session):
-        retirement = plan_superseded_retirement(str(args.supersedes_session), payload)
-    # No pure refusal remains: NOW mint or swap. A fresh native session mints its
-    # binding (#378); an authorized replacement rebinds the successor in for the
-    # verified predecessor (#319); an exact-native re-registration already resolved
-    # read-only above.
-    if canonical is None:
-        if replacement_predecessor is not None:
-            canonical = _replace_pi_binding_or_refuse(
-                args, runtime, pi_native_session_id, replacement_predecessor
-            )
-        else:
-            canonical = _provision_pi_binding_or_refuse(args, runtime, pi_native_session_id)
-    payload.update(canonical)
-    for key in ("binding_id", "binding_generation", "endpoint_id"):
-        prepared_binding_candidate[key] = payload[key]
-    prepared_binding = (
-        prepared_binding_candidate,
-        json.dumps(prepared_binding_candidate, indent=2, sort_keys=True),
-    )
-    prepared_candidate = dict(payload)
-    prepared = (
-        prepared_candidate,
-        json.dumps(prepared_candidate, indent=2, sort_keys=True),
-    )
-    # Swap done. Retire the predecessor legacy record (carried prepared tuple, no
-    # reopen), then write the new binding, then the new session (carried prepared).
-    if retirement is not None:
-        commit_superseded_retirement(*retirement)
-    binding = update_binding_from_session(payload, prepared=prepared_binding)
-    save_session(payload, prepared=prepared, allow_reactivation=True)
-    if binding is not None:
-        payload["binding"] = binding
-    return payload
 
 
 def existing_binding_snapshot_or_refuse(payload: dict) -> dict:

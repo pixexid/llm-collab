@@ -42,6 +42,13 @@ class CoworkerPromptTest(unittest.TestCase):
                                 "CHAT-ABCD1234", "app", "gemini_cli")
         self.assertIn("watch_inbox.py", p)
 
+    def test_prompt_states_full_project_chat_refusal_scope(self):
+        # GH-468: the refusal key is the (project_id, chat_id) scope, not "another
+        # chat" — the prompt must not imply cross-project chat_id reuse works.
+        p = ncs.coworker_prompt("gemini", "watcher", "llm-collab",
+                                "CHAT-ABCD1234", "app", "gemini_cli")
+        self.assertIn("(project_id, chat_id)", p)
+
     def test_prompt_never_hardcodes_a_native_id(self):
         p = ncs.coworker_prompt("codex", "ax_doorbell", "llm-collab",
                                 "CHAT-ABCD1234", "app", "codex_app")
@@ -65,8 +72,14 @@ class CoworkerPromptTest(unittest.TestCase):
         self.assertIn("--project-path", p)
 
     def test_watch_cmd_omits_skip_existing(self):
-        cmd = ncs.watch_cmd("claude", "p", "CHAT-X", "S", "app", "id")
+        cmd = ncs.watch_cmd("claude", "p", "CHAT-X", "S", "app", "id", "claude_app")
         self.assertNotIn("--skip-existing", cmd)
+
+    def test_watch_cmd_exports_reader_family(self):
+        # GH-468: the reader must carry its actual family, so the watcher exports
+        # LLM_COLLAB_READER_RUNTIME_FAMILY alongside the id.
+        cmd = ncs.watch_cmd("claude", "p", "CHAT-X", "S", "app", "id", "claude_app")
+        self.assertIn("export LLM_COLLAB_READER_RUNTIME_FAMILY=claude_app", cmd)
 
 
 class PickupBlockTest(unittest.TestCase):
@@ -75,15 +88,16 @@ class PickupBlockTest(unittest.TestCase):
         # to arm one (codex ruling).
         block = "\n".join(ncs.pickup_block(
             "ax_doorbell", "codex", "llm-collab", "CHAT-ABCD1234",
-            "SESSION-CODEX", "app", "019f-native"))
+            "SESSION-CODEX", "app", "019f-native", "codex_app"))
         self.assertNotIn("watch_inbox.py", block)
         self.assertIn("inbox.py", block)
 
     def test_watcher_pickup_arms_a_watcher(self):
         block = "\n".join(ncs.pickup_block(
             "watcher", "claude", "llm-collab", "CHAT-ABCD1234",
-            "SESSION-CLAUDE", "app", "3db9-native"))
+            "SESSION-CLAUDE", "app", "3db9-native", "claude_app"))
         self.assertIn("watch_inbox.py", block)
+        self.assertIn("export LLM_COLLAB_READER_RUNTIME_FAMILY=claude_app", block)
 
 
 class DirtyCheckoutGuardTest(unittest.TestCase):

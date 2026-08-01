@@ -482,9 +482,335 @@ class SessionAutobridgeTest(unittest.TestCase):
         ) as binding_write:
             with self.assertRaisesRegex(ValueError, "session payload exceeds"):
                 session_autobridge_cli.register_session(args)
+            binding_read.assert_not_called()
+            binding_write.assert_not_called()
 
-        binding_read.assert_not_called()
-        binding_write.assert_not_called()
+    # ---- GH-468: a native session may back at most one ACTIVE chat lease ----
+    OWNER_FAMILY = "claude_app"
+
+    def _sessions_with_active_native(self, status="active", native="NAT-1",
+                                     expires=None, family=OWNER_FAMILY):
+        # Self-contained temp sessions dir (no make_workspace side effects).
+        sessions = Path(tempfile.mkdtemp(prefix="gh468-", dir="/tmp")) / "sessions"
+        sessions.mkdir(parents=True)
+        self.addCleanup(shutil.rmtree, sessions.parent, ignore_errors=True)
+        record = {
+            "session_id": "SESSION-A", "agent_id": "claude",
+            "project_id": "llm-collab", "chat_id": "CHAT-A",
+            "status": status, "runtime": {"family": family, "session_id": native},
+        }
+        if expires is not None:
+            record["lease_expires_utc"] = expires
+        write_json(sessions / "SESSION-A.json", record)
+        return sessions
+
+    def _guard(self, session_id, project, chat, native, status, family=OWNER_FAMILY):
+        # Native identity is (family, id); default the registering family to the
+        # owner's so existing scope/status cases keep testing one identity.
+        return session_autobridge_cli.refuse_native_session_active_elsewhere(
+            session_id, project, chat, native, family, status)
+
+    def _sessions_dir(self, *records):
+        # Write arbitrary lease records for resolver tests. iter_sessions(strict)
+        # requires the filename stem to equal session_id.
+        sessions = Path(tempfile.mkdtemp(prefix="gh468-rnf-", dir="/tmp")) / "sessions"
+        sessions.mkdir(parents=True)
+        self.addCleanup(shutil.rmtree, sessions.parent, ignore_errors=True)
+        for rec in records:
+            write_json(sessions / f"{rec['session_id']}.json", rec)
+        return sessions
+
+    def _rec(self, sid, family, native, status="active", chat="CHAT-A"):
+        return {
+            "session_id": sid, "agent_id": "claude",
+            "project_id": "llm-collab", "chat_id": chat,
+            "status": status, "runtime": {"family": family, "session_id": native},
+        }
+
+    def test_gh468_resolve_native_family_single_live_returns_it(self):
+        sessions = self._sessions_dir(self._rec("S0", "claude_app", "NAT-1"))
+        with patch.object(session_autobridge_lib, "SESSIONS_DIR", sessions):
+            self.assertEqual(
+                "claude_app",
+                session_autobridge_cli.resolve_native_family("NAT-1"),
+            )
+
+    def test_gh468_resolve_native_family_none_when_unowned(self):
+        sessions = self._sessions_dir(self._rec("S0", "claude_app", "NAT-1"))
+        with patch.object(session_autobridge_lib, "SESSIONS_DIR", sessions):
+            self.assertIsNone(session_autobridge_cli.resolve_native_family("NAT-OTHER"))
+
+    def test_gh468_resolve_native_family_ignores_stopped_prefers_live(self):
+        # A stopped lease no longer owns the native: its family must not be chosen
+        # over the LIVE owner's, even though it is written first.
+        sessions = self._sessions_dir(
+            self._rec("S0", "claude_app", "NAT-1", status="stopped"),
+            self._rec("S1", "gemini_cli", "NAT-1", status="active", chat="CHAT-B"),
+        )
+        with patch.object(session_autobridge_lib, "SESSIONS_DIR", sessions):
+            self.assertEqual(
+                "gemini_cli",
+                session_autobridge_cli.resolve_native_family("NAT-1"),
+            )
+
+    def _reader_record(self, family=None, status="parked"):
+        rec = {
+            "session_id": "SESSION-R", "agent_id": "claude",
+            "project_id": "llm-collab", "chat_id": "CHAT-A",
+            "status": status, "ephemeral_reader": True,
+            "runtime": {"session_id": "NAT-1"},
+        }
+        if family is not None:
+            rec["runtime"]["family"] = family
+        return rec
+
+    def test_gh468_ephemeral_reader_without_family_is_not_dispatchable(self):
+        ok, reason = session_autobridge_lib.session_is_dispatchable(self._reader_record())
+        self.assertFalse(ok)
+        self.assertEqual("reader_runtime_family_unresolved", reason)
+
+    def test_gh468_ephemeral_reader_legacy_reader_family_is_not_dispatchable(self):
+        ok, reason = session_autobridge_lib.session_is_dispatchable(
+            self._reader_record(family="reader"))
+        self.assertFalse(ok)
+        self.assertEqual("reader_runtime_family_unresolved", reason)
+
+    def test_gh468_ephemeral_reader_with_real_family_is_dispatchable(self):
+        ok, _ = session_autobridge_lib.session_is_dispatchable(
+            self._reader_record(family="claude_app"))
+        self.assertTrue(ok)
+
+    def test_gh468_non_reader_parked_is_still_dispatchable(self):
+        # The reader rule must not over-reach to ordinary parked leases.
+        rec = self._reader_record(family="reader")
+        del rec["ephemeral_reader"]
+        self.assertTrue(session_autobridge_lib.session_is_dispatchable(rec)[0])
+
+    def test_gh468_unresolved_reader_does_not_block_ordinary_registration(self):
+        # A non-dispatchable unresolved reader must neither collide with nor mask a
+        # later ordinary registration of the same native in another scope.
+        sessions = self._sessions_dir(self._reader_record(family="reader"))
+        with patch.object(session_autobridge_lib, "SESSIONS_DIR", sessions):
+            self._guard("SESSION-B", "llm-collab", "CHAT-B", "NAT-1", "active",
+                        family="claude_app")
+            self.assertIsNone(session_autobridge_cli.resolve_native_family("NAT-1"))
+
+    def test_gh468_reader_first_then_pi_registration_is_refused(self):
+        # A JSON activation-reader lease for a Pi native in scope A has no canonical
+        # ledger row, so the Pi canonical check cannot see it. The Pi path must run
+        # the session-registry ownership scan too: a Pi registration for the same
+        # (family, id) in a DIFFERENT scope must refuse and write no second owner.
+        root = self.make_workspace()
+        self.add_agent(root, {
+            "id": "glmpi", "display_name": "Glim",
+            "activation": {"type": "cli_session", "watcher_enabled": True},
+        })
+        sessions_dir = root / "State" / "session_autobridge" / "sessions"
+        sessions_dir.mkdir(parents=True, exist_ok=True)
+        write_json(sessions_dir / "SESSION-READER-A.json", {
+            "session_id": "SESSION-READER-A", "agent_id": "glmpi",
+            "project_id": "amiga", "chat_id": "CHAT-A", "status": "parked",
+            "ephemeral_reader": True, "lease_expires_utc": "2999-01-01T00:00:00+00:00",
+            "runtime": {"family": "pi", "session_id": "pi-native-1"},
+        })
+        pi_cwd = root / "pi-cwd"; pi_cwd.mkdir()
+        done = self._register_pi(
+            root, session="SESSION-PI-B", project="amiga", chat="CHAT-B",
+            native="pi-native-1", endpoint="endpoint_pi_b",
+            runtime_instance="runtime_pi_b", cwd=pi_cwd, home=root / "pi-home",
+            repo_target="app", check=False,
+        )
+        self.assertNotEqual(0, done.returncode, done.stdout + done.stderr)
+        self.assertIn("dispatchable binding", done.stderr + done.stdout)
+        self.assertFalse((sessions_dir / "SESSION-PI-B.json").exists(),
+                         "a refused Pi registration must not write a second owner")
+
+    def test_gh468_routable_command_session_without_family_is_refused(self):
+        # A --runtime-command + --runtime-session-id session is exact-routable even
+        # without a family, so it would slip past the (family, id) ownership scan.
+        # Refuse it before any write rather than leave an unguarded phantom owner.
+        root = self.make_workspace()
+        self.add_agent(root, {
+            "id": "codex", "display_name": "Codex",
+            "activation": {"type": "cli_session", "watcher_enabled": False},
+        })
+        with self.assertRaises(subprocess.CalledProcessError) as cm:
+            self.run_cli(
+                root, "register",
+                "--session", "SESSION-CMD", "--agent", "codex",
+                "--project", "amiga", "--chat", "CHAT-CMD",
+                "--mode", "auto-read", "--wake-strategy", "runtime_trigger",
+                "--runtime-session-id", "cmd-native-1",
+                "--runtime-session-source", "test_fixture",
+                "--runtime-command", json.dumps([sys.executable, "-c", "pass"]),
+            )
+        out = (cm.exception.stderr or "") + (cm.exception.stdout or "")
+        self.assertIn("routable", out)
+        self.assertFalse(
+            (root / "State" / "session_autobridge" / "sessions" / "SESSION-CMD.json").exists(),
+            "a refused routable registration must not write a lease",
+        )
+
+    def test_gh468_resolve_native_family_ambiguous_multiple_live_fails_closed(self):
+        # Two live different-family leases share one id (the identity model allows
+        # it): a reader has no basis to choose and must fail closed.
+        sessions = self._sessions_dir(
+            self._rec("S0", "claude_app", "NAT-1", status="active", chat="CHAT-A"),
+            self._rec("S1", "gemini_cli", "NAT-1", status="active", chat="CHAT-B"),
+        )
+        with patch.object(session_autobridge_lib, "SESSIONS_DIR", sessions):
+            with self.assertRaises(session_autobridge_cli.AmbiguousNativeFamily):
+                session_autobridge_cli.resolve_native_family("NAT-1")
+
+    def test_gh468_native_session_active_in_another_chat_is_refused(self):
+        sessions = self._sessions_with_active_native()
+        with patch.object(session_autobridge_lib, "SESSIONS_DIR", sessions):
+            with self.assertRaisesRegex(ValueError, "already owns a dispatchable binding"):
+                self._guard("SESSION-B", "llm-collab", "CHAT-B", "NAT-1", "active")
+
+    def test_gh468_exact_same_lease_reregistration_is_allowed(self):
+        sessions = self._sessions_with_active_native()
+        with patch.object(session_autobridge_lib, "SESSIONS_DIR", sessions):
+            # In-place re-registration in the same (project, chat) scope is not a
+            # cross-routing collision.
+            self._guard("SESSION-A", "llm-collab", "CHAT-A", "NAT-1", "active")
+
+    def test_gh468_second_lease_in_same_scope_is_allowed(self):
+        # The exclusion unit is the (project, chat) SCOPE, not the lease: within
+        # one chat, binding-scoped dispatch disambiguates several leases sharing a
+        # native (e.g. a wildcard lease alongside a binding-pinned one), so a
+        # DIFFERENT session_id in the SAME scope on the same native is allowed.
+        sessions = self._sessions_with_active_native()
+        with patch.object(session_autobridge_lib, "SESSIONS_DIR", sessions):
+            self._guard("SESSION-B", "llm-collab", "CHAT-A", "NAT-1", "active")
+
+    def test_gh468_same_session_move_to_a_different_chat_is_allowed(self):
+        # A record is unique per session_id, so re-registering the SAME session_id
+        # into another chat MOVES that one record (a rebind/takeover); it is not a
+        # second owner. Mirrors test_activation_lease's rebound-owner contract.
+        sessions = self._sessions_with_active_native()
+        with patch.object(session_autobridge_lib, "SESSIONS_DIR", sessions):
+            self._guard("SESSION-A", "llm-collab", "CHAT-B", "NAT-1", "active")
+
+    def test_gh468_different_project_same_chat_is_refused(self):
+        # Finding 2: the collision key is (project, chat) — the exact key dispatch
+        # resolves by. A DIFFERENT session reusing the native under the same
+        # chat_id but a different project is a second dispatchable routing target
+        # and must refuse.
+        sessions = self._sessions_with_active_native()
+        with patch.object(session_autobridge_lib, "SESSIONS_DIR", sessions):
+            with self.assertRaisesRegex(ValueError, "already owns a dispatchable binding"):
+                self._guard("SESSION-B", "other-project", "CHAT-A", "NAT-1", "active")
+
+    def test_gh468_different_native_id_is_allowed(self):
+        sessions = self._sessions_with_active_native()
+        with patch.object(session_autobridge_lib, "SESSIONS_DIR", sessions):
+            self._guard("SESSION-B", "llm-collab", "CHAT-B", "NAT-2", "active")
+
+    def test_gh468_same_native_id_different_family_is_allowed(self):
+        # Native identity is (runtime_family, runtime_session_id) — the exact key
+        # resolve_exact_dispatch_pair() matches on. A different family reusing the
+        # same textual id is a DISTINCT native (dispatch would not route to it), so
+        # it must not be refused (id-only comparison would over-block it).
+        sessions = self._sessions_with_active_native(family="claude_app")
+        with patch.object(session_autobridge_lib, "SESSIONS_DIR", sessions):
+            self._guard("SESSION-B", "llm-collab", "CHAT-B", "NAT-1", "active",
+                        family="gemini_cli")
+
+    def test_gh468_reuse_after_other_lease_stopped_is_allowed(self):
+        sessions = self._sessions_with_active_native(status="stopped")
+        with patch.object(session_autobridge_lib, "SESSIONS_DIR", sessions):
+            self._guard("SESSION-B", "llm-collab", "CHAT-B", "NAT-1", "active")
+
+    def test_gh468_parked_registration_against_dispatchable_owner_is_refused(self):
+        # Connector P1: register/publish-current DEFAULT to `parked`, and
+        # session_is_dispatchable() routes an unexpired `parked` lease. So a
+        # parked NEW registration for a native already held elsewhere must refuse
+        # too — guarding only `active` left the common path open.
+        sessions = self._sessions_with_active_native()
+        with patch.object(session_autobridge_lib, "SESSIONS_DIR", sessions):
+            with self.assertRaisesRegex(ValueError, "already owns a dispatchable binding"):
+                self._guard("SESSION-B", "llm-collab", "CHAT-B", "NAT-1", "parked")
+
+    def test_gh468_parked_owner_blocks_a_second_parked_lease(self):
+        # Connector P1, other-lease side: the EXISTING owner is an unexpired
+        # `parked` lease (the default register status), not `active`. Two chats
+        # defaulting to parked would both stay dispatchable and route to one
+        # native conversation unless the guard counts parked owners.
+        sessions = self._sessions_with_active_native(status="parked")
+        with patch.object(session_autobridge_lib, "SESSIONS_DIR", sessions):
+            with self.assertRaisesRegex(ValueError, "already owns a dispatchable binding"):
+                self._guard("SESSION-B", "llm-collab", "CHAT-B", "NAT-1", "parked")
+
+    def test_gh468_reuse_after_other_parked_lease_expired_is_allowed(self):
+        # An expired parked owner is not dispatchable (session_is_dispatchable
+        # drops it), so it no longer holds the native — reuse is allowed.
+        sessions = self._sessions_with_active_native(
+            status="parked", expires="2000-01-01T00:00:00+00:00"
+        )
+        with patch.object(session_autobridge_lib, "SESSIONS_DIR", sessions):
+            self._guard("SESSION-B", "llm-collab", "CHAT-B", "NAT-1", "parked")
+
+    def test_gh468_terminal_status_registration_is_not_guarded(self):
+        # A non-dispatchable NEW status (e.g. stopped) creates no routable lease,
+        # so it is not subject to the ownership scan.
+        sessions = self._sessions_with_active_native()
+        with patch.object(session_autobridge_lib, "SESSIONS_DIR", sessions):
+            self._guard("SESSION-B", "llm-collab", "CHAT-B", "NAT-1", "stopped")
+
+    def test_gh468_malformed_lease_fails_the_ownership_scan_closed(self):
+        # Finding: the ownership scan is an authority decision, so a malformed
+        # (unreadable) lease must fail CLOSED — refuse — not be skipped as absent
+        # (it could be the active owner of this native session).
+        sessions = Path(tempfile.mkdtemp(prefix="gh468-", dir="/tmp")) / "sessions"
+        sessions.mkdir(parents=True)
+        self.addCleanup(shutil.rmtree, sessions.parent, ignore_errors=True)
+        (sessions / "SESSION-BAD.json").write_text("{not valid json")
+        with patch.object(session_autobridge_lib, "SESSIONS_DIR", sessions):
+            with self.assertRaisesRegex(ValueError, "malformed session record"):
+                self._guard("SESSION-B", "llm-collab", "CHAT-B", "NAT-1", "active")
+
+    def test_gh468_write_lock_is_reentrant(self):
+        # Finding #2 prerequisite: the register write lock must be reentrant so
+        # the ownership scan can be held across save_session (which re-acquires
+        # it) without a self-deadlock.
+        with session_autobridge_lib._session_write_lock():
+            with session_autobridge_lib._session_write_lock():
+                pass  # nested acquisition must not deadlock or raise
+
+    def test_gh468_scan_and_write_share_one_lock(self):
+        # Finding #2: the ownership scan and the register writes must be one
+        # critical section — the guard call and save_session both inside a single
+        # `with _session_write_lock()` in the ordinary register branch.
+        src = (REPO_ROOT / "bin" / "session_autobridge.py").read_text()
+        anchor = "if pi_native_session_id is None:"
+        block = src[src.index(anchor):]
+        block = block[: block.index("return payload") + len("return payload")]
+        lock_at = block.index("with _session_write_lock():")
+        guard_at = block.index("refuse_native_session_active_elsewhere(")
+        save_at = block.index("save_session(")
+        self.assertLess(lock_at, guard_at, "guard must be inside the write lock")
+        self.assertLess(guard_at, save_at, "guard must precede the write")
+        self.assertLess(lock_at, save_at, "save must be inside the same lock")
+
+    def test_gh468_pi_reader_scan_and_write_share_one_lock(self):
+        # The Pi reader scan must be held under ONE continuous write lock through
+        # the canonical mint and save_session — releasing the lock after the scan
+        # leaves a TOCTOU window where a concurrent reader could publish a second
+        # cross-scope lease. Assert no lock re-open between the Pi scan and its save.
+        src = (REPO_ROOT / "bin" / "session_autobridge.py").read_text()
+        scan_at = src.index("readers_only=True,")
+        lock_at = src.rindex("with _session_write_lock():", 0, scan_at)
+        save_at = src.index(
+            "save_session(payload, prepared=prepared, allow_reactivation=True)", scan_at)
+        self.assertLess(lock_at, scan_at)
+        self.assertLess(scan_at, save_at)
+        between = src[lock_at:save_at]
+        self.assertEqual(
+            1, between.count("with _session_write_lock():"),
+            "the Pi reader scan and save must share ONE continuous lock hold "
+            "(no lock release/re-open between the scan and the ownership write)",
+        )
 
     def test_dispatch_refuses_capacity_before_the_runtime_side_effect(self):
         root = self.make_workspace()
