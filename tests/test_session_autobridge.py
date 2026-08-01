@@ -793,6 +793,25 @@ class SessionAutobridgeTest(unittest.TestCase):
         self.assertLess(guard_at, save_at, "guard must precede the write")
         self.assertLess(lock_at, save_at, "save must be inside the same lock")
 
+    def test_gh468_pi_reader_scan_and_write_share_one_lock(self):
+        # The Pi reader scan must be held under ONE continuous write lock through
+        # the canonical mint and save_session — releasing the lock after the scan
+        # leaves a TOCTOU window where a concurrent reader could publish a second
+        # cross-scope lease. Assert no lock re-open between the Pi scan and its save.
+        src = (REPO_ROOT / "bin" / "session_autobridge.py").read_text()
+        scan_at = src.index("readers_only=True,")
+        lock_at = src.rindex("with _session_write_lock():", 0, scan_at)
+        save_at = src.index(
+            "save_session(payload, prepared=prepared, allow_reactivation=True)", scan_at)
+        self.assertLess(lock_at, scan_at)
+        self.assertLess(scan_at, save_at)
+        between = src[lock_at:save_at]
+        self.assertEqual(
+            1, between.count("with _session_write_lock():"),
+            "the Pi reader scan and save must share ONE continuous lock hold "
+            "(no lock release/re-open between the scan and the ownership write)",
+        )
+
     def test_dispatch_refuses_capacity_before_the_runtime_side_effect(self):
         root = self.make_workspace()
         inbox_path = root / "agents" / "gemini" / "inbox.json"

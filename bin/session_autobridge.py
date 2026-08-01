@@ -769,104 +769,109 @@ def register_session(args) -> dict:
     # ensure_reader_session in another scope) has no ledger row, so the canonical
     # check below cannot see it — a reader-first-then-Pi registration for the same
     # (family, id) in a different scope would otherwise publish a second
-    # dispatchable owner. Run the session-registry ownership scan here too, under
-    # the session write lock (matching the reader's own locked write), as one more
-    # pure refusal before any canonical mutation.
+    # dispatchable owner. Run the session-registry ownership scan here too, and
+    # HOLD the cross-process session write lock continuously from the scan through
+    # the canonical mint and the ownership-establishing save_session below — if it
+    # were released after the scan, an activation reader for the same Pi native
+    # could acquire it in the gap, see no Pi record, and publish its own cross-scope
+    # lease while this registration proceeds unrescanned. This mirrors the non-pi
+    # branch, which already holds the lock across its binding write (same lock
+    # order, so no new deadlock surface).
     with _session_write_lock():
         refuse_native_session_active_elsewhere(
             args.session, args.project, args.chat,
             gh468_native_session_id, gh468_native_family, args.status,
             readers_only=True,
         )
-    # Pi registration can MUTATE the ledger (mint, or a rebind that supersedes the
-    # current owner), so EVERY pure refusal must run and be CARRIED before it. Sizing
-    # the capacity preflight against the canonical fields' schema maxima (added only
-    # after the mutation) is not enough on its own: prepare_session_write compacts the
-    # agent inbox when oversized, and recomputing after the swap would re-read a
-    # possibly-changed inbox — the TOCTOU this file already fights. So compact ONCE
-    # here and carry the settled candidate forward; the post-swap serialize re-adds the
-    # real (never-larger) canonical fields and cannot re-enter the oversized branch.
-    # Classify the registration read-only FIRST (no writes): an exact-native match
-    # resolves the binding; a DIFFERENT active native is a replacement iff
-    # --supersedes-session names that exact owner — authorize it purely here so a bad
-    # supersedes refuses with canonical_replacement_predecessor_mismatch BEFORE the
-    # retirement plan's own scope check could raise a less specific error.
-    replacement_predecessor = None
-    try:
-        canonical = resolve_active_canonical_binding(
-            args.project, args.chat, args.agent, pi_native_session_id
-        )
-    except CanonicalBindingNativeMismatch as mismatch:
-        canonical = None
-        replacement_predecessor = _authorize_pi_replacement_or_refuse(args, mismatch)
-    preflight_candidate, _ = prepare_session_write(
-        {
-            **payload,
-            "binding_id": "x" * 128,
-            "binding_generation": 9223372036854775807,
-            "endpoint_id": "x" * 128,
-        }
-    )
-    for placeholder in ("binding_id", "binding_generation", "endpoint_id"):
-        preflight_candidate.pop(placeholder, None)
-    payload = preflight_candidate
-    existing_binding = existing_binding_snapshot_or_refuse(payload)
-    binding_candidate = binding_payload_from_session(
-        {
-            **payload,
-            "binding_id": "x" * 128,
-            "binding_generation": 9223372036854775807,
-            "endpoint_id": "x" * 128,
-        },
-        existing=existing_binding,
-    )
-    try:
-        prepared_binding_candidate, _ = prepare_binding_write(binding_candidate)
-    except BindingUnreadable as error:
-        raise SystemExit(
-            f"[error] {error}. Refusing to register before the canonical transition; "
-            "no session was written."
-        )
-    # Pre-validate the predecessor retirement as a pure refusal gate too: adding the
-    # terminal status can itself cross the cap / trip inbox compaction, and that save
-    # would otherwise land AFTER the swap. Plan (load + validate + prepare) now; commit
-    # the carried tuple after the swap. For a replacement the supersedes is already
-    # proven same-scope, so this only sizes the terminal record.
-    retirement = None
-    if args.supersedes_session and str(args.supersedes_session) != str(args.session):
-        retirement = plan_superseded_retirement(str(args.supersedes_session), payload)
-    # No pure refusal remains: NOW mint or swap. A fresh native session mints its
-    # binding (#378); an authorized replacement rebinds the successor in for the
-    # verified predecessor (#319); an exact-native re-registration already resolved
-    # read-only above.
-    if canonical is None:
-        if replacement_predecessor is not None:
-            canonical = _replace_pi_binding_or_refuse(
-                args, runtime, pi_native_session_id, replacement_predecessor
+        # Pi registration can MUTATE the ledger (mint, or a rebind that supersedes the
+        # current owner), so EVERY pure refusal must run and be CARRIED before it. Sizing
+        # the capacity preflight against the canonical fields' schema maxima (added only
+        # after the mutation) is not enough on its own: prepare_session_write compacts the
+        # agent inbox when oversized, and recomputing after the swap would re-read a
+        # possibly-changed inbox — the TOCTOU this file already fights. So compact ONCE
+        # here and carry the settled candidate forward; the post-swap serialize re-adds the
+        # real (never-larger) canonical fields and cannot re-enter the oversized branch.
+        # Classify the registration read-only FIRST (no writes): an exact-native match
+        # resolves the binding; a DIFFERENT active native is a replacement iff
+        # --supersedes-session names that exact owner — authorize it purely here so a bad
+        # supersedes refuses with canonical_replacement_predecessor_mismatch BEFORE the
+        # retirement plan's own scope check could raise a less specific error.
+        replacement_predecessor = None
+        try:
+            canonical = resolve_active_canonical_binding(
+                args.project, args.chat, args.agent, pi_native_session_id
             )
-        else:
-            canonical = _provision_pi_binding_or_refuse(args, runtime, pi_native_session_id)
-    payload.update(canonical)
-    for key in ("binding_id", "binding_generation", "endpoint_id"):
-        prepared_binding_candidate[key] = payload[key]
-    prepared_binding = (
-        prepared_binding_candidate,
-        json.dumps(prepared_binding_candidate, indent=2, sort_keys=True),
-    )
-    prepared_candidate = dict(payload)
-    prepared = (
-        prepared_candidate,
-        json.dumps(prepared_candidate, indent=2, sort_keys=True),
-    )
-    # Swap done. Retire the predecessor legacy record (carried prepared tuple, no
-    # reopen), then write the new binding, then the new session (carried prepared).
-    if retirement is not None:
-        commit_superseded_retirement(*retirement)
-    binding = update_binding_from_session(payload, prepared=prepared_binding)
-    save_session(payload, prepared=prepared, allow_reactivation=True)
-    if binding is not None:
-        payload["binding"] = binding
-    return payload
+        except CanonicalBindingNativeMismatch as mismatch:
+            canonical = None
+            replacement_predecessor = _authorize_pi_replacement_or_refuse(args, mismatch)
+        preflight_candidate, _ = prepare_session_write(
+            {
+                **payload,
+                "binding_id": "x" * 128,
+                "binding_generation": 9223372036854775807,
+                "endpoint_id": "x" * 128,
+            }
+        )
+        for placeholder in ("binding_id", "binding_generation", "endpoint_id"):
+            preflight_candidate.pop(placeholder, None)
+        payload = preflight_candidate
+        existing_binding = existing_binding_snapshot_or_refuse(payload)
+        binding_candidate = binding_payload_from_session(
+            {
+                **payload,
+                "binding_id": "x" * 128,
+                "binding_generation": 9223372036854775807,
+                "endpoint_id": "x" * 128,
+            },
+            existing=existing_binding,
+        )
+        try:
+            prepared_binding_candidate, _ = prepare_binding_write(binding_candidate)
+        except BindingUnreadable as error:
+            raise SystemExit(
+                f"[error] {error}. Refusing to register before the canonical transition; "
+                "no session was written."
+            )
+        # Pre-validate the predecessor retirement as a pure refusal gate too: adding the
+        # terminal status can itself cross the cap / trip inbox compaction, and that save
+        # would otherwise land AFTER the swap. Plan (load + validate + prepare) now; commit
+        # the carried tuple after the swap. For a replacement the supersedes is already
+        # proven same-scope, so this only sizes the terminal record.
+        retirement = None
+        if args.supersedes_session and str(args.supersedes_session) != str(args.session):
+            retirement = plan_superseded_retirement(str(args.supersedes_session), payload)
+        # No pure refusal remains: NOW mint or swap. A fresh native session mints its
+        # binding (#378); an authorized replacement rebinds the successor in for the
+        # verified predecessor (#319); an exact-native re-registration already resolved
+        # read-only above.
+        if canonical is None:
+            if replacement_predecessor is not None:
+                canonical = _replace_pi_binding_or_refuse(
+                    args, runtime, pi_native_session_id, replacement_predecessor
+                )
+            else:
+                canonical = _provision_pi_binding_or_refuse(args, runtime, pi_native_session_id)
+        payload.update(canonical)
+        for key in ("binding_id", "binding_generation", "endpoint_id"):
+            prepared_binding_candidate[key] = payload[key]
+        prepared_binding = (
+            prepared_binding_candidate,
+            json.dumps(prepared_binding_candidate, indent=2, sort_keys=True),
+        )
+        prepared_candidate = dict(payload)
+        prepared = (
+            prepared_candidate,
+            json.dumps(prepared_candidate, indent=2, sort_keys=True),
+        )
+        # Swap done. Retire the predecessor legacy record (carried prepared tuple, no
+        # reopen), then write the new binding, then the new session (carried prepared).
+        if retirement is not None:
+            commit_superseded_retirement(*retirement)
+        binding = update_binding_from_session(payload, prepared=prepared_binding)
+        save_session(payload, prepared=prepared, allow_reactivation=True)
+        if binding is not None:
+            payload["binding"] = binding
+        return payload
 
 
 def existing_binding_snapshot_or_refuse(payload: dict) -> dict:
