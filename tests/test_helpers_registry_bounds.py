@@ -95,6 +95,30 @@ class RegistryBoundedReadTest(unittest.TestCase):
             _helpers.load_agents()
         self.assertIsNone(_helpers._agents_cache)
 
+    def test_read_deadline_fails_closed_on_a_stalled_read(self):
+        # O_NONBLOCK does not bound a regular-file read on a hung mount; the SIGALRM
+        # deadline must interrupt a stalled read and fail closed, not hang the caller.
+        import time
+        from unittest.mock import patch
+        _helpers.AGENTS_FILE.write_text(json.dumps({"agents": [{"id": "codex"}]}))
+        real_read = os.read
+        calls = {"n": 0}
+
+        def _stalled_read(fd, n):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                time.sleep(1.0)  # exceeds the deadline; SIGALRM must interrupt it
+            return real_read(fd, n)
+
+        started = time.monotonic()
+        with patch.object(_helpers, "REGISTRY_READ_DEADLINE_SECONDS", 0.3), \
+             patch.object(_helpers.os, "read", _stalled_read):
+            with self.assertRaises(SystemExit):
+                _helpers.load_agents()
+        self.assertLess(time.monotonic() - started, 0.9,
+                        "must fail at the deadline, not after the full stall")
+        self.assertIsNone(_helpers._agents_cache)
+
     def test_corrupt_json_fails_closed(self):
         _helpers.AGENTS_FILE.write_text("{not valid json")
         with self.assertRaises(SystemExit):

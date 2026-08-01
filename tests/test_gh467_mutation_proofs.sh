@@ -52,5 +52,10 @@ mutate_and_check "M5 read-to-fstat-size-not-cap" \
   'remaining = info.st_size' \
   "$T.test_grow_past_cap_after_fstat_is_refused_not_truncated"
 
+mutate_and_check "M6 no-read-deadline" \
+  'signal.setitimer(signal.ITIMER_REAL, REGISTRY_READ_DEADLINE_SECONDS)' \
+  'signal.setitimer(signal.ITIMER_REAL, 0)' \
+  "$T.test_read_deadline_fails_closed_on_a_stalled_read"
+
 echo "---"; [ "$fail" = 0 ] && echo "ALL MUTATIONS KILLED" || echo "SOME SURVIVED"
 exit $fail

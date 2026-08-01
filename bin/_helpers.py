@@ -12,6 +12,7 @@ import fcntl
 import os
 import re
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -189,6 +190,15 @@ _agents_cache: list | None = None
 # refuse rather than parse an unbounded blob or truncate it.
 MAX_REGISTRY_FILE_BYTES = 1 << 20  # 1 MiB
 
+# A local registry read is instantaneous; anything slower is a stalled mount, not
+# real work. O_NONBLOCK does NOT make a regular-file open/read nonblocking on a
+# hung NFS/FUSE mount, so an elapsed-time deadline is the only real bound.
+REGISTRY_READ_DEADLINE_SECONDS = 5.0
+
+
+class _RegistryReadTimeout(Exception):
+    """The bounded registry read exceeded its elapsed-time deadline."""
+
 
 def _registry_read_error(message: str):
     print(f"[error] {message}", file=sys.stderr)
@@ -201,8 +211,11 @@ def _read_registry_json_bounded(path: Path) -> Any:
     Shared read/parse seam for the project/agent registries so every caller inherits
     the same protection against a huge/corrupt file or a hung mount. Each guard is
     the SOLE authority for its failure (no redundant second check masking it):
-      * O_NONBLOCK open so a writer-less FIFO / hung mount cannot block inside open()
-        (a regular file is always ready, so its read never blocks either);
+      * an elapsed-time deadline (SIGALRM itimer) around the whole open/fstat/read:
+        O_NONBLOCK does NOT make a regular-file open/read nonblocking on a stalled
+        NFS/FUSE mount, so a wall-clock deadline is the only real bound — it fails
+        closed on expiry instead of hanging every caller. (Main-thread only, as all
+        bin/ callers are; O_NONBLOCK still short-circuits a writer-less FIFO.)
       * a regular-file requirement on that SAME descriptor (a dir/FIFO/device is
         refused before any read);
       * read through EOF but never beyond the cap (`remaining` = cap + 1), so a
@@ -216,24 +229,37 @@ def _read_registry_json_bounded(path: Path) -> Any:
     Fails closed (stderr + exit 1), matching this module's existing registry-read
     error style. Absence is the caller's concern (checked before calling).
     """
+    def _on_deadline(_signum, _frame):
+        raise _RegistryReadTimeout()
+
+    previous_handler = signal.signal(signal.SIGALRM, _on_deadline)
+    signal.setitimer(signal.ITIMER_REAL, REGISTRY_READ_DEADLINE_SECONDS)
     try:
-        descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
-    except OSError as error:
-        _registry_read_error(f"cannot open {path}: {error}")
-    try:
-        info = os.fstat(descriptor)
-        if not stat.S_ISREG(info.st_mode):
-            _registry_read_error(f"{path} is not a regular file; refusing to read it")
-        chunks: list[bytes] = []
-        remaining = MAX_REGISTRY_FILE_BYTES + 1
-        while remaining > 0:
-            chunk = os.read(descriptor, remaining)
-            if not chunk:
-                break
-            chunks.append(chunk)
-            remaining -= len(chunk)
+        try:
+            descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+        except OSError as error:
+            _registry_read_error(f"cannot open {path}: {error}")
+        try:
+            info = os.fstat(descriptor)
+            if not stat.S_ISREG(info.st_mode):
+                _registry_read_error(f"{path} is not a regular file; refusing to read it")
+            chunks: list[bytes] = []
+            remaining = MAX_REGISTRY_FILE_BYTES + 1
+            while remaining > 0:
+                chunk = os.read(descriptor, remaining)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+        finally:
+            os.close(descriptor)
+    except _RegistryReadTimeout:
+        _registry_read_error(
+            f"{path} read exceeded {REGISTRY_READ_DEADLINE_SECONDS}s (hung mount?); "
+            "refusing")
     finally:
-        os.close(descriptor)
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
     raw = b"".join(chunks)
     if len(raw) > MAX_REGISTRY_FILE_BYTES:
         _registry_read_error(
