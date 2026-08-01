@@ -123,7 +123,7 @@ python bin/init_agent_memory.py --agent claude --target claude-md \
 At the start of **every LLM session**, run the bootstrap command:
 
 ```bash
-python bin/session_bootstrap.py --agent <id>
+~/.local/share/llm-collab/runtime/main/bin/llm-collab current_runtime.py --agent <id>
 ```
 
 This:
@@ -137,13 +137,13 @@ For `human_relay` agents: you paste the bootstrap command into the new LLM sessi
 
 ```bash
 # Start all watcher-enabled agents
-python bin/pm2_watchers.py start --all
+<runtime_root>/bin/llm-collab pm2_watchers.py start --all
 
 # Check status
-python bin/pm2_watchers.py status --all
+<runtime_root>/bin/llm-collab pm2_watchers.py status --all
 
 # View logs
-python bin/pm2_watchers.py logs --agent orchestrator
+<runtime_root>/bin/llm-collab pm2_watchers.py logs --agent orchestrator
 ```
 
 Watchers provide background wake behavior. Treat `skills/llm-collab-join/SKILL.md`
@@ -184,7 +184,7 @@ Check `agents.json` — the ID must match exactly (case-sensitive).
 Return to `skills/llm-collab-join/SKILL.md` and `docs/workflows/collab-thread-quickstart.md` for the current mailbox and wake path instead of inspecting runtime pointer files directly.
 
 **PM2 watchers not starting**
-Install PM2: `npm install -g pm2`. Check logs: `python bin/pm2_watchers.py logs --agent <id>`.
+Install PM2: `npm install -g pm2`. Check logs: `<runtime_root>/bin/llm-collab pm2_watchers.py logs --agent <id>`.
 
 **Identity file missing**
 Re-run `python scripts/init.py` — it will skip existing config and only generate missing agent files.

@@ -759,24 +759,20 @@ Do not idle the active thread just to wait for asynchronous deploy automation if
 work is already complete. Treat deploy as a later checkpoint unless it has actually failed or a new
 production-impacting merge would stack on top of an unresolved deploy state.
 
-For `llm-collab` itself, refreshing `main` after every merge is mandatory before
-new coordination work starts from a persistent checkout. Workers and new
-sessions must not keep using an old feature branch as the collaboration runtime
-after its changes merge.
+For `llm-collab` itself, refreshing the deployed runtime after every merge is
+mandatory before new coordination work starts. Workers and new sessions must
+not use a parked source checkout as the collaboration runtime.
 
 Use:
 
 ```bash
-git fetch origin main
-git switch main
-git pull --ff-only origin main
-git status --short --branch --untracked-files=all
+<source_worktree>/bin/llm-collab deploy_runtime.py \
+  --source <source_worktree>
 ```
 
-Do not delete or commit project-private untracked files during this refresh.
-Examples include `.secrets/`, local runtime state, generated worker memory
-templates, and project-local config examples. They should remain local unless a
-separate reviewed task explicitly promotes them into the open-source repo.
+The deploy command validates an exact `origin/main` source and the contract before
+resetting only the deployed runtime's tracked files. It preserves source-checkout
+dirt, runtime-state symlinks, and private files.
 
 ## Branch/worktree cleanup contract
 

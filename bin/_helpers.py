@@ -35,6 +35,17 @@ def find_workspace_root(start: Path | None = None) -> Path:
 
 
 ROOT: Path = find_workspace_root()
+_configured_runtime_root = Path(
+    os.environ.get(
+        "LLM_COLLAB_RUNTIME_ROOT",
+        Path.home() / ".local" / "share" / "llm-collab" / "runtime" / "main",
+    )
+).expanduser()
+RUNTIME_ROOT = (
+    _configured_runtime_root
+    if (_configured_runtime_root / "bin" / "current_runtime.py").is_file()
+    else ROOT
+)
 CONFIG_FILE = ROOT / "collab.config.json"
 AGENTS_FILE = ROOT / "agents.json"
 PROJECTS_FILE = ROOT / "projects.json"
@@ -982,7 +993,7 @@ def collab_join_skill_path() -> Path:
 
 
 def collab_bootstrap_command(agent_id: str) -> str:
-    return f"{ROOT}/bin/llm-collab session_bootstrap.py --agent {agent_id}"
+    return f"{RUNTIME_ROOT}/bin/llm-collab current_runtime.py --agent {agent_id}"
 
 
 def build_handoff_prompt(

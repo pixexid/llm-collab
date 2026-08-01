@@ -349,17 +349,12 @@ def main():
     status_exit_code = 0
     for agent_id in targets:
         name = app_name(agent_id)
-        if is_sidecar(agent_id) and args.command == "restart":
-            # Plain `pm2 restart <name>` relaunches PM2's STORED definition, so the
-            # gate could approve today's secure token path while PM2 re-ran yesterday's
-            # insecure one. startOrRestart re-reads this ecosystem, making the thing
-            # validated and the thing launched the same thing.
-            pm2_run(["startOrRestart", str(ecosystem_path()), "--only", app_name(agent_id)])
-            continue
         if args.command == "start":
             start_agent(agent_id)
         elif args.command == "restart":
-            pm2_run(["restart", name])
+            # Re-read the deployed ecosystem so the running process matches the
+            # definition that the current-runtime gate approved.
+            pm2_run(["startOrRestart", str(ecosystem_path()), "--only", name])
         elif args.command == "ensure":
             ensure_agent(agent_id)
         elif args.command == "stop":
