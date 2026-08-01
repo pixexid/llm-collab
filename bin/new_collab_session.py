@@ -9,10 +9,11 @@ copy-paste setup prompt for the part only they can do — registering their OWN
 native session. Nobody's native session id is ever guessed.
 
 Freshness is a convention this helper asks each worker to follow, not something
-it can enforce: ordinary session_autobridge registration does not yet reject a
-native id already active in another chat, so the setup prompt instructs each
-worker to start a fresh native session and not reuse one across chats. The
-registration-layer guard that would make this enforced is tracked in GH-468.
+enforced end to end: session_autobridge registration now REFUSES an active
+registration whose native session is already active in another (project, chat)
+lease (GH-468), so a reused native id fails closed at register time. The setup
+prompt still instructs each worker to start a fresh native session — that keeps
+the flow clean and avoids the refusal.
 
 It:
   1. Refuses if this checkout is behind origin/main (co-workers must run current
@@ -191,9 +192,9 @@ def coworker_prompt(agent, channel, project, chat, repo_target, family) -> str:
         f"# runtime ({LAUNCH}), never a parked/dirty operator checkout.",
         "",
         "# 1. Start a FRESH native session for THIS chat and read its id + home",
-        "#    (verify it is the thread you are in). Do NOT reuse a native session",
-        "#    already bound to another chat — registration does not yet reject",
-        "#    that (tracked in GH-468); freshness is your responsibility here.",
+        "#    (verify it is the thread you are in). Use a FRESH native session —",
+        "#    registration REFUSES a native id already active in another",
+        "#    (project, chat) lease (GH-468); deactivate the old lease first.",
         "#    Use the session_id AND home this prints in step 2:",
         f"{LAUNCH} session_autobridge.py discover-runtime --runtime-family {family}{discover_scope} --json",
         "",
