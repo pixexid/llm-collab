@@ -26,7 +26,7 @@ Usage:
   python bin/new_collab_session.py \
     --project llm-collab --title "Paseo Phase-1 conformance" \
     --me claude --my-runtime-session-id <native-id> --my-runtime-family claude_app \
-    --with codex --repo-target app
+    --with codex:codex_app --repo-target app
 """
 
 import sys
@@ -39,6 +39,7 @@ require_python()
 
 import argparse
 import json
+import shutil
 import subprocess
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -50,6 +51,11 @@ DEFAULT_HOMES = {
     "codex_app": "~/.codex",
     "gemini_cli": "~/.gemini",
 }
+# This helper only knows the discover-runtime families. Pi workers (glmpi/relay/
+# kimi) must use `worker.py start-pi`, and a human_relay (zcode) has no native
+# session — routing them through discover+register would misbind, so they are
+# refused rather than guessed.
+SUPPORTED_FAMILIES = ("codex_app", "claude_app", "gemini_cli")
 
 
 def _git(*args: str) -> str:
@@ -124,15 +130,23 @@ def register_session(session, agent, project, chat, repo_target, family, rsid, h
     ]
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
-        sys.exit(f"[error] registering {agent} session failed:\n{r.stderr or r.stdout}")
+        raise RuntimeError(f"registering {agent} session failed:\n{r.stderr or r.stdout}")
+
+
+# Every generated command goes through the deployed launcher, which selects a
+# Python 3.10+ — raw `python` is absent or is 3.9 on the supported macs.
+LAUNCH = "<runtime_root>/bin/llm-collab"
 
 
 def watch_cmd(agent, project, chat, session, repo_target, rsid) -> str:
+    # No --skip-existing: on a fresh chat there is no legitimate backlog to
+    # suppress, and skipping would drop a packet delivered in the window between
+    # the binding going active and the watcher starting.
     return (
         f"export LLM_COLLAB_READER_RUNTIME_ID={rsid}\n"
-        f"<runtime_root>/bin/llm-collab watch_inbox.py \\\n"
+        f"{LAUNCH} watch_inbox.py \\\n"
         f"  --me {agent} --project {project} --chat {chat} \\\n"
-        f"  --session {session} --repo-target {repo_target} --skip-existing --json"
+        f"  --session {session} --repo-target {repo_target} --json"
     )
 
 
@@ -151,7 +165,7 @@ def pickup_block(channel, agent, project, chat, session, repo_target, rsid) -> l
             "# You have NO native session watcher. A bound session receives",
             "# autobridge dispatch; between turns, poll your inbox — senders wake",
             "# you with the AX doorbell deliver.py prints when you are unbound:",
-            f"python bin/inbox.py --me {agent} --project {project} --chat {chat} \\",
+            f"{LAUNCH} inbox.py --me {agent} --project {project} --chat {chat} \\",
             f"  --session {session} --repo-target {repo_target} --peek --limit 5",
         ]
     return [
@@ -162,22 +176,25 @@ def pickup_block(channel, agent, project, chat, session, repo_target, rsid) -> l
 
 def coworker_prompt(agent, channel, project, chat, repo_target, family) -> str:
     session = f"SESSION-{agent.upper()}-{chat.split('-')[-1]}"
-    home = DEFAULT_HOMES.get(family, f"~/.{agent}")
+    # claude_app discovery refuses an unscoped read (it could pick another
+    # project's session), so the worker must pass its own checkout path.
+    discover_scope = " --project-path <your-checkout>" if family == "claude_app" else ""
     lines = [
         f"# Setup prompt for {agent} — new collab session on {chat}",
         f"# Project {project}, repo-target {repo_target}. Run from the deployed",
-        f"# runtime (~/.local/share/llm-collab/runtime/main), never a parked checkout.",
+        f"# runtime ({LAUNCH}), never a parked/dirty operator checkout.",
         "",
-        "# 1. Read your OWN native session id (verify it is the thread you are in):",
-        f"python bin/session_autobridge.py discover-runtime --runtime-family {family} --json",
+        "# 1. Read your OWN native session id + home (verify it is the thread you",
+        "#    are in); use the session_id AND home this prints in step 2:",
+        f"{LAUNCH} session_autobridge.py discover-runtime --runtime-family {family}{discover_scope} --json",
         "",
-        "# 2. Register THAT id (never guess someone else's):",
-        f"python bin/session_autobridge.py register \\",
+        "# 2. Register THAT id + THAT home (never guess, never substitute a default):",
+        f"{LAUNCH} session_autobridge.py register \\",
         f"  --session {session} --agent {agent} \\",
         f"  --project {project} --chat {chat} --repo-target {repo_target} \\",
         f"  --mode auto-read --status active --wake-strategy runtime_trigger \\",
         f"  --runtime-family {family} --runtime-session-id <YOUR_ID> \\",
-        f"  --runtime-home {home} --runtime-session-source first_read",
+        f"  --runtime-home <YOUR_HOME_FROM_STEP_1> --runtime-session-source first_read",
         "",
         "# 3. Pick up packets on YOUR wake channel:",
     ]
@@ -197,7 +214,9 @@ def parse_args():
     p.add_argument("--my-runtime-home", default=None,
                    help="defaults per family (~/.claude, ~/.codex, ~/.gemini)")
     p.add_argument("--with", dest="coworkers", required=True,
-                   help="comma-separated co-worker agent ids")
+                   help="comma-separated co-worker agent:family pairs, e.g. "
+                        "codex:codex_app,gemini:gemini_cli (family is explicit — "
+                        "never guessed; Pi/relay workers are not supported here)")
     p.add_argument("--repo-target", required=True)
     p.add_argument("--skip-currency-check", action="store_true",
                    help="skip the origin/main guard (tests only)")
@@ -211,12 +230,27 @@ def main():
         assert_current_checkout()
 
     agents = load_agents()
-    coworkers = [c.strip() for c in args.coworkers.split(",") if c.strip()]
-    # Validate EVERY identity before any side effect. The initiator was
-    # previously validated only implicitly by register_session, which runs after
-    # new_chat.py — an unknown --me left an orphan chat behind. Fail closed here.
-    for agent_id in [args.me, *coworkers]:
-        agent_activation(agents, agent_id)  # existence check, fail closed
+
+    # Parse "agent:family" pairs; family is explicit, never guessed.
+    coworkers = []
+    for spec in (s.strip() for s in args.coworkers.split(",") if s.strip()):
+        if ":" not in spec:
+            sys.exit(f"[error] --with entry {spec!r} must be agent:family "
+                     f"(one of {', '.join(SUPPORTED_FAMILIES)})")
+        agent_id, family = spec.split(":", 1)
+        coworkers.append((agent_id.strip(), family.strip()))
+
+    # Validate EVERYTHING before any side effect (fail closed): initiator and
+    # coworkers must exist, and every family must be one this helper supports —
+    # otherwise new_chat.py leaves an orphan chat behind. Pi/relay are refused
+    # here, not routed through an unusable claude_app prompt.
+    agent_activation(agents, args.me)
+    for agent_id, family in coworkers:
+        agent_activation(agents, agent_id)
+        if family not in SUPPORTED_FAMILIES:
+            sys.exit(f"[error] {agent_id}: family {family!r} not supported by this "
+                     f"helper (use {', '.join(SUPPORTED_FAMILIES)}). Pi workers use "
+                     f"`worker.py start-pi`; a human_relay has no native session.")
 
     created = subprocess.run(
         [sys.executable, str(BIN / "new_chat.py"),
@@ -225,13 +259,20 @@ def main():
     )
     if created.returncode != 0:
         sys.exit(f"[error] creating chat failed:\n{created.stderr or created.stdout}")
-    chat = json.loads(created.stdout)["chat_id"]
+    created_json = json.loads(created.stdout)
+    chat = created_json["chat_id"]
     suffix = chat.split("-")[-1]
 
     my_session = f"SESSION-{args.me.upper()}-{suffix}"
     my_home = args.my_runtime_home or DEFAULT_HOMES.get(args.my_runtime_family, f"~/.{args.me}")
-    register_session(my_session, args.me, args.project, chat, args.repo_target,
-                     args.my_runtime_family, args.my_runtime_session_id, my_home)
+    try:
+        register_session(my_session, args.me, args.project, chat, args.repo_target,
+                         args.my_runtime_family, args.my_runtime_session_id, my_home)
+    except RuntimeError as exc:
+        # Roll back exactly the chat we just created so a failed run is
+        # all-or-nothing rather than leaving a hidden orphan chat.
+        shutil.rmtree(created_json["path"], ignore_errors=True)
+        sys.exit(f"[error] {exc}\n[rolled back] removed orphan chat {chat}")
 
     print(f"chat_id: {chat}")
     print(f"initiator session: {my_session} ({args.me} / {args.my_runtime_session_id})")
@@ -239,11 +280,10 @@ def main():
     print("\n=== YOUR OWN PICKUP (do this now) ===")
     print("\n".join(pickup_block(my_channel, args.me, args.project, chat,
                                  my_session, args.repo_target, args.my_runtime_session_id)))
-    for c in coworkers:
-        channel = wake_channel(agent_activation(agents, c))
-        family = {"codex": "codex_app", "gemini": "gemini_cli"}.get(c, "claude_app")
-        print(f"\n=== SETUP PROMPT — share with {c} ===")
-        print(coworker_prompt(c, channel, args.project, chat, args.repo_target, family))
+    for agent_id, family in coworkers:
+        channel = wake_channel(agent_activation(agents, agent_id))
+        print(f"\n=== SETUP PROMPT — share with {agent_id} ===")
+        print(coworker_prompt(agent_id, channel, args.project, chat, args.repo_target, family))
 
 
 if __name__ == "__main__":

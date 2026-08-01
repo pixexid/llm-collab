@@ -44,10 +44,16 @@ can do.
 python bin/new_collab_session.py \
   --project demo-app --title "Checkout refactor" \
   --me codex --my-runtime-session-id 019f9452-... --my-runtime-family codex_app \
-  --with zcode --repo-target app
+  --with claude:claude_app --repo-target app
 #  -> creates the chat, registers ONLY codex's own session, prints codex's own
-#     pickup command (branched by wake channel), and a setup prompt for zcode.
+#     pickup command (branched by wake channel), and a setup prompt for claude.
 ```
+
+Co-worker families are explicit (`agent:family`), never guessed. This helper
+supports the discover-runtime families only — `codex_app`, `claude_app`,
+`gemini_cli`. Pi workers (glmpi/relay/kimi) use `worker.py start-pi` and a
+human-relay (zcode) has no native session, so both are refused here rather than
+misbound.
 
 Share each printed prompt with its worker. The initiator's own pickup command —
 and each co-worker's — is **branched by that agent's wake channel**: a
