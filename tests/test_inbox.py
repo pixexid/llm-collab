@@ -11,7 +11,7 @@ from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -1588,6 +1588,50 @@ class InboxMarkAllReadTest(unittest.TestCase):
             patch.object(inbox_lib, "ensure_reader_session", _raise),
         ):
             return inbox_lib.gate_activation_message(args, msg, consume=True)
+
+    def _gate_with_reader_record(self, reader_record, *, runtime_id="NAT-1"):
+        # Drive gate_activation_message with a reader record of a chosen family and
+        # a mocked claim so we can assert refuse-before-claim vs proceed-to-claim.
+        msg = {
+            "frontmatter": {
+                "activation": True, "to": "codex",
+                "project_id": "amiga", "chat_id": "CHAT-B",
+                "related_task": "TASK-1", "worktree": str(self.worktree),
+                "branch": "codex/gh-468-test",
+            },
+            "path": "Chats/x/packet.md",
+        }
+        args = SimpleNamespace(me="codex", session="SESSION-READER")
+        claim_mock = Mock(return_value={"lease": {}, "fence_token": 1, "poller_audit": {}})
+        with (
+            patch.object(inbox_lib, "load_lease", lambda identity: None),
+            patch.object(inbox_lib, "activation_reader_runtime_id", lambda: runtime_id),
+            patch.object(inbox_lib, "activation_reader_runtime_family", lambda: None),
+            patch.object(inbox_lib, "ensure_reader_session", lambda *a, **k: reader_record),
+            patch.object(inbox_lib, "claim_activation_lease", claim_mock),
+        ):
+            result = inbox_lib.gate_activation_message(args, msg, consume=True)
+        return result, claim_mock
+
+    def test_gh468_gate_refuses_family_less_reader_before_claim(self):
+        # No family: refuse before claim, packet stays unread (claim not called).
+        result, claim = self._gate_with_reader_record({"runtime": {"session_id": "NAT-1"}})
+        self.assertFalse(result["authorized"])
+        self.assertEqual("reader_runtime_family_unresolved", result["reason"])
+        claim.assert_not_called()
+
+    def test_gh468_gate_refuses_legacy_reader_family_before_claim(self):
+        result, claim = self._gate_with_reader_record(
+            {"runtime": {"session_id": "NAT-1", "family": "reader"}})
+        self.assertFalse(result["authorized"])
+        self.assertEqual("reader_runtime_family_unresolved", result["reason"])
+        claim.assert_not_called()
+
+    def test_gh468_gate_allows_resolved_family_reader_to_claim(self):
+        result, claim = self._gate_with_reader_record(
+            {"runtime": {"session_id": "NAT-1", "family": "claude_app"}})
+        self.assertTrue(result["authorized"])
+        claim.assert_called_once()
 
     def test_gh468_reader_family_ambiguity_has_its_own_gate_reason(self):
         # An ambiguity is not an ownership collision: the gate reports a distinct

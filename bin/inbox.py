@@ -650,7 +650,7 @@ def gate_activation_message(args, msg: dict, *, consume: bool) -> dict | None:
     owner_pid = None if runtime_id else activation_reader_pid()
     session_id = activation_reader_session_id(args, identity)
     try:
-        ensure_reader_session(
+        reader = ensure_reader_session(
             session_id, args.me, identity,
             runtime_id=runtime_id,
             runtime_family=activation_reader_runtime_family(),
@@ -675,6 +675,24 @@ def gate_activation_message(args, msg: dict, *, consume: bool) -> dict | None:
         }
     # Registry corruption / save-validation raise other exceptions; they are NOT
     # ownership outcomes and must surface distinctly rather than be mislabeled.
+
+    # GH-468: making an unresolved-family reader non-dispatchable only closes the
+    # autobridge route; the direct consume path below would still claim the lease
+    # and mark the packet read, so native X could serve scope A here while a later
+    # ordinary (real_family, id) registration serves scope B. When a reader has a
+    # runtime id but no resolvable real family (absent or the synthetic "reader"),
+    # native ownership cannot be established, so REFUSE before claiming — leave the
+    # packet unread. Readers with a carried/resolved family, or with no runtime id
+    # at all, are unaffected.
+    if runtime_id:
+        reader_family = (reader.get("runtime") or {}).get("family")
+        if not reader_family or reader_family == "reader":
+            return {
+                "authorized": False,
+                "reason": "reader_runtime_family_unresolved",
+                "identity": identity,
+            }
+
     try:
         claim = claim_activation_lease(
             identity,

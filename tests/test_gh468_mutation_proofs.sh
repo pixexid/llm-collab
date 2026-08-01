@@ -120,5 +120,21 @@ rc13=$?
 mv "$F2.mutbak" "$F2"
 if [ "$rc13" = 1 ]; then echo "killed: M13 reader-nondispatch-branch"; else echo "SURVIVED/ERR(rc=$rc13): M13 reader-nondispatch-branch"; fail=1; fi
 
+# M14: the consume-gate refusal for an unresolved-family reader lives in bin/inbox.py;
+# drop it and the gate would claim/consume a family-less reader's packet.
+F3=bin/inbox.py
+cp "$F3" "$F3.mutbak"
+$PY - "$F3" <<'PY'
+import sys
+p = sys.argv[1]; s = open(p).read()
+old = 'if not reader_family or reader_family == "reader":'
+assert old in s, "M14 anchor missing"
+open(p, "w").write(s.replace(old, "if False:", 1))
+PY
+$PY -m unittest "tests.test_inbox.InboxMarkAllReadTest.test_gh468_gate_refuses_family_less_reader_before_claim" >/dev/null 2>&1
+rc14=$?
+mv "$F3.mutbak" "$F3"
+if [ "$rc14" = 1 ]; then echo "killed: M14 gate-consume-refusal"; else echo "SURVIVED/ERR(rc=$rc14): M14 gate-consume-refusal"; fail=1; fi
+
 echo "---"; [ "$fail" = 0 ] && echo "ALL MUTATIONS KILLED" || echo "SOME SURVIVED"
 exit $fail
