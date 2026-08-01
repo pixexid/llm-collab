@@ -237,6 +237,13 @@ def _read_registry_json_bounded(path: Path) -> Any:
     try:
         try:
             descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+        except FileNotFoundError:
+            # Absence is the caller's concern (agents.json missing is fatal;
+            # projects.json missing yields []); propagate it. Crucially this
+            # open() — the earliest filesystem op, and the one that hangs on a
+            # stalled mount — is inside the deadline, so a stalled stat/open on a
+            # genuinely-missing-vs-hung path fails closed rather than blocking.
+            raise
         except OSError as error:
             _registry_read_error(f"cannot open {path}: {error}")
         try:
@@ -277,14 +284,18 @@ def _read_registry_json_bounded(path: Path) -> Any:
 def load_agents() -> list[dict]:
     global _agents_cache
     if _agents_cache is None:
-        if not AGENTS_FILE.exists():
+        # No pre-read .exists() stat: it would run outside the read deadline and
+        # hang on a stalled mount. The bounded read covers open() and surfaces a
+        # genuinely-missing file as FileNotFoundError.
+        try:
+            payload = _read_registry_json_bounded(AGENTS_FILE)
+        except FileNotFoundError:
             print(
                 f"[error] agents.json not found at {ROOT}\n"
                 "Run: python scripts/init.py",
                 file=sys.stderr,
             )
             sys.exit(1)
-        payload = _read_registry_json_bounded(AGENTS_FILE)
         _agents_cache = payload.get("agents", [])
     return _agents_cache
 
@@ -344,9 +355,14 @@ _projects_cache: list | None = None
 def load_projects() -> list[dict]:
     global _projects_cache
     if _projects_cache is None:
-        if not PROJECTS_FILE.exists():
-            return []
-        payload = _read_registry_json_bounded(PROJECTS_FILE)
+        # No pre-read .exists() stat (see load_agents): an absent projects.json is
+        # not an error — it yields []. The bounded read covers open() under the
+        # deadline and surfaces absence as FileNotFoundError.
+        try:
+            payload = _read_registry_json_bounded(PROJECTS_FILE)
+        except FileNotFoundError:
+            _projects_cache = []
+            return _projects_cache
         _projects_cache = payload.get("projects", [])
     return _projects_cache
 

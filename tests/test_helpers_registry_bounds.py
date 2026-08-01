@@ -95,6 +95,38 @@ class RegistryBoundedReadTest(unittest.TestCase):
             _helpers.load_agents()
         self.assertIsNone(_helpers._agents_cache)
 
+    def test_missing_agents_is_fatal(self):
+        # No agents.json (and no pre-read .exists() stat): the bounded read
+        # surfaces absence as FileNotFoundError and load_agents exits.
+        with self.assertRaises(SystemExit):
+            _helpers.load_agents()
+
+    def test_missing_projects_yields_empty_list(self):
+        # An absent projects.json is not an error — it yields [].
+        self.assertEqual([], _helpers.load_projects())
+        _helpers.ensure_project(None)  # allow_none: no exit
+
+    def test_read_deadline_covers_a_stalled_open(self):
+        # The earliest filesystem op (open) — the one that hangs on a stalled mount
+        # and previously sat behind an unbounded .exists() — must be under the
+        # deadline too, not just the read.
+        import time
+        from unittest.mock import patch
+        _helpers.AGENTS_FILE.write_text(json.dumps({"agents": [{"id": "codex"}]}))
+        real_open = os.open
+
+        def _stalled_open(path, flags, *a, **k):
+            time.sleep(1.0)  # exceeds the deadline; SIGALRM must interrupt it
+            return real_open(path, flags, *a, **k)
+
+        started = time.monotonic()
+        with patch.object(_helpers, "REGISTRY_READ_DEADLINE_SECONDS", 0.3), \
+             patch.object(_helpers.os, "open", _stalled_open):
+            with self.assertRaises(SystemExit):
+                _helpers.load_agents()
+        self.assertLess(time.monotonic() - started, 0.9,
+                        "a stalled open must fail at the deadline, not after the full stall")
+
     def test_read_deadline_fails_closed_on_a_stalled_read(self):
         # O_NONBLOCK does not bound a regular-file read on a hung mount; the SIGALRM
         # deadline must interrupt a stalled read and fail closed, not hang the caller.
