@@ -482,6 +482,17 @@ class AxRecoveryWordingPinTest(unittest.TestCase):
         readme = (self.AXBRIDGE / "README.md").read_text()
         self.assertNotIn("proven readable and empty", readme)
 
+    def test_attended_recovery_banner_is_target_resolution_not_value_opacity(self) -> None:
+        # GH-470: the deliver.py attended-recovery banner must describe an
+        # unresolvable/undriveable TARGET, not a value-opaque/non-empty composer
+        # (which now proceeds). The old emptiness/value-opacity reason must be gone.
+        deliver_src = (REPO_ROOT / "bin" / "deliver.py").read_text()
+        self.assertNotIn("emptiness cannot be proven", deliver_src)
+        self.assertNotIn("has an AXValue-opaque composer", deliver_src)
+        # Contiguous source substrings (the banner is split across string lines).
+        self.assertIn("resolved or verified as a safe send target", deliver_src)
+        self.assertIn("target-resolution hold", deliver_src)
+
 
 class AxAttendedRecoveryPrintPriorityTest(unittest.TestCase):
     """GH-1547 PR #110 P2 3609336511: the human-relay print branch must not

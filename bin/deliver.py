@@ -826,9 +826,12 @@ def main():
         print(border)
         print()
         print(
-            f"{recipient_display} ({args.recipient}) has an AXValue-opaque composer: "
-            "emptiness cannot be proven, so a routine axsend ring must not touch it "
-            "(the binary refuses with exit 11; do not bypass with --attended yourself)."
+            f"{recipient_display} ({args.recipient})'s native composer target cannot be "
+            "resolved or verified as a safe send target, so a routine axsend ring "
+            "cannot reach it (the binary refuses with exit 11; do not bypass with "
+            "--attended yourself). GH-470: this is a target-resolution hold, not a "
+            "value-opaque or non-empty composer — a resolvable Codex composer is "
+            "cleared and overridden by a routine ring."
         )
         print()
         print(
