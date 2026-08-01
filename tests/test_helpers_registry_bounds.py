@@ -60,6 +60,25 @@ class RegistryBoundedReadTest(unittest.TestCase):
         self.assertIsNone(_helpers._projects_cache,
                           "an over-limit read must not cache a partial/claimed result")
 
+    def test_short_read_fails_closed_with_no_partial_result(self):
+        # If fstat over-declares the size (file shrank / short read), the loop ends
+        # with bytes missing; parsing them would be a partial result claiming
+        # completeness. Simulate by inflating the fstat size over the real content.
+        from unittest.mock import patch
+        _helpers.AGENTS_FILE.write_text(json.dumps({"agents": [{"id": "codex"}]}))
+        real_fstat = os.fstat
+
+        class _Inflated:
+            def __init__(self, real):
+                self.st_mode = real.st_mode
+                self.st_size = real.st_size + 10_000
+
+        with patch.object(_helpers.os, "fstat", lambda fd: _Inflated(real_fstat(fd))):
+            with self.assertRaises(SystemExit):
+                _helpers.load_agents()
+        self.assertIsNone(_helpers._agents_cache,
+                          "a short read must not cache a partial/claimed result")
+
     def test_corrupt_json_fails_closed(self):
         _helpers.AGENTS_FILE.write_text("{not valid json")
         with self.assertRaises(SystemExit):

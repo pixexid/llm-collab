@@ -42,5 +42,10 @@ mutate_and_check "M3 json-parse-not-fail-closed" \
   'except (KeyError,) as error:' \
   "$T.test_corrupt_json_fails_closed"
 
+mutate_and_check "M4 short-read-not-fail-closed" \
+  'if remaining != 0:' \
+  'if False:' \
+  "$T.test_short_read_fails_closed_with_no_partial_result"
+
 echo "---"; [ "$fail" = 0 ] && echo "ALL MUTATIONS KILLED" || echo "SOME SURVIVED"
 exit $fail

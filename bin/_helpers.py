@@ -231,6 +231,13 @@ def _read_registry_json_bounded(path: Path) -> Any:
                 break
             chunks.append(chunk)
             remaining -= len(chunk)
+        if remaining != 0:
+            # A short read or a file that shrank mid-read: json.loads on the bytes
+            # we did get would be a partial result claiming completeness. The
+            # bounded-work contract forbids silently truncating — fail closed.
+            _registry_read_error(
+                f"{path} returned a short read ({info.st_size - remaining} of "
+                f"{info.st_size} bytes); refusing a partial result")
     finally:
         os.close(descriptor)
     try:
