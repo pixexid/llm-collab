@@ -64,6 +64,7 @@ def assert_current_checkout() -> None:
         _git("fetch", "origin", "main", "--quiet")
         origin_main = _git("rev-parse", "origin/main")
         head = _git("rev-parse", "HEAD")
+        dirty = _git("status", "--porcelain")
     except subprocess.CalledProcessError as exc:  # pragma: no cover - env-dependent
         sys.exit(f"[error] could not compare against origin/main: {exc.stderr or exc}")
     if head != origin_main:
@@ -73,6 +74,16 @@ def assert_current_checkout() -> None:
             f"(HEAD={head[:8]} origin/main={origin_main[:8]}, {behind} behind).\n"
             "        Run the helper from the deployed runtime or a fresh "
             "origin/main worktree, never a parked/dirty operator checkout."
+        )
+    # Same HEAD is not enough: a tracked edit or untracked replacement means the
+    # tree is not the verified origin/main code, which is exactly the "dirty
+    # operator checkout" the docstring/quickstart promise never to use.
+    if dirty:
+        sys.exit(
+            "[error] working tree is dirty at origin/main "
+            f"({len(dirty.splitlines())} change(s)); the new session must run "
+            "the verified origin/main tree.\n        Use the deployed runtime or "
+            "a clean fresh worktree, never a parked/dirty operator checkout."
         )
 
 
@@ -123,6 +134,30 @@ def watch_cmd(agent, project, chat, session, repo_target, rsid) -> str:
     )
 
 
+def pickup_block(channel, agent, project, chat, session, repo_target, rsid) -> list[str]:
+    """How THIS agent picks up packets, keyed to its real wake channel. A
+    persistent native watcher is printed only for watcher-backed workers; Codex
+    has no native session watcher, so it gets polling/AX guidance instead of a
+    watcher it cannot run."""
+    if channel == "watcher":
+        return [
+            "# Arm your own inbox watcher in a persistent Monitor:",
+            watch_cmd(agent, project, chat, session, repo_target, rsid),
+        ]
+    if channel == "ax_doorbell":
+        return [
+            "# You have NO native session watcher. A bound session receives",
+            "# autobridge dispatch; between turns, poll your inbox — senders wake",
+            "# you with the AX doorbell deliver.py prints when you are unbound:",
+            f"python bin/inbox.py --me {agent} --project {project} --chat {chat} \\",
+            f"  --session {session} --repo-target {repo_target} --peek --limit 5",
+        ]
+    return [
+        f"# Wake channel '{channel}': pickup follows this agent's activation",
+        "# contract (see docs/workflows/session-autobridge-runbook.md).",
+    ]
+
+
 def coworker_prompt(agent, channel, project, chat, repo_target, family) -> str:
     session = f"SESSION-{agent.upper()}-{chat.split('-')[-1]}"
     home = DEFAULT_HOMES.get(family, f"~/.{agent}")
@@ -142,24 +177,9 @@ def coworker_prompt(agent, channel, project, chat, repo_target, family) -> str:
         f"  --runtime-family {family} --runtime-session-id <YOUR_ID> \\",
         f"  --runtime-home {home} --runtime-session-source first_read",
         "",
+        "# 3. Pick up packets on YOUR wake channel:",
     ]
-    if channel == "watcher":
-        lines += [
-            "# 3. Arm your own inbox watcher in a persistent Monitor:",
-            watch_cmd(agent, project, chat, session, repo_target, "<YOUR_ID>"),
-        ]
-    elif channel == "ax_doorbell":
-        lines += [
-            "# 3. You have NO native session watcher: the sender wakes you via the",
-            "#    AX doorbell deliver.py prints. Between wakes, poll your inbox:",
-            f"python bin/inbox.py --me {agent} --project {project} --chat {chat} \\",
-            f"  --session {session} --repo-target {repo_target} --peek --limit 5",
-        ]
-    else:
-        lines += [
-            f"# 3. Wake channel is '{channel}': pickup follows this agent's activation",
-            "#    contract (see docs/workflows/session-autobridge-runbook.md).",
-        ]
+    lines += pickup_block(channel, agent, project, chat, session, repo_target, "<YOUR_ID>")
     return "\n".join(lines)
 
 
@@ -190,8 +210,11 @@ def main():
 
     agents = load_agents()
     coworkers = [c.strip() for c in args.coworkers.split(",") if c.strip()]
-    for c in coworkers:
-        agent_activation(agents, c)  # existence check, fail closed
+    # Validate EVERY identity before any side effect. The initiator was
+    # previously validated only implicitly by register_session, which runs after
+    # new_chat.py — an unknown --me left an orphan chat behind. Fail closed here.
+    for agent_id in [args.me, *coworkers]:
+        agent_activation(agents, agent_id)  # existence check, fail closed
 
     created = subprocess.run(
         [sys.executable, str(BIN / "new_chat.py"),
@@ -210,9 +233,10 @@ def main():
 
     print(f"chat_id: {chat}")
     print(f"initiator session: {my_session} ({args.me} / {args.my_runtime_session_id})")
-    print("\n=== ARM YOUR OWN INBOX WATCHER (persistent Monitor) ===")
-    print(watch_cmd(args.me, args.project, chat, my_session,
-                    args.repo_target, args.my_runtime_session_id))
+    my_channel = wake_channel(agent_activation(agents, args.me))
+    print("\n=== YOUR OWN PICKUP (do this now) ===")
+    print("\n".join(pickup_block(my_channel, args.me, args.project, chat,
+                                 my_session, args.repo_target, args.my_runtime_session_id)))
     for c in coworkers:
         channel = wake_channel(agent_activation(agents, c))
         family = {"codex": "codex_app", "gemini": "gemini_cli"}.get(c, "claude_app")

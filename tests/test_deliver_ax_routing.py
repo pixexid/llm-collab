@@ -508,5 +508,58 @@ class AxAttendedRecoveryPrintPriorityTest(unittest.TestCase):
         self.assertTrue(deliver.is_human_relay(antigravity))
 
 
-if __name__ == "__main__":  # pragma: no cover
+class AxBoundVsUnboundPrecedenceTest(unittest.TestCase):
+    """TASK-4ECB66: prove the wake precedence the fresh-session incident hinged
+    on — an exact, dispatchable Codex binding suppresses the AX doorbell (the
+    runtime trigger IS the wake), while an unbound supported Codex target is
+    classified for AX; scope refusal stays terminal. deliver.py computes this
+    inline in main(), so the behavioural cases apply deliver's own importable
+    classifier under the documented gate, and test_precedence_source_pin ties
+    that gate to the real source so the truth table cannot silently drift.
+    """
+
+    CODEX = {
+        "id": "codex",
+        "activation": {"type": "cli_session", "watcher_enabled": True, "ax_app": "Codex"},
+    }
+
+    @staticmethod
+    def _ax_required(agent, agent_id, *, sender_id, autobridge_ready, dispatch_scope_refused):
+        # Mirrors deliver.main(): pinned to source by test_precedence_source_pin.
+        wake_fallback_allowed = not autobridge_ready and not dispatch_scope_refused
+        return (
+            agent_id != "operator"
+            and wake_fallback_allowed
+            and deliver.is_ax_doorbell_target(agent, agent_id, sender_id=sender_id)
+        )
+
+    def test_bound_dispatchable_codex_suppresses_ax(self) -> None:
+        self.assertFalse(self._ax_required(
+            self.CODEX, "codex", sender_id="claude",
+            autobridge_ready=True, dispatch_scope_refused=False))
+
+    def test_unbound_codex_requires_ax(self) -> None:
+        self.assertTrue(self._ax_required(
+            self.CODEX, "codex", sender_id="claude",
+            autobridge_ready=False, dispatch_scope_refused=False))
+
+    def test_scope_refused_is_terminal_even_when_unbound(self) -> None:
+        self.assertFalse(self._ax_required(
+            self.CODEX, "codex", sender_id="claude",
+            autobridge_ready=False, dispatch_scope_refused=True))
+
+    def test_precedence_source_pin(self) -> None:
+        src = (REPO_ROOT / "bin" / "deliver.py").read_text()
+        self.assertIn(
+            "wake_fallback_allowed = not autobridge_ready and not dispatch_scope_refused",
+            src,
+            "wake precedence changed — update AxBoundVsUnboundPrecedenceTest to match",
+        )
+        # ax_doorbell_required must stay gated on wake_fallback_allowed.
+        marker = "ax_doorbell_required = ("
+        idx = src.index(marker)
+        self.assertIn("wake_fallback_allowed", src[idx:idx + 300])
+
+
+if __name__ == "__main__":
     unittest.main()
