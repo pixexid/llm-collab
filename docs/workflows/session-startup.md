@@ -204,10 +204,14 @@ Safest task-grade workflow for desktop-app agents:
    - `activation_unavailable` means the durable packet exists but neither a
      dispatchable runtime nor an explicit wake transport is configured
 2. when `ax_doorbell_required` is true, the sender rings once with the printed AX
-   command only after the native composer is provably empty. Once proven empty,
-   a busy recipient may queue the one-line pointer behind its active turn. A
-   non-empty draft or unreadable, unprovable, or `AXValue`-opaque composer state
-   means hold and recovery—never infer empty. `VERIFIED` exit 0 confirms
+   command. Do not prove the composer empty first: for Codex, composer content
+   and `AXValue` readability/opacity are never a hold, and a busy recipient is
+   not a hold either — the ring clears and overrides whatever is in the
+   composer and sends, and queues behind the recipient's active turn. Only a
+   genuine targeting/operation failure (no or ambiguous native composer target,
+   a non-Codex or unrecognized profile, an AX-trust failure, a
+   clear/type/submit failure, or post-submit identity loss) means hold and
+   recovery. `VERIFIED` exit 0 confirms
    delivery. `QUEUED (UNCONFIRMED)` exit 0 does
    not prove the pointer entered the intended thread: preserve the mailbox
    packet, record the unconfirmed blocker/follow-up, never re-ring it, and do not
@@ -226,11 +230,11 @@ Safest task-grade workflow for desktop-app agents:
    sending but preserve the packet. In an attended Codex turn, use Computer Use
    plus `bin/axsend-ensure tree --app <app> --editable-only` to remove/blank the
    competing field, select the correct window, and clear probes. Resume routine
-   AX only after verifying both the native composer identity and its provably
-   empty state through readable `AXValue`. An unreadable, unprovable, or
-   `AXValue`-opaque composer remains on attended recovery; use one idle-gated
-   Computer Use send as the bounded fallback. Never turn one targeting incident
-   into a standing AX-disabled rule.
+   AX only after verifying the native composer **target** identity is resolved
+   and unambiguous — composer content/`AXValue` readability is never the gate.
+   An opaque or unresolvable target remains on attended recovery; use one
+   idle-gated Computer Use send as the bounded fallback. Never turn one
+   targeting incident into a standing AX-disabled rule.
 
 A Claude packet that is not picked up is a watcher or binding defect: preserve
 the durable packet, record the observed blocker, and report it for repair or

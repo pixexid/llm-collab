@@ -16,10 +16,12 @@ deliver.py — Send a message from one agent to another.
 Writes the message to Chats/ (canonical record) and appends
 a pointer to the recipient's agents/{id}/inbox.json.
 
-If the Codex CLI-session recipient configures a supported AX-readable
-activation.ax_app profile, prints an AX doorbell instruction; a supported
-ax_attended_only recipient (AXValue-opaque composer) instead gets an ATTENDED
-RECOVERY REQUIRED instruction routing control to Codex (GH-1547). Codex-to-Codex delivery is a
+If the Codex CLI-session recipient configures a supported activation.ax_app
+profile, prints an AX doorbell instruction (GH-470: the ring clears/overrides any
+composer content and does not require a provably-empty or readable composer); a
+supported ax_attended_only recipient (a target whose composer cannot be
+resolved/driven at all, not merely a value-opaque one) instead gets an ATTENDED
+RECOVERY REQUIRED instruction routing control to Codex. Codex-to-Codex delivery is a
 deliberate exception:
 the durable packet is preserved, but app activation is suppressed in favor of
 Thread Coordination. Every non-Codex watcher-backed recipient is also excluded:
@@ -248,10 +250,15 @@ def ax_doorbell_app(recipient_agent: dict) -> str | None:
 
 
 def ax_attended_only(recipient_agent: dict) -> bool:
-    """GH-1547 registry hint: the target's composer is AXValue-opaque, so
-    routine AX doorbells are forbidden — only Codex-attended recovery may
-    touch it. Must agree with the axsend binary's composer opacity table
-    (tools/axbridge/send-resolution.swift); a fixture asserts they match."""
+    """Registry hint: the target's native composer cannot be resolved/driven for
+    a routine AX ring, so only Codex-attended recovery may reach it. This only
+    yields attended recovery for a no-app target or an ax_app that resolves to a
+    supported opaque profile (see is_ax_attended_recovery_target); an ax_app that
+    resolves to NO supported profile fails closed (activation_unavailable), not
+    attended recovery. Post-GH-470 this flag is NOT about a value-opaque or
+    non-empty composer of a *resolvable* Codex composer: a routine ring clears
+    and overrides that content and proceeds (see
+    tools/axbridge/send-resolution.swift routineRingDecision)."""
     return bool(recipient_agent.get("activation", {}).get("ax_attended_only"))
 
 
@@ -281,9 +288,11 @@ def is_ax_doorbell_target(
         and not is_watcher_only_target(recipient_agent, recipient_id)
         and activation.get("type") == "cli_session"
         and ax_doorbell_app(recipient_agent) is not None
-        # GH-1547: an AXValue-opaque target never gets a routine doorbell —
-        # it routes to Codex-attended recovery instead (never silently to
-        # mailbox-only).
+        # An unresolvable/undriveable target (ax_attended_only) never gets a
+        # routine doorbell — it routes to Codex-attended recovery instead (never
+        # silently to mailbox-only). GH-470: a merely value-opaque or non-empty
+        # composer of a resolvable Codex target is NOT ax_attended_only and does
+        # get the routine doorbell (the ring clears+overrides).
         and not ax_attended_only(recipient_agent)
     )
 
@@ -294,10 +303,12 @@ def is_ax_attended_recovery_target(
     *,
     sender_id: str,
 ) -> bool:
-    """A target whose composer is opaque (activation.ax_attended_only): the
-    durable packet is written as usual, but activation must be a Codex-attended
-    recovery — an `--attended` axsend inside a supervised turn when the target
-    has an ax_app, or an attended Computer-Use intervention when it does not
+    """A target that cannot be reached by a routine ring at all
+    (activation.ax_attended_only — an unresolvable/undriveable composer target,
+    not merely a value-opaque one; GH-470): the durable packet is written as
+    usual, but activation must be a Codex-attended recovery — an `--attended`
+    axsend inside a supervised turn when the target has an ax_app, or an attended
+    Computer-Use intervention when it does not
     (Antigravity). This supersedes human-relay routing for flagged targets: the
     operator is never the routine relay for an agent Codex can supervise."""
     activation = recipient_agent.get("activation", {})
@@ -816,9 +827,12 @@ def main():
         print(border)
         print()
         print(
-            f"{recipient_display} ({args.recipient}) has an AXValue-opaque composer: "
-            "emptiness cannot be proven, so a routine axsend ring must not touch it "
-            "(the binary refuses with exit 11; do not bypass with --attended yourself)."
+            f"{recipient_display} ({args.recipient})'s native composer target cannot be "
+            "resolved or verified as a safe send target, so a routine axsend ring "
+            "cannot reach it (the binary refuses with exit 11; do not bypass with "
+            "--attended yourself). GH-470: this is a target-resolution hold, not a "
+            "value-opaque or non-empty composer — a resolvable Codex composer is "
+            "cleared and overridden by a routine ring."
         )
         print()
         print(

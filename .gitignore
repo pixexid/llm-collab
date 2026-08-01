@@ -5,6 +5,7 @@
 
 # Per-agent runtime state (inbox pointers, memory, identity)
 agents/*/inbox.json
+agents/*/inbox.json.lock
 agents/*/memory.md
 agents/*/identity.md
 

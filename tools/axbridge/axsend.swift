@@ -88,6 +88,14 @@ func selectAllAndDelete(pid: pid_t) {
 func setComposerText(_ composer: AXUIElement, pid: pid_t, _ text: String) -> Bool {
     AXUIElementSetAttributeValue(composer, kAXFocusedAttribute as CFString, kCFBooleanTrue)
     usleep(80_000)
+    // GH-470 P1: element-targeted full-replacement write, then require an EXACT
+    // readback below. AXUIElementSetAttributeValue targets THIS composer element
+    // directly (not process-wide key events), so it replaces any existing draft
+    // without a focus-dependent Cmd+A/Delete that could clear the wrong control.
+    // The exact readback is what prevents a stale same-prefix draft from
+    // false-positiving: if the write is ignored, current() != text, so we fall
+    // through to the key-event path (which clears+types) rather than submitting
+    // the stale pointer.
     AXUIElementSetAttributeValue(composer, kAXValueAttribute as CFString, text as CFString)
     usleep(90_000)
     func current() -> String { str(composer, kAXValueAttribute) ?? "" }
@@ -103,15 +111,19 @@ func setComposerText(_ composer: AXUIElement, pid: pid_t, _ text: String) -> Boo
         usleep(120_000)
         return true
     }
-    func has() -> Bool { current().contains(String(text.prefix(20))) }
-    if has() { return true }
+    // Exact full-replacement readback (GH-470 P1): after the pre-clear + write,
+    // success requires the composer to read back EXACTLY the new text — a stale
+    // draft sharing a prefix can no longer false-positive. A false negative
+    // (e.g. an Electron composer that ignores/normalizes AXValue) is safe: it
+    // falls through to the key-event path below.
+    if current() == text { return true }
     // AXValue rejected — clear any draft and type as real key events.
     selectAllAndDelete(pid: pid)
     typeUnicode(pid: pid, text)
     usleep(120_000)
-    if has() { return true }
+    if current() == text { return true }
     // Electron composers (ZCode/Antigravity) accept key events but do NOT
-    // reflect the typed text back through AXValue, so has() stays false even
+    // reflect the typed text back through AXValue, so the readback stays false even
     // though the text is visibly in the field. Returning false here is the bug
     // that bit us: the caller treats it as "could not put text", aborts before
     // submitting, and LEAVES the just-typed keystrokes stuck in the composer.
@@ -731,38 +743,41 @@ func cmdRing(app: String, text: String, submit: Bool, windowIndex: Int?, dryRun:
         print(axOutcomeLine(.notDelivered(reason: "no_native_composer")))
         return 3
     }
-    // GH-1547 composer-safety gate: decide BEFORE any mutation (no clear,
-    // select-all, delete, typing, or submit happens on a refusal — including
-    // --dry-run, whose probe also populates the composer). The decision is the
-    // pure routineRingDecision; every refusal routes to Codex-attended recovery.
+    // GH-470 composer gate: a resolved composer's content and AXValue
+    // readability are NEVER a hold — the send below clears and overrides whatever
+    // is there (the recipient never types into its own composer, so any value is
+    // stray; AX send takes preference over any content, including operator
+    // typing). A busy/running recipient is not a hold either (the ring queues).
+    // The only routine refusal is an unrecognized profile: some editable field
+    // resolved but we cannot confirm it is the intended target, so fail closed
+    // rather than type into the wrong place. currentValue is read for diagnostics
+    // only. (`no_native_composer` above and set/submit failures below cover the
+    // other fail-closed cases.)
     let currentValue = str(composer, kAXValueAttribute)
     switch routineRingDecision(profile: profile, attended: attended, axValue: currentValue) {
     case .proceed:
-        if attended {
-            FileHandle.standardError.write("⚠️ ATTENDED MODE: bypassing composer-safety proof — Codex-supervised attended recovery only; key-event typing may overwrite draft state that AXValue cannot show.\n".data(using: .utf8)!)
+        if let v = currentValue, !v.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            FileHandle.standardError.write("clearing stray composer content (\(v.count) chars) — AX send takes preference (GH-470)\n".data(using: .utf8)!)
         }
-    case .refuseOpaqueProfile:
-        FileHandle.standardError.write("REFUSED (no mutation): \(app) composer is AXValue-opaque — emptiness cannot be proven, so a routine ring may not touch it. Keep the durable mailbox packet authoritative and request Codex-attended recovery; --attended is valid only inside that supervised recovery.\n".data(using: .utf8)!)
-        print(axOutcomeLine(.notDelivered(reason: "opaque_profile")))
-        return 11
-    case .refuseUnreadableValue:
-        FileHandle.standardError.write("REFUSED (no mutation): could not read \(app) composer AXValue — emptiness is unprovable right now. Re-probe with `axsend tree --app \(app) --editable-only`; if the value stays unreadable, request Codex-attended recovery. Do not retype.\n".data(using: .utf8)!)
-        print(axOutcomeLine(.notDelivered(reason: "unreadable_value")))
-        return 11
-    case .refuseNonEmptyDraft:
-        let n = currentValue?.count ?? 0
-        FileHandle.standardError.write("REFUSED (no mutation): \(app) composer holds a draft (\(n) chars) — not clobbering it. Wait for the draft to clear or request Codex-attended recovery to inspect/clear it.\n".data(using: .utf8)!)
-        print(axOutcomeLine(.notDelivered(reason: "non_empty_draft")))
+    case .refuseUnresolvedTarget:
+        FileHandle.standardError.write("REFUSED (no mutation): the routine AX doorbell is Codex-only; \(app) is not a Codex target (non-Codex or unrecognized profile), so a routine ring will not type into its composer. Use the durable mailbox / the recipient's own channel.\n".data(using: .utf8)!)
+        print(axOutcomeLine(.notDelivered(reason: "unresolved_target")))
         return 11
     }
     // AXValue if the field accepts it, else key-event typing (Electron editors
     // like ZCode/Antigravity reject AXValue and need real keystrokes).
-    if !setComposerText(composer, pid: pid, text) {
-        FileHandle.standardError.write("could not put text in composer (AXValue rejected and key-typing failed)\n".data(using: .utf8)!)
-        print(axOutcomeLine(.notDelivered(reason: "composer_set_failed")))
-        return 4
+    // A --dry-run is a side-effect-free probe: resolve the send target below
+    // WITHOUT populating the composer (send-button resolution is geometry-based
+    // and needs no text), so the probe never overwrites or clears existing
+    // composer content. Only a real (non-dry-run) send mutates.
+    if !dryRun {
+        if !setComposerText(composer, pid: pid, text) {
+            FileHandle.standardError.write("could not put text in composer (AXValue rejected and key-typing failed)\n".data(using: .utf8)!)
+            print(axOutcomeLine(.notDelivered(reason: "composer_set_failed")))
+            return 4
+        }
+        print("composer set (role=\(role(composer)))")
     }
-    print("composer set (role=\(role(composer)))")
 
     if submit {
         // Prefer the best-scoring send button that comes AFTER the composer.
@@ -811,13 +826,12 @@ func cmdRing(app: String, text: String, submit: Bool, windowIndex: Int?, dryRun:
         let bf = button.flatMap(frame).map { String(format: "x=%.0f y=%.0f", $0.x, $0.y) } ?? "none"
         let tgt = button.map { "label=\"\(label($0).prefix(20))\" sub=\"\(subrole($0))\" \(bf)" } ?? "no button"
         if dryRun {
-            // Side-effect-free probe: the composer was populated above to resolve
-            // the send target; clear it so a dry-run never leaves a stray draft
-            // (issue #77). Best-effort key-event clear (Electron-safe).
-            _ = setComposerText(composer, pid: pid, "")
+            // Side-effect-free probe: the composer was NOT populated (setComposerText
+            // is skipped on --dry-run), so there is nothing to clear and any
+            // existing composer content is left untouched (bot #471 @axsend:748).
             print(buttonOK
-                ? "DRY-RUN send target: \(tgt) — will press, then AXConfirm/key-return (not pressed; draft cleared)"
-                : "DRY-RUN no confident send button (resolved: \(tgt)) — will submit via AXConfirm/key-return only (not pressed; draft cleared)")
+                ? "DRY-RUN send target: \(tgt) — will press, then AXConfirm/key-return (not pressed; composer untouched)"
+                : "DRY-RUN no confident send button (resolved: \(tgt)) — will submit via AXConfirm/key-return only (not pressed; composer untouched)")
             return 0
         }
         // Sending to a BUSY recipient is allowed and SAFE: the app queues the
@@ -1073,19 +1087,19 @@ func cmdConfirm(app: String, text: String, windowIndex: Int?) -> Int32 {
 
     // Only the DELIVERED signal is reliable on Electron: a sent message renders
     // as a real conversation turn ABOVE the composer (AX-readable), whereas the
-    // composer's own draft/empty state is NOT reliably readable (AXValue is blank
-    // and the subtree keeps stale cached static-text nodes that false-positive a
-    // "stuck draft"). So report delivered vs not — and recovery for not-delivered
-    // is CONDITIONAL (GH-1547): re-ring only for a proven readable+empty
-    // composer; opaque/unreadable/draft states are refused by the routine ring
-    // (exit 11) and go through Codex-attended recovery.
+    // composer's own draft/empty state is NOT reliably readable. So report
+    // delivered vs not. GH-470: recovery for a Codex target does NOT require a
+    // proven-empty composer — a routine re-ring clears and overrides any content
+    // (opaque/unreadable/non-empty are not holds). Do not re-ring a QUEUED
+    // (UNCONFIRMED) send (it likely landed); a routine ring only fails closed on
+    // an unresolvable/undriveable *target*, which goes to Codex-attended recovery.
     let proc = isProcessing(win)
     if messageLanded(win, sentText: text, profileFor(app)) {
         print("delivered: text appears as a sent message\(proc ? "; recipient is processing" : "")")
         print(axOutcomeLine(.verified(method: "conversation_turn")))
         return 0
     }
-    FileHandle.standardError.write("not delivered: text is not a sent message (it's a draft or was never typed). Recovery is conditional (GH-1547): re-ring ONLY when the target composer is proven readable and empty — a routine ring refuses (exit 11) on an opaque profile, an unreadable AXValue, or a remaining draft, so for those states hold and request Codex-attended recovery instead. Confirm again after any recovery.\n".data(using: .utf8)!)
+    FileHandle.standardError.write("not delivered: text is not a sent message (it's a draft or was never typed). GH-470 recovery: a routine re-ring of a resolvable Codex composer clears and overrides any content and does not require a proven-empty composer; do NOT re-ring a QUEUED (UNCONFIRMED) send. Only an unresolvable/undriveable target fails closed (exit 11) and goes through Codex-attended recovery. Confirm again after any recovery.\n".data(using: .utf8)!)
     print(axOutcomeLine(.notDelivered(reason: "text_not_landed")))
     return 7
 }

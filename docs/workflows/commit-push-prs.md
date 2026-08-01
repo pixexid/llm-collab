@@ -487,9 +487,13 @@ heartbeat or queue owner finds actionable PR feedback that needs the implementer
 to change their branch, it must send a durable mailbox packet and inspect the
 `deliver.py` result. If `autobridge_ready: true`, the current Phase 1 route is
 session autobridge and no AX doorbell was requested. If
-`ax_doorbell_required: true`, first prove the native composer is empty, then
-ring the implementer once with AX even if busy. A non-empty, unreadable,
-unprovable, or `AXValue`-opaque composer means hold and enter recovery.
+`ax_doorbell_required: true`, ring the implementer once with AX even if busy.
+Do not prove the composer empty first: composer content and `AXValue`
+readability/opacity are never a hold for Codex, and busy alone is not a hold
+either — the ring overrides and sends. Only a genuine targeting/operation
+failure (no or ambiguous target, a non-Codex or unrecognized profile, an
+AX-trust failure, a clear/type/submit failure, or post-submit identity loss)
+means hold and enter recovery.
 `VERIFIED` exit 0 confirms delivery; `QUEUED (UNCONFIRMED)` exit 0 preserves the
 mailbox/blocker follow-up but is not exact-thread delivery proof and must not be
 re-rung. The idle input gate applies only if attended screenshot/keyboard

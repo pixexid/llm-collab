@@ -10,50 +10,51 @@ dedicated desktop apps (e.g. Claude in `/Applications/Claude.app`, Codex in
 > background inbox watcher. The heartbeat survives only as a bounded,
 > provisional **safety-fuse** (see below), not as the primary path.
 
-This desktop-app workflow applies only between distinct collaborator app
-identities. External workers such as Claude and ZCode may ring root Codex. Root
-Codex may ring those external apps **except Claude**, which is never a ring
-target: it is woken by its durable packet and the Claude app's own background
-inbox watcher. It does not apply to `codex -> codex`, root self-handoffs, or
-managed Codex workers.
+The AX doorbell is **Codex-only**: only a Codex/ChatGPT app is ever an AX ring
+target, and only as the wake for a durable `deliver.py` packet, using exactly the
+command `deliver.py` prints. Every other worker (Claude, ZCode, …) is woken by
+its durable packet and its own background watcher — never by AX. The durable
+mailbox is the sole agent-to-agent channel; AX is a wake mechanism for a
+delivered Codex packet, not a separate messaging path. It does not apply to
+`codex -> codex`, root self-handoffs, or managed Codex workers.
 
-## Communication tiers: llm-collab vs direct ax (choose by PURPOSE)
+## One channel: the durable mailbox (AX is only a Codex wake)
 
-Two channels, picked by what the message IS — not by convenience:
-
-- **llm-collab (durable / work channel)** — task delegation, handoffs, status
-  changes, anything a worker must **act on as work**, long context, and anything
-  that must **survive a thread/context loss**. It is the mailbox of record; read
-  at the worker's own pace from the inbox. If it needs to be remembered,
-  recovered, or done-as-work → it goes here.
-- **Direct ax doorbell (real-time / thinking channel)** — discuss with a
-  distinct app collaborator an implementation plan, expand/explore ideas,
-  get **feedback before opening an issue or task** (don't open issues with zero
-  prior planning/research), resolve
-  a **decision between workers**, quick coordination. Ephemeral — NOT in the
-  mailbox, so never put a task/decision/handoff *only* in a direct ax msg.
+There is a single agent-to-agent channel: the **llm-collab durable mailbox**
+(`deliver.py`). Everything — task delegation, handoffs, status changes,
+implementation discussion, feedback before opening an issue/task, a decision
+between workers, quick coordination — goes through it as a durable packet, read
+at the worker's own pace from the inbox. There is no separate ephemeral "direct
+AX" messaging channel: **AX is only the wake** for a durable Codex packet (the
+exact command `deliver.py` prints), never a place to put content that isn't also
+in the mailbox.
 
 **Ask the right worker, not the operator.** Engineering / plan / decision
-questions go to **Codex (or the worker who owns that area) over the direct
-channel**, not to the operator. The operator decides product, visual/UX, scope,
-and business calls — not technical implementation. Routing eng decisions to the
-operator stalls the work (they can't adjudicate them).
+questions go to **Codex (or the worker who owns that area) as a durable packet**,
+not to the operator. The operator decides product, visual/UX, scope, and business
+calls — not technical implementation. Routing eng decisions to the operator
+stalls the work (they can't adjudicate them).
 
-**Queueing to a busy recipient is SAFE after composer-safety proof.** A routine
-AX ring requires a provably empty native composer. Once that proof exists, do
-NOT wait/poll for the other agent to be idle merely because `Stop`, `Running`,
-or processing is visible. Only a Codex recipient may receive an AX doorbell,
-using exactly the command `deliver.py` prints; if Codex is busy, the message
-queues and is processed when its
+**Queueing to a busy recipient is SAFE, unconditionally, for Codex.** Only a
+Codex recipient may receive an AX doorbell, using exactly the command
+`deliver.py` prints. For Codex, composer content and `AXValue`
+readability/opacity are NEVER a hold, and a busy/running recipient is NOT a
+hold either: the ring clears and overrides whatever is in the composer and
+sends (Codex never types into its own composer, so any content there is
+stray; AX send takes preference over any composer content, including the
+operator actively typing). Do NOT prove the composer empty first, and do NOT
+wait/poll for Codex to be idle merely because `Stop`, `Running`, or processing
+is visible; if Codex is busy, the message queues and is processed when its
 current turn ends.
 Queueing is *insurance* that the receiver gets the message even if it already
 saw it on another channel; it does **not** corrupt the running turn (only a
 forced steer would), and queued messages are cancelable on the receiver side.
-A non-empty draft or unreadable, unprovable, or `AXValue`-opaque composer state
-means hold and enter recovery—never infer empty. The target's busy state alone
-is not a hold condition after the empty-composer proof. An ambiguous or unsafe
-target likewise enters recovery. Never stack or re-ring the same pointer; if it
-is already queued, one copy is enough.
+A routine ring fails closed only on a genuine targeting/operation failure: no
+or ambiguous native composer target, a non-Codex or unrecognized profile, an
+AX-trust failure, a clear/type/submit failure, or post-submit identity loss —
+that ambiguous/unresolved-target case, not composer content, is what enters
+recovery. Never stack or re-ring the same pointer; if it is already queued,
+one copy is enough.
 Receiver discipline: when not running, read queued messages and ignore a queued
 copy already handled from the inbox. This policy does not authorize a Codex
 self-doorbell or AX delivery to any non-Codex worker.
@@ -116,9 +117,11 @@ For delivery, run only the complete command printed by `deliver.py`; never
 hand-author a ring command.
 
 Rules: deliver the durable packet with `deliver.py` FIRST (mailbox = truth);
-prove the native composer is empty, then ring once even when the recipient is
-busy. An unreadable, unprovable, or `AXValue`-opaque composer enters recovery.
-`VERIFIED` exit 0 is confirmed;
+then ring once, even when the recipient is busy. Do not prove the composer
+empty first — for Codex, composer content and `AXValue` readability/opacity
+are never a hold, so the ring overrides and sends; only a genuine targeting
+failure (no/ambiguous target, unrecognized profile, AX-trust failure) enters
+recovery. `VERIFIED` exit 0 is confirmed;
 `QUEUED (UNCONFIRMED)` exit 0 must be recorded and followed up without re-ringing
 or claiming exact-thread delivery. Use `--dry-run` first on any new app and
 `--verify` (non-zero means the text did not land; a post-send empty composer is
@@ -135,28 +138,30 @@ for Claude. Full reference:
 
 | App | Composer write | Submit | Status |
 |-----|----------------|--------|--------|
-| Codex | `AXValue` | send-arrow `AXPress` | ✅ proven bidirectional |
+| Codex | `AXValue` | send-arrow `AXPress` | ✅ proven — content/opacity never a hold (GH-470) |
 | Claude Desktop | — | — | ⛔ never a routine target: durable packet + its own background inbox watcher |
-| ZCode | `AXValue`-opaque | attended recovery only | ⚠️ routine ring holds because emptiness is unprovable |
-| Antigravity (Gemini) | unreadable/unproven | attended recovery only | ⚠️ routine AX target unsupported until composer safety is provable |
+| ZCode | `AXValue`-opaque | attended recovery only | ⛔ never a routine AX target (non-Codex profile); attended recovery only |
+| Antigravity (Gemini) | unreadable/unproven | attended recovery only | ⛔ never a routine AX target (non-Codex, unresolved profile); attended recovery only |
 
 This target-side hold is ENFORCED (GH-1547). The registry marks ZCode and
 Antigravity `ax_attended_only`; `deliver.py` never emits a routine AX doorbell
 for them and instead prints an explicit ATTENDED RECOVERY REQUIRED instruction
 that routes control to Codex (never a silent mailbox-only fallback). The
-`axsend` binary independently refuses a routine `ring` against an opaque
-composer with exit 11 before any mutation; `--attended` (and the attended-only
-`type` command) unlock key-event typing solely inside a Codex-supervised
-recovery turn, with a loud warning.
+`axsend` binary independently refuses a routine `ring` against an unrecognized
+or opaque-profile **target** with exit 11 before any mutation; `--attended`
+(and the attended-only `type` command) unlock key-event typing solely inside a
+Codex-supervised recovery turn, with a loud warning.
 
-Routine `ring` requires readable `AXValue` proof that the native composer is
-empty. A rejected write, opaque value, unreadable state, or otherwise unprovable
-composer does not authorize automatic key-event typing: hold and use the
-attended recovery path. Low-level key-event typing may be used only within that
-recovery path after composer safety is established; it is never a blind-send
-escape hatch. Once safety is proved, recipient busy state alone does not require
-an idle wait. The doorbell works between supported distinct app identities;
-that capability does not make it a Codex-to-Codex transport.
+Routine `ring` is Codex-only. For a resolved Codex composer, content and
+`AXValue` readability/opacity are NEVER a hold: the ring clears and overrides
+whatever is there and sends, and a busy/running recipient does not require an
+idle wait — the doorbell queues instead. A rejected write, opaque profile, or
+unresolved/ambiguous **target** — never composer content — is what does not
+authorize a routine ring: hold and use the attended recovery path. Low-level
+key-event typing may be used only within that recovery path after target
+safety is established; it is never a blind-send escape hatch. The doorbell
+works between supported distinct app identities; that capability does not make
+it a Codex-to-Codex transport.
 
 ## GH-135 update-survival decision and recovery evidence
 
@@ -187,12 +192,13 @@ selected in the current implementation, and this runbook does not authorize one.
 Draft/composer-targeting failures, including the GH-1547 target-side hold, are
 a different failure class and are not TCC update-survival evidence.
 
-## Two channels: mailbox + doorbell
+## One channel (the mailbox) plus a wake (the doorbell)
 
-- **Mailbox = `llm-collab` (durable source of truth).** Every task, handoff,
-  blocker, clarification, decision, and piece of evidence is a file written with
-  `deliver.py`. Nothing load-bearing lives only in an app's visible thread.
-- **Doorbell = AX (immediate, event-driven nudge to Codex only).** When
+- **Mailbox = `llm-collab` (the single durable channel / source of truth).**
+  Every task, handoff, blocker, clarification, decision, and piece of evidence is
+  a file written with `deliver.py`. Nothing load-bearing lives only in an app's
+  visible thread. This is the message.
+- **Doorbell = AX (the wake only, to Codex only — not a second channel).** When
   `deliver.py` reports `ax_doorbell_required`, run its exact printed command to
   send one short, sender-tagged pointer to the
   durable packet. Screenshot/keyboard Computer Use is a fallback only when AX is
@@ -209,18 +215,20 @@ See `session-autobridge-runbook.md`.
 
 ## Sender identifier convention
 
-Because agents now type directly into each other's apps, every agent-to-agent
-message must carry a sender identifier so the recipient can attribute it. The
-operator never tags their own messages.
+Because a Codex AX wake ring types a pointer into Codex's app, every such ring
+must carry a sender identifier so the recipient can attribute it (the message
+itself is always the durable mailbox packet). The operator never tags their own
+messages.
 
 - `[BRIDGE <8-char-uuid-prefix>] ...` — a durable bridge pointer routed via
   `llm-collab`.
-- `[from <agent>] ...` or `[<agent> doorbell] ...` — a direct AX or fallback ring
-  (there is no message frontmatter on a direct ring, so the inline tag is what
-  disambiguates).
+- `[from <agent>] ...` or `[<agent> doorbell] ...` — the inline tag on a Codex
+  AX **wake ring** whose content is a pointer to a durable `llm-collab` packet
+  (the ring carries no frontmatter, so the tag disambiguates the sender). The
+  ring is not itself the message — the packet in the mailbox is.
 - **Untagged plain text is operator-origin by convention.** Treat a tagged
-  message as peer-agent coordination; reply/hand back through the durable
-  mailbox, not only the ring.
+  message as peer-agent coordination; the work is always the durable packet —
+  read and reply through the mailbox, never treat the ring pointer as the message.
 
 ## Ringing the doorbell
 
@@ -232,11 +240,13 @@ For task-grade work, in order:
    If sender and recipient are both `codex`, stop app routing and use Thread
    Coordination (`read_thread` / `send_message_to_thread`). Otherwise, only
    when `deliver.py` reports `ax_doorbell_required`, run its exact printed
-   command after the native
-   composer is provably empty. Once proven empty, ring even if the recipient is
-   busy. A non-empty draft or unreadable, unprovable, or `AXValue`-opaque
-   composer state means hold and recovery—never infer empty. The one-line
-   pointer may queue behind the current turn, but the ring result must be
+   command. Do not prove the composer empty first: composer content and
+   `AXValue` readability/opacity are never a hold for Codex, and the ring
+   overrides and sends. Ring even if the recipient is busy — the one-line
+   pointer queues behind the current turn. Only a genuine targeting failure
+   (no/ambiguous target, unrecognized profile, AX-trust failure,
+   clear/type/submit failure, post-submit identity loss) means hold and
+   recovery. The ring result must be
    classified as described below. Use exactly **one short,
    sender-tagged, one-line pointer** to the exact inbox/chat/message path as the
    `--text` value. Full context stays in the durable packet, never in the
@@ -255,8 +265,9 @@ For task-grade work, in order:
    that fallback path, pass the idle input gate before typing.
 5. Record the ring result in your own thread and, when relevant, in the mailbox.
 
-For non-task ad-hoc chat, the mailbox is optional, but a sender tag is still
-required. AX targets Codex only; the idle gate applies only to attended
+Every agent-to-agent message — including ad-hoc coordination — goes through the
+durable mailbox; it is never optional. AX targets Codex only and is only the wake
+for a durable Codex packet; the idle gate applies only to attended
 screenshot/keyboard Computer Use fallback for an external collaborator app.
 
 ## Idle input gate (Computer Use fallback only)
@@ -341,18 +352,20 @@ the settled UI, then records the meaningful content into the mailbox.
 
 - Recipient idle/awaiting input: safe to read the last answer and decide whether
   an explicit next ring exists.
-- Recipient still generating / shows `Stop` / creating a worktree: after the
-  native composer is provably empty, one AX ring is allowed and may queue the
-  pointer behind the active turn. If composer state is unreadable, unprovable,
-  or `AXValue`-opaque, hold and enter recovery. If the result is
+- Recipient still generating / shows `Stop` / creating a worktree: one AX ring
+  is allowed unconditionally and may queue the pointer behind the active turn
+  — do not wait for or prove an empty composer first; composer content and
+  `AXValue` readability/opacity are never a hold for Codex. Only a genuine
+  targeting failure (no/ambiguous target, unrecognized profile, AX-trust
+  failure) means hold and enter recovery. If the result is
   `QUEUED (UNCONFIRMED)`, preserve the mailbox/follow-up, never re-ring, and do
   not claim exact-thread delivery. Do not use screenshot/keyboard Computer Use
   until the idle input gate passes.
 - Computer Use cannot see the prompt/transcript: the Computer Use fallback is
   paused; record the blocker and retry that fallback after repair. AX may still
-  ring once only when it can verify the native
-  composer identity and prove its empty state through readable `AXValue`. Do
-  not fall back to CLI.
+  ring once whenever it can resolve the native composer TARGET — it does not need
+  to prove an empty composer, and composer content/`AXValue` readability are not
+  a hold (the ring clears and overrides). Do not fall back to CLI.
 - App-visible thread changed: re-read app state and confirm project/title before
   sending anything.
 - Safety-fuse heartbeat times out: record `timed_out`, delete the heartbeat, and
