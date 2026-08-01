@@ -452,6 +452,12 @@ def main():
                             f"llm-collab: {args.me}",
                             f"New message: {Path(path).stem}",
                         )
+                # seen_paths records what has been ANNOUNCED, committed BEFORE
+                # dispatch. If a dispatch below raises, the except unwinds past
+                # this point; committing after dispatch left every message in the
+                # poll eligible for re-announcement and re-dispatch on the next
+                # poll (GH-94: the observed 3x duplicate delivery to Codex).
+                seen_paths = seen_paths | new_msgs
                 if not args.session and not args.no_autobridge:
                     consumed_paths = sorted(
                         set(
@@ -463,7 +469,6 @@ def main():
                             )
                         )
                     )
-                seen_paths = seen_paths | new_msgs
         except Exception as e:
             ts_str = utc_now_str()
             emit({"ts": ts_str, "event": "error", "detail": str(e)}, args.json_output)

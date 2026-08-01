@@ -3041,10 +3041,27 @@ def execute_codex_app_server_trigger(session: dict, message: dict, runtime_home:
         }
         if model:
             turn_payload["model"] = model
+        # turn/start acceptance is the delivery boundary: once this returns, the
+        # recipient HAS the packet. Anything that raises at or before this line
+        # is a PRE-acceptance failure and stays retryable (it propagates out of
+        # the `with`). Everything after is delivered — never retried, never
+        # allowed to fall through to AX or another thread (GH-94 routing guard).
         started = client.request("turn/start", turn_payload)
         deadline = time.monotonic() + timeout_seconds
         while time.monotonic() < deadline:
-            message_payload = client.recv_json()
+            try:
+                message_payload = client.recv_json()
+            except (TimeoutError, OSError):
+                # The reply view is lost after acceptance (deadline hit inside
+                # recv, dropped connection, peer reset). Delivered-but-
+                # unobserved; stop observing, do not raise.
+                break
+            # A JSON-RPC message is an object. A valid-JSON non-object frame
+            # ([]) would raise AttributeError on .get and escape as a type the
+            # post-accept path does not treat as delivered — reject it here and
+            # keep observing until the deadline.
+            if not isinstance(message_payload, dict):
+                continue
             method = str(message_payload.get("method", ""))
             if not method:
                 continue
@@ -3060,12 +3077,12 @@ def execute_codex_app_server_trigger(session: dict, message: dict, runtime_home:
             if method.lower() in {"turn/completed", "turn/failed", "turn/cancelled"}:
                 terminal = params if isinstance(params, dict) else {"raw": params}
                 break
-        if terminal is None:
-            raise TimeoutError("Codex app-server turn did not complete before timeout")
 
     turn = terminal.get("turn") if isinstance(terminal, dict) else None
     status = turn.get("status") if isinstance(turn, dict) else None
     error = turn.get("error") if isinstance(turn, dict) else None
+    delivery_observed = terminal is not None
+    terminal_status = status if delivery_observed else "unobserved"
     return {
         "command": ["codex-app-server", str(endpoint["url"]), "turn/start", runtime_session_id],
         "derived_command": True,
@@ -3076,11 +3093,16 @@ def execute_codex_app_server_trigger(session: dict, message: dict, runtime_home:
             "source": endpoint.get("source"),
         },
         "timeout_seconds": timeout_seconds,
-        "returncode": 0 if status == "completed" else 1,
+        # turn/start was accepted, so returncode is 0 regardless of the reply
+        # outcome: the caller marks the packet processed and never re-sends. The
+        # reply detail lives in terminal_status / delivery_observed, not a
+        # failure code — a delivered turn must not read as a redelivery trigger.
+        "returncode": 0,
         "stdout": assistant_text.strip(),
-        "stderr": "" if status == "completed" else json.dumps(error or terminal, sort_keys=True),
+        "stderr": "" if status == "completed" else json.dumps(error or terminal or {"unobserved": True}, sort_keys=True),
         "turn_started": started,
-        "terminal_status": status,
+        "terminal_status": terminal_status,
+        "delivery_observed": delivery_observed,
         "notifications": notifications[-50:],
     }
 
