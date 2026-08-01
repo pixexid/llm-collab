@@ -179,7 +179,7 @@ Update CLAUDE.md to point to the new workspace bootstrap:
 <Project_Collaboration>
 Your collaboration workspace: /Users/pixexid/Projects/_collab
 
-Bootstrap: python3 /Users/pixexid/Projects/_collab/bin/session_bootstrap.py --agent claude
+Bootstrap: <runtime_root>/bin/llm-collab current_runtime.py --agent claude
 
 If the user says "check your inbox":
   python3 /Users/pixexid/Projects/_collab/bin/inbox.py --me claude --project amiga --limit 5
@@ -192,7 +192,7 @@ If the user says "check your inbox":
 
 ```bash
 # Verify new workspace is operational
-python3 bin/session_bootstrap.py --agent codex
+<runtime_root>/bin/llm-collab current_runtime.py --agent codex
 python3 bin/task_board.py --project amiga
 python3 bin/inbox.py --me codex --project amiga
 
