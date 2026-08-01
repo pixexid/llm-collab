@@ -46,6 +46,7 @@ class FakeClient:
         self._recv = list(recv_script)
         self._turn_start_ok = turn_start_ok
         self.turn_start_calls = 0
+        self.deadline_set = None
 
     def __enter__(self):
         return self
@@ -54,7 +55,7 @@ class FakeClient:
         return False
 
     def set_deadline(self, deadline):
-        pass
+        self.deadline_set = deadline
 
     def request(self, method, params=None):
         if method == "turn/start":
@@ -89,10 +90,10 @@ def _run(recv_script, *, turn_start_ok=True):
     return result, client
 
 
-def _completed(text="done"):
+def _completed(text="done", turn_id="turn-1"):
     return {
         "method": "turn/completed",
-        "params": {"turn": {"id": "turn-1", "status": "completed"},
+        "params": {"turn": {"id": turn_id, "status": "completed"},
                    "item": {"type": "agentMessage", "text": text}},
     }
 
@@ -151,6 +152,25 @@ class PostAcceptanceIsDeliveredTest(unittest.TestCase):
         with self.assertRaises(ConnectionError):
             _run([], turn_start_ok=False)
 
+    def test_absolute_deadline_is_installed_before_observation(self):
+        # A trickling peer must not stall the watcher: the observation loop must
+        # bound recv_json by the absolute deadline (bot #465 @3054).
+        _, client = _run([_completed()])
+        self.assertIsNotNone(client.deadline_set)
+
+    def test_foreign_turn_terminal_is_not_observed(self):
+        # A buffered terminal for another turn must not be accepted as ours.
+        result, _ = _run([_completed(turn_id="turn-OTHER"), TimeoutError("t")])
+        self.assertFalse(result["delivery_observed"])
+        self.assertEqual(result["terminal_status"], "unobserved")
+
+    def test_our_terminal_after_a_foreign_one_is_observed(self):
+        result, _ = _run([_completed(text="theirs", turn_id="turn-OTHER"),
+                          _completed(text="ours", turn_id="turn-1")])
+        self.assertTrue(result["delivery_observed"])
+        self.assertEqual(result["terminal_status"], "completed")
+        self.assertEqual(result["stdout"], "ours")
+
     def test_one_packet_causes_at_most_one_turn_start(self):
         for script in ([TimeoutError("t")], [ConnectionError("c")],
                        [ValueError("malformed")], [_completed()]):
@@ -181,8 +201,11 @@ class RealRecvJsonRejectsMalformedFramesTest(unittest.TestCase):
 
 
 class SeenPathsCommittedBeforeDispatchTest(unittest.TestCase):
-    """defect #1, source-pinned: the announced set must be committed before the
-    dispatch call, or a dispatch exception replays the whole poll."""
+    """defect #1, source-pinned: the ANNOUNCED set must be committed before the
+    dispatch call, or a dispatch exception re-emits the new_message announcement
+    for the whole poll. This is announcement dedup only; duplicate DISPATCH is
+    prevented by the processed-messages ledger (returncode 0 -> marked
+    processed), proven by PostAcceptanceIsDeliveredTest, not by seen_paths."""
 
     def test_seen_paths_commit_precedes_dispatch_call(self):
         src = (REPO_ROOT / "bin" / "watch_inbox.py").read_text()

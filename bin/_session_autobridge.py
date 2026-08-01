@@ -3057,7 +3057,14 @@ def execute_codex_app_server_trigger(session: dict, message: dict, runtime_home:
         # the `with`). Everything after is delivered — never retried, never
         # allowed to fall through to AX or another thread (GH-94 routing guard).
         started = client.request("turn/start", turn_payload)
+        started_turn = started.get("turn") if isinstance(started, dict) else None
+        started_turn_id = started_turn.get("id") if isinstance(started_turn, dict) else None
         deadline = time.monotonic() + timeout_seconds
+        # Bound every post-acceptance read by the ABSOLUTE deadline. Without
+        # this, _socket_read_exact resets to the full per-call timeout on each
+        # chunk, so a peer trickling bytes could hold recv_json forever and stall
+        # the whole inbox watcher. Mirrors the canonical delivery transport.
+        client.set_deadline(deadline)
         while time.monotonic() < deadline:
             try:
                 message_payload = client.recv_json()
@@ -3074,6 +3081,15 @@ def execute_codex_app_server_trigger(session: dict, message: dict, runtime_home:
                 continue
             notifications.append(method)
             params = message_payload.get("params")
+            # Only attribute output/terminals to OUR turn. A resumed thread can
+            # buffer notifications for an earlier or concurrent turn; accepting
+            # the first terminal blindly reported the wrong turn's status/output
+            # (mirrors llm_collab/canonical/codex_delivery.py turn-id check).
+            if started_turn_id is not None and isinstance(params, dict):
+                frame_turn = params.get("turn") if isinstance(params.get("turn"), dict) else None
+                frame_turn_id = params.get("turnId") or (frame_turn.get("id") if frame_turn else None)
+                if frame_turn_id is not None and frame_turn_id != started_turn_id:
+                    continue
             item = params.get("item") if isinstance(params, dict) else None
             if isinstance(item, dict) and item.get("type") == "agentMessage":
                 text = str(item.get("text", ""))
