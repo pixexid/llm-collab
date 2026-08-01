@@ -35,7 +35,7 @@ session, because a guessed id binds the wrong thread. The initiator registers
 only itself and hands each co-worker an exact setup prompt for the part only they
 can do. Freshness is a convention each worker follows: ordinary registration
 REFUSES a registration whose native id already backs a dispatchable lease
-(active, or the default `parked` when unexpired) in another (project, chat) scope
+(active, or the default `parked` when unexpired) in another chat
 (GH-468), so start a fresh native session per chat and deactivate an old lease
 before reusing its native session.
 

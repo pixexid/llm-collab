@@ -37,16 +37,13 @@ mutate_and_check "M1 helper-noop" \
     return' \
   "$T.test_gh468_native_session_active_in_another_chat_is_refused"
 
-mutate_and_check "M2 drop-chat-from-same-scope" \
-  'and other.get("chat_id") == chat_id' 'and True' \
-  "$T.test_gh468_same_id_move_to_a_different_chat_is_refused"
+mutate_and_check "M2 drop-chat-discrimination" \
+  'and other.get("chat_id") != chat_id' 'and True' \
+  "$T.test_gh468_second_lease_in_same_scope_is_allowed"
 
-mutate_and_check "M3 drop-project-from-same-scope" \
-  'other.get("project_id") == project_id
-            and other.get("chat_id") == chat_id' \
-  'True
-            and other.get("chat_id") == chat_id' \
-  "$T.test_gh468_same_chat_id_in_a_different_project_is_refused"
+mutate_and_check "M3 drop-session-discrimination" \
+  'other.get("session_id") != session_id' 'True' \
+  "$T.test_gh468_same_session_move_to_a_different_chat_is_allowed"
 
 mutate_and_check "M4 drop-other-dispatchable" \
   'and session_is_dispatchable(other)[0]' 'and True' \

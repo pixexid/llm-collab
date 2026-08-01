@@ -526,23 +526,21 @@ class SessionAutobridgeTest(unittest.TestCase):
         with patch.object(session_autobridge_lib, "SESSIONS_DIR", sessions):
             self._guard("SESSION-B", "llm-collab", "CHAT-A", "NAT-1", "active")
 
-    def test_gh468_same_id_move_to_a_different_chat_is_refused(self):
-        # Finding #1: a same-id re-registration that MOVES the native to a
-        # different chat must refuse (it is not the same lease). Deactivate first.
+    def test_gh468_same_session_move_to_a_different_chat_is_allowed(self):
+        # A record is unique per session_id, so re-registering the SAME session_id
+        # into another chat MOVES that one record (a rebind/takeover); it is not a
+        # second owner. Mirrors test_activation_lease's rebound-owner contract.
         sessions = self._sessions_with_active_native()
         with patch.object(session_autobridge_lib, "SESSIONS_DIR", sessions):
-            with self.assertRaisesRegex(ValueError, "already owns a dispatchable binding"):
-                self._guard("SESSION-A", "llm-collab", "CHAT-B", "NAT-1", "active")
+            self._guard("SESSION-A", "llm-collab", "CHAT-B", "NAT-1", "active")
 
-    def test_gh468_same_chat_id_in_a_different_project_is_refused(self):
-        # Finding #3: scope is (project_id, chat_id), not chat_id alone. Same
-        # session_id + same chat_id but a DIFFERENT project is not the same lease
-        # (a cross-project move) and must refuse — this discriminates the project
-        # component of the exact-lease exclusion.
+    def test_gh468_same_chat_different_project_different_session_is_allowed(self):
+        # Project is deliberately NOT part of the key: two projects may register
+        # under one chat_id on one native (canonical home derivation does this,
+        # test_session_register_runtime_home). The chat is the routing scope.
         sessions = self._sessions_with_active_native()
         with patch.object(session_autobridge_lib, "SESSIONS_DIR", sessions):
-            with self.assertRaisesRegex(ValueError, "already owns a dispatchable binding"):
-                self._guard("SESSION-A", "other-project", "CHAT-A", "NAT-1", "active")
+            self._guard("SESSION-B", "other-project", "CHAT-A", "NAT-1", "active")
 
     def test_gh468_different_native_id_is_allowed(self):
         sessions = self._sessions_with_active_native()
