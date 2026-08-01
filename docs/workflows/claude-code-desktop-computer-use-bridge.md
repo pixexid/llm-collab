@@ -363,9 +363,9 @@ the settled UI, then records the meaningful content into the mailbox.
   until the idle input gate passes.
 - Computer Use cannot see the prompt/transcript: the Computer Use fallback is
   paused; record the blocker and retry that fallback after repair. AX may still
-  ring once only when it can verify the native
-  composer identity and prove its empty state through readable `AXValue`. Do
-  not fall back to CLI.
+  ring once whenever it can resolve the native composer TARGET — it does not need
+  to prove an empty composer, and composer content/`AXValue` readability are not
+  a hold (the ring clears and overrides). Do not fall back to CLI.
 - App-visible thread changed: re-read app state and confirm project/title before
   sending anything.
 - Safety-fuse heartbeat times out: record `timed_out`, delete the heartbeat, and

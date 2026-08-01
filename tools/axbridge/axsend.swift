@@ -88,6 +88,16 @@ func selectAllAndDelete(pid: pid_t) {
 func setComposerText(_ composer: AXUIElement, pid: pid_t, _ text: String) -> Bool {
     AXUIElementSetAttributeValue(composer, kAXFocusedAttribute as CFString, kCFBooleanTrue)
     usleep(80_000)
+    // GH-470 P1: clear any existing draft BEFORE writing, then require an EXACT
+    // readback below. Otherwise, if a stale draft shares the new text's 20-char
+    // prefix and the AXValue write is ignored, the prefix `contains` check would
+    // false-positive and submit the stale pointer instead of the new text. With
+    // a pre-clear, an ignored AXValue write leaves the composer empty so the
+    // readback fails and we fall through to the key-event path.
+    if !text.isEmpty {
+        selectAllAndDelete(pid: pid)
+        usleep(40_000)
+    }
     AXUIElementSetAttributeValue(composer, kAXValueAttribute as CFString, text as CFString)
     usleep(90_000)
     func current() -> String { str(composer, kAXValueAttribute) ?? "" }
@@ -103,15 +113,19 @@ func setComposerText(_ composer: AXUIElement, pid: pid_t, _ text: String) -> Boo
         usleep(120_000)
         return true
     }
-    func has() -> Bool { current().contains(String(text.prefix(20))) }
-    if has() { return true }
+    // Exact full-replacement readback (GH-470 P1): after the pre-clear + write,
+    // success requires the composer to read back EXACTLY the new text — a stale
+    // draft sharing a prefix can no longer false-positive. A false negative
+    // (e.g. an Electron composer that ignores/normalizes AXValue) is safe: it
+    // falls through to the key-event path below.
+    if current() == text { return true }
     // AXValue rejected — clear any draft and type as real key events.
     selectAllAndDelete(pid: pid)
     typeUnicode(pid: pid, text)
     usleep(120_000)
-    if has() { return true }
+    if current() == text { return true }
     // Electron composers (ZCode/Antigravity) accept key events but do NOT
-    // reflect the typed text back through AXValue, so has() stays false even
+    // reflect the typed text back through AXValue, so the readback stays false even
     // though the text is visibly in the field. Returning false here is the bug
     // that bit us: the caller treats it as "could not put text", aborts before
     // submitting, and LEAVES the just-typed keystrokes stuck in the composer.

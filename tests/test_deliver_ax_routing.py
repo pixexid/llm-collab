@@ -482,6 +482,22 @@ class AxRecoveryWordingPinTest(unittest.TestCase):
         readme = (self.AXBRIDGE / "README.md").read_text()
         self.assertNotIn("proven readable and empty", readme)
 
+    def test_set_composer_text_uses_exact_readback_not_prefix_contains(self) -> None:
+        # GH-470 P1: setComposerText must clear before writing and require an
+        # EXACT readback (current() == text). The old 20-char-prefix `contains`
+        # check could false-positive on a stale same-prefix draft and submit the
+        # stale pointer. Pin both: the exact check present, the prefix check gone.
+        src = (self.AXBRIDGE / "axsend.swift").read_text()
+        self.assertIn("if current() == text { return true }", src)
+        self.assertNotIn("current().contains(String(text.prefix(20)))", src)
+        # And a clear happens before the AXValue write in setComposerText.
+        body = src[src.index("func setComposerText"):]
+        body = body[: body.index("\nfunc ")]
+        clear_at = body.index("selectAllAndDelete(pid: pid)")
+        write_at = body.index("kAXValueAttribute as CFString, text as CFString")
+        self.assertLess(clear_at, write_at,
+                        "setComposerText must clear the composer before writing (GH-470 P1)")
+
     def test_attended_recovery_banner_is_target_resolution_not_value_opacity(self) -> None:
         # GH-470: the deliver.py attended-recovery banner must describe an
         # unresolvable/undriveable TARGET, not a value-opaque/non-empty composer
