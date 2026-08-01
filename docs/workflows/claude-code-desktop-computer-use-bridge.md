@@ -10,34 +10,30 @@ dedicated desktop apps (e.g. Claude in `/Applications/Claude.app`, Codex in
 > background inbox watcher. The heartbeat survives only as a bounded,
 > provisional **safety-fuse** (see below), not as the primary path.
 
-This desktop-app workflow applies only between distinct collaborator app
-identities. External workers such as Claude and ZCode may ring root Codex. Root
-Codex may ring those external apps **except Claude**, which is never a ring
-target: it is woken by its durable packet and the Claude app's own background
-inbox watcher. It does not apply to `codex -> codex`, root self-handoffs, or
-managed Codex workers.
+The AX doorbell is **Codex-only**: only a Codex/ChatGPT app is ever an AX ring
+target, and only as the wake for a durable `deliver.py` packet, using exactly the
+command `deliver.py` prints. Every other worker (Claude, ZCode, …) is woken by
+its durable packet and its own background watcher — never by AX. The durable
+mailbox is the sole agent-to-agent channel; AX is a wake mechanism for a
+delivered Codex packet, not a separate messaging path. It does not apply to
+`codex -> codex`, root self-handoffs, or managed Codex workers.
 
-## Communication tiers: llm-collab vs direct ax (choose by PURPOSE)
+## One channel: the durable mailbox (AX is only a Codex wake)
 
-Two channels, picked by what the message IS — not by convenience:
-
-- **llm-collab (durable / work channel)** — task delegation, handoffs, status
-  changes, anything a worker must **act on as work**, long context, and anything
-  that must **survive a thread/context loss**. It is the mailbox of record; read
-  at the worker's own pace from the inbox. If it needs to be remembered,
-  recovered, or done-as-work → it goes here.
-- **Direct ax doorbell (real-time / thinking channel)** — discuss with a
-  distinct app collaborator an implementation plan, expand/explore ideas,
-  get **feedback before opening an issue or task** (don't open issues with zero
-  prior planning/research), resolve
-  a **decision between workers**, quick coordination. Ephemeral — NOT in the
-  mailbox, so never put a task/decision/handoff *only* in a direct ax msg.
+There is a single agent-to-agent channel: the **llm-collab durable mailbox**
+(`deliver.py`). Everything — task delegation, handoffs, status changes,
+implementation discussion, feedback before opening an issue/task, a decision
+between workers, quick coordination — goes through it as a durable packet, read
+at the worker's own pace from the inbox. There is no separate ephemeral "direct
+AX" messaging channel: **AX is only the wake** for a durable Codex packet (the
+exact command `deliver.py` prints), never a place to put content that isn't also
+in the mailbox.
 
 **Ask the right worker, not the operator.** Engineering / plan / decision
-questions go to **Codex (or the worker who owns that area) over the direct
-channel**, not to the operator. The operator decides product, visual/UX, scope,
-and business calls — not technical implementation. Routing eng decisions to the
-operator stalls the work (they can't adjudicate them).
+questions go to **Codex (or the worker who owns that area) as a durable packet**,
+not to the operator. The operator decides product, visual/UX, scope, and business
+calls — not technical implementation. Routing eng decisions to the operator
+stalls the work (they can't adjudicate them).
 
 **Queueing to a busy recipient is SAFE, unconditionally, for Codex.** Only a
 Codex recipient may receive an AX doorbell, using exactly the command
