@@ -510,6 +510,60 @@ class SessionAutobridgeTest(unittest.TestCase):
         return session_autobridge_cli.refuse_native_session_active_elsewhere(
             session_id, project, chat, native, family, status)
 
+    def _sessions_dir(self, *records):
+        # Write arbitrary lease records for resolver tests. iter_sessions(strict)
+        # requires the filename stem to equal session_id.
+        sessions = Path(tempfile.mkdtemp(prefix="gh468-rnf-", dir="/tmp")) / "sessions"
+        sessions.mkdir(parents=True)
+        self.addCleanup(shutil.rmtree, sessions.parent, ignore_errors=True)
+        for rec in records:
+            write_json(sessions / f"{rec['session_id']}.json", rec)
+        return sessions
+
+    def _rec(self, sid, family, native, status="active", chat="CHAT-A"):
+        return {
+            "session_id": sid, "agent_id": "claude",
+            "project_id": "llm-collab", "chat_id": chat,
+            "status": status, "runtime": {"family": family, "session_id": native},
+        }
+
+    def test_gh468_resolve_native_family_single_live_returns_it(self):
+        sessions = self._sessions_dir(self._rec("S0", "claude_app", "NAT-1"))
+        with patch.object(session_autobridge_lib, "SESSIONS_DIR", sessions):
+            self.assertEqual(
+                "claude_app",
+                session_autobridge_cli.resolve_native_family("NAT-1"),
+            )
+
+    def test_gh468_resolve_native_family_none_when_unowned(self):
+        sessions = self._sessions_dir(self._rec("S0", "claude_app", "NAT-1"))
+        with patch.object(session_autobridge_lib, "SESSIONS_DIR", sessions):
+            self.assertIsNone(session_autobridge_cli.resolve_native_family("NAT-OTHER"))
+
+    def test_gh468_resolve_native_family_ignores_stopped_prefers_live(self):
+        # A stopped lease no longer owns the native: its family must not be chosen
+        # over the LIVE owner's, even though it is written first.
+        sessions = self._sessions_dir(
+            self._rec("S0", "claude_app", "NAT-1", status="stopped"),
+            self._rec("S1", "gemini_cli", "NAT-1", status="active", chat="CHAT-B"),
+        )
+        with patch.object(session_autobridge_lib, "SESSIONS_DIR", sessions):
+            self.assertEqual(
+                "gemini_cli",
+                session_autobridge_cli.resolve_native_family("NAT-1"),
+            )
+
+    def test_gh468_resolve_native_family_ambiguous_multiple_live_fails_closed(self):
+        # Two live different-family leases share one id (the identity model allows
+        # it): a reader has no basis to choose and must fail closed.
+        sessions = self._sessions_dir(
+            self._rec("S0", "claude_app", "NAT-1", status="active", chat="CHAT-A"),
+            self._rec("S1", "gemini_cli", "NAT-1", status="active", chat="CHAT-B"),
+        )
+        with patch.object(session_autobridge_lib, "SESSIONS_DIR", sessions):
+            with self.assertRaises(session_autobridge_cli.AmbiguousNativeFamily):
+                session_autobridge_cli.resolve_native_family("NAT-1")
+
     def test_gh468_native_session_active_in_another_chat_is_refused(self):
         sessions = self._sessions_with_active_native()
         with patch.object(session_autobridge_lib, "SESSIONS_DIR", sessions):

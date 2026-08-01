@@ -1481,6 +1481,29 @@ class InboxMarkAllReadTest(unittest.TestCase):
             record = json.loads((sessions / "SESSION-READER.json").read_text())
             self.assertEqual("claude_app", record["runtime"]["family"])
 
+    def test_gh468_reader_ambiguous_native_family_fails_closed(self):
+        # Two live different-family leases share the native id: the reader cannot
+        # resolve one, so ensure_reader_session must fail closed (raise) and write
+        # no lease.
+        import _session_autobridge as sa_lib
+        sessions = Path(tempfile.mkdtemp(prefix="gh468-reader-amb-")) / "sessions"
+        sessions.mkdir(parents=True)
+        self.addCleanup(shutil.rmtree, sessions.parent, ignore_errors=True)
+        for sid, fam, chat in (("A", "claude_app", "CHAT-A"), ("B", "gemini_cli", "CHAT-B")):
+            write_json(sessions / f"SESSION-OWN-{sid}.json", {
+                "session_id": f"SESSION-OWN-{sid}", "agent_id": "codex",
+                "project_id": "amiga", "chat_id": chat, "status": "parked",
+                "lease_expires_utc": "2999-01-01T00:00:00+00:00",
+                "runtime": {"family": fam, "session_id": "NAT-1"},
+            })
+        identity = {"project": "amiga", "chat": "CHAT-C"}
+        with patch.object(sa_lib, "SESSIONS_DIR", sessions):
+            with self.assertRaises(ValueError):
+                inbox_lib.ensure_reader_session(
+                    "SESSION-READER", "codex", identity, runtime_id="NAT-1"
+                )
+            self.assertFalse((sessions / "SESSION-READER.json").exists())
+
     def test_gh468_reader_with_no_ordinary_owner_falls_back_to_reader_family(self):
         # No ordinary lease owns this native id, so there is nothing to collide
         # with: the reader is created and falls back to the synthetic "reader"

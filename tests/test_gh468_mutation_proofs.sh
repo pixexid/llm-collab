@@ -49,8 +49,13 @@ mutate_and_check "M4 drop-session-discrimination" \
   'other.get("session_id") != session_id' 'True' \
   "$T.test_gh468_same_session_move_to_a_different_chat_is_allowed"
 
+# Guard-specific anchor: session_is_dispatchable(other)[0] also appears in
+# resolve_native_family(); pin this to the guard via the preceding line.
 mutate_and_check "M5 drop-other-dispatchable" \
-  'and session_is_dispatchable(other)[0]' 'and True' \
+  'and different_scope
+            and session_is_dispatchable(other)[0]' \
+  'and different_scope
+            and True' \
   "$T.test_gh468_reuse_after_other_lease_stopped_is_allowed"
 
 mutate_and_check "M6 drop-family-discrimination" \
@@ -80,11 +85,24 @@ mutate_and_check "M9 scan-not-strict-fails-open" \
 # nothing, the reader falls back to "reader" and the (family,id) guard misses a
 # cross-scope collision with the ordinary owner. Killed by an inbox test.
 mutate_and_check "M10 reader-family-not-resolved" \
-  '            return family
-    return None' \
-  '            return None
-    return None' \
+  'return next(iter(families)) if families else None' \
+  'return None' \
   "tests.test_inbox.InboxMarkAllReadTest.test_gh468_reader_session_refuses_cross_scope_native_and_writes_nothing"
+
+# M11: resolution must consider only DISPATCHABLE leases; without it a stopped
+# old-family lease is chosen over (or alongside) the live owner. Resolver-
+# specific anchor via the preceding line.
+mutate_and_check "M11 resolver-ignores-dispatchability" \
+  'and runtime.get("session_id") == native_session_id
+            and session_is_dispatchable(other)[0]' \
+  'and runtime.get("session_id") == native_session_id
+            and True' \
+  "$T.test_gh468_resolve_native_family_ignores_stopped_prefers_live"
+
+# M12: several live families sharing an id must fail closed, not pick arbitrarily.
+mutate_and_check "M12 resolver-ambiguity-not-fail-closed" \
+  'if len(families) > 1:' 'if False:' \
+  "$T.test_gh468_resolve_native_family_ambiguous_multiple_live_fails_closed"
 
 echo "---"; [ "$fail" = 0 ] && echo "ALL MUTATIONS KILLED" || echo "SOME SURVIVED"
 exit $fail

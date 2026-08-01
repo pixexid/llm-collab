@@ -428,20 +428,33 @@ def _replace_pi_binding_or_refuse(args, runtime: dict, native_session_id, predec
     )
 
 
+class AmbiguousNativeFamily(ValueError):
+    """Several live runtime families share one native id — a reader cannot pick."""
+
+
 def resolve_native_family(native_session_id: str | None) -> str | None:
-    """The runtime family under which a native session id is already registered,
-    or None if no ordinary lease owns it.
+    """The runtime family that currently owns a native id, or None if none does.
 
     Activation readers only learn the native id (exported as
     LLM_COLLAB_READER_RUNTIME_ID), not its family — yet native IDENTITY is
     (family, id). A reader must adopt the family of the ordinary lease that owns
     this native so the GH-468 guard compares like-for-like; a synthetic label
-    would let (reader, id) slip past a real (family, id) owner. Synthetic reader
-    leases are skipped so resolution returns the real family, never another
-    reader's placeholder.
+    would let (reader, id) slip past a real (family, id) owner.
+
+    Ownership is defined by DISPATCHABLE ordinary leases only:
+      * a stopped/expired lease no longer owns the native, so its (possibly
+        different) family must not be chosen over the live owner's — selecting by
+        first-match regardless of status would guard the wrong family and miss
+        the live collision;
+      * synthetic `reader` leases are skipped so resolution returns a real
+        family, never another reader's placeholder.
+    Return the family iff EXACTLY ONE live family owns the id; None if none does.
+    If several live families share the id (which the identity model permits), a
+    reader has no basis to choose and must FAIL CLOSED, so raise rather than guess.
     """
     if not native_session_id:
         return None
+    families: set[str] = set()
     for other in iter_sessions(strict=True):
         runtime = other.get("runtime") or {}
         family = runtime.get("family")
@@ -449,9 +462,16 @@ def resolve_native_family(native_session_id: str | None) -> str | None:
             family
             and family != "reader"
             and runtime.get("session_id") == native_session_id
+            and session_is_dispatchable(other)[0]
         ):
-            return family
-    return None
+            families.add(family)
+    if len(families) > 1:
+        raise AmbiguousNativeFamily(
+            f"native session {native_session_id} is owned by multiple live runtime "
+            f"families {sorted(families)}; a reader cannot resolve one — refusing "
+            "rather than guessing"
+        )
+    return next(iter(families)) if families else None
 
 
 def refuse_native_session_active_elsewhere(
