@@ -1489,6 +1489,18 @@ def session_is_dispatchable(session: dict) -> tuple[bool, str]:
     status = session.get("status")
     if status not in {"active", "parked"}:
         return False, f"status={status}"
+    # GH-468: an activation reader's native id IS the worker's ordinary native, so
+    # native identity is (family, id). A reader created from LLM_COLLAB_READER_
+    # RUNTIME_ID alone — with no carried/resolvable family — must not become a
+    # dispatchable (reader, id) route, or a later ordinary (real_family, id)
+    # registration in another scope would not collide with or be masked by it.
+    # Keep the record as a durable activation helper (claim/consume unchanged) but
+    # non-routable until its real family is known; the ownership guard and
+    # resolve_native_family() both key off this predicate, so this alone closes it.
+    if session.get("ephemeral_reader"):
+        family = (session.get("runtime") or {}).get("family")
+        if not family or family == "reader":
+            return False, "reader_runtime_family_unresolved"
     # An `active` session's validity follows its native task: it ends when that
     # task ends or an explicit continuation supersedes it, never on a clock. A
     # TTL is not evidence that a live session died, and treating it as evidence

@@ -553,6 +553,48 @@ class SessionAutobridgeTest(unittest.TestCase):
                 session_autobridge_cli.resolve_native_family("NAT-1"),
             )
 
+    def _reader_record(self, family=None, status="parked"):
+        rec = {
+            "session_id": "SESSION-R", "agent_id": "claude",
+            "project_id": "llm-collab", "chat_id": "CHAT-A",
+            "status": status, "ephemeral_reader": True,
+            "runtime": {"session_id": "NAT-1"},
+        }
+        if family is not None:
+            rec["runtime"]["family"] = family
+        return rec
+
+    def test_gh468_ephemeral_reader_without_family_is_not_dispatchable(self):
+        ok, reason = session_autobridge_lib.session_is_dispatchable(self._reader_record())
+        self.assertFalse(ok)
+        self.assertEqual("reader_runtime_family_unresolved", reason)
+
+    def test_gh468_ephemeral_reader_legacy_reader_family_is_not_dispatchable(self):
+        ok, reason = session_autobridge_lib.session_is_dispatchable(
+            self._reader_record(family="reader"))
+        self.assertFalse(ok)
+        self.assertEqual("reader_runtime_family_unresolved", reason)
+
+    def test_gh468_ephemeral_reader_with_real_family_is_dispatchable(self):
+        ok, _ = session_autobridge_lib.session_is_dispatchable(
+            self._reader_record(family="claude_app"))
+        self.assertTrue(ok)
+
+    def test_gh468_non_reader_parked_is_still_dispatchable(self):
+        # The reader rule must not over-reach to ordinary parked leases.
+        rec = self._reader_record(family="reader")
+        del rec["ephemeral_reader"]
+        self.assertTrue(session_autobridge_lib.session_is_dispatchable(rec)[0])
+
+    def test_gh468_unresolved_reader_does_not_block_ordinary_registration(self):
+        # A non-dispatchable unresolved reader must neither collide with nor mask a
+        # later ordinary registration of the same native in another scope.
+        sessions = self._sessions_dir(self._reader_record(family="reader"))
+        with patch.object(session_autobridge_lib, "SESSIONS_DIR", sessions):
+            self._guard("SESSION-B", "llm-collab", "CHAT-B", "NAT-1", "active",
+                        family="claude_app")
+            self.assertIsNone(session_autobridge_cli.resolve_native_family("NAT-1"))
+
     def test_gh468_resolve_native_family_ambiguous_multiple_live_fails_closed(self):
         # Two live different-family leases share one id (the identity model allows
         # it): a reader has no basis to choose and must fail closed.

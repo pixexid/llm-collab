@@ -104,5 +104,21 @@ mutate_and_check "M12 resolver-ambiguity-not-fail-closed" \
   'if len(families) > 1:' 'if False:' \
   "$T.test_gh468_resolve_native_family_ambiguous_multiple_live_fails_closed"
 
+# M13: the reader-non-dispatchable branch lives in the shared predicate in a
+# DIFFERENT file; drop it and the unresolved reader becomes a route again.
+F2=bin/_session_autobridge.py
+cp "$F2" "$F2.mutbak"
+$PY - "$F2" <<'PY'
+import sys
+p = sys.argv[1]; s = open(p).read()
+old = 'if not family or family == "reader":'
+assert old in s, "M13 anchor missing"
+open(p, "w").write(s.replace(old, "if False:", 1))
+PY
+$PY -m unittest "$T.test_gh468_ephemeral_reader_without_family_is_not_dispatchable" >/dev/null 2>&1
+rc13=$?
+mv "$F2.mutbak" "$F2"
+if [ "$rc13" = 1 ]; then echo "killed: M13 reader-nondispatch-branch"; else echo "SURVIVED/ERR(rc=$rc13): M13 reader-nondispatch-branch"; fail=1; fi
+
 echo "---"; [ "$fail" = 0 ] && echo "ALL MUTATIONS KILLED" || echo "SOME SURVIVED"
 exit $fail
