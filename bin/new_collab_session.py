@@ -51,6 +51,29 @@ import subprocess
 
 sys.path.insert(0, str(Path(__file__).parent))
 from _helpers import ROOT, ensure_project, get_project, load_agents
+from _ax_trust import has_ax_doorbell_capability
+
+
+def _supports_native_registration(agent_id: str, activation: dict) -> bool:
+    """Whether an agent can back an autonomously-registered NATIVE session (the
+    only kind this helper sets up). True iff it is watcher-backed (cli_session with
+    a watcher) or has a routine-doorbell AX app (Codex/ChatGPT per Contract v10).
+
+    A human_relay has no native session and an attended-only AX identity cannot be
+    registered autonomously — both must be refused. wake_channel() alone is too
+    loose here: it returns "ax_doorbell" for ANY non-empty ax_app before checking
+    the activation type or the routine-doorbell profile allowlist, so it would
+    accept a bogus AX identity; has_ax_doorbell_capability() applies the shared
+    allowlist that deliver.py uses.
+    """
+    activation = activation or {}
+    if activation.get("ax_attended_only") or activation.get("type") == "human_relay":
+        return False
+    watcher_backed = (
+        activation.get("type") == "cli_session" and activation.get("watcher_enabled")
+    )
+    doorbell = has_ax_doorbell_capability({"id": agent_id, "activation": activation})
+    return bool(watcher_backed or doorbell)
 
 BIN = Path(__file__).parent
 DEFAULT_HOMES = {
@@ -275,26 +298,29 @@ def main():
     # coworkers must exist, and every family must be one this helper supports —
     # otherwise new_chat.py leaves an orphan chat behind. Pi/relay are refused
     # here, not routed through an unusable claude_app prompt.
-    agent_activation(agents, args.me)
+    # The initiator registers its OWN native session (below), and every coworker
+    # must too, so ALL of them — not just coworkers — need native-registration
+    # capability validated BEFORE any chat side effect. A supported family is a
+    # native family; a human_relay/attended-only/non-routine-AX identity cannot
+    # back one and would otherwise produce a bogus registration.
+    if not _supports_native_registration(args.me, agent_activation(agents, args.me)):
+        sys.exit(
+            f"[error] initiator {args.me}: this activation cannot back an "
+            "autonomously-registered native session (human_relay / attended-only / "
+            "non-routine AX). Run this helper only from a native worker."
+        )
     for agent_id, family in coworkers:
         activation = agent_activation(agents, agent_id)
         if family not in SUPPORTED_FAMILIES:
             sys.exit(f"[error] {agent_id}: family {family!r} not supported by this "
                      f"helper (use {', '.join(SUPPORTED_FAMILIES)}). Pi workers use "
                      f"`worker.py start-pi`; a human_relay has no native session.")
-        # A supported family is a NATIVE family, so the agent's activation must be
-        # able to back a native session. A human_relay has none, and an
-        # attended-only identity cannot be autonomously registered — both would
-        # otherwise pass here and produce a bogus registration while suppressing
-        # the real relay/attended fallback. Refuse before any chat side effect.
-        channel = wake_channel(activation)
-        if channel not in ("watcher", "ax_doorbell"):
+        if not _supports_native_registration(agent_id, activation):
             sys.exit(
                 f"[error] {agent_id}: activation type {activation.get('type')!r} "
-                f"(wake channel {channel!r}) has no autonomously-registerable native "
-                f"session, so it cannot back family {family!r}. A human_relay or "
-                "attended-only identity is refused here — reach it by its own "
-                "activation path, not this native-session setup."
+                f"cannot back a native session (human_relay / attended-only / "
+                f"non-routine AX), so it cannot back family {family!r}. Reach it by "
+                "its own activation path, not this native-session setup."
             )
 
     # Validate --repo-target against the project's configured repos before creating

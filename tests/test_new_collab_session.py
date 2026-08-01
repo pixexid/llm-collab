@@ -231,6 +231,29 @@ class MainPathTest(unittest.TestCase):
             agents)
         sub.run.assert_not_called()
 
+    def test_non_native_initiator_is_refused_before_chat(self):
+        # GH-469 P1 (initiator bypass): a non-native --me must be refused before
+        # new_chat.py too, not only coworkers.
+        agents = self.AGENTS + [{"id": "zcode", "activation": {"type": "human_relay"}}]
+        sub = self._run_expect_exit(
+            ["--project", "p", "--title", "t", "--me", "zcode",
+             "--my-runtime-session-id", "z", "--my-runtime-family", "claude_app",
+             "--with", "codex:codex_app", "--repo-target", "app", "--skip-currency-check"],
+            agents)
+        sub.run.assert_not_called()
+
+    def test_bogus_ax_app_coworker_is_refused(self):
+        # GH-469 P1 (wake_channel too loose): an agent with a NON-routine ax_app and
+        # no watcher would be classed ax_doorbell by wake_channel, but is not a
+        # registerable native session — the routine-doorbell allowlist must refuse it.
+        agents = self.AGENTS + [{"id": "botx", "activation": {"type": "cli_session", "ax_app": "RandomApp"}}]
+        sub = self._run_expect_exit(
+            ["--project", "p", "--title", "t", "--me", "claude",
+             "--my-runtime-session-id", "3db9", "--my-runtime-family", "claude_app",
+             "--with", "botx:claude_app", "--repo-target", "app", "--skip-currency-check"],
+            agents)
+        sub.run.assert_not_called()
+
     def test_unknown_repo_target_is_refused_before_chat(self):
         # GH-469 P2: a --repo-target not in the project's configured repos exits
         # before chat creation.

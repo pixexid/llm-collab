@@ -27,10 +27,20 @@ PY
   cp "$F.mutbak" "$F"
 }
 
-mutate_and_check "M1 drop-native-capability-guard" \
-  'if channel not in ("watcher", "ax_doorbell"):' \
+mutate_and_check "M1 drop-coworker-native-guard" \
+  'if not _supports_native_registration(agent_id, activation):' \
   'if False:' \
   "$T.test_human_relay_coworker_is_refused_before_chat"
+
+mutate_and_check "M5 drop-initiator-native-guard" \
+  'if not _supports_native_registration(args.me, agent_activation(agents, args.me)):' \
+  'if False:' \
+  "$T.test_non_native_initiator_is_refused_before_chat"
+
+mutate_and_check "M6 native-guard-trusts-any-ax-app" \
+  'doorbell = has_ax_doorbell_capability({"id": agent_id, "activation": activation})' \
+  'doorbell = bool(activation.get("ax_app"))' \
+  "$T.test_bogus_ax_app_coworker_is_refused"
 
 mutate_and_check "M2 drop-repo-target-guard" \
   'if args.repo_target not in configured_repos:' \
