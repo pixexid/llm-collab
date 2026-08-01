@@ -452,6 +452,15 @@ def main():
                             f"llm-collab: {args.me}",
                             f"New message: {Path(path).stem}",
                         )
+                # seen_paths records what has been ANNOUNCED, committed BEFORE
+                # dispatch. If a dispatch below raises, the except unwinds past
+                # this point; committing after dispatch re-emitted the
+                # new_message announcement for every packet in the poll on the
+                # next poll. This dedups ANNOUNCEMENTS only — duplicate DISPATCH
+                # is prevented by the processed-messages ledger (a delivered turn
+                # returns returncode 0 and is marked processed), not by this set,
+                # since dispatch_autobridge runs whenever `unread` is nonempty.
+                seen_paths = seen_paths | new_msgs
                 if not args.session and not args.no_autobridge:
                     consumed_paths = sorted(
                         set(
@@ -463,7 +472,6 @@ def main():
                             )
                         )
                     )
-                seen_paths = seen_paths | new_msgs
         except Exception as e:
             ts_str = utc_now_str()
             emit({"ts": ts_str, "event": "error", "detail": str(e)}, args.json_output)

@@ -2739,7 +2739,17 @@ class JsonRpcWebSocketClient:
                 self._send_frame(payload, opcode=0xA)
                 continue
             if opcode == 0x1:
+                # A JSON-RPC message is an object. Reject a valid-JSON non-object
+                # frame ([]) as ValueError HERE, before _handle_server_request
+                # calls .get -- otherwise it raised AttributeError past every
+                # catch and left an already-accepted packet redeliverable
+                # (GH-94). Malformed JSON / bad UTF-8 already raise ValueError
+                # subclasses (JSONDecodeError / UnicodeDecodeError); the
+                # post-accept loop catches ValueError, so every read path is
+                # uniform without re-wrapping them here.
                 message = json.loads(payload.decode("utf-8"))
+                if not isinstance(message, dict):
+                    raise ValueError("websocket text frame is not a JSON-RPC object")
                 if self._handle_server_request(message):
                     continue
                 return message
@@ -3041,15 +3051,45 @@ def execute_codex_app_server_trigger(session: dict, message: dict, runtime_home:
         }
         if model:
             turn_payload["model"] = model
+        # turn/start acceptance is the delivery boundary: once this returns, the
+        # recipient HAS the packet. Anything that raises at or before this line
+        # is a PRE-acceptance failure and stays retryable (it propagates out of
+        # the `with`). Everything after is delivered — never retried, never
+        # allowed to fall through to AX or another thread (GH-94 routing guard).
         started = client.request("turn/start", turn_payload)
+        started_turn = started.get("turn") if isinstance(started, dict) else None
+        started_turn_id = started_turn.get("id") if isinstance(started_turn, dict) else None
         deadline = time.monotonic() + timeout_seconds
+        # Bound every post-acceptance read by the ABSOLUTE deadline. Without
+        # this, _socket_read_exact resets to the full per-call timeout on each
+        # chunk, so a peer trickling bytes could hold recv_json forever and stall
+        # the whole inbox watcher. Mirrors the canonical delivery transport.
+        client.set_deadline(deadline)
         while time.monotonic() < deadline:
-            message_payload = client.recv_json()
+            try:
+                message_payload = client.recv_json()
+            except (TimeoutError, OSError, ValueError):
+                # The reply view is lost after acceptance: deadline hit inside
+                # recv, dropped connection/peer reset (TimeoutError/OSError), or
+                # a malformed/non-object peer frame normalized to ValueError at
+                # the recv_json parse boundary. Delivered-but-unobserved; stop
+                # observing, never raise, never retry (GH-94). recv_json now
+                # guarantees a dict on success, so no in-loop type guard.
+                break
             method = str(message_payload.get("method", ""))
             if not method:
                 continue
             notifications.append(method)
             params = message_payload.get("params")
+            # Only attribute output/terminals to OUR turn. A resumed thread can
+            # buffer notifications for an earlier or concurrent turn; accepting
+            # the first terminal blindly reported the wrong turn's status/output
+            # (mirrors llm_collab/canonical/codex_delivery.py turn-id check).
+            if started_turn_id is not None and isinstance(params, dict):
+                frame_turn = params.get("turn") if isinstance(params.get("turn"), dict) else None
+                frame_turn_id = params.get("turnId") or (frame_turn.get("id") if frame_turn else None)
+                if frame_turn_id is not None and frame_turn_id != started_turn_id:
+                    continue
             item = params.get("item") if isinstance(params, dict) else None
             if isinstance(item, dict) and item.get("type") == "agentMessage":
                 text = str(item.get("text", ""))
@@ -3060,12 +3100,12 @@ def execute_codex_app_server_trigger(session: dict, message: dict, runtime_home:
             if method.lower() in {"turn/completed", "turn/failed", "turn/cancelled"}:
                 terminal = params if isinstance(params, dict) else {"raw": params}
                 break
-        if terminal is None:
-            raise TimeoutError("Codex app-server turn did not complete before timeout")
 
     turn = terminal.get("turn") if isinstance(terminal, dict) else None
     status = turn.get("status") if isinstance(turn, dict) else None
     error = turn.get("error") if isinstance(turn, dict) else None
+    delivery_observed = terminal is not None
+    terminal_status = status if delivery_observed else "unobserved"
     return {
         "command": ["codex-app-server", str(endpoint["url"]), "turn/start", runtime_session_id],
         "derived_command": True,
@@ -3076,11 +3116,16 @@ def execute_codex_app_server_trigger(session: dict, message: dict, runtime_home:
             "source": endpoint.get("source"),
         },
         "timeout_seconds": timeout_seconds,
-        "returncode": 0 if status == "completed" else 1,
+        # turn/start was accepted, so returncode is 0 regardless of the reply
+        # outcome: the caller marks the packet processed and never re-sends. The
+        # reply detail lives in terminal_status / delivery_observed, not a
+        # failure code — a delivered turn must not read as a redelivery trigger.
+        "returncode": 0,
         "stdout": assistant_text.strip(),
-        "stderr": "" if status == "completed" else json.dumps(error or terminal, sort_keys=True),
+        "stderr": "" if status == "completed" else json.dumps(error or terminal or {"unobserved": True}, sort_keys=True),
         "turn_started": started,
-        "terminal_status": status,
+        "terminal_status": terminal_status,
+        "delivery_observed": delivery_observed,
         "notifications": notifications[-50:],
     }
 
