@@ -138,7 +138,7 @@ for Claude. Full reference:
 
 | App | Composer write | Submit | Status |
 |-----|----------------|--------|--------|
-| Codex | `AXValue` | send-arrow `AXPress` | ✅ proven bidirectional — content/opacity never a hold (GH-470) |
+| Codex | `AXValue` | send-arrow `AXPress` | ✅ proven — content/opacity never a hold (GH-470) |
 | Claude Desktop | — | — | ⛔ never a routine target: durable packet + its own background inbox watcher |
 | ZCode | `AXValue`-opaque | attended recovery only | ⛔ never a routine AX target (non-Codex profile); attended recovery only |
 | Antigravity (Gemini) | unreadable/unproven | attended recovery only | ⛔ never a routine AX target (non-Codex, unresolved profile); attended recovery only |
@@ -192,12 +192,13 @@ selected in the current implementation, and this runbook does not authorize one.
 Draft/composer-targeting failures, including the GH-1547 target-side hold, are
 a different failure class and are not TCC update-survival evidence.
 
-## Two channels: mailbox + doorbell
+## One channel (the mailbox) plus a wake (the doorbell)
 
-- **Mailbox = `llm-collab` (durable source of truth).** Every task, handoff,
-  blocker, clarification, decision, and piece of evidence is a file written with
-  `deliver.py`. Nothing load-bearing lives only in an app's visible thread.
-- **Doorbell = AX (immediate, event-driven nudge to Codex only).** When
+- **Mailbox = `llm-collab` (the single durable channel / source of truth).**
+  Every task, handoff, blocker, clarification, decision, and piece of evidence is
+  a file written with `deliver.py`. Nothing load-bearing lives only in an app's
+  visible thread. This is the message.
+- **Doorbell = AX (the wake only, to Codex only — not a second channel).** When
   `deliver.py` reports `ax_doorbell_required`, run its exact printed command to
   send one short, sender-tagged pointer to the
   durable packet. Screenshot/keyboard Computer Use is a fallback only when AX is
@@ -214,18 +215,20 @@ See `session-autobridge-runbook.md`.
 
 ## Sender identifier convention
 
-Because agents now type directly into each other's apps, every agent-to-agent
-message must carry a sender identifier so the recipient can attribute it. The
-operator never tags their own messages.
+Because a Codex AX wake ring types a pointer into Codex's app, every such ring
+must carry a sender identifier so the recipient can attribute it (the message
+itself is always the durable mailbox packet). The operator never tags their own
+messages.
 
 - `[BRIDGE <8-char-uuid-prefix>] ...` — a durable bridge pointer routed via
   `llm-collab`.
-- `[from <agent>] ...` or `[<agent> doorbell] ...` — a direct AX or fallback ring
-  (there is no message frontmatter on a direct ring, so the inline tag is what
-  disambiguates).
+- `[from <agent>] ...` or `[<agent> doorbell] ...` — the inline tag on a Codex
+  AX **wake ring** whose content is a pointer to a durable `llm-collab` packet
+  (the ring carries no frontmatter, so the tag disambiguates the sender). The
+  ring is not itself the message — the packet in the mailbox is.
 - **Untagged plain text is operator-origin by convention.** Treat a tagged
-  message as peer-agent coordination; reply/hand back through the durable
-  mailbox, not only the ring.
+  message as peer-agent coordination; the work is always the durable packet —
+  read and reply through the mailbox, never treat the ring pointer as the message.
 
 ## Ringing the doorbell
 
@@ -262,8 +265,9 @@ For task-grade work, in order:
    that fallback path, pass the idle input gate before typing.
 5. Record the ring result in your own thread and, when relevant, in the mailbox.
 
-For non-task ad-hoc chat, the mailbox is optional, but a sender tag is still
-required. AX targets Codex only; the idle gate applies only to attended
+Every agent-to-agent message — including ad-hoc coordination — goes through the
+durable mailbox; it is never optional. AX targets Codex only and is only the wake
+for a durable Codex packet; the idle gate applies only to attended
 screenshot/keyboard Computer Use fallback for an external collaborator app.
 
 ## Idle input gate (Computer Use fallback only)
