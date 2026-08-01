@@ -1433,7 +1433,8 @@ class InboxMarkAllReadTest(unittest.TestCase):
         # Terminal before reader-session creation: nothing was written.
         self.assertFalse(sessions_dir.exists() and any(sessions_dir.glob("*.json")))
 
-    def _reader_sessions_dir_with_owner(self, *, status="parked", native="NAT-1"):
+    def _reader_sessions_dir_with_owner(self, *, status="parked", native="NAT-1",
+                                        family="claude_app"):
         import _session_autobridge as sa_lib  # noqa: F401 (patched by caller)
         sessions = Path(tempfile.mkdtemp(prefix="gh468-reader-")) / "sessions"
         sessions.mkdir(parents=True)
@@ -1442,18 +1443,19 @@ class InboxMarkAllReadTest(unittest.TestCase):
             "session_id": "SESSION-OWNER", "agent_id": "codex",
             "project_id": "amiga", "chat_id": "CHAT-A",
             "status": status, "lease_expires_utc": "2999-01-01T00:00:00+00:00",
-            # ensure_reader_session stores family "reader"; native identity is
-            # (family, id), so the owner must share the family to collide.
-            "runtime": {"family": "reader", "session_id": native},
+            # An ORDINARY-family lease: the reader must resolve THIS family for the
+            # native id (its runtime id IS the registered native), not a synthetic
+            # "reader", or the (family, id) guard would miss the collision.
+            "runtime": {"family": family, "session_id": native},
         })
         return sessions
 
     def test_gh468_reader_session_refuses_cross_scope_native_and_writes_nothing(self):
-        # Finding 1: ensure_reader_session() is a second parked/dispatchable write
-        # path. A reader for a native already dispatchable in another (project,
-        # chat) must refuse AND leave no record (the refused path writes nothing).
+        # Finding 1 + reader-family P1: a reader whose native id is already owned
+        # by an ORDINARY lease in another (project, chat) must resolve that lease's
+        # family, refuse, AND leave no record (the refused path writes nothing).
         import _session_autobridge as sa_lib
-        sessions = self._reader_sessions_dir_with_owner()
+        sessions = self._reader_sessions_dir_with_owner(family="claude_app")
         identity = {"project": "nuvyr", "chat": "CHAT-B"}
         with patch.object(sa_lib, "SESSIONS_DIR", sessions):
             with self.assertRaisesRegex(ValueError, "already owns a dispatchable binding"):
@@ -1467,15 +1469,31 @@ class InboxMarkAllReadTest(unittest.TestCase):
 
     def test_gh468_reader_session_same_scope_native_is_created(self):
         # The guard must not over-block the normal reader path: a reader in the
-        # SAME (project, chat) as the owner is disambiguated, not a collision.
+        # SAME (project, chat) as the owner is disambiguated, not a collision, and
+        # it adopts the owner's real family.
         import _session_autobridge as sa_lib
-        sessions = self._reader_sessions_dir_with_owner()
+        sessions = self._reader_sessions_dir_with_owner(family="claude_app")
         identity = {"project": "amiga", "chat": "CHAT-A"}
         with patch.object(sa_lib, "SESSIONS_DIR", sessions):
             inbox_lib.ensure_reader_session(
                 "SESSION-READER", "codex", identity, runtime_id="NAT-1"
             )
-            self.assertTrue((sessions / "SESSION-READER.json").exists())
+            record = json.loads((sessions / "SESSION-READER.json").read_text())
+            self.assertEqual("claude_app", record["runtime"]["family"])
+
+    def test_gh468_reader_with_no_ordinary_owner_falls_back_to_reader_family(self):
+        # No ordinary lease owns this native id, so there is nothing to collide
+        # with: the reader is created and falls back to the synthetic "reader"
+        # family.
+        import _session_autobridge as sa_lib
+        sessions = self._reader_sessions_dir_with_owner(family="claude_app")
+        identity = {"project": "nuvyr", "chat": "CHAT-B"}
+        with patch.object(sa_lib, "SESSIONS_DIR", sessions):
+            inbox_lib.ensure_reader_session(
+                "SESSION-READER", "codex", identity, runtime_id="NAT-UNOWNED"
+            )
+            record = json.loads((sessions / "SESSION-READER.json").read_text())
+            self.assertEqual("reader", record["runtime"]["family"])
 
     def test_gh468_reader_collision_returns_structured_refusal_not_exception(self):
         # Finding A: an ownership refusal on the reader path must surface as a

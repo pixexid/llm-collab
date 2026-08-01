@@ -428,6 +428,32 @@ def _replace_pi_binding_or_refuse(args, runtime: dict, native_session_id, predec
     )
 
 
+def resolve_native_family(native_session_id: str | None) -> str | None:
+    """The runtime family under which a native session id is already registered,
+    or None if no ordinary lease owns it.
+
+    Activation readers only learn the native id (exported as
+    LLM_COLLAB_READER_RUNTIME_ID), not its family — yet native IDENTITY is
+    (family, id). A reader must adopt the family of the ordinary lease that owns
+    this native so the GH-468 guard compares like-for-like; a synthetic label
+    would let (reader, id) slip past a real (family, id) owner. Synthetic reader
+    leases are skipped so resolution returns the real family, never another
+    reader's placeholder.
+    """
+    if not native_session_id:
+        return None
+    for other in iter_sessions(strict=True):
+        runtime = other.get("runtime") or {}
+        family = runtime.get("family")
+        if (
+            family
+            and family != "reader"
+            and runtime.get("session_id") == native_session_id
+        ):
+            return family
+    return None
+
+
 def refuse_native_session_active_elsewhere(
     session_id: str,
     project_id: str,

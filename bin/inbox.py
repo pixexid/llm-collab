@@ -67,7 +67,11 @@ from _session_autobridge import (
     session_target_ids,
     _session_write_lock,
 )
-from session_autobridge import register_session, refuse_native_session_active_elsewhere
+from session_autobridge import (
+    register_session,
+    refuse_native_session_active_elsewhere,
+    resolve_native_family,
+)
 
 MAX_EXACT_SESSION_ENTRIES = 5_000
 MAX_EXACT_SESSION_BYTES = 16 * 1024 * 1024
@@ -546,7 +550,6 @@ def ensure_reader_session(
             "allowed_actions": [],
             "runtime": (
                 {
-                    "family": "reader",
                     "session_id": runtime_id,
                     "session_source": "activation_reader_env",
                 }
@@ -562,15 +565,26 @@ def ensure_reader_session(
         # already dispatchable in another (project, chat). Route it through the
         # same locked ownership seam as register — the guard raises (no write)
         # before save_session on a cross-scope collision.
+        #
+        # LLM_COLLAB_READER_RUNTIME_ID carries the REGISTERED native id, so a
+        # reader's runtime id IS the worker's ordinary native. Native identity is
+        # (family, id), so the reader must adopt the family of the ordinary lease
+        # that owns this native — a synthetic "reader" family would compare
+        # (reader, id) against (real_family, id) and miss the collision. Fall back
+        # to "reader" only when no ordinary lease owns the id (nothing to collide
+        # with). Resolve + guard + write under one lock.
         with _session_write_lock():
+            native_family = (
+                (resolve_native_family(runtime_id) or "reader") if runtime_id else None
+            )
+            if runtime_id:
+                payload["runtime"]["family"] = native_family
             refuse_native_session_active_elsewhere(
                 session_id,
                 identity["project"],
                 identity["chat"],
                 runtime_id,
-                # Native identity is (family, id); this reader stores family
-                # "reader" (see runtime above), so guard under that family.
-                "reader" if runtime_id else None,
+                native_family,
                 "parked",
             )
             save_session(payload)

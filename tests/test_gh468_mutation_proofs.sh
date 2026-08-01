@@ -67,10 +67,24 @@ mutate_and_check "M8 drop-parked-from-new-side" \
   'if not native_session_id or not native_family or status not in {"active"}:' \
   "$T.test_gh468_parked_registration_against_dispatchable_owner_is_refused"
 
+# Anchor includes the guard-specific next line so it does not match the
+# identical loop header in resolve_native_family().
 mutate_and_check "M9 scan-not-strict-fails-open" \
-  'for other in iter_sessions(strict=True):' \
-  'for other in iter_sessions():' \
+  'for other in iter_sessions(strict=True):
+        other_runtime = other.get("runtime") or {}' \
+  'for other in iter_sessions():
+        other_runtime = other.get("runtime") or {}' \
   "$T.test_gh468_malformed_lease_fails_the_ownership_scan_closed"
+
+# M10: the reader must resolve the native's REAL family; if resolution yields
+# nothing, the reader falls back to "reader" and the (family,id) guard misses a
+# cross-scope collision with the ordinary owner. Killed by an inbox test.
+mutate_and_check "M10 reader-family-not-resolved" \
+  '            return family
+    return None' \
+  '            return None
+    return None' \
+  "tests.test_inbox.InboxMarkAllReadTest.test_gh468_reader_session_refuses_cross_scope_native_and_writes_nothing"
 
 echo "---"; [ "$fail" = 0 ] && echo "ALL MUTATIONS KILLED" || echo "SOME SURVIVED"
 exit $fail
