@@ -119,10 +119,21 @@ class PostAcceptanceIsDeliveredTest(unittest.TestCase):
         self.assertFalse(result["delivery_observed"])
         self.assertEqual(result["terminal_status"], "unobserved")
 
-    def test_non_object_frame_after_acceptance_does_not_raise(self):
-        # defect #3: `[]` would hit .get on a list -> AttributeError past the
-        # catch. It must be skipped; the turn then times out as unobserved.
-        result, _ = _run([[], TimeoutError("deadline")])
+    def test_malformed_frame_after_acceptance_is_delivered_unobserved(self):
+        # defect #3: recv_json normalizes a non-object/malformed peer frame to
+        # ValueError at the parse boundary; post-acceptance that is delivered-
+        # but-unobserved, never a raise/retry.
+        result, _ = _run([ValueError("websocket text frame is not a JSON-RPC object")])
+        self.assertEqual(result["returncode"], 0)
+        self.assertFalse(result["delivery_observed"])
+        self.assertEqual(result["terminal_status"], "unobserved")
+
+    def test_malformed_json_frame_after_acceptance_is_delivered_unobserved(self):
+        # recv_json raises json.JSONDecodeError (a ValueError subclass) for a
+        # bad-JSON/bad-UTF-8 peer frame; the post-accept loop's ValueError catch
+        # must treat it as delivered-but-unobserved, not a redelivery.
+        import json as _json
+        result, _ = _run([_json.JSONDecodeError("bad", "x", 0)])
         self.assertEqual(result["returncode"], 0)
         self.assertEqual(result["terminal_status"], "unobserved")
 
@@ -142,9 +153,31 @@ class PostAcceptanceIsDeliveredTest(unittest.TestCase):
 
     def test_one_packet_causes_at_most_one_turn_start(self):
         for script in ([TimeoutError("t")], [ConnectionError("c")],
-                       [[], TimeoutError("t")], [_completed()]):
+                       [ValueError("malformed")], [_completed()]):
             _, client = _run(script)
             self.assertEqual(client.turn_start_calls, 1)
+
+
+class RealRecvJsonRejectsMalformedFramesTest(unittest.TestCase):
+    """defect #3 at the REAL parse boundary (not the FakeClient): recv_json must
+    reject a non-object / malformed text frame as ValueError before .get, so
+    _handle_server_request never hits AttributeError and every read path handles
+    it uniformly."""
+
+    def _client(self, frame_bytes):
+        client = sab.JsonRpcWebSocketClient("ws://127.0.0.1:1/", timeout_seconds=5)
+        client._recv_frame = lambda: (0x1, frame_bytes)  # text opcode
+        return client
+
+    def test_non_object_json_frame_is_value_error(self):
+        # The load-bearing guard: `[]` decodes fine but is not a dict; without
+        # the isinstance check _handle_server_request(.get) raised AttributeError.
+        with self.assertRaises(ValueError):
+            self._client(b"[]").recv_json()
+
+    def test_object_frame_is_returned(self):
+        msg = self._client(b'{"id": null, "method": "x"}').recv_json()
+        self.assertEqual(msg["method"], "x")
 
 
 class SeenPathsCommittedBeforeDispatchTest(unittest.TestCase):

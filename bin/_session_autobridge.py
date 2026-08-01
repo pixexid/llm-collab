@@ -2739,7 +2739,17 @@ class JsonRpcWebSocketClient:
                 self._send_frame(payload, opcode=0xA)
                 continue
             if opcode == 0x1:
+                # A JSON-RPC message is an object. Reject a valid-JSON non-object
+                # frame ([]) as ValueError HERE, before _handle_server_request
+                # calls .get -- otherwise it raised AttributeError past every
+                # catch and left an already-accepted packet redeliverable
+                # (GH-94). Malformed JSON / bad UTF-8 already raise ValueError
+                # subclasses (JSONDecodeError / UnicodeDecodeError); the
+                # post-accept loop catches ValueError, so every read path is
+                # uniform without re-wrapping them here.
                 message = json.loads(payload.decode("utf-8"))
+                if not isinstance(message, dict):
+                    raise ValueError("websocket text frame is not a JSON-RPC object")
                 if self._handle_server_request(message):
                     continue
                 return message
@@ -3051,17 +3061,14 @@ def execute_codex_app_server_trigger(session: dict, message: dict, runtime_home:
         while time.monotonic() < deadline:
             try:
                 message_payload = client.recv_json()
-            except (TimeoutError, OSError):
-                # The reply view is lost after acceptance (deadline hit inside
-                # recv, dropped connection, peer reset). Delivered-but-
-                # unobserved; stop observing, do not raise.
+            except (TimeoutError, OSError, ValueError):
+                # The reply view is lost after acceptance: deadline hit inside
+                # recv, dropped connection/peer reset (TimeoutError/OSError), or
+                # a malformed/non-object peer frame normalized to ValueError at
+                # the recv_json parse boundary. Delivered-but-unobserved; stop
+                # observing, never raise, never retry (GH-94). recv_json now
+                # guarantees a dict on success, so no in-loop type guard.
                 break
-            # A JSON-RPC message is an object. A valid-JSON non-object frame
-            # ([]) would raise AttributeError on .get and escape as a type the
-            # post-accept path does not treat as delivered — reject it here and
-            # keep observing until the deadline.
-            if not isinstance(message_payload, dict):
-                continue
             method = str(message_payload.get("method", ""))
             if not method:
                 continue
