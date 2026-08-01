@@ -482,9 +482,63 @@ class SessionAutobridgeTest(unittest.TestCase):
         ) as binding_write:
             with self.assertRaisesRegex(ValueError, "session payload exceeds"):
                 session_autobridge_cli.register_session(args)
+            binding_read.assert_not_called()
+            binding_write.assert_not_called()
 
-        binding_read.assert_not_called()
-        binding_write.assert_not_called()
+    # ---- GH-468: a native session may back at most one ACTIVE chat lease ----
+    def _sessions_with_active_native(self, status="active", native="NAT-1"):
+        # Self-contained temp sessions dir (no make_workspace side effects).
+        sessions = Path(tempfile.mkdtemp(prefix="gh468-", dir="/tmp")) / "sessions"
+        sessions.mkdir(parents=True)
+        self.addCleanup(shutil.rmtree, sessions.parent, ignore_errors=True)
+        write_json(
+            sessions / "SESSION-A.json",
+            {
+                "session_id": "SESSION-A", "agent_id": "claude",
+                "project_id": "llm-collab", "chat_id": "CHAT-A",
+                "status": status, "runtime": {"session_id": native},
+            },
+        )
+        return sessions
+
+    def test_gh468_native_session_active_in_another_chat_is_refused(self):
+        sessions = self._sessions_with_active_native()
+        with patch.object(session_autobridge_lib, "SESSIONS_DIR", sessions):
+            with self.assertRaisesRegex(ValueError, "already owns an active binding"):
+                session_autobridge_cli.refuse_native_session_active_elsewhere(
+                    "SESSION-B", "CHAT-B", "NAT-1", "active"
+                )
+
+    def test_gh468_same_chat_reregistration_is_allowed(self):
+        sessions = self._sessions_with_active_native()
+        with patch.object(session_autobridge_lib, "SESSIONS_DIR", sessions):
+            # A DIFFERENT lease on the SAME chat with the same native is allowed —
+            # only the chat-difference guard permits it (a different session_id, so
+            # the self-exclusion does not apply). This discriminates the chat check.
+            session_autobridge_cli.refuse_native_session_active_elsewhere(
+                "SESSION-A2", "CHAT-A", "NAT-1", "active"
+            )
+
+    def test_gh468_different_native_id_is_allowed(self):
+        sessions = self._sessions_with_active_native()
+        with patch.object(session_autobridge_lib, "SESSIONS_DIR", sessions):
+            session_autobridge_cli.refuse_native_session_active_elsewhere(
+                "SESSION-B", "CHAT-B", "NAT-2", "active"
+            )
+
+    def test_gh468_reuse_after_other_lease_stopped_is_allowed(self):
+        sessions = self._sessions_with_active_native(status="stopped")
+        with patch.object(session_autobridge_lib, "SESSIONS_DIR", sessions):
+            session_autobridge_cli.refuse_native_session_active_elsewhere(
+                "SESSION-B", "CHAT-B", "NAT-1", "active"
+            )
+
+    def test_gh468_non_active_registration_is_not_guarded(self):
+        sessions = self._sessions_with_active_native()
+        with patch.object(session_autobridge_lib, "SESSIONS_DIR", sessions):
+            session_autobridge_cli.refuse_native_session_active_elsewhere(
+                "SESSION-B", "CHAT-B", "NAT-1", "parked"
+            )
 
     def test_dispatch_refuses_capacity_before_the_runtime_side_effect(self):
         root = self.make_workspace()

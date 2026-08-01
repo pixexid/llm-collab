@@ -426,6 +426,36 @@ def _replace_pi_binding_or_refuse(args, runtime: dict, native_session_id, predec
     )
 
 
+def refuse_native_session_active_elsewhere(
+    session_id: str, chat_id: str, native_session_id: str | None, status: str
+) -> None:
+    """GH-468: a native runtime session may back at most one ACTIVE chat lease.
+
+    The canonical binding layer already enforces one mutation owner per native
+    session; this mirrors it for the ordinary session-lease register so two chats
+    cannot target the same native conversation. Refuse only when the SAME native
+    session id is already active in a DIFFERENT chat (a different lease record).
+    Same-chat re-registration, a different native id, and reuse after the other
+    lease is stopped/superseded all remain allowed (and a non-active registration
+    is never guarded).
+    """
+    if not native_session_id or status != "active":
+        return
+    for other in iter_sessions():
+        if (
+            other.get("session_id") != session_id
+            and other.get("status") == "active"
+            and other.get("chat_id") != chat_id
+            and (other.get("runtime") or {}).get("session_id") == native_session_id
+        ):
+            raise ValueError(
+                "native session already owns an active binding in "
+                f"{other.get('project_id')}/{other.get('chat_id')}/{other.get('agent_id')} "
+                f"(session {other.get('session_id')}); a native session may back only "
+                "one active chat — deactivate the other lease or use a fresh native session"
+            )
+
+
 def register_session(args) -> dict:
     agent = get_agent(args.agent)
     now = now_utc()
@@ -468,6 +498,11 @@ def register_session(args) -> dict:
             raise ValueError("--runtime-command must be a JSON array of strings")
     elif "command" in runtime and "timeout_seconds" not in runtime:
         runtime["timeout_seconds"] = args.runtime_timeout
+
+    # GH-468: a native runtime session may back at most one ACTIVE chat lease.
+    refuse_native_session_active_elsewhere(
+        args.session, args.chat, runtime.get("session_id") if runtime else None, args.status
+    )
 
     if not runtime:
         runtime = None
