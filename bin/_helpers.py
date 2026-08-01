@@ -12,6 +12,8 @@ import fcntl
 import os
 import re
 import shutil
+import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -182,17 +184,118 @@ def python_cmd() -> str:
 _agents_cache: list | None = None
 
 
+# projects.json/agents.json are tiny workspace registries (a handful of KB); a file
+# larger than this is an accident (runaway writer, wrong file, corruption), not real
+# data. AGENTS.md 'Bounded work fails closed and never truncates': cap the read and
+# refuse rather than parse an unbounded blob or truncate it.
+MAX_REGISTRY_FILE_BYTES = 1 << 20  # 1 MiB
+
+# A local registry read is instantaneous; anything slower is a stalled mount, not
+# real work. O_NONBLOCK does NOT make a regular-file open/read nonblocking on a
+# hung NFS/FUSE mount, so an elapsed-time deadline is the only real bound.
+REGISTRY_READ_DEADLINE_SECONDS = 5.0
+
+
+class _RegistryReadTimeout(Exception):
+    """The bounded registry read exceeded its elapsed-time deadline."""
+
+
+def _registry_read_error(message: str):
+    print(f"[error] {message}", file=sys.stderr)
+    sys.exit(1)
+
+
+def _read_registry_json_bounded(path: Path) -> Any:
+    """Read + parse an untrusted workspace registry file, bounded and fail-closed.
+
+    Shared read/parse seam for the project/agent registries so every caller inherits
+    the same protection against a huge/corrupt file or a hung mount. Each guard is
+    the SOLE authority for its failure (no redundant second check masking it):
+      * an elapsed-time deadline (SIGALRM itimer) around the whole open/fstat/read:
+        O_NONBLOCK does NOT make a regular-file open/read nonblocking on a stalled
+        NFS/FUSE mount, so a wall-clock deadline is the only real bound — it fails
+        closed on expiry instead of hanging every caller. (Main-thread only, as all
+        bin/ callers are; O_NONBLOCK still short-circuits a writer-less FIFO.)
+      * a regular-file requirement on that SAME descriptor (a dir/FIFO/device is
+        refused before any read);
+      * read through EOF but never beyond the cap (`remaining` = cap + 1), so a
+        file that grows in place past the cap after open is refused, not truncated
+        — reading to EOF (not to a recorded fstat size) also means an OS short read
+        just loops again, never yielding a partial result;
+      * decode strictly as UTF-8 before parsing, matching the daemon's authority
+        registry decode — an auto-detected UTF-16/BOM blob the daemon rejects must
+        not be accepted here, or shared authority semantics split;
+      * invalid JSON is a refusal, not a silent empty result.
+    Fails closed (stderr + exit 1), matching this module's existing registry-read
+    error style. Absence is the caller's concern (checked before calling).
+    """
+    def _on_deadline(_signum, _frame):
+        raise _RegistryReadTimeout()
+
+    previous_handler = signal.signal(signal.SIGALRM, _on_deadline)
+    signal.setitimer(signal.ITIMER_REAL, REGISTRY_READ_DEADLINE_SECONDS)
+    try:
+        try:
+            descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+        except FileNotFoundError:
+            # Absence is the caller's concern (agents.json missing is fatal;
+            # projects.json missing yields []); propagate it. Crucially this
+            # open() — the earliest filesystem op, and the one that hangs on a
+            # stalled mount — is inside the deadline, so a stalled stat/open on a
+            # genuinely-missing-vs-hung path fails closed rather than blocking.
+            raise
+        except OSError as error:
+            _registry_read_error(f"cannot open {path}: {error}")
+        try:
+            info = os.fstat(descriptor)
+            if not stat.S_ISREG(info.st_mode):
+                _registry_read_error(f"{path} is not a regular file; refusing to read it")
+            chunks: list[bytes] = []
+            remaining = MAX_REGISTRY_FILE_BYTES + 1
+            while remaining > 0:
+                chunk = os.read(descriptor, remaining)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+        finally:
+            os.close(descriptor)
+    except _RegistryReadTimeout:
+        _registry_read_error(
+            f"{path} read exceeded {REGISTRY_READ_DEADLINE_SECONDS}s (hung mount?); "
+            "refusing")
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+    raw = b"".join(chunks)
+    if len(raw) > MAX_REGISTRY_FILE_BYTES:
+        _registry_read_error(
+            f"{path} exceeds the {MAX_REGISTRY_FILE_BYTES} byte limit; refusing to parse it")
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as error:
+        _registry_read_error(f"{path} is not valid UTF-8: {error}")
+    try:
+        return json.loads(text)
+    except ValueError as error:
+        _registry_read_error(f"{path} is not valid JSON: {error}")
+
+
 def load_agents() -> list[dict]:
     global _agents_cache
     if _agents_cache is None:
-        if not AGENTS_FILE.exists():
+        # No pre-read .exists() stat: it would run outside the read deadline and
+        # hang on a stalled mount. The bounded read covers open() and surfaces a
+        # genuinely-missing file as FileNotFoundError.
+        try:
+            payload = _read_registry_json_bounded(AGENTS_FILE)
+        except FileNotFoundError:
             print(
                 f"[error] agents.json not found at {ROOT}\n"
                 "Run: python scripts/init.py",
                 file=sys.stderr,
             )
             sys.exit(1)
-        payload = json.loads(AGENTS_FILE.read_text())
         _agents_cache = payload.get("agents", [])
     return _agents_cache
 
@@ -252,9 +355,14 @@ _projects_cache: list | None = None
 def load_projects() -> list[dict]:
     global _projects_cache
     if _projects_cache is None:
-        if not PROJECTS_FILE.exists():
-            return []
-        payload = json.loads(PROJECTS_FILE.read_text())
+        # No pre-read .exists() stat (see load_agents): an absent projects.json is
+        # not an error — it yields []. The bounded read covers open() under the
+        # deadline and surfaces absence as FileNotFoundError.
+        try:
+            payload = _read_registry_json_bounded(PROJECTS_FILE)
+        except FileNotFoundError:
+            _projects_cache = []
+            return _projects_cache
         _projects_cache = payload.get("projects", [])
     return _projects_cache
 
