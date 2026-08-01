@@ -1288,7 +1288,7 @@ class InboxMarkAllReadTest(unittest.TestCase):
             Path(path).name,
             "--json",
             env={
-                "LLM_COLLAB_READER_RUNTIME_ID": "runtime-a",
+                "LLM_COLLAB_READER_RUNTIME_ID": "runtime-a", "LLM_COLLAB_READER_RUNTIME_FAMILY": "codex_app",
                 "LLM_COLLAB_READER_PID": str(os.getpid()),
             },
         )
@@ -1330,7 +1330,7 @@ class InboxMarkAllReadTest(unittest.TestCase):
             "--packet",
             Path(path).name,
             "--json",
-            env={"LLM_COLLAB_READER_RUNTIME_ID": "runtime-a"},
+            env={"LLM_COLLAB_READER_RUNTIME_ID": "runtime-a", "LLM_COLLAB_READER_RUNTIME_FAMILY": "codex_app"},
         )
         self.assertEqual(0, first.returncode, first.stderr)
 
@@ -1343,7 +1343,7 @@ class InboxMarkAllReadTest(unittest.TestCase):
             Path(path).name,
             "--peek",
             "--json",
-            env={"LLM_COLLAB_READER_RUNTIME_ID": "runtime-b"},
+            env={"LLM_COLLAB_READER_RUNTIME_ID": "runtime-b", "LLM_COLLAB_READER_RUNTIME_FAMILY": "codex_app"},
         )
 
         self.assertEqual(0, observed.returncode, observed.stderr)
@@ -1364,7 +1364,7 @@ class InboxMarkAllReadTest(unittest.TestCase):
             Path(path).name,
             "--json",
             env={
-                "LLM_COLLAB_READER_RUNTIME_ID": "runtime-a",
+                "LLM_COLLAB_READER_RUNTIME_ID": "runtime-a", "LLM_COLLAB_READER_RUNTIME_FAMILY": "codex_app",
                 "LLM_COLLAB_READER_PID": str(os.getpid()),
             },
         )
@@ -1383,7 +1383,7 @@ class InboxMarkAllReadTest(unittest.TestCase):
             Path(path).name,
             "--json",
             env={
-                "LLM_COLLAB_READER_RUNTIME_ID": "runtime-b",
+                "LLM_COLLAB_READER_RUNTIME_ID": "runtime-b", "LLM_COLLAB_READER_RUNTIME_FAMILY": "codex_app",
                 "LLM_COLLAB_READER_PID": str(os.getpid()),
             },
         )
@@ -1659,7 +1659,7 @@ class InboxMarkAllReadTest(unittest.TestCase):
             "--packet",
             Path(path).name,
             "--json",
-            env={"LLM_COLLAB_READER_RUNTIME_ID": "runtime-a"},
+            env={"LLM_COLLAB_READER_RUNTIME_ID": "runtime-a", "LLM_COLLAB_READER_RUNTIME_FAMILY": "codex_app"},
         )
         self.assertEqual(0, first.returncode, first.stderr)
         first_gate = json.loads(first.stdout)["messages"][0]["activation_gate"]
@@ -1710,7 +1710,7 @@ class InboxMarkAllReadTest(unittest.TestCase):
             "--packet",
             Path(path).name,
             "--json",
-            env={"LLM_COLLAB_READER_RUNTIME_ID": "runtime-b"},
+            env={"LLM_COLLAB_READER_RUNTIME_ID": "runtime-b", "LLM_COLLAB_READER_RUNTIME_FAMILY": "codex_app"},
         )
 
         self.assertEqual(0, second.returncode, second.stderr)
