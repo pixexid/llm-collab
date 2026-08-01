@@ -1,0 +1,120 @@
+{
+  "fixture": "paseo-phase0",
+  "version": "0.2.5",
+  "capture": {
+    "provider": "pi",
+    "agent_kind": "fresh_paseo_managed_agent",
+    "llm_collab_pi_worker_reused": false,
+    "daemon_home": "<DISPOSABLE_PASEO_HOME>",
+    "repository": "<DISPOSABLE_REPOSITORY>",
+    "host": "127.0.0.1:<DISPOSABLE_PORT>"
+  },
+  "identity": {
+    "full_id_lookup": {
+      "input": "<REDACTED_AGENT_ID>",
+      "result": {
+        "Id": "<REDACTED_AGENT_ID>",
+        "Provider": "pi",
+        "Status": "idle",
+        "PendingPermissions": []
+      }
+    },
+    "unique_prefix_lookup": {
+      "input": "<REDACTED_SHORT_ID>",
+      "result": "resolved in installed CLI; adapter input remains full-ID-only"
+    },
+    "ambiguous_prefix_refusal": {
+      "input": "c",
+      "error": {
+        "code": "INSPECT_FAILED",
+        "message": "Failed to inspect agent: Agent identifier \"c\" is ambiguous (<REDACTED_SHORT_ID>, <REDACTED_SHORT_ID>)"
+      }
+    },
+    "missing_full_id": {
+      "error": {
+        "code": "INSPECT_FAILED",
+        "message": "Failed to inspect agent: Agent not found: <REDACTED_AGENT_ID>"
+      }
+    }
+  },
+  "lifecycle": {
+    "running": {
+      "Status": "running",
+      "PendingPermissions": []
+    },
+    "idle": {
+      "Status": "idle",
+      "PendingPermissions": []
+    },
+    "permission_surface": {
+      "observed": false,
+      "permit_ls": [],
+      "parser_shape": {
+        "Status": "running",
+        "PendingPermissions": ["<REDACTED_PERMISSION>" ]
+      }
+    },
+    "error": {
+      "error": {
+        "code": "DAEMON_NOT_RUNNING",
+        "message": "Cannot connect to daemon at <DISPOSABLE_HOST>: connect ECONNREFUSED"
+      }
+    },
+    "agent_create_failed": {
+      "error": {
+        "code": "AGENT_CREATE_FAILED",
+        "message": "Failed to create agent: <REDACTED_PROVIDER_ERROR>"
+      }
+    }
+  },
+  "transport": {
+    "send_no_wait": {
+      "agentId": "<REDACTED_AGENT_ID>",
+      "status": "sent",
+      "message": "Message sent, not waiting for completion"
+    },
+    "send_wait": {
+      "agentId": "<REDACTED_AGENT_ID>",
+      "status": "completed",
+      "message": "Agent completed processing the message"
+    },
+    "wait_idle": {
+      "agentId": "<REDACTED_AGENT_ID>",
+      "status": "idle",
+      "message": "Agent is idle. Last 5 activity items: <REDACTED_TIMELINE>"
+    },
+    "busy_send": {
+      "original": {
+        "status": "sent",
+        "message": "Message sent, not waiting for completion"
+      },
+      "replacement": {
+        "status": "sent",
+        "message": "Message sent, not waiting for completion"
+      },
+      "timeline": [
+        "[User] Run <REDACTED_LONG_TASK> <REDACTED_ORIGINAL_MARKER>",
+        "[Shell] <REDACTED_LONG_TASK>",
+        "[User] Print exactly <REDACTED_REPLACEMENT_MARKER>",
+        "<REDACTED_REPLACEMENT_MARKER>"
+      ],
+      "original_marker_observed": false,
+      "replacement_marker_observed": true
+    },
+    "correlation": {
+      "send_fields": ["agentId", "status", "message"],
+      "per_send_id_fields": [],
+      "stable_exact_per_send_id": false
+    }
+  },
+  "failure_boundary": {
+    "before_submission": ["DAEMON_NOT_RUNNING", "AGENT_NOT_FOUND", "AGENT_CREATE_FAILED"],
+    "possibly_after_acceptance": ["status=sent", "wait timeout", "disconnect after send"],
+    "native_completed_is_not_canonical_ack": true
+  },
+  "decision": {
+    "outcome": "proceed_to_future_adapter_seam",
+    "constraint": "synchronous_best_effort_only_until_a_stable_correlation_or_native_ack_is_proven",
+    "phase0_only": true
+  }
+}
