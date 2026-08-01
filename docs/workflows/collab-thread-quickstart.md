@@ -29,11 +29,13 @@ unregistered project is refused by the tooling rather than guessed at, so this i
 optional. Missing agents go in `agents.json` the same way.
 
 **A new collab session is new for _everyone_.** It is not the reuse of whatever
-binding happened to be lying around. Each worker gets a fresh native session and
+binding happened to be lying around. Each worker starts a fresh native session and
 registers *its own* — the initiator never discovers or registers a co-worker's
 session, because a guessed id binds the wrong thread. The initiator registers
 only itself and hands each co-worker an exact setup prompt for the part only they
-can do.
+can do. Freshness is a convention each worker follows: ordinary registration does
+not yet reject a native id already active in another chat, so do not reuse one
+across chats (the enforcing registration-layer guard is tracked in GH-468).
 
 **The one-command path** does the initiator's share and prints those prompts:
 
