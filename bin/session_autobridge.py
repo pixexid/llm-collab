@@ -453,7 +453,10 @@ def refuse_native_session_active_elsewhere(
     """
     if not native_session_id or status != "active":
         return
-    for other in iter_sessions():
+    # strict=True: an unreadable/malformed lease must fail this authority scan
+    # closed (refuse the registration) rather than be skipped as absent — a
+    # corrupt record could be the active owner of this very native session.
+    for other in iter_sessions(strict=True):
         same_lease = (
             other.get("session_id") == session_id
             and other.get("project_id") == project_id

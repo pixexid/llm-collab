@@ -550,6 +550,18 @@ class SessionAutobridgeTest(unittest.TestCase):
         with patch.object(session_autobridge_lib, "SESSIONS_DIR", sessions):
             self._guard("SESSION-B", "llm-collab", "CHAT-B", "NAT-1", "parked")
 
+    def test_gh468_malformed_lease_fails_the_ownership_scan_closed(self):
+        # Finding: the ownership scan is an authority decision, so a malformed
+        # (unreadable) lease must fail CLOSED — refuse — not be skipped as absent
+        # (it could be the active owner of this native session).
+        sessions = Path(tempfile.mkdtemp(prefix="gh468-", dir="/tmp")) / "sessions"
+        sessions.mkdir(parents=True)
+        self.addCleanup(shutil.rmtree, sessions.parent, ignore_errors=True)
+        (sessions / "SESSION-BAD.json").write_text("{not valid json")
+        with patch.object(session_autobridge_lib, "SESSIONS_DIR", sessions):
+            with self.assertRaisesRegex(ValueError, "malformed session record"):
+                self._guard("SESSION-B", "llm-collab", "CHAT-B", "NAT-1", "active")
+
     def test_gh468_write_lock_is_reentrant(self):
         # Finding #2 prerequisite: the register write lock must be reentrant so
         # the ownership scan can be held across save_session (which re-acquires

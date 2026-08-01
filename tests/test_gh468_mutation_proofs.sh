@@ -54,5 +54,10 @@ mutate_and_check "M5 guard-non-active" \
   'if not native_session_id or status == "__never__":' \
   "$T.test_gh468_non_active_registration_is_not_guarded"
 
+mutate_and_check "M6 scan-not-strict-fails-open" \
+  'for other in iter_sessions(strict=True):' \
+  'for other in iter_sessions():' \
+  "$T.test_gh468_malformed_lease_fails_the_ownership_scan_closed"
+
 echo "---"; [ "$fail" = 0 ] && echo "ALL MUTATIONS KILLED" || echo "SOME SURVIVED"
 exit $fail

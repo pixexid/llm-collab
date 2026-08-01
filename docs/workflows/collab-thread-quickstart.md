@@ -34,8 +34,9 @@ registers *its own* — the initiator never discovers or registers a co-worker's
 session, because a guessed id binds the wrong thread. The initiator registers
 only itself and hands each co-worker an exact setup prompt for the part only they
 can do. Freshness is a convention each worker follows: ordinary registration does
-not yet reject a native id already active in another chat, so do not reuse one
-across chats (the enforcing registration-layer guard is tracked in GH-468).
+REFUSES an active registration whose native id is already active in another
+(project, chat) lease (GH-468), so start a fresh native session per chat and
+deactivate an old lease before reusing its native session.
 
 **The one-command path** does the initiator's share and prints those prompts:
 

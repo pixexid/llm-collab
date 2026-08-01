@@ -116,7 +116,7 @@ def load_session(session_id: str) -> dict:
     return payload
 
 
-def iter_sessions(agent_id: str | None = None) -> list[dict]:
+def iter_sessions(agent_id: str | None = None, *, strict: bool = False) -> list[dict]:
     try:
         scan = os.scandir(SESSIONS_DIR)
     except FileNotFoundError:
@@ -144,7 +144,13 @@ def iter_sessions(agent_id: str | None = None) -> list[dict]:
             )
             spent += len(raw)
             session = json.loads(raw.decode("utf-8"))
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as error:
+            # Default: skip a corrupt record (a best-effort listing). strict:
+            # fail closed — an authority scan (e.g. the GH-468 native-session
+            # ownership guard) must not treat an unreadable record as absent and
+            # let a duplicate active owner through.
+            if strict:
+                raise ValueError(f"malformed session record {path.stem}: {error}") from error
             continue
         if not isinstance(session, dict):
             raise ValueError(f"Malformed session: {path.stem}")
