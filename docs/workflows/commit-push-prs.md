@@ -770,7 +770,7 @@ Use:
   --source <source_worktree>
 ```
 
-The deploy command validates `origin/main` ancestry and the contract before
+The deploy command validates an exact `origin/main` source and the contract before
 resetting only the deployed runtime's tracked files. It preserves source-checkout
 dirt, runtime-state symlinks, and private files.
 

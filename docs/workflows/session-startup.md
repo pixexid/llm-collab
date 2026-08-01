@@ -38,7 +38,8 @@ Safe refresh flow:
   --source <source_worktree>
 ```
 
-The deploy command fetches and validates only the named source before resetting
+The deploy command requires the named source to be an exact `origin/main`, then
+resets
 the deployed runtime's tracked files. It leaves runtime-state symlinks and
 source-checkout files untouched. If the source is stale or its contract differs
 from `origin/main`, it refuses before changing the target.

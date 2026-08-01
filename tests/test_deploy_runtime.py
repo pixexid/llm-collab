@@ -12,6 +12,18 @@ import deploy_runtime
 
 
 class DeployRuntimeTest(unittest.TestCase):
+    def test_source_head_rejects_unmerged_feature_head(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir)
+            (source / "AGENTS.md").write_text("<!-- CONTRACT_VERSION: 10 -->\n")
+            with patch.object(
+                deploy_runtime,
+                "git",
+                side_effect=["", "origin-sha", "feature-sha"],
+            ):
+                with self.assertRaisesRegex(deploy_runtime.DeployError, "exact origin/main"):
+                    deploy_runtime.source_head(source)
+
     def test_deploy_refreshes_target_only_after_source_gate(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             source = Path(temp_dir) / "source"

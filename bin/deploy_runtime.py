@@ -42,6 +42,10 @@ def source_head(source: Path) -> tuple[str, str]:
     git(source, "fetch", "origin", "main", "--quiet")
     origin_main = git(source, "rev-parse", "origin/main")
     head = git(source, "rev-parse", "HEAD")
+    if head != origin_main:
+        raise DeployError(
+            f"source must be exact origin/main: origin/main={origin_main} HEAD={head}"
+        )
     ancestry = subprocess.run(
         ["git", "-C", str(source), "merge-base", "--is-ancestor", "origin/main", "HEAD"],
         timeout=30,
