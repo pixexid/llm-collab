@@ -227,5 +227,25 @@ class StaleAnnouncementTest(unittest.TestCase):
         self.assertIn("including anything you report", text)
 
 
+class WatcherReloadTest(unittest.TestCase):
+    def test_start_watcher_reloads_the_deployed_ecosystem(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            watcher = root / "bin" / "pm2_watchers.py"
+            watcher.parent.mkdir()
+            watcher.touch()
+            with (
+                patch.object(session_bootstrap, "ROOT", root),
+                patch.object(
+                    session_bootstrap.subprocess,
+                    "run",
+                    return_value=completed(),
+                ) as run,
+            ):
+                self.assertEqual({"status": "ok"}, session_bootstrap.start_watcher("claude"))
+
+        self.assertEqual("restart", run.call_args.args[0][2])
+
+
 if __name__ == "__main__":
     unittest.main()

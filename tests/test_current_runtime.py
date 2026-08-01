@@ -23,6 +23,8 @@ class CurrentRuntimeTest(unittest.TestCase):
                 return completed(stdout="same-sha\n")
             if list(command) == ["rev-parse", "HEAD"]:
                 return completed(stdout="same-sha\n")
+            if list(command) == ["status", "--porcelain=v1", "--untracked-files=no"]:
+                return completed()
             if list(command) == ["show", "origin/main:AGENTS.md"]:
                 return completed(stdout="<!-- CONTRACT_VERSION: 10 -->\n")
             raise AssertionError(command)
@@ -36,6 +38,20 @@ class CurrentRuntimeTest(unittest.TestCase):
             {"head": "same-sha", "origin_main": "same-sha", "contract_version": "10"},
             evidence,
         )
+
+    def test_tracked_runtime_changes_are_refused(self):
+        def run(*command, **_kwargs):
+            if list(command) == ["fetch", "origin", "main", "--quiet"]:
+                return completed()
+            if list(command) in (["rev-parse", "origin/main"], ["rev-parse", "HEAD"]):
+                return completed(stdout="same-sha\n")
+            if list(command) == ["status", "--porcelain=v1", "--untracked-files=no"]:
+                return completed(stdout=" M bin/current_runtime.py\n")
+            raise AssertionError(command)
+
+        with patch.object(current_runtime, "git", side_effect=run):
+            with self.assertRaisesRegex(current_runtime.ToolingError, "tracked changes"):
+                current_runtime.current_tooling()
 
     def test_non_main_checkout_is_refused_before_bootstrap(self):
         with patch.object(

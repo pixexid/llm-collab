@@ -19,12 +19,17 @@ from collections.abc import Callable
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-RUNTIME_ROOT = Path(
+_configured_runtime_root = Path(
     os.environ.get(
         "LLM_COLLAB_RUNTIME_ROOT",
         Path.home() / ".local" / "share" / "llm-collab" / "runtime" / "main",
     )
 ).expanduser()
+RUNTIME_ROOT = (
+    _configured_runtime_root
+    if (_configured_runtime_root / "bin" / "current_runtime.py").is_file()
+    else ROOT
+)
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -191,16 +196,16 @@ def build_identity_md(agent: dict, workspace_name: str, all_agent_ids: list[str]
         "",
         f"```bash",
         f"# Check inbox",
-        f"{ROOT}/bin/llm-collab inbox.py --me {aid}",
+        f"{RUNTIME_ROOT}/bin/llm-collab inbox.py --me {aid}",
         "",
         f"# Send message",
-        f'{ROOT}/bin/llm-collab deliver.py --chat last --from {aid} --to <agent> --project <project_id> --title "..."',
+        f'{RUNTIME_ROOT}/bin/llm-collab deliver.py --chat last --from {aid} --to <agent> --project <project_id> --title "..."',
         "",
         f"# Create task",
-        f'{ROOT}/bin/llm-collab new_task.py --title "..." --created-by {aid} --project <project_id>',
+        f'{RUNTIME_ROOT}/bin/llm-collab new_task.py --title "..." --created-by {aid} --project <project_id>',
         "",
         f"# Task board",
-        f"{ROOT}/bin/llm-collab task_board.py",
+        f"{RUNTIME_ROOT}/bin/llm-collab task_board.py",
         f"```",
         "",
         f"## Active Projects",

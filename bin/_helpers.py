@@ -35,12 +35,17 @@ def find_workspace_root(start: Path | None = None) -> Path:
 
 
 ROOT: Path = find_workspace_root()
-RUNTIME_ROOT = Path(
+_configured_runtime_root = Path(
     os.environ.get(
         "LLM_COLLAB_RUNTIME_ROOT",
         Path.home() / ".local" / "share" / "llm-collab" / "runtime" / "main",
     )
 ).expanduser()
+RUNTIME_ROOT = (
+    _configured_runtime_root
+    if (_configured_runtime_root / "bin" / "current_runtime.py").is_file()
+    else ROOT
+)
 CONFIG_FILE = ROOT / "collab.config.json"
 AGENTS_FILE = ROOT / "agents.json"
 PROJECTS_FILE = ROOT / "projects.json"

@@ -53,6 +53,11 @@ def current_tooling() -> dict[str, str]:
             "runtime must be exact origin/main; "
             f"origin/main={origin_main} HEAD={head}"
         )
+    tracked_changes = git(
+        "status", "--porcelain=v1", "--untracked-files=no"
+    ).stdout.strip()
+    if tracked_changes:
+        raise ToolingError("runtime has tracked changes; refusing bootstrap")
 
     local_contract = contract_version((ROOT / "AGENTS.md").read_text(encoding="utf-8"))
     origin_contract = contract_version(
@@ -97,6 +102,7 @@ def main() -> int:
     print(
         f"[tooling] current: contract v{evidence['contract_version']} "
         f"HEAD {evidence['head']} origin/main {evidence['origin_main']}",
+        file=sys.stdout if check_only else sys.stderr,
         flush=True,
     )
     if check_only:

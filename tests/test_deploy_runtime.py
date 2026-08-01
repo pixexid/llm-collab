@@ -1,7 +1,8 @@
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 import sys
 
@@ -38,13 +39,56 @@ class DeployRuntimeTest(unittest.TestCase):
                     "source_head",
                     return_value=("head-sha", "10"),
                 ),
-                patch.object(deploy_runtime, "git") as git,
+                patch.object(
+                    deploy_runtime,
+                    "git",
+                    side_effect=["old-sha", ""],
+                ) as git,
+                patch.object(
+                    deploy_runtime.subprocess,
+                    "run",
+                    return_value=subprocess.CompletedProcess([], 0, "", ""),
+                ) as run,
                 patch.object(deploy_runtime, "DEFAULT_TARGET", target),
             ):
                 evidence = deploy_runtime.deploy(source)
 
         self.assertEqual("head-sha", evidence["head"])
-        git.assert_called_once_with(target.resolve(), "reset", "--hard", "head-sha")
+        git.assert_has_calls(
+            [
+                call(target.resolve(), "rev-parse", "HEAD"),
+                call(target.resolve(), "status", "--porcelain=v1", "--untracked-files=no"),
+            ]
+        )
+        run.assert_called_once()
+        self.assertEqual("head-sha", run.call_args.args[0][-1])
+
+    def test_timeout_rolls_target_back_to_previous_head(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "source"
+            target = Path(temp_dir) / "target"
+            source.mkdir()
+            target.mkdir()
+            (source / ".git").mkdir()
+            (target / ".git").mkdir()
+            with (
+                patch.object(deploy_runtime, "source_head", return_value=("new-sha", "10")),
+                patch.object(
+                    deploy_runtime,
+                    "git",
+                    side_effect=["old-sha", "", "old-sha", ""],
+                ),
+                patch.object(
+                    deploy_runtime.subprocess,
+                    "run",
+                    side_effect=[
+                        subprocess.TimeoutExpired(["git"], 30),
+                        subprocess.CompletedProcess([], 0, "", ""),
+                    ],
+                ),
+            ):
+                with self.assertRaisesRegex(deploy_runtime.DeployError, "restored target HEAD old-sha"):
+                    deploy_runtime.deploy(source, target)
 
     def test_source_and_target_must_differ(self):
         with tempfile.TemporaryDirectory() as temp_dir:

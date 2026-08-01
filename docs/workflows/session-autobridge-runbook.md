@@ -392,7 +392,7 @@ python3 -m py_compile \
   bin/deliver.py \
   bin/inbox.py \
   bin/session_autobridge.py \
-  <runtime_root>/bin/llm-collab watch_inbox.py \
+  <runtime_root>/bin/watch_inbox.py \
   tests/test_session_autobridge.py
 
 python3 -m unittest tests.test_session_autobridge

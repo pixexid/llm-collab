@@ -186,7 +186,7 @@ def start_watcher(agent_id: str) -> dict:
         return {"status": "skipped", "reason": "pm2_watchers.py not found"}
     try:
         result = subprocess.run(
-            [sys.executable, str(watcher_script), "ensure", "--agent", agent_id],
+            [sys.executable, str(watcher_script), "restart", "--agent", agent_id],
             capture_output=True, text=True, timeout=15,
         )
         if result.returncode == 0:
