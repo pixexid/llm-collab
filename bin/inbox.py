@@ -33,7 +33,14 @@ from datetime import datetime
 sys.path.insert(0, str(Path(__file__).parent))
 from _activation_cleanup import claim_activation_lease
 from _activation_identity import classify_activation, lease_key
-from _activation_lease import LeaseRefused, load_lease, owner_summary, pid_from_env, runtime_id_from_env
+from _activation_lease import (
+    LeaseRefused,
+    load_lease,
+    owner_summary,
+    pid_from_env,
+    runtime_family_from_env,
+    runtime_id_from_env,
+)
 from _helpers import (
     AGENTS_FILE,
     PROJECTS_FILE,
@@ -512,6 +519,10 @@ def activation_reader_runtime_id() -> str | None:
     return runtime_id_from_env()
 
 
+def activation_reader_runtime_family() -> str | None:
+    return runtime_family_from_env()
+
+
 def activation_reader_pid() -> int | None:
     return pid_from_env() or os.getpid()
 
@@ -530,6 +541,7 @@ def ensure_reader_session(
     identity: dict[str, str],
     *,
     runtime_id: str | None,
+    runtime_family: str | None = None,
 ) -> dict:
     try:
         return load_session(session_id)
@@ -568,14 +580,18 @@ def ensure_reader_session(
         #
         # LLM_COLLAB_READER_RUNTIME_ID carries the REGISTERED native id, so a
         # reader's runtime id IS the worker's ordinary native. Native identity is
-        # (family, id), so the reader must adopt the family of the ordinary lease
-        # that owns this native — a synthetic "reader" family would compare
-        # (reader, id) against (real_family, id) and miss the collision. Fall back
-        # to "reader" only when no ordinary lease owns the id (nothing to collide
-        # with). Resolve + guard + write under one lock.
+        # (family, id), so the reader must carry its ACTUAL family. Prefer the
+        # family carried from the environment (LLM_COLLAB_READER_RUNTIME_FAMILY or
+        # a family-specific id var) — that is authoritative even before any
+        # ordinary lease exists. Otherwise fall back to the family of an existing
+        # ordinary lease for this native, and only to the synthetic "reader" when
+        # neither is available (no owner to collide with). Resolve + guard + write
+        # under one lock.
         with _session_write_lock():
             native_family = (
-                (resolve_native_family(runtime_id) or "reader") if runtime_id else None
+                (runtime_family or resolve_native_family(runtime_id) or "reader")
+                if runtime_id
+                else None
             )
             if runtime_id:
                 payload["runtime"]["family"] = native_family
@@ -632,7 +648,11 @@ def gate_activation_message(args, msg: dict, *, consume: bool) -> dict | None:
     owner_pid = None if runtime_id else activation_reader_pid()
     session_id = activation_reader_session_id(args, identity)
     try:
-        ensure_reader_session(session_id, args.me, identity, runtime_id=runtime_id)
+        ensure_reader_session(
+            session_id, args.me, identity,
+            runtime_id=runtime_id,
+            runtime_family=activation_reader_runtime_family(),
+        )
     except ValueError as exc:
         # GH-468 ownership refusal on the reader path is a normal terminal
         # outcome, not a crash: surface it as a structured refusal like every

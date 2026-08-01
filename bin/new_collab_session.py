@@ -145,19 +145,24 @@ def register_session(session, agent, project, chat, repo_target, family, rsid, h
 LAUNCH = "<runtime_root>/bin/llm-collab"
 
 
-def watch_cmd(agent, project, chat, session, repo_target, rsid) -> str:
+def watch_cmd(agent, project, chat, session, repo_target, rsid, family) -> str:
     # No --skip-existing: on a fresh chat there is no legitimate backlog to
     # suppress, and skipping would drop a packet delivered in the window between
     # the binding going active and the watcher starting.
+    #
+    # Export the family alongside the id: an activation reader's native id IS this
+    # worker's ordinary native, and native identity is (family, id), so the reader
+    # must carry the real family (GH-468) rather than synthesize a placeholder.
     return (
         f"export LLM_COLLAB_READER_RUNTIME_ID={rsid}\n"
+        f"export LLM_COLLAB_READER_RUNTIME_FAMILY={family}\n"
         f"{LAUNCH} watch_inbox.py \\\n"
         f"  --me {agent} --project {project} --chat {chat} \\\n"
         f"  --session {session} --repo-target {repo_target} --json"
     )
 
 
-def pickup_block(channel, agent, project, chat, session, repo_target, rsid) -> list[str]:
+def pickup_block(channel, agent, project, chat, session, repo_target, rsid, family) -> list[str]:
     """How THIS agent picks up packets, keyed to its real wake channel. A
     persistent native watcher is printed only for watcher-backed workers; Codex
     has no native session watcher, so it gets polling/AX guidance instead of a
@@ -165,7 +170,7 @@ def pickup_block(channel, agent, project, chat, session, repo_target, rsid) -> l
     if channel == "watcher":
         return [
             "# Arm your own inbox watcher in a persistent Monitor:",
-            watch_cmd(agent, project, chat, session, repo_target, rsid),
+            watch_cmd(agent, project, chat, session, repo_target, rsid, family),
         ]
     if channel == "ax_doorbell":
         return [
@@ -209,7 +214,7 @@ def coworker_prompt(agent, channel, project, chat, repo_target, family) -> str:
         "",
         "# 3. Pick up packets on YOUR wake channel:",
     ]
-    lines += pickup_block(channel, agent, project, chat, session, repo_target, "<YOUR_ID>")
+    lines += pickup_block(channel, agent, project, chat, session, repo_target, "<YOUR_ID>", family)
     return "\n".join(lines)
 
 
@@ -290,7 +295,8 @@ def main():
     my_channel = wake_channel(agent_activation(agents, args.me))
     print("\n=== YOUR OWN PICKUP (do this now) ===")
     print("\n".join(pickup_block(my_channel, args.me, args.project, chat,
-                                 my_session, args.repo_target, args.my_runtime_session_id)))
+                                 my_session, args.repo_target, args.my_runtime_session_id,
+                                 args.my_runtime_family)))
     for agent_id, family in coworkers:
         channel = wake_channel(agent_activation(agents, agent_id))
         print(f"\n=== SETUP PROMPT — share with {agent_id} ===")

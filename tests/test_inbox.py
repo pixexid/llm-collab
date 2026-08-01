@@ -1504,6 +1504,28 @@ class InboxMarkAllReadTest(unittest.TestCase):
                 )
             self.assertFalse((sessions / "SESSION-READER.json").exists())
 
+    def test_gh468_reader_prefers_carried_family_over_inference(self):
+        # The reader's ACTUAL family carried from the environment is authoritative
+        # even before any ordinary lease exists, closing the reader-first ordering:
+        # the stored family is the carried one, not the synthetic "reader".
+        import _session_autobridge as sa_lib
+        sessions = self._reader_sessions_dir_with_owner(family="claude_app")
+        identity = {"project": "nuvyr", "chat": "CHAT-B"}
+        with patch.object(sa_lib, "SESSIONS_DIR", sessions):
+            inbox_lib.ensure_reader_session(
+                "SESSION-READER", "codex", identity,
+                runtime_id="NAT-UNOWNED", runtime_family="codex_app",
+            )
+            record = json.loads((sessions / "SESSION-READER.json").read_text())
+            self.assertEqual("codex_app", record["runtime"]["family"])
+
+    def test_gh468_activation_reader_runtime_family_from_env(self):
+        # Explicit family var wins; a family-specific id var implies its family.
+        with patch.dict(os.environ, {"LLM_COLLAB_READER_RUNTIME_FAMILY": "gemini_cli"}, clear=False):
+            self.assertEqual("gemini_cli", inbox_lib.activation_reader_runtime_family())
+        with patch.dict(os.environ, {"CODEX_SESSION_ID": "abc"}, clear=True):
+            self.assertEqual("codex_app", inbox_lib.activation_reader_runtime_family())
+
     def test_gh468_reader_with_no_ordinary_owner_falls_back_to_reader_family(self):
         # No ordinary lease owns this native id, so there is nothing to collide
         # with: the reader is created and falls back to the synthetic "reader"
