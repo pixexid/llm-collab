@@ -12,6 +12,7 @@ import fcntl
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -182,6 +183,62 @@ def python_cmd() -> str:
 _agents_cache: list | None = None
 
 
+# projects.json/agents.json are tiny workspace registries (a handful of KB); a file
+# larger than this is an accident (runaway writer, wrong file, corruption), not real
+# data. AGENTS.md 'Bounded work fails closed and never truncates': cap the read and
+# refuse rather than parse an unbounded blob or truncate it.
+MAX_REGISTRY_FILE_BYTES = 1 << 20  # 1 MiB
+
+
+def _registry_read_error(message: str):
+    print(f"[error] {message}", file=sys.stderr)
+    sys.exit(1)
+
+
+def _read_registry_json_bounded(path: Path) -> Any:
+    """Read + parse an untrusted workspace registry file, bounded and fail-closed.
+
+    Shared read/parse seam for the project/agent registries so every caller inherits
+    the same protection against a huge/corrupt file or a hung mount. Each guard is
+    the SOLE authority for its failure (no redundant second check masking it):
+      * O_NONBLOCK open so a writer-less FIFO / hung mount cannot block inside open()
+        (a regular file is always ready, so its read never blocks either);
+      * a regular-file requirement on that SAME descriptor (a dir/FIFO/device is
+        refused before any read);
+      * the fstat size is the authoritative byte cap — refuse over-limit BEFORE
+        reading, so there is never a partial or truncated result;
+      * the whole regular file (size already <= cap) is then read and parsed;
+        invalid JSON is a refusal, not a silent empty result.
+    Fails closed (stderr + exit 1), matching this module's existing registry-read
+    error style. Absence is the caller's concern (checked before calling).
+    """
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    except OSError as error:
+        _registry_read_error(f"cannot open {path}: {error}")
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            _registry_read_error(f"{path} is not a regular file; refusing to read it")
+        if info.st_size > MAX_REGISTRY_FILE_BYTES:
+            _registry_read_error(
+                f"{path} exceeds the {MAX_REGISTRY_FILE_BYTES} byte limit; refusing to parse it")
+        chunks: list[bytes] = []
+        remaining = info.st_size
+        while remaining > 0:
+            chunk = os.read(descriptor, remaining)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+    finally:
+        os.close(descriptor)
+    try:
+        return json.loads(b"".join(chunks))
+    except (ValueError, UnicodeDecodeError) as error:
+        _registry_read_error(f"{path} is not valid JSON: {error}")
+
+
 def load_agents() -> list[dict]:
     global _agents_cache
     if _agents_cache is None:
@@ -192,7 +249,7 @@ def load_agents() -> list[dict]:
                 file=sys.stderr,
             )
             sys.exit(1)
-        payload = json.loads(AGENTS_FILE.read_text())
+        payload = _read_registry_json_bounded(AGENTS_FILE)
         _agents_cache = payload.get("agents", [])
     return _agents_cache
 
@@ -254,7 +311,7 @@ def load_projects() -> list[dict]:
     if _projects_cache is None:
         if not PROJECTS_FILE.exists():
             return []
-        payload = json.loads(PROJECTS_FILE.read_text())
+        payload = _read_registry_json_bounded(PROJECTS_FILE)
         _projects_cache = payload.get("projects", [])
     return _projects_cache
 
