@@ -28,6 +28,36 @@ for a GitHub-backed project — materializing and validating the issue queue. An
 unregistered project is refused by the tooling rather than guessed at, so this is not
 optional. Missing agents go in `agents.json` the same way.
 
+**A new collab session is new for _everyone_.** It is not the reuse of whatever
+binding happened to be lying around. Each worker gets a fresh native session and
+registers *its own* — the initiator never discovers or registers a co-worker's
+session, because a guessed id binds the wrong thread. The initiator registers
+only itself and hands each co-worker an exact setup prompt for the part only they
+can do.
+
+**The one-command path** does the initiator's share and prints those prompts:
+
+```bash
+# From the deployed runtime or a fresh origin/main worktree — NEVER a parked/dirty
+# operator checkout (it refuses if this checkout is behind origin/main, so a
+# co-worker cannot be pointed at stale code).
+python bin/new_collab_session.py \
+  --project demo-app --title "Checkout refactor" \
+  --me codex --my-runtime-session-id 019f9452-... --my-runtime-family codex_app \
+  --with zcode --repo-target app
+#  -> creates the chat, registers ONLY codex's own session, prints codex's own
+#     inbox-watcher command, and prints a copy-paste setup prompt for zcode.
+```
+
+Share each printed prompt with its worker. A watcher-backed worker (claude,
+gemini, …) arms its own inbox watcher; Codex has no native session watcher, so
+its prompt tells it to poll and relies on the sender's AX doorbell for wakes.
+**Arm your own watcher** — the helper prints yours first; a packet you never see
+is a packet you never answer.
+
+The manual steps below are exactly what that helper automates; run them by hand
+only when you need to diverge from the defaults.
+
 **Then, once per collaboration:**
 
 ```bash
