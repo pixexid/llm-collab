@@ -186,7 +186,13 @@ class StartPiFlowTest(unittest.TestCase):
         (cfg_root / "collab.config.json").write_text(json.dumps(
             {"workspace_name": "ws", "projects_root": str(cfg_root), "schema_version": 2}))
         self._orig_config_file = _helpers.CONFIG_FILE
+        self._orig_chats_dir = _helpers.CHATS_DIR
         _helpers.CONFIG_FILE = cfg_root / "collab.config.json"
+        _helpers.CHATS_DIR = cfg_root / "Chats"
+        _helpers.CHATS_DIR.mkdir()
+        (_helpers.CHATS_DIR / "2026-08-02_test__CHAT-NEWPROJ").mkdir()
+        (_helpers.CHATS_DIR / "2026-08-02_test__CHAT-NEWPROJ" / "meta.json").write_text(
+            json.dumps({"chat_id": "CHAT-NEWPROJ", "project_id": "llm-collab"}))
         _helpers._config_cache = None
         self.addCleanup(self._cfg_tmp.cleanup)
         self.addCleanup(self._restore_config)
@@ -194,6 +200,7 @@ class StartPiFlowTest(unittest.TestCase):
     def _restore_config(self):
         import _helpers
         _helpers.CONFIG_FILE = self._orig_config_file
+        _helpers.CHATS_DIR = self._orig_chats_dir
         _helpers._config_cache = None
 
     def _run(self, cfg, transport, run, *, resolve_profile=None):
@@ -213,6 +220,13 @@ class StartPiFlowTest(unittest.TestCase):
         self.assertEqual(reg[reg.index("--status") + 1], "active")
         self.assertEqual(reg[reg.index("--expect-pi-model") + 1], "glm-5.2")
         self.assertEqual(reg[reg.index("--wake-strategy") + 1], "runtime_trigger")
+
+    def test_nonexistent_chat_fails_before_pi_web_or_binding(self):
+        t, run = _Transport(), _Autobridge()
+        with self.assertRaisesRegex(wr.RotateError, r"chat_not_found: CHAT-MISSING"):
+            self._run(_cfg(chat="CHAT-MISSING"), t, run)
+        self.assertEqual(t.paths, [])
+        self.assertEqual(run.calls, [])
 
     def test_first_project_profile_reaches_registration(self):
         import tempfile

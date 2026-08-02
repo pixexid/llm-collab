@@ -56,6 +56,16 @@ def _monitor_inbox() -> str:
 def _sessions_dir() -> Path:
     return _workspace_root() / "State" / "session_autobridge" / "sessions"
 
+
+def _chat_exists(project: str, chat: str) -> bool:
+    from _helpers import find_chat_by_partial
+
+    try:
+        return find_chat_by_partial(chat, project=project) is not None
+    except ValueError as error:
+        raise RotateError(f"chat_not_unique: {chat}") from error
+
+
 BOOTSTRAP_TEMPLATE = """Automated llm-collab worker provisioning. You are {agent} in fresh Pi native session {native}. Do not start project work. Start exactly one persistent monitor now with monitor_watch_path (NOT monitor_start — monitor_start needs an attended confirmation and will time out).
 
 Watch this exact file: {event_path}
@@ -530,6 +540,8 @@ def start_pi(
     cfg, *, piweb, run_autobridge, event_path_for, resolve_cwd, resolve_profile,
     sleep=time.sleep, clock=time.monotonic, prepare_event=_touch_event,
 ) -> dict:
+    if not _chat_exists(cfg.project, cfg.chat):
+        raise RotateError(f"chat_not_found: {cfg.chat}")
     override = None
     if any((cfg.provider, cfg.model, cfg.thinking)):
         override = (cfg.provider, cfg.model, cfg.thinking)
