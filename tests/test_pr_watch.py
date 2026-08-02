@@ -6,7 +6,7 @@ import subprocess
 import sys
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "bin"))
@@ -93,12 +93,129 @@ class PrWatchDiffTest(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 self.pw._gh_pages("repos/x/y/issues/1/timeline")
 
-    def test_oversized_response_fails_closed(self):
-        fake = MagicMock(returncode=0,
-                         stdout=json.dumps([[] for _ in range(self.pw.MAX_PAGES + 1)]))
-        with patch.object(self.pw.subprocess, "run", return_value=fake):
+    def test_page_budget_enforced_during_pagination(self):
+        # Every page comes back full, so more always remains: the budget must be
+        # spent BEFORE the check — never more than MAX_PAGES requests — then fail
+        # closed rather than paginate on.
+        calls = []
+
+        def fake_call(path):
+            calls.append(path)
+            return json.dumps([{"id": i} for i in range(self.pw.PER_PAGE)])
+
+        with patch.object(self.pw, "_gh_call", side_effect=fake_call):
             with self.assertRaises(RuntimeError):
                 self.pw._gh_pages("repos/x/y/issues/1/timeline")
+        self.assertEqual(self.pw.MAX_PAGES, len(calls))
+
+    def test_pagination_stops_on_short_page(self):
+        pages = [json.dumps([{"id": 1}] * self.pw.PER_PAGE), json.dumps([{"id": 2}])]
+        with patch.object(self.pw, "_gh_call", side_effect=pages):
+            got = self.pw.gh_array("repos/x/y/issues/1/timeline")
+        self.assertEqual(self.pw.PER_PAGE + 1, len(got))
+
+    def test_page_len_across_shapes(self):
+        self.assertEqual(3, self.pw._page_len([1, 2, 3]))
+        self.assertEqual(2, self.pw._page_len({"check_runs": [1, 2]}))
+        self.assertEqual(0, self.pw._page_len({"head": {"sha": "x"}}))
+
+    def test_rerun_check_runs_are_distinct(self):
+        # Two runs sharing a name (a re-run) must not collapse: key by name#id so
+        # the new run's conclusion is visible in the signature.
+        def fake_one(path, budget=None):
+            if path.endswith("/status"):
+                return {"state": "success"}
+            return {"head": {"sha": "s"}, "state": "open", "merged": False}
+
+        def fake_pages(path, budget=None):
+            if "check-runs" in path:
+                return [{"check_runs": [
+                    {"name": "verify", "id": 1, "conclusion": "failure"},
+                    {"name": "verify", "id": 2, "conclusion": "success"},
+                ]}]
+            return []
+
+        with patch.object(self.pw, "gh_one", side_effect=fake_one), \
+                patch.object(self.pw, "gh_array", side_effect=lambda p, budget=None: []), \
+                patch.object(self.pw, "_gh_pages", side_effect=fake_pages):
+            sig, _ = self.pw.snapshot("x/y", "1")
+        self.assertIn("verify#1", sig["checks"])
+        self.assertIn("verify#2", sig["checks"])
+        self.assertEqual("failure", sig["checks"]["verify#1"])
+        self.assertEqual("success", sig["checks"]["verify#2"])
+
+    def _snapshot_with_comments(self, n_comments, fetched):
+        comments = [{"id": i} for i in range(n_comments)]
+
+        def fake_array(path, budget=None):
+            if path.endswith("issues/1/comments"):
+                return comments
+            if "comments/" in path and path.endswith("/reactions"):
+                fetched.append(path)
+            return []
+
+        def fake_one(path, budget=None):
+            if path.endswith("/status"):
+                return {"state": "success"}
+            return {"head": {"sha": "s"}, "state": "open", "merged": False}
+
+        with patch.object(self.pw, "gh_one", side_effect=fake_one), \
+                patch.object(self.pw, "gh_array", side_effect=fake_array), \
+                patch.object(self.pw, "_gh_pages", side_effect=lambda p, budget=None: []):
+            return self.pw.snapshot("x/y", "1")
+
+    def test_over_cap_comments_fail_closed_with_no_reaction_fetches(self):
+        # Past the cap the poll must fail closed (retryable) rather than silently
+        # skip comments — a dropped comment could carry the verdict.
+        fetched = []
+        with self.assertRaises(RuntimeError):
+            self._snapshot_with_comments(self.pw.MAX_REACTION_COMMENTS + 1, fetched)
+        self.assertEqual([], fetched)
+
+    def test_at_cap_comments_fetch_all_reactions(self):
+        fetched = []
+        self._snapshot_with_comments(self.pw.MAX_REACTION_COMMENTS, fetched)
+        self.assertEqual(self.pw.MAX_REACTION_COMMENTS, len(fetched))
+
+    def test_budget_exhausts_after_max_pages(self):
+        b = self.pw._Budget(2)
+        b.charge("p")
+        b.charge("p")
+        with self.assertRaises(RuntimeError):
+            b.charge("p")
+
+    def test_budget_observes_deadline(self):
+        b = self.pw._Budget(100, deadline=self.pw.time.monotonic() - 1)
+        with self.assertRaises(RuntimeError) as cm:
+            b.charge("p")
+        self.assertIn("deadline", str(cm.exception))
+
+    def test_snapshot_fails_closed_on_cumulative_budget(self):
+        # Per-call MAX_PAGES is not enough: many legal calls collectively overrun.
+        # The shared snapshot budget must fail closed across calls.
+        def fake_call(path):
+            if "/pulls/" in path:
+                return json.dumps({"head": {"sha": "s"}, "state": "open", "merged": False})
+            if "/status" in path:
+                return json.dumps({"state": "success"})
+            if "check-runs" in path:
+                return json.dumps({"check_runs": []})
+            return json.dumps([])
+
+        with patch.object(self.pw, "MAX_SNAPSHOT_PAGES", 3), \
+                patch.object(self.pw, "_gh_call", side_effect=fake_call):
+            with self.assertRaises(RuntimeError) as cm:
+                self.pw.snapshot("x/y", "1")
+        self.assertIn("MAX_SNAPSHOT_PAGES", str(cm.exception))
+
+    def test_snapshot_fails_closed_on_deadline(self):
+        def fake_call(path):
+            return json.dumps({"head": {"sha": "s"}} if "/pulls/" in path else [])
+
+        with patch.object(self.pw, "_gh_call", side_effect=fake_call):
+            with self.assertRaises(RuntimeError) as cm:
+                self.pw.snapshot("x/y", "1", deadline=self.pw.time.monotonic() - 1)
+        self.assertIn("deadline", str(cm.exception))
 
     def test_repo_is_required(self):
         # A worker must never fall back to a default repo.
