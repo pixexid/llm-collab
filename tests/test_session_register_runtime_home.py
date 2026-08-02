@@ -18,6 +18,22 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "bin"))
 
 import session_autobridge as cli  # noqa: E402
+from _helpers import find_workspace_root, state_root  # noqa: E402
+
+
+class WorkspaceRootResolutionTest(unittest.TestCase):
+    def test_deployed_config_alias_resolves_real_workspace_root(self) -> None:
+        with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
+            root = Path(tmp)
+            workspace = root / "workspace"
+            runtime = root / "runtime" / "main"
+            workspace.mkdir()
+            runtime.mkdir(parents=True)
+            (workspace / "collab.config.json").write_text("{}", encoding="utf-8")
+            (runtime / "collab.config.json").symlink_to(workspace / "collab.config.json")
+
+            self.assertEqual(runtime.resolve(), find_workspace_root(runtime))
+            self.assertEqual(workspace.resolve(), state_root(runtime))
 
 
 class CanonicalRuntimeHomeTest(unittest.TestCase):

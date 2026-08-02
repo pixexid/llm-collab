@@ -188,6 +188,7 @@ class WorkerRotatePiTest(unittest.TestCase):
         self.assertEqual(reg[reg.index("--expect-pi-provider") + 1], "zai")
         self.assertEqual(reg[reg.index("--expect-pi-model") + 1], "glm-5.2")
         self.assertEqual(reg[reg.index("--expect-pi-thinking") + 1], "max")
+        self.assertEqual(reg[reg.index("--mode") + 1], "auto-read")
 
     def test_model_drift_before_register_closes_tab_and_skips_register(self):
         chron: list = []
