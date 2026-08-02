@@ -8039,6 +8039,50 @@ class SessionAutobridgeTest(unittest.TestCase):
                 ),
             )
 
+    def test_compaction_continuity_preserves_canonical_binding(self):
+        # GH-457 proof 1 (compaction continuity): a continuation/compaction
+        # re-registers the SAME native session, so resolve_active_canonical_binding
+        # must READ the canonical binding_id/generation the lifecycle authority
+        # minted once — never re-mint. A different native session is refused so the
+        # identity can't be inherited across sessions.
+        root = self.make_workspace()
+        self.add_agent(
+            root,
+            {
+                "id": "glmpi",
+                "display_name": "Glim",
+                "activation": {"type": "cli_session", "watcher_enabled": True},
+            },
+        )
+        minted = self._mint_pi_binding_through_lifecycle(
+            root,
+            chat_id="CHAT-PI-BIND",
+            project="amiga",
+            agent_id="glmpi",
+            endpoint_id="endpoint_pi_glim",
+            native_session_id="pi-glim-1",
+            runtime_instance_id="runtime_pi_glim",
+        )
+        with patch.object(session_autobridge_lib, "_repo_package_root"), patch.object(
+            session_autobridge_lib, "config_get", return_value="ws_alpha",
+        ), patch.object(
+            session_autobridge_lib, "project_state_root",
+            return_value=root / "project-state",
+        ), patch.object(
+            store_module, "_linked_sqlite_version_info", return_value=SAFE_VERSION,
+        ):
+            first = session_autobridge_lib.resolve_active_canonical_binding(
+                "amiga", "CHAT-PI-BIND", "glmpi", "pi-glim-1")
+            second = session_autobridge_lib.resolve_active_canonical_binding(
+                "amiga", "CHAT-PI-BIND", "glmpi", "pi-glim-1")
+            with self.assertRaises(session_autobridge_lib.CanonicalBindingNativeMismatch):
+                session_autobridge_lib.resolve_active_canonical_binding(
+                    "amiga", "CHAT-PI-BIND", "glmpi", "pi-glim-2-foreign")
+        # Re-registration returns the identical canonical identity, not a new mint.
+        self.assertEqual(first, second)
+        self.assertEqual(minted["binding_id"], first["binding_id"])
+        self.assertEqual(minted["generation"], first["binding_generation"])
+
     def test_pi_registration_refuses_a_foreign_native_session(self):
         # GH-346 P1: the participant's binding is minted for one native session.
         # Registering a different --runtime-session-id must not inherit it (that
