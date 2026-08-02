@@ -512,13 +512,17 @@ class DeliverFoundationTest(unittest.TestCase):
         self.assertIn("--chat CHAT-TEST0001", content)
 
     def test_activation_ax_budget_failure_only_when_ax_selected(self):
-        # The AX-selected subject is relay, not claude: Claude is excluded from the
-        # doorbell selector, so it can no longer be used to reach the AX branch.
+        # #455 restricted routine AX wake ownership to Codex: `codex` is the only
+        # routine AX doorbell target, and only when the sender is not codex. The
+        # build_activation_ring_prompt budget failure must therefore surface
+        # (rc 2) ONLY on the codex-doorbell path — never for a non-codex subject
+        # (relay, even with an ax_app), and never once an exact autobridge
+        # session exists.
         root = self.make_workspace()
         agents_path = root / "agents.json"
         agents = json.loads(agents_path.read_text())
         for agent in agents["agents"]:
-            if agent["id"] == "relay":
+            if agent["id"] in ("codex", "relay"):
                 agent["activation"]["ax_app"] = "Codex"
         write_json(agents_path, agents)
         body = root / "b.md"
@@ -527,45 +531,58 @@ class DeliverFoundationTest(unittest.TestCase):
             "deliver.build_activation_ring_prompt = "
             "lambda *a, **k: (_ for _ in ()).throw(ValueError('long-root budget')); "
         )
-        argv = [
-            sys.executable,
-            "-c",
-            self.WRAPPER.format(extra_patch=patch_prompt),
-            str(REPO_ROOT / "bin"),
-            *[a if a != "claude" else "relay" for a in self.BASE],
-            "--body-file",
-            str(body),
-            "--activation",
-            "--related-task",
-            "TASK-TEST01",
-            "--worktree",
-            self.worktree,
-            "--branch",
-            "b",
-        ]
 
+        def argv_for(sender: str, recipient: str) -> list[str]:
+            base = [
+                "--chat", "CHAT-TEST0001", "--from", sender, "--to", recipient,
+                "--project", "amiga", "--title", "lane a check",
+            ]
+            return [
+                sys.executable, "-c",
+                self.WRAPPER.format(extra_patch=patch_prompt),
+                str(REPO_ROOT / "bin"),
+                *base, "--body-file", str(body), "--activation",
+                "--related-task", "TASK-TEST01",
+                "--worktree", self.worktree, "--branch", "b",
+            ]
+
+        # AX selected: recipient codex, non-codex sender, no autobridge session.
+        # The doorbell branch runs build_activation_ring_prompt, which throws.
         ax_selected = subprocess.run(
-            argv, cwd=root, text=True, capture_output=True, env={**os.environ}, check=False
+            argv_for("claude", "codex"), cwd=root, text=True,
+            capture_output=True, env={**os.environ}, check=False,
         )
-
-        self.assertEqual(2, ax_selected.returncode)
+        self.assertEqual(2, ax_selected.returncode, ax_selected.stderr)
         self.assertIn("long-root budget", ax_selected.stderr)
 
+        # Negative: a non-codex subject (relay) can never reach the AX branch,
+        # so the budget failure never fires even though relay has an ax_app.
+        relay_selected = subprocess.run(
+            argv_for("codex", "relay"), cwd=root, text=True,
+            capture_output=True, env={**os.environ}, check=False,
+        )
+        self.assertNotIn("long-root budget", relay_selected.stderr)
+        self.assertEqual(0, relay_selected.returncode, relay_selected.stderr)
+        relay_payload, _ = json.JSONDecoder().raw_decode(relay_selected.stdout)
+        self.assertFalse(relay_payload["ax_doorbell_required"])
+
+        # An exact dispatchable autobridge session for codex selects the
+        # autobridge path over the doorbell, so the budget failure is not reached.
         write_json(
-            root / "State" / "session_autobridge" / "sessions" / "SESSION-RELAY-EXACT.json",
+            root / "State" / "session_autobridge" / "sessions" / "SESSION-CODEX-EXACT.json",
             {
-                "session_id": "SESSION-RELAY-EXACT",
-                "agent_id": "relay",
+                "session_id": "SESSION-CODEX-EXACT",
+                "agent_id": "codex",
                 "project_id": "amiga",
                 "chat_id": "CHAT-TEST0001",
                 "mode": "auto-read",
                 "status": "parked",
                 "wake_strategy": "runtime_trigger",
-                "lease_owner": "relay",
+                "lease_owner": "codex",
                 "lease_expires_utc": "2099-01-01T00:00:00+00:00",
                 "runtime": {
-                    "family": "zcode_cli",
-                    "session_id": "relay-runtime",
+                    "family": "codex_app",
+                    "session_id": "codex-runtime",
                     "session_source": "test_fixture",
                 },
             },
@@ -577,19 +594,20 @@ class DeliverFoundationTest(unittest.TestCase):
             / "bindings"
             / "amiga"
             / "CHAT-TEST0001"
-            / "relay.json",
+            / "codex.json",
             {
                 "project_id": "amiga",
                 "chat_id": "CHAT-TEST0001",
-                "agent_id": "relay",
-                "session_id": "SESSION-RELAY-EXACT",
-                "runtime_family": "zcode_cli",
-                "runtime_session_id": "relay-runtime",
+                "agent_id": "codex",
+                "session_id": "SESSION-CODEX-EXACT",
+                "runtime_family": "codex_app",
+                "runtime_session_id": "codex-runtime",
                 "runtime_session_source": "test_fixture",
             },
         )
         autobridge_selected = subprocess.run(
-            argv, cwd=root, text=True, capture_output=True, env={**os.environ}, check=False
+            argv_for("claude", "codex"), cwd=root, text=True,
+            capture_output=True, env={**os.environ}, check=False,
         )
 
         self.assertEqual(0, autobridge_selected.returncode, autobridge_selected.stderr)
