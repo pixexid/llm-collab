@@ -279,7 +279,7 @@ class StartPiFlowTest(unittest.TestCase):
         self.assertIn("monitor_watch_path", prompt)
         self.assertIn("wake file", prompt)
         self.assertIn("do not watch the diagnostic event log", prompt)
-        self.assertNotIn("--acknowledge", prompt)  # inbox.py read already marks read
+        self.assertIn("--acknowledge", prompt)
 
     def test_default_event_path_is_the_pi_wake_stream(self):
         with mock.patch.object(wr, "_workspace_root", return_value=Path("/workspace")):
