@@ -141,6 +141,28 @@ def _run(cfg, transport, autobridge):
 
 
 class WorkerRotatePiTest(unittest.TestCase):
+    def setUp(self):
+        # rotate() resolves the workspace via _helpers.config_get(); without an
+        # isolated config it reads the gitignored collab.config.json (absent in a
+        # clean checkout / CI) and load_config() exits. Point it at a temp config
+        # so these tests are self-contained.
+        import tempfile
+        import _helpers
+        self._cfg_tmp = tempfile.TemporaryDirectory()
+        cfg_root = Path(self._cfg_tmp.name)
+        (cfg_root / "collab.config.json").write_text(json.dumps(
+            {"workspace_name": "ws", "projects_root": str(cfg_root), "schema_version": 2}))
+        self._orig_config_file = _helpers.CONFIG_FILE
+        _helpers.CONFIG_FILE = cfg_root / "collab.config.json"
+        _helpers._config_cache = None
+        self.addCleanup(self._cfg_tmp.cleanup)
+        self.addCleanup(self._restore_config)
+
+    def _restore_config(self):
+        import _helpers
+        _helpers.CONFIG_FILE = self._orig_config_file
+        _helpers._config_cache = None
+
     def test_happy_path_registers_after_marker_and_verifies(self):
         chron: list = []
         transport, run = FakeTransport(chron), FakeAutobridge(chron)
