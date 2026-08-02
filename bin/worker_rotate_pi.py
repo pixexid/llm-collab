@@ -56,6 +56,30 @@ def _monitor_inbox() -> str:
 def _sessions_dir() -> Path:
     return _workspace_root() / "State" / "session_autobridge" / "sessions"
 
+
+def _resolve_chat(project: str, chat: str) -> str | None:
+    from _helpers import MAX_CHAT_SCAN_ENTRIES, find_chat_by_partial, load_chat_meta
+
+    try:
+        chat_dir = find_chat_by_partial(
+            chat, project=project, max_entries=MAX_CHAT_SCAN_ENTRIES,
+        )
+    except ValueError as error:
+        raise RotateError(f"chat_not_unique: {chat}") from error
+    except RuntimeError as error:
+        raise RotateError(f"chat_scan_bound: {chat}") from error
+    if chat_dir is None:
+        return None
+    try:
+        meta = load_chat_meta(chat_dir)
+    except (OSError, ValueError) as error:
+        raise RotateError(f"chat_metadata_unreadable: {chat}") from error
+    canonical = meta.get("chat_id", chat_dir.name)
+    if not isinstance(canonical, str) or not canonical.strip():
+        raise RotateError(f"chat_not_found: {chat}")
+    return canonical
+
+
 BOOTSTRAP_TEMPLATE = """Automated llm-collab worker provisioning. You are {agent} in fresh Pi native session {native}. Do not start project work. Start exactly one persistent monitor now with monitor_watch_path (NOT monitor_start — monitor_start needs an attended confirmation and will time out).
 
 Watch this exact file: {event_path}
@@ -530,6 +554,9 @@ def start_pi(
     cfg, *, piweb, run_autobridge, event_path_for, resolve_cwd, resolve_profile,
     sleep=time.sleep, clock=time.monotonic, prepare_event=_touch_event,
 ) -> dict:
+    chat = _resolve_chat(cfg.project, cfg.chat)
+    if chat is None:
+        raise RotateError(f"chat_not_found: {cfg.chat}")
     override = None
     if any((cfg.provider, cfg.model, cfg.thinking)):
         override = (cfg.provider, cfg.model, cfg.thinking)
@@ -539,9 +566,9 @@ def start_pi(
     repo_cwd = resolve_cwd(cfg.project, cfg.repo_target)
     if not repo_cwd:
         raise RotateError(f"no repo path for project {cfg.project} repo {cfg.repo_target}")
-    suffix = cfg.chat[len("CHAT-"):] if cfg.chat.startswith("CHAT-") else cfg.chat
+    suffix = chat[len("CHAT-"):] if chat.startswith("CHAT-") else chat
     r = _provision_and_bind(
-        agent=cfg.agent, project=cfg.project, chat=cfg.chat, repo_target=cfg.repo_target,
+        agent=cfg.agent, project=cfg.project, chat=chat, repo_target=cfg.repo_target,
         repo_cwd=repo_cwd, provider=profile["provider"], model=profile["model"], thinking=profile["thinking"],
         endpoint_id=profile["endpoint_id"], runtime_home=profile["runtime_home"],
         wake_strategy=profile["wake_strategy"], mode="manual",
@@ -553,7 +580,7 @@ def start_pi(
     )
     binding = _load_json(
         run_autobridge,
-        ["show-binding", "--project", cfg.project, "--chat", cfg.chat, "--agent", cfg.agent, "--json"],
+        ["show-binding", "--project", cfg.project, "--chat", chat, "--agent", cfg.agent, "--json"],
         "start-pi postcondition",
     )
     verified = binding.get("session_id") == r["logical"] and binding.get("status") == "active"

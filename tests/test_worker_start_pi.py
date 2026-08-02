@@ -11,6 +11,7 @@ import json
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "bin"))
 
@@ -186,7 +187,13 @@ class StartPiFlowTest(unittest.TestCase):
         (cfg_root / "collab.config.json").write_text(json.dumps(
             {"workspace_name": "ws", "projects_root": str(cfg_root), "schema_version": 2}))
         self._orig_config_file = _helpers.CONFIG_FILE
+        self._orig_chats_dir = _helpers.CHATS_DIR
         _helpers.CONFIG_FILE = cfg_root / "collab.config.json"
+        _helpers.CHATS_DIR = cfg_root / "Chats"
+        _helpers.CHATS_DIR.mkdir()
+        (_helpers.CHATS_DIR / "2026-08-02_test__CHAT-NEWPROJ").mkdir()
+        (_helpers.CHATS_DIR / "2026-08-02_test__CHAT-NEWPROJ" / "meta.json").write_text(
+            json.dumps({"chat_id": "CHAT-NEWPROJ", "project_id": "llm-collab"}))
         _helpers._config_cache = None
         self.addCleanup(self._cfg_tmp.cleanup)
         self.addCleanup(self._restore_config)
@@ -194,6 +201,7 @@ class StartPiFlowTest(unittest.TestCase):
     def _restore_config(self):
         import _helpers
         _helpers.CONFIG_FILE = self._orig_config_file
+        _helpers.CHATS_DIR = self._orig_chats_dir
         _helpers._config_cache = None
 
     def _run(self, cfg, transport, run, *, resolve_profile=None):
@@ -213,6 +221,32 @@ class StartPiFlowTest(unittest.TestCase):
         self.assertEqual(reg[reg.index("--status") + 1], "active")
         self.assertEqual(reg[reg.index("--expect-pi-model") + 1], "glm-5.2")
         self.assertEqual(reg[reg.index("--wake-strategy") + 1], "runtime_trigger")
+
+    def test_nonexistent_chat_fails_before_pi_web_or_binding(self):
+        t, run = _Transport(), _Autobridge()
+        with self.assertRaisesRegex(wr.RotateError, r"chat_not_found: CHAT-MISSING"):
+            self._run(_cfg(chat="CHAT-MISSING"), t, run)
+        self.assertEqual(t.paths, [])
+        self.assertEqual(run.calls, [])
+
+    def test_selector_registers_under_canonical_chat_id(self):
+        t, run = _Transport(), _Autobridge()
+        self._run(_cfg(chat="chat-newproj"), t, run)
+        reg = next(a for a in run.calls if a[0] == "register")
+        self.assertEqual(reg[reg.index("--chat") + 1], "CHAT-NEWPROJ")
+        self.assertNotIn("chat-newproj", reg)
+
+    def test_chat_scan_bound_fails_before_pi_web_or_binding(self):
+        import _helpers
+
+        extra = _helpers.CHATS_DIR / "2026-08-03_extra__CHAT-EXTRA"
+        extra.mkdir()
+        with mock.patch.object(_helpers, "MAX_CHAT_SCAN_ENTRIES", 1):
+            t, run = _Transport(), _Autobridge()
+            with self.assertRaisesRegex(wr.RotateError, r"chat_scan_bound: CHAT-NEWPROJ"):
+                self._run(_cfg(), t, run)
+        self.assertEqual(t.paths, [])
+        self.assertEqual(run.calls, [])
 
     def test_first_project_profile_reaches_registration(self):
         import tempfile
