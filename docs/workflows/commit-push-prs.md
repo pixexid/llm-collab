@@ -233,6 +233,26 @@ Every PR waits for that first pass before merge. Consume everything in
 [the reviewed artifact set](#reviewed-artifact-set); silence and elapsed time are
 never a substitute for the bot's terminal result.
 
+## Local verify gate
+
+`bin/verify.py` is the canonical way to run the suite, locally and in CI. Run it
+before pushing a review head:
+
+```bash
+python3.11 bin/verify.py
+```
+
+It runs two gates and fails if either fails: `python -m unittest discover -s
+tests` from the repo root (so the top-level `llm_collab/` package imports —
+running discover from inside `tests/` silently drops ~345 `import llm_collab.*`
+modules to import errors and shrinks the suite; it also strips runner-session
+identity vars like `CLAUDE_CODE_SESSION_ID` so they cannot leak through
+`os.environ` into subprocess tests) and `git diff --check` (whitespace errors and
+leftover conflict markers). The GitHub Actions workflow
+`.github/workflows/verify.yml` pins python3.11 and invokes the same command, so
+"verified locally" and "green CI" mean the same run. The exit code is nonzero if
+either gate fails.
+
 ## PR requirements
 
 Include:

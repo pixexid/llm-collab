@@ -1,0 +1,117 @@
+"""Alignment: bin/verify.py and .github/workflows/verify.yml stay the single,
+correctly-configured source of truth for "verified"."""
+
+import importlib.util
+import unittest
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+VERIFY_PY = ROOT / "bin" / "verify.py"
+VERIFY_YML = ROOT / ".github" / "workflows" / "verify.yml"
+
+
+def load_verify():
+    spec = importlib.util.spec_from_file_location("verify_mod", VERIFY_PY)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class VerifyCommandTest(unittest.TestCase):
+    def setUp(self):
+        self.verify = load_verify()
+
+    def test_root_is_repo_root(self):
+        # cwd for the suite must be the repo root, where the top-level packages
+        # import; otherwise ~345 `import llm_collab.*` modules become import
+        # errors and the suite silently shrinks.
+        self.assertEqual(self.verify.ROOT, ROOT)
+        self.assertTrue((self.verify.ROOT / "llm_collab").is_dir())
+        self.assertTrue((self.verify.ROOT / "tests").is_dir())
+
+    def test_strips_runner_identity_env(self):
+        for var in (
+            "CLAUDE_CODE_SESSION_ID", "CODEX_SESSION_ID", "GEMINI_SESSION_ID",
+            "LLM_COLLAB_READER_RUNTIME_FAMILY", "LLM_COLLAB_READER_RUNTIME_ID",
+        ):
+            self.assertIn(var, self.verify.STRIP_ENV)
+
+    def test_build_env_removes_leaked_session_and_disables_bytecode(self):
+        import os
+        os.environ["CLAUDE_CODE_SESSION_ID"] = "leak-should-be-stripped"
+        self.addCleanup(os.environ.pop, "CLAUDE_CODE_SESSION_ID", None)
+        env = self.verify.build_env()
+        self.assertNotIn("CLAUDE_CODE_SESSION_ID", env)
+        self.assertEqual("1", env["PYTHONDONTWRITEBYTECODE"])
+
+    def test_diff_check_clean_tree_passes(self):
+        # This branch's committed diff (vs merge-base) has no whitespace errors.
+        self.assertEqual(0, self.verify.run_diff_check())
+
+    def test_diff_check_base_resolves_committed_range(self):
+        import os
+        # Default: merge-base against origin/main resolves in a real checkout, so
+        # the committed range is examined (not just the working tree).
+        self.assertIsNotNone(self.verify._diff_check_base())
+        # A non-existent base ref fails closed to None (bare working-tree check).
+        os.environ["GITHUB_BASE_REF"] = "no-such-branch-xyz"
+        self.addCleanup(os.environ.pop, "GITHUB_BASE_REF", None)
+        self.assertIsNone(self.verify._diff_check_base())
+
+    def test_main_fails_if_either_gate_fails(self):
+        # GH-472 requires one command to run BOTH the suite and git diff --check;
+        # a failure in either must surface, unmasked by the other passing.
+        import sys as _sys
+        v = self.verify
+        self.addCleanup(setattr, v, "run_tests", v.run_tests)
+        self.addCleanup(setattr, v, "run_diff_check", v.run_diff_check)
+        self.addCleanup(setattr, _sys, "argv", _sys.argv)
+        _sys.argv = ["verify.py"]
+
+        v.run_tests = lambda argv: 0
+        v.run_diff_check = lambda: 0
+        self.assertEqual(0, v.main())
+
+        v.run_tests = lambda argv: 0
+        v.run_diff_check = lambda: 1
+        self.assertNotEqual(0, v.main(), "diff-check failure must not be masked")
+
+        v.run_tests = lambda argv: 1
+        v.run_diff_check = lambda: 0
+        self.assertNotEqual(0, v.main(), "test failure must not be masked")
+
+
+class VerifyWorkflowTest(unittest.TestCase):
+    def setUp(self):
+        self.text = VERIFY_YML.read_text()
+
+    def test_read_only_permissions(self):
+        self.assertIn("permissions:", self.text)
+        self.assertIn("contents: read", self.text)
+
+    def test_cancels_superseded_runs(self):
+        self.assertIn("concurrency:", self.text)
+        self.assertIn("cancel-in-progress: true", self.text)
+
+    def test_pins_python_311(self):
+        self.assertIn("python-version: '3.11'", self.text)
+
+    def test_fetches_full_history_for_diff_check(self):
+        # verify.py's diff-check resolves a merge-base; CI must fetch full history.
+        self.assertIn("fetch-depth: 0", self.text)
+
+    def test_installs_runtime_and_dev_requirements(self):
+        self.assertIn("requirements-runtime.txt", self.text)
+        self.assertIn("requirements-dev.txt", self.text)
+
+    def test_invokes_the_canonical_verify_command(self):
+        self.assertIn("python bin/verify.py", self.text)
+
+    def test_has_stable_aggregate_required_job(self):
+        # A single stable required-check name survives adding future jobs.
+        self.assertRegex(self.text, r"\n  verify:\n")
+        self.assertIn("needs: [unittest]", self.text)
+
+
+if __name__ == "__main__":
+    unittest.main()

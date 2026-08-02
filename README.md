@@ -409,12 +409,18 @@ Do not discard another lane's tracked changes or untracked local files.
 
 ## Verification
 
-Run the full suite with Python 3.10 or newer:
+Run the canonical verify gate (Python 3.10+; CI pins 3.11):
 
 ```bash
-python3.11 -m unittest discover -s tests
-git diff --check
+python3.11 bin/verify.py
 ```
+
+`bin/verify.py` runs two gates and fails if either fails: `unittest discover -s
+tests` from the repo root (stripping runner-session identity vars so they cannot
+leak into subprocess tests) and `git diff --check` (whitespace errors and leftover
+conflict markers). The `verify` GitHub Actions workflow invokes the same command,
+so a local pass and a green CI check are the same run. To run a subset, pass
+unittest arguments through: `python3.11 bin/verify.py <module.Class.test>`.
 
 ## Documentation map
 
