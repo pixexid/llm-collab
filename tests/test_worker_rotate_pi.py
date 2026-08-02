@@ -35,6 +35,7 @@ class FakeTransport:
                  thinking="max", marker_after=1, bad_state=False, drift=False):
         self.chronology = chronology
         self.paths: list[str] = []
+        self.prompt_text = None
         self.provider, self.model_id, self.thinking = provider, model_id, thinking
         self.marker_after, self._polls, self._marker = marker_after, 0, None
         self.bad_state, self.drift, self._state_calls = bad_state, drift, 0
@@ -56,6 +57,7 @@ class FakeTransport:
             provider = "openai" if (self.drift and self._state_calls >= 2) else self.provider
             return 200, {"sessionId": NATIVE, "model": {"provider": provider, "id": self.model_id}, "thinkingLevel": self.thinking, "isStreaming": False}
         if method == "POST" and base == f"/api/sessions/{NATIVE}/prompt":
+            self.prompt_text = body["text"]
             self._marker = re.search(r"BOOTSTRAP_READY_\S+", body["text"]).group(0)
             return 200, {"accepted": True}
         if method == "GET" and base == f"/api/sessions/{NATIVE}/messages":
@@ -198,6 +200,18 @@ class WorkerRotatePiTest(unittest.TestCase):
         self.assertEqual(reg[reg.index("--expect-pi-model") + 1], "glm-5.2")
         self.assertEqual(reg[reg.index("--expect-pi-thinking") + 1], "max")
         self.assertEqual(reg[reg.index("--mode") + 1], "auto-read")
+
+    def test_bootstrap_prompt_allows_later_scoped_packets_without_interactive_hold(self):
+        chron: list = []
+        transport, run = FakeTransport(chron), FakeAutobridge(chron)
+        _run(make_cfg(), transport, run)
+        prompt = transport.prompt_text
+        self.assertIn("during this bootstrap turn", prompt)
+        self.assertIn("valid non-empty durable packet addressed to this worker", prompt)
+        self.assertIn("scoped to this project/repository", prompt)
+        self.assertIn("explicit collaboration task authorization", prompt)
+        self.assertIn("do not ask a user to reconcile it", prompt)
+        self.assertIn("Do not do other work without such a packet", prompt)
 
     def test_model_drift_before_register_closes_tab_and_skips_register(self):
         chron: list = []

@@ -82,11 +82,13 @@ def _resolve_chat(project: str, chat: str) -> str | None:
     return canonical
 
 
-BOOTSTRAP_TEMPLATE = """Automated llm-collab worker provisioning. You are {agent} in fresh Pi native session {native}. Do not start project work. Start exactly one persistent monitor now with monitor_watch_path (NOT monitor_start — monitor_start needs an attended confirmation and will time out).
+BOOTSTRAP_TEMPLATE = """Automated llm-collab worker provisioning. You are {agent} in fresh Pi native session {native}. Do not start project work during this bootstrap turn. Start exactly one persistent monitor now with monitor_watch_path (NOT monitor_start — monitor_start needs an attended confirmation and will time out).
+
+The bootstrap hold applies only to this setup turn. Once the watcher is running, a valid non-empty durable packet addressed to this worker and scoped to this project/repository is the explicit collaboration task authorization. Follow that packet; do not ask a user to reconcile it with the bootstrap instruction or wait for an interactive answer. If no such packet arrives, remain idle after replying with the marker.
 
 Watch this exact wake file: {event_path}
 On each change to that file, run exactly: LLM_COLLAB_READER_RUNTIME_ID={native} LLM_COLLAB_READER_RUNTIME_FAMILY=pi {py} '{inbox}' --me {agent} --session {logical} --project {project} --chat {chat} --repo-target {repo} --acknowledge
-Then summarize each durable packet and follow it. This file contains wake events only; do not watch the diagnostic event log. Do not do other work.
+Then summarize each valid durable packet and follow it. This file contains wake events only; do not watch the diagnostic event log. Do not do other work without such a packet.
 
 After the watcher is running, reply only {marker}"""
 
