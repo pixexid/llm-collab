@@ -18,10 +18,12 @@ import re
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "bin"))
 
 import worker_rotate_pi as wr  # noqa: E402
+import _helpers  # noqa: E402
 
 PRED = "SESSION-PIWEB-RELAY-01285DE6-019FAED3"
 NATIVE = "019fb3ac73ad79400db1cfd667d9b7f"
@@ -141,6 +143,13 @@ def _run(cfg, transport, autobridge):
 
 
 class WorkerRotatePiTest(unittest.TestCase):
+    def test_monitor_uses_runtime_inbox_not_state_workspace(self):
+        with patch.object(_helpers, "RUNTIME_ROOT", Path("/deployed/runtime")):
+            self.assertEqual(
+                "/deployed/runtime/bin/inbox.py",
+                wr._monitor_inbox(),
+            )
+
     def setUp(self):
         # rotate() resolves the workspace via _helpers.config_get(); without an
         # isolated config it reads the gitignored collab.config.json (absent in a

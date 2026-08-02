@@ -31,7 +31,15 @@ import subprocess
 
 sys.path.insert(0, str(Path(__file__).parent))
 from _ax_trust import format_ax_status, probe_ax_trust
-from _helpers import ROOT, agent_ids, canonical_path, config_get, get_agent, watcher_enabled_agents
+from _helpers import (
+    ROOT,
+    RUNTIME_ROOT,
+    agent_ids,
+    canonical_path,
+    config_get,
+    get_agent,
+    watcher_enabled_agents,
+)
 
 COMMANDS = ("start", "restart", "ensure", "stop", "delete", "status", "logs")
 DEFAULT_PM2_TIMEOUT_SECONDS = 15
@@ -258,7 +266,7 @@ def pm2_run(args_list: list[str], *, capture_output: bool = False) -> subprocess
 
 
 def ecosystem_path() -> Path:
-    return ROOT / "pm2" / "ecosystem.config.cjs"
+    return RUNTIME_ROOT / "pm2" / "ecosystem.config.cjs"
 
 
 def start_agent(agent_id: str) -> None:
