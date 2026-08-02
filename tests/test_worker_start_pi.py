@@ -276,7 +276,16 @@ class StartPiFlowTest(unittest.TestCase):
             agent="glmpi", native="n", logical="L", event_path="/e.jsonl",
             py="py", inbox="ib", project="p", chat="c", repo="r", marker="M")
         self.assertIn("monitor_watch_path", prompt)
+        self.assertIn("wake file", prompt)
+        self.assertIn("do not watch the diagnostic event log", prompt)
         self.assertNotIn("--acknowledge", prompt)  # inbox.py read already marks read
+
+    def test_default_event_path_is_the_pi_wake_stream(self):
+        with mock.patch.object(wr, "_workspace_root", return_value=Path("/workspace")):
+            self.assertEqual(
+                "/workspace/State/session_autobridge/events/wake/L.jsonl",
+                wr._default_event_path("L"),
+            )
 
     def test_autobridge_subprocess_runs_from_canonical_workspace_cwd(self):
         # Proves every autobridge subprocess gets the canonical cwd, so an

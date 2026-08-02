@@ -67,6 +67,7 @@ This keeps two distinct `codex` sessions from being conflated and lets `codex ->
 Dispatcher artifacts live under:
 
 - `State/session_autobridge/events/<session-id>.jsonl`
+- `State/session_autobridge/events/wake/<session-id>.jsonl` — Pi wake-only stream
 - `State/session_autobridge/prompts/<session-id>/...`
 
 Canonical runtime bindings live under:

@@ -86,6 +86,11 @@ def autobridge_event_log_path(session_id: str) -> Path:
     return EVENTS_DIR / f"{session_id}.jsonl"
 
 
+def autobridge_wake_log_path(session_id: str) -> Path:
+    """Return the Pi-only wake stream; diagnostics must not wake a worker."""
+    return EVENTS_DIR / "wake" / f"{session_id}.jsonl"
+
+
 def autobridge_prompt_dir(session_id: str) -> Path:
     return PROMPTS_DIR / session_id
 
@@ -1115,14 +1120,21 @@ def update_binding_from_session(
     return payload
 
 
-def append_event(session_id: str, event: dict[str, Any]) -> None:
-    path = autobridge_event_log_path(session_id)
+def _append_event_path(path: Path, event: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     event_payload = {"ts": utc_iso(), **event}
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(event_payload, sort_keys=True) + "\n")
         handle.flush()
         os.fsync(handle.fileno())
+
+
+def append_event(session_id: str, event: dict[str, Any]) -> None:
+    _append_event_path(autobridge_event_log_path(session_id), event)
+
+
+def append_wake_event(session_id: str, event: dict[str, Any]) -> None:
+    _append_event_path(autobridge_wake_log_path(session_id), event)
 
 
 def write_operator_turn_summary(
@@ -3194,10 +3206,9 @@ def execute_runtime_trigger(session: dict, message: dict) -> dict[str, Any]:
         # a second delivery overwrote before the monitor read it. The event is only a
         # wake; the durable unread queue is the authority. A coalesced wake is harmless
         # because Pi drains the queue (inbox.py --session --acknowledge), not the event.
-        append_event(
-            str(session["session_id"]),
-            {"event": "pi_inbox_wake", "message_path": str(message["path"])},
-        )
+        wake_event = {"event": "pi_inbox_wake", "message_path": str(message["path"])}
+        append_event(str(session["session_id"]), wake_event)
+        append_wake_event(str(session["session_id"]), wake_event)
         # returncode 0 marks the packet in the session's processed_messages so the
         # watcher wakes once, not on every poll. That ledger is separate from the
         # durable unread queue: delivery_accepted stays False, so the packet remains
