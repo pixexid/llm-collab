@@ -6,7 +6,7 @@ import subprocess
 import sys
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "bin"))
@@ -93,12 +93,78 @@ class PrWatchDiffTest(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 self.pw._gh_pages("repos/x/y/issues/1/timeline")
 
-    def test_oversized_response_fails_closed(self):
-        fake = MagicMock(returncode=0,
-                         stdout=json.dumps([[] for _ in range(self.pw.MAX_PAGES + 1)]))
-        with patch.object(self.pw.subprocess, "run", return_value=fake):
+    def test_page_budget_enforced_during_pagination(self):
+        # Every page comes back full, so more always remains: the budget must be
+        # spent BEFORE the check — never more than MAX_PAGES requests — then fail
+        # closed rather than paginate on.
+        calls = []
+
+        def fake_call(path):
+            calls.append(path)
+            return json.dumps([{"id": i} for i in range(self.pw.PER_PAGE)])
+
+        with patch.object(self.pw, "_gh_call", side_effect=fake_call):
             with self.assertRaises(RuntimeError):
                 self.pw._gh_pages("repos/x/y/issues/1/timeline")
+        self.assertEqual(self.pw.MAX_PAGES, len(calls))
+
+    def test_pagination_stops_on_short_page(self):
+        pages = [json.dumps([{"id": 1}] * self.pw.PER_PAGE), json.dumps([{"id": 2}])]
+        with patch.object(self.pw, "_gh_call", side_effect=pages):
+            got = self.pw.gh_array("repos/x/y/issues/1/timeline")
+        self.assertEqual(self.pw.PER_PAGE + 1, len(got))
+
+    def test_page_len_across_shapes(self):
+        self.assertEqual(3, self.pw._page_len([1, 2, 3]))
+        self.assertEqual(2, self.pw._page_len({"check_runs": [1, 2]}))
+        self.assertEqual(0, self.pw._page_len({"head": {"sha": "x"}}))
+
+    def test_rerun_check_runs_are_distinct(self):
+        # Two runs sharing a name (a re-run) must not collapse: key by name#id so
+        # the new run's conclusion is visible in the signature.
+        def fake_one(path):
+            if path.endswith("/status"):
+                return {"state": "success"}
+            return {"head": {"sha": "s"}, "state": "open", "merged": False}
+
+        def fake_pages(path):
+            if "check-runs" in path:
+                return [{"check_runs": [
+                    {"name": "verify", "id": 1, "conclusion": "failure"},
+                    {"name": "verify", "id": 2, "conclusion": "success"},
+                ]}]
+            return []
+
+        with patch.object(self.pw, "gh_one", side_effect=fake_one), \
+                patch.object(self.pw, "gh_array", side_effect=lambda p: []), \
+                patch.object(self.pw, "_gh_pages", side_effect=fake_pages):
+            sig, _ = self.pw.snapshot("x/y", "1")
+        self.assertIn("verify#1", sig["checks"])
+        self.assertIn("verify#2", sig["checks"])
+        self.assertEqual("failure", sig["checks"]["verify#1"])
+        self.assertEqual("success", sig["checks"]["verify#2"])
+
+    def test_per_comment_reaction_fetch_is_capped(self):
+        comments = [{"id": i} for i in range(self.pw.MAX_REACTION_COMMENTS + 5)]
+        fetched = []
+
+        def fake_array(path):
+            if path.endswith("issues/1/comments"):
+                return comments
+            if "comments/" in path and path.endswith("/reactions"):
+                fetched.append(path)
+            return []
+
+        def fake_one(path):
+            if path.endswith("/status"):
+                return {"state": "success"}
+            return {"head": {"sha": "s"}, "state": "open", "merged": False}
+
+        with patch.object(self.pw, "gh_one", side_effect=fake_one), \
+                patch.object(self.pw, "gh_array", side_effect=fake_array), \
+                patch.object(self.pw, "_gh_pages", side_effect=lambda p: []):
+            self.pw.snapshot("x/y", "1")
+        self.assertEqual(self.pw.MAX_REACTION_COMMENTS, len(fetched))
 
     def test_repo_is_required(self):
         # A worker must never fall back to a default repo.

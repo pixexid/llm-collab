@@ -26,29 +26,32 @@ import time
 # A stalled `gh api` must never hang the watch: bound every call, and fail the
 # poll closed (the loop retries next interval) rather than blocking forever.
 GH_CALL_TIMEOUT = 30.0
-# Budget guard: a pathologically large timeline/check response fails closed
-# instead of paginating unbounded. ~1000 items is far beyond any real PR.
+PER_PAGE = 100
+# Budget guard: paginate manually so the cap is enforced BEFORE each request — a
+# pathological timeline can never spend more than MAX_PAGES calls. ~1000 items is
+# far beyond any real PR.
 MAX_PAGES = 10
+# A very chatty PR has unboundedly many comments; fetching per-comment reactions
+# for all of them is unbounded work. A fresh connector verdict (its 👍 on an
+# "@codex review" comment) rides the most recent comments, so cap the per-comment
+# reaction fetch to the newest N — bounded cost, still catches the live signal.
+MAX_REACTION_COMMENTS = 30
 
 
 def _flatten_pages(pages):
-    """Flatten --slurp output (a list of per-page values) into one list. Array
-    pages are concatenated; a non-list page (single-object endpoint) is kept as
-    one element."""
+    """Flatten per-page values into one list. Array pages are concatenated; a
+    non-list page (single-object endpoint) is kept as one element."""
     out = []
     for page in pages:
         out.extend(page if isinstance(page, list) else [page])
     return out
 
 
-def _gh_pages(path):
-    """Per-page JSON values from a paginated gh call. `--slurp` wraps the pages
-    in one JSON array — WITHOUT it, --paginate emits each page as a separate
-    top-level value and a single json.loads() raises 'Extra data' on any
-    multi-page response, silently killing the watch."""
+def _gh_call(path):
+    """One `gh api` invocation, bounded by a timeout; returns stripped stdout."""
     try:
         r = subprocess.run(
-            ["gh", "api", "--paginate", "--slurp", path],
+            ["gh", "api", path],
             capture_output=True, text=True, timeout=GH_CALL_TIMEOUT,
         )
     except subprocess.TimeoutExpired as error:
@@ -57,11 +60,38 @@ def _gh_pages(path):
         ) from error
     if r.returncode != 0:
         raise RuntimeError(f"gh api {path}: {r.stderr.strip()}")
-    body = r.stdout.strip()
-    pages = json.loads(body) if body else []
-    if len(pages) > MAX_PAGES:
+    return r.stdout.strip()
+
+
+def _page_len(value):
+    """Item count of one page across the shapes we fetch: a bare array, a
+    check-runs object ({check_runs: [...]}), or a single object (0 -> no more
+    pages, ends pagination)."""
+    if isinstance(value, list):
+        return len(value)
+    if isinstance(value, dict) and isinstance(value.get("check_runs"), list):
+        return len(value["check_runs"])
+    return 0
+
+
+def _gh_pages(path):
+    """Per-page JSON values, paginating manually with explicit per_page/page so
+    the budget is enforced BEFORE each request. A page shorter than PER_PAGE (or
+    a single object) ends pagination; a full MAX_PAGES-th page means more remains
+    than the budget allows, so fail the poll closed rather than paginate on."""
+    sep = "&" if "?" in path else "?"
+    pages = []
+    for page_num in range(1, MAX_PAGES + 1):
+        body = _gh_call(f"{path}{sep}per_page={PER_PAGE}&page={page_num}")
+        if not body:
+            break
+        value = json.loads(body)
+        pages.append(value)
+        if _page_len(value) < PER_PAGE:
+            break
+    else:
         raise RuntimeError(
-            f"gh api {path}: {len(pages)} pages exceeds MAX_PAGES={MAX_PAGES}; failing closed"
+            f"gh api {path}: exceeds MAX_PAGES={MAX_PAGES}; failing closed"
         )
     return pages
 
@@ -103,7 +133,7 @@ def snapshot(repo, pr):
     # Reactions can land on a review-request comment, not just the PR itself — the
     # connector's thumbs-up verdict on a manual "@codex review" comment lives
     # there. Include per-comment reactions so a reaction-only CLEAN is not missed.
-    for comment in gh_array(f"repos/{repo}/issues/{pr}/comments"):
+    for comment in gh_array(f"repos/{repo}/issues/{pr}/comments")[-MAX_REACTION_COMMENTS:]:
         cid = comment.get("id")
         for rxn in gh_array(f"repos/{repo}/issues/comments/{cid}/reactions"):
             rx.append(f"c{cid}:{rxn.get('user', {}).get('login')}:{rxn.get('content')}")
@@ -113,7 +143,11 @@ def snapshot(repo, pr):
     if sha:
         for page in _gh_pages(f"repos/{repo}/commits/{sha}/check-runs"):
             for run in page.get("check_runs", []):
-                checks[run.get("name")] = run.get("conclusion") or run.get("status")
+                # Key by name#id, not name alone: a re-run shares the name, and
+                # collapsing on name would hide the new run's conclusion.
+                checks[f"{run.get('name')}#{run.get('id')}"] = (
+                    run.get("conclusion") or run.get("status")
+                )
         st = gh_one(f"repos/{repo}/commits/{sha}/status")
         checks["_combined_status"] = st.get("state")
 
@@ -175,8 +209,13 @@ def main():
         return 0
 
     deadline = time.monotonic() + args.timeout
-    while time.monotonic() < deadline:
-        time.sleep(args.interval)
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        # Clamp the wait so the last poll never overshoots the deadline by up to
+        # a full interval.
+        time.sleep(min(args.interval, remaining))
         try:
             cur, raw = snapshot(args.repo, args.pr)
         except RuntimeError as e:
