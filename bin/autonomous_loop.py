@@ -221,7 +221,9 @@ def next_action(state: dict[str, Any]) -> str:
         return "Inspect the blocker, patch or re-delegate the smallest fix, rerun gates, and return to the loop."
     if mode == "post_merge":
         return (
-            "Fast-forward main and run post-merge checks, then evaluate the exact merge SHA. "
+            "Run bin/local_main_sync.py --apply to synchronize the persistent checkout to "
+            "origin/main (it fails closed on tracked dirt, an active branch, or divergence) "
+            "and run post-merge checks, then evaluate the exact merge SHA. "
             "PENDING, MISSING, FAILURE, or CANCELLED results keep the task in review and "
             "preserve the lane with no done transition or cleanup. Only after terminal "
             "success or an explicit non-success disposition, mark the task done, then run "
