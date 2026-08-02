@@ -860,6 +860,35 @@ class InboxMarkAllReadTest(unittest.TestCase):
             [entry["path"] for entry in payload["repo_scope_refused"]],
         )
 
+    def test_wrong_binding_packet_is_not_consumed_on_acknowledge(self) -> None:
+        # GH-457 proof 2 (same-project isolation, real consume path): worker B
+        # (binding-current) must not CONSUME worker A's binding-targeted packet
+        # (binding-foreign). The exact-read fence must fail closed on --acknowledge
+        # too, leaving the foreign-binding packet in B's unread — never moved to
+        # read. --peek coverage is insufficient because it never marks state.
+        self.add_exact_session(binding_id="binding-current", binding_generation=3)
+        foreign = self.add_exact_message(
+            "foreign-target",
+            repo_targets=["app"],
+            target_binding_id="binding-foreign",
+            target_binding_generation=3,
+        )
+        before = self.load_inbox()
+        self.assertIn(foreign, before["unread"])
+        self.assertNotIn(foreign, before.get("read", []))
+
+        result = self.run_inbox(
+            "--project", "amiga", "--chat", "CHAT-EXACT",
+            "--session", "SESSION-EXACT", "--repo-target", "app",
+            "--acknowledge", "--json",
+            env={"LLM_COLLAB_READER_RUNTIME_ID": "pi-exact"},
+        )
+
+        self.assertEqual(75, result.returncode, result.stderr)
+        after = self.load_inbox()
+        self.assertIn(foreign, after["unread"], "foreign-binding packet must stay unread")
+        self.assertNotIn(foreign, after.get("read", []), "must not be marked read")
+
     def test_exact_session_refuses_malformed_repo_targets_before_rendering(self) -> None:
         self.add_exact_session()
         self.add_exact_message("TAIL-MARKER", repo_targets=[1])
