@@ -32,9 +32,9 @@ PER_PAGE = 100
 # far beyond any real PR.
 MAX_PAGES = 10
 # A very chatty PR has unboundedly many comments; fetching per-comment reactions
-# for all of them is unbounded work. A fresh connector verdict (its 👍 on an
-# "@codex review" comment) rides the most recent comments, so cap the per-comment
-# reaction fetch to the newest N — bounded cost, still catches the live signal.
+# for all of them is unbounded work. Bound it with a cap and FAIL CLOSED past the
+# cap (the poll retries + WARNs) — silently skipping older comments could miss the
+# authoritative reaction verdict, which is worse than a loud, retryable failure.
 MAX_REACTION_COMMENTS = 30
 
 
@@ -133,7 +133,16 @@ def snapshot(repo, pr):
     # Reactions can land on a review-request comment, not just the PR itself — the
     # connector's thumbs-up verdict on a manual "@codex review" comment lives
     # there. Include per-comment reactions so a reaction-only CLEAN is not missed.
-    for comment in gh_array(f"repos/{repo}/issues/{pr}/comments")[-MAX_REACTION_COMMENTS:]:
+    # Fail closed past the cap rather than silently truncate: a dropped comment
+    # could carry the authoritative verdict, and a bounded-but-complete-looking
+    # result must never hide what it skipped.
+    comments = gh_array(f"repos/{repo}/issues/{pr}/comments")
+    if len(comments) > MAX_REACTION_COMMENTS:
+        raise RuntimeError(
+            f"{len(comments)} comments exceeds MAX_REACTION_COMMENTS="
+            f"{MAX_REACTION_COMMENTS}; failing closed rather than skip reactions"
+        )
+    for comment in comments:
         cid = comment.get("id")
         for rxn in gh_array(f"repos/{repo}/issues/comments/{cid}/reactions"):
             rx.append(f"c{cid}:{rxn.get('user', {}).get('login')}:{rxn.get('content')}")

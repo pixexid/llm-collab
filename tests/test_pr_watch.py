@@ -144,9 +144,8 @@ class PrWatchDiffTest(unittest.TestCase):
         self.assertEqual("failure", sig["checks"]["verify#1"])
         self.assertEqual("success", sig["checks"]["verify#2"])
 
-    def test_per_comment_reaction_fetch_is_capped(self):
-        comments = [{"id": i} for i in range(self.pw.MAX_REACTION_COMMENTS + 5)]
-        fetched = []
+    def _snapshot_with_comments(self, n_comments, fetched):
+        comments = [{"id": i} for i in range(n_comments)]
 
         def fake_array(path):
             if path.endswith("issues/1/comments"):
@@ -163,7 +162,19 @@ class PrWatchDiffTest(unittest.TestCase):
         with patch.object(self.pw, "gh_one", side_effect=fake_one), \
                 patch.object(self.pw, "gh_array", side_effect=fake_array), \
                 patch.object(self.pw, "_gh_pages", side_effect=lambda p: []):
-            self.pw.snapshot("x/y", "1")
+            return self.pw.snapshot("x/y", "1")
+
+    def test_over_cap_comments_fail_closed_with_no_reaction_fetches(self):
+        # Past the cap the poll must fail closed (retryable) rather than silently
+        # skip comments — a dropped comment could carry the verdict.
+        fetched = []
+        with self.assertRaises(RuntimeError):
+            self._snapshot_with_comments(self.pw.MAX_REACTION_COMMENTS + 1, fetched)
+        self.assertEqual([], fetched)
+
+    def test_at_cap_comments_fetch_all_reactions(self):
+        fetched = []
+        self._snapshot_with_comments(self.pw.MAX_REACTION_COMMENTS, fetched)
         self.assertEqual(self.pw.MAX_REACTION_COMMENTS, len(fetched))
 
     def test_repo_is_required(self):
