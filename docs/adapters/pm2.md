@@ -7,7 +7,7 @@ PM2 is entirely optional. You can check your inbox manually at any time with:
 <runtime_root>/bin/llm-collab inbox.py --me <agent_id>
 ```
 
-For Amiga collab-loop waits, Claude owns ongoing PR/CI, bot-review, inbox-reply,
+For Amiga collab-loop waits, Claude owns ongoing PR review, bot-review, inbox-reply,
 and doorbell monitoring. Codex should prefer an attended one-shot check and hand
 continuing watches to Claude instead of keeping a Codex thread heartbeat alive.
 If Codex must create a monitor, use one monitor per purpose, clear stale prior

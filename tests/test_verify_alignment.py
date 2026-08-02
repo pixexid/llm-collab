@@ -1,5 +1,6 @@
-"""Alignment: bin/verify.py and .github/workflows/verify.yml stay the single,
-correctly-configured source of truth for "verified"."""
+"""Alignment: bin/verify.py is the required local gate for "verified", and
+.github/workflows/verify.yml stays a correctly-configured manual
+(workflow_dispatch) escape hatch — not an automatic PR gate."""
 
 import importlib.util
 import unittest
@@ -48,6 +49,13 @@ class VerifyCommandTest(unittest.TestCase):
         # This branch's committed diff (vs merge-base) has no whitespace errors.
         self.assertEqual(0, self.verify.run_diff_check())
 
+    def test_diff_check_fails_closed_without_merge_base(self):
+        # Sole gate: when origin/main can't resolve, fail closed rather than
+        # silently degrade to the bare working-tree check (misses committed dirt).
+        import unittest.mock as mock
+        with mock.patch.object(self.verify, "_diff_check_base", return_value=None):
+            self.assertNotEqual(0, self.verify.run_diff_check())
+
     def test_diff_check_base_resolves_committed_range(self):
         import os
         # Default: merge-base against origin/main resolves in a real checkout, so
@@ -89,15 +97,21 @@ class VerifyWorkflowTest(unittest.TestCase):
         self.assertIn("permissions:", self.text)
         self.assertIn("contents: read", self.text)
 
-    def test_cancels_superseded_runs(self):
-        self.assertIn("concurrency:", self.text)
-        self.assertIn("cancel-in-progress: true", self.text)
+    def test_manual_dispatch_only(self):
+        # Verify is a LOCAL gate; the workflow is a manual escape hatch.
+        self.assertIn("workflow_dispatch:", self.text)
+
+    def test_no_automatic_triggers(self):
+        # No per-PR Actions minutes: must not run on pull_request or push.
+        self.assertNotIn("pull_request", self.text)
+        self.assertNotIn("push:", self.text)
 
     def test_pins_python_311(self):
         self.assertIn("python-version: '3.11'", self.text)
 
     def test_fetches_full_history_for_diff_check(self):
-        # verify.py's diff-check resolves a merge-base; CI must fetch full history.
+        # verify.py's diff-check resolves a merge-base; the manual workflow
+        # checkout must fetch full history.
         self.assertIn("fetch-depth: 0", self.text)
 
     def test_installs_runtime_and_dev_requirements(self):
@@ -106,11 +120,6 @@ class VerifyWorkflowTest(unittest.TestCase):
 
     def test_invokes_the_canonical_verify_command(self):
         self.assertIn("python bin/verify.py", self.text)
-
-    def test_has_stable_aggregate_required_job(self):
-        # A single stable required-check name survives adding future jobs.
-        self.assertRegex(self.text, r"\n  verify:\n")
-        self.assertIn("needs: [unittest]", self.text)
 
 
 if __name__ == "__main__":

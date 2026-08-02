@@ -130,7 +130,7 @@ For Codex manual watcher checks, `watch_inbox.py` should behave the same as the 
 
 ## Collab-loop monitor ownership
 
-Claude owns ongoing collab-loop monitoring for PR/CI status, bot-review
+Claude owns ongoing collab-loop monitoring for PR/review status, bot-review
 comments, inbox replies, and doorbell handoffs. Codex should usually check live
 state once while actively gating/reviewing, then hand any continuing watch to
 Claude through the durable mailbox.

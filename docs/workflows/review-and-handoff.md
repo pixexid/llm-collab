@@ -237,8 +237,8 @@ artifacts only; it does not waive the handling below:
   five-minute post-clean settle and full re-read as a text verdict**. The
   rationale for accepting a reaction-only CLEAN at Tier A rests on that settle
   plus adjudication, so exempting it from the settle would remove the evidence
-  the rule depends on. Required CI, mergeability, independent review, and full
-  inspection of [the reviewed artifact set](commit-push-prs.md#reviewed-artifact-set) still apply.
+  the rule depends on. Required local verification, mergeability, independent
+  review, and full inspection of [the reviewed artifact set](commit-push-prs.md#reviewed-artifact-set) still apply.
 - A disposed-review completion receives the same approximately five-minute
   settle and full artifact re-read. Any new or unadjudicated finding cancels
   that completion.

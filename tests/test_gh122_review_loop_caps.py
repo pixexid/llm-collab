@@ -209,7 +209,7 @@ class ReviewLoopCapContractTest(unittest.TestCase):
         precedence = contract_section(
             workflow_text,
             "#### First-pass precedence",
-            "If the PR is waiting only for remote checks or remote review state",
+            "If the PR is waiting only for the remote review state",
         )
         handoff_wait = contract_section(
             handoff_text,

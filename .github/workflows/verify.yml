@@ -1,18 +1,14 @@
 name: verify
 
+# Manual escape hatch ONLY. Verify is a LOCAL gate (bin/verify.py); this workflow
+# has no automatic triggers, so it consumes no Actions minutes per PR. Dispatch it
+# by hand for dependency/environment drift or incident reproduction — a dispatched
+# run is supplementary evidence, never the merge gate.
 on:
-  pull_request:
-  push:
-    branches: [main]
+  workflow_dispatch:
 
-# Read-only: this workflow proves the suite; it never writes to the repo.
 permissions:
   contents: read
-
-# Superseded runs on the same ref are cancelled so only the latest head is proven.
-concurrency:
-  group: verify-${{ github.ref }}
-  cancel-in-progress: true
 
 jobs:
   unittest:
@@ -20,8 +16,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # Full history so verify.py's diff-check can resolve the merge-base and
-          # examine the branch's committed changes, not just the working tree.
+          # Full history so verify.py's diff-check can resolve the merge-base.
           fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
@@ -32,18 +27,3 @@ jobs:
           pip install -r requirements-runtime.txt -r requirements-dev.txt
       - name: Verify
         run: python bin/verify.py
-
-  # Single stable required check. Branch protection requires "verify / verify";
-  # add more jobs to `needs` later without changing the required name.
-  verify:
-    runs-on: ubuntu-latest
-    needs: [unittest]
-    if: always()
-    steps:
-      - name: Aggregate required results
-        run: |
-          if [ "${{ needs.unittest.result }}" != "success" ]; then
-            echo "verify failed: unittest=${{ needs.unittest.result }}"
-            exit 1
-          fi
-          echo "all required jobs passed"

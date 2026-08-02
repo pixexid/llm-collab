@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
-"""Canonical local verify gate — run the test suite the way CI does.
+"""Canonical local verify gate — the required pre-push/pre-PR check.
+
+This is THE gate: run it locally before pushing a review head or opening a PR.
+There is no automatic PR CI; `.github/workflows/verify.yml` is a manual-dispatch
+escape hatch only, and a dispatched run is supplementary evidence, never the merge
+gate.
 
 Side-effect-free: it fetches nothing, writes nothing to the repo or a remote, and
-mutates no runtime state. It only runs the unittest suite, and it fixes the two
-environment factors that have silently produced false greens
-(see the reliability notes):
+mutates no runtime state. Because it does not fetch, run `git fetch origin main`
+first (fetch-only) so the diff-check merge-base is current. It runs the
+unittest suite and fixes the two environment factors that have silently produced
+false greens (see the reliability notes):
 
 - **cwd = repo root**, so the top-level `llm_collab/` package imports. Running
   discover from inside `tests/` turns ~345 `import llm_collab.*` modules into
@@ -15,11 +21,8 @@ environment factors that have silently produced false greens
   subprocess tests and resolve a runtime family the test meant to leave unset.
 
 It runs two gates and fails if either fails: the unittest suite, and
-`git diff --check` (whitespace errors and leftover conflict markers). CI
-(.github/workflows/verify.yml) pins the interpreter (python3.11) and invokes this
-same command, so `bin/verify.py` is the single source of truth for "verified"
-locally and in CI. Exit code is 0 iff every test passes and the diff check is
-clean.
+`git diff --check` (whitespace errors and leftover conflict markers). Exit code
+is 0 iff every test passes and the diff check is clean.
 """
 
 from __future__ import annotations
@@ -63,9 +66,10 @@ def _diff_check_base() -> str | None:
     """Merge-base of HEAD and the integration branch, or None if it can't be
     resolved. In a PR, GITHUB_BASE_REF names the base branch; otherwise default to
     origin/main. `git diff --check <merge-base>` then examines the working tree
-    against that base, covering the branch's COMMITTED changes (what a clean CI
-    checkout has) as well as any uncommitted local edits — the bare form compares
-    only working-tree-vs-index and so checks none of the committed diff in CI."""
+    against that base, covering the branch's COMMITTED changes (what a fresh
+    checkout of the branch has) as well as any uncommitted local edits — the bare
+    form compares only working-tree-vs-index and so checks none of the committed
+    diff on a clean checkout."""
     base_ref = os.environ.get("GITHUB_BASE_REF")
     remote_base = f"origin/{base_ref}" if base_ref else "origin/main"
     result = subprocess.run(
@@ -76,14 +80,22 @@ def _diff_check_base() -> str | None:
 
 
 def run_diff_check() -> int:
-    """`git diff --check`: whitespace errors and leftover conflict markers.
-    Side-effect-free (read-only). Checked against the merge-base when it resolves,
-    so the branch's committed changes are examined (not just uncommitted ones);
-    falls back to the bare working-tree check when no base is available."""
+    """`git diff --check` against the merge-base: whitespace errors and leftover
+    conflict markers across the branch's committed changes, not just the working
+    tree. Side-effect-free (read-only).
+
+    Fails closed when the merge-base cannot be resolved (origin/main not fetched):
+    verify is the sole gate, so silently degrading to the bare working-tree check —
+    which misses committed whitespace — would weaken it. Sync origin/main first
+    (`git fetch origin main`)."""
     base = _diff_check_base()
-    target = [base] if base else []
+    if base is None:
+        print("verify: cannot resolve the origin/main merge-base — run "
+              "`git fetch origin main` first so the committed diff is checked",
+              file=sys.stderr)
+        return 1
     return subprocess.run(
-        ["git", "-C", str(ROOT), "diff", "--check", *target], env=build_env(),
+        ["git", "-C", str(ROOT), "diff", "--check", base], env=build_env(),
     ).returncode
 
 
