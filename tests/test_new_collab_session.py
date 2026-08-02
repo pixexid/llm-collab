@@ -1,3 +1,4 @@
+import subprocess
 import sys
 import unittest
 from pathlib import Path
@@ -102,7 +103,7 @@ class PickupBlockTest(unittest.TestCase):
 
 class DirtyCheckoutGuardTest(unittest.TestCase):
     def _run_guard(self, *, head, origin, dirty):
-        def fake_git(*args):
+        def fake_git(*args, timeout=None):
             a = list(args)
             if a[:2] == ["rev-parse", "origin/main"]:
                 return origin
@@ -138,6 +139,7 @@ class MainPathTest(unittest.TestCase):
         out = io.StringIO()
         with patch.object(sys, "argv", ["new_collab_session.py", *argv]), \
              patch.object(ncs, "ensure_project", return_value=None), \
+             patch.object(ncs, "get_project", return_value={"repos": {"app": "."}}), \
              patch.object(ncs, "load_agents", return_value=self.AGENTS), \
              patch.object(ncs, "register_session", return_value=None), \
              patch.object(ncs, "subprocess") as sub:
@@ -187,6 +189,7 @@ class MainPathTest(unittest.TestCase):
                 "--with", "codex:codex_app", "--repo-target", "app", "--skip-currency-check"]
         with patch.object(sys, "argv", ["new_collab_session.py", *argv]), \
              patch.object(ncs, "ensure_project", return_value=None), \
+             patch.object(ncs, "get_project", return_value={"repos": {"app": "."}}), \
              patch.object(ncs, "load_agents", return_value=self.AGENTS), \
              patch.object(ncs, "register_session", side_effect=RuntimeError("boom")), \
              patch.object(ncs, "shutil") as sh, \
@@ -195,6 +198,119 @@ class MainPathTest(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 ncs.main()
             sh.rmtree.assert_called_once()  # orphan chat rolled back
+
+    def _run_expect_exit(self, argv, agents, *, get_project_ret={"repos": {"app": "."}}):
+        with patch.object(sys, "argv", ["new_collab_session.py", *argv]), \
+             patch.object(ncs, "ensure_project", return_value=None), \
+             patch.object(ncs, "get_project", return_value=get_project_ret), \
+             patch.object(ncs, "load_agents", return_value=agents), \
+             patch.object(ncs, "register_session", return_value=None), \
+             patch.object(ncs, "subprocess") as sub:
+            with self.assertRaises(SystemExit):
+                ncs.main()
+            return sub
+
+    def test_human_relay_coworker_is_refused_before_chat(self):
+        # GH-469 P1: a human_relay identity has no native session, so --with
+        # zcode:claude_app must exit before new_chat.py, never registering it.
+        agents = self.AGENTS + [{"id": "zcode", "activation": {"type": "human_relay"}}]
+        sub = self._run_expect_exit(
+            ["--project", "p", "--title", "t", "--me", "claude",
+             "--my-runtime-session-id", "3db9", "--my-runtime-family", "claude_app",
+             "--with", "zcode:claude_app", "--repo-target", "app", "--skip-currency-check"],
+            agents)
+        sub.run.assert_not_called()
+
+    def test_attended_only_coworker_is_refused_before_chat(self):
+        # GH-469 P1: an attended-only identity cannot be autonomously registered.
+        agents = self.AGENTS + [{"id": "att", "activation": {"ax_attended_only": True, "ax_app": "X"}}]
+        sub = self._run_expect_exit(
+            ["--project", "p", "--title", "t", "--me", "claude",
+             "--my-runtime-session-id", "3db9", "--my-runtime-family", "claude_app",
+             "--with", "att:claude_app", "--repo-target", "app", "--skip-currency-check"],
+            agents)
+        sub.run.assert_not_called()
+
+    def test_non_native_initiator_is_refused_before_chat(self):
+        # GH-469 P1 (initiator bypass): a non-native --me must be refused before
+        # new_chat.py too, not only coworkers.
+        agents = self.AGENTS + [{"id": "zcode", "activation": {"type": "human_relay"}}]
+        sub = self._run_expect_exit(
+            ["--project", "p", "--title", "t", "--me", "zcode",
+             "--my-runtime-session-id", "z", "--my-runtime-family", "claude_app",
+             "--with", "codex:codex_app", "--repo-target", "app", "--skip-currency-check"],
+            agents)
+        sub.run.assert_not_called()
+
+    def test_bogus_ax_app_coworker_is_refused(self):
+        # GH-469 P1 (wake_channel too loose): an agent with a NON-routine ax_app and
+        # no watcher would be classed ax_doorbell by wake_channel, but is not a
+        # registerable native session — the routine-doorbell allowlist must refuse it.
+        agents = self.AGENTS + [{"id": "botx", "activation": {"type": "cli_session", "ax_app": "RandomApp"}}]
+        sub = self._run_expect_exit(
+            ["--project", "p", "--title", "t", "--me", "claude",
+             "--my-runtime-session-id", "3db9", "--my-runtime-family", "claude_app",
+             "--with", "botx:claude_app", "--repo-target", "app", "--skip-currency-check"],
+            agents)
+        sub.run.assert_not_called()
+
+    def test_watcher_backed_attended_coworker_is_accepted(self):
+        # GH-469: ax_attended_only disables only the routine AX doorbell; a
+        # watcher-backed agent still has a native session (watcher precedence), so
+        # it must NOT be refused.
+        import io
+        from contextlib import redirect_stdout
+        agents = self.AGENTS + [{"id": "watk", "activation": {
+            "type": "cli_session", "watcher_enabled": True, "ax_attended_only": True}}]
+        out = io.StringIO()
+        with patch.object(sys, "argv", ["new_collab_session.py",
+                "--project", "p", "--title", "t", "--me", "claude",
+                "--my-runtime-session-id", "3db9", "--my-runtime-family", "claude_app",
+                "--with", "watk:claude_app", "--repo-target", "app", "--skip-currency-check"]), \
+             patch.object(ncs, "ensure_project", return_value=None), \
+             patch.object(ncs, "get_project", return_value={"repos": {"app": "."}}), \
+             patch.object(ncs, "load_agents", return_value=agents), \
+             patch.object(ncs, "register_session", return_value=None), \
+             patch.object(ncs, "subprocess") as sub:
+            sub.run.return_value = type("R", (), {"returncode": 0, "stdout": '{"chat_id": "CHAT-TEST9999"}', "stderr": ""})()
+            with redirect_stdout(out):
+                ncs.main()
+            sub.run.assert_called()  # accepted -> chat created, not refused
+
+    def test_unknown_repo_target_is_refused_before_chat(self):
+        # GH-469 P2: a --repo-target not in the project's configured repos exits
+        # before chat creation.
+        sub = self._run_expect_exit(
+            ["--project", "p", "--title", "t", "--me", "claude",
+             "--my-runtime-session-id", "3db9", "--my-runtime-family", "claude_app",
+             "--with", "codex:codex_app", "--repo-target", "typo", "--skip-currency-check"],
+            self.AGENTS)
+        sub.run.assert_not_called()
+
+    def test_configured_repo_target_passes(self):
+        # GH-469 P2: a configured repo-target proceeds to chat creation.
+        out, sub = self._main([
+            "--project", "p", "--title", "t", "--me", "claude",
+            "--my-runtime-session-id", "3db9", "--my-runtime-family", "claude_app",
+            "--with", "codex:codex_app", "--repo-target", "app", "--skip-currency-check",
+        ])
+        self.assertIn("chat_id: CHAT-TEST9999", out)
+
+    def test_fetch_timeout_surfaces_currency_refusal_not_a_hang(self):
+        # GH-469 P3: the fetch must be bounded by a timeout AND a timeout must
+        # become the checkout-currency refusal (SystemExit), not a hang.
+        seen = {}
+
+        def fake_git(*args, timeout=None):
+            if args[:1] == ("fetch",):
+                seen["fetch_timeout"] = timeout
+                raise subprocess.TimeoutExpired(cmd="git fetch", timeout=timeout or 0)
+            return ""
+        with patch.object(ncs, "_git", side_effect=fake_git):
+            with self.assertRaises(SystemExit):
+                ncs.assert_current_checkout()
+        self.assertIsNotNone(seen.get("fetch_timeout"),
+                             "the origin/main fetch must be bounded by a timeout")
 
     def test_unknown_initiator_creates_no_chat(self):
         # P2: an invalid --me must fail closed BEFORE new_chat.py runs.

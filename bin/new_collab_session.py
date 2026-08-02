@@ -50,7 +50,33 @@ import shutil
 import subprocess
 
 sys.path.insert(0, str(Path(__file__).parent))
-from _helpers import ROOT, ensure_project, load_agents
+from _helpers import ROOT, ensure_project, get_project, load_agents
+from _ax_trust import has_ax_doorbell_capability
+
+
+def _supports_native_registration(agent_id: str, activation: dict) -> bool:
+    """Whether an agent can back an autonomously-registered NATIVE session (the
+    only kind this helper sets up). True iff it is watcher-backed (cli_session with
+    a watcher) or has a routine-doorbell AX app (Codex/ChatGPT per Contract v10).
+
+    A human_relay has no native session and must be refused. `ax_attended_only`
+    only disables the ROUTINE AX doorbell, not a native watcher — a watcher-backed
+    agent that is also attended keeps a working native session (deliver.py gives
+    the watcher precedence via is_watcher_only_target), so it must NOT be refused
+    here; only the doorbell path honours the attended flag (has_ax_doorbell_
+    capability already does). wake_channel() alone is too loose: it returns
+    "ax_doorbell" for ANY non-empty ax_app before checking the activation type or
+    the routine-doorbell profile allowlist, so it would accept a bogus AX identity;
+    has_ax_doorbell_capability() applies the shared allowlist deliver.py uses.
+    """
+    activation = activation or {}
+    if activation.get("type") == "human_relay":
+        return False
+    watcher_backed = (
+        activation.get("type") == "cli_session" and activation.get("watcher_enabled")
+    )
+    doorbell = has_ax_doorbell_capability({"id": agent_id, "activation": activation})
+    return bool(watcher_backed or doorbell)
 
 BIN = Path(__file__).parent
 DEFAULT_HOMES = {
@@ -65,10 +91,16 @@ DEFAULT_HOMES = {
 SUPPORTED_FAMILIES = ("codex_app", "claude_app", "gemini_cli")
 
 
-def _git(*args: str) -> str:
+def _git(*args: str, timeout: float | None = None) -> str:
     return subprocess.run(
-        ["git", *args], cwd=ROOT, capture_output=True, text=True, check=True
+        ["git", *args], cwd=ROOT, capture_output=True, text=True, check=True,
+        timeout=timeout,
     ).stdout.strip()
+
+
+# The origin/main fetch is the only network op here; an unreachable or
+# auth-blocked origin would otherwise hang setup before any chat is created.
+FETCH_TIMEOUT_SECONDS = 20.0
 
 
 def assert_current_checkout() -> None:
@@ -76,10 +108,18 @@ def assert_current_checkout() -> None:
     pointed at a stale checkout runs outdated code — the exact trap that made a
     'new' session pick up 100+ commits of old behaviour."""
     try:
-        _git("fetch", "origin", "main", "--quiet")
+        _git("fetch", "origin", "main", "--quiet", timeout=FETCH_TIMEOUT_SECONDS)
         origin_main = _git("rev-parse", "origin/main")
         head = _git("rev-parse", "HEAD")
         dirty = _git("status", "--porcelain")
+    except subprocess.TimeoutExpired:
+        # An unreachable/auth-blocked origin must fail closed as a currency
+        # refusal, not hang setup before any chat is created.
+        sys.exit(
+            f"[error] git fetch origin main timed out after {FETCH_TIMEOUT_SECONDS}s; "
+            "cannot verify this checkout is current. Run from the deployed runtime or "
+            "a fresh origin/main worktree with a reachable origin."
+        )
     except subprocess.CalledProcessError as exc:  # pragma: no cover - env-dependent
         sys.exit(f"[error] could not compare against origin/main: {exc.stderr or exc}")
     if head != origin_main:
@@ -261,13 +301,42 @@ def main():
     # coworkers must exist, and every family must be one this helper supports —
     # otherwise new_chat.py leaves an orphan chat behind. Pi/relay are refused
     # here, not routed through an unusable claude_app prompt.
-    agent_activation(agents, args.me)
+    # The initiator registers its OWN native session (below), and every coworker
+    # must too, so ALL of them — not just coworkers — need native-registration
+    # capability validated BEFORE any chat side effect. A supported family is a
+    # native family; a human_relay/attended-only/non-routine-AX identity cannot
+    # back one and would otherwise produce a bogus registration.
+    if not _supports_native_registration(args.me, agent_activation(agents, args.me)):
+        sys.exit(
+            f"[error] initiator {args.me}: this activation cannot back an "
+            "autonomously-registered native session (human_relay / attended-only / "
+            "non-routine AX). Run this helper only from a native worker."
+        )
     for agent_id, family in coworkers:
-        agent_activation(agents, agent_id)
+        activation = agent_activation(agents, agent_id)
         if family not in SUPPORTED_FAMILIES:
             sys.exit(f"[error] {agent_id}: family {family!r} not supported by this "
                      f"helper (use {', '.join(SUPPORTED_FAMILIES)}). Pi workers use "
                      f"`worker.py start-pi`; a human_relay has no native session.")
+        if not _supports_native_registration(agent_id, activation):
+            sys.exit(
+                f"[error] {agent_id}: activation type {activation.get('type')!r} "
+                f"cannot back a native session (human_relay / attended-only / "
+                f"non-routine AX), so it cannot back family {family!r}. Reach it by "
+                "its own activation path, not this native-session setup."
+            )
+
+    # Validate --repo-target against the project's configured repos before creating
+    # the chat: a typo would otherwise persist into chat/session scope and only
+    # fail later at delivery.
+    project = get_project(args.project) or {}
+    configured_repos = project.get("repos") or {}
+    if args.repo_target not in configured_repos:
+        sys.exit(
+            f"[error] --repo-target {args.repo_target!r} is not a configured repo of "
+            f"project {args.project!r} (configured: "
+            f"{', '.join(sorted(configured_repos)) or 'none'})."
+        )
 
     created = subprocess.run(
         [sys.executable, str(BIN / "new_chat.py"),
