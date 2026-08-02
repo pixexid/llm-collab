@@ -306,7 +306,7 @@ JSON. `--seconds` bounds the run.
 
 GitHub Codex review starts automatically when a PR is opened or marked ready.
 **Every PR waits for that first bot pass before merge.** Do not infer a pass from
-green checks, silence, or a low review tier.
+a passing local verify, silence, or a low review tier.
 
 Whether a manual fallback is allowed is decided by the Tier A/B/C rule in
 [`AGENTS.md` → Requesting Code Review](../../AGENTS.md#requesting-code-review-all-workers-every-repository).

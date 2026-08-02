@@ -114,8 +114,8 @@ next action:
   project-approved unread check
 - canonical issue/design queue validation
 - active task mirrors and worker checkpoint status
-- active PR checks, merge state, branch freshness, and the full reviewed artifact
-  set (`commit-push-prs.md#reviewed-artifact-set`)
+- active PR review state, merge state, branch freshness, and the full reviewed
+  artifact set (`commit-push-prs.md#reviewed-artifact-set`)
 
 The loop may stop only when one of the recorded stop conditions is true:
 

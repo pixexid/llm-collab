@@ -224,7 +224,7 @@ findings on the current head that were classified contract-violating remain
 blocking until fixed or individually accepted under the bounded-risk cap
 disposition above; out-of-contract findings follow the defer-first disposition
 and do not block. After a pushed
-amendment, stale review-attestation CI is an expected transitional state rather
+amendment, a stale review attestation is an expected transitional state rather
 than evidence that product verification failed. Refresh the PR body only after
 the amended head passes its required local verification.
 
@@ -235,12 +235,19 @@ never a substitute for the bot's terminal result.
 
 ## Local verify gate
 
-`bin/verify.py` is the canonical way to run the suite, locally and in CI. Run it
-before pushing a review head:
+`bin/verify.py` is the **required local gate** — the suite is not run on PRs by CI.
+Run it before pushing a review head or opening a PR. It is side-effect-free and
+does not fetch, so **fetch origin/main first** (fetch-only, works on any branch) or
+the diff-check merge-base is stale and verify fails closed:
 
 ```bash
+git fetch origin main
 python3.11 bin/verify.py
 ```
+
+Use a fetch-only preflight here, not `bin/local_main_sync.py --apply`: that tool is
+the *post-merge* persistent-checkout synchronizer and deliberately fails closed
+(`active_branch`) on a feature branch carrying review commits.
 
 It runs two gates and fails if either fails: `python -m unittest discover -s
 tests` from the repo root (so the top-level `llm_collab/` package imports —
@@ -248,10 +255,12 @@ running discover from inside `tests/` silently drops ~345 `import llm_collab.*`
 modules to import errors and shrinks the suite; it also strips runner-session
 identity vars like `CLAUDE_CODE_SESSION_ID` so they cannot leak through
 `os.environ` into subprocess tests) and `git diff --check` (whitespace errors and
-leftover conflict markers). The GitHub Actions workflow
-`.github/workflows/verify.yml` pins python3.11 and invokes the same command, so
-"verified locally" and "green CI" mean the same run. The exit code is nonzero if
-either gate fails.
+leftover conflict markers). The exit code is nonzero if either gate fails.
+
+`.github/workflows/verify.yml` is a **manual `workflow_dispatch` escape hatch**
+only (dependency/environment drift, incident reproduction). It does not run on
+PRs, so it costs no per-PR Actions minutes; a dispatched run is supplementary
+evidence, never the merge gate.
 
 ## PR requirements
 
@@ -276,18 +285,23 @@ Include:
 
 ## PR Review Wait Gate
 
-Do not merge a PR from green CI alone. A merge is allowed only after the
-orchestrator has inspected:
+There is no automatic PR CI, so the merge prerequisite is **local exact-head
+verification**, not a green check. A merge is allowed only after the orchestrator
+has inspected:
 
-- GitHub Actions checks on the latest head SHA
+- **local `bin/verify.py` run on the exact head SHA** (origin/main synced first) —
+  this replaces "required CI green" as the objective gate
+- a manually dispatched `verify.yml` run, if one exists, as *supplementary*
+  evidence only (never the sole gate)
 - `mergeStateStatus`
 - all of [the reviewed artifact set](#reviewed-artifact-set)
 - any requested changes or review replies after follow-up commits
 
 To poll a PR for these, `bin/pr_watch.py --repo <owner/name> --pr <N>` reports the
 first change across the PR timeline, reactions, and check-runs (the connector
-posts its verdict as a comment **and** a reaction, and CI arrives as check-runs —
-none reliably bump `updated_at`), then exits with a JSON delta. It watches one PR
+posts its verdict as a comment **and** a reaction, and any check-runs — e.g. a
+manually dispatched verify — arrive separately; none reliably bump `updated_at`),
+then exits with a JSON delta. It watches one PR
 and exits on the first event, so re-arm it to catch the next event on the same PR.
 
 Do not idle on review while `mergeStateStatus` is dirty. A dirty merge state is
@@ -473,11 +487,11 @@ else is a second source that goes stale the moment this one moves.
   that ripens a head for merge. Waiting is what a Tier A head does while a
   requested review is outstanding; it is not a way to acquire the signal
 - **the worker who pushed a review fix owns proving that amended exact head.**
-  Rerun the focused and required checks and inspect the fix directly. Do not
-  re-request or withdraw the bot review; the first pass is the PR's review record
-- neither a bot verdict nor a reaction waives required CI, mergeability, the
-  lane's required local verification (tests and defect-verbatim mutation
-  proof), or full inspection of [the reviewed artifact set](#reviewed-artifact-set).
+  Rerun the required local exact-head verification and inspect the fix directly.
+  Do not re-request or withdraw the bot review; the first pass is the review record
+- neither a bot verdict nor a reaction waives mergeability, the lane's required
+  local verification (tests and defect-verbatim mutation proof), or full
+  inspection of [the reviewed artifact set](#reviewed-artifact-set).
   The first connector pass is the PR's external gate; local verification owns
   amended-head proof. A second model review must not be run. The pre-PR cold
   full-diff review is unchanged and happens once, before the first PR-ready head.
@@ -501,12 +515,14 @@ not start, Tier A may issue one manual fallback request; do not retry it and do
 not replace a missing terminal review with a timer or disposition. Non-GitHub
 lanes use an exact-OID mailbox request and verdict, with the same no-silence rule.
 
-If the PR is waiting only for remote checks or remote review state, keep it open
-and create or update a Codex heartbeat attached to the current thread with a
-6-minute cadence. Each heartbeat must re-check the PR checks, merge state, and
-[the reviewed artifact set](#reviewed-artifact-set) in full. It waits for the
-configured automatic first pass and reports a stalled trigger; it never converts
-time into a pass.
+If the PR is waiting only for the remote review state (the connector's first
+pass) or merge state, keep it open and create or update a Codex heartbeat attached
+to the current thread with a 6-minute cadence. Each heartbeat must re-check the
+review state, merge state, and [the reviewed artifact set](#reviewed-artifact-set)
+in full. A manually dispatched `verify.yml` run, if one was explicitly requested,
+may be observed but is never a wait condition — never hold on an absent optional
+Actions run. The heartbeat waits for the configured automatic first pass and
+reports a stalled trigger; it never converts time into a pass.
 
 PR-wait heartbeats are a safety-fuse, not the primary routing path. When a
 heartbeat or queue owner finds actionable PR feedback that needs the implementer
@@ -527,9 +543,8 @@ Computer Use is needed as fallback. Do not silently wait for the next heartbeat
 or depend on the operator to notice the PR comment.
 
 The heartbeat may complete the wait after the release-gate worker verifies the
-exact current head has
-green required checks, the PR is mergeable with clean `mergeStateStatus`, the
-required local exact-head verification is clean, and the full current comment, review,
+exact current head passes the required local exact-head verification, the PR is
+mergeable with clean `mergeStateStatus`, and the full current comment, review,
 payload of [the reviewed artifact set](#reviewed-artifact-set) has no actionable finding. Treat the GitHub
 Codex review gate as complete when any of these holds:
 
@@ -582,7 +597,8 @@ Proceed only when all of these are true:
 - the connector completed the PR's first pass; every finding has a written
   disposition accepted by the lane owner and release-gate worker; and required
   local exact-head verification passed after any fixes
-- required checks are green on the latest head
+- the required local exact-head verification is clean on the latest head (a
+  manually dispatched verify.yml run, if any, is supplementary evidence only)
 - the PR is mergeable and `mergeStateStatus` is clean
 - **every arriving finding has a thread-linked written outcome, whatever head it was
   initiated on and whatever its current resolution state.** The origin rule above
@@ -607,17 +623,17 @@ Proceed only when all of these are true:
 Read [the reviewed artifact set](#reviewed-artifact-set) directly. Do not infer the
 result from a review body alone: inline threads carry findings. After the terminal
 first pass, observe the approximately five-minute settle and re-read the full set.
-If feedback landed, fix or respond to it, push, and rerun required local and CI
-checks on the new exact head; do not request a second bot pass.
+If feedback landed, fix or respond to it, push, and rerun the required local
+verification on the new exact head; do not request a second bot pass.
 
-If the wait cannot self-progress because checks stalled, review state is
-ambiguous, or the implementer has not acknowledged a routed review-fix request,
+If the wait cannot self-progress because local verification stalled, review state
+is ambiguous, or the implementer has not acknowledged a routed review-fix request,
 the heartbeat must escalate by doorbell with the exact blocker and next action.
 Delete or rewrite any PR-wait heartbeat that misses this escalation path.
 
 
-Keep the heartbeat active until rerun checks, merge state, and current PR
-comments/reviews are clean. Delete the PR-wait heartbeat immediately after the
+Keep the heartbeat active until rerun local verification, merge state, and current
+PR comments/reviews are clean. Delete the PR-wait heartbeat immediately after the
 merge, then continue normal post-merge cleanup in the same Codex thread.
 
 ## Autonomous Queue Runner State

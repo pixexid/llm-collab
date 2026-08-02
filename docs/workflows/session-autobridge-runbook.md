@@ -42,7 +42,7 @@ Session autobridge and PM2/heartbeat polling survive only as a bounded,
 
 - only when a doorbell attempt is blocked, or a worker is visibly running and a
   handoff is expected
-- for collab-loop waits such as PR/CI, bot-review comments, inbox replies, and
+- for collab-loop waits such as PR review, bot-review comments, inbox replies, and
   doorbell handoffs, Claude owns the ongoing monitor; Codex should hand the
   watch to Claude instead of keeping an in-thread heartbeat alive
 - task-scoped: tied to one specific task/worktree/branch and its chat
