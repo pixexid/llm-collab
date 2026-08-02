@@ -14,6 +14,13 @@ import pm2_watchers
 
 
 class PM2WatchersTest(unittest.TestCase):
+    def test_ecosystem_comes_from_runtime_root(self) -> None:
+        with patch.object(pm2_watchers, "RUNTIME_ROOT", Path("/deployed/runtime")):
+            self.assertEqual(
+                Path("/deployed/runtime/pm2/ecosystem.config.cjs"),
+                pm2_watchers.ecosystem_path(),
+            )
+
     def test_pm2_run_exits_when_pm2_times_out(self) -> None:
         with patch.object(pm2_watchers, "resolve_pm2", return_value="/usr/local/bin/pm2"):
             with patch.object(

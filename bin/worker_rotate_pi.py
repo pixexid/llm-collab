@@ -50,7 +50,9 @@ def _workspace_root() -> Path:
 
 
 def _monitor_inbox() -> str:
-    return str(_workspace_root() / "bin" / "inbox.py")
+    from _helpers import RUNTIME_ROOT
+
+    return str(RUNTIME_ROOT / "bin" / "inbox.py")
 
 
 def _sessions_dir() -> Path:
