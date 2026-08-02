@@ -284,6 +284,12 @@ orchestrator has inspected:
 - all of [the reviewed artifact set](#reviewed-artifact-set)
 - any requested changes or review replies after follow-up commits
 
+To poll a PR for these, `bin/pr_watch.py --repo <owner/name> --pr <N>` reports the
+first change across the PR timeline, reactions, and check-runs (the connector
+posts its verdict as a comment **and** a reaction, and CI arrives as check-runs —
+none reliably bump `updated_at`), then exits with a JSON delta. It watches one PR
+and exits on the first event, so re-arm it to catch the next event on the same PR.
+
 Do not idle on review while `mergeStateStatus` is dirty. A dirty merge state is
 an active blocker: refresh the branch against the target base, resolve conflicts,
 rerun verification, push, then locally verify the amended head and inspect the
