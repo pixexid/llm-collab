@@ -36,6 +36,32 @@ MAX_PAGES = 10
 # cap (the poll retries + WARNs) — silently skipping older comments could miss the
 # authoritative reaction verdict, which is worse than a loud, retryable failure.
 MAX_REACTION_COMMENTS = 30
+# MAX_PAGES is PER-CALL; one snapshot makes ~36 paginated calls (up to
+# MAX_REACTION_COMMENTS per-comment reaction loops), so per-call caps alone let a
+# pathological PR issue hundreds of sequential requests and overrun the watcher
+# deadline by hours. A single shared budget across the whole snapshot bounds the
+# cumulative page count, and the deadline is observed before every request.
+MAX_SNAPSHOT_PAGES = 80
+
+
+class _Budget:
+    """Cumulative page + deadline budget shared across one snapshot's gh calls,
+    charged before every page request so many paginated endpoints can't
+    collectively exceed MAX_SNAPSHOT_PAGES requests or run past the watcher
+    deadline. Fails the poll closed (it retries) on either."""
+
+    def __init__(self, max_pages, deadline=None):
+        self.pages_left = max_pages
+        self.deadline = deadline
+
+    def charge(self, path):
+        if self.deadline is not None and time.monotonic() >= self.deadline:
+            raise RuntimeError(f"snapshot exceeded watcher deadline before {path}")
+        if self.pages_left <= 0:
+            raise RuntimeError(
+                f"snapshot exceeded MAX_SNAPSHOT_PAGES budget before {path}"
+            )
+        self.pages_left -= 1
 
 
 def _flatten_pages(pages):
@@ -74,14 +100,18 @@ def _page_len(value):
     return 0
 
 
-def _gh_pages(path):
+def _gh_pages(path, budget=None):
     """Per-page JSON values, paginating manually with explicit per_page/page so
-    the budget is enforced BEFORE each request. A page shorter than PER_PAGE (or
-    a single object) ends pagination; a full MAX_PAGES-th page means more remains
-    than the budget allows, so fail the poll closed rather than paginate on."""
+    the per-call cap is enforced BEFORE each request. A page shorter than PER_PAGE
+    (or a single object) ends pagination; a full MAX_PAGES-th page means more
+    remains than the budget allows, so fail the poll closed rather than paginate
+    on. When a shared `budget` is passed it is charged before every request, so
+    the whole snapshot's cumulative page count and deadline are bounded too."""
     sep = "&" if "?" in path else "?"
     pages = []
     for page_num in range(1, MAX_PAGES + 1):
+        if budget is not None:
+            budget.charge(path)
         body = _gh_call(f"{path}{sep}per_page={PER_PAGE}&page={page_num}")
         if not body:
             break
@@ -96,15 +126,15 @@ def _gh_pages(path):
     return pages
 
 
-def gh_one(path):
+def gh_one(path, budget=None):
     """A single-object resource (first page)."""
-    pages = _gh_pages(path)
+    pages = _gh_pages(path, budget)
     return pages[0] if pages else {}
 
 
-def gh_array(path):
+def gh_array(path, budget=None):
     """A paginated array resource, flattened across all pages."""
-    return _flatten_pages(_gh_pages(path))
+    return _flatten_pages(_gh_pages(path, budget))
 
 
 def _timeline_sig(timeline):
@@ -118,17 +148,20 @@ def _timeline_sig(timeline):
     ]
 
 
-def snapshot(repo, pr):
-    """Return (signature_dict, raw) — one poll's worth of state."""
-    pull = gh_one(f"repos/{repo}/pulls/{pr}")
+def snapshot(repo, pr, deadline=None):
+    """Return (signature_dict, raw) — one poll's worth of state. All gh calls
+    share one page+deadline budget so the whole snapshot is bounded, not just
+    each call."""
+    budget = _Budget(MAX_SNAPSHOT_PAGES, deadline)
+    pull = gh_one(f"repos/{repo}/pulls/{pr}", budget)
     sha = pull.get("head", {}).get("sha", "")
     state = pull.get("state", "")
     merged = pull.get("merged", False)
 
-    timeline = gh_array(f"repos/{repo}/issues/{pr}/timeline")
+    timeline = gh_array(f"repos/{repo}/issues/{pr}/timeline", budget)
     tl = _timeline_sig(timeline)
 
-    reactions = gh_array(f"repos/{repo}/issues/{pr}/reactions")
+    reactions = gh_array(f"repos/{repo}/issues/{pr}/reactions", budget)
     rx = [f"{x.get('user', {}).get('login')}:{x.get('content')}" for x in reactions]
     # Reactions can land on a review-request comment, not just the PR itself — the
     # connector's thumbs-up verdict on a manual "@codex review" comment lives
@@ -136,7 +169,7 @@ def snapshot(repo, pr):
     # Fail closed past the cap rather than silently truncate: a dropped comment
     # could carry the authoritative verdict, and a bounded-but-complete-looking
     # result must never hide what it skipped.
-    comments = gh_array(f"repos/{repo}/issues/{pr}/comments")
+    comments = gh_array(f"repos/{repo}/issues/{pr}/comments", budget)
     if len(comments) > MAX_REACTION_COMMENTS:
         raise RuntimeError(
             f"{len(comments)} comments exceeds MAX_REACTION_COMMENTS="
@@ -144,20 +177,20 @@ def snapshot(repo, pr):
         )
     for comment in comments:
         cid = comment.get("id")
-        for rxn in gh_array(f"repos/{repo}/issues/comments/{cid}/reactions"):
+        for rxn in gh_array(f"repos/{repo}/issues/comments/{cid}/reactions", budget):
             rx.append(f"c{cid}:{rxn.get('user', {}).get('login')}:{rxn.get('content')}")
     rx = sorted(rx)
 
     checks = {}
     if sha:
-        for page in _gh_pages(f"repos/{repo}/commits/{sha}/check-runs"):
+        for page in _gh_pages(f"repos/{repo}/commits/{sha}/check-runs", budget):
             for run in page.get("check_runs", []):
                 # Key by name#id, not name alone: a re-run shares the name, and
                 # collapsing on name would hide the new run's conclusion.
                 checks[f"{run.get('name')}#{run.get('id')}"] = (
                     run.get("conclusion") or run.get("status")
                 )
-        st = gh_one(f"repos/{repo}/commits/{sha}/status")
+        st = gh_one(f"repos/{repo}/commits/{sha}/status", budget)
         checks["_combined_status"] = st.get("state")
 
     sig = {
@@ -226,7 +259,7 @@ def main():
         # a full interval.
         time.sleep(min(args.interval, remaining))
         try:
-            cur, raw = snapshot(args.repo, args.pr)
+            cur, raw = snapshot(args.repo, args.pr, deadline)
         except RuntimeError as e:
             print(f"WARN: {e}", file=sys.stderr)
             continue
