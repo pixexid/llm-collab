@@ -629,7 +629,8 @@ persistent queue runner.
 
 After merge:
 
-1. fast-forward local `main`
+1. synchronize the persistent local checkout to `origin/main` with the
+   executable local-main sync gate (see the gate command below)
 2. run targeted post-merge smoke only when the merge is browser-relevant
 3. evaluate the exact merge SHA through the project's configured release
    authority
@@ -661,16 +662,24 @@ grandfathered. Post-merge cleanup is verification/application only, never an
 alternate transition path.
 
 For `llm-collab` itself, the shared local checkout is part of the shipped
-workflow. After a PR that changes workflow docs, scripts, gates, skills, agent
-routing, or queue behavior merges, fast-forward the canonical local checkout
-that future sessions read before starting or handing off more work. For Amiga,
-that checkout is `/Users/pixexid/Projects/llm-collab`.
+workflow: future sessions read it before starting or handing off more work, and
+`current_runtime.py` refuses to bootstrap from a checkout that is not exactly
+`origin/main`. After any merge, bring that checkout current with the executable
+local-main sync gate instead of a manual fast-forward:
 
-If tracked local dirt blocks the fast-forward, stash or move the tracked dirt
-aside with an explicit note. Do not leave the shared checkout behind
-`origin/main` just because GitHub is up to date. Project-private untracked files
-may remain untracked; do not delete or commit them just to sync tracked workflow
-files.
+```bash
+python3 bin/local_main_sync.py --apply
+```
+
+The gate fetches `origin/main`, classifies the checkout, and prints the exact
+local and remote SHAs. It fast-forwards only when it is safe (`already_current`,
+`aligned_to_main`, `fast_forwarded`) and fails closed with exit 1 on
+`dirty_tracked`, `active_branch`, or `diverged` — it never stashes, discards, or
+overwrites tracked or staged work. Project-private untracked state (`Chats/`,
+`Logs/`, `State/`) is ignored. On a fail-closed classification, resolve the named
+blocker by hand (land or move the local work aside with an explicit note); do not
+leave the shared checkout behind `origin/main` just because GitHub is up to date.
+For Amiga, that checkout is `/Users/pixexid/Projects/llm-collab`.
 
 The cleanup gate is:
 

@@ -132,13 +132,16 @@ class AutonomousLoopStateRecoveryTest(unittest.TestCase):
 
         self.assertEqual(
             action,
-            "Fast-forward main and run post-merge checks, then evaluate the exact merge SHA. "
+            "Run bin/local_main_sync.py --apply to synchronize the persistent checkout to "
+            "origin/main (it fails closed on tracked dirt, an active branch, or divergence) "
+            "and run post-merge checks, then evaluate the exact merge SHA. "
             "PENDING, MISSING, FAILURE, or CANCELLED results keep the task in review and "
             "preserve the lane with no done transition or cleanup. Only after terminal "
             "success or an explicit non-success disposition, mark the task done, then run "
             "bin/post_merge_cleanup.py; continue only when cleanup is clear or deferred "
             "items are recorded.",
         )
+        self.assertIn("bin/local_main_sync.py --apply", action)
         self.assertLess(
             action.index("evaluate the exact merge SHA"),
             action.index("mark the task done"),
