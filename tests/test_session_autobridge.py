@@ -8039,49 +8039,104 @@ class SessionAutobridgeTest(unittest.TestCase):
                 ),
             )
 
-    def test_compaction_continuity_preserves_canonical_binding(self):
-        # GH-457 proof 1 (compaction continuity): a continuation/compaction
-        # re-registers the SAME native session, so resolve_active_canonical_binding
-        # must READ the canonical binding_id/generation the lifecycle authority
-        # minted once — never re-mint. A different native session is refused so the
-        # identity can't be inherited across sessions.
+    def test_compaction_continuity_preserves_claude_file_binding(self):
+        # GH-457 proof 1: a Claude continuation re-registers the SAME native
+        # session through the supported CLI supersession path. Claude owns the
+        # file binding, not a canonical ledger binding, so preserve the file's
+        # stable scope/native identity and original bind time instead of asserting
+        # Pi-only binding_id/binding_generation fields.
         root = self.make_workspace()
         self.add_agent(
             root,
             {
-                "id": "glmpi",
-                "display_name": "Glim",
+                "id": "claude",
+                "display_name": "Claude",
                 "activation": {"type": "cli_session", "watcher_enabled": True},
             },
         )
-        minted = self._mint_pi_binding_through_lifecycle(
+        chat_id = "CHAT-CLAUDE-COMPACTION"
+        self.create_chat(
             root,
-            chat_id="CHAT-PI-BIND",
-            project="amiga",
-            agent_id="glmpi",
-            endpoint_id="endpoint_pi_glim",
-            native_session_id="pi-glim-1",
-            runtime_instance_id="runtime_pi_glim",
+            chat_dir_name="2026-08-02_claude_compaction__CHAT-CLAUDE-COMPACTION",
+            chat_id=chat_id,
+            project_id="amiga",
         )
-        with patch.object(session_autobridge_lib, "_repo_package_root"), patch.object(
-            session_autobridge_lib, "config_get", return_value="ws_alpha",
-        ), patch.object(
-            session_autobridge_lib, "project_state_root",
-            return_value=root / "project-state",
-        ), patch.object(
-            store_module, "_linked_sqlite_version_info", return_value=SAFE_VERSION,
-        ):
-            first = session_autobridge_lib.resolve_active_canonical_binding(
-                "amiga", "CHAT-PI-BIND", "glmpi", "pi-glim-1")
-            second = session_autobridge_lib.resolve_active_canonical_binding(
-                "amiga", "CHAT-PI-BIND", "glmpi", "pi-glim-1")
-            with self.assertRaises(session_autobridge_lib.CanonicalBindingNativeMismatch):
-                session_autobridge_lib.resolve_active_canonical_binding(
-                    "amiga", "CHAT-PI-BIND", "glmpi", "pi-glim-2-foreign")
-        # Re-registration returns the identical canonical identity, not a new mint.
-        self.assertEqual(first, second)
-        self.assertEqual(minted["binding_id"], first["binding_id"])
-        self.assertEqual(minted["generation"], first["binding_generation"])
+        sessions = root / "State" / "session_autobridge" / "sessions"
+        binding_path = (
+            root
+            / "State"
+            / "session_autobridge"
+            / "bindings"
+            / "amiga"
+            / chat_id
+            / "claude.json"
+        )
+        native_session_id = "CLAUDE-NATIVE-COMPACTION"
+        common = (
+            "--agent", "claude",
+            "--project", "amiga",
+            "--chat", chat_id,
+            "--mode", "notify",
+            "--runtime-family", "claude_app",
+            "--runtime-session-id", native_session_id,
+            "--runtime-session-source", "first_read",
+        )
+        self.run_cli(
+            root,
+            "register",
+            "--session", "SESSION-CLAUDE-COMPACTION-OLD",
+            *common,
+        )
+        before = json.loads(binding_path.read_text())
+        self.assertEqual(
+            {
+                "project_id": "amiga",
+                "chat_id": chat_id,
+                "agent_id": "claude",
+                "runtime_family": "claude_app",
+                "runtime_session_id": native_session_id,
+            },
+            {key: before[key] for key in (
+                "project_id", "chat_id", "agent_id",
+                "runtime_family", "runtime_session_id",
+            )},
+        )
+        original_bound_at = before["bound_at_utc"]
+
+        self.run_cli(
+            root,
+            "register",
+            "--session", "SESSION-CLAUDE-COMPACTION-NEW",
+            *common,
+            "--supersedes-session", "SESSION-CLAUDE-COMPACTION-OLD",
+        )
+
+        retired = json.loads(
+            (sessions / "SESSION-CLAUDE-COMPACTION-OLD.json").read_text()
+        )
+        successor = json.loads(
+            (sessions / "SESSION-CLAUDE-COMPACTION-NEW.json").read_text()
+        )
+        after = json.loads(binding_path.read_text())
+        self.assertEqual("superseded", retired["status"])
+        self.assertEqual(
+            "SESSION-CLAUDE-COMPACTION-NEW", retired["superseded_by"]
+        )
+        self.assertEqual(native_session_id, successor["runtime"]["session_id"])
+        self.assertEqual(native_session_id, after["runtime_session_id"])
+        self.assertEqual(original_bound_at, after["bound_at_utc"])
+        self.assertEqual(
+            {key: before[key] for key in (
+                "project_id", "chat_id", "agent_id", "runtime_family",
+                "runtime_session_id", "runtime_session_source", "runtime_home",
+                "bound_at_utc",
+            )},
+            {key: after[key] for key in (
+                "project_id", "chat_id", "agent_id", "runtime_family",
+                "runtime_session_id", "runtime_session_source", "runtime_home",
+                "bound_at_utc",
+            )},
+        )
 
     def test_pi_registration_refuses_a_foreign_native_session(self):
         # GH-346 P1: the participant's binding is minted for one native session.
@@ -10361,18 +10416,82 @@ class SessionAutobridgeTest(unittest.TestCase):
         with patch.object(store_module, "_linked_sqlite_version_info", return_value=SAFE_VERSION):
             reader = LedgerStore.open_reader(paths)
         with reader as store:
-            self.assertEqual(
-                (1, 1, 1, 1),
-                store._connection.execute(
-                    """
-                    SELECT
-                      (SELECT count(*) FROM canonical_messages),
-                      (SELECT count(*) FROM canonical_deliveries),
-                      (SELECT count(*) FROM canonical_delivery_attempts),
-                      (SELECT count(*) FROM canonical_delivery_attempt_binding_freezes)
-                    """
-                ).fetchone(),
-            )
+            first_counts = store._connection.execute(
+                """
+                SELECT
+                  (SELECT count(*) FROM canonical_messages),
+                  (SELECT count(*) FROM canonical_deliveries),
+                  (SELECT count(*) FROM canonical_delivery_attempts),
+                  (SELECT count(*) FROM canonical_delivery_attempt_binding_freezes)
+                """
+            ).fetchone()
+            self.assertEqual((1, 1, 1, 1), first_counts)
+
+        # GH-457 proof 3 (duplicate-event idempotency): replay the same unread
+        # filesystem event after the first dispatch/ack cycle. The watcher must
+        # recognize the already-settled packet, avoid a second runtime turn, and
+        # leave all canonical rows unchanged.
+        write_json(
+            root / "agents" / "gemini" / "inbox.json",
+            {"agent": "gemini", "unread": [message_rel], "read": []},
+        )
+        replay_result = subprocess.run(
+            [
+                sys.executable,
+                str(WATCH_INBOX_SCRIPT),
+                "--me",
+                "gemini",
+                "--max-polls",
+                "1",
+                "--json",
+            ],
+            cwd=root,
+            text=True,
+            capture_output=True,
+            env=self.subprocess_env(root),
+            check=True,
+        )
+        replay_events = [
+            json.loads(line)
+            for line in replay_result.stdout.splitlines()
+            if line.strip()
+        ]
+        self.assertNotIn(
+            "autobridge_failed",
+            [event["event"] for event in replay_events],
+        )
+        self.assertEqual(
+            1,
+            len(output_file.read_text().splitlines()),
+            "replaying one packet must not trigger a second runtime turn",
+        )
+        replay_session = json.loads(session_path.read_text())
+        self.assertEqual(
+            1,
+            replay_session["processed_messages"].count(message_rel),
+        )
+        replay_inbox = json.loads(
+            (root / "agents" / "gemini" / "inbox.json").read_text()
+        )
+        self.assertNotIn(message_rel, replay_inbox["unread"])
+        self.assertIn(
+            message_rel,
+            replay_inbox["read"],
+            "replayed duplicate must be recognized and settled, not silently dropped",
+        )
+        with patch.object(store_module, "_linked_sqlite_version_info", return_value=SAFE_VERSION):
+            reader = LedgerStore.open_reader(paths)
+        with reader as store:
+            replay_counts = store._connection.execute(
+                """
+                SELECT
+                  (SELECT count(*) FROM canonical_messages),
+                  (SELECT count(*) FROM canonical_deliveries),
+                  (SELECT count(*) FROM canonical_delivery_attempts),
+                  (SELECT count(*) FROM canonical_delivery_attempt_binding_freezes)
+                """
+            ).fetchone()
+        self.assertEqual(first_counts, replay_counts)
 
     def test_watch_inbox_read_state_guard_is_not_in_helpers(self):
         with patch.object(watch_inbox_lib, "autobridge_session_ids", return_value=["SESSION-A"]):
