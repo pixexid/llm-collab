@@ -221,6 +221,7 @@ class StartPiFlowTest(unittest.TestCase):
         self.assertEqual(reg[reg.index("--status") + 1], "active")
         self.assertEqual(reg[reg.index("--expect-pi-model") + 1], "glm-5.2")
         self.assertEqual(reg[reg.index("--wake-strategy") + 1], "runtime_trigger")
+        self.assertEqual(reg[reg.index("--mode") + 1], "auto-read")
 
     def test_nonexistent_chat_fails_before_pi_web_or_binding(self):
         t, run = _Transport(), _Autobridge()

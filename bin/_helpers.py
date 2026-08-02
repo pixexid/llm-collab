@@ -30,13 +30,24 @@ def find_workspace_root(start: Path | None = None) -> Path:
     """Walk up from start (default: cwd) looking for collab.config.json."""
     here = Path(start or os.getcwd()).resolve()
     for candidate in [here, *here.parents]:
-        if (candidate / "collab.config.json").exists():
+        config = candidate / "collab.config.json"
+        if config.exists():
             return candidate
     # Fallback: the bin/ script's parent
     return Path(__file__).resolve().parent.parent
 
 
+def state_root(start: Path | None = None) -> Path:
+    """Return the real workspace root used for deployed State/Chats paths."""
+    workspace = find_workspace_root(start)
+    try:
+        return (workspace / "collab.config.json").resolve().parent
+    except OSError:
+        return workspace
+
+
 ROOT: Path = find_workspace_root()
+STATE_ROOT: Path = state_root()
 _configured_runtime_root = Path(
     os.environ.get(
         "LLM_COLLAB_RUNTIME_ROOT",

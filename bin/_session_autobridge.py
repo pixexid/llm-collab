@@ -36,6 +36,7 @@ HEURISTIC_RUNTIME_DISCOVERY_FAMILIES = frozenset(
 
 from _helpers import (
     ROOT,
+    STATE_ROOT,
     agent_inbox_path,
     build_handoff_prompt,
     config_get,
@@ -49,7 +50,7 @@ from _helpers import (
 )
 from _activation_identity import classify_activation
 
-AUTOBRIDGE_ROOT = ROOT / "State" / "session_autobridge"
+AUTOBRIDGE_ROOT = STATE_ROOT / "State" / "session_autobridge"
 SESSIONS_DIR = AUTOBRIDGE_ROOT / "sessions"
 EVENTS_DIR = AUTOBRIDGE_ROOT / "events"
 PROMPTS_DIR = AUTOBRIDGE_ROOT / "prompts"
@@ -1147,7 +1148,7 @@ def write_operator_turn_summary(
     chat_id = message.get("frontmatter", {}).get("chat_id")
     if not chat_id:
         return None
-    matches = sorted(ROOT.joinpath("Chats").glob(f"*__{chat_id}"))
+    matches = sorted(STATE_ROOT.joinpath("Chats").glob(f"*__{chat_id}"))
     if not matches:
         return None
     resolved_chat_dir = matches[-1]
@@ -1999,7 +2000,7 @@ def materialize_selected_runtime_packet(session: dict, message: dict) -> dict[st
         with ledger_module.LedgerStore.open_writer(paths) as store:
             return materialization_module.materialize_selected_legacy_packet(
                 store,
-                workspace_root=ROOT,
+                workspace_root=STATE_ROOT,
                 session=session,
                 message=message,
             )
@@ -3805,7 +3806,7 @@ def create_relay_prompt(session: dict, message: dict) -> dict[str, Any]:
         ]
     )
     write_file(prompt_path, body)
-    return {"prompt_path": str(prompt_path.relative_to(ROOT)), "prompt": prompt}
+    return {"prompt_path": str(prompt_path.relative_to(STATE_ROOT)), "prompt": prompt}
 
 
 def dispatch_session(
