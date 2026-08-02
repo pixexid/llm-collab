@@ -270,7 +270,8 @@ Useful inspection points:
 
 - `agents/codex/inbox.json`
 - `Logs/watchers/codex.pm2.out-1.log`
-- `State/session_autobridge/events/<session>.jsonl`
+- `State/session_autobridge/events/<session>.jsonl` (diagnostic event evidence)
+- `State/session_autobridge/events/wake/<session>.jsonl` (Pi wake-only stream)
 
 ---
 

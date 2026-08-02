@@ -129,6 +129,12 @@ def run_cli_with_eacces_on(root, target_path, module_name, argv):
 
 
 class SessionAutobridgeTest(unittest.TestCase):
+    def test_pi_wake_namespace_cannot_collide_with_a_session_id(self):
+        self.assertNotEqual(
+            session_autobridge_lib.autobridge_event_log_path("X.wake"),
+            session_autobridge_lib.autobridge_wake_log_path("X"),
+        )
+
     def make_workspace(self) -> Path:
         temp_root = Path(tempfile.mkdtemp(prefix="lca-", dir="/tmp"))
         write(
@@ -7278,7 +7284,17 @@ class SessionAutobridgeTest(unittest.TestCase):
             / "events"
             / "SESSION-PI-GLIM.jsonl"
         )
+        wake_path = event_path.parent / "wake" / "SESSION-PI-GLIM.jsonl"
         events_after_wake = event_path.read_text()
+        wake_events_after_wake = wake_path.read_text()
+        self.assertEqual(
+            1,
+            sum(
+                json.loads(line).get("event") == "pi_inbox_wake"
+                for line in wake_events_after_wake.splitlines()
+                if line.strip()
+            ),
+        )
         settled = subprocess.run(
             command,
             cwd=root,
@@ -7288,6 +7304,15 @@ class SessionAutobridgeTest(unittest.TestCase):
             check=True,
         )
         self.assertEqual(events_after_wake, event_path.read_text())
+        self.assertEqual(wake_events_after_wake, wake_path.read_text())
+        session_autobridge_lib.append_event(
+            "SESSION-PI-GLIM", {"event": "session_skipped", "reason": "stopped"}
+        )
+        self.assertEqual(
+            wake_events_after_wake,
+            wake_path.read_text(),
+            "diagnostic appends must not wake the Pi monitor",
+        )
         session_payload = json.loads(session_path.read_text())
         self.assertIn(
             message_rel,
@@ -7325,6 +7350,17 @@ class SessionAutobridgeTest(unittest.TestCase):
                               for line in event_path.read_text().splitlines() if line.strip())
             ),
             "the durable event log must carry a pi_inbox_wake for the packet",
+        )
+        self.assertTrue(
+            all(
+                event.get("event") == "pi_inbox_wake"
+                for event in (
+                    json.loads(line)
+                    for line in wake_path.read_text().splitlines()
+                    if line.strip()
+                )
+            ),
+            "the Pi monitor stream must contain wake events only",
         )
         self.assertTrue(
             any(

@@ -82,9 +82,9 @@ def _resolve_chat(project: str, chat: str) -> str | None:
 
 BOOTSTRAP_TEMPLATE = """Automated llm-collab worker provisioning. You are {agent} in fresh Pi native session {native}. Do not start project work. Start exactly one persistent monitor now with monitor_watch_path (NOT monitor_start — monitor_start needs an attended confirmation and will time out).
 
-Watch this exact file: {event_path}
+Watch this exact wake file: {event_path}
 On each change to that file, run exactly: LLM_COLLAB_READER_RUNTIME_ID={native} LLM_COLLAB_READER_RUNTIME_FAMILY=pi {py} '{inbox}' --me {agent} --session {logical} --project {project} --chat {chat} --repo-target {repo}
-Then summarize each durable packet and follow it. Waking on an unrelated append is fine — the drain is idempotent. Do not do other work.
+Then summarize each durable packet and follow it. This file contains wake events only; do not watch the diagnostic event log. Do not do other work.
 
 After the watcher is running, reply only {marker}"""
 
@@ -249,7 +249,7 @@ def _default_run_autobridge(args: list[str]):
 
 
 def _default_event_path(logical_id: str) -> str:
-    return str(_workspace_root() / "State" / "session_autobridge" / "events" / f"{logical_id}.jsonl")
+    return str(_workspace_root() / "State" / "session_autobridge" / "events" / "wake" / f"{logical_id}.jsonl")
 
 
 def _default_resolve_cwd(project: str, repo_target: str):

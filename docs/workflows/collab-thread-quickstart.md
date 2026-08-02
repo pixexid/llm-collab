@@ -184,7 +184,8 @@ bin/llm-collab worker.py start-pi \
 `start-pi` creates a fresh Pi Web session, restores the agent's pinned
 provider/model/thinking profile, registers the exact native session in the
 canonical workspace, starts one persistent `monitor_watch_path` on that
-session's event file, and waits for the worker's bootstrap marker. It fails
+session's wake-only event file, and waits for the worker's bootstrap marker. The
+diagnostic event log is not a worker wake source. It fails
 closed instead of guessing when the profile is ambiguous, corrupt, unreadable,
 or newer than the last complete fingerprint. The explicit first-profile form is
 the only zero-history exception.
