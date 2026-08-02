@@ -59,15 +59,18 @@ def _supports_native_registration(agent_id: str, activation: dict) -> bool:
     only kind this helper sets up). True iff it is watcher-backed (cli_session with
     a watcher) or has a routine-doorbell AX app (Codex/ChatGPT per Contract v10).
 
-    A human_relay has no native session and an attended-only AX identity cannot be
-    registered autonomously — both must be refused. wake_channel() alone is too
-    loose here: it returns "ax_doorbell" for ANY non-empty ax_app before checking
-    the activation type or the routine-doorbell profile allowlist, so it would
-    accept a bogus AX identity; has_ax_doorbell_capability() applies the shared
-    allowlist that deliver.py uses.
+    A human_relay has no native session and must be refused. `ax_attended_only`
+    only disables the ROUTINE AX doorbell, not a native watcher — a watcher-backed
+    agent that is also attended keeps a working native session (deliver.py gives
+    the watcher precedence via is_watcher_only_target), so it must NOT be refused
+    here; only the doorbell path honours the attended flag (has_ax_doorbell_
+    capability already does). wake_channel() alone is too loose: it returns
+    "ax_doorbell" for ANY non-empty ax_app before checking the activation type or
+    the routine-doorbell profile allowlist, so it would accept a bogus AX identity;
+    has_ax_doorbell_capability() applies the shared allowlist deliver.py uses.
     """
     activation = activation or {}
-    if activation.get("ax_attended_only") or activation.get("type") == "human_relay":
+    if activation.get("type") == "human_relay":
         return False
     watcher_backed = (
         activation.get("type") == "cli_session" and activation.get("watcher_enabled")

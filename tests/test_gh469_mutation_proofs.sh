@@ -42,6 +42,11 @@ mutate_and_check "M6 native-guard-trusts-any-ax-app" \
   'doorbell = bool(activation.get("ax_app"))' \
   "$T.test_bogus_ax_app_coworker_is_refused"
 
+mutate_and_check "M7 attended-rejects-watcher-backed" \
+  'if activation.get("type") == "human_relay":' \
+  'if activation.get("ax_attended_only") or activation.get("type") == "human_relay":' \
+  "$T.test_watcher_backed_attended_coworker_is_accepted"
+
 mutate_and_check "M2 drop-repo-target-guard" \
   'if args.repo_target not in configured_repos:' \
   'if False:' \

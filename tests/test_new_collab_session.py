@@ -254,6 +254,29 @@ class MainPathTest(unittest.TestCase):
             agents)
         sub.run.assert_not_called()
 
+    def test_watcher_backed_attended_coworker_is_accepted(self):
+        # GH-469: ax_attended_only disables only the routine AX doorbell; a
+        # watcher-backed agent still has a native session (watcher precedence), so
+        # it must NOT be refused.
+        import io
+        from contextlib import redirect_stdout
+        agents = self.AGENTS + [{"id": "watk", "activation": {
+            "type": "cli_session", "watcher_enabled": True, "ax_attended_only": True}}]
+        out = io.StringIO()
+        with patch.object(sys, "argv", ["new_collab_session.py",
+                "--project", "p", "--title", "t", "--me", "claude",
+                "--my-runtime-session-id", "3db9", "--my-runtime-family", "claude_app",
+                "--with", "watk:claude_app", "--repo-target", "app", "--skip-currency-check"]), \
+             patch.object(ncs, "ensure_project", return_value=None), \
+             patch.object(ncs, "get_project", return_value={"repos": {"app": "."}}), \
+             patch.object(ncs, "load_agents", return_value=agents), \
+             patch.object(ncs, "register_session", return_value=None), \
+             patch.object(ncs, "subprocess") as sub:
+            sub.run.return_value = type("R", (), {"returncode": 0, "stdout": '{"chat_id": "CHAT-TEST9999"}', "stderr": ""})()
+            with redirect_stdout(out):
+                ncs.main()
+            sub.run.assert_called()  # accepted -> chat created, not refused
+
     def test_unknown_repo_target_is_refused_before_chat(self):
         # GH-469 P2: a --repo-target not in the project's configured repos exits
         # before chat creation.
