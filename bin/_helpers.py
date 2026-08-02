@@ -61,6 +61,7 @@ AWARENESS_FILE = ROOT / "State" / "awareness.json"
 TASK_FOLDERS = ("active", "backlog", "done")
 TASK_STATUSES = ("open", "in_progress", "blocked", "review", "done")
 TASK_PRIORITIES = ("low", "normal", "high", "urgent")
+MAX_CHAT_SCAN_ENTRIES = 2000
 RELEASE_EVIDENCE_VERDICTS = (
     "success",
     "risk-accepted-followup",
@@ -886,13 +887,18 @@ def dump_frontmatter(fm: dict, body: str) -> str:
 # Chat helpers
 # ---------------------------------------------------------------------------
 
-def find_chats(partial: str | None = None) -> list[Path]:
+def find_chats(partial: str | None = None, *, max_entries: int | None = None) -> list[Path]:
     if not CHATS_DIR.exists():
         return []
-    dirs = sorted(
-        (d for d in CHATS_DIR.iterdir() if d.is_dir() and not d.name.startswith(".")),
-        key=lambda d: d.name,
-    )
+    dirs = []
+    for index, d in enumerate(CHATS_DIR.iterdir(), 1):
+        if max_entries is not None and index > max_entries:
+            raise RuntimeError(
+                f"chat directory scan exceeds {max_entries} entries; refusing to guess"
+            )
+        if d.is_dir() and not d.name.startswith("."):
+            dirs.append(d)
+    dirs.sort(key=lambda d: d.name)
     if partial and partial != "last":
         dirs = [d for d in dirs if partial.lower() in d.name.lower()]
     return dirs
@@ -948,7 +954,9 @@ def _collision_message(partial: str, candidates: list, project: str | None) -> s
     )
 
 
-def find_chat_by_partial(partial: str, *, project: str | None = None) -> Path | None:
+def find_chat_by_partial(
+    partial: str, *, project: str | None = None, max_entries: int | None = None,
+) -> Path | None:
     """Resolve a chat selector to one directory.
 
     Two matches for one chat id mean the workspace is corrupt: ids must be unique, and
@@ -965,7 +973,11 @@ def find_chat_by_partial(partial: str, *, project: str | None = None) -> Path | 
     toward the collision. Loose partials keep newest-wins -- that is human lookup, not
     delivery addressing.
     """
-    matches = find_chats(partial) if partial != "last" else find_chats()
+    matches = (
+        find_chats(partial, max_entries=max_entries)
+        if partial != "last"
+        else find_chats(max_entries=max_entries)
+    )
     selector = partial.strip().casefold()
 
     # Who BEARS this id is a global fact, established before any scoping. The pre-filter

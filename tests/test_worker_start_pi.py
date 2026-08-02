@@ -11,6 +11,7 @@ import json
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "bin"))
 
@@ -225,6 +226,25 @@ class StartPiFlowTest(unittest.TestCase):
         t, run = _Transport(), _Autobridge()
         with self.assertRaisesRegex(wr.RotateError, r"chat_not_found: CHAT-MISSING"):
             self._run(_cfg(chat="CHAT-MISSING"), t, run)
+        self.assertEqual(t.paths, [])
+        self.assertEqual(run.calls, [])
+
+    def test_selector_registers_under_canonical_chat_id(self):
+        t, run = _Transport(), _Autobridge()
+        self._run(_cfg(chat="chat-newproj"), t, run)
+        reg = next(a for a in run.calls if a[0] == "register")
+        self.assertEqual(reg[reg.index("--chat") + 1], "CHAT-NEWPROJ")
+        self.assertNotIn("chat-newproj", reg)
+
+    def test_chat_scan_bound_fails_before_pi_web_or_binding(self):
+        import _helpers
+
+        extra = _helpers.CHATS_DIR / "2026-08-03_extra__CHAT-EXTRA"
+        extra.mkdir()
+        with mock.patch.object(_helpers, "MAX_CHAT_SCAN_ENTRIES", 1):
+            t, run = _Transport(), _Autobridge()
+            with self.assertRaisesRegex(wr.RotateError, r"chat_scan_bound: CHAT-NEWPROJ"):
+                self._run(_cfg(), t, run)
         self.assertEqual(t.paths, [])
         self.assertEqual(run.calls, [])
 
