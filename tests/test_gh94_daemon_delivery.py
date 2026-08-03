@@ -235,7 +235,7 @@ class DispatchAuthorityTest(unittest.TestCase):
                     packet_repo_targets=["api"],
                 )
 
-    def test_authority_descriptor_chain_survives_path_replacement(self) -> None:
+    def test_authority_descriptor_chain_fails_on_path_rebinding(self) -> None:
         with TemporaryDirectory(dir="/tmp") as tmp:
             root = Path(tmp) / "repo"
             cwd = root / "work"
@@ -255,7 +255,8 @@ class DispatchAuthorityTest(unittest.TestCase):
             try:
                 root.rename(root.with_name("repo-old"))
                 (root / "work").mkdir(parents=True)
-                self.assertEqual((str(root.resolve()), str(cwd.resolve())), chain.canonical_paths())
+                with self.assertRaisesRegex(ValueError, "pathname was rebound"):
+                    chain.canonical_paths()
             finally:
                 chain.close()
 

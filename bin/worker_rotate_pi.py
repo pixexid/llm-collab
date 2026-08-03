@@ -41,6 +41,9 @@ PI_WEB_ENDPOINT = "endpoint_pi_web_local"
 LIVECRAFT_ENDPOINT = "endpoint_pi_livecraft_local"
 MESSAGE_PAGE_SIZE = 500
 MESSAGE_SCAN_LIMIT = 5000
+HTTP_TIMEOUT_SECONDS = 30.0
+HTTP_RESPONSE_LIMIT = 1024 * 1024
+HTTP_READ_CHUNK = 64 * 1024
 
 
 def _workspace_root() -> Path:
@@ -100,6 +103,65 @@ class RotateError(Exception):
     """A precondition or Pi Web step failed; no canonical rebind was performed."""
 
 
+def _set_response_timeout(response, timeout: float) -> None:
+    candidates = [response, getattr(response, "fp", None), getattr(response, "raw", None)]
+    fp = getattr(response, "fp", None)
+    raw = getattr(fp, "raw", None)
+    candidates.extend((raw, getattr(raw, "_sock", None)))
+    for candidate in candidates:
+        setter = getattr(candidate, "settimeout", None)
+        if callable(setter):
+            try:
+                setter(timeout)
+            except OSError:
+                continue
+            return
+
+
+def _read_http_body(response, deadline: float) -> bytes:
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RotateError("HTTP response deadline exceeded")
+        _set_response_timeout(response, remaining)
+        chunk = response.read(min(HTTP_READ_CHUNK, HTTP_RESPONSE_LIMIT + 1 - total))
+        if not chunk:
+            return b"".join(chunks)
+        if not isinstance(chunk, (bytes, bytearray)):
+            raise RotateError("HTTP response body is not bytes")
+        total += len(chunk)
+        if total > HTTP_RESPONSE_LIMIT:
+            raise RotateError("HTTP response exceeds the byte limit")
+        chunks.append(bytes(chunk))
+
+
+def _http_json_request(base_url: str, method: str, path: str, body):
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(base_url.rstrip("/") + path, data=data, method=method)
+    req.add_header("Content-Type", "application/json")
+    deadline = time.monotonic() + HTTP_TIMEOUT_SECONDS
+
+    def decode(response, status: int):
+        raw = _read_http_body(response, deadline)
+        if deadline - time.monotonic() <= 0:
+            raise RotateError("HTTP response deadline exceeded")
+        return status, (json.loads(raw) if raw else None)
+
+    try:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RotateError("HTTP response deadline exceeded")
+        with urllib.request.urlopen(req, timeout=remaining) as response:
+            return decode(response, response.status)
+    except urllib.error.HTTPError as exc:
+        try:
+            return decode(exc, exc.code)
+        finally:
+            exc.close()
+
+
 class PiWeb:
     """Thin stdlib client over jmfederico/pi-web's loopback session API."""
 
@@ -109,16 +171,7 @@ class PiWeb:
         self._sessions = {}
 
     def _http(self, method: str, path: str, body):
-        data = json.dumps(body).encode() if body is not None else None
-        req = urllib.request.Request(self.base + path, data=data, method=method)
-        req.add_header("Content-Type", "application/json")
-        try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                raw = resp.read()
-                return resp.status, (json.loads(raw) if raw else None)
-        except urllib.error.HTTPError as exc:
-            raw = exc.read()
-            return exc.code, (json.loads(raw) if raw else None)
+        return _http_json_request(self.base, method, path, body)
 
     def create_tab(self, cwd: str, title: str) -> dict:
         status, body = self._request("POST", "/api/sessions", {"cwd": cwd})
@@ -237,16 +290,7 @@ class Livecraft:
         self._sessions = {}
 
     def _http(self, method: str, path: str, body):
-        data = json.dumps(body).encode() if body is not None else None
-        req = urllib.request.Request(self.base + path, data=data, method=method)
-        req.add_header("Content-Type", "application/json")
-        try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                raw = resp.read()
-                return resp.status, (json.loads(raw) if raw else None)
-        except urllib.error.HTTPError as exc:
-            raw = exc.read()
-            return exc.code, (json.loads(raw) if raw else None)
+        return _http_json_request(self.base, method, path, body)
 
     def create_session(self, cwd: str) -> dict:
         status, body = self._request("POST", "/api/sessions", {"cwd": cwd})

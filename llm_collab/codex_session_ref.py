@@ -60,6 +60,21 @@ class RepositoryDescriptorChain:
         current = tuple((info.st_dev, info.st_ino, info.st_mode) for info in stats)
         if current != self.identities:
             raise SessionRefError("repository descriptor chain changed")
+        for label, path, index in (
+            ("root", self.root_path, self.root_index),
+            ("cwd", self.cwd_path, self.cwd_index),
+        ):
+            try:
+                info = os.stat(path, follow_symlinks=False)
+            except OSError as error:
+                raise SessionRefError(
+                    f"repository descriptor {label} pathname is unavailable"
+                ) from error
+            identity = (info.st_dev, info.st_ino, info.st_mode)
+            if identity != self.identities[index]:
+                raise SessionRefError(
+                    f"repository descriptor {label} pathname was rebound"
+                )
         return self.root_path, self.cwd_path
 
     def close(self) -> None:

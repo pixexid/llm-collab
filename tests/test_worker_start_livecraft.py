@@ -164,6 +164,26 @@ class StartLivecraftTest(unittest.TestCase):
         self.assertEqual(calls[2][2], {"type": "set_thinking_level", "level": "max"})
         self.assertEqual(calls[4][2], {"type": "prompt", "message": "bootstrap"})
 
+    def test_http_body_is_bounded_before_json_parse(self):
+        class Body:
+            def __init__(self):
+                self.remaining = b"x" * (wr.HTTP_RESPONSE_LIMIT + 1)
+
+            def read(self, size):
+                chunk, self.remaining = self.remaining[:size], self.remaining[size:]
+                return chunk
+
+        with self.assertRaisesRegex(wr.RotateError, "byte limit"):
+            wr._read_http_body(Body(), wr.time.monotonic() + 1)
+
+    def test_http_body_deadline_is_checked_before_read(self):
+        class Body:
+            def read(self, _size):
+                raise AssertionError("read must not start after the deadline")
+
+        with self.assertRaisesRegex(wr.RotateError, "deadline exceeded"):
+            wr._read_http_body(Body(), wr.time.monotonic() - 1)
+
     def test_default_gate_refuses_without_network_mutation(self):
         cfg = _cfg(disposable=False)
         client = FakeLivecraft([])
