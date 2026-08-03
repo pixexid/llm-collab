@@ -7,7 +7,9 @@
 # import error) is never miscounted as a killed mutation (bot #465 @20).
 set -u
 cd "$(dirname "$0")/.."
-export LLM_COLLAB_RUNTIME_GATE_TEST_BYPASS=1  # GH-503: gate bypass for subprocessed CLIs (test-only)
+# GH-503: authorize the freshness-gate bypass for the CLIs this script subprocesses,
+# via the same per-run token+sentinel the Python testkit uses.
+eval "$(PYTHONPATH=tests python3.11 -c 'import _runtime_gate_testkit as k, os; print(f"export {list(k.gate_bypass_env())[0]}={k.gate_bypass_env()[list(k.gate_bypass_env())[0]]}; export {list(k.gate_bypass_env())[1]}={k.gate_bypass_env()[list(k.gate_bypass_env())[1]]}")')"
 SAB=bin/_session_autobridge.py
 WI=bin/watch_inbox.py
 PY=python3.11

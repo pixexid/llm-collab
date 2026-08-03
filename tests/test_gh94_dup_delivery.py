@@ -19,7 +19,6 @@ Each behavioural case has a matching mutation in test_gh94_mutation_proofs.sh.
 from __future__ import annotations
 
 import os
-os.environ.setdefault("LLM_COLLAB_RUNTIME_GATE_TEST_BYPASS", "1")  # GH-503: focused-run gate bypass (test-only)
 import sys
 import unittest
 from pathlib import Path

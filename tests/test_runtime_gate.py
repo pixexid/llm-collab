@@ -11,6 +11,7 @@ test_current_runtime.py; here we drive the gate above it.
 """
 from __future__ import annotations
 
+import os
 import sys
 import unittest
 from pathlib import Path
@@ -92,13 +93,61 @@ class RuntimeGateTest(unittest.TestCase):
                 current_runtime.require_current_runtime("watch", environ=env)
         self.assertEqual(current_runtime.RUNTIME_GATE_REFUSED, cm.exception.code)
 
-    # ---- test-only bypass short-circuits before any git work ----
+    # ---- test bypass: per-run token must match the sentinel file (not a switch) ----
 
-    def test_test_bypass_short_circuits(self):
-        env = {current_runtime.TEST_BYPASS_ENV: "1"}
-        with patch.object(current_runtime, "current_tooling", side_effect=AssertionError("must not run")):
-            out = current_runtime.require_current_runtime("deliver", environ=env)
-        self.assertEqual("deliver", out.get("test_bypass"))
+    def test_token_matching_sentinel_bypasses(self):
+        import tempfile
+        fd, path = tempfile.mkstemp()
+        with os.fdopen(fd, "w") as h:
+            h.write("secret-token-123")
+        try:
+            env = {current_runtime.TEST_TOKEN_ENV: "secret-token-123",
+                   current_runtime.TEST_SENTINEL_ENV: path}
+            with patch.object(current_runtime, "current_tooling", side_effect=AssertionError("must not run")):
+                out = current_runtime.require_current_runtime("deliver", environ=env)
+            self.assertEqual("deliver", out.get("test_bypass"))
+        finally:
+            os.unlink(path)
+
+    def test_token_without_sentinel_does_not_bypass(self):
+        # a bare env token with no sentinel file must NOT bypass — enforce the gate.
+        env = {current_runtime.TEST_TOKEN_ENV: "x"}
+        with patch.object(current_runtime, "current_tooling", side_effect=_stale()):
+            with self.assertRaises(SystemExit) as cm:
+                current_runtime.require_current_runtime("deliver", environ=env)
+        self.assertEqual(current_runtime.RUNTIME_GATE_REFUSED, cm.exception.code)
+
+    def test_token_mismatch_does_not_bypass(self):
+        import tempfile
+        fd, path = tempfile.mkstemp()
+        with os.fdopen(fd, "w") as h:
+            h.write("real-token")
+        try:
+            env = {current_runtime.TEST_TOKEN_ENV: "guessed-wrong",
+                   current_runtime.TEST_SENTINEL_ENV: path}
+            with patch.object(current_runtime, "current_tooling", side_effect=_stale()):
+                with self.assertRaises(SystemExit) as cm:
+                    current_runtime.require_current_runtime("deliver", environ=env)
+            self.assertEqual(current_runtime.RUNTIME_GATE_REFUSED, cm.exception.code)
+        finally:
+            os.unlink(path)
+
+    def test_direct_production_subprocess_cannot_bypass(self):
+        # codex's required proof: a direct mutator with NO test token/sentinel and NO
+        # recovery waiver, from this feature-branch worktree, is refused with exit 78.
+        import subprocess
+        bin_deliver = REPO_ROOT / "bin" / "deliver.py"
+        clean = {
+            k: v for k, v in os.environ.items()
+            if k not in (current_runtime.TEST_TOKEN_ENV, current_runtime.TEST_SENTINEL_ENV,
+                         current_runtime.RECOVERY_WAIVER_ENV)
+        }
+        proc = subprocess.run(
+            [sys.executable, str(bin_deliver)], env=clean,
+            capture_output=True, text=True, timeout=60,
+        )
+        self.assertEqual(current_runtime.RUNTIME_GATE_REFUSED, proc.returncode, proc.stderr)
+        self.assertIn("runtime-gate", proc.stderr)
 
     # ---- direct-entrypoint coverage: mutation gates, read-only does not ----
 

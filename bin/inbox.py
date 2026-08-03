@@ -22,6 +22,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from _python_runtime import require_python
+from current_runtime import require_current_runtime
 
 require_python()
 
@@ -870,6 +871,17 @@ def main():
     args = parse_args()
 
     exact_requested = args.session is not None and not args.publish_session
+    # GH-503: inbox consuming modes are mutations — they claim an activation lease
+    # (gate_activation_message) and mark_messages_read(), consuming durable packets
+    # and acquiring writer authority. Gate them on exact-current runtime; leave
+    # --peek and --show-all (read-only diagnostics) ungated.
+    if args.mark_all_read:
+        require_current_runtime("inbox:mark-all-read")
+    elif exact_requested and args.acknowledge:
+        require_current_runtime("inbox:acknowledge")
+    elif not exact_requested and not args.peek and not args.show_all:
+        require_current_runtime("inbox:consume")
+
     if not exact_requested:
         known = agent_ids()
         if args.me not in known:

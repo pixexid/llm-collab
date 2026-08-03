@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-os.environ.setdefault("LLM_COLLAB_RUNTIME_GATE_TEST_BYPASS", "1")  # GH-503: focused-run gate bypass (test-only)
 import base64
 import hashlib
 import shlex

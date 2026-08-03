@@ -28,10 +28,13 @@ RECOVERY_WAIVER_ENV = "LLM_COLLAB_ALLOW_STALE_RUNTIME_RECOVERY"
 
 # Test-ONLY bypass, distinct from the production recovery waiver above and from
 # session_bootstrap's --allow-stale-tooling. The suite runs from a feature-branch
-# worktree (HEAD != origin/main), which the gate would legitimately refuse; the
-# harness sets this so CLI/subprocess tests of unrelated behavior are not gated.
-# It must never be set in a real deployment; it is not a recovery path.
-TEST_BYPASS_ENV = "LLM_COLLAB_RUNTIME_GATE_TEST_BYPASS"
+# worktree (HEAD != origin/main), which the gate would legitimately refuse. This is
+# NOT a generic env switch: the bypass is honored ONLY when the token env matches
+# the contents of a per-run sentinel file that the shared test helper
+# (tests/_runtime_gate_testkit) creates for this run. Production has no sentinel and
+# cannot forge the per-run token, so a leaked/guessed env value alone does nothing.
+TEST_TOKEN_ENV = "LLM_COLLAB_RUNTIME_GATE_TEST_TOKEN"
+TEST_SENTINEL_ENV = "LLM_COLLAB_RUNTIME_GATE_TEST_SENTINEL"
 
 # Best-effort label so a refusal names WHICH tree is stale (deployed vs source).
 _DEPLOYED_RUNTIME = Path.home() / ".local" / "share" / "llm-collab" / "runtime" / "main"
@@ -106,6 +109,22 @@ def _tree_label(root: Path) -> str:
     return f"source checkout {root}"
 
 
+def _test_sentinel_authorized(env) -> bool:
+    """True only for a genuine test run: the token env must match the contents of a
+    per-run sentinel file created by the shared test helper. Production has neither
+    the env nor the sentinel, and cannot forge the per-run token — so this is not a
+    generic env switch and a stray/guessed env value alone never bypasses the gate.
+    """
+    token = env.get(TEST_TOKEN_ENV)
+    sentinel = env.get(TEST_SENTINEL_ENV)
+    if not token or not sentinel:
+        return False
+    try:
+        return Path(sentinel).read_text(encoding="utf-8").strip() == token
+    except OSError:
+        return False
+
+
 def require_current_runtime(command: str, *, environ=None, exit_on_refusal: bool = True):
     """Gate a mutation-capable entrypoint on exact-current origin/main.
 
@@ -123,7 +142,7 @@ def require_current_runtime(command: str, *, environ=None, exit_on_refusal: bool
     startup.
     """
     env = os.environ if environ is None else environ
-    if env.get(TEST_BYPASS_ENV):
+    if _test_sentinel_authorized(env):
         return {"test_bypass": command}
     try:
         evidence = current_tooling()

@@ -5,7 +5,6 @@ import errno
 import fcntl
 import json
 import os
-os.environ.setdefault("LLM_COLLAB_RUNTIME_GATE_TEST_BYPASS", "1")  # GH-503: focused-run gate bypass (test-only)
 import subprocess
 import sys
 import tempfile
