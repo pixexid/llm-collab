@@ -11,6 +11,8 @@ canonical resolver/operator inspection via a query-only reader.
 from __future__ import annotations
 
 import sys
+import json
+import secrets
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -38,6 +40,7 @@ from llm_collab.session_lifecycle import (
     SessionLifecycleCore,
     TrustedProjectRoot,
 )
+from llm_collab.daemon.client import project_dispatch_session
 
 
 def open_store(*, writer: bool = False) -> LedgerStore:
@@ -56,6 +59,19 @@ def main(argv: list[str] | None = None) -> int:
         sub.add_argument("--project", required=True, help="Exact project id")
     for name in ("show", "retire"):
         commands.choices[name].add_argument("worker_id")
+    send = commands.add_parser("send", help="Queue one exact packet through the daemon owner")
+    send.add_argument("worker_id")
+    send.add_argument("--project", required=True)
+    send.add_argument("--message-path", required=True)
+    send.add_argument("--endpoint", required=True)
+    send.add_argument("--codex-home", required=True)
+    send.add_argument("--repo-id", default="app")
+    send.add_argument("--repo-root", required=True)
+    send.add_argument("--cwd", default=None)
+    send.add_argument("--token", default=None)
+    send.add_argument("--model", default=None)
+    send.add_argument("--timeout-seconds", type=float, default=180.0)
+    send.add_argument("--user-agent-prefix", default="llm-collab")
     attach = commands.add_parser("attach", help="Attach one exact existing native session (register->reserve->consume->active)")
     for arg in ("--project", "--chat", "--participant", "--agent", "--endpoint-id",
                 "--native-session", "--runtime-instance", "--codex-home",
@@ -76,6 +92,79 @@ def main(argv: list[str] | None = None) -> int:
         return _rotate_pi.run(args)
     if args.command == "start-pi":
         return _rotate_pi.run_start_pi(args)
+
+    if args.command == "send":
+        from _session_autobridge import iter_sessions
+        from llm_collab.daemon.client import request as daemon_request
+
+        workspace_id = config_get("workspace_id")
+        if not workspace_id:
+            raise SystemExit("[error] collab.config.json lacks workspace_id")
+        with open_store() as store:
+            try:
+                worker = show_worker(
+                    store,
+                    workspace_id=store.paths.workspace_id,
+                    project_id=args.project,
+                    worker_id=args.worker_id,
+                )
+            except WorkerLookupError as exc:
+                print(f"[error] {exc}", file=sys.stderr)
+                return 1
+        agent_id = str(worker["agent_id"])
+        if agent_id.startswith("agent_"):
+            agent_id = agent_id[len("agent_"):]
+        sessions = [
+            session for session in iter_sessions(agent_id, strict=True)
+            if session.get("project_id") == args.project
+            and session.get("chat_id") == worker["conversation_id"]
+            and session.get("status") == "active"
+        ]
+        if len(sessions) != 1:
+            print(
+                f"[error] worker {args.worker_id} has {len(sessions)} exact active sessions; refusing to guess",
+                file=sys.stderr,
+            )
+            return 1
+        session = sessions[0]
+        if (
+            session.get("binding_id") != worker.get("binding_id")
+            or session.get("binding_generation") != worker.get("generation")
+        ):
+            print("[error] worker session binding does not match the canonical worker", file=sys.stderr)
+            return 1
+        runtime = session.get("runtime")
+        if not isinstance(runtime, dict) or runtime.get("home") != args.codex_home:
+            print("[error] --codex-home does not match the selected session", file=sys.stderr)
+            return 1
+        target = {
+            "codex_home": args.codex_home,
+            "repo_id": args.repo_id,
+            "repo_root": args.repo_root,
+            "cwd": args.cwd or args.repo_root,
+            "user_agent_prefix": args.user_agent_prefix,
+        }
+        request = {
+            "worker_id": args.worker_id,
+            "project_id": args.project,
+            "session": project_dispatch_session(session),
+            "message": {"path": args.message_path},
+            "endpoint": {"url": args.endpoint, "token": args.token},
+            "target": target,
+            "correlation_id": "corr_" + secrets.token_urlsafe(12),
+            "observed_at_utc": utc_iso(),
+            "timeout_seconds": args.timeout_seconds,
+            "model": args.model,
+        }
+        paths = LedgerPaths.derive(project_state_root(), str(workspace_id))
+        response = daemon_request(
+            paths,
+            "dispatch",
+            request=request,
+            timeout=max(args.timeout_seconds + 5.0, 10.0),
+        )
+        print(json.dumps(response, separators=(",", ":")))
+        return 0 if isinstance(response, dict) and response.get("outcome") == "accepted" else 1
 
     if args.command == "attach":
         import datetime as _dt

@@ -1,10 +1,11 @@
-"""One inert, same-user Unix control socket for the workspace ledger."""
+"""Default-off same-user Unix control socket for the workspace ledger."""
 
 from __future__ import annotations
 
 import ctypes
 import errno
 import json
+import math
 import os
 import socket
 import stat
@@ -16,7 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Mapping
 
-from llm_collab.daemon.gate import GateStatus, evaluate_observation_gate
+from llm_collab.daemon.gate import GateStatus, evaluate_observation_gate, read_exact_nofollow
 from llm_collab.ledger import LedgerPaths, LedgerStore
 
 REQUEST_LIMIT = 4 * 1024
@@ -31,6 +32,70 @@ INTEGRITY_ERROR_LIMIT = 256
 
 class ProtocolError(ValueError):
     pass
+
+
+def _resolve_authoritative_repo(
+    store: LedgerStore,
+    *,
+    workspace_root: Path,
+    project_id: str,
+    session: Mapping[str, object],
+    target: Mapping[str, object],
+) -> tuple[str, str, str]:
+    """Resolve and verify the target against the immutable project registry."""
+    repo_id = target.get("repo_id")
+    if not isinstance(repo_id, str) or not repo_id:
+        raise ValueError("dispatch repo_id is invalid")
+    repo_targets = session.get("repo_targets")
+    if not isinstance(repo_targets, (list, tuple)) or repo_id not in repo_targets:
+        raise ValueError("dispatch repo_id is not in the worker project scope")
+    revision = store.current_registry_revision(workspace_id=store.paths.workspace_id)
+    snapshot = store.get_project_snapshot(
+        workspace_id=store.paths.workspace_id,
+        project_id=project_id,
+        registry_revision=revision,
+    )
+    if snapshot is None:
+        raise ValueError("dispatch project is absent from the current registry")
+    try:
+        project = json.loads(snapshot["snapshot_json"])
+    except (KeyError, TypeError, json.JSONDecodeError) as exc:
+        raise ValueError("dispatch project authority is malformed") from exc
+    repos = project.get("repos") if isinstance(project, dict) else None
+    raw_root = repos.get(repo_id) if isinstance(repos, dict) else None
+    if not isinstance(raw_root, str) or not raw_root:
+        raise ValueError("dispatch repo is absent from project authority")
+    raw_path = Path(raw_root).expanduser()
+    if raw_path.is_absolute():
+        repo_root = raw_path.resolve()
+    elif raw_path.parts and raw_path.parts[0] == "..":
+        repo_root = (workspace_root / raw_path).resolve()
+    else:
+        try:
+            config = json.loads(
+                read_exact_nofollow(workspace_root / "collab.config.json")
+                .decode("utf-8")
+            )
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError("dispatch cannot resolve relative project repo authority") from exc
+        projects_root = config.get("projects_root") if isinstance(config, dict) else None
+        if not isinstance(projects_root, str) or not projects_root:
+            raise ValueError("dispatch project authority lacks projects_root")
+        repo_root = (Path(projects_root).expanduser() / raw_path).resolve()
+    requested_root = target.get("repo_root")
+    requested_cwd = target.get("cwd")
+    if not isinstance(requested_root, str) or not isinstance(requested_cwd, str):
+        raise ValueError("dispatch target paths are invalid")
+    if Path(requested_root).expanduser().resolve() != repo_root:
+        raise ValueError("dispatch repo_root does not match project authority")
+    cwd = Path(requested_cwd).expanduser().resolve()
+    try:
+        beneath = os.path.commonpath((str(repo_root), str(cwd))) == str(repo_root)
+    except ValueError as exc:
+        raise ValueError("dispatch cwd is not under project authority") from exc
+    if not repo_root.is_dir() or not cwd.is_dir() or not beneath:
+        raise ValueError("dispatch cwd is not under project authority")
+    return repo_id, str(repo_root), str(cwd)
 
 
 # The probe's COVERAGE, not a claim that verification happened. `ok` alone would
@@ -107,6 +172,65 @@ def parse_request(payload: bytes) -> str:
     return value["op"]
 
 
+def parse_dispatch_request(payload: bytes) -> dict[str, object]:
+    """Parse the closed daemon-owned worker dispatch envelope."""
+    try:
+        value = json.loads(payload.decode("utf-8"), object_pairs_hook=_no_duplicates)
+    except (UnicodeDecodeError, json.JSONDecodeError, ProtocolError) as exc:
+        raise ProtocolError("invalid dispatch request") from exc
+    if not isinstance(value, dict) or set(value) != {"version", "op", "request"}:
+        raise ProtocolError("dispatch request must contain exactly version, op and request")
+    if type(value["version"]) is not int or value["version"] != 1 or value["op"] != "dispatch":
+        raise ProtocolError("unsupported dispatch request")
+    request = value["request"]
+    if not isinstance(request, dict) or set(request) != {
+        "worker_id", "project_id", "session", "message", "endpoint", "target",
+        "correlation_id", "observed_at_utc", "timeout_seconds", "model",
+    }:
+        raise ProtocolError("dispatch request has an invalid shape")
+    for key in ("worker_id", "project_id", "correlation_id", "observed_at_utc"):
+        if not isinstance(request[key], str) or not request[key] or len(request[key]) > 512:
+            raise ProtocolError(f"dispatch request {key} is invalid")
+    if not isinstance(request["session"], dict):
+        raise ProtocolError("dispatch request session is invalid")
+    message = request["message"]
+    if not isinstance(message, dict) or set(message) != {"path"}:
+        raise ProtocolError("dispatch request message must contain only path")
+    if not isinstance(message["path"], str) or not message["path"] or len(message["path"]) > 512:
+        raise ProtocolError("dispatch request message path is invalid")
+    endpoint = request["endpoint"]
+    if not isinstance(endpoint, dict) or set(endpoint) != {"url", "token"}:
+        raise ProtocolError("dispatch request endpoint is invalid")
+    if not isinstance(endpoint["url"], str) or not endpoint["url"] or len(endpoint["url"]) > 2048:
+        raise ProtocolError("dispatch request endpoint url is invalid")
+    if endpoint["token"] is not None and (
+        not isinstance(endpoint["token"], str) or len(endpoint["token"]) > 8192
+    ):
+        raise ProtocolError("dispatch request endpoint token is invalid")
+    target = request["target"]
+    if not isinstance(target, dict) or set(target) != {
+        "codex_home", "repo_id", "repo_root", "cwd", "user_agent_prefix"
+    }:
+        raise ProtocolError("dispatch request target is invalid")
+    for key in ("codex_home", "repo_id", "repo_root", "cwd", "user_agent_prefix"):
+        if not isinstance(target[key], str) or not target[key] or len(target[key]) > 4096:
+            raise ProtocolError(f"dispatch request target {key} is invalid")
+    timeout = request["timeout_seconds"]
+    if (
+        isinstance(timeout, bool)
+        or not isinstance(timeout, (int, float))
+        or not math.isfinite(timeout)
+        or timeout <= 0
+        or timeout > 180
+    ):
+        raise ProtocolError("dispatch request timeout_seconds is invalid")
+    if request["model"] is not None and (
+        not isinstance(request["model"], str) or not request["model"] or len(request["model"]) > 512
+    ):
+        raise ProtocolError("dispatch request model is invalid")
+    return request
+
+
 def peer_uid(connection: socket.socket, *, platform: str | None = None) -> int:
     platform = sys.platform if platform is None else platform
     if platform.startswith("linux"):
@@ -150,7 +274,7 @@ def _identity(path: Path) -> tuple[int, int]:
 
 
 class DaemonServer:
-    """Own a P1a writer store while serving the closed lifecycle vocabulary."""
+    """Own the ledger and the sole default-off worker dispatch boundary."""
 
     def __init__(
         self,
@@ -422,17 +546,129 @@ class DaemonServer:
                 chunks.append(chunk)
             if not chunks:
                 raise ProtocolError("empty control request")
-            op = parse_request(b"".join(chunks))
+            payload = b"".join(chunks)
+            try:
+                op = parse_request(payload)
+                request = None
+            except ProtocolError:
+                request = parse_dispatch_request(payload)
+                op = "dispatch"
             if op == "status":
                 response: object = self._status_response()
             elif op == "logs":
                 response = {"version": 1, "logs": self._read_logs()}
+            elif op == "dispatch":
+                response = {"version": 1, **self._dispatch(request)}
             else:
                 self._stopping = True
                 response = {"version": 1, "stopping": True}
             self._send(connection, response)
         except (OSError, PermissionError, ProtocolError) as exc:
             self._send(connection, {"version": 1, "error": str(exc)})
+
+    def _dispatch(self, request: Mapping[str, object] | None) -> dict[str, object]:
+        if request is None:
+            raise ProtocolError("dispatch request is missing")
+        gate = self._gate_status
+        if gate is None or not gate.dispatch_effective:
+            return {
+                "outcome": "gate_disabled",
+                "dispatch_enabled": False,
+                "transport_connected": False,
+            }
+        store = self._store
+        if store is None:
+            return {"outcome": "gate_disabled", "reason": "ledger_not_opened"}
+        try:
+            # ponytail: keep the first daemon-owned slice on the writer thread;
+            # add a fenced worker pool only with the lease/reconcile slice.
+            from llm_collab.canonical.codex_delivery import (
+                deliver_worker_turn,
+                resolve_worker_delivery_context,
+            )
+            from llm_collab.codex_app_server_live_probe import (
+                _WebSocketJsonRpcTransport,
+                observe_exact_thread,
+                probe_exact_thread,
+            )
+            from llm_collab.codex_runtime_home import bind_runtime_home
+            from llm_collab.session_lifecycle import (
+                CodexLifecycleProvider,
+                TrustedProjectRoot,
+            )
+
+            project_id = str(request["project_id"])
+            session = request["session"]
+            if not isinstance(session, Mapping):
+                raise ValueError("dispatch session is not an object")
+            context = resolve_worker_delivery_context(
+                worker_id=str(request["worker_id"]),
+                project_id=project_id,
+                workspace_id=self.paths.workspace_id,
+                session=session,
+            )
+            target = request["target"]
+            endpoint = request["endpoint"]
+            if not isinstance(target, Mapping) or not isinstance(endpoint, Mapping):
+                raise ValueError("dispatch endpoint/target is not an object")
+            if str(target["codex_home"]) != context.runtime_home_source:
+                raise ValueError("dispatch CODEX_HOME does not match the selected session")
+            repo_id, repo_root, cwd = _resolve_authoritative_repo(
+                store,
+                workspace_root=self.workspace_root,
+                project_id=project_id,
+                session=session,
+                target=target,
+            )
+            runtime_home = bind_runtime_home(target["codex_home"])
+            trusted_root = TrustedProjectRoot(
+                project_id,
+                repo_id,
+                repo_root,
+                cwd,
+            )
+            endpoint_url = str(endpoint["url"])
+            token = endpoint["token"] if isinstance(endpoint["token"], str) else None
+            prefix = str(target["user_agent_prefix"])
+            provider = CodexLifecycleProvider(
+                exact_thread_probe=lambda thread_id: probe_exact_thread(
+                    thread_id,
+                    endpoint_url=endpoint_url,
+                    token=token,
+                    timeout_seconds=5,
+                )
+            )
+            return deliver_worker_turn(
+                store,
+                workspace_root=self.workspace_root,
+                context=context,
+                message=request["message"],
+                provider=provider,
+                runtime_home=runtime_home,
+                trusted_project_root=trusted_root,
+                observed_at_utc=str(request["observed_at_utc"]),
+                correlation_id=str(request["correlation_id"]),
+                dispatch_enabled=True,
+                make_observe=lambda: lambda thread_id: observe_exact_thread(
+                    thread_id,
+                    expected_runtime_home=runtime_home.runtime_home_realpath,
+                    supported_user_agent_prefixes=(prefix,),
+                    endpoint_url=endpoint_url,
+                    token=token,
+                    timeout_seconds=5,
+                ),
+                make_transport=lambda: _WebSocketJsonRpcTransport(
+                    endpoint_url, timeout_seconds=float(request["timeout_seconds"]), token=token
+                ).__enter__(),
+                model=request["model"] if isinstance(request["model"], str) else None,
+                timeout_seconds=float(request["timeout_seconds"]),
+            )
+        except Exception as exc:
+            return {
+                "outcome": "dispatch_failed",
+                "error": f"{type(exc).__name__}: {exc}",
+                "transport_connected": False,
+            }
 
     def _status_response(self) -> dict[str, object]:
         gate = None if self._gate_status is None else self._gate_status.as_dict()

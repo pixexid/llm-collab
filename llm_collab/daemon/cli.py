@@ -1,4 +1,4 @@
-"""Fixed local CLI for the inert daemon."""
+"""Fixed local CLI for the default-off workspace daemon."""
 
 from __future__ import annotations
 
@@ -10,7 +10,13 @@ import sys
 import time
 from pathlib import Path
 
-from llm_collab.daemon.server import DEADLINE_SECONDS, RESPONSE_LIMIT, DaemonServer, parse_request
+from llm_collab.daemon.server import (
+    DEADLINE_SECONDS,
+    RESPONSE_LIMIT,
+    DaemonServer,
+    parse_dispatch_request,
+    parse_request,
+)
 from llm_collab.ledger import LedgerPaths
 
 
@@ -41,13 +47,22 @@ def _request(
     paths: LedgerPaths,
     op: str,
     *,
+    request: dict[str, object] | None = None,
     timeout: float = DEADLINE_SECONDS,
     clock=time.monotonic,
 ) -> object:
     if timeout <= 0:
         raise TimeoutError("daemon I/O deadline exceeded")
-    payload = json.dumps({"version": 1, "op": op}, separators=(",", ":")).encode("utf-8")
-    parse_request(payload)
+    body: dict[str, object] = {"version": 1, "op": op}
+    if request is not None:
+        if op != "dispatch":
+            raise ValueError("request payload is only valid for dispatch")
+        body["request"] = request
+    payload = json.dumps(body, separators=(",", ":")).encode("utf-8")
+    if op == "dispatch":
+        parse_dispatch_request(payload)
+    else:
+        parse_request(payload)
     client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
         deadline = clock() + timeout

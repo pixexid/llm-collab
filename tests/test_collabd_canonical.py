@@ -1741,6 +1741,11 @@ class CompatibilityProjectionTest(unittest.TestCase):
         targets = {"llm_collab.compatibility.projection"}
         reached: list[tuple[str, str]] = []
         for start in sorted(module for module in modules if module.startswith("bin.")):
+            # GH-94 makes the daemon the sole production owner of canonical
+            # dispatch. The daemon entrypoint is the one intentional path into
+            # that owner; worker.py remains a socket-only client.
+            if start == "bin.llm_collabd":
+                continue
             stack = [(start, start)]
             seen = set()
             while stack:
@@ -5234,7 +5239,7 @@ class CanonicalMessageTest(_CanonicalMessageTestBase):
         package_root = root / "llm_collab"
         consumers = []
         for source in package_root.rglob("*.py"):
-            if source.parent == package_root / "canonical":
+            if source.parent == package_root / "canonical" or source == package_root / "daemon" / "server.py":
                 continue
             relative = source.relative_to(root).with_suffix("")
             parts = relative.parts

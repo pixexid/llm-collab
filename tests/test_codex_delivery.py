@@ -611,8 +611,7 @@ class DeliveryTest(unittest.TestCase):
             ).fetchall()
         self.assertIn(("rejected_before_acceptance", "authoritative"), receipts)
 
-    def test_lost_turn_start_response_records_ambiguity_before_raising(self) -> None:
-        from llm_collab.canonical.codex_delivery import CodexDeliveryError
+    def test_lost_turn_start_response_returns_recorded_ambiguity(self) -> None:
         class LostTurnStartTransport(FakeTurnTransport):
             def exchange(self, frame):
                 if frame["method"] == "turn/start":
@@ -620,8 +619,10 @@ class DeliveryTest(unittest.TestCase):
                     raise TimeoutError("turn/start response lost")
                 return super().exchange(frame)
         transport = LostTurnStartTransport()
-        with self.assertRaises((CodexDeliveryError, TimeoutError)):
-            self.deliver(transport=transport)
+        result, _transport, _receipts = self.deliver(transport=transport)
+        self.assertEqual("ambiguous", result["outcome"])
+        self.assertTrue(result["attempt_id"])
+        self.assertTrue(result["receipt_id"])
         self.assertEqual(1, len(self.turn_frames(transport)))
         with LedgerStore.open_reader(self.paths) as store:
             receipts = store._connection.execute(

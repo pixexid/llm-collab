@@ -1612,6 +1612,9 @@ class LifecycleTest(unittest.TestCase):
             # identity proof before one idle-thread turn; it never drives
             # reserve/consume/retire lifecycle state in this slice.
             Path("llm_collab/canonical/codex_delivery.py"),
+            # The daemon-owned GH-94 dispatch boundary constructs the provider
+            # only after its independent exact-thread gate is effective.
+            Path("llm_collab/daemon/server.py"),
         }
         offenders = []
         for checked in (root / "bin", root / "scripts", root / "llm_collab"):
