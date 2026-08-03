@@ -174,6 +174,7 @@ def deliver_worker_turn(
     timeout_seconds: float = 180.0,
     absolute_deadline: float | None = None,
     expected_packet_sha256: str | None = None,
+    workspace_root_fd: int | None = None,
 ) -> dict[str, object]:
     """Run the one daemon-owned delivery, with transport construction gated."""
     _validate_timeout(timeout_seconds)
@@ -202,6 +203,7 @@ def deliver_worker_turn(
         session=context.session,
         message=message,
         expected_packet_sha256=expected_packet_sha256,
+        workspace_root_fd=workspace_root_fd,
     )
     if not materialized.get("materialized"):
         return {
@@ -231,6 +233,7 @@ def deliver_worker_turn(
             timeout_seconds=timeout_seconds,
             absolute_deadline=absolute_deadline,
             expected_packet_sha256=expected_packet_sha256,
+            workspace_root_fd=workspace_root_fd,
         )
         result["transport_connected"] = True
         return result
@@ -258,6 +261,7 @@ def deliver_next_turn_idle(
     timeout_seconds: float = 180.0,
     absolute_deadline: float | None = None,
     expected_packet_sha256: str | None = None,
+    workspace_root_fd: int | None = None,
 ) -> dict[str, object]:
     """Deliver one canonical message to one exact idle Codex thread, or do not.
 
@@ -285,6 +289,7 @@ def deliver_next_turn_idle(
         session=session,
         message=message,
         expected_packet_sha256=expected_packet_sha256,
+        workspace_root_fd=workspace_root_fd,
     )
     if not materialized.get("materialized"):
         return {"outcome": OUTCOME_GATE_DISABLED, "materialized": False}

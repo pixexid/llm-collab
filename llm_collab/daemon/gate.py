@@ -91,16 +91,45 @@ def parse_feature_declaration(raw: bytes) -> dict[str, bool]:
     return {name: declared.get(name, False) for name in FEATURES}
 
 
-def read_exact_nofollow(path: Path, *, maximum_bytes: int = 1024 * 1024) -> bytes:
+def _nofollow_directory_flags() -> int:
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    if nofollow is None:
+        raise OSError("O_NOFOLLOW is required")
+    return os.O_RDONLY | nofollow | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
+
+
+def _open_relative_directory_nofollow(directory_fd: int, parts: tuple[str, ...]) -> int:
+    current = os.dup(directory_fd)
+    try:
+        for part in parts:
+            if part in {"", ".", ".."}:
+                raise ValueError("relative path contains an unsafe component")
+            next_fd = os.open(part, _nofollow_directory_flags(), dir_fd=current)
+            os.close(current)
+            current = next_fd
+        return current
+    except Exception:
+        os.close(current)
+        raise
+
+
+def read_exact_nofollow(
+    path: Path,
+    *,
+    maximum_bytes: int = 1024 * 1024,
+    directory_fd: int | None = None,
+) -> bytes:
     """Read one regular final component through a no-follow parent descriptor."""
     if maximum_bytes <= 0:
         raise ValueError("maximum_bytes must be positive")
     nofollow = getattr(os, "O_NOFOLLOW", None)
     if nofollow is None:
         raise OSError("O_NOFOLLOW is required")
-    directory_flags = os.O_RDONLY | nofollow | getattr(os, "O_DIRECTORY", 0)
-    directory_flags |= getattr(os, "O_CLOEXEC", 0)
-    directory_fd = os.open(path.parent, directory_flags)
+    owns_directory_fd = directory_fd is None
+    if directory_fd is None:
+        directory_fd = os.open(path.parent, _nofollow_directory_flags())
+    elif path.is_absolute() or len(path.parts) != 1:
+        raise ValueError("directory-relative reads require one final path component")
     try:
         fd = os.open(
             path.name,
@@ -111,7 +140,8 @@ def read_exact_nofollow(path: Path, *, maximum_bytes: int = 1024 * 1024) -> byte
             dir_fd=directory_fd,
         )
     finally:
-        os.close(directory_fd)
+        if owns_directory_fd:
+            os.close(directory_fd)
     try:
         before = os.fstat(fd)
         if not stat.S_ISREG(before.st_mode) or before.st_size > maximum_bytes:
@@ -138,6 +168,26 @@ def read_exact_nofollow(path: Path, *, maximum_bytes: int = 1024 * 1024) -> byte
         return raw
     finally:
         os.close(fd)
+
+
+def read_exact_nofollow_at(
+    directory_fd: int,
+    relative_path: Path,
+    *,
+    maximum_bytes: int = 1024 * 1024,
+) -> bytes:
+    """Read a bounded relative file through one already-pinned directory."""
+    if relative_path.is_absolute() or not relative_path.parts:
+        raise ValueError("relative path is required")
+    parent_fd = _open_relative_directory_nofollow(directory_fd, relative_path.parts[:-1])
+    try:
+        return read_exact_nofollow(
+            Path(relative_path.parts[-1]),
+            maximum_bytes=maximum_bytes,
+            directory_fd=parent_fd,
+        )
+    finally:
+        os.close(parent_fd)
 
 
 def evaluate_observation_gate(

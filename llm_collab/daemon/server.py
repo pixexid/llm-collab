@@ -17,7 +17,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Mapping
 
-from llm_collab.daemon.gate import GateStatus, evaluate_observation_gate, read_exact_nofollow
+from llm_collab.daemon.gate import (
+    GateStatus,
+    evaluate_observation_gate,
+    read_exact_nofollow,
+    read_exact_nofollow_at,
+)
 from llm_collab.codex_session_ref import RepositoryDescriptorChain
 from llm_collab.ledger import LedgerPaths, LedgerStore
 
@@ -44,8 +49,14 @@ def _resolve_authoritative_repo(
     target: Mapping[str, object],
     packet_repo_targets: object | None = None,
     descriptor_chain_out: list[RepositoryDescriptorChain] | None = None,
+    workspace_root_fd: int | None = None,
+    workspace_root_path: Path | None = None,
+    check_deadline: Callable[[], float] | None = None,
 ) -> tuple[str, str, str]:
     """Resolve and verify the target against the immutable project registry."""
+    if check_deadline is not None:
+        check_deadline()
+    authority_workspace_root = workspace_root if workspace_root_path is None else workspace_root_path
     repo_id = target.get("repo_id")
     if not isinstance(repo_id, str) or not repo_id:
         raise ValueError("dispatch repo_id is invalid")
@@ -58,12 +69,16 @@ def _resolve_authoritative_repo(
         or repo_id not in packet_repo_targets
     ):
         raise ValueError("dispatch repo_id is not in the packet repo scope")
+    if check_deadline is not None:
+        check_deadline()
     revision = store.current_registry_revision(workspace_id=store.paths.workspace_id)
     snapshot = store.get_project_snapshot(
         workspace_id=store.paths.workspace_id,
         project_id=project_id,
         registry_revision=revision,
     )
+    if check_deadline is not None:
+        check_deadline()
     if snapshot is None:
         raise ValueError("dispatch project is absent from the current registry")
     try:
@@ -76,39 +91,79 @@ def _resolve_authoritative_repo(
         raise ValueError("dispatch repo is absent from project authority")
     raw_path = Path(raw_root).expanduser()
     if raw_path.is_absolute():
-        repo_root = raw_path.resolve()
+        if workspace_root_fd is None:
+            repo_root = raw_path.resolve()
+        else:
+            repo_root = Path(os.path.normpath(str(raw_path)))
     elif raw_path.parts and raw_path.parts[0] == "..":
-        repo_root = (workspace_root / raw_path).resolve()
+        if workspace_root_fd is None:
+            repo_root = (authority_workspace_root / raw_path).resolve()
+        else:
+            repo_root = Path(os.path.normpath(str(authority_workspace_root / raw_path)))
     else:
         try:
-            config = json.loads(
-                read_exact_nofollow(workspace_root / "collab.config.json")
-                .decode("utf-8")
-            )
+            if check_deadline is not None:
+                check_deadline()
+            if workspace_root_fd is None:
+                config_bytes = read_exact_nofollow(
+                    authority_workspace_root / "collab.config.json"
+                )
+            else:
+                config_bytes = read_exact_nofollow_at(
+                    workspace_root_fd, Path("collab.config.json")
+                )
+            config = json.loads(config_bytes.decode("utf-8"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise ValueError("dispatch cannot resolve relative project repo authority") from exc
+        if check_deadline is not None:
+            check_deadline()
         projects_root = config.get("projects_root") if isinstance(config, dict) else None
         if not isinstance(projects_root, str) or not projects_root:
             raise ValueError("dispatch project authority lacks projects_root")
         projects_base = Path(projects_root).expanduser()
         if not projects_base.is_absolute():
-            projects_base = workspace_root / projects_base
-        repo_root = (projects_base / raw_path).resolve()
+            projects_base = authority_workspace_root / projects_base
+        combined_root = projects_base / raw_path
+        if workspace_root_fd is None:
+            repo_root = combined_root.resolve()
+        else:
+            repo_root = Path(os.path.normpath(str(combined_root)))
     requested_root = target.get("repo_root")
     requested_cwd = target.get("cwd")
     if not isinstance(requested_root, str) or not isinstance(requested_cwd, str):
         raise ValueError("dispatch target paths are invalid")
-    if Path(requested_root).expanduser().resolve() != repo_root:
+    requested_root_path = Path(requested_root).expanduser()
+    requested_cwd_path = Path(requested_cwd).expanduser()
+    if workspace_root_fd is not None:
+        requested_root_path = Path(os.path.normpath(str(requested_root_path)))
+        requested_cwd_path = Path(os.path.normpath(str(requested_cwd_path)))
+    else:
+        requested_root_path = requested_root_path.resolve()
+        requested_cwd_path = requested_cwd_path.resolve()
+    if requested_root_path != repo_root:
         raise ValueError("dispatch repo_root does not match project authority")
-    cwd = Path(requested_cwd).expanduser().resolve()
+    cwd = requested_cwd_path
     try:
         beneath = os.path.commonpath((str(repo_root), str(cwd))) == str(repo_root)
     except ValueError as exc:
         raise ValueError("dispatch cwd is not under project authority") from exc
     if not beneath:
         raise ValueError("dispatch cwd is not under project authority")
+    relative_repo_parts: tuple[str, ...] | None = None
+    if workspace_root_fd is not None:
+        try:
+            relative_repo_parts = repo_root.relative_to(authority_workspace_root).parts
+        except ValueError:
+            pass
+    if check_deadline is not None:
+        check_deadline()
     try:
-        descriptor_chain = _open_repository_descriptor_chain(repo_root, cwd)
+        descriptor_chain = _open_repository_descriptor_chain(
+            repo_root,
+            cwd,
+            base_fd=workspace_root_fd if relative_repo_parts is not None else None,
+            relative_root_parts=relative_repo_parts,
+        )
     except (OSError, ValueError) as exc:
         raise ValueError("dispatch repository authority could not be pinned") from exc
     if descriptor_chain_out is None:
@@ -118,7 +173,13 @@ def _resolve_authoritative_repo(
     return repo_id, str(repo_root), str(cwd)
 
 
-def _open_repository_descriptor_chain(repo_root: Path, cwd: Path) -> RepositoryDescriptorChain:
+def _open_repository_descriptor_chain(
+    repo_root: Path,
+    cwd: Path,
+    *,
+    base_fd: int | None = None,
+    relative_root_parts: tuple[str, ...] | None = None,
+) -> RepositoryDescriptorChain:
     """Open one no-follow descriptor chain from filesystem root through cwd."""
     nofollow = getattr(os, "O_NOFOLLOW", None)
     if nofollow is None:
@@ -126,11 +187,20 @@ def _open_repository_descriptor_chain(repo_root: Path, cwd: Path) -> RepositoryD
     flags = os.O_RDONLY | nofollow | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
     fds: list[int] = []
     try:
-        fd = os.open(os.sep, flags)
-        fds.append(fd)
-        for part in repo_root.parts[1:]:
-            fd = os.open(part, flags, dir_fd=fd)
+        if base_fd is None:
+            fd = os.open(os.sep, flags)
             fds.append(fd)
+            for part in repo_root.parts[1:]:
+                fd = os.open(part, flags, dir_fd=fd)
+                fds.append(fd)
+        else:
+            if relative_root_parts is None:
+                raise ValueError("relative repository parts are required with base_fd")
+            fd = os.dup(base_fd)
+            fds.append(fd)
+            for part in relative_root_parts:
+                fd = os.open(part, flags, dir_fd=fd)
+                fds.append(fd)
         root_index = len(fds) - 1
         relative_cwd = cwd.relative_to(repo_root)
         for part in relative_cwd.parts:
@@ -636,6 +706,16 @@ class DaemonServer:
         store = self._store
         if store is None:
             return {"outcome": "gate_disabled", "reason": "ledger_not_opened"}
+        dispatch_deadline = time.monotonic() + float(request["timeout_seconds"])
+
+        def remaining_timeout() -> float:
+            remaining = dispatch_deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("absolute dispatch deadline exceeded")
+            return remaining
+
+        workspace_descriptor_chain: RepositoryDescriptorChain | None = None
+        descriptor_chain: RepositoryDescriptorChain | None = None
         try:
             # ponytail: keep the first daemon-owned slice on the writer thread;
             # add a fenced worker pool only with the lease/reconcile slice.
@@ -673,81 +753,95 @@ class DaemonServer:
                 raise ValueError("dispatch endpoint/target is not an object")
             if str(target["codex_home"]) != context.runtime_home_source:
                 raise ValueError("dispatch CODEX_HOME does not match the selected session")
-            packet_scope = selected_legacy_packet_scope(self.workspace_root, request["message"])
+            pinned_workspace_root = self.workspace_root.resolve(strict=True)
+            workspace_descriptor_chain = _open_repository_descriptor_chain(
+                pinned_workspace_root, pinned_workspace_root
+            )
+            workspace_root_path, _ = workspace_descriptor_chain.canonical_paths()
+            workspace_root_fd = workspace_descriptor_chain.fds[
+                workspace_descriptor_chain.root_index
+            ]
+            remaining_timeout()
+            packet_scope = selected_legacy_packet_scope(
+                self.workspace_root,
+                request["message"],
+                workspace_root_fd=workspace_root_fd,
+            )
+            remaining_timeout()
             descriptor_chain_out: list[RepositoryDescriptorChain] = []
             repo_id, repo_root, cwd = _resolve_authoritative_repo(
                 store,
                 workspace_root=self.workspace_root,
+                workspace_root_path=Path(workspace_root_path),
                 project_id=project_id,
                 session=session,
                 target=target,
                 packet_repo_targets=packet_scope["repo_targets"],
                 descriptor_chain_out=descriptor_chain_out,
+                workspace_root_fd=workspace_root_fd,
+                check_deadline=remaining_timeout,
             )
             descriptor_chain = descriptor_chain_out[0]
-            dispatch_deadline = time.monotonic() + float(request["timeout_seconds"])
+            remaining_timeout()
 
-            def remaining_timeout() -> float:
-                remaining = dispatch_deadline - time.monotonic()
-                if remaining <= 0:
-                    raise TimeoutError("absolute dispatch deadline exceeded")
-                return remaining
-
-            try:
-                runtime_home = bind_runtime_home(target["codex_home"])
-                trusted_root = TrustedProjectRoot(
-                    project_id,
-                    repo_id,
-                    repo_root,
-                    cwd,
-                    descriptor_chain=descriptor_chain,
+            runtime_home = bind_runtime_home(target["codex_home"])
+            trusted_root = TrustedProjectRoot(
+                project_id,
+                repo_id,
+                repo_root,
+                cwd,
+                descriptor_chain=descriptor_chain,
+            )
+            endpoint_url = str(endpoint["url"])
+            token = endpoint["token"] if isinstance(endpoint["token"], str) else None
+            prefix = str(target["user_agent_prefix"])
+            provider = CodexLifecycleProvider(
+                exact_thread_probe=lambda thread_id: probe_exact_thread(
+                    thread_id,
+                    endpoint_url=endpoint_url,
+                    token=token,
+                    timeout_seconds=remaining_timeout(),
                 )
-                endpoint_url = str(endpoint["url"])
-                token = endpoint["token"] if isinstance(endpoint["token"], str) else None
-                prefix = str(target["user_agent_prefix"])
-                provider = CodexLifecycleProvider(
-                    exact_thread_probe=lambda thread_id: probe_exact_thread(
-                        thread_id,
-                        endpoint_url=endpoint_url,
-                        token=token,
-                        timeout_seconds=remaining_timeout(),
-                    )
-                )
-                return deliver_worker_turn(
-                    store,
-                    workspace_root=self.workspace_root,
-                    context=context,
-                    message=request["message"],
-                    provider=provider,
-                    runtime_home=runtime_home,
-                    trusted_project_root=trusted_root,
-                    observed_at_utc=str(request["observed_at_utc"]),
-                    correlation_id=str(request["correlation_id"]),
-                    dispatch_enabled=True,
-                    make_observe=lambda: lambda thread_id: observe_exact_thread(
-                        thread_id,
-                        expected_runtime_home=runtime_home.runtime_home_realpath,
-                        supported_user_agent_prefixes=(prefix,),
-                        endpoint_url=endpoint_url,
-                        token=token,
-                        timeout_seconds=remaining_timeout(),
-                    ),
-                    make_transport=lambda: _WebSocketJsonRpcTransport(
-                        endpoint_url, timeout_seconds=remaining_timeout(), token=token
-                    ).__enter__(),
-                    model=request["model"] if isinstance(request["model"], str) else None,
-                    timeout_seconds=float(request["timeout_seconds"]),
-                    absolute_deadline=dispatch_deadline,
-                    expected_packet_sha256=str(packet_scope["packet_sha256"]),
-                )
-            finally:
-                descriptor_chain.close()
+            )
+            return deliver_worker_turn(
+                store,
+                workspace_root=self.workspace_root,
+                context=context,
+                message=request["message"],
+                provider=provider,
+                runtime_home=runtime_home,
+                trusted_project_root=trusted_root,
+                observed_at_utc=str(request["observed_at_utc"]),
+                correlation_id=str(request["correlation_id"]),
+                dispatch_enabled=True,
+                make_observe=lambda: lambda thread_id: observe_exact_thread(
+                    thread_id,
+                    expected_runtime_home=runtime_home.runtime_home_realpath,
+                    supported_user_agent_prefixes=(prefix,),
+                    endpoint_url=endpoint_url,
+                    token=token,
+                    timeout_seconds=remaining_timeout(),
+                ),
+                make_transport=lambda: _WebSocketJsonRpcTransport(
+                    endpoint_url, timeout_seconds=remaining_timeout(), token=token
+                ).__enter__(),
+                model=request["model"] if isinstance(request["model"], str) else None,
+                timeout_seconds=float(request["timeout_seconds"]),
+                absolute_deadline=dispatch_deadline,
+                expected_packet_sha256=str(packet_scope["packet_sha256"]),
+                workspace_root_fd=workspace_root_fd,
+            )
         except Exception as exc:
             return {
                 "outcome": "dispatch_failed",
                 "error": f"{type(exc).__name__}: {exc}",
                 "transport_connected": False,
             }
+        finally:
+            if descriptor_chain is not None:
+                descriptor_chain.close()
+            if workspace_descriptor_chain is not None:
+                workspace_descriptor_chain.close()
 
     def _status_response(self) -> dict[str, object]:
         gate = None if self._gate_status is None else self._gate_status.as_dict()
