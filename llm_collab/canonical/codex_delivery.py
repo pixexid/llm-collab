@@ -1,27 +1,29 @@
-"""First exact Codex delivery machinery (#94): one idle-thread next_turn.
+"""Exact Codex delivery machinery (#94): one daemon-owned idle next_turn.
 
-INERT BY CONTRACT: nothing in production calls this module in this slice; the
-daemon/worker-send wiring is a separately reviewed follow-up, as are busy
-coalescing, steer, interrupt, UI refresh, correlation hardening, and the
-canonical mutation lease. Durable intent lands first (the canonical
-message/delivery/attempt rows ARE the recovery record), exact-thread identity
-is attested before any NATIVE side effect, and a turn is started only for a
-proven idle/admissible thread — never on busy or uncertain. One authority: the
-session, the lifecycle subject, and the resolved canonical binding must agree
-exactly before anything happens.
+The production caller is default-off behind the runtime-dispatch and
+canonical-write gates. Busy coalescing, steer, interrupt, UI refresh,
+correlation hardening, and the canonical mutation lease remain later slices.
+Durable intent lands first (the canonical message/delivery/attempt rows ARE the
+recovery record), exact-thread identity is attested before any NATIVE side
+effect, and a turn is started only for a proven idle/admissible thread — never
+on busy or uncertain. One authority: the session, lifecycle subject, and
+resolved canonical binding must agree exactly before anything happens.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import os
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from llm_collab.canonical.legacy_packet_materialization import (
     materialize_selected_legacy_packet,
 )
+from llm_collab.canonical.control import CANONICAL_CONTROL_ENABLED, CANONICAL_CONTROL_ENV
 from llm_collab.codex_app_server_live_probe import (
     OBSERVATION_ADMISSIBLE,
     OBSERVATION_BUSY,
@@ -60,6 +62,145 @@ class _JsonRpcPeerError(CodexDeliveryError):
 
 class _TurnStartResponseLost(CodexDeliveryError):
     """The turn/start request was sent but its response was not recovered."""
+
+
+@dataclass(frozen=True)
+class WorkerDeliveryContext:
+    """The one exact session selected for a canonical worker delivery."""
+
+    session: Mapping[str, object]
+    subject: LifecycleSubject
+    runtime_home_source: str
+    endpoint_id: str
+    native_session_id: str
+
+
+def resolve_worker_delivery_context(
+    *,
+    worker_id: str,
+    project_id: str,
+    workspace_id: str,
+    session: Mapping[str, object],
+) -> WorkerDeliveryContext:
+    """Validate the caller's one exact worker/session binding.
+
+    The daemon supplies one session record selected by the worker client. This
+    function does not search, pick a newest record, or fall back to another
+    runtime; the canonical binding join below remains the final authority.
+    """
+    if session.get("project_id") != project_id or session.get("status") != "active":
+        raise CodexDeliveryError("worker session is not active in the requested project")
+    agent_id = session.get("agent_id")
+    chat_id = session.get("chat_id")
+    endpoint_id = session.get("endpoint_id")
+    runtime = session.get("runtime")
+    if not all(isinstance(value, str) and value for value in (agent_id, chat_id, endpoint_id)):
+        raise CodexDeliveryError("worker session is missing exact agent/chat/endpoint identity")
+    if not isinstance(runtime, Mapping):
+        raise CodexDeliveryError("worker session is missing runtime identity")
+    native = runtime.get("session_id")
+    runtime_instance = runtime.get("instance_id")
+    runtime_home = runtime.get("home")
+    if not all(isinstance(value, str) and value for value in (native, runtime_instance, runtime_home)):
+        raise CodexDeliveryError("worker session is missing exact runtime identity")
+    from llm_collab.worker import derive_worker_id
+
+    expected_worker_id = derive_worker_id(
+        workspace_id=workspace_id,
+        scope_kind="project",
+        scope_identity=project_id,
+        conversation_id=chat_id,
+        participant_id="participant_" + agent_id,
+    )
+    if worker_id != expected_worker_id:
+        raise CodexDeliveryError("worker id does not match the supplied session identity")
+    subject = LifecycleSubject(
+        workspace_id=workspace_id,
+        scope_kind="project",
+        scope_identity=project_id,
+        conversation_id=chat_id,
+        participant_id="participant_" + agent_id,
+        agent_id="agent_" + agent_id,
+        endpoint_id=endpoint_id,
+        native_session_id=native,
+        runtime_instance_id=runtime_instance,
+    )
+    return WorkerDeliveryContext(
+        session=session,
+        subject=subject,
+        runtime_home_source=runtime_home,
+        endpoint_id=endpoint_id,
+        native_session_id=native,
+    )
+
+
+def deliver_worker_turn(
+    store: LedgerStore,
+    *,
+    workspace_root: Path,
+    context: WorkerDeliveryContext,
+    message: Mapping[str, object],
+    provider: CodexLifecycleProvider,
+    runtime_home: RuntimeHomeIdentity,
+    trusted_project_root: TrustedProjectRoot,
+    observed_at_utc: str,
+    correlation_id: str,
+    dispatch_enabled: bool,
+    make_observe: Callable[[], Callable[[str], CodexAppServerThreadObservation]],
+    make_transport: Callable[[], Any],
+    model: str | None = None,
+    timeout_seconds: float = 180.0,
+) -> dict[str, object]:
+    """Run the one daemon-owned delivery, with transport construction gated."""
+    if (
+        dispatch_enabled is not True
+        or os.environ.get(CANONICAL_CONTROL_ENV) != CANONICAL_CONTROL_ENABLED
+    ):
+        return {
+            "outcome": OUTCOME_GATE_DISABLED,
+            "materialized": False,
+            "transport_connected": False,
+        }
+    # Prove the project-scoped canonical-write gate before constructing a live
+    # transport. The delivery core repeats this idempotently as its durable
+    # intent step; this first pass keeps the two mutation gates independent.
+    materialized = materialize_selected_legacy_packet(
+        store,
+        workspace_root=workspace_root,
+        session=context.session,
+        message=message,
+    )
+    if not materialized.get("materialized"):
+        return {
+            "outcome": OUTCOME_GATE_DISABLED,
+            "materialized": False,
+            "transport_connected": False,
+        }
+    observe = make_observe()
+    transport = make_transport()
+    try:
+        result = deliver_next_turn_idle(
+            store,
+            workspace_root=workspace_root,
+            session=context.session,
+            message=message,
+            subject=context.subject,
+            provider=provider,
+            observe=observe,
+            turn_transport=transport,
+            runtime_home=runtime_home,
+            trusted_project_root=trusted_project_root,
+            observed_at_utc=observed_at_utc,
+            correlation_id=correlation_id,
+            model=model,
+            timeout_seconds=timeout_seconds,
+        )
+        result["transport_connected"] = True
+        return result
+    finally:
+        close = getattr(transport, "close", None)
+        if callable(close):
+            close()
 
 
 def deliver_next_turn_idle(

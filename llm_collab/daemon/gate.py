@@ -36,6 +36,8 @@ class GateStatus:
     thread_event_runner_enabled: bool
     thread_event_runner_observe: bool
     effective: bool
+    thread_event_runner_dispatch: bool = False
+    dispatch_effective: bool = False
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -43,7 +45,9 @@ class GateStatus:
             "features": dict(sorted(self.features.items())),
             "thread_event_runner_enabled": self.thread_event_runner_enabled,
             "thread_event_runner_observe": self.thread_event_runner_observe,
+            "thread_event_runner_dispatch": self.thread_event_runner_dispatch,
             "effective": self.effective,
+            "dispatch_effective": self.dispatch_effective,
         }
 
 
@@ -144,6 +148,7 @@ def evaluate_observation_gate(
     environment = os.environ if environ is None else environ
     enabled = environment.get("THREAD_EVENT_RUNNER_ENABLED") == "1"
     observe = environment.get("THREAD_EVENT_RUNNER_OBSERVE") == "1"
+    dispatch = environment.get("THREAD_EVENT_RUNNER_DISPATCH_EXACT_THREAD") == "1"
     try:
         features = parse_feature_declaration(read_exact_nofollow(declaration_path))
         valid = True
@@ -151,4 +156,21 @@ def evaluate_observation_gate(
         features = dict(_FALSE_FEATURES)
         valid = False
     effective = valid and features["daemon_observation"] and enabled and observe
-    return GateStatus(valid, features, enabled, observe, effective)
+    dispatch_effective = (
+        valid
+        and features["daemon_observation"]
+        and features["canonical_writes"]
+        and features["runtime_dispatch"]
+        and enabled
+        and observe
+        and dispatch
+    )
+    return GateStatus(
+        valid,
+        features,
+        enabled,
+        observe,
+        effective,
+        dispatch,
+        dispatch_effective,
+    )

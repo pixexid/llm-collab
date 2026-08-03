@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Entrypoint for the inert workspace daemon."""
+"""Entrypoint for the default-off workspace daemon."""
 
 from pathlib import Path
 import sys
