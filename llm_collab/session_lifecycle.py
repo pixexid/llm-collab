@@ -13,6 +13,7 @@ from llm_collab.codex_runtime_home import RuntimeHomeIdentity
 from llm_collab.codex_app_server_live_probe import CodexAppServerExactThreadResult
 from llm_collab.codex_session_ref import (
     RepositoryBinding,
+    RepositoryDescriptorChain,
     SessionAuthority,
     build_session_ref,
     derive_session_owner_key,
@@ -39,6 +40,7 @@ class TrustedProjectRoot:
     repo_id: str
     repo_root: str
     cwd: str
+    descriptor_chain: RepositoryDescriptorChain | None = None
 
     def repository_binding(self) -> RepositoryBinding:
         return RepositoryBinding(
@@ -46,6 +48,7 @@ class TrustedProjectRoot:
             repo_id=self.repo_id,
             repo_root=self.repo_root,
             cwd=self.cwd,
+            descriptor_chain=self.descriptor_chain,
         )
 
 
@@ -329,10 +332,16 @@ def _trusted_canonical_cwd(trusted_project_root: TrustedProjectRoot) -> str:
     if not isinstance(trusted_project_root, TrustedProjectRoot):
         raise SessionLifecycleError("trusted_project_root is required")
     try:
-        repo_root = os.path.realpath(trusted_project_root.repo_root)
-        cwd = os.path.realpath(trusted_project_root.cwd)
-        if not os.path.isdir(repo_root) or not os.path.isdir(cwd):
-            raise SessionLifecycleError("trusted project paths must be directories")
+        if trusted_project_root.descriptor_chain is None:
+            repo_root = os.path.realpath(trusted_project_root.repo_root)
+            cwd = os.path.realpath(trusted_project_root.cwd)
+            if not os.path.isdir(repo_root) or not os.path.isdir(cwd):
+                raise SessionLifecycleError("trusted project paths must be directories")
+        else:
+            repo_root, cwd = trusted_project_root.descriptor_chain.canonical_paths()
+            if (repo_root != trusted_project_root.repo_root
+                    or cwd != trusted_project_root.cwd):
+                raise SessionLifecycleError("trusted descriptor paths do not match")
         if os.path.commonpath((repo_root, cwd)) != repo_root:
             raise SessionLifecycleError("trusted cwd must be under the repository root")
     except (TypeError, ValueError) as error:

@@ -28,6 +28,7 @@ EXCLUDED_PREFIXES = ("docs/protocols/", "docs/migration/", "Tasks/", "Chats/")
 RUNTIME_ROOTS = ("bin/", "scripts/", "tools/", "pm2/", "llm_collab/", "tests/")
 THIS_TEST = "tests/test_standalone_feature_declarations.py"
 SANCTIONED_CONSUMERS = {
+    "bin/worker_rotate_pi.py",
     "llm_collab/canonical/control.py",
     "llm_collab/daemon/gate.py",
     "tests/test_collabd_canonical.py",
@@ -157,6 +158,7 @@ class StandaloneFeatureDeclarationTests(unittest.TestCase):
         self.assertEqual(
             SANCTIONED_CONSUMERS,
             {
+                "bin/worker_rotate_pi.py",
                 "llm_collab/canonical/control.py",
                 "llm_collab/daemon/gate.py",
                 "tests/test_collabd_canonical.py",

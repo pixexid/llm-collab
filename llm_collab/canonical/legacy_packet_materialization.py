@@ -45,10 +45,13 @@ def materialize_selected_legacy_packet(
     workspace_root: Path,
     session: Mapping[str, object],
     message: Mapping[str, object],
+    expected_packet_sha256: str | None = None,
 ) -> dict[str, object]:
     """Append canonical rows for one already-selected legacy packet."""
     relpath, packet = _selected_packet(workspace_root, message)
     packet_sha256 = hashlib.sha256(packet).hexdigest()
+    if expected_packet_sha256 is not None and packet_sha256 != expected_packet_sha256:
+        _refuse("selected packet changed during dispatch")
     try:
         frontmatter, _body = _parse_legacy_frontmatter(packet)
     except ValueError as exc:
@@ -203,6 +206,22 @@ def materialize_selected_legacy_packet(
         "packet_sha256": packet_sha256,
         "packet_relpath": relpath,
         "canonical_write_started": canonical_write_started,
+    }
+
+
+def selected_legacy_packet_scope(
+    workspace_root: Path, message: Mapping[str, object]
+) -> dict[str, object]:
+    """Read the selected packet once to pin its hash and explicit repo scope."""
+    relpath, packet = _selected_packet(workspace_root, message)
+    try:
+        frontmatter, _body = _parse_legacy_frontmatter(packet)
+    except ValueError as exc:
+        _refuse(str(exc))
+    return {
+        "packet_relpath": relpath,
+        "packet_sha256": hashlib.sha256(packet).hexdigest(),
+        "repo_targets": _string_list(frontmatter.get("repo_targets"), "repo_targets"),
     }
 
 

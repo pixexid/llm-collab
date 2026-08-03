@@ -36,11 +36,47 @@ class SessionAuthority:
 
 
 @dataclass(frozen=True)
+class RepositoryDescriptorChain:
+    """Pinned directory descriptors kept alive across authority attestation."""
+
+    fds: tuple[int, ...]
+    root_index: int
+    cwd_index: int
+    root_path: str
+    cwd_path: str
+    identities: tuple[tuple[int, int, int], ...]
+
+    def canonical_paths(self) -> tuple[str, str]:
+        if (
+            len(self.fds) != len(self.identities)
+            or not 0 <= self.root_index < len(self.fds)
+            or not 0 <= self.cwd_index < len(self.fds)
+        ):
+            raise SessionRefError("repository descriptor chain is malformed")
+        try:
+            stats = tuple(os.fstat(fd) for fd in self.fds)
+        except OSError as error:
+            raise SessionRefError("repository descriptor chain is unavailable") from error
+        current = tuple((info.st_dev, info.st_ino, info.st_mode) for info in stats)
+        if current != self.identities:
+            raise SessionRefError("repository descriptor chain changed")
+        return self.root_path, self.cwd_path
+
+    def close(self) -> None:
+        for fd in reversed(self.fds):
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+
+@dataclass(frozen=True)
 class RepositoryBinding:
     project_id: str
     repo_id: str
     repo_root: str | os.PathLike[str]
     cwd: str | os.PathLike[str]
+    descriptor_chain: RepositoryDescriptorChain | None = None
 
 
 def build_session_ref(
@@ -273,8 +309,13 @@ def _repository_binding(binding: RepositoryBinding | None, scope: Mapping[str, A
         return None
     if not isinstance(binding, RepositoryBinding):
         raise SessionRefError("repository_binding must be a RepositoryBinding")
-    root = _real_directory(binding.repo_root, "repository root")
-    cwd = _real_directory(binding.cwd, "canonical cwd")
+    if binding.descriptor_chain is None:
+        root = _real_directory(binding.repo_root, "repository root")
+        cwd = _real_directory(binding.cwd, "canonical cwd")
+    else:
+        root, cwd = binding.descriptor_chain.canonical_paths()
+        if os.fspath(binding.repo_root) != root or os.fspath(binding.cwd) != cwd:
+            raise SessionRefError("repository descriptor paths do not match binding")
     try:
         if os.path.commonpath([root, cwd]) != root:
             raise SessionRefError("canonical cwd must be under repository root")

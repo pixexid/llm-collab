@@ -128,6 +128,13 @@ class DispatchEnvelopeTest(unittest.TestCase):
             with self.subTest(request=request), self.assertRaises(ProtocolError):
                 parse_dispatch_request(payload)
 
+    def test_dispatch_envelope_rejects_a_payload_larger_than_the_socket_limit(self) -> None:
+        request = _request()
+        request["endpoint"]["token"] = "x" * 5000
+        payload = json.dumps({"version": 1, "op": "dispatch", "request": request}).encode()
+        with self.assertRaisesRegex(ProtocolError, "complete envelope"):
+            parse_dispatch_request(payload)
+
 
 class DispatchAuthorityTest(unittest.TestCase):
     class Store:
@@ -182,6 +189,70 @@ class DispatchAuthorityTest(unittest.TestCase):
                     target=good,
                 ),
             )
+
+    def test_relative_projects_root_is_resolved_from_workspace_root(self) -> None:
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            root = Path(tmp)
+            repo = root / "projects" / "repo"
+            repo.mkdir(parents=True)
+            (root / "collab.config.json").write_text(json.dumps({"projects_root": "projects"}))
+            store = self.Store({"project_id": "paseo", "repos": {"app": "repo"}})
+            target = {"repo_id": "app", "repo_root": str(repo), "cwd": str(repo)}
+            original = Path.cwd()
+            try:
+                os.chdir(repo)
+                self.assertEqual(
+                    ("app", str(repo.resolve()), str(repo.resolve())),
+                    _resolve_authoritative_repo(
+                        store,
+                        workspace_root=root,
+                        project_id="paseo",
+                        session={"repo_targets": ["app"]},
+                        target=target,
+                    ),
+                )
+            finally:
+                os.chdir(original)
+
+    def test_selected_repo_must_be_in_packet_scope(self) -> None:
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            root = Path(tmp) / "repo"
+            root.mkdir()
+            store = self.Store({"project_id": "paseo", "repos": {"app": str(root)}})
+            target = {"repo_id": "app", "repo_root": str(root), "cwd": str(root)}
+            with self.assertRaisesRegex(ValueError, "packet repo scope"):
+                _resolve_authoritative_repo(
+                    store,
+                    workspace_root=root.parent,
+                    project_id="paseo",
+                    session={"repo_targets": ["app", "api"]},
+                    target=target,
+                    packet_repo_targets=["api"],
+                )
+
+    def test_authority_descriptor_chain_survives_path_replacement(self) -> None:
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            root = Path(tmp) / "repo"
+            cwd = root / "work"
+            cwd.mkdir(parents=True)
+            store = self.Store({"project_id": "paseo", "repos": {"app": str(root)}})
+            target = {"repo_id": "app", "repo_root": str(root), "cwd": str(cwd)}
+            chains = []
+            _resolve_authoritative_repo(
+                store,
+                workspace_root=root.parent,
+                project_id="paseo",
+                session={"repo_targets": ["app"]},
+                target=target,
+                descriptor_chain_out=chains,
+            )
+            chain = chains[0]
+            try:
+                root.rename(root.with_name("repo-old"))
+                (root / "work").mkdir(parents=True)
+                self.assertEqual((str(root.resolve()), str(cwd.resolve())), chain.canonical_paths())
+            finally:
+                chain.close()
 
 
 class DispatchGateTest(unittest.TestCase):

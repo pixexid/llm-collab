@@ -33,11 +33,10 @@ treat that as the single authority. Migrate a worker only through an explicit
 per-worker replacement/cutover (with reconciliation and rollback), one worker at a
 time, never in bulk just to make things uniform.
 
-> Livecraft is the *preferred new* host, not the *proven production provisioning* path.
-> Its end-to-end wake/drain was proven live (GH-486 — a real `to-glmpi` durable packet
-> woke a real Livecraft-hosted `glmpi`, which drained with exact-session `--acknowledge`
-> and replied `from-glmpi`). But a production first-start/spawn path on Livecraft is not
-> yet implemented — see *Provisioning* below.
+> Livecraft is the *preferred new* host, but native mutation remains pilot-gated. Its
+> end-to-end wake/drain was proven live (GH-486 — a real `to-glmpi` durable packet woke
+> a real Livecraft-hosted `glmpi`, which drained with exact-session `--acknowledge` and
+> replied `from-glmpi`).
 
 ## Ponytail and other defaults are runtime-global
 
@@ -55,8 +54,8 @@ runtime home, not a per-worker toggle.
 
 ## Provisioning a new Pi worker
 
-Pi-Web has a working manual first-start; Livecraft does not yet. Know which host you are
-provisioning on before you promise a new worker to a session:
+Pi-Web has a working manual first-start and Livecraft has a separate gated pilot path.
+Know which host you are provisioning on before you promise a new worker to a session:
 
 - **Pi-Web: manual first-start exists.** `bin/worker.py start-pi` (→
   `worker_rotate_pi.py:start_pi`, called with `supersedes=None`) provisions a fresh
@@ -66,22 +65,23 @@ provisioning on before you promise a new worker to a session:
   as active. `bin/worker.py rotate-pi` handles rotating a context-bloated worker to a
   fresh session (`--supersedes-session`). Both are Pi-Web-specific and
   operator-invoked — not something a worker triggers autonomously.
-- **Livecraft: no spawn path yet.** The Livecraft `glmpi` used in GH-486 was
-  hand-provisioned: create the native session (Livecraft `POST /api/sessions`),
-  bootstrap it through the real Pi RPC command path until it returns its marker, then
-  register the binding through the canonical reserve/consume path. There is no
-  `start-pi`/`rotate-pi` equivalent for Livecraft.
-- **A Livecraft first-start/spawn tool is planned** (GH-94), reusing the same
-  create/verify/bootstrap/register discipline the Pi-Web path already proves. When it
-  lands it must: validate exact project/worker/chat/repo/cwd scope; reserve the binding;
-  create exactly one native session; verify the returned native id and
-  provider/model/thinking fingerprint; bootstrap the worker; and register the binding
-  **only after** the bootstrap marker succeeds. Any mismatch leaves the durable packet
-  pull-pending and creates **no** binding.
-- **The Livecraft path stays gated.** Production mutation is off by default. A pilot
-  requires `runtime_dispatch` plus the exact-thread dispatch subscription and the
-  canonical-write / current-authority gates, plus an explicit disposable or allowlisted
-  worker/project scope — no single generic flag enables it.
+- **Livecraft: gated first-start exists.** `bin/worker.py start-livecraft-pi` drives
+  Livecraft `POST /api/sessions`, sets model/thinking through Pi RPC, verifies the exact
+  native id/cwd/fingerprint, waits for a bootstrap marker from the snapshot API, then
+  registers through the canonical reserve/consume path. A mismatch or missing marker
+  creates no binding; Livecraft has no delete endpoint, so failed cleanup can only issue
+  native `abort`.
+- **The first-start flow is deliberately separate from Pi-Web.** It validates exact
+  project/worker/chat/repo/cwd scope, creates exactly one native session, verifies its
+  returned identity and provider/model/thinking fingerprint, and registers only after
+  the bootstrap marker succeeds. The worker bootstrap does not install a foreground
+  event monitor; the Livecraft host owns background wakes.
+- **The Livecraft path stays gated.** The command refuses by default. A pilot requires
+  the valid `runtime_dispatch` declaration and exact-thread environment gate,
+  `LLM_COLLAB_CANONICAL_CONTROL=enabled`, a current project snapshot with
+  `canonical_writes: true`, an exact `--pilot-scope <project>/<agent>`, and the explicit
+  `--disposable` confirmation. Provider/model/thinking/runtime-home and repo target are
+  required; no generic flag enables production provisioning.
 - Do not add a provider abstraction spanning both hosts until both actually need one.
 
 ## Current worker hosts

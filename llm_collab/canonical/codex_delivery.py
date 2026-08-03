@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import time
 from dataclasses import dataclass
@@ -62,6 +63,27 @@ class _JsonRpcPeerError(CodexDeliveryError):
 
 class _TurnStartResponseLost(CodexDeliveryError):
     """The turn/start request was sent but its response was not recovered."""
+
+
+def _ensure_deadline(deadline: float) -> None:
+    if (
+        isinstance(deadline, bool)
+        or not isinstance(deadline, (int, float))
+        or not math.isfinite(deadline)
+    ):
+        raise CodexDeliveryError("absolute delivery deadline is invalid")
+    if deadline <= time.monotonic():
+        raise CodexDeliveryError("absolute delivery deadline exceeded")
+
+
+def _validate_timeout(timeout_seconds: float) -> None:
+    if (
+        isinstance(timeout_seconds, bool)
+        or not isinstance(timeout_seconds, (int, float))
+        or not math.isfinite(timeout_seconds)
+        or timeout_seconds <= 0
+    ):
+        raise CodexDeliveryError("timeout_seconds must be a positive finite number")
 
 
 @dataclass(frozen=True)
@@ -150,8 +172,14 @@ def deliver_worker_turn(
     make_transport: Callable[[], Any],
     model: str | None = None,
     timeout_seconds: float = 180.0,
+    absolute_deadline: float | None = None,
+    expected_packet_sha256: str | None = None,
 ) -> dict[str, object]:
     """Run the one daemon-owned delivery, with transport construction gated."""
+    _validate_timeout(timeout_seconds)
+    if absolute_deadline is None:
+        absolute_deadline = time.monotonic() + timeout_seconds
+    _ensure_deadline(absolute_deadline)
     if (
         dispatch_enabled is not True
         or os.environ.get(CANONICAL_CONTROL_ENV) != CANONICAL_CONTROL_ENABLED
@@ -173,6 +201,7 @@ def deliver_worker_turn(
         workspace_root=workspace_root,
         session=context.session,
         message=message,
+        expected_packet_sha256=expected_packet_sha256,
     )
     if not materialized.get("materialized"):
         return {
@@ -180,7 +209,9 @@ def deliver_worker_turn(
             "materialized": False,
             "transport_connected": False,
         }
+    _ensure_deadline(absolute_deadline)
     observe = make_observe()
+    _ensure_deadline(absolute_deadline)
     transport = make_transport()
     try:
         result = deliver_next_turn_idle(
@@ -198,6 +229,8 @@ def deliver_worker_turn(
             correlation_id=correlation_id,
             model=model,
             timeout_seconds=timeout_seconds,
+            absolute_deadline=absolute_deadline,
+            expected_packet_sha256=expected_packet_sha256,
         )
         result["transport_connected"] = True
         return result
@@ -223,6 +256,8 @@ def deliver_next_turn_idle(
     correlation_id: str,
     model: str | None = None,
     timeout_seconds: float = 180.0,
+    absolute_deadline: float | None = None,
+    expected_packet_sha256: str | None = None,
 ) -> dict[str, object]:
     """Deliver one canonical message to one exact idle Codex thread, or do not.
 
@@ -232,8 +267,10 @@ def deliver_next_turn_idle(
     is started only when all four pass, and the outcome is receipted from
     native terminal evidence for the SAME turn id only.
     """
-    if not isinstance(timeout_seconds, (int, float)) or timeout_seconds <= 0 or timeout_seconds == float("inf") or timeout_seconds != timeout_seconds:
-        raise CodexDeliveryError("timeout_seconds must be a positive finite number")
+    _validate_timeout(timeout_seconds)
+    if absolute_deadline is None:
+        absolute_deadline = time.monotonic() + timeout_seconds
+    _ensure_deadline(absolute_deadline)
     # 0. ONE authority: the caller session and the lifecycle subject must agree
     # with each other (and therefore with the binding materialize resolves) on
     # every identity field, before any side effect of any kind.
@@ -247,9 +284,11 @@ def deliver_next_turn_idle(
         workspace_root=workspace_root,
         session=session,
         message=message,
+        expected_packet_sha256=expected_packet_sha256,
     )
     if not materialized.get("materialized"):
         return {"outcome": OUTCOME_GATE_DISABLED, "materialized": False}
+    _ensure_deadline(absolute_deadline)
     message_id = str(materialized["message_id"])
     delivery_id = str(materialized["delivery_id"])
     attempt_id = str(materialized["attempt_id"])
@@ -311,7 +350,7 @@ def deliver_next_turn_idle(
         f"[from {sender}] Read latest {session['agent_id']} packet in "
         f"{session['chat_id']}: {materialized['packet_relpath']}"
     )
-    deadline = time.monotonic() + timeout_seconds
+    deadline = absolute_deadline
 
     def _exchange(frame: dict[str, Any]) -> Mapping[str, Any]:
         remaining = deadline - time.monotonic()

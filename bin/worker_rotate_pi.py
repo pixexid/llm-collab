@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import ipaddress
 import json
+import os
 import subprocess
 import sys
 import time
@@ -29,6 +30,7 @@ import urllib.request
 from pathlib import Path
 
 DEFAULT_PI_WEB_URL = "http://127.0.0.1:8504"
+DEFAULT_LIVECRAFT_BACKEND_URL = "http://127.0.0.1:43121"
 _BIN = Path(__file__).resolve().parent
 AUTOBRIDGE = _BIN / "session_autobridge.py"
 # The persistent monitor must reference the stable workspace root, not this
@@ -36,6 +38,7 @@ AUTOBRIDGE = _BIN / "session_autobridge.py"
 MONITOR_PYTHON = str(Path(sys.executable).resolve())
 # start-pi owns the Pi Web transport; only these records seed a first-start profile.
 PI_WEB_ENDPOINT = "endpoint_pi_web_local"
+LIVECRAFT_ENDPOINT = "endpoint_pi_livecraft_local"
 MESSAGE_PAGE_SIZE = 500
 MESSAGE_SCAN_LIMIT = 5000
 
@@ -225,7 +228,105 @@ class PiWeb:
             pass  # best-effort stop; the caller already has the real error
 
 
-def require_loopback(url: str) -> str:
+class Livecraft:
+    """Thin stdlib client for Livecraft's backend session/RPC API."""
+
+    def __init__(self, base_url: str, request=None):
+        self.base = base_url.rstrip("/")
+        self._request = request or self._http
+        self._sessions = {}
+
+    def _http(self, method: str, path: str, body):
+        data = json.dumps(body).encode() if body is not None else None
+        req = urllib.request.Request(self.base + path, data=data, method=method)
+        req.add_header("Content-Type", "application/json")
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                raw = resp.read()
+                return resp.status, (json.loads(raw) if raw else None)
+        except urllib.error.HTTPError as exc:
+            raw = exc.read()
+            return exc.code, (json.loads(raw) if raw else None)
+
+    def create_session(self, cwd: str) -> dict:
+        status, body = self._request("POST", "/api/sessions", {"cwd": cwd})
+        if status != 201 or not isinstance(body, dict):
+            raise RotateError(f"Livecraft create session failed (HTTP {status})")
+        session_id, returned_cwd = body.get("id"), body.get("cwd")
+        if not all(isinstance(value, str) and value for value in (session_id, returned_cwd)):
+            raise RotateError("Livecraft create session response is incomplete")
+        session = {"id": session_id, "cwd": returned_cwd}
+        self._sessions[session_id] = session
+        return session
+
+    def _command(self, session_id: str, command: dict) -> dict:
+        if session_id not in self._sessions:
+            raise RotateError(f"unknown Livecraft session {session_id}")
+        status, body = self._request(
+            "POST", f"/api/sessions/{urllib.parse.quote(session_id)}/commands", command,
+        )
+        if status != 200 or not isinstance(body, dict):
+            raise RotateError(f"Livecraft RPC {command.get('type')} failed (HTTP {status})")
+        return body
+
+    def set_model(self, session_id: str, provider: str, model_id: str) -> None:
+        self._command(session_id, {"type": "set_model", "provider": provider, "modelId": model_id})
+
+    def set_thinking(self, session_id: str, level: str) -> None:
+        self._command(session_id, {"type": "set_thinking_level", "level": level})
+
+    def get_state(self, session_id: str) -> dict:
+        status, body = self._request(
+            "GET", f"/api/sessions/{urllib.parse.quote(session_id)}/snapshot", None,
+        )
+        if status != 200 or not isinstance(body, dict) or not isinstance(body.get("state"), dict):
+            raise RotateError("Livecraft snapshot/state response is malformed")
+        state = body["state"]
+        model = state.get("model")
+        if not isinstance(model, dict):
+            raise RotateError("Livecraft state has no model fingerprint")
+        values = (state.get("sessionId"), state.get("sessionFile"), model.get("provider"),
+                  model.get("id"), state.get("thinkingLevel"))
+        if not all(isinstance(value, str) and value for value in values):
+            raise RotateError("Livecraft state fingerprint is incomplete")
+        return {
+            "native": values[0], "session_file": values[1], "provider": values[2],
+            "model_id": values[3], "thinking": values[4], "cwd": self._sessions[session_id]["cwd"],
+        }
+
+    def prompt(self, session_id: str, message: str) -> None:
+        self._command(session_id, {"type": "prompt", "message": message})
+
+    def last_assistant_text(self, session_id: str):
+        status, body = self._request(
+            "GET", f"/api/sessions/{urllib.parse.quote(session_id)}/snapshot", None,
+        )
+        if status != 200 or not isinstance(body, dict) or not isinstance(body.get("messages"), list):
+            return None
+        for message in reversed(body["messages"]):
+            if not isinstance(message, dict) or message.get("role") != "assistant":
+                continue
+            content = message.get("content")
+            if isinstance(content, str):
+                return content
+            if isinstance(content, list):
+                text = "".join(
+                    block["text"] for block in content
+                    if isinstance(block, dict) and block.get("type") == "text"
+                    and isinstance(block.get("text"), str)
+                )
+                return text or None
+            return None
+        return None
+
+    def close_session(self, session_id: str) -> None:
+        try:
+            self._command(session_id, {"type": "abort"})
+        except Exception:
+            pass  # Livecraft has no delete endpoint; abort is best-effort cleanup.
+
+
+def require_loopback(url: str, option: str = "--pi-web-url") -> str:
     host = urllib.parse.urlparse(url).hostname or ""
     if host in ("localhost",):
         return url
@@ -234,7 +335,7 @@ def require_loopback(url: str) -> str:
             return url
     except ValueError:
         pass
-    raise RotateError(f"--pi-web-url must be loopback, got host {host!r}")
+    raise RotateError(f"{option} must be loopback, got host {host!r}")
 
 
 def _default_run_autobridge(args: list[str]):
@@ -595,6 +696,166 @@ def start_pi(
     }
 
 
+LIVECRAFT_BOOTSTRAP_TEMPLATE = """Automated llm-collab worker provisioning. You are {agent} in fresh Livecraft native session {native}. Do not start project work during this bootstrap turn. Do not start a Pi event monitor: the Livecraft host watcher owns background wakes and must not interrupt this session UI.
+
+This bootstrap hold applies only to this setup turn. A valid non-empty durable packet addressed to this worker and scoped to this exact project/repository is the collaboration task authorization. If no such packet arrives, remain idle after replying with the marker.
+
+After setup, remain idle until the Livecraft host presents an exact durable inbox packet. Reply only {marker}"""
+
+
+def _livecraft_declaration_path() -> Path:
+    from _helpers import RUNTIME_ROOT
+
+    return Path(RUNTIME_ROOT) / "docs" / "protocols" / "standalone-v1-feature-declarations.json"
+
+
+def _require_current_project_authority(project: str) -> None:
+    """Require the current ledger snapshot to authorize canonical project writes."""
+    from _helpers import config_get, project_state_root
+    from llm_collab.ledger import LedgerPaths, LedgerStore
+
+    workspace_id = config_get("workspace_id")
+    if not workspace_id:
+        raise RotateError("Livecraft pilot gate: workspace_id is unset")
+    try:
+        paths = LedgerPaths.derive(project_state_root(), str(workspace_id))
+        with LedgerStore.open_reader(paths) as store:
+            revision = store.current_registry_revision(workspace_id=str(workspace_id))
+            snapshot = store.get_project_snapshot(
+                workspace_id=str(workspace_id), project_id=project, registry_revision=revision,
+            )
+        payload = json.loads(snapshot["snapshot_json"]) if snapshot else None
+    except Exception as exc:
+        raise RotateError(f"Livecraft pilot gate: current project authority unavailable: {exc}") from exc
+    if not isinstance(payload, dict) or payload.get("canonical_writes") is not True:
+        raise RotateError("Livecraft pilot gate: current project authority does not enable canonical writes")
+
+
+def require_livecraft_pilot_gate(cfg, *, declaration_path=None, environ=None) -> None:
+    """Keep Livecraft native mutation off unless every pilot conjunct is explicit."""
+    from llm_collab.daemon.gate import evaluate_observation_gate
+
+    environment = os.environ if environ is None else environ
+    if cfg.disposable is not True:
+        raise RotateError("Livecraft pilot gate: --disposable is required")
+    if cfg.pilot_scope != f"{cfg.project}/{cfg.agent}":
+        raise RotateError("Livecraft pilot gate: --pilot-scope must equal <project>/<agent>")
+    gate = evaluate_observation_gate(
+        Path(declaration_path) if declaration_path is not None else _livecraft_declaration_path(),
+        environ=environment,
+    )
+    if not gate.dispatch_effective:
+        raise RotateError("Livecraft pilot gate: runtime dispatch is not enabled for an exact thread")
+    if environment.get("LLM_COLLAB_CANONICAL_CONTROL") != "enabled":
+        raise RotateError("Livecraft pilot gate: canonical control is not enabled")
+    _require_current_project_authority(cfg.project)
+
+
+def _require_livecraft_worker_scope(cfg) -> None:
+    from _helpers import is_agent_disabled, load_agents
+
+    agent = next((item for item in load_agents() if item.get("id") == cfg.agent), None)
+    if agent is None:
+        raise RotateError(f"unknown worker: {cfg.agent}")
+    activation = agent.get("activation") or {}
+    if is_agent_disabled(agent) or activation.get("type") != "cli_session":
+        raise RotateError(f"worker {cfg.agent} is not an enabled cli_session worker")
+    if activation.get("watcher_enabled") is not True:
+        raise RotateError(f"worker {cfg.agent} has no enabled background watcher")
+
+
+def _provision_livecraft_and_bind(
+    *, agent, project, chat, repo_target, repo_cwd, provider, model, thinking,
+    runtime_home, livecraft, run_autobridge, bootstrap_timeout, poll_interval, sleep, clock,
+) -> dict:
+    session = livecraft.create_session(repo_cwd)
+    session_id = session["id"]
+    try:
+        if session["cwd"] != repo_cwd:
+            raise RotateError(f"Livecraft session cwd {session['cwd']} != {repo_cwd}")
+        livecraft.set_model(session_id, provider, model)
+        livecraft.set_thinking(session_id, thinking)
+        state = livecraft.get_state(session_id)
+        if state["native"] != session_id or state["cwd"] != repo_cwd:
+            raise RotateError(f"Livecraft native identity/cwd mismatch: {state}")
+        if (state["provider"], state["model_id"], state["thinking"]) != (provider, model, thinking):
+            raise RotateError(
+                f"Livecraft native state mismatch: {state['provider']}/{state['model_id']}/{state['thinking']} "
+                f"!= {provider}/{model}/{thinking}"
+            )
+        native = state["native"]
+        suffix = chat[len("CHAT-"):] if chat.startswith("CHAT-") else chat
+        logical = f"SESSION-LIVECRAFT-{agent.upper()}-{suffix}-{native[:8].lower()}"
+        marker = f"BOOTSTRAP_READY_{logical}"
+        livecraft.prompt(session_id, LIVECRAFT_BOOTSTRAP_TEMPLATE.format(
+            agent=agent, native=native, marker=marker,
+        ))
+        _await_marker(livecraft, session_id, marker, timeout=bootstrap_timeout,
+                      interval=poll_interval, sleep=sleep, clock=clock)
+        final = livecraft.get_state(session_id)
+        if final["native"] != native or final["cwd"] != repo_cwd or (
+            final["provider"], final["model_id"], final["thinking"]
+        ) != (provider, model, thinking):
+            raise RotateError(f"Livecraft native state drifted before register: {final}")
+    except Exception as exc:
+        livecraft.close_session(session_id)
+        if isinstance(exc, RotateError):
+            raise
+        raise RotateError(f"pre-register Livecraft failure closed session {session_id}: {exc!r}") from exc
+
+    argv = [
+        "register", "--session", logical, "--agent", agent, "--project", project,
+        "--chat", chat, "--repo-target", repo_target, "--runtime-family", "pi",
+        "--runtime-session-id", final["native"], "--runtime-session-source", final["session_file"],
+        "--runtime-home", runtime_home, "--endpoint-id", LIVECRAFT_ENDPOINT,
+        "--runtime-instance-id", session_id, "--cwd", repo_cwd, "--status", "active",
+        "--mode", "auto-read", "--wake-strategy", "runtime_trigger",
+        "--expect-pi-provider", final["provider"], "--expect-pi-model", final["model_id"],
+        "--expect-pi-thinking", final["thinking"], "--json",
+    ]
+    rc, out = run_autobridge(argv)
+    if rc != 0:
+        raise RotateError(
+            f"register failed (rc={rc}); Livecraft session {session_id} native {native} left as partial state: {out}"
+        )
+    return {"logical": logical, "native": native, "tab_id": session_id, "register_out": out}
+
+
+def start_livecraft(
+    cfg, *, livecraft, run_autobridge, resolve_cwd, gate_check=require_livecraft_pilot_gate,
+    sleep=time.sleep, clock=time.monotonic,
+) -> dict:
+    gate_check(cfg)
+    _require_livecraft_worker_scope(cfg)
+    chat = _resolve_chat(cfg.project, cfg.chat)
+    if chat is None:
+        raise RotateError(f"chat_not_found: {cfg.chat}")
+    if chat != cfg.chat:
+        raise RotateError("Livecraft requires the canonical --chat id")
+    repo_cwd = resolve_cwd(cfg.project, cfg.repo_target)
+    if not repo_cwd:
+        raise RotateError(f"no repo path for project {cfg.project} repo {cfg.repo_target}")
+    repo_cwd = str(Path(repo_cwd).resolve())
+    result = _provision_livecraft_and_bind(
+        agent=cfg.agent, project=cfg.project, chat=chat, repo_target=cfg.repo_target,
+        repo_cwd=repo_cwd, provider=cfg.provider, model=cfg.model, thinking=cfg.thinking,
+        runtime_home=cfg.runtime_home, livecraft=livecraft, run_autobridge=run_autobridge,
+        bootstrap_timeout=cfg.bootstrap_timeout, poll_interval=cfg.poll_interval,
+        sleep=sleep, clock=clock,
+    )
+    binding = _load_json(
+        run_autobridge,
+        ["show-binding", "--project", cfg.project, "--chat", chat, "--agent", cfg.agent, "--json"],
+        "start-livecraft-pi postcondition",
+    )
+    verified = binding.get("session_id") == result["logical"] and binding.get("status") == "active"
+    return {
+        "session": result["logical"], "native_session_id": result["native"],
+        "runtime_instance_id": result["tab_id"], "verified": verified,
+        "generation": binding.get("binding_generation"),
+    }
+
+
 def add_rotate_pi_arguments(p) -> None:
     p.add_argument("--pi-web-url", default=DEFAULT_PI_WEB_URL, help="Loopback Pi Web manager URL")
     p.add_argument("--agent", required=True)
@@ -671,6 +932,41 @@ def run_start_pi(cfg) -> int:
     print(json.dumps(result) if cfg.json_output else
           f"[start-pi] {result['session']} active gen {result['generation']} "
           f"({result['profile']['provider']}/{result['profile']['model']}, verified={result['verified']})")
+    return 0 if result.get("verified") else 2
+
+
+def add_start_livecraft_pi_arguments(p) -> None:
+    p.add_argument("--livecraft-backend-url", default=DEFAULT_LIVECRAFT_BACKEND_URL,
+                   help="Loopback Livecraft backend URL")
+    p.add_argument("--agent", required=True)
+    p.add_argument("--project", required=True)
+    p.add_argument("--chat", required=True, help="Canonical CHAT-... id")
+    p.add_argument("--repo-target", required=True)
+    p.add_argument("--provider", required=True)
+    p.add_argument("--model", required=True)
+    p.add_argument("--thinking", required=True)
+    p.add_argument("--runtime-home", required=True)
+    p.add_argument("--pilot-scope", required=True, help="Exact <project>/<agent> pilot scope")
+    p.add_argument("--disposable", action="store_true",
+                   help="Confirm this is a disposable pilot worker")
+    p.add_argument("--bootstrap-timeout", type=float, default=180.0)
+    p.add_argument("--poll-interval", type=float, default=2.0)
+    p.add_argument("--json", dest="json_output", action="store_true")
+
+
+def run_start_livecraft_pi(cfg) -> int:
+    try:
+        require_loopback(cfg.livecraft_backend_url, "--livecraft-backend-url")
+        result = start_livecraft(
+            cfg, livecraft=Livecraft(cfg.livecraft_backend_url),
+            run_autobridge=_default_run_autobridge, resolve_cwd=_default_resolve_cwd,
+        )
+    except RotateError as exc:
+        print(f"[start-livecraft-pi] {exc}", file=sys.stderr)
+        return 1
+    print(json.dumps(result) if cfg.json_output else
+          f"[start-livecraft-pi] {result['session']} active gen {result['generation']} "
+          f"(verified={result['verified']})")
     return 0 if result.get("verified") else 2
 
 
