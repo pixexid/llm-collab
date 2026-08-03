@@ -1,3 +1,5 @@
+import sys as _grsys; from pathlib import Path as _grPath
+_grsys.path.insert(0, str(_grPath(__file__).resolve().parent)); import _runtime_gate_testkit  # noqa: E402,F401  GH-503: deterministic gate-bypass install (any run form)
 import subprocess
 import sys
 import unittest
