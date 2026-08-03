@@ -38,6 +38,7 @@ from _python_runtime import require_python
 require_python()
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "tests"))  # GH-503: import the runtime-gate testkit
 
 # Runner-session identity that must never leak into subprocess tests: each is
 # read by runtime_family_from_env() and would resolve a family a test left unset.
@@ -53,6 +54,14 @@ STRIP_ENV = (
 def build_env() -> dict[str, str]:
     env = {k: v for k, v in os.environ.items() if k not in STRIP_ENV}
     env["PYTHONDONTWRITEBYTECODE"] = "1"
+    # GH-503: authorize the runtime freshness-gate bypass for the whole suite via
+    # the per-run token+sentinel (not a generic switch). Installed here so the
+    # canonical gate passes regardless of the unittest argv form (plain discover,
+    # a -p pattern that skips tests/__init__, or explicit module names) from a
+    # feature-branch worktree the gate would otherwise refuse.
+    from _runtime_gate_testkit import gate_bypass_env
+
+    env.update(gate_bypass_env())
     return env
 
 

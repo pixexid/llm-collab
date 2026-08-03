@@ -18,6 +18,7 @@ Each behavioural case has a matching mutation in test_gh94_mutation_proofs.sh.
 
 from __future__ import annotations
 
+import os
 import sys
 import unittest
 from pathlib import Path

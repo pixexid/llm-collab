@@ -16,6 +16,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from _python_runtime import require_python
+from current_runtime import require_current_runtime
 
 require_python()
 
@@ -1071,6 +1072,16 @@ def lease_release_command(args) -> tuple[dict, int]:
 
 def main():
     args = parse_args()
+    # GH-503: gate the mutation-capable commands on exact-current origin/main.
+    # Read-only commands (show, show-binding, lease-show, discover-runtime) are
+    # not gated so diagnostics stay available.
+    _MUTATION_COMMANDS = {
+        "register", "publish-current", "dispatch",
+        "deactivate", "deactivate-pi",
+        "lease-claim", "lease-assert", "lease-release",
+    }
+    if args.command in _MUTATION_COMMANDS:
+        require_current_runtime(f"autobridge:{args.command}")
     exit_code = 0
     if args.command == "register":
         result = register_session(args)
