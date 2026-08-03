@@ -15,6 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from _python_runtime import require_python
+from current_runtime import require_current_runtime
 
 require_python()
 
@@ -363,6 +364,9 @@ def dispatch_autobridge(
 
 
 def main():
+    # GH-503: a watcher that dispatches from a stale runtime keeps re-triggering
+    # stale delivery code — refuse to start from a stale tree (fails closed).
+    require_current_runtime("watch")
     args = parse_args()
 
     if not args.session:

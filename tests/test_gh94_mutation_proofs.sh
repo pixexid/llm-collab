@@ -7,6 +7,7 @@
 # import error) is never miscounted as a killed mutation (bot #465 @20).
 set -u
 cd "$(dirname "$0")/.."
+export LLM_COLLAB_RUNTIME_GATE_TEST_BYPASS=1  # GH-503: gate bypass for subprocessed CLIs (test-only)
 SAB=bin/_session_autobridge.py
 WI=bin/watch_inbox.py
 PY=python3.11

@@ -53,6 +53,11 @@ STRIP_ENV = (
 def build_env() -> dict[str, str]:
     env = {k: v for k, v in os.environ.items() if k not in STRIP_ENV}
     env["PYTHONDONTWRITEBYTECODE"] = "1"
+    # GH-503: the suite runs from a feature-branch worktree (HEAD != origin/main),
+    # which the runtime freshness gate would legitimately refuse. Bypass the gate
+    # for the test suite only; the gate's own behavior is covered by
+    # test_runtime_gate.py, which never sets this.
+    env["LLM_COLLAB_RUNTIME_GATE_TEST_BYPASS"] = "1"
     return env
 
 

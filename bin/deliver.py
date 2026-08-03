@@ -7,6 +7,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from _python_runtime import require_python
+from current_runtime import require_current_runtime
 
 require_python()
 
@@ -326,6 +327,9 @@ def is_ax_attended_recovery_target(
 
 
 def main():
+    # GH-503: delivery is always a mutation — refuse to write a durable packet
+    # from a stale runtime/checkout (fails closed unless a loud recovery waiver).
+    require_current_runtime("deliver")
     args = parse_args()
     if args.activation:
         try:
