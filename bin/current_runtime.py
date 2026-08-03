@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -120,9 +121,17 @@ def _test_sentinel_authorized(env) -> bool:
     if not token or not sentinel:
         return False
     try:
-        return Path(sentinel).read_text(encoding="utf-8").strip() == token
+        info = os.stat(sentinel, follow_symlinks=False)
+        # A stale/hostile sentinel path (FIFO, device, or huge file) must FAIL
+        # CLOSED, never hang or exhaust memory: require a small regular file and
+        # read a bounded amount. A token is short (32 hex chars); 256 is ample.
+        if not stat.S_ISREG(info.st_mode) or info.st_size > 256:
+            return False
+        with open(sentinel, "r", encoding="utf-8") as handle:
+            content = handle.read(256)
     except OSError:
         return False
+    return content.strip() == token
 
 
 def require_current_runtime(command: str, *, environ=None, exit_on_refusal: bool = True):

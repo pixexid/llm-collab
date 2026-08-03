@@ -132,6 +132,37 @@ class RuntimeGateTest(unittest.TestCase):
         finally:
             os.unlink(path)
 
+    def test_fifo_sentinel_fails_closed_without_hanging(self):
+        # A sentinel path pointing at a FIFO must NOT be read (would block forever);
+        # it must fail closed and enforce the gate.
+        import tempfile
+        d = tempfile.mkdtemp()
+        fifo = os.path.join(d, "sentinel-fifo")
+        os.mkfifo(fifo)
+        try:
+            env = {current_runtime.TEST_TOKEN_ENV: "t", current_runtime.TEST_SENTINEL_ENV: fifo}
+            with patch.object(current_runtime, "current_tooling", side_effect=_stale()):
+                with self.assertRaises(SystemExit) as cm:
+                    current_runtime.require_current_runtime("deliver", environ=env)
+            self.assertEqual(current_runtime.RUNTIME_GATE_REFUSED, cm.exception.code)
+        finally:
+            os.unlink(fifo)
+            os.rmdir(d)
+
+    def test_oversized_sentinel_does_not_bypass(self):
+        import tempfile
+        fd, path = tempfile.mkstemp()
+        with os.fdopen(fd, "w") as h:
+            h.write("t" + "x" * 400)  # > 256 bytes
+        try:
+            env = {current_runtime.TEST_TOKEN_ENV: "t", current_runtime.TEST_SENTINEL_ENV: path}
+            with patch.object(current_runtime, "current_tooling", side_effect=_stale()):
+                with self.assertRaises(SystemExit) as cm:
+                    current_runtime.require_current_runtime("deliver", environ=env)
+            self.assertEqual(current_runtime.RUNTIME_GATE_REFUSED, cm.exception.code)
+        finally:
+            os.unlink(path)
+
     def test_direct_production_subprocess_cannot_bypass(self):
         # codex's required proof: a direct mutator with NO test token/sentinel and NO
         # recovery waiver, from this feature-branch worktree, is refused with exit 78.
