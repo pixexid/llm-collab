@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Mapping
 
-from llm_collab.daemon.gate import GateStatus, evaluate_observation_gate
+from llm_collab.daemon.gate import GateStatus, evaluate_observation_gate, read_exact_nofollow
 from llm_collab.ledger import LedgerPaths, LedgerStore
 
 REQUEST_LIMIT = 4 * 1024
@@ -32,6 +32,70 @@ INTEGRITY_ERROR_LIMIT = 256
 
 class ProtocolError(ValueError):
     pass
+
+
+def _resolve_authoritative_repo(
+    store: LedgerStore,
+    *,
+    workspace_root: Path,
+    project_id: str,
+    session: Mapping[str, object],
+    target: Mapping[str, object],
+) -> tuple[str, str, str]:
+    """Resolve and verify the target against the immutable project registry."""
+    repo_id = target.get("repo_id")
+    if not isinstance(repo_id, str) or not repo_id:
+        raise ValueError("dispatch repo_id is invalid")
+    repo_targets = session.get("repo_targets")
+    if not isinstance(repo_targets, (list, tuple)) or repo_id not in repo_targets:
+        raise ValueError("dispatch repo_id is not in the worker project scope")
+    revision = store.current_registry_revision(workspace_id=store.paths.workspace_id)
+    snapshot = store.get_project_snapshot(
+        workspace_id=store.paths.workspace_id,
+        project_id=project_id,
+        registry_revision=revision,
+    )
+    if snapshot is None:
+        raise ValueError("dispatch project is absent from the current registry")
+    try:
+        project = json.loads(snapshot["snapshot_json"])
+    except (KeyError, TypeError, json.JSONDecodeError) as exc:
+        raise ValueError("dispatch project authority is malformed") from exc
+    repos = project.get("repos") if isinstance(project, dict) else None
+    raw_root = repos.get(repo_id) if isinstance(repos, dict) else None
+    if not isinstance(raw_root, str) or not raw_root:
+        raise ValueError("dispatch repo is absent from project authority")
+    raw_path = Path(raw_root).expanduser()
+    if raw_path.is_absolute():
+        repo_root = raw_path.resolve()
+    elif raw_path.parts and raw_path.parts[0] == "..":
+        repo_root = (workspace_root / raw_path).resolve()
+    else:
+        try:
+            config = json.loads(
+                read_exact_nofollow(workspace_root / "collab.config.json")
+                .decode("utf-8")
+            )
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError("dispatch cannot resolve relative project repo authority") from exc
+        projects_root = config.get("projects_root") if isinstance(config, dict) else None
+        if not isinstance(projects_root, str) or not projects_root:
+            raise ValueError("dispatch project authority lacks projects_root")
+        repo_root = (Path(projects_root).expanduser() / raw_path).resolve()
+    requested_root = target.get("repo_root")
+    requested_cwd = target.get("cwd")
+    if not isinstance(requested_root, str) or not isinstance(requested_cwd, str):
+        raise ValueError("dispatch target paths are invalid")
+    if Path(requested_root).expanduser().resolve() != repo_root:
+        raise ValueError("dispatch repo_root does not match project authority")
+    cwd = Path(requested_cwd).expanduser().resolve()
+    try:
+        beneath = os.path.commonpath((str(repo_root), str(cwd))) == str(repo_root)
+    except ValueError as exc:
+        raise ValueError("dispatch cwd is not under project authority") from exc
+    if not repo_root.is_dir() or not cwd.is_dir() or not beneath:
+        raise ValueError("dispatch cwd is not under project authority")
+    return repo_id, str(repo_root), str(cwd)
 
 
 # The probe's COVERAGE, not a claim that verification happened. `ok` alone would
@@ -549,12 +613,19 @@ class DaemonServer:
                 raise ValueError("dispatch endpoint/target is not an object")
             if str(target["codex_home"]) != context.runtime_home_source:
                 raise ValueError("dispatch CODEX_HOME does not match the selected session")
+            repo_id, repo_root, cwd = _resolve_authoritative_repo(
+                store,
+                workspace_root=self.workspace_root,
+                project_id=project_id,
+                session=session,
+                target=target,
+            )
             runtime_home = bind_runtime_home(target["codex_home"])
             trusted_root = TrustedProjectRoot(
                 project_id,
-                str(target["repo_id"]),
-                str(target["repo_root"]),
-                str(target["cwd"]),
+                repo_id,
+                repo_root,
+                cwd,
             )
             endpoint_url = str(endpoint["url"])
             token = endpoint["token"] if isinstance(endpoint["token"], str) else None

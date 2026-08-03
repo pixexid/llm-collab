@@ -6,12 +6,46 @@ import json
 import os
 import socket
 import time
+from collections.abc import Mapping
 from typing import Any
 
 from llm_collab.ledger import LedgerPaths
 
 
 RESPONSE_LIMIT = 64 * 1024
+
+
+def project_dispatch_session(session: Mapping[str, object]) -> dict[str, object]:
+    """Return the closed session shape consumed by daemon dispatch."""
+    runtime = session.get("runtime")
+    if not isinstance(runtime, Mapping):
+        raise ValueError("worker session is missing runtime identity")
+    required_runtime = ("session_id", "instance_id", "home")
+    if any(not isinstance(runtime.get(key), str) or not runtime[key] for key in required_runtime):
+        raise ValueError("worker session is missing exact runtime identity")
+    repo_targets = session.get("repo_targets")
+    if not isinstance(repo_targets, (list, tuple)) or any(
+        not isinstance(repo, str) or not repo or len(repo) > 128 for repo in repo_targets
+    ) or len(repo_targets) > 64:
+        raise ValueError("worker session repo targets are invalid")
+    projection: dict[str, object] = {
+        key: session.get(key)
+        for key in (
+            "project_id",
+            "chat_id",
+            "agent_id",
+            "status",
+            "endpoint_id",
+            "binding_id",
+            "binding_generation",
+        )
+    }
+    projection["repo_targets"] = list(repo_targets)
+    projection["session_id"] = session.get("session_id") or runtime["session_id"]
+    projection["runtime"] = {key: runtime[key] for key in required_runtime}
+    if len(json.dumps(projection, separators=(",", ":"))) > 2048:
+        raise ValueError("worker dispatch session projection is oversized")
+    return projection
 
 
 def request(

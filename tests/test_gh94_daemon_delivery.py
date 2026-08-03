@@ -9,11 +9,22 @@ from unittest.mock import patch
 
 from llm_collab.canonical.codex_delivery import (
     WorkerDeliveryContext,
+    CodexDeliveryError,
     deliver_worker_turn,
     resolve_worker_delivery_context,
 )
+from llm_collab.canonical.legacy_packet_materialization import (
+    LegacyPacketMaterializationRefused,
+    MAX_PACKET_BYTES,
+    _selected_packet,
+)
 from llm_collab.daemon.gate import DECLARATION_ID, evaluate_observation_gate
-from llm_collab.daemon.server import ProtocolError, parse_dispatch_request
+from llm_collab.daemon.client import project_dispatch_session
+from llm_collab.daemon.server import (
+    ProtocolError,
+    _resolve_authoritative_repo,
+    parse_dispatch_request,
+)
 from llm_collab.worker import derive_worker_id
 
 
@@ -81,6 +92,24 @@ class WorkerContextTest(unittest.TestCase):
                 session=session,
             )
 
+    def test_dispatch_projection_excludes_session_history(self) -> None:
+        session = _session()
+        session["processed_messages"] = ["x"] * 100_000
+        projection = project_dispatch_session(session)
+        self.assertNotIn("processed_messages", projection)
+        self.assertEqual("native-94", projection["session_id"])
+        self.assertEqual(
+            {"session_id", "instance_id", "home"},
+            set(projection["runtime"]),
+        )
+        self.assertLess(len(json.dumps(projection)), 2048)
+
+    def test_projection_rejects_unbounded_repo_scope(self) -> None:
+        session = _session()
+        session["repo_targets"] = ["repo"] * 65
+        with self.assertRaisesRegex(ValueError, "repo targets"):
+            project_dispatch_session(session)
+
 
 class DispatchEnvelopeTest(unittest.TestCase):
     def test_closed_dispatch_envelope_accepts_locator_only_message(self) -> None:
@@ -98,6 +127,61 @@ class DispatchEnvelopeTest(unittest.TestCase):
             payload = json.dumps({"version": 1, "op": "dispatch", "request": request}).encode()
             with self.subTest(request=request), self.assertRaises(ProtocolError):
                 parse_dispatch_request(payload)
+
+
+class DispatchAuthorityTest(unittest.TestCase):
+    class Store:
+        class Paths:
+            workspace_id = "ws_94"
+
+        paths = Paths()
+
+        def __init__(self, project_snapshot):
+            self.project_snapshot = project_snapshot
+
+        def current_registry_revision(self, *, workspace_id):
+            self.assert_workspace(workspace_id)
+            return "sha256:" + "ab" * 32
+
+        def get_project_snapshot(self, *, workspace_id, project_id, registry_revision):
+            self.assert_workspace(workspace_id)
+            return {"snapshot_json": json.dumps(self.project_snapshot)}
+
+        @staticmethod
+        def assert_workspace(workspace_id):
+            if workspace_id != "ws_94":
+                raise AssertionError(workspace_id)
+
+    def test_repo_root_must_match_immutable_project_authority(self) -> None:
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            alternate = root / "alternate"
+            repo.mkdir()
+            alternate.mkdir()
+            store = self.Store({"project_id": "paseo", "repos": {"app": str(repo)}})
+            session = {"repo_targets": ["app"]}
+            bad = {"repo_id": "app", "repo_root": str(alternate), "cwd": str(alternate)}
+            with self.assertRaisesRegex(ValueError, "repo_root"):
+                _resolve_authoritative_repo(
+                    store,
+                    workspace_root=root,
+                    project_id="paseo",
+                    session=session,
+                    target=bad,
+                )
+
+            good = {"repo_id": "app", "repo_root": str(repo), "cwd": str(repo)}
+            self.assertEqual(
+                ("app", str(repo.resolve()), str(repo.resolve())),
+                _resolve_authoritative_repo(
+                    store,
+                    workspace_root=root,
+                    project_id="paseo",
+                    session=session,
+                    target=good,
+                ),
+            )
 
 
 class DispatchGateTest(unittest.TestCase):
@@ -152,6 +236,49 @@ class DispatchGateTest(unittest.TestCase):
                 )
         self.assertEqual("gate_disabled", result["outcome"])
         self.assertEqual([], made)
+
+    def test_binding_join_precedes_first_materialization(self) -> None:
+        context = resolve_worker_delivery_context(
+            worker_id=_request()["worker_id"],
+            project_id="paseo",
+            workspace_id="ws_94",
+            session=_session(),
+        )
+        with patch.dict(os.environ, {"LLM_COLLAB_CANONICAL_CONTROL": "enabled"}):
+            with patch(
+                "llm_collab.canonical.codex_delivery._require_exact_join",
+                side_effect=CodexDeliveryError("binding mismatch"),
+            ) as join, patch(
+                "llm_collab.canonical.codex_delivery.materialize_selected_legacy_packet",
+                side_effect=AssertionError("materialization preceded exact join"),
+            ):
+                with self.assertRaisesRegex(CodexDeliveryError, "binding mismatch"):
+                    deliver_worker_turn(
+                        object(),
+                        workspace_root=Path("/tmp"),
+                        context=context,
+                        message={"path": "Chats/dir/to-codex.md"},
+                        provider=object(),
+                        runtime_home=object(),
+                        trusted_project_root=object(),
+                        observed_at_utc="now",
+                        correlation_id="corr",
+                        dispatch_enabled=True,
+                        make_observe=lambda: None,
+                        make_transport=lambda: None,
+                    )
+                join.assert_called_once()
+
+
+class PacketReadBoundTest(unittest.TestCase):
+    def test_selected_packet_read_is_bounded(self) -> None:
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            root = Path(tmp)
+            packet_dir = root / "Chats" / "dir"
+            packet_dir.mkdir(parents=True)
+            (packet_dir / "packet.md").write_bytes(b"x" * (MAX_PACKET_BYTES + 1))
+            with self.assertRaises(LegacyPacketMaterializationRefused):
+                _selected_packet(root, {"path": "Chats/dir/packet.md"})
 
 
 if __name__ == "__main__":

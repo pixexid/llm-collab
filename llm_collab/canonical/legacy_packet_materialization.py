@@ -17,6 +17,7 @@ from llm_collab.canonical.control import (
 )
 from llm_collab.canonical.delivery import create_bound_attempt, create_deliveries
 from llm_collab.canonical.messages import create_or_return_equivalent
+from llm_collab.daemon.gate import read_exact_nofollow
 from llm_collab.ledger.store import (
     CONVERSATION_BINDING_RESOLUTION_REASONS,
     LedgerStore,
@@ -26,6 +27,7 @@ from llm_collab.ledger.store import (
 
 
 ROUTE_AMBIGUOUS = "route_ambiguous"
+MAX_PACKET_BYTES = 256 * 1024
 
 
 @dataclass(frozen=True)
@@ -218,7 +220,11 @@ def _selected_packet(workspace_root: Path, message: Mapping[str, object]) -> tup
             _refuse("packet path contains a symlink")
     if not current.is_file():
         _refuse("packet path does not exist")
-    return rel.as_posix(), current.read_bytes()
+    try:
+        packet = read_exact_nofollow(current, maximum_bytes=MAX_PACKET_BYTES)
+    except (OSError, ValueError) as exc:
+        _refuse("packet exceeds the bounded read limit or changed during read")
+    return rel.as_posix(), packet
 
 
 def _required_text(value: object, name: str) -> str:

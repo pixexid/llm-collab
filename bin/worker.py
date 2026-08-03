@@ -40,6 +40,7 @@ from llm_collab.session_lifecycle import (
     SessionLifecycleCore,
     TrustedProjectRoot,
 )
+from llm_collab.daemon.client import project_dispatch_session
 
 
 def open_store(*, writer: bool = False) -> LedgerStore:
@@ -146,7 +147,7 @@ def main(argv: list[str] | None = None) -> int:
         request = {
             "worker_id": args.worker_id,
             "project_id": args.project,
-            "session": session,
+            "session": project_dispatch_session(session),
             "message": {"path": args.message_path},
             "endpoint": {"url": args.endpoint, "token": args.token},
             "target": target,
@@ -163,7 +164,7 @@ def main(argv: list[str] | None = None) -> int:
             timeout=max(args.timeout_seconds + 5.0, 10.0),
         )
         print(json.dumps(response, separators=(",", ":")))
-        return 1 if isinstance(response, dict) and response.get("outcome") == "dispatch_failed" else 0
+        return 0 if isinstance(response, dict) and response.get("outcome") == "accepted" else 1
 
     if args.command == "attach":
         import datetime as _dt

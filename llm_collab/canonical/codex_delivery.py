@@ -161,6 +161,10 @@ def deliver_worker_turn(
             "materialized": False,
             "transport_connected": False,
         }
+    # Join the caller's session to the frozen canonical binding before the
+    # first packet read or canonical row write. The delivery core repeats this
+    # check after materialization for its own direct callers.
+    _require_exact_join(store, context.session, context.subject)
     # Prove the project-scoped canonical-write gate before constructing a live
     # transport. The delivery core repeats this idempotently as its durable
     # intent step; this first pass keeps the two mutation gates independent.
@@ -397,7 +401,7 @@ def deliver_next_turn_idle(
     except _JsonRpcPeerError:
         raise
     except _TurnStartResponseLost:
-        _append_native_receipt(
+        receipt_id, _ = _append_native_receipt(
             store,
             subject=subject,
             provider=provider,
@@ -411,7 +415,15 @@ def deliver_next_turn_idle(
             observed_at_utc=observed_at_utc,
             native_detail={"x_note_turn_start": "response_lost_or_timeout"},
         )
-        raise
+        return {
+            "outcome": OUTCOME_AMBIGUOUS,
+            "message_id": message_id,
+            "delivery_id": delivery_id,
+            "attempt_id": attempt_id,
+            "receipt_id": receipt_id,
+            "turn_id": None,
+            "terminal_status": None,
+        }
     turn = (started.get("result") or {}).get("turn") if isinstance(started, dict) else None
     turn_id = turn.get("id") if isinstance(turn, dict) else None
     if not isinstance(turn_id, str) or not turn_id:
