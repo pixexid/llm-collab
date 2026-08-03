@@ -31,25 +31,45 @@ import sys
 
 # GitHub's closing keywords (https://docs.github.com/.../linking-a-pull-request-to-an-issue).
 CLOSING = r"clos(?:e|es|ed)|fix(?:|es|ed)|resolv(?:e|es|ed)"
-# A closing keyword immediately before a #N (optional colon/space), case-insensitive.
-# The (?<![\w-]) lookbehind keeps the keyword a standalone word: prose like
-# "auto-close #503" or "preclose #7" must NOT count as a closing directive (it
-# would falsely claim an auto-close GitHub won't actually perform).
-CLOSING_REF = re.compile(rf"(?<![\w-])(?:{CLOSING})\b[:\s]+#(\d+)", re.IGNORECASE)
-# Any issue reference: #N or a full issues URL.
-ANY_REF = re.compile(r"(?:#|/issues/)(\d+)")
-# Branch convention: claude/gh505-... encodes issue 505.
-BRANCH_REF = re.compile(r"gh-?(\d+)", re.IGNORECASE)
+# An issue reference in any of GitHub's forms: bare `#N` (same repo), a
+# repo-qualified `owner/name#N`, or a full issues URL. The owner/name is captured so
+# qualified/URL forms can be limited to the target repository (a cross-repo
+# `other/repo#N` or URL must NOT match a local issue N).
+_QUALIFIER = r"(?P<repo>[\w.-]+/[\w.-]+)"
+_REF = re.compile(
+    rf"(?:{_QUALIFIER}#|(?<![\w./-])#|https?://github\.com/(?P<url_repo>[\w.-]+/[\w.-]+)/issues/)(\d+)",
+    re.IGNORECASE,
+)
+# A closing keyword standalone (not inside a hyphen/word token like "auto-close")
+# immediately before any of those reference forms.
+CLOSING_REF = re.compile(rf"(?<![\w-])(?:{CLOSING})\b[:\s]+{_REF.pattern}", re.IGNORECASE)
+# Branch convention: .../gh505-... encodes issue 505. Require a boundary before `gh`
+# and a delimiter/end after the digits so `feature/high500-x` or `rough2-edge` do NOT
+# resolve to an issue.
+BRANCH_REF = re.compile(r"(?:^|[/_-])gh-?(\d+)(?:[/_-]|$)", re.IGNORECASE)
 MAX_SWEEP_PRS = 60
 MAX_OPEN_ISSUES = 400
 
 
-def closing_refs(text: str) -> set[int]:
-    return {int(m) for m in CLOSING_REF.findall(text or "")}
+def _refs(pattern: re.Pattern, text: str, repo: str | None) -> set[int]:
+    """Local issue numbers matched by `pattern`. Bare `#N` is same-repo; a
+    repo-qualified or URL form counts only when its owner/name equals `repo`
+    (when `repo` is given)."""
+    out: set[int] = set()
+    for m in pattern.finditer(text or ""):
+        qualifier = m.group("repo") or m.group("url_repo")
+        number = int(m.groups()[-1])
+        if qualifier is None or repo is None or qualifier.lower() == repo.lower():
+            out.add(number)
+    return out
 
 
-def any_refs(text: str) -> set[int]:
-    return {int(m) for m in ANY_REF.findall(text or "")}
+def closing_refs(text: str, repo: str | None = None) -> set[int]:
+    return _refs(CLOSING_REF, text, repo)
+
+
+def any_refs(text: str, repo: str | None = None) -> set[int]:
+    return _refs(_REF, text, repo)
 
 
 def branch_issue(branch: str) -> int | None:
@@ -57,7 +77,7 @@ def branch_issue(branch: str) -> int | None:
     return int(m.group(1)) if m else None
 
 
-def classify_pr(title: str, body: str, branch: str) -> dict[str, list[int]]:
+def classify_pr(title: str, body: str, branch: str, repo: str | None = None) -> dict[str, list[int]]:
     """Classify a PR's issue links.
 
     Closing is detected in the PR BODY only: GitHub's durable auto-close fires from
@@ -70,10 +90,10 @@ def classify_pr(title: str, body: str, branch: str) -> dict[str, list[int]]:
     reported as informational references only (too noisy to treat as the PR's issue,
     and auto-closing them would be wrong).
     """
-    closing = closing_refs(body)
+    closing = closing_refs(body, repo)
     b = branch_issue(branch)
     orphan_risk = [b] if (b is not None and b not in closing) else []
-    referenced = sorted(any_refs(f"{title}\n{body}") - closing - set(orphan_risk))
+    referenced = sorted(any_refs(f"{title}\n{body}", repo) - closing - set(orphan_risk))
     return {
         "closing": sorted(closing),
         "orphan_risk": orphan_risk,
@@ -110,7 +130,7 @@ def default_branch(repo: str) -> str:
 def check_pr(repo: str, number: int) -> int:
     pr = _gh_json(["pr", "view", str(number), "--repo", repo,
                    "--json", "title,body,headRefName,baseRefName,state"])
-    cls = classify_pr(pr.get("title", ""), pr.get("body", ""), pr.get("headRefName", ""))
+    cls = classify_pr(pr.get("title", ""), pr.get("body", ""), pr.get("headRefName", ""), repo)
     base = pr.get("baseRefName", "")
     default = default_branch(repo)
     if cls["closing"]:
@@ -159,7 +179,7 @@ def sweep(repo: str) -> int:
     orphans: dict[int, int] = {}  # issue -> the merged PR that referenced it
     for pr in merged:
         text = f"{pr.get('title','')}\n{pr.get('body','')}"
-        for issue in any_refs(text):
+        for issue in any_refs(text, repo):
             if issue in open_issues and issue not in orphans:
                 orphans[issue] = pr["number"]
     if orphans:

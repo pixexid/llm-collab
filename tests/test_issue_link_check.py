@@ -47,12 +47,34 @@ class ClosingKeywordTest(unittest.TestCase):
 
 class RefExtractionTest(unittest.TestCase):
     def test_hash_and_url_refs(self):
-        self.assertEqual({1, 2}, ilc.any_refs("touches #1 and github.com/o/r/issues/2"))
+        self.assertEqual({1, 2}, ilc.any_refs("touches #1 and https://github.com/o/r/issues/2"))
+
+    def test_cross_repo_refs_excluded_when_repo_given(self):
+        REPO = "pixexid/llm-collab"
+        # bare #N is always same-repo; a cross-repo qualified/URL ref must NOT match a
+        # local issue N (else --sweep would suggest closing the wrong local issue).
+        text = "#42 pixexid/llm-collab#43 other/repo#44 https://github.com/other/repo/issues/45"
+        self.assertEqual({42, 43}, ilc.any_refs(text, REPO))
+        # same text without a repo (pure classifier) includes all — repo filters
+        self.assertEqual({42, 43, 44, 45}, ilc.any_refs(text, None))
+
+    def test_qualified_and_url_closing_forms(self):
+        REPO = "pixexid/llm-collab"
+        self.assertEqual({42}, ilc.closing_refs("Closes pixexid/llm-collab#42", REPO))
+        self.assertEqual({42}, ilc.closing_refs(
+            "Fixes https://github.com/pixexid/llm-collab/issues/42", REPO))
+        self.assertEqual(set(), ilc.closing_refs("Closes other/repo#42", REPO))
 
     def test_branch_issue(self):
         self.assertEqual(505, ilc.branch_issue("claude/gh505-freshness-gate"))
         self.assertEqual(505, ilc.branch_issue("codex/gh-505-x"))
+        self.assertEqual(507, ilc.branch_issue("claude/gh507"))
         self.assertIsNone(ilc.branch_issue("claude/no-issue-here"))
+
+    def test_branch_issue_requires_boundaries(self):
+        # "gh" inside an ordinary word must NOT resolve to an issue.
+        self.assertIsNone(ilc.branch_issue("feature/high500-throughput"))
+        self.assertIsNone(ilc.branch_issue("feature/rough2-edge"))
 
 
 class ClassifyTest(unittest.TestCase):
