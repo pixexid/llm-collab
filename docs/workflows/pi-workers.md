@@ -24,7 +24,8 @@ There are two Pi hosts, and both are valid:
 - **Pi-Web** (`endpoint_pi_web_local`) — the existing host. Loopback manager at
   `http://127.0.0.1:8504`.
 - **Livecraft** (`endpoint_pi_livecraft_local`) — the newer host. Manager at
-  `127.0.0.1:43120`, backend at `http://127.0.0.1:43121`, UI at `http://127.0.0.1:5173`.
+  `127.0.0.1:43120`, backend at `http://127.0.0.1:43121`, UI at `http://127.0.0.1:43122`.
+  The frontend port is pinned to the reserved 43122 via `PI_LIVECRAFT_FRONTEND_PORT` (default 43122) and Vite `strictPort: true` in the pi-livecraft clone's `vite.config.ts` — a local override (no upstream PR); `strictPort` makes a taken port fail loudly instead of silently drifting off 5173.
 
 **Livecraft is the preferred host for new Pi provisioning** where its API is available.
 It is **not** the universal host: Pi-Web is not deprecated, and existing Pi-Web workers
