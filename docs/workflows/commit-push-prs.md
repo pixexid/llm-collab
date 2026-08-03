@@ -283,6 +283,22 @@ Include:
   repository-specific autolinks such as `GH-123` as linked-issue examples
   unless that project's local guidance establishes the autolink.
 
+### Do not orphan the related issue (GH-507)
+
+This is not a "must have an issue to open a PR" gate — no issue is ever required.
+But when a PR **does** resolve an issue, it must close it on merge, not leave it
+orphaned. A PR whose branch follows the `…/gh<N>-…` convention is treated as being
+*for* issue N: put `Closes #N` in the body so GitHub closes it on merge (works with
+squash — GitHub reads the PR body). If the PR intentionally leaves that issue open,
+that is fine — the check below only warns.
+
+- Before requesting review: `python bin/issue_link_check.py --pr <N>` — warns if the
+  branch's issue is referenced but not closed (advisory, never blocking; bare `#N`
+  mentions elsewhere are reported as informational, never auto-closed).
+- Periodic backstop: `python bin/issue_link_check.py --sweep` — lists open issues
+  referenced by recently merged PRs, so orphans get closed or explicitly re-marked
+  `Related`. (Umbrella/epic issues intentionally stay open — filter those.)
+
 ## PR Review Wait Gate
 
 There is no automatic PR CI, so the merge prerequisite is **local exact-head
