@@ -83,6 +83,39 @@ real PIDs.
 
 ---
 
+## Deploy contract: restart watchers on every runtime advance (interim, GH-505)
+
+A persistent PM2 watcher loads its code once at startup and keeps running. The
+GH-503 runtime freshness gate refuses stale-runtime mutation at *entrypoint
+startup*, but it cannot re-check a process that is already running: `deploy_runtime.py`
+advances the deployed checkout **without restarting PM2**, so a watcher started at
+the old head keeps dispatching and marking packets read with the **old loaded
+code** — exactly the stale-runtime mutation the gate is meant to prevent.
+
+Until GH-505 makes deployment restart+verify watchers automatically, a deploy is
+**not complete** unless it, in order:
+
+1. deploys exact `origin/main` with a clean tree, verified from the **deployed
+   runtime** (`<runtime_root>/bin/llm-collab current_runtime.py --check` passes);
+2. restarts every persistent watcher from the current ecosystem, **run from the
+   deployed runtime** so the restart itself cannot execute a stale/dirty source
+   checkout: `<runtime_root>/bin/llm-collab pm2_watchers.py restart --all`
+   (start-or-restart, not a bare reload);
+3. verifies the restart took, again via the deployed runtime: PM2/runtime heads
+   match `origin/main`, and each watcher's logs show the restart
+   (`<runtime_root>/bin/llm-collab pm2_watchers.py logs --agent <id>`).
+
+Every command above **must** run through the deployed runtime launcher
+(`<runtime_root>/bin/llm-collab …`, where `<runtime_root>` is
+`~/.local/share/llm-collab/runtime/main`), never a bare `python bin/…` from a
+local checkout — a bare local invocation can itself be the stale/dirty tree this
+contract exists to keep out of the running watchers. A bare `deploy_runtime.py`
+run without step 2+3 leaves stale watchers executing old code — do not treat it as
+a completed deploy. The overall freshness objective is not complete until GH-505
+lands this as an enforced, verified step.
+
+---
+
 ## Commands
 
 ```bash
