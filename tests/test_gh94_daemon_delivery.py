@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from llm_collab.canonical.codex_delivery import (
@@ -17,11 +19,14 @@ from llm_collab.canonical.legacy_packet_materialization import (
     LegacyPacketMaterializationRefused,
     MAX_PACKET_BYTES,
     _selected_packet,
+    selected_legacy_packet_scope,
 )
 from llm_collab.daemon.gate import DECLARATION_ID, evaluate_observation_gate
 from llm_collab.daemon.client import project_dispatch_session
 from llm_collab.daemon.server import (
     ProtocolError,
+    DaemonServer,
+    _open_repository_descriptor_chain,
     _resolve_authoritative_repo,
     parse_dispatch_request,
 )
@@ -128,6 +133,13 @@ class DispatchEnvelopeTest(unittest.TestCase):
             with self.subTest(request=request), self.assertRaises(ProtocolError):
                 parse_dispatch_request(payload)
 
+    def test_dispatch_envelope_rejects_a_payload_larger_than_the_socket_limit(self) -> None:
+        request = _request()
+        request["endpoint"]["token"] = "x" * 5000
+        payload = json.dumps({"version": 1, "op": "dispatch", "request": request}).encode()
+        with self.assertRaisesRegex(ProtocolError, "complete envelope"):
+            parse_dispatch_request(payload)
+
 
 class DispatchAuthorityTest(unittest.TestCase):
     class Store:
@@ -182,6 +194,148 @@ class DispatchAuthorityTest(unittest.TestCase):
                     target=good,
                 ),
             )
+
+    def test_relative_projects_root_is_resolved_from_workspace_root(self) -> None:
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            root = Path(tmp)
+            repo = root / "projects" / "repo"
+            repo.mkdir(parents=True)
+            (root / "collab.config.json").write_text(json.dumps({"projects_root": "projects"}))
+            store = self.Store({"project_id": "paseo", "repos": {"app": "repo"}})
+            target = {"repo_id": "app", "repo_root": str(repo), "cwd": str(repo)}
+            original = Path.cwd()
+            try:
+                os.chdir(repo)
+                self.assertEqual(
+                    ("app", str(repo.resolve()), str(repo.resolve())),
+                    _resolve_authoritative_repo(
+                        store,
+                        workspace_root=root,
+                        project_id="paseo",
+                        session={"repo_targets": ["app"]},
+                        target=target,
+                    ),
+                )
+            finally:
+                os.chdir(original)
+
+    def test_selected_repo_must_be_in_packet_scope(self) -> None:
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            root = Path(tmp) / "repo"
+            root.mkdir()
+            store = self.Store({"project_id": "paseo", "repos": {"app": str(root)}})
+            target = {"repo_id": "app", "repo_root": str(root), "cwd": str(root)}
+            with self.assertRaisesRegex(ValueError, "packet repo scope"):
+                _resolve_authoritative_repo(
+                    store,
+                    workspace_root=root.parent,
+                    project_id="paseo",
+                    session={"repo_targets": ["app", "api"]},
+                    target=target,
+                    packet_repo_targets=["api"],
+                )
+
+    def test_authority_descriptor_chain_fails_on_path_rebinding(self) -> None:
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            root = Path(tmp) / "repo"
+            cwd = root / "work"
+            cwd.mkdir(parents=True)
+            store = self.Store({"project_id": "paseo", "repos": {"app": str(root)}})
+            target = {"repo_id": "app", "repo_root": str(root), "cwd": str(cwd)}
+            chains = []
+            _resolve_authoritative_repo(
+                store,
+                workspace_root=root.parent,
+                project_id="paseo",
+                session={"repo_targets": ["app"]},
+                target=target,
+                descriptor_chain_out=chains,
+            )
+            chain = chains[0]
+            try:
+                root.rename(root.with_name("repo-old"))
+                (root / "work").mkdir(parents=True)
+                with self.assertRaisesRegex(ValueError, "pathname was rebound"):
+                    chain.canonical_paths()
+            finally:
+                chain.close()
+
+    def test_workspace_descriptor_pins_packet_and_config_reads(self) -> None:
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            workspace = Path(tmp) / "workspace"
+            packet = workspace / "Chats" / "dir" / "to-codex.md"
+            repo = workspace / "projects" / "repo"
+            repo.mkdir(parents=True)
+            packet.parent.mkdir(parents=True)
+            packet.write_text(
+                "---\nproject_id: paseo\nchat_id: CHAT-94\n"
+                "repo_targets: [app]\n---\n\npacket\n",
+                encoding="utf-8",
+            )
+            (workspace / "collab.config.json").write_text(
+                json.dumps({"projects_root": "projects"}), encoding="utf-8"
+            )
+            pinned_workspace = workspace.resolve()
+            chain = _open_repository_descriptor_chain(pinned_workspace, pinned_workspace)
+            try:
+                workspace.rename(workspace.with_name("workspace-old"))
+                workspace_fd = chain.fds[chain.root_index]
+                scope = selected_legacy_packet_scope(
+                    workspace,
+                    {"path": "Chats/dir/to-codex.md"},
+                    workspace_root_fd=workspace_fd,
+                )
+                self.assertEqual(("app",), scope["repo_targets"])
+                store = self.Store({"project_id": "paseo", "repos": {"app": str(repo)}})
+                chains = []
+                self.assertEqual(
+                    ("app", str(repo), str(repo)),
+                    _resolve_authoritative_repo(
+                        store,
+                        workspace_root=workspace,
+                        workspace_root_path=workspace,
+                        workspace_root_fd=workspace_fd,
+                        project_id="paseo",
+                        session={"repo_targets": ["app"]},
+                        target={"repo_id": "app", "repo_root": str(repo), "cwd": str(repo)},
+                        packet_repo_targets=scope["repo_targets"],
+                        descriptor_chain_out=chains,
+                    ),
+                )
+                chains[0].close()
+            finally:
+                chain.close()
+
+    def test_dispatch_deadline_starts_before_packet_scope(self) -> None:
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            workspace = Path(tmp) / "workspace"
+            workspace.mkdir()
+            server = DaemonServer.__new__(DaemonServer)
+            server._gate_status = SimpleNamespace(dispatch_effective=True)
+            server._store = SimpleNamespace(paths=SimpleNamespace(workspace_id="ws_94"))
+            server.paths = SimpleNamespace(workspace_id="ws_94")
+            server.workspace_root = workspace
+
+            def slow_scope(*_args, **_kwargs):
+                time.sleep(0.03)
+                return {"repo_targets": ["app"], "packet_sha256": "a" * 64}
+
+            context = SimpleNamespace(runtime_home_source="/tmp/codex-home-94")
+            with patch(
+                "llm_collab.canonical.legacy_packet_materialization.selected_legacy_packet_scope",
+                side_effect=slow_scope,
+            ), patch(
+                "llm_collab.canonical.codex_delivery.resolve_worker_delivery_context",
+                return_value=context,
+            ), patch(
+                "llm_collab.canonical.codex_delivery.deliver_worker_turn",
+            ) as deliver:
+                request = _request()
+                request["timeout_seconds"] = 0.01
+                result = server._dispatch(request)
+            self.assertEqual("dispatch_failed", result["outcome"])
+            self.assertIn("absolute dispatch deadline exceeded", result["error"])
+            deliver.assert_not_called()
 
 
 class DispatchGateTest(unittest.TestCase):

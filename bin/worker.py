@@ -85,6 +85,8 @@ def main(argv: list[str] | None = None) -> int:
         commands.add_parser("rotate-pi", help="Rotate a bloated Pi worker to a fresh native session"))
     _rotate_pi.add_start_pi_arguments(
         commands.add_parser("start-pi", help="Start a fresh Pi worker session for an existing agent"))
+    _rotate_pi.add_start_livecraft_pi_arguments(
+        commands.add_parser("start-livecraft-pi", help="Start a gated disposable Livecraft Pi worker"))
     args = parser.parse_args(argv)
     ensure_project(args.project, allow_none=False)
 
@@ -92,6 +94,8 @@ def main(argv: list[str] | None = None) -> int:
         return _rotate_pi.run(args)
     if args.command == "start-pi":
         return _rotate_pi.run_start_pi(args)
+    if args.command == "start-livecraft-pi":
+        return _rotate_pi.run_start_livecraft_pi(args)
 
     if args.command == "send":
         from _session_autobridge import iter_sessions
@@ -157,6 +161,10 @@ def main(argv: list[str] | None = None) -> int:
             "model": args.model,
         }
         paths = LedgerPaths.derive(project_state_root(), str(workspace_id))
+        # The daemon applies one absolute timeout across packet validation,
+        # identity/idle probes, and the native turn. Keep the client socket open
+        # past both daemon control-I/O windows so a slow but accepted turn cannot
+        # be retried after the client gives up.
         response = daemon_request(
             paths,
             "dispatch",

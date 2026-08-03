@@ -17,7 +17,7 @@ from llm_collab.canonical.control import (
 )
 from llm_collab.canonical.delivery import create_bound_attempt, create_deliveries
 from llm_collab.canonical.messages import create_or_return_equivalent
-from llm_collab.daemon.gate import read_exact_nofollow
+from llm_collab.daemon.gate import read_exact_nofollow, read_exact_nofollow_at
 from llm_collab.ledger.store import (
     CONVERSATION_BINDING_RESOLUTION_REASONS,
     LedgerStore,
@@ -45,10 +45,16 @@ def materialize_selected_legacy_packet(
     workspace_root: Path,
     session: Mapping[str, object],
     message: Mapping[str, object],
+    expected_packet_sha256: str | None = None,
+    workspace_root_fd: int | None = None,
 ) -> dict[str, object]:
     """Append canonical rows for one already-selected legacy packet."""
-    relpath, packet = _selected_packet(workspace_root, message)
+    relpath, packet = _selected_packet(
+        workspace_root, message, workspace_root_fd=workspace_root_fd
+    )
     packet_sha256 = hashlib.sha256(packet).hexdigest()
+    if expected_packet_sha256 is not None and packet_sha256 != expected_packet_sha256:
+        _refuse("selected packet changed during dispatch")
     try:
         frontmatter, _body = _parse_legacy_frontmatter(packet)
     except ValueError as exc:
@@ -206,22 +212,53 @@ def materialize_selected_legacy_packet(
     }
 
 
-def _selected_packet(workspace_root: Path, message: Mapping[str, object]) -> tuple[str, bytes]:
+def selected_legacy_packet_scope(
+    workspace_root: Path,
+    message: Mapping[str, object],
+    *,
+    workspace_root_fd: int | None = None,
+) -> dict[str, object]:
+    """Read the selected packet once to pin its hash and explicit repo scope."""
+    relpath, packet = _selected_packet(
+        workspace_root, message, workspace_root_fd=workspace_root_fd
+    )
+    try:
+        frontmatter, _body = _parse_legacy_frontmatter(packet)
+    except ValueError as exc:
+        _refuse(str(exc))
+    return {
+        "packet_relpath": relpath,
+        "packet_sha256": hashlib.sha256(packet).hexdigest(),
+        "repo_targets": _string_list(frontmatter.get("repo_targets"), "repo_targets"),
+    }
+
+
+def _selected_packet(
+    workspace_root: Path,
+    message: Mapping[str, object],
+    *,
+    workspace_root_fd: int | None = None,
+) -> tuple[str, bytes]:
     raw_path = _required_text(message.get("path"), "message.path")
     rel = Path(raw_path)
     if rel.is_absolute() or ".." in rel.parts or len(rel.parts) != 3:
         _refuse("packet path is not a closed Chats packet path")
     if rel.parts[0] != "Chats" or not rel.parts[2].endswith(".md"):
         _refuse("packet path is not a Chats markdown packet")
-    current = workspace_root.resolve(strict=True)
-    for part in rel.parts:
-        current = current / part
-        if current.is_symlink():
-            _refuse("packet path contains a symlink")
-    if not current.is_file():
-        _refuse("packet path does not exist")
     try:
-        packet = read_exact_nofollow(current, maximum_bytes=MAX_PACKET_BYTES)
+        if workspace_root_fd is None:
+            current = workspace_root.resolve(strict=True)
+            for part in rel.parts:
+                current = current / part
+                if current.is_symlink():
+                    _refuse("packet path contains a symlink")
+            if not current.is_file():
+                _refuse("packet path does not exist")
+            packet = read_exact_nofollow(current, maximum_bytes=MAX_PACKET_BYTES)
+        else:
+            packet = read_exact_nofollow_at(
+                workspace_root_fd, rel, maximum_bytes=MAX_PACKET_BYTES
+            )
     except (OSError, ValueError) as exc:
         _refuse("packet exceeds the bounded read limit or changed during read")
     return rel.as_posix(), packet

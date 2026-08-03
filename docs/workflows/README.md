@@ -23,7 +23,7 @@ Recommended read order:
 6. `pi-workers.md` — how Pi-runtime workers (glmpi/relay/kimi) are hosted
    (Pi-Web vs Livecraft, endpoint-per-binding), what they inherit by default
    (ponytail is runtime-global), and the provisioning state (Pi-Web `start-pi`
-   exists; Livecraft spawn is not yet productionized)
+   exists; Livecraft has an explicitly gated pilot first-start)
 7. `task-intake-and-delegation.md`
 8. `review-and-handoff.md`
 9. `isolated-worktrees.md`
