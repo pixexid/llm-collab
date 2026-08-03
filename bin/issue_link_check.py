@@ -32,12 +32,16 @@ import sys
 # GitHub's closing keywords (https://docs.github.com/.../linking-a-pull-request-to-an-issue).
 CLOSING = r"clos(?:e|es|ed)|fix(?:|es|ed)|resolv(?:e|es|ed)"
 # A closing keyword immediately before a #N (optional colon/space), case-insensitive.
-CLOSING_REF = re.compile(rf"\b(?:{CLOSING})\b[:\s]+#(\d+)", re.IGNORECASE)
+# The (?<![\w-]) lookbehind keeps the keyword a standalone word: prose like
+# "auto-close #503" or "preclose #7" must NOT count as a closing directive (it
+# would falsely claim an auto-close GitHub won't actually perform).
+CLOSING_REF = re.compile(rf"(?<![\w-])(?:{CLOSING})\b[:\s]+#(\d+)", re.IGNORECASE)
 # Any issue reference: #N or a full issues URL.
 ANY_REF = re.compile(r"(?:#|/issues/)(\d+)")
 # Branch convention: claude/gh505-... encodes issue 505.
 BRANCH_REF = re.compile(r"gh-?(\d+)", re.IGNORECASE)
 MAX_SWEEP_PRS = 60
+MAX_OPEN_ISSUES = 400
 
 
 def closing_refs(text: str) -> set[int]:
@@ -56,17 +60,20 @@ def branch_issue(branch: str) -> int | None:
 def classify_pr(title: str, body: str, branch: str) -> dict[str, list[int]]:
     """Classify a PR's issue links.
 
+    Closing is detected in the PR BODY only: GitHub's durable auto-close fires from
+    closing keywords in the PR body (and commit messages), NOT the PR title — a
+    `Closes #N` in the title does not auto-close, so counting it would over-promise.
+
     The authoritative "this PR is FOR issue N" signal is the branch convention
-    (`claude/gh<N>-...`). Orphan risk is that branch-declared issue when the PR does
-    not close it — a precise, low-noise nudge. Bare `#N` mentions in prose are
-    reported as informational references only (they are too noisy to treat as the
-    PR's issue, and auto-closing them would be wrong).
+    (`claude/gh<N>-...`). Orphan risk is that branch-declared issue when the body
+    does not close it — a precise, low-noise nudge. Bare `#N` mentions anywhere are
+    reported as informational references only (too noisy to treat as the PR's issue,
+    and auto-closing them would be wrong).
     """
-    text = f"{title}\n{body}"
-    closing = closing_refs(text)
+    closing = closing_refs(body)
     b = branch_issue(branch)
     orphan_risk = [b] if (b is not None and b not in closing) else []
-    referenced = sorted(any_refs(text) - closing - set(orphan_risk))
+    referenced = sorted(any_refs(f"{title}\n{body}") - closing - set(orphan_risk))
     return {
         "closing": sorted(closing),
         "orphan_risk": orphan_risk,
@@ -81,13 +88,44 @@ def _gh_json(args: list[str]):
     return json.loads(out.stdout) if out.stdout.strip() else None
 
 
+def resolve_repo(repo: str | None) -> str:
+    """Explicit --repo, else the current checkout's repo — never a hardcoded default."""
+    if repo:
+        return repo
+    got = _gh_json(["repo", "view", "--json", "nameWithOwner"])
+    name = (got or {}).get("nameWithOwner")
+    if not name:
+        raise RuntimeError("could not resolve the repository; pass --repo <owner/name>")
+    return name
+
+
+def default_branch(repo: str) -> str:
+    got = _gh_json(["repo", "view", repo, "--json", "defaultBranchRef"])
+    name = ((got or {}).get("defaultBranchRef") or {}).get("name")
+    if not name:
+        raise RuntimeError(f"could not resolve the default branch for {repo}")
+    return name
+
+
 def check_pr(repo: str, number: int) -> int:
     pr = _gh_json(["pr", "view", str(number), "--repo", repo,
-                   "--json", "title,body,headRefName,state"])
+                   "--json", "title,body,headRefName,baseRefName,state"])
     cls = classify_pr(pr.get("title", ""), pr.get("body", ""), pr.get("headRefName", ""))
+    base = pr.get("baseRefName", "")
+    default = default_branch(repo)
     if cls["closing"]:
-        print(f"PR #{number}: will auto-close on merge: "
-              + ", ".join(f"#{n}" for n in cls["closing"]))
+        if base == default:
+            print(f"PR #{number}: will auto-close on merge: "
+                  + ", ".join(f"#{n}" for n in cls["closing"]))
+        else:
+            # Closing keywords only auto-close when the PR merges to the default branch.
+            print(f"PR #{number}: has closing keyword(s) for "
+                  + ", ".join(f"#{n}" for n in cls["closing"])
+                  + f" but targets base '{base}', not the default '{default}' — these will "
+                  "NOT auto-close on merge.")
+            print("  Retarget the PR at the default branch, or close the issue manually.",
+                  file=sys.stderr)
+            return 1
     if cls["referenced"]:
         print(f"PR #{number}: also references (informational): "
               + ", ".join(f"#{n}" for n in cls["referenced"]))
@@ -108,11 +146,16 @@ def sweep(repo: str) -> int:
     merged = _gh_json(["pr", "list", "--repo", repo, "--state", "merged",
                        "--limit", str(MAX_SWEEP_PRS), "--json", "number,title,body"]) or []
     # One bounded call for the open set, then intersect — avoids an N+1 gh lookup.
-    open_issues = {
-        item["number"]
-        for item in (_gh_json(["issue", "list", "--repo", repo, "--state", "open",
-                               "--limit", "400", "--json", "number"]) or [])
-    }
+    open_list = _gh_json(["issue", "list", "--repo", repo, "--state", "open",
+                          "--limit", str(MAX_OPEN_ISSUES), "--json", "number"]) or []
+    open_issues = {item["number"] for item in open_list}
+    # Never silently treat a capped result as complete — say what may be missed.
+    if len(merged) >= MAX_SWEEP_PRS:
+        print(f"WARNING: hit the {MAX_SWEEP_PRS}-merged-PR cap — older merged PRs were "
+              "not scanned; orphans beyond that window may be missed.", file=sys.stderr)
+    if len(open_list) >= MAX_OPEN_ISSUES:
+        print(f"WARNING: hit the {MAX_OPEN_ISSUES}-open-issue cap — some open issues were "
+              "not loaded; results may be incomplete.", file=sys.stderr)
     orphans: dict[int, int] = {}  # issue -> the merged PR that referenced it
     for pr in merged:
         text = f"{pr.get('title','')}\n{pr.get('body','')}"
@@ -131,13 +174,15 @@ def sweep(repo: str) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--repo", default="pixexid/llm-collab")
+    p.add_argument("--repo", default=None,
+                   help="owner/name; defaults to the current checkout's repo (never hardcoded)")
     g = p.add_mutually_exclusive_group(required=True)
     g.add_argument("--pr", type=int, help="check one PR for orphan risk")
     g.add_argument("--sweep", action="store_true", help="find open issues referenced by merged PRs")
     p.add_argument("--strict", action="store_true", help="exit nonzero on orphan risk / found orphans")
     args = p.parse_args(argv)
-    rc = check_pr(args.repo, args.pr) if args.pr is not None else sweep(args.repo)
+    repo = resolve_repo(args.repo)
+    rc = check_pr(repo, args.pr) if args.pr is not None else sweep(repo)
     return rc if args.strict else 0
 
 

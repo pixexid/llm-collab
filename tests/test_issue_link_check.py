@@ -30,6 +30,20 @@ class ClosingKeywordTest(unittest.TestCase):
         # author is warned rather than surprised (matches commit-push-prs.md).
         self.assertEqual({9}, ilc.closing_refs("This does not resolve #9"))
 
+    def test_hyphen_prefixed_keyword_is_not_closing(self):
+        # "auto-close #503" is prose describing behavior, not a closing directive —
+        # GitHub won't auto-close on it, so neither should we (real #508 smoke bug).
+        self.assertEqual(set(), ilc.closing_refs('output: "will auto-close #503"'))
+        self.assertEqual(set(), ilc.closing_refs("preclose #7"))
+        # a genuine standalone keyword still counts
+        self.assertEqual({503}, ilc.closing_refs("Closes #503"))
+
+    def test_closing_in_title_is_ignored_body_only(self):
+        # GitHub's durable auto-close is from the body, not the title.
+        c = ilc.classify_pr("Closes #5 in the title", "no closing keyword in body", "x")
+        self.assertEqual([], c["closing"])
+        self.assertEqual([5], c["referenced"])
+
 
 class RefExtractionTest(unittest.TestCase):
     def test_hash_and_url_refs(self):
