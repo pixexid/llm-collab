@@ -163,12 +163,13 @@ def main(argv: list[str] | None = None) -> int:
         paths = LedgerPaths.derive(project_state_root(), str(workspace_id))
         # The daemon applies one absolute timeout across packet validation,
         # identity/idle probes, and the native turn. Keep the client socket open
-        # past that same bound so a slow but still-live turn cannot be retried.
+        # past both daemon control-I/O windows so a slow but accepted turn cannot
+        # be retried after the client gives up.
         response = daemon_request(
             paths,
             "dispatch",
             request=request,
-            timeout=max(args.timeout_seconds + 2.0, 10.0),
+            timeout=max(args.timeout_seconds + 5.0, 10.0),
         )
         print(json.dumps(response, separators=(",", ":")))
         return 0 if isinstance(response, dict) and response.get("outcome") == "accepted" else 1
