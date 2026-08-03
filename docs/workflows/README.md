@@ -10,8 +10,8 @@ Recommended read order:
 
 1. `session-startup.md`
 2. `claude-code-desktop-computer-use-bridge.md` — the canonical agent-to-agent
-   comms reference (`llm-collab` mailbox plus supported one-way Computer-Use
-   doorbells); read whenever desktop-app agents need to notify each other
+   comms reference (Codex-only Computer-Use doorbell + bidirectional `llm-collab`
+   mailbox); read whenever desktop-app agents need to notify each other
 3. `session-autobridge-runbook.md` — provisional safety-fuse only (polling is no
    longer the primary wake; see the doorbell doc)
 4. `thread-event-runner-rfc.md` — Phase 1 architecture/threat contract for a
@@ -20,8 +20,12 @@ Recommended read order:
 5. `observation-global-cadence-rfc.md` — design contract for the GH-179 global
    observation cadence budget, GH-183 pinned-root precondition, and GH-181 audit
    accounting before scheduler implementation
-6. `task-intake-and-delegation.md`
-7. `review-and-handoff.md`
-8. `isolated-worktrees.md`
-9. `commit-push-prs.md`
-10. `github-projects.md`
+6. `pi-workers.md` — how Pi-runtime workers (glmpi/relay/kimi) are hosted
+   (Pi-Web vs Livecraft, endpoint-per-binding), what they inherit by default
+   (ponytail is runtime-global), and the provisioning state (Pi-Web `start-pi`
+   exists; Livecraft spawn is not yet productionized)
+7. `task-intake-and-delegation.md`
+8. `review-and-handoff.md`
+9. `isolated-worktrees.md`
+10. `commit-push-prs.md`
+11. `github-projects.md`
