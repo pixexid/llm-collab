@@ -1491,6 +1491,70 @@ class InboxMarkAllReadTest(unittest.TestCase):
         )
         self.assertEqual([path], self.load_inbox()["unread"])
 
+    def test_general_read_skips_a_refused_activation_and_drains_valid_mail(self) -> None:
+        # GH-502: one refused activation packet must not batch-abort the general
+        # (non --session) read and hide the reader's other valid mail. The refused
+        # packet is left unread and surfaced; the valid packet is shown and drained.
+        valid = self.add_message("OK", project_line="amiga")
+        refused = self.add_malformed_activation("BAD")
+
+        result = self.run_inbox("--project", "amiga", "--json")
+
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(
+            [refused],
+            [entry["path"] for entry in payload.get("activation_refused", [])],
+        )
+        inbox = self.load_inbox()
+        self.assertEqual([valid], inbox["read"])
+        self.assertEqual([refused], inbox["unread"])
+
+    def test_general_read_fails_closed_when_every_activation_packet_refused(self) -> None:
+        # GH-502: an all-refused batch (no valid unread packet left to show or
+        # drain) still exits 75 with nothing consumed.
+        first = self.add_malformed_activation("BAD1")
+        second = self.add_malformed_activation("BAD2")
+
+        result = self.run_inbox("--project", "amiga", "--json")
+
+        self.assertEqual(75, result.returncode, result.stdout + result.stderr)
+        self.assertEqual({first, second}, set(self.load_inbox()["unread"]))
+        self.assertEqual([], self.load_inbox()["read"])
+
+    def test_refused_prefix_does_not_consume_the_limit_and_hide_valid_mail(self) -> None:
+        # GH-502 P1: a refused activation packet must not consume the --limit
+        # budget. With --limit 1 and a refused packet ahead of valid mail, the read
+        # must scan past the refused entry to the valid packet (exit 0, valid
+        # drained) instead of slicing to the refused prefix and exiting 75 — which,
+        # since the refused packet stays unread, would hide the valid mail forever.
+        refused = self.add_malformed_activation("BAD")
+        valid = self.add_message("OK", project_line="amiga")
+
+        result = self.run_inbox("--project", "amiga", "--limit", "1", "--json")
+
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(
+            [refused],
+            [entry["path"] for entry in payload.get("activation_refused", [])],
+        )
+        inbox = self.load_inbox()
+        self.assertEqual([valid], inbox["read"])
+        self.assertEqual([refused], inbox["unread"])
+
+    def test_zero_limit_selects_and_consumes_nothing(self):
+        # GH-502: --limit 0 must select nothing and consume nothing (matching the
+        # prior messages[:0] semantics), not display/consume the first valid packet.
+        valid = self.add_message("OK", project_line="amiga")
+
+        result = self.run_inbox("--project", "amiga", "--limit", "0", "--json")
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual([], json.loads(result.stdout)["messages"])
+        self.assertEqual([valid], self.load_inbox()["unread"])  # not consumed
+        self.assertEqual([], self.load_inbox()["read"])
+
     def test_unregistered_activation_scope_is_terminal_before_reader_session(self):
         # GH-160: an invalid/unregistered project scope must be terminal at the gate,
         # before ensure_reader_session() or the claim's poller cleanup can mutate.
